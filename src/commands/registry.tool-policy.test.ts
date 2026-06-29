@@ -36,6 +36,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'diagnose',
 		'preflight',
 		'benchmark',
+		'costs',
 		'knowledge',
 		'memory',
 		'memory status',
@@ -44,6 +45,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory stale',
 		'memory export',
 		'memory evaluate',
+		'memory consolidation-log',
 		'sdd',
 		'sdd status',
 		'sdd validate',
@@ -99,6 +101,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'full-auto',
 		'handoff',
 		'issue',
+		'link',
+		'link status',
 		'loop',
 		'pr-feedback',
 		'pr-review',
@@ -107,17 +111,18 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'simulate',
 		'specify',
 		'turbo',
+		'unlink',
 		'write-retro',
 	]);
 
-	test("'agent' bucket contains exactly the expected 33 commands", () => {
+	test("'agent' bucket contains exactly the expected commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'agent') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(33);
+		expect(actual.size).toBe(EXPECTED_AGENT.size);
 		for (const name of EXPECTED_AGENT) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -158,14 +163,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'none' bucket contains exactly the expected 25 standalone non-tool commands", () => {
+	test("'none' bucket contains exactly the expected standalone non-tool commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'none') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(27);
+		expect(actual.size).toBe(EXPECTED_NONE.size);
 		for (const name of EXPECTED_NONE) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -374,6 +379,35 @@ describe('gap command classification', () => {
 
 	test('post-mortem: toolPolicy === "agent"', () => {
 		expect(cmd('post-mortem').toolPolicy).toBe('agent');
+	});
+
+	test('costs: toolPolicy === "agent"', () => {
+		expect(cmd('costs').toolPolicy).toBe('agent');
+	});
+});
+
+describe('cost command argument policies', () => {
+	test('benchmark allows cost threshold through swarm_command', () => {
+		const resolved = _internals.resolveCommand([
+			'benchmark',
+			'--ci-gate',
+			'--max-cost-usd',
+			'0.30',
+		]);
+		expect(resolved).not.toBeNull();
+		expect(classifySwarmCommandToolUse(resolved!)).toEqual({ allowed: true });
+	});
+
+	test('costs allows only empty args or --json through swarm_command', () => {
+		const jsonResolved = _internals.resolveCommand(['costs', '--json']);
+		const badResolved = _internals.resolveCommand(['costs', '--verbose']);
+
+		expect(jsonResolved).not.toBeNull();
+		expect(badResolved).not.toBeNull();
+		expect(classifySwarmCommandToolUse(jsonResolved!)).toEqual({
+			allowed: true,
+		});
+		expect(classifySwarmCommandToolUse(badResolved!).allowed).toBe(false);
 	});
 });
 

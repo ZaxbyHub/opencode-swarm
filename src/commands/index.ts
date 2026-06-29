@@ -46,6 +46,7 @@ export { COMMAND_NAME_SET, COMMAND_NAMES } from './command-names.js';
 export { handleConcurrencyCommand } from './concurrency';
 export { handleConfigCommand } from './config';
 export { handleConsolidateCommand } from './consolidate';
+export { handleCostsCommand } from './costs';
 export { handleCouncilCommand } from './council';
 export { handleCurateCommand } from './curate';
 export { handleDarkMatterCommand } from './dark-matter';

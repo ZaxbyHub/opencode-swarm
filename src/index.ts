@@ -36,6 +36,7 @@ import {
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
@@ -112,10 +113,11 @@ import { createMemoryLifecycleHooks } from './memory';
 import { createPrmHook } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
+import { buildDelegationCostFields } from './services/cost-accounting.js';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
-import { ensureAgentSession, swarmState } from './state';
+import { ensureAgentSession, getActiveWindow, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
@@ -211,6 +213,122 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 		throw err;
 	}
 };
+
+const MAX_TRACKED_ASSISTANT_USAGE_EVENTS = 200;
+const latestAssistantUsageBySession = new Map<string, unknown>();
+
+function rememberAssistantUsageEvent(input: unknown): void {
+	const event = isPlainRecord(input) ? input.event : undefined;
+	if (!isPlainRecord(event)) return;
+	if (event.type === 'message.updated') {
+		const properties = isPlainRecord(event.properties)
+			? event.properties
+			: undefined;
+		const info = isPlainRecord(properties?.info) ? properties.info : undefined;
+		if (info?.role === 'assistant')
+			rememberAssistantUsage(info.sessionID, info);
+		return;
+	}
+	if (event.type === 'message.part.updated') {
+		const properties = isPlainRecord(event.properties)
+			? event.properties
+			: undefined;
+		const part = isPlainRecord(properties?.part) ? properties.part : undefined;
+		if (part?.type === 'step-finish')
+			rememberAssistantUsage(part.sessionID, part);
+	}
+}
+
+function rememberAssistantUsage(sessionID: unknown, raw: unknown): void {
+	if (typeof sessionID !== 'string' || sessionID.trim() === '') return;
+	latestAssistantUsageBySession.set(sessionID, raw);
+	while (
+		latestAssistantUsageBySession.size > MAX_TRACKED_ASSISTANT_USAGE_EVENTS
+	) {
+		const oldest = latestAssistantUsageBySession.keys().next().value;
+		if (oldest === undefined) break;
+		latestAssistantUsageBySession.delete(oldest);
+	}
+}
+
+function consumeAssistantUsageForTask(
+	parentSessionID: string,
+	taskOutput: unknown,
+): unknown {
+	const sessionIDs = [parentSessionID, ...collectSessionIDs(taskOutput)];
+	for (const sessionID of sessionIDs) {
+		const usage = latestAssistantUsageBySession.get(sessionID);
+		if (usage !== undefined) {
+			latestAssistantUsageBySession.delete(sessionID);
+			return usage;
+		}
+	}
+	return undefined;
+}
+
+function collectSessionIDs(raw: unknown): string[] {
+	const found: string[] = [];
+	const seen = new Set<unknown>();
+	const visit = (value: unknown, depth: number): void => {
+		if (depth > 3 || !isPlainRecord(value) || seen.has(value)) return;
+		seen.add(value);
+		for (const key of ['sessionID', 'sessionId', 'session_id']) {
+			const candidate = value[key];
+			if (typeof candidate === 'string' && candidate.trim() !== '') {
+				found.push(candidate);
+			}
+		}
+		for (const key of [
+			'metadata',
+			'data',
+			'info',
+			'message',
+			'response',
+			'output',
+		]) {
+			visit(value[key], depth + 1);
+		}
+	};
+	visit(raw, 0);
+	return [...new Set(found)];
+}
+
+function resolveDelegationModel(
+	config: PluginConfig,
+	agentName: string,
+	baseAgentName: string,
+): string {
+	const topLevelModel =
+		config.agents?.[agentName]?.model ?? config.agents?.[baseAgentName]?.model;
+	if (topLevelModel) return topLevelModel;
+
+	const swarmID = inferSwarmID(agentName, baseAgentName);
+	const swarmAgents = swarmID ? config.swarms?.[swarmID]?.agents : undefined;
+	return (
+		swarmAgents?.[agentName]?.model ??
+		swarmAgents?.[baseAgentName]?.model ??
+		DEFAULT_MODELS[baseAgentName] ??
+		DEFAULT_MODELS.default
+	);
+}
+
+function inferSwarmID(
+	agentName: string,
+	baseAgentName: string,
+): string | undefined {
+	if (!agentName || agentName === baseAgentName) return undefined;
+	for (const separator of ['_', '-', ' ']) {
+		const suffix = `${separator}${baseAgentName}`;
+		if (agentName.endsWith(suffix) && agentName.length > suffix.length) {
+			return agentName.slice(0, -suffix.length);
+		}
+	}
+	return undefined;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 // Return type intentionally inferred so the literal `{ name: ..., agent: ... }`
 // does not trip excess-property checks against `Hooks`. The wrapper above is
@@ -1087,10 +1205,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		tool: buildPluginToolObject(agentDefinitionMap, config),
 
 		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
-		// ADVISORY/observer-only — safeHook-wrapped so it can never block event delivery or
-		// plugin load. No-op unless hooks.background_subagents is opted in.
-		// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
-		event: safeHook(backgroundCompletionObserver.event) as any,
+		// ADVISORY/observer-only - catches locally so it can never block event delivery or
+		// plugin load. Background observer is no-op unless hooks.background_subagents is opted in.
+		event: async (input: { event: unknown }): Promise<void> => {
+			try {
+				rememberAssistantUsageEvent(input);
+				await backgroundCompletionObserver.event(input);
+			} catch (err) {
+				warn(
+					`[swarm] event hook error: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		},
 
 		// Configure OpenCode - merge agents into config
 		config: async (opencodeConfig: Record<string, unknown>) => {
@@ -1292,6 +1418,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				'swarm-benchmark': {
 					template: '/swarm benchmark',
 					description: 'Use /swarm benchmark to show performance metrics',
+				},
+				'swarm-costs': {
+					template: '/swarm costs $ARGUMENTS',
+					description:
+						'Use /swarm costs to show per-agent, task, gate, and retry token/cost totals',
 				},
 				'swarm-export': {
 					template: '/swarm export',
@@ -2228,6 +2359,22 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			if (isTaskTool) {
 				const sessionId = input.sessionID;
 				const agentName = swarmState.activeAgent.get(sessionId) || 'unknown';
+				const baseAgentName = stripKnownSwarmPrefix(agentName);
+				const preHandoffSession = swarmState.agentSessions.get(sessionId);
+				const activeWindow = getActiveWindow(sessionId);
+				const configuredModel = resolveDelegationModel(
+					config,
+					agentName,
+					baseAgentName,
+				);
+				const assistantUsage = consumeAssistantUsageForTask(sessionId, output);
+				const costFields = buildDelegationCostFields({
+					raw: { metadata: output.metadata, output, assistant: assistantUsage },
+					model: configuredModel,
+					gate: preHandoffSession?.lastDelegationReason,
+					retry_index: activeWindow?.transientRetryCount,
+					pricing: config.pricing,
+				});
 				swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
 				ensureAgentSession(sessionId, ORCHESTRATOR_NAME);
 				const taskSession = swarmState.agentSessions.get(sessionId);
@@ -2239,11 +2386,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						agentName,
 						taskSession.currentTaskId || '',
 						'completed',
+						costFields,
 					);
 					// Pipeline continuation advisory — prevents happy-path stall when
 					// delegated agents return clean results. The architect must resume
 					// direct tool execution for remaining QA gate steps.
-					const baseAgentName = stripKnownSwarmPrefix(agentName);
 					if (
 						baseAgentName === 'reviewer' ||
 						baseAgentName === 'test_engineer' ||

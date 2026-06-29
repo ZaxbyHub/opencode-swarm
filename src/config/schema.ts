@@ -199,6 +199,22 @@ export const SwarmConfigSchema = z.object({
 
 export type SwarmConfig = z.infer<typeof SwarmConfigSchema>;
 
+export const ModelPricingConfigSchema = z.object({
+	input_per_million: z.number().min(0),
+	output_per_million: z.number().min(0),
+	reasoning_per_million: z.number().min(0).optional(),
+	cache_per_million: z.number().min(0).optional(),
+});
+export type ModelPricingConfig = z.infer<typeof ModelPricingConfigSchema>;
+
+export const PricingConfigSchema = z.object({
+	models: z
+		.record(z.string().min(1), ModelPricingConfigSchema)
+		.optional()
+		.default({}),
+});
+export type PricingConfig = z.infer<typeof PricingConfigSchema>;
+
 // Hook feature flags
 export const HooksConfigSchema = z.object({
 	system_enhancer: z.boolean().default(true),
@@ -2216,6 +2232,10 @@ export const PluginConfigSchema = z.object({
 
 	// Context budget configuration
 	context_budget: ContextBudgetConfigSchema.optional(),
+
+	// Token/cost estimation fallback table. Provider-reported cost wins when
+	// present; these entries only estimate from usage tokens when reports omit cost.
+	pricing: PricingConfigSchema.optional(),
 
 	// Guardrails configuration
 	guardrails: GuardrailsConfigSchema.optional(),

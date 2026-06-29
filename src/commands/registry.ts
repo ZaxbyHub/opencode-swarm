@@ -14,6 +14,7 @@ import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
 import { handleConsolidateCommand } from './consolidate.js';
+import { handleCostsCommand } from './costs.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
 import { handleCurateCommand } from './curate.js';
@@ -477,8 +478,16 @@ export const COMMAND_REGISTRY = {
 	},
 	benchmark: {
 		handler: (ctx) => handleBenchmarkCommand(ctx.directory, ctx.args),
-		description: 'Show performance metrics [--cumulative] [--ci-gate]',
-		args: '--cumulative, --ci-gate',
+		description:
+			'Show performance metrics [--cumulative] [--ci-gate] [--max-cost-usd <n>]',
+		args: '--cumulative, --ci-gate, --max-cost-usd <n>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	costs: {
+		handler: (ctx) => handleCostsCommand(ctx.directory, ctx.args),
+		description: 'Show per-agent and per-task token/cost telemetry [--json]',
+		args: '--json',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

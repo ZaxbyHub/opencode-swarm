@@ -45,7 +45,9 @@ describe('buildHelpText()', () => {
 
 		test('benchmark command includes Args:', () => {
 			const benchmarkEntry = COMMAND_REGISTRY.benchmark;
-			expect(benchmarkEntry.args).toBe('--cumulative, --ci-gate');
+			expect(benchmarkEntry.args).toBe(
+				'--cumulative, --ci-gate, --max-cost-usd <n>',
+			);
 			expect(helpText).toContain(`Args: \`${benchmarkEntry.args}\``);
 		});
 	});

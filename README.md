@@ -1094,6 +1094,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm evidence [task]` | Evidence bundles for a task or all tasks |
 | `/swarm archive [--dry-run]` | Archive old evidence with retention policy |
 | `/swarm benchmark` | Performance benchmarks |
+| `/swarm costs [--json]` | Per-agent, per-task, per-gate, and per-retry token/cost totals from telemetry |
 | `/swarm retrieve [id]` | Retrieve auto-summarized tool outputs (supports offset/limit pagination) |
 | `/swarm reset --confirm` | Clear swarm state files |
 | `/swarm reset-session` | Clear session state files in `.swarm/session/` (preserves plan and context) |

@@ -49,6 +49,34 @@ You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
 
+## Pricing fallback estimates
+
+Provider-reported cost metadata wins when it is available. When a provider returns token usage but no cost, Swarm can estimate delegation cost from an optional top-level `pricing.models` table:
+
+```json
+{
+  "pricing": {
+    "models": {
+      "provider/custom-model": {
+        "input_per_million": 1,
+        "output_per_million": 2,
+        "reasoning_per_million": 3,
+        "cache_per_million": 0.5
+      }
+    }
+  }
+}
+```
+
+| Field | Required | Description |
+|---|---:|---|
+| `input_per_million` | yes | USD per 1M input tokens |
+| `output_per_million` | yes | USD per 1M output tokens |
+| `reasoning_per_million` | no | USD per 1M reasoning tokens; defaults to output pricing when omitted |
+| `cache_per_million` | no | USD per 1M cache-read tokens; defaults to input pricing when omitted |
+
+Missing usage or missing pricing degrades to `cost_source: "unavailable"` in telemetry and `/swarm costs`.
+
 ## Per-agent override fields
 
 Each entry under `agents` accepts the following optional fields:

@@ -247,15 +247,33 @@ export function classifySwarmCommandToolUse(
 	}
 
 	if (canonicalKey === 'benchmark') {
-		const allowedFlags = new Set(['--cumulative', '--ci-gate']);
-		const invalid = args.filter((arg) => !allowedFlags.has(arg));
-		if (invalid.length > 0) {
+		for (let i = 0; i < args.length; i++) {
+			const arg = args[i];
+			if (arg === '--cumulative' || arg === '--ci-gate') continue;
+			if (
+				arg === '--max-cost-usd' &&
+				i + 1 < args.length &&
+				/^\d+(\.\d+)?$/.test(args[i + 1])
+			) {
+				i++;
+				continue;
+			}
 			return {
 				allowed: false,
 				message:
-					'Only `--cumulative` and `--ci-gate` are supported for `/swarm benchmark` through swarm_command.',
+					'Only `--cumulative`, `--ci-gate`, and `--max-cost-usd <n>` are supported for `/swarm benchmark` through swarm_command.',
 			};
 		}
+	}
+
+	if (canonicalKey === 'costs') {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		return {
+			allowed: false,
+			message:
+				'Usage through swarm_command: `/swarm costs` or `/swarm costs --json`.',
+		};
 	}
 
 	if (canonicalKey === 'show-plan') {

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { DelegationCostFields } from './services/cost-accounting.js';
 
 // ============================================================================
 // Types
@@ -255,8 +256,23 @@ export const telemetry = {
 		agentName: string,
 		taskId: string,
 		result: string,
+		costFields?: Partial<DelegationCostFields>,
 	): void {
-		_internals.emit('delegation_end', { sessionId, agentName, taskId, result });
+		_internals.emit('delegation_end', {
+			sessionId,
+			agentName,
+			taskId,
+			result,
+			tokens_input: costFields?.tokens_input ?? 0,
+			tokens_output: costFields?.tokens_output ?? 0,
+			tokens_reasoning: costFields?.tokens_reasoning ?? 0,
+			tokens_cache: costFields?.tokens_cache ?? 0,
+			cost_usd: costFields?.cost_usd ?? null,
+			cost_source: costFields?.cost_source ?? 'unavailable',
+			model: costFields?.model,
+			gate: costFields?.gate,
+			retry_index: costFields?.retry_index,
+		});
 	},
 
 	taskStateChanged(

@@ -4,6 +4,7 @@ import {
 	listEvidenceTaskIds,
 	loadEvidence,
 } from '../evidence/manager';
+import { summarizeTelemetryCosts } from '../services/cost-accounting.js';
 import { swarmState } from '../state';
 import { warn } from '../utils';
 
@@ -25,9 +26,13 @@ export async function handleBenchmarkCommand(
 ): Promise<string> {
 	let cumulative = args.includes('--cumulative');
 	if (args.includes('--ci-gate')) cumulative = true;
+	const maxCostUsd = parseMaxCostUsd(args);
 	const mode: 'in-memory' | 'cumulative' = cumulative
 		? 'cumulative'
 		: 'in-memory';
+	const costSummary = cumulative
+		? summarizeTelemetryCosts(directory)
+		: undefined;
 
 	// Agent health
 	const agentMap = new Map<
@@ -301,6 +306,15 @@ export async function handleBenchmarkCommand(
 					!hasQualityEvidence || testToCodeRatio >= CI.min_test_to_code_ratio,
 			},
 		];
+		if (maxCostUsd !== null) {
+			checks.push({
+				name: 'Total cost',
+				value: costSummary?.total_cost_usd ?? 0,
+				threshold: maxCostUsd,
+				operator: '<=',
+				passed: (costSummary?.total_cost_usd ?? 0) <= maxCostUsd,
+			});
+		}
 		ciGate = { passed: checks.every((c) => c.passed), checks: checks };
 	}
 
@@ -384,6 +398,15 @@ export async function handleBenchmarkCommand(
 		lines.push('');
 	}
 
+	if (costSummary) {
+		lines.push('### Cost Signals');
+		lines.push(
+			`- Total tracked cost: $${costSummary.total_cost_usd.toFixed(6)} (${costSummary.delegations} delegations)`,
+			`- Reported: $${costSummary.total_reported_usd.toFixed(6)}; estimated: $${costSummary.total_estimated_usd.toFixed(6)}; unavailable: ${costSummary.unavailable_delegations}`,
+		);
+		lines.push('');
+	}
+
 	if (ciGate) {
 		lines.push('### CI Gate', ciGate.passed ? '✅ PASSED' : '❌ FAILED');
 		for (const c of ciGate.checks) {
@@ -391,13 +414,17 @@ export async function handleBenchmarkCommand(
 			let valueStr: string;
 			if (c.name === 'Complexity Delta' || c.name === 'Public API Delta') {
 				valueStr = `${c.value}`;
+			} else if (c.name === 'Total cost') {
+				valueStr = `$${c.value.toFixed(6)}`;
 			} else {
 				valueStr = `${c.value}%`;
 			}
 			const thresholdStr =
 				c.name === 'Complexity Delta' || c.name === 'Public API Delta'
 					? `${c.threshold}`
-					: `${c.threshold}%`;
+					: c.name === 'Total cost'
+						? `$${c.threshold.toFixed(6)}`
+						: `${c.threshold}%`;
 			lines.push(
 				`- ${c.name}: ${valueStr} ${c.operator} ${thresholdStr} ${c.passed ? '✅' : '❌'}`,
 			);
@@ -441,6 +468,18 @@ export async function handleBenchmarkCommand(
 			thresholds: qualityMetrics.thresholds,
 			has_evidence: qualityMetrics.hasEvidence,
 		};
+	if (costSummary)
+		json.costs = {
+			total_cost_usd: costSummary.total_cost_usd,
+			total_reported_usd: costSummary.total_reported_usd,
+			total_estimated_usd: costSummary.total_estimated_usd,
+			total_input_tokens: costSummary.total_input_tokens,
+			total_output_tokens: costSummary.total_output_tokens,
+			total_reasoning_tokens: costSummary.total_reasoning_tokens,
+			total_cache_tokens: costSummary.total_cache_tokens,
+			delegations: costSummary.delegations,
+			unavailable_delegations: costSummary.unavailable_delegations,
+		};
 	if (ciGate)
 		json.ci_gate = {
 			passed: ciGate.passed,
@@ -458,4 +497,22 @@ export async function handleBenchmarkCommand(
 		'[/BENCHMARK_JSON]',
 	);
 	return lines.join('\n');
+}
+
+function parseMaxCostUsd(args: string[]): number | null {
+	const index = args.indexOf('--max-cost-usd');
+	if (index === -1) return null;
+	const raw = args[index + 1];
+	if (!raw || raw.startsWith('--')) {
+		throw new Error(
+			'Invalid --max-cost-usd value: expected a non-negative number.',
+		);
+	}
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		throw new Error(
+			'Invalid --max-cost-usd value: expected a non-negative number.',
+		);
+	}
+	return parsed;
 }

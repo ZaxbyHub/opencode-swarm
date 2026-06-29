@@ -921,6 +921,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'pricing': {
+			emitObjectTypeMismatch('pricing', value, findings);
+			break;
+		}
+
 		case 'guardrails': {
 			emitObjectTypeMismatch('guardrails', value, findings);
 			break;

@@ -557,12 +557,22 @@ Generate an evidence summary showing completion ratio across all tasks, blockers
 
 Archive old evidence bundles. Two-tier retention: age-based (`max_age_days`, default 90) then count-based (`max_bundles`, default 1000). Use `--dry-run` to preview.
 
-### `/swarm benchmark [--cumulative] [--ci-gate]`
+### `/swarm benchmark [--cumulative] [--ci-gate] [--max-cost-usd <n>]`
 
-Show performance metrics: tool call rates, delegation chains, evidence pass rates.
+Show performance metrics: tool call rates, delegation chains, evidence pass rates, and cumulative cost signals.
 
 - `--cumulative`: aggregate across sessions.
 - `--ci-gate`: return non-zero exit if thresholds exceeded (for CI).
+- `--max-cost-usd <n>`: with `--ci-gate`, fail the benchmark when cumulative telemetry cost exceeds the threshold.
+
+### `/swarm costs [--json]`
+
+Show per-agent, per-task, per-gate, and per-retry-loop token and cost totals from `.swarm/telemetry.jsonl`.
+
+- Reported provider costs are used when present.
+- Estimated costs require `pricing.models` entries in config.
+- Existing telemetry without token/cost fields is counted with `cost_source: "unavailable"`.
+- `--json`: return the raw summary inside a `[COSTS_JSON]` block.
 
 ### `/swarm retrieve <summary-id>`
 

@@ -114,6 +114,24 @@ Forty events across six categories (`src/telemetry.ts:10-40`):
 
 **Environment:** `environment_detected`, `auto_oversight_escalation`, `heartbeat`
 
+### Delegation Cost Fields
+
+Every `delegation_end` event includes token and cost fields:
+
+| Field | Description |
+|---|---|
+| `tokens_input` | Input tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_output` | Output tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_reasoning` | Reasoning tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_cache` | Cache-read/input tokens attributed to the delegation, or `0` when unavailable |
+| `cost_usd` | Reported or estimated USD cost, or `null` when unavailable |
+| `cost_source` | `reported`, `estimated`, or `unavailable` |
+| `model` | Model id used for attribution when known |
+| `gate` | Delegation gate/reason when known |
+| `retry_index` | Transient retry count for the invocation window when known |
+
+Provider-reported cost wins. If only usage is available, configure `pricing.models` to enable estimates. Older telemetry lines without these fields are still readable and aggregate as unavailable.
+
 ### Fire-and-Forget
 
 Telemetry never blocks the caller. Emit errors are silently swallowed — a failed append won't break a phase. This is deliberate: a broken telemetry write must not fail a phase.
@@ -223,6 +241,9 @@ When spec requirements are present, `injection_summary` includes a coverage note
 /swarm benchmark                   # in-memory perf metrics
 /swarm benchmark --cumulative      # scan all evidence, compute pass rates
 /swarm benchmark --ci-gate         # non-zero exit if thresholds exceeded
+/swarm benchmark --ci-gate --max-cost-usd 1.50
+/swarm costs                       # per-agent/task/gate/retry token/cost totals
+/swarm costs --json                # machine-readable cost summary
 ```
 
 `benchmark --cumulative` reads every bundle and computes:

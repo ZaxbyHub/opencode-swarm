@@ -336,6 +336,12 @@ describe('telemetry', () => {
 			// Verify data for some methods
 			expect(receivedEvents[0].data.sessionId).toBe('s1');
 			expect(receivedEvents[0].data.agentName).toBe('coder');
+			expect(receivedEvents[4].data.tokens_input).toBe(0);
+			expect(receivedEvents[4].data.tokens_output).toBe(0);
+			expect(receivedEvents[4].data.tokens_reasoning).toBe(0);
+			expect(receivedEvents[4].data.tokens_cache).toBe(0);
+			expect(receivedEvents[4].data.cost_usd).toBeNull();
+			expect(receivedEvents[4].data.cost_source).toBe('unavailable');
 			expect(receivedEvents[10].data.fromModel).toBe('gpt-4');
 			expect(receivedEvents[10].data.toModel).toBe('gpt-3.5');
 		});
