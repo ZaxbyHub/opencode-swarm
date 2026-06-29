@@ -41,7 +41,11 @@ import {
 	type SkillImproveResult,
 } from '../services/skill-improver';
 import { readEarliestSessionStart } from '../session/session-start-store.js';
-import { resetSwarmStatePreservingSingletons, swarmState } from '../state';
+import {
+	endAgentSession,
+	resetSwarmStatePreservingSingletons,
+	swarmState,
+} from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
 interface PlanPhase {
@@ -1789,6 +1793,18 @@ export async function handleCloseCommand(
 		// .swarm/archive/) and should not be written to the .swarm/ directory during close.
 		// Stage 3 cleanup removes any pre-existing SWARM_PLAN artifacts from prior sessions.
 
+		// Terminal state teardown: explicitly end all agent sessions at /swarm close (FR-007).
+		// This is the per-session lifecycle signal — endAgentSession(sessionId) is the
+		// canonical notification that a session has ended. The resetSwarmStatePreservingSingletons()
+		// call below also clears agentSessions as a coarse safety net, but this loop provides
+		// the explicit per-session teardown contract required by FR-007. Double-calls are safe
+		// because Map.delete is a no-op for missing keys (FR-010).
+		// Collect keys first to avoid mutating the Map during iteration.
+		const sessionIdsToEnd = [...swarmState.agentSessions.keys()];
+		for (const sessionId of sessionIdsToEnd) {
+			_internals.endAgentSession(sessionId);
+		}
+
 		// Preserve plugin-init singletons through state reset
 		_internals.resetSwarmStatePreservingSingletons();
 
@@ -1899,4 +1915,5 @@ export const _internals = {
 	runAlignStage,
 	archiveEvidence,
 	closePlanTerminalState,
+	endAgentSession,
 };

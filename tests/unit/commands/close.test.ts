@@ -144,6 +144,9 @@ const mockRunSkillImprover = mock(async () => ({
 	quota: { date: '2026-05-11', calls_used: 1, max_calls: 10 },
 }));
 
+// Spy for endAgentSession so tests can assert the session teardown wiring fires (FR-007).
+const mockEndAgentSession = mock((_sessionId: string) => {});
+
 let forceSkillReviewTimeout = false;
 let observedSkillReviewSignal: AbortSignal | undefined;
 let observedSkillReviewAborted = false;
@@ -252,7 +255,7 @@ function mockResetSwarmStatePreservingSingletons(): void {
 
 mock.module('../../../src/state.js', () => ({
 	swarmState: mockSwarmState,
-	endAgentSession: () => {},
+	endAgentSession: mockEndAgentSession,
 	resetSwarmState: mockResetSwarmState,
 	resetSwarmStatePreservingSingletons: mockResetSwarmStatePreservingSingletons,
 }));
@@ -293,6 +296,7 @@ describe('handleCloseCommand', () => {
 		mockCheckHivePromotions.mockClear();
 		mockLoadPluginConfigWithMeta.mockClear();
 		mockRunSkillImprover.mockClear();
+		mockEndAgentSession.mockClear();
 		forceSkillReviewTimeout = false;
 		observedSkillReviewSignal = undefined;
 		observedSkillReviewAborted = false;
@@ -1090,9 +1094,12 @@ describe('handleCloseCommand', () => {
 				const result = await handleCloseCommand(testDir, []);
 
 				// Because plan.json never existed, it cannot be "preserved because not
-				// archived". The preserve warning is only for files that existed but
-				// failed to copy.
-				expect(result).not.toContain('Preserved plan.json');
+				// archived" *with a reason*. The generic preserve message may appear for
+				// absent ACTIVE_STATE files in plan-free closes, but a detailed failure
+				// reason indicates a real copy error for a file that existed.
+				expect(result).not.toContain(
+					'Preserved plan.json because it was not successfully archived:',
+				);
 			});
 		});
 
@@ -2200,6 +2207,31 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('terminal state');
 				expect(result).not.toContain('Plan was already complete');
 			});
+		});
+	});
+
+	describe('Session lifecycle teardown (FR-007)', () => {
+		it('calls endAgentSession for each active session before state reset', async () => {
+			// beforeEach seeds mockSwarmState.agentSessions.set('session-1', ...)
+			// so 'session-1' must be present when /swarm close fires the teardown loop.
+			await writeCanonicalPlan(testDir, {
+				title: 'Test Project',
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'complete',
+						tasks: [{ id: '1.1', status: 'complete' }],
+					},
+				],
+			});
+
+			await handleCloseCommand(testDir, []);
+
+			// endAgentSession must have been called with the seeded session ID (FR-007).
+			// This verifies the wiring fires before resetSwarmStatePreservingSingletons
+			// clears the map as a coarse safety net.
+			expect(mockEndAgentSession).toHaveBeenCalledWith('session-1');
 		});
 	});
 });

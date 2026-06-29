@@ -446,6 +446,42 @@ describe('state module', () => {
 			expect(getAgentSession('s1')).toBeUndefined();
 		});
 
+		it('SC-006: session absent from agentSessions after endAgentSession at terminal event', () => {
+			// Given an agent session reaches a terminal state
+			startAgentSession('sc006-session', 'coder');
+			expect(swarmState.agentSessions.get('sc006-session')).toBeDefined();
+
+			// When endAgentSession is called
+			endAgentSession('sc006-session');
+
+			// Then the session must not be retrievable (FR-008)
+			expect(swarmState.agentSessions.get('sc006-session')).toBeUndefined();
+		});
+
+		it('SC-007: double-close is a no-op and does not throw (FR-010)', () => {
+			// Given endAgentSession has already been called for a session ID
+			startAgentSession('sc007-session', 'coder');
+			endAgentSession('sc007-session');
+
+			// When endAgentSession is called again with the same ID
+			// Then no error is thrown and the session remains absent
+			expect(() => endAgentSession('sc007-session')).not.toThrow();
+			expect(swarmState.agentSessions.get('sc007-session')).toBeUndefined();
+		});
+
+		it('SC-008: non-terminal events do not remove session from agentSessions', () => {
+			// Given an agent session that is actively running
+			startAgentSession('sc008-session', 'coder');
+
+			// When non-terminal events fire (ensureAgentSession updates, mid-task state change)
+			ensureAgentSession('sc008-session', 'coder');
+			const session = swarmState.agentSessions.get('sc008-session')!;
+			advanceTaskState(session, 'task-1.1', 'coder_delegated');
+
+			// Then the session must still be in agentSessions (FR-009)
+			expect(swarmState.agentSessions.get('sc008-session')).toBeDefined();
+		});
+
 		it('getAgentSession returns undefined for unknown', () => {
 			expect(getAgentSession('nonexistent')).toBeUndefined();
 		});

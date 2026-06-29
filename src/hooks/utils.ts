@@ -24,7 +24,14 @@ export const _internals: {
 	composeHandlers: typeof composeHandlers;
 	validateSwarmPath: typeof validateSwarmPath;
 	readSwarmFileAsync: typeof readSwarmFileAsync;
-} = { safeHook, composeHandlers, validateSwarmPath, readSwarmFileAsync };
+	readCachedTextFile: typeof readCachedTextFile;
+} = {
+	safeHook,
+	composeHandlers,
+	validateSwarmPath,
+	readSwarmFileAsync,
+	readCachedTextFile,
+};
 
 export function safeHook<I, O>(
 	fn: (input: I, output: O) => Promise<void>,
@@ -170,7 +177,22 @@ export function validateSwarmPath(directory: string, filename: string): string {
 export async function readSwarmFileAsync(
 	directory: string,
 	filename: string,
+	cache?: Map<string, Promise<string | null>>,
 ): Promise<string | null> {
+	if (cache !== undefined) {
+		const key = `${directory}::${filename}`;
+		const cached = cache.get(key);
+		if (cached !== undefined) {
+			// Return the cached promise directly — concurrent awaits share the
+			// same in-flight request, and null results are cached too.
+			return cached;
+		}
+		// Store the promise BEFORE awaiting so any concurrent call for the same
+		// key picks up the in-flight promise instead of starting a second read.
+		const promise = readSwarmFileAsync(directory, filename);
+		cache.set(key, promise);
+		return promise;
+	}
 	// Retry loop to handle macOS/APFS rename-visibility race.
 	// After an atomic rename, the filesystem can take a few ms to update
 	// the directory entry. Immediately-following reads may see ENOENT.
@@ -180,7 +202,7 @@ export async function readSwarmFileAsync(
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
 		try {
 			const resolvedPath = _internals.validateSwarmPath(directory, filename);
-			return await readCachedTextFile(resolvedPath, async () => {
+			return await _internals.readCachedTextFile(resolvedPath, async () => {
 				const file = bunFile(resolvedPath);
 				return await file.text();
 			});
