@@ -63,7 +63,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 
 ## Release History
 
-**Current package metadata:** see [`package.json`](../package.json) and [`CHANGELOG.md`](../CHANGELOG.md). In this checkout, `package.json` reports `7.46.1`, and the top changelog entry is `7.46.1` from 2026-05-29.
+**Current package metadata:** see [`package.json`](../package.json) and [`CHANGELOG.md`](../CHANGELOG.md) for the authoritative current version (this index intentionally does not pin a version string to avoid drift — release-please-managed and not hand-edited).
 
 The full release history is documented in [CHANGELOG.md](../CHANGELOG.md). The per-version files under `docs/releases/` are supporting release-note artifacts and may not cover every changelog entry.
 
@@ -116,4 +116,4 @@ See [Archive](archive/ARCHIVE.md) for:
 
 ---
 
-*Last updated: 2026-06-14. Current package metadata was verified from `package.json` and `CHANGELOG.md`.*
+*Last updated: 2026-06-29. Package version is read from `package.json` and `CHANGELOG.md` (release-please-managed, not pinned in prose).*

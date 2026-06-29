@@ -39,7 +39,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
 - 🖥️ **PR Monitor** — GitHub PR subscription and background polling via `gh` CLI; delivers real-time CI, review, and merge status updates via the AutomationEventBus (FR-001, opt-in via `pr_monitor.enabled: true`). Subscribe with `/swarm pr subscribe <pr-url|owner/repo#N|N>`; unsubscribe with `/swarm pr unsubscribe <pr-url|owner/repo#N|N>`; check status with `/swarm pr status`. Enable `auto_pr_feedback: true` in `pr_monitor` config to inject `[MODE: PR_FEEDBACK pr="URL"]` on CI failures and merge conflicts automatically.
-- 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex (extending: see [docs/adding-a-language.md](docs/adding-a-language.md))
+- 🌐 **12 full language profiles** (TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP) with **tree-sitter parse validation across 20 grammars** (adds JavaScript, CSS, Bash, PowerShell, INI, Regex — and `.tsx` / `.c` aliases) — extending: see [docs/adding-a-language.md](docs/adding-a-language.md)
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
 - 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence, TTL expiry, and scope-aware destructive command blocking. **Handles both single-string and array-based path arguments** (`files[]`, `paths[]`, `targetFiles[]`) to prevent scope bypass via multi-file tool calls.
 - 📝 **Shell write detection** — Static analysis of POSIX/PowerShell/cmd commands to detect file writes (redirects, builtins, in-place editors, network downloads, archive extraction, git destructive ops) before execution
@@ -522,6 +522,8 @@ Every agent runs inside a circuit breaker that prevents runaway behavior:
 
 Limits reset per task. Per-agent overrides available in config.
 
+> **Note:** Built-in per-agent profiles override the global `max_consecutive_errors` to **8** for `architect`, `coder`, `test_engineer`, `explorer`, and `reviewer` (`src/config/schema.ts` `DEFAULT_AGENT_PROFILES`). The `5` shown above is the `GuardrailsConfigSchema` global default that applies only when no per-agent profile sets the value. See [docs/installation.md § Guardrails Configuration](docs/installation.md#guardrails-configuration) for the full schema and [docs/configuration.md § Per-agent override fields](docs/configuration.md#per-agent-override-fields) for how to override.
+
 ### File Authority (Per-Agent Write Permissions)
 
 Each agent can only write to specific paths:
@@ -540,7 +542,7 @@ Built-in tools verify every task before it ships:
 
 - **syntax_check** — Tree-sitter validation across the configured language grammar map
 - **placeholder_scan** — Catches TODOs, stubs, incomplete code
-- **sast_scan** — 63+ security rules, 9 languages (offline)
+- **sast_scan** — 65 security rules across 7 languages (offline)
 - **sbom_generate** — Dependency tracking (CycloneDX)
 - **quality_budget** — Complexity, duplication, test ratio limits
 
@@ -796,7 +798,7 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 |------|-------------|
 | syntax_check | Tree-sitter validation across the configured language grammar map |
 | placeholder_scan | Catches TODOs, FIXMEs, stubs, placeholder text |
-| sast_scan | Offline security analysis, 63+ rules, 9 languages |
+| sast_scan | Offline security analysis, 65 rules, 7 languages |
 | sbom_generate | CycloneDX dependency tracking, 8 ecosystems |
 | build_check | Runs your project's native build/typecheck |
 | incremental_verify | Post-coder hook for TS/JS, Go, Rust, Python, and C#; configured by `incremental_verify.*`, not invoked as a registered tool |

@@ -436,7 +436,7 @@ Coder → syntax_check → placeholder_scan → sast_scan → sbom_generate → 
 |------|---------|---------------|
 | `syntax_check` | Parse errors, invalid syntax | Machine finds syntax errors instantly |
 | `placeholder_scan` | TODO/FIXME comments, stubs | Prevents shipping incomplete code |
-| `sast_scan` | Security vulnerabilities (63 rules) | Security review before human review |
+| `sast_scan` | Security vulnerabilities (65 rules across 7 languages) | Security review before human review |
 | `sbom_generate` | Dependency inventory | Audit trail for compliance |
 | `build_check` | Compilation errors, type failures | Build must pass before review |
 | `quality_budget` | Complexity, duplication, test coverage | Maintainability enforcement |

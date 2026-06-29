@@ -29,6 +29,30 @@ Former root-level knowledge audit from 2026-04-26. It is retained for
 provenance only; the maintained knowledge-system behavior is documented in
 `/docs/knowledge.md` and `/docs/skills.md`.
 
+### `/docs/archive/test-audit-report.md`, `/docs/archive/test-audit-failures.md` — root test-audit snapshots (2026-04-28)
+
+Former root-level test-suite audit snapshots captured during the
+2026-04-28 full-repo audit pass (issue #1268). The 17+ initial failures
+they list were resolved in subsequent PRs (telemetry-wiring,
+acknowledge-spec-drift, web-search-provider, check-gate-status, etc.),
+and the 25 remaining guardrails/Windows-specific items are tracked
+separately. They are retained for provenance; current test status is
+authoritative in `bun run test` and CI.
+
+### `/docs/archive/test-tool-schema.mjs` — root probe script
+
+A one-off ad-hoc probe script (13 lines) that logged the
+`@opencode-ai/plugin/tool` schema shape during the v7.x audit work.
+Not imported by any source file, not referenced by any CI workflow,
+not listed in `package.json#files`. Kept for provenance; do not run.
+
+### `/docs/archive/test_dist_check/` — root scratch build probe
+
+A scratch `dist/` subtree (only `dist/tools/test.js` was tracked in git)
+created during the v7.x audit work to inspect built output. Not part of
+the published package, not part of the source tree, not referenced
+anywhere. Kept for provenance; not a build artifact.
+
 ## Why archive instead of delete?
 
 Git preserves history, but references across docs sometimes outlive their sources. Archiving in place keeps the files reachable at stable paths while signalling that they are no longer maintained. Two live docs still link into this archive:

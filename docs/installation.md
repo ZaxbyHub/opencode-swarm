@@ -875,7 +875,7 @@ Enable all gates with defaults:
 |------|-------------|---------|-------------|
 | `syntax_check` | Tree-sitter parse validation (20 languages) | `true` | Block review |
 | `placeholder_scan` | Detect TODO/FIXME/stub implementations | `true` | Block review |
-| `sast_scan` | Static security analysis (63+ rules) | `true` | Block review |
+| `sast_scan` | Static security analysis (65 rules across 7 languages) | `true` | Block review |
 | `sbom_generate` | Generate CycloneDX SBOM | `true` | Continue (informational) |
 | `build_check` | Build/typecheck verification | `true` | Block review |
 | `quality_budget` | Enforce maintainability thresholds | `true` | Block review |
