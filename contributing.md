@@ -223,6 +223,7 @@ All of these must be green. They run automatically on every PR.
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
 | `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
+| `coverage` (merge queue only) | Code coverage ≥ 41.48% (enforced via `bun test --coverage`) |
 | `dist-check` | Committed `dist/` matches a fresh build |
 | `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |
@@ -234,6 +235,10 @@ All of these must be green. They run automatically on every PR.
 | `check-duplicates` | PR title does not match an already-open PR |
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
+
+The `quality` job also runs `scripts/check-mock-cleanup.sh` which enforces:
+- All `mock.module` calls have proper cleanup (`afterEach(mock.restore())` or file-scoped `mockClear`/`mockReset`)
+- All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
 
 ---
 
@@ -255,6 +260,14 @@ All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `
 | `tests/architect/` | Architect agent behavior and identity tests |
 | `test/` | Top-level standalone tests (adversarial plan write, reviewer tiers, agent tagging) |
 
+### Test file size limits
+
+- **Maximum 500 lines per test file** (FR-006 SC-006.1 enforcement)
+- `delegation-gate.test.ts` was the monolith — 2835 lines split into 45 focused files, each under 500 lines
+- When a test file exceeds 500 lines, split it by behavior/feature into focused files
+- SME tests (FR-008) use parameterization to keep files lean while maximizing coverage
+- FR-010/011/012 hook tests (Phase 4) use shared fixture files (e.g., `curator-test-fixtures.ts`) to consolidate common setup and avoid duplication across focused test files
+
 ### When you change behavior, update the tests
 
 If your code change alters the behavior of an existing function (new error messages, stricter validation, changed defaults), **find and update every test that asserts the old behavior.** Do not leave tests failing for a follow-up PR. Common examples:
@@ -267,6 +280,25 @@ If your code change alters the behavior of an existing function (new error messa
 ### Opt-in tool maps
 
 Some tools are gated behind feature flags and use **opt-in tool maps** (e.g., `MEMORY_AGENT_TOOL_MAP` when `memory.enabled === true`, `EXTERNAL_SKILL_AGENT_TOOL_MAP` when `external_skills.curation_enabled === true`). These tools must still be fully registered (export, `TOOL_NAMES`, `tool-metadata`, manifest entry), but are merged into agent configs conditionally at build time. See AGENTS.md invariant #11 (Tool registration + agent-map coherence) for the complete checklist.
+
+### Adding adversarial tests
+
+Adversarial tests live in `tests/adversarial/` and verify security boundaries (FR-003 subprocess injection, FR-004 guardrail bypass, FR-005 evidence spoofing). Use the `_internals` DI seam pattern rather than `mock.module` to avoid cross-file mock leakage:
+
+```typescript
+// in tests/adversarial/evidence-spoofing.test.ts
+import { _internals } from '../../src/hooks/knowledge-migrator';
+
+const real = _internals.writeSentinel;
+afterEach(() => { _internals.writeSentinel = real; });
+
+test('evidence spoofing is blocked', () => {
+  _internals.writeSentinel = mock(...) as typeof real;
+  // assertions
+});
+```
+
+For validating evidence integrity, use `src/evidence/manager.ts:_internals.validateEvidence` which is exposed for DI testing.
 
 ---
 

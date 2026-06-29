@@ -24,44 +24,47 @@
  * 3. Tools execute successfully with provided contexts
  */
 
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realFs from 'node:fs';
 import * as os from 'node:os';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ===== MOCK HELPER FUNCTIONS =====
 // Mock isCommandAvailable
-vi.mock('../../../src/build/discovery', () => ({
-	isCommandAvailable: vi.fn(() => true),
+mock.module('../../../src/build/discovery', () => ({
+	isCommandAvailable: mock(() => true),
 }));
 
 // Mock warn
-vi.mock('../../../src/utils', () => ({
-	warn: vi.fn(),
+mock.module('../../../src/utils', () => ({
+	warn: mock(),
 }));
 
 // Mock fs module to prevent actual file operations
-vi.mock('node:fs', () => ({
+mock.module('node:fs', () => ({
+	...realFs,
 	default: {
-		existsSync: vi.fn(() => true),
-		readFileSync: vi.fn(() => '{}'),
-		mkdirSync: vi.fn(),
-		writeFileSync: vi.fn(),
-		readdirSync: vi.fn(() => []),
-		statSync: vi.fn(() => ({ isFile: () => true, isDirectory: () => false })),
-		readFile: vi.fn((_path: unknown, cb: (err: null, data: Buffer) => void) =>
+		...realFs,
+		existsSync: mock(() => true),
+		readFileSync: mock(() => '{}'),
+		mkdirSync: mock(),
+		writeFileSync: mock(),
+		readdirSync: mock(() => []),
+		statSync: mock(() => ({ isFile: () => true, isDirectory: () => false })),
+		readFile: mock((_path: unknown, cb: (err: null, data: Buffer) => void) =>
 			cb(null, Buffer.from('{}')),
 		),
 	},
 }));
 
 // Mock semgrep
-vi.mock('../../../src/sast/semgrep', () => ({
-	isSemgrepAvailable: vi.fn(() => false),
-	runSemgrep: vi.fn().mockResolvedValue({
+mock.module('../../../src/sast/semgrep', () => ({
+	isSemgrepAvailable: mock(() => false),
+	runSemgrep: mock().mockImplementation(async () => ({
 		available: false,
 		findings: [],
 		engine: 'tier_a',
-	}),
-	resetSemgrepCache: vi.fn(),
+	})),
+	resetSemgrepCache: mock(),
 }));
 
 import { build_check } from '../../../src/tools/build-check';
@@ -80,7 +83,7 @@ import { todo_extract } from '../../../src/tools/todo-extract';
 
 describe('Batch tool migration: createSwarmTool integration verification', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.reset();
 	});
 
 	// Verify all tools have execute methods that accept directory parameter

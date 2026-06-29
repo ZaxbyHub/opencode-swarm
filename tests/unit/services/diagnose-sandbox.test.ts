@@ -102,7 +102,10 @@ mock.module('node:fs', () => ({
 	readFileSync: () => '{}',
 }));
 
+import * as realChildProcess from 'node:child_process';
+
 mock.module('node:child_process', () => ({
+	...realChildProcess,
 	execSync: () => Buffer.from('.git'),
 }));
 

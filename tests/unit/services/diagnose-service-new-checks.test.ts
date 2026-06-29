@@ -1,5 +1,5 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
 
 // Mock all the imported modules

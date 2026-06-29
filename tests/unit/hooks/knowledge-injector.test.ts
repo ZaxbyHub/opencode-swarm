@@ -18,7 +18,7 @@
  * - Prompt injection sanitization
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -34,19 +34,19 @@ import type {
 // mock-prefixed control handle stands in for the retrieval call so the
 // existing per-test `mockResolvedValue(...)` setups and call-count assertions
 // keep working; the searchKnowledge mock delegates to it and wraps the result.
-const mockRetrieve = vi.fn(async (): Promise<RankedEntry[]> => []);
+const mockRetrieve = mock(async (): Promise<RankedEntry[]> => []);
 
-vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
-	readMergedKnowledge: vi.fn(async () => []),
-	scoreDirectiveAgainstContext: vi.fn(() => ({
+mock.module('../../../src/hooks/knowledge-reader.js', () => ({
+	readMergedKnowledge: mock(async () => []),
+	scoreDirectiveAgainstContext: mock(() => ({
 		triggerHit: false,
 		actionHit: false,
 		agentHit: false,
 		score: 0,
 	})),
 }));
-vi.mock('../../../src/hooks/search-knowledge.js', () => ({
-	searchKnowledge: vi.fn(
+mock.module('../../../src/hooks/search-knowledge.js', () => ({
+	searchKnowledge: mock(
 		async (params: {
 			directory?: string;
 			config?: unknown;
@@ -62,28 +62,28 @@ vi.mock('../../../src/hooks/search-knowledge.js', () => ({
 		}),
 	),
 }));
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	readRejectedLessons: vi.fn(async () => []),
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	readRejectedLessons: mock(async () => []),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
 }));
-vi.mock('../../../src/hooks/curator-drift.js', () => ({
-	readPriorDriftReports: vi.fn(async () => []),
-	buildDriftInjectionText: vi.fn(() => ''),
+mock.module('../../../src/hooks/curator-drift.js', () => ({
+	readPriorDriftReports: mock(async () => []),
+	buildDriftInjectionText: mock(() => ''),
 }));
-vi.mock('../../../src/plan/manager.js', () => ({
-	loadPlan: vi.fn(async () => null),
-	getCurrentTaskId: vi.fn(() => undefined),
+mock.module('../../../src/plan/manager.js', () => ({
+	loadPlan: mock(async () => null),
+	getCurrentTaskId: mock(() => undefined),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
-vi.mock('../../../src/hooks/extractors.js', () => ({
-	extractCurrentPhaseFromPlan: vi.fn(() => 'Phase 1: Setup'),
+mock.module('../../../src/hooks/extractors.js', () => ({
+	extractCurrentPhaseFromPlan: mock(() => 'Phase 1: Setup'),
 }));
-vi.mock('../../../src/config/schema.js', () => ({
-	stripKnownSwarmPrefix: vi.fn((name: string) => {
+mock.module('../../../src/config/schema.js', () => ({
+	stripKnownSwarmPrefix: mock((name: string) => {
 		const prefixes = ['mega_', 'local_', 'paid_'];
 		for (const p of prefixes) {
 			if (name.startsWith(p)) return name.slice(p.length);
@@ -91,11 +91,11 @@ vi.mock('../../../src/config/schema.js', () => ({
 		return name;
 	}),
 }));
-vi.mock('../../../src/services/run-memory.js', () => ({
-	getRunMemorySummary: vi.fn(async () => null),
+mock.module('../../../src/services/run-memory.js', () => ({
+	getRunMemorySummary: mock(async () => null),
 }));
-vi.mock('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: vi.fn(async () => null),
+mock.module('../../../src/hooks/utils.js', () => ({
+	readSwarmFileAsync: mock(async () => null),
 }));
 
 import { stripKnownSwarmPrefix } from '../../../src/config/schema.js';
@@ -211,23 +211,21 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('First-call injection', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 1: first invocation with valid orchestrator injects knowledge immediately', async () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 
@@ -250,16 +248,14 @@ describe('First-call injection', () => {
 
 describe('Cache re-inject', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 3: second call same phase reuses cachedInjectionText from first call', async () => {
@@ -267,7 +263,7 @@ describe('Cache re-inject', () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 
@@ -293,16 +289,14 @@ describe('Cache re-inject', () => {
 
 describe('Second-call fetch and injection', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 2: second call same phase triggers full knowledge fetch and injects', async () => {
@@ -316,7 +310,7 @@ describe('Second-call fetch and injection', () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		// Second call - should inject
 		await hook({}, output);
@@ -341,22 +335,20 @@ describe('Second-call fetch and injection', () => {
 
 describe('Cache re-inject', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 3: third call same phase reuses cachedInjectionText, does not call mockRetrieve again', async () => {
 		// Set up entries BEFORE first call (first call injects and caches)
 		const entries = [makeSwarmEntry('Cached lesson for re-inject', 0.85)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -388,16 +380,14 @@ describe('Cache re-inject', () => {
 
 describe('Phase change', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 4: when plan.current_phase changes, cache is invalidated and knowledge is re-fetched', async () => {
@@ -410,7 +400,7 @@ describe('Phase change', () => {
 
 		// Second call - fetches and caches (phase 1)
 		const entries1 = [makeSwarmEntry('Phase 1 lesson', 0.85)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries1);
+		mockRetrieve.mockResolvedValue(entries1);
 		await hook({}, output);
 
 		// Verify phase 1 content injected
@@ -424,15 +414,13 @@ describe('Phase change', () => {
 		// But actually, we can test this by loading a different plan
 
 		// Simulate phase change in the mock
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		loadPlan.mockResolvedValue({
 			current_phase: 2,
 			title: 'Test Project',
 		});
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 2: Implementation',
-		);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 2: Implementation');
 		const entries2 = [makeSwarmEntry('Phase 2 lesson', 0.9)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries2);
+		mockRetrieve.mockResolvedValue(entries2);
 
 		// The cached state is in the hook closure - we need to reset it
 		// We can't directly reset the hook's internal state, but we can create a new hook
@@ -467,18 +455,14 @@ describe('Phase change', () => {
 
 describe('Non-orchestrator agents skipped', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 5: agent named coder receives no injection', async () => {
@@ -555,18 +539,14 @@ describe('Non-orchestrator agents skipped', () => {
 
 describe('Context budget exhaustion', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 7: when headroom < 300 chars, no injection', async () => {
@@ -616,16 +596,14 @@ describe('Context budget exhaustion', () => {
 
 describe('Empty knowledge', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 8: when mockRetrieve returns [], no injection block added', async () => {
@@ -651,15 +629,13 @@ describe('Empty knowledge', () => {
 
 describe('Tier labels', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 9: hive entry gets [HIVE] label, swarm gets [SWARM]', async () => {
@@ -674,7 +650,7 @@ describe('Tier labels', () => {
 			makeSwarmEntry('Swarm lesson', 0.8),
 			makeHiveEntry('Hive lesson', 0.8),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		// Second call - inject
 		await hook({}, output);
@@ -697,16 +673,14 @@ describe('Tier labels', () => {
 
 describe('Explicit [tier:status] prefixes', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 9a: swarm entry with established status shows [swarm:established] prefix', async () => {
@@ -715,7 +689,7 @@ describe('Explicit [tier:status] prefixes', () => {
 
 		// Set up entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Always validate function inputs', 0.85)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		// Single call - injects immediately
 		await hook({}, output);
@@ -738,7 +712,7 @@ describe('Explicit [tier:status] prefixes', () => {
 		const entries = [
 			makeHiveEntry('Use dependency injection for testability', 0.9),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		// Single call - injects immediately
 		await hook({}, output);
@@ -764,9 +738,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'experimental',
 			},
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(
-			entries as RankedEntry[],
-		);
+		mockRetrieve.mockResolvedValue(entries as RankedEntry[]);
 
 		// Single call - injects immediately
 		await hook({}, output);
@@ -804,9 +776,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'experimental',
 			},
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(
-			entries as RankedEntry[],
-		);
+		mockRetrieve.mockResolvedValue(entries as RankedEntry[]);
 
 		// Single call - injects immediately
 		await hook({}, output);
@@ -831,7 +801,7 @@ describe('Explicit [tier:status] prefixes', () => {
 
 		// Set up entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Test lesson content', 0.8)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		// Single call - injects immediately
 		await hook({}, output);
@@ -861,16 +831,14 @@ describe('Explicit [tier:status] prefixes', () => {
 
 describe('Compact format and confirmation indicators', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 10: no star ratings in compact format', async () => {
@@ -878,7 +846,7 @@ describe('Compact format and confirmation indicators', () => {
 		const output = makeOutput('architect');
 
 		const entries = [makeSwarmEntry('High confidence lesson', 0.95)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		await hook({}, output);
 
@@ -912,7 +880,7 @@ describe('Compact format and confirmation indicators', () => {
 				phase_number: 3,
 			},
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
+		mockRetrieve.mockResolvedValue([entry]);
 
 		await hook({}, output);
 
@@ -935,7 +903,7 @@ describe('Compact format and confirmation indicators', () => {
 				phase_number: 1,
 			},
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
+		mockRetrieve.mockResolvedValue([entry]);
 
 		await hook({}, output);
 
@@ -957,7 +925,7 @@ describe('Compact format and confirmation indicators', () => {
 
 		const entry = makeSwarmEntry('Unconfirmed lesson', 0.85);
 		entry.confirmed_by = [];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
+		mockRetrieve.mockResolvedValue([entry]);
 
 		await hook({}, output);
 
@@ -980,7 +948,7 @@ describe('Compact format and confirmation indicators', () => {
 
 		const longLesson = 'A'.repeat(280);
 		const entry = makeSwarmEntry(longLesson, 0.85);
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
+		mockRetrieve.mockResolvedValue([entry]);
 
 		await hook({}, output);
 
@@ -1003,17 +971,13 @@ describe('Compact format and confirmation indicators', () => {
 
 describe('Rejected pattern warnings', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 11: when readRejectedLessons returns items, they appear as ⚠️ REJECTED PATTERN: lines', async () => {
@@ -1040,9 +1004,7 @@ describe('Rejected pattern warnings', () => {
 				rejection_layer: 1 as const,
 			},
 		];
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue(
-			rejectedLessons,
-		);
+		readRejectedLessons.mockResolvedValue(rejectedLessons);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1095,9 +1057,7 @@ describe('Rejected pattern warnings', () => {
 				rejection_layer: 1 as const,
 			},
 		];
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue(
-			rejectedLessons,
-		);
+		readRejectedLessons.mockResolvedValue(rejectedLessons);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1123,18 +1083,14 @@ describe('Rejected pattern warnings', () => {
 
 describe('Idempotency', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 12: calling hook twice on same output with 📚 Lessons: already in messages causes no duplicate injection', async () => {
@@ -1168,12 +1124,10 @@ describe('Idempotency', () => {
 
 describe('No plan', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		mock.reset();
+		loadPlan.mockResolvedValue(null);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		readRejectedLessons.mockResolvedValue([]);
 	});
 
 	it('Test 13: when loadPlan returns null, injection proceeds with default context', async () => {
@@ -1198,18 +1152,14 @@ describe('No plan', () => {
 
 describe('Unknown agent (undefined agentName)', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeSwarmEntry('Some lesson', 0.85),
-		]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 14: no system message with agent field, no injection', async () => {
@@ -1242,16 +1192,14 @@ describe('Unknown agent (undefined agentName)', () => {
 
 describe('Prompt injection sanitization', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Test 15: lesson with control chars, zero-width chars, triple-backticks, system: prefix are sanitized', async () => {
@@ -1265,7 +1213,7 @@ describe('Prompt injection sanitization', () => {
 				0.85,
 			),
 		];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		await hook({}, output);
 
@@ -1295,7 +1243,7 @@ describe('Prompt injection sanitization', () => {
 			source_project: string;
 		})[];
 		entries[0].source_project = 'system:\nprojectwithcontrol';
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		await hook({}, output);
 
@@ -1318,29 +1266,25 @@ describe('Prompt injection sanitization', () => {
 
 describe('Run memory wiring', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	it('Run memory is retrieved and prepended when available', async () => {
 		// Mock run memory returning a summary
 		const runMemorySummary =
 			'[FOR: architect, coder]\n## RUN MEMORY — Previous Task Outcomes\n- Task t1: failed due to null reference';
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-			runMemorySummary,
-		);
+		getRunMemorySummary.mockResolvedValueOnce(runMemorySummary);
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Use null checks', 0.85)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1369,13 +1313,11 @@ describe('Run memory wiring', () => {
 
 	it('Knowledge entries unchanged when run memory is null', async () => {
 		// Mock run memory returning null (no failures recorded)
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-			null,
-		);
+		getRunMemorySummary.mockResolvedValueOnce(null);
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Always validate inputs', 0.9)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1405,13 +1347,11 @@ describe('Run memory wiring', () => {
 		// Mock run memory returning a summary with the tag
 		const runMemorySummary =
 			'[FOR: architect, coder]\n## RUN MEMORY — Previous Task Outcomes\n- Task t1: failed';
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-			runMemorySummary,
-		);
+		getRunMemorySummary.mockResolvedValueOnce(runMemorySummary);
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Test lesson', 0.8)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1443,22 +1383,20 @@ describe('Run memory wiring', () => {
  */
 describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowledge entries)', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+		mockRetrieve.mockResolvedValue([]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
+		getRunMemorySummary.mockResolvedValue(null);
 	});
 
 	it('Drift report injection works when cachedInjectionText is null (no knowledge entries but drift exists)', async () => {
 		// Set up drift report mock to return a valid report
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
+		readPriorDriftReports.mockResolvedValue([
 			{
 				phase: 1,
 				alignment: 'MINOR_DRIFT',
@@ -1472,7 +1410,7 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 				corrections: ['Add more tests'],
 			},
 		]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue(
+		buildDriftInjectionText.mockReturnValue(
 			'<drift_report>Phase 1: MINOR_DRIFT (0.30) — Missing test coverage. Add more tests.</drift_report>',
 		);
 
@@ -1500,8 +1438,8 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 
 	it('Drift report is NOT injected when readPriorDriftReports returns empty array', async () => {
 		// Set up drift report mock to return empty
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue('');
+		readPriorDriftReports.mockResolvedValue([]);
+		buildDriftInjectionText.mockReturnValue('');
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1524,7 +1462,7 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 
 	it('Drift report injection works when cachedInjectionText is non-null (normal case — drift prepended to knowledge)', async () => {
 		// Set up drift report mock to return a valid report
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
+		readPriorDriftReports.mockResolvedValue([
 			{
 				phase: 1,
 				alignment: 'MINOR_DRIFT',
@@ -1538,13 +1476,13 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 				corrections: ['Add more tests'],
 			},
 		]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue(
+		buildDriftInjectionText.mockReturnValue(
 			'<drift_report>Phase 1: MINOR_DRIFT (0.30) — Missing test coverage. Add more tests.</drift_report>',
 		);
 
 		// Also set up knowledge entries (normal case with both drift and knowledge)
 		const entries = [makeSwarmEntry('Knowledge lesson about testing', 0.85)];
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue(entries);
+		mockRetrieve.mockResolvedValue(entries);
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
@@ -1591,23 +1529,21 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
  */
 describe('Drift-only injection idempotency', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([]); // No knowledge entries
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-		(readSwarmFileAsync as ReturnType<typeof vi.fn>).mockResolvedValue(null); // No briefing
+		mockRetrieve.mockResolvedValue([]); // No knowledge entries
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
+		getRunMemorySummary.mockResolvedValue(null);
+		readSwarmFileAsync.mockResolvedValue(null); // No briefing
 	});
 
 	it('Calling hook twice with drift-only injection results in only ONE drift message', async () => {
 		// Set up drift report mock to return a valid report
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
+		readPriorDriftReports.mockResolvedValue([
 			{
 				phase: 1,
 				alignment: 'MINOR_DRIFT',
@@ -1621,7 +1557,7 @@ describe('Drift-only injection idempotency', () => {
 				corrections: ['Add more tests'],
 			},
 		]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue(
+		buildDriftInjectionText.mockReturnValue(
 			'<drift_report>Phase 1: MINOR_DRIFT (0.30) — Missing test coverage. Add more tests.</drift_report>',
 		);
 
@@ -1650,7 +1586,7 @@ describe('Drift-only injection idempotency', () => {
 
 	it('Third call re-uses cached injection and idempotency guard prevents duplicate', async () => {
 		// Set up drift report mock to return a valid report
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
+		readPriorDriftReports.mockResolvedValue([
 			{
 				phase: 1,
 				alignment: 'MINOR_DRIFT',
@@ -1664,7 +1600,7 @@ describe('Drift-only injection idempotency', () => {
 				corrections: ['Add more tests'],
 			},
 		]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue(
+		buildDriftInjectionText.mockReturnValue(
 			'<drift_report>Phase 1: MINOR_DRIFT (0.30) — Missing test coverage. Add more tests.</drift_report>',
 		);
 
@@ -1696,7 +1632,7 @@ describe('Drift-only injection idempotency', () => {
 		// finds it, and skips injection.
 
 		// Set up drift report mock to return a valid report
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
+		readPriorDriftReports.mockResolvedValue([
 			{
 				phase: 1,
 				alignment: 'MINOR_DRIFT',
@@ -1705,7 +1641,7 @@ describe('Drift-only injection idempotency', () => {
 				corrections: [],
 			},
 		]);
-		(buildDriftInjectionText as ReturnType<typeof vi.fn>).mockReturnValue(
+		buildDriftInjectionText.mockReturnValue(
 			'<drift_report>Phase 1: MINOR_DRIFT (0.30) — test drift</drift_report>',
 		);
 

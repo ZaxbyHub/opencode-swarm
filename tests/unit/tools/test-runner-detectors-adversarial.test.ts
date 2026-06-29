@@ -1,16 +1,16 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the discovery module before importing test-runner
-const mockIsCommandAvailable = vi.fn();
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-	clearToolchainCache: vi.fn(),
-	discoverBuildCommands: vi.fn(),
-	discoverBuildCommandsFromProfiles: vi.fn(),
-	getEcosystems: vi.fn(() => []),
+	clearToolchainCache: mock(),
+	discoverBuildCommands: mock(),
+	discoverBuildCommandsFromProfiles: mock(),
+	getEcosystems: mock(() => []),
 }));
 
 // Now import after mocking is set up
@@ -27,7 +27,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 		// Reset mock before each test
 		mockIsCommandAvailable.mockReset();
 		// Default: no commands available
-		mockIsCommandAvailable.mockReturnValue(false);
+		mockIsCommandAvailable.mockImplementation(false);
 	});
 
 	afterEach(() => {
@@ -312,7 +312,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 			const nonExistentDir = path.join(tempDir, 'does-not-exist');
 
 			// Mock: all commands available (doesn't matter, directory doesn't exist)
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			// Should NOT throw, should return 'none'
 			const result = await detectTestFramework(nonExistentDir);
@@ -330,7 +330,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 				'non-existent',
 			);
 
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = await detectTestFramework(deepPath);
 			expect(result).toBe('none');
@@ -344,7 +344,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 				'non-existent',
 			);
 
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = await detectTestFramework(specialPath);
 			expect(result).toBe('none');
@@ -354,7 +354,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 	describe('Additional adversarial edge cases', () => {
 		it('empty directory with no files', async () => {
 			// Directory exists but is empty
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = await detectTestFramework(tempDir);
 			expect(result).toBe('none');
@@ -366,7 +366,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 			fs.mkdirSync(path.join(tempDir, 'docs'));
 			fs.writeFileSync(path.join(tempDir, 'docs', 'guide.md'), '# Guide');
 
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = await detectTestFramework(tempDir);
 			expect(result).toBe('none');
@@ -377,7 +377,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 			const filePath = path.join(tempDir, 'restricted.txt');
 			fs.writeFileSync(filePath, 'content');
 
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			// Using a file as cwd should not crash
 			const result = await detectTestFramework(filePath);
@@ -392,7 +392,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 			fs.writeFileSync(path.join(tempDir, 'Gemfile'), 'source "rubygems"');
 
 			// Mock: no binaries available
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = await detectTestFramework(tempDir);
 			// Should detect package.json first and check JS/TS frameworks
@@ -413,7 +413,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 
 			// Clear and set fresh mock
 			mockIsCommandAvailable.mockClear();
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = await detectTestFramework(tempDir);
 

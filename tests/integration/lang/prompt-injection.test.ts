@@ -5,7 +5,7 @@
  * helpers from src/hooks/system-enhancer.ts using real profile data (not mocks).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { getProfileForFile } from '../../../src/lang/detector';
 import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 

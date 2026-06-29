@@ -160,7 +160,7 @@ jobs:
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
-            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
+            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 --coverage > "$tmp" 2>&1 || exit_code=$?
             if [ $exit_code -ne 0 ]; then
               if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp"; then
                 echo "::error file=$f::FAILED: $f"
@@ -172,6 +172,37 @@ jobs:
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
           exit $failed
+
+      - name: Coverage gate enforcement
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        run: |
+          set -e
+          echo "Running coverage measurement for gate enforcement..."
+          # Run the full unit test suite with coverage
+          bun --smol test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
+          # Extract line coverage from "All files" row
+          COVERAGE=$(grep -E "All files" coverage-output.txt | head -1 | awk -F'|' '{gsub(/ /,"",$2); print $2}' | head -c 5)
+          if [ -z "$COVERAGE" ]; then
+            echo "::warning::Could not parse coverage output"
+            COVERAGE="0"
+          fi
+          THRESHOLD=41.48
+          echo "Coverage: ${COVERAGE}% (threshold: ${THRESHOLD}%)"
+          # Compare using awk for floating-point
+          if awk "BEGIN {exit !($COVERAGE < $THRESHOLD)}"; then
+            echo "::error::Coverage gate failed: ${COVERAGE}% < ${THRESHOLD}%"
+            exit 1
+          fi
+          echo "Coverage gate passed: ${COVERAGE}% >= ${THRESHOLD}%"
+      - name: Upload coverage report
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage-output.txt
+            coverage/lcov.info
+          if-no-files-found: warn
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success
   # to satisfy required checks without doing work. Also skipped for release-please.

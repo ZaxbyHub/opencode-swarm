@@ -5,91 +5,97 @@
  * These tests verify the COMMAND_REGISTRY and resolveCommand() function
  * independently of the CLI or hook entry points.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock all individual command files so we can import the registry
 // without triggering real I/O in handler modules
-vi.mock('../../src/commands/status.js', () => ({
-	handleStatusCommand: vi.fn(),
+mock.module('../../src/commands/status.js', () => ({
+	handleStatusCommand: mock(),
 }));
-vi.mock('../../src/commands/plan.js', () => ({ handlePlanCommand: vi.fn() }));
-vi.mock('../../src/commands/agents.js', () => ({
-	handleAgentsCommand: vi.fn(),
+mock.module('../../src/commands/plan.js', () => ({
+	handlePlanCommand: mock(),
 }));
-vi.mock('../../src/commands/archive.js', () => ({
-	handleArchiveCommand: vi.fn(),
+mock.module('../../src/commands/agents.js', () => ({
+	handleAgentsCommand: mock(),
 }));
-vi.mock('../../src/commands/history.js', () => ({
-	handleHistoryCommand: vi.fn(),
+mock.module('../../src/commands/archive.js', () => ({
+	handleArchiveCommand: mock(),
 }));
-vi.mock('../../src/commands/config.js', () => ({
-	handleConfigCommand: vi.fn(),
+mock.module('../../src/commands/history.js', () => ({
+	handleHistoryCommand: mock(),
 }));
-vi.mock('../../src/commands/doctor.js', () => ({
-	handleDoctorCommand: vi.fn(),
+mock.module('../../src/commands/config.js', () => ({
+	handleConfigCommand: mock(),
 }));
-vi.mock('../../src/commands/evidence.js', () => ({
-	handleEvidenceCommand: vi.fn(),
-	handleEvidenceSummaryCommand: vi.fn(),
+mock.module('../../src/commands/doctor.js', () => ({
+	handleDoctorCommand: mock(),
 }));
-vi.mock('../../src/commands/diagnose.js', () => ({
-	handleDiagnoseCommand: vi.fn(),
+mock.module('../../src/commands/evidence.js', () => ({
+	handleEvidenceCommand: mock(),
+	handleEvidenceSummaryCommand: mock(),
 }));
-vi.mock('../../src/commands/preflight.js', () => ({
-	handlePreflightCommand: vi.fn(),
+mock.module('../../src/commands/diagnose.js', () => ({
+	handleDiagnoseCommand: mock(),
 }));
-vi.mock('../../src/commands/sync-plan.js', () => ({
-	handleSyncPlanCommand: vi.fn(),
+mock.module('../../src/commands/preflight.js', () => ({
+	handlePreflightCommand: mock(),
 }));
-vi.mock('../../src/commands/benchmark.js', () => ({
-	handleBenchmarkCommand: vi.fn(),
+mock.module('../../src/commands/sync-plan.js', () => ({
+	handleSyncPlanCommand: mock(),
 }));
-vi.mock('../../src/commands/export.js', () => ({
-	handleExportCommand: vi.fn(),
+mock.module('../../src/commands/benchmark.js', () => ({
+	handleBenchmarkCommand: mock(),
 }));
-vi.mock('../../src/commands/reset.js', () => ({ handleResetCommand: vi.fn() }));
-vi.mock('../../src/commands/retrieve.js', () => ({
-	handleRetrieveCommand: vi.fn(),
+mock.module('../../src/commands/export.js', () => ({
+	handleExportCommand: mock(),
 }));
-vi.mock('../../src/commands/clarify.js', () => ({
-	handleClarifyCommand: vi.fn(),
+mock.module('../../src/commands/reset.js', () => ({
+	handleResetCommand: mock(),
 }));
-vi.mock('../../src/commands/analyze.js', () => ({
-	handleAnalyzeCommand: vi.fn(),
+mock.module('../../src/commands/retrieve.js', () => ({
+	handleRetrieveCommand: mock(),
 }));
-vi.mock('../../src/commands/specify.js', () => ({
-	handleSpecifyCommand: vi.fn(),
+mock.module('../../src/commands/clarify.js', () => ({
+	handleClarifyCommand: mock(),
 }));
-vi.mock('../../src/commands/dark-matter.js', () => ({
-	handleDarkMatterCommand: vi.fn(),
+mock.module('../../src/commands/analyze.js', () => ({
+	handleAnalyzeCommand: mock(),
 }));
-vi.mock('../../src/commands/knowledge.js', () => ({
-	handleKnowledgeListCommand: vi.fn(),
-	handleKnowledgeMigrateCommand: vi.fn(),
-	handleKnowledgeQuarantineCommand: vi.fn(),
-	handleKnowledgeRestoreCommand: vi.fn(),
+mock.module('../../src/commands/specify.js', () => ({
+	handleSpecifyCommand: mock(),
 }));
-vi.mock('../../src/commands/rollback.js', () => ({
-	handleRollbackCommand: vi.fn(),
+mock.module('../../src/commands/dark-matter.js', () => ({
+	handleDarkMatterCommand: mock(),
 }));
-vi.mock('../../src/commands/promote.js', () => ({
-	handlePromoteCommand: vi.fn(),
+mock.module('../../src/commands/knowledge.js', () => ({
+	handleKnowledgeListCommand: mock(),
+	handleKnowledgeMigrateCommand: mock(),
+	handleKnowledgeQuarantineCommand: mock(),
+	handleKnowledgeRestoreCommand: mock(),
 }));
-vi.mock('../../src/commands/handoff.js', () => ({
-	handleHandoffCommand: vi.fn(),
+mock.module('../../src/commands/rollback.js', () => ({
+	handleRollbackCommand: mock(),
 }));
-vi.mock('../../src/commands/turbo.js', () => ({ handleTurboCommand: vi.fn() }));
-vi.mock('../../src/commands/simulate.js', () => ({
-	handleSimulateCommand: vi.fn(),
+mock.module('../../src/commands/promote.js', () => ({
+	handlePromoteCommand: mock(),
 }));
-vi.mock('../../src/commands/curate.js', () => ({
-	handleCurateCommand: vi.fn(),
+mock.module('../../src/commands/handoff.js', () => ({
+	handleHandoffCommand: mock(),
 }));
-vi.mock('../../src/commands/write_retro.js', () => ({
-	handleWriteRetroCommand: vi.fn(),
+mock.module('../../src/commands/turbo.js', () => ({
+	handleTurboCommand: mock(),
 }));
-vi.mock('../../src/commands/checkpoint.js', () => ({
-	handleCheckpointCommand: vi.fn(),
+mock.module('../../src/commands/simulate.js', () => ({
+	handleSimulateCommand: mock(),
+}));
+mock.module('../../src/commands/curate.js', () => ({
+	handleCurateCommand: mock(),
+}));
+mock.module('../../src/commands/write_retro.js', () => ({
+	handleWriteRetroCommand: mock(),
+}));
+mock.module('../../src/commands/checkpoint.js', () => ({
+	handleCheckpointCommand: mock(),
 }));
 
 import {

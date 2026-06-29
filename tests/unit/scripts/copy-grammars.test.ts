@@ -7,7 +7,15 @@
  * Note: Uses a simpler test approach without complex module mocking to avoid circular dependencies
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
 
 const TARGET_DIR = 'C:/opencode/opencode-swarm/src/lang/grammars';
 const SOURCE_DIR =
@@ -16,17 +24,19 @@ const SOURCE_DIR =
 // Direct test of vendored grammar verification behavior
 // We're testing the logic without mocking the entire module
 describe('Vendored Grammar Verification Logic', () => {
-	let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-	let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+	let consoleLogSpy: ReturnType<typeof spyOn>;
+	let consoleWarnSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
 		// Mock console methods
-		consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-		consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
+		consoleWarnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		// Reset individual mock functions (bun:test pattern)
+		consoleLogSpy.mockReset();
+		consoleWarnSpy.mockReset();
 	});
 
 	// Helper that simulates the vendored grammar verification logic from copyGrammars()
@@ -314,9 +324,10 @@ describe('Vendored Grammar Verification Logic', () => {
 			);
 
 			// Clear for next scenario
-			vi.clearAllMocks();
-			consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-			consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			consoleLogSpy.mockReset();
+			consoleWarnSpy.mockReset();
+			consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
+			consoleWarnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Scenario 2: 1 missing
 			result = simulateVerification([
@@ -329,9 +340,10 @@ describe('Vendored Grammar Verification Logic', () => {
 			);
 
 			// Clear for next scenario
-			vi.clearAllMocks();
-			consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-			consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			consoleLogSpy.mockReset();
+			consoleWarnSpy.mockReset();
+			consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
+			consoleWarnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Scenario 3: 2 missing
 			result = simulateVerification(['tree-sitter-kotlin.wasm']);
@@ -341,9 +353,10 @@ describe('Vendored Grammar Verification Logic', () => {
 			);
 
 			// Clear for next scenario
-			vi.clearAllMocks();
-			consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-			consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			consoleLogSpy.mockReset();
+			consoleWarnSpy.mockReset();
+			consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
+			consoleWarnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Scenario 4: 3 missing
 			result = simulateVerification([]);

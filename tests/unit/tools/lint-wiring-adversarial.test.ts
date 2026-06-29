@@ -7,8 +7,9 @@
  * NO HAPPY PATHS - ONLY ATTACK VECTORS
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realFs from 'node:fs';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	getAdditionalLinterCommand,
 	MAX_COMMAND_LENGTH,
@@ -17,17 +18,19 @@ import {
 } from '../../../src/tools/lint';
 
 // Mock node:fs
-const mockExistsSync = vi.fn();
-vi.mock('node:fs', () => ({
+const mockExistsSync = mock();
+mock.module('node:fs', () => ({
+	...realFs,
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	default: {
+		...realFs,
 		existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	},
 }));
 
 // Mock isCommandAvailable from build/discovery
-const mockIsCommandAvailable = vi.fn();
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
 }));
 
@@ -44,9 +47,9 @@ const makeStream = (content: string) =>
 
 describe('getAdditionalLinterCommand — injection and path attacks', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(false);
-		mockExistsSync.mockReturnValue(false);
+		mock.reset();
+		mockIsCommandAvailable.mockImplementation(() => false);
+		mockExistsSync.mockImplementation(() => false);
 	});
 
 	it('should not crash with path traversal attempt in cwd (../../etc/passwd)', () => {
@@ -89,7 +92,7 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 			// Simulate gradlew.bat exists on Windows
 			return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 		});
-		mockIsCommandAvailable.mockReturnValue(false);
+		mockIsCommandAvailable.mockImplementation(false);
 
 		const result = getAdditionalLinterCommand(
 			'checkstyle',
@@ -127,8 +130,8 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 		// Need about 500 - ' checkstyleMain' = 487 chars minimum for the gradlew path
 		const longSegment = 'a'.repeat(120);
 		const longCwd = `/${longSegment}/${longSegment}/${longSegment}/${longSegment}`;
-		mockExistsSync.mockReturnValue(true);
-		mockIsCommandAvailable.mockReturnValue(false);
+		mockExistsSync.mockImplementation(true);
+		mockIsCommandAvailable.mockImplementation(false);
 
 		const result = getAdditionalLinterCommand('checkstyle', 'check', longCwd);
 		expect(result).toBeDefined();
@@ -163,8 +166,8 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 
 describe('getAdditionalLinterCommand — Gradlew path edge cases', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(false);
+		mock.reset();
+		mockIsCommandAvailable.mockImplementation(false);
 	});
 
 	it('should return null gradlew and fall back to gradle when gradlew exists but gradlew.bat does not (on Windows)', () => {
@@ -290,9 +293,9 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	let originalSpawn: typeof Bun.spawn;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(false);
-		mockExistsSync.mockReturnValue(false);
+		mock.reset();
+		mockIsCommandAvailable.mockImplementation(false);
+		mockExistsSync.mockImplementation(false);
 		originalSpawn = Bun.spawn;
 	});
 
@@ -301,7 +304,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	});
 
 	it('should catch Bun.spawn synchronous throw and return error result', async () => {
-		Bun.spawn = vi.fn().mockImplementation(() => {
+		Bun.spawn = (() => {
 			throw new Error('spawn failed: ENOENT');
 		}) as typeof Bun.spawn;
 
@@ -321,7 +324,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.reject(new Error('process killed')),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result).toBeDefined();
@@ -342,7 +345,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result).toBeDefined();
@@ -353,8 +356,8 @@ describe('runAdditionalLint — resource and error attacks', () => {
 		// Need about 500 - ' checkstyleMain' = 487 chars minimum for the gradlew path
 		const longSegment = 'a'.repeat(120);
 		const longCwd = `/${longSegment}/${longSegment}/${longSegment}/${longSegment}`;
-		mockExistsSync.mockReturnValue(true);
-		mockIsCommandAvailable.mockReturnValue(false);
+		mockExistsSync.mockImplementation(true);
+		mockIsCommandAvailable.mockImplementation(false);
 
 		const command = getAdditionalLinterCommand('checkstyle', 'check', longCwd);
 		const commandStr = command.join(' ');
@@ -381,7 +384,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -398,7 +401,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -416,7 +419,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(largeStderr),
 			exited: Promise.resolve(1),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -435,7 +438,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(largeStderr),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -447,7 +450,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	});
 
 	it('should handle Bun.spawn throwing non-Error objects', async () => {
-		Bun.spawn = vi.fn().mockImplementation(() => {
+		Bun.spawn = (() => {
 			throw 'string error';
 		}) as typeof Bun.spawn;
 
@@ -462,7 +465,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	});
 
 	it('should handle Bun.spawn throwing null', async () => {
-		Bun.spawn = vi.fn().mockImplementation(() => {
+		Bun.spawn = (() => {
 			throw null;
 		}) as typeof Bun.spawn;
 
@@ -477,7 +480,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	});
 
 	it('should handle Bun.spawn throwing undefined', async () => {
-		Bun.spawn = vi.fn().mockImplementation(() => {
+		Bun.spawn = (() => {
 			throw undefined;
 		}) as typeof Bun.spawn;
 
@@ -497,7 +500,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(999999),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -511,7 +514,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(-1),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = () => mockProc as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/some/cwd');
 		expect(result.success).toBe(true);
@@ -521,7 +524,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 
 describe('getAdditionalLinterCommand — type safety edge cases', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.reset();
 	});
 
 	it('should return undefined for null linter (bypasses TypeScript type check)', () => {

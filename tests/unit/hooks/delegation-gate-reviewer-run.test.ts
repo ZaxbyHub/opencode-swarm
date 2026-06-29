@@ -59,7 +59,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('verification: hasReviewer true + currentTaskId set advances to reviewer_run', () => {
 		it('should advance task state to reviewer_run when reviewer detected after coder with currentTaskId set', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: coder → reviewer (reviewer AFTER last coder)
 			swarmState.delegationChains.set('test-session', [
@@ -81,7 +81,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should advance to reviewer_run with mega_reviewer after local_coder', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', [
 				{ from: 'architect', to: 'local_coder', timestamp: 1 },
@@ -103,7 +103,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('verification: hasReviewer false does NOT advance', () => {
 		it('should NOT advance state when hasReviewer is false (test_engineer only)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: coder → test_engineer (NO reviewer)
 			swarmState.delegationChains.set('test-session', [
@@ -123,7 +123,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should NOT advance state when only coder in chain', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: coder only (no reviewer, no test_engineer)
 			swarmState.delegationChains.set('test-session', [
@@ -143,7 +143,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('verification: currentTaskId null does NOT advance', () => {
 		it('should NOT advance state when currentTaskId is undefined', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: coder → reviewer (has reviewer)
 			swarmState.delegationChains.set('test-session', [
@@ -164,7 +164,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should NOT advance state when currentTaskId is null', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', [
 				{ from: 'architect', to: 'mega_coder', timestamp: 1 },
@@ -184,7 +184,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('verification: State already past reviewer_run is non-fatal', () => {
 		it('should NOT crash when state is already at reviewer_run (catches error non-fatally)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain with reviewer
 			swarmState.delegationChains.set('test-session', [
@@ -207,7 +207,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should NOT crash when state is already past reviewer_run (tests_run)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', [
 				{ from: 'architect', to: 'mega_coder', timestamp: 1 },
@@ -228,7 +228,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should NOT crash when state is complete', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', [
 				{ from: 'architect', to: 'mega_coder', timestamp: 1 },
@@ -254,7 +254,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: no coder in chain returns early', () => {
 		it('should return early and not crash when no coder in delegation chain (lastCoderIndex === -1)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: reviewer → test_engineer (NO coder)
 			swarmState.delegationChains.set('test-session', [
@@ -280,7 +280,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: empty delegation chain', () => {
 		it('should not crash on empty delegation chain', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', []);
 
@@ -298,7 +298,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: reviewer before coder (not after)', () => {
 		it('should not advance state when reviewer appears BEFORE coder (not after)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: reviewer → coder (reviewer BEFORE coder, not after)
 			swarmState.delegationChains.set('test-session', [
@@ -318,7 +318,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should handle reviewer at index 0, coder at index 1', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Only coder, no reviewer after
 			swarmState.delegationChains.set('test-session', [
@@ -337,7 +337,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: test_engineer only (no reviewer)', () => {
 		it('should not advance state when only test_engineer present (no reviewer)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Chain: coder → test_engineer (only test_engineer, no reviewer)
 			swarmState.delegationChains.set('test-session', [
@@ -357,7 +357,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should handle test_engineer with prefix', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			swarmState.delegationChains.set('test-session', [
 				{ from: 'architect', to: 'mega_coder', timestamp: 1 },
@@ -377,7 +377,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: undefined delegation chain', () => {
 		it('should not crash when delegationChain is undefined', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// Session exists but no delegation chain set
 			const session = ensureAgentSession('test-session');
@@ -393,7 +393,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('adversarial: multiple coders with reviewer only after last', () => {
 		it('should advance only when reviewer is after the LAST coder', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// coder1 → reviewer → coder2 (reviewer AFTER coder1 but BEFORE coder2)
 			swarmState.delegationChains.set('test-session', [
@@ -416,7 +416,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 		it('should advance when reviewer is after the LAST coder', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// coder1 → coder2 → reviewer (reviewer AFTER last coder)
 			swarmState.delegationChains.set('test-session', [
@@ -442,7 +442,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	describe('input.args primary path (v6.23 hotfix)', () => {
 		it('should advance coder_delegated → reviewer_run via input.args alone (no delegationChains)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config);
+			const hook = createDelegationGateHook(config, process.cwd());
 
 			// No delegationChains set — input.args is the only signal
 			const session = ensureAgentSession('args-session');

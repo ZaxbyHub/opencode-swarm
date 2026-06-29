@@ -8,44 +8,44 @@
  * 4. Correct bundle.entries access (not direct property access on result)
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Create mock functions before vi.mock to ensure they're available in the mock
-const mockLoadEvidence = vi.fn();
-const mockListEvidenceTaskIds = vi.fn();
-const mockLoadPlan = vi.fn();
-const mockLoadPlanJsonOnly = vi.fn();
+// Create mock functions before mock.module to ensure they're available in the mock
+const mockLoadEvidence = mock();
+const mockListEvidenceTaskIds = mock();
+const mockLoadPlan = mock();
+const mockLoadPlanJsonOnly = mock();
 
 // Mock the evidence/manager module BEFORE importing system-enhancer
-vi.mock('../../../src/evidence/manager.js', () => ({
+mock.module('../../../src/evidence/manager.js', () => ({
 	loadEvidence: mockLoadEvidence,
 	listEvidenceTaskIds: mockListEvidenceTaskIds,
-	checkRequirementCoverage: vi.fn(),
-	saveEvidence: vi.fn(),
-	deleteEvidence: vi.fn(),
-	archiveEvidence: vi.fn(),
-	sanitizeTaskId: vi.fn((id: string) => id),
-	isValidEvidenceType: vi.fn(() => true),
-	isSyntaxEvidence: vi.fn(() => false),
-	isPlaceholderEvidence: vi.fn(() => false),
-	isSastEvidence: vi.fn(() => false),
-	isSbomEvidence: vi.fn(() => false),
-	isBuildEvidence: vi.fn(() => false),
-	isQualityBudgetEvidence: vi.fn(() => false),
-	isSecretscanEvidence: vi.fn(() => false),
-	validateProjectRoot: vi.fn(),
+	checkRequirementCoverage: mock(),
+	saveEvidence: mock(),
+	deleteEvidence: mock(),
+	archiveEvidence: mock(),
+	sanitizeTaskId: mock((id: string) => id),
+	isValidEvidenceType: mock(() => true),
+	isSyntaxEvidence: mock(() => false),
+	isPlaceholderEvidence: mock(() => false),
+	isSastEvidence: mock(() => false),
+	isSbomEvidence: mock(() => false),
+	isBuildEvidence: mock(() => false),
+	isQualityBudgetEvidence: mock(() => false),
+	isSecretscanEvidence: mock(() => false),
+	validateProjectRoot: mock(),
 	VALID_EVIDENCE_TYPES: [],
 }));
 
 // Mock the plan/manager module
-vi.mock('../../../src/plan/manager.js', () => ({
+mock.module('../../../src/plan/manager.js', () => ({
 	loadPlan: mockLoadPlan,
 	loadPlanJsonOnly: mockLoadPlanJsonOnly,
-	derivePlanMarkdown: vi.fn((plan: any) => '# Derived Plan\n'),
-	savePlan: vi.fn(),
-	updateTaskStatus: vi.fn(),
-	migrateLegacyPlan: vi.fn(),
-	regeneratePlanMarkdown: vi.fn(),
+	derivePlanMarkdown: mock((plan: any) => '# Derived Plan\n'),
+	savePlan: mock(),
+	updateTaskStatus: mock(),
+	migrateLegacyPlan: mock(),
+	regeneratePlanMarkdown: mock(),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));

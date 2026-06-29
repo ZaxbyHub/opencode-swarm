@@ -6,7 +6,7 @@
  * These tests document vulnerabilities where runtime enforcement is expected but not guaranteed.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeCategory,

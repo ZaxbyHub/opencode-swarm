@@ -1,32 +1,44 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 
 // At top of file, before imports:
-const mockExistsSync = vi.fn();
-const mockReadFileSync = vi.fn();
-const mockReadFile = vi.fn();
-const mockWriteFile = vi.fn();
-const mockMkdir = vi.fn();
-const mockReadKnowledge = vi.fn();
-const mockRewriteKnowledge = vi.fn();
-const mockResolveSwarmKnowledgePath = vi.fn();
-const mockFindNearDuplicate = vi.fn();
-const mockInferTags = vi.fn();
-const mockNormalize = vi.fn();
-const mockValidateLesson = vi.fn();
-const mockRandomUUID = vi.fn();
+const mockExistsSync = mock(() => false);
+const mockReadFileSync = mock(() => '');
+const mockReadFile = mock(async () => '');
+const mockWriteFile = mock(async () => undefined);
+const mockMkdir = mock(async () => undefined);
+const mockReadKnowledge = mock(async () => []);
+const mockRewriteKnowledge = mock(async () => undefined);
+const mockResolveSwarmKnowledgePath = mock(
+	() => '/test/.swarm/knowledge.jsonl',
+);
+const mockFindNearDuplicate = mock(() => undefined);
+const mockInferTags = mock(() => []);
+const mockNormalize = mock((s: string) => s.toLowerCase().trim());
+const mockValidateLesson = mock(() => ({
+	valid: true,
+	layer: null,
+	reason: null,
+	severity: null,
+}));
+const mockRandomUUID = mock(() => 'test-uuid-1234');
 
-vi.mock('node:fs', () => ({
+mock.module('node:fs', () => ({
+	...fs,
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
 }));
 
-vi.mock('node:fs/promises', () => ({
+mock.module('node:fs/promises', () => ({
+	...fsPromises,
 	readFile: (...args: unknown[]) => mockReadFile(...args),
 	writeFile: (...args: unknown[]) => mockWriteFile(...args),
 	mkdir: (...args: unknown[]) => mockMkdir(...args),
 }));
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: (...args: unknown[]) => mockReadKnowledge(...args),
 	rewriteKnowledge: (...args: unknown[]) => mockRewriteKnowledge(...args),
 	resolveSwarmKnowledgePath: (...args: unknown[]) =>
@@ -40,11 +52,12 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (...args: unknown[]) => mockValidateLesson(...args),
 }));
 
-vi.mock('node:crypto', () => ({
+mock.module('node:crypto', () => ({
+	...crypto,
 	randomUUID: () => mockRandomUUID(),
 }));
 
@@ -81,37 +94,37 @@ const withOrderTracking = (name: string, fn: (...args: any[]) => any) => {
 
 describe('migrateContextToKnowledge', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.reset();
 		callOrder.length = 0; // Clear order tracking
 
 		// defaults
-		mockExistsSync.mockReturnValue(false); // no files exist by default
-		mockReadFile.mockResolvedValue('');
+		mockExistsSync.mockImplementation(() => false); // no files exist by default
+		mockReadFile.mockImplementation(async () => '');
 		mockWriteFile.mockImplementation(
 			withOrderTracking('writeFile', async () => undefined),
 		);
-		mockMkdir.mockResolvedValue(undefined);
-		mockReadKnowledge.mockResolvedValue([]);
+		mockMkdir.mockImplementation(async () => undefined);
+		mockReadKnowledge.mockImplementation(async () => []);
 		mockRewriteKnowledge.mockImplementation(
 			withOrderTracking('rewriteKnowledge', async () => undefined),
 		);
-		mockResolveSwarmKnowledgePath.mockReturnValue(
-			'/test/.swarm/knowledge.jsonl',
+		mockResolveSwarmKnowledgePath.mockImplementation(
+			() => '/test/.swarm/knowledge.jsonl',
 		);
-		mockFindNearDuplicate.mockReturnValue(undefined); // no duplicate
-		mockInferTags.mockReturnValue([]);
+		mockFindNearDuplicate.mockImplementation(() => undefined); // no duplicate
+		mockInferTags.mockImplementation(() => []);
 		mockNormalize.mockImplementation((s: string) => s.toLowerCase().trim());
-		mockValidateLesson.mockReturnValue({
+		mockValidateLesson.mockImplementation(() => ({
 			valid: true,
 			layer: null,
 			reason: null,
 			severity: null,
-		});
-		mockRandomUUID.mockReturnValue('test-uuid-1234');
+		}));
+		mockRandomUUID.mockImplementation(() => 'test-uuid-1234');
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		mock.restore();
 	});
 
 	describe('Gate 1 — sentinel exists', () => {

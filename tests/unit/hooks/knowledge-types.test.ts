@@ -6,7 +6,7 @@
  * we use compile-time assertions rather than runtime tests.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeCategory,

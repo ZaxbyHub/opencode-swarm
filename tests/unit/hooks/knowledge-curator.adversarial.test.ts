@@ -4,138 +4,39 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import {
+	createCuratorBeforeEach,
+	createCuratorMocks,
+	defaultConfig,
+	makePlanContent,
+	setupMockModules,
+} from './curator-test-fixtures.js';
 
-// Create local mock variables for knowledge-store
-const mockAppendRejectedLesson = mock(async () => {});
-const mockFindNearDuplicate = mock(
-	(_s: string, _a: unknown[], _n: number) => undefined,
-);
-const mockReadKnowledge = mock((_s: string) => Promise.resolve([]));
-const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) =>
-	Promise.resolve(),
-);
-const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
-const mockResolveSwarmRejectedPath = mock((_s: string) => '');
-const mockResolveHiveKnowledgePath = mock(() => '');
-const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
-const mockInferTags = mock((_s: string) => [] as string[]);
-const mockReadRetractionRecords = mock((_s: string) => Promise.resolve([]));
-const mockAppendRetractionRecord = mock((_s: string, _u: unknown) =>
-	Promise.resolve(),
-);
+// Create fresh mocks for this test file
+const mocks = createCuratorMocks();
+setupMockModules(mocks);
 
-// Create local mock variables for utils
-const mockReadSwarmFileAsync = mock((_s: string, _f: string) =>
-	Promise.resolve(null as string | null),
-);
-const mockSafeHook = mock((fn: unknown) => fn);
-const mockValidateSwarmPath = mock((_d: string, _f: string) => '');
-
-// Create local mock variable for knowledge-validator
-const mockValidateLesson = mock(
-	(
-		_l: string,
-		_t: string[],
-		_c: { category: string; scope: string; confidence: number },
-	) => ({
-		valid: true,
-		layer: null,
-		reason: null,
-		severity: null,
-	}),
-);
-const mockQuarantineEntry = mock(
-	(_s: string, _e: string, _r: string, _who: 'architect' | 'user' | 'auto') =>
-		Promise.resolve(),
-);
-const mockNormalize = mock((_s: string) => '');
-
-// Create local mock variable for knowledge-reader
-const mockUpdateRetrievalOutcome = mock(
-	(_s: string, _id: string, _b: boolean) => Promise.resolve(),
-);
-
-mock.module('../../../src/hooks/knowledge-validator.js', () => ({
-	validateLesson: (...args: unknown[]) =>
-		mockValidateLesson(
-			...(args as [
-				string,
-				string[],
-				{ category: string; scope: string; confidence: number },
-			]),
-		),
-	quarantineEntry: (...args: unknown[]) =>
-		mockQuarantineEntry(
-			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
-		),
-	// Layer-5 stubs (Change 4): suite tests layers 1-3 adversarial inputs, not
-	// the actionability gate (dedicated suites exist). Keep the gate open.
-	validateActionability: () => ({ actionable: true }),
-	validateActionableFields: () => ({ valid: true, errors: [] }),
-	appendUnactionable: async () => {},
-}));
-
-mock.module('../../../src/hooks/knowledge-reader.js', () => ({
-	updateRetrievalOutcome: (...args: unknown[]) =>
-		mockUpdateRetrievalOutcome(...(args as [string, string, boolean])),
-}));
-
-mock.module('../../../src/hooks/knowledge-store.js', () => ({
-	resolveSwarmKnowledgePath: (...args: unknown[]) =>
-		mockResolveSwarmKnowledgePath(...(args as [string])),
-	resolveSwarmRejectedPath: (...args: unknown[]) =>
-		mockResolveSwarmRejectedPath(...(args as [string])),
-	resolveHiveKnowledgePath: () => mockResolveHiveKnowledgePath(),
-	readKnowledge: (...args: unknown[]) =>
-		mockReadKnowledge(...(args as [string])),
-	readRetractionRecords: (...args: unknown[]) =>
-		mockReadRetractionRecords(...(args as [string])),
-	appendRetractionRecord: (...args: unknown[]) =>
-		mockAppendRetractionRecord(...(args as [string, unknown])),
-	appendRejectedLesson: (...args: unknown[]) =>
-		mockAppendRejectedLesson(...(args as [])),
-	findNearDuplicate: (...args: unknown[]) =>
-		mockFindNearDuplicate(...(args as [string, unknown[], number])),
-	rewriteKnowledge: (...args: unknown[]) =>
-		mockRewriteKnowledge(...(args as [string, unknown[]])),
-	computeConfidence: (...args: unknown[]) =>
-		mockComputeConfidence(...(args as [number, boolean])),
-	computeOutcomeSignal: () => 0,
-	inferTags: (...args: unknown[]) => mockInferTags(...(args as [string])),
-	normalize: (...args: unknown[]) => mockNormalize(...(args as [string])),
-	transactKnowledge: mock(
-		async <T>(
-			filePath: string,
-			mutate: (entries: T[]) => T[] | null,
-		): Promise<boolean> => {
-			const entries = (await mockReadKnowledge(filePath)) as T[];
-			const result = mutate(entries);
-			return result !== null;
-		},
-	),
-	transactFile: async () => false,
-	enforceKnowledgeCap: async () => {},
-	sweepAgedEntries: async () => {},
-	sweepStaleTodos: async () => {},
-	bumpKnowledgeConfidenceBatch: async () => {},
-	resolveSwarmRetractionsPath: () => '',
-	resolveHiveRejectedPath: () => '',
-	readRejectedLessons: async () => [],
-	normalizeEntry: (e: unknown) => e,
-	getPlatformConfigDir: () => '/tmp',
-	_internals: {},
-	wordBigrams: (_t: string) => new Set<string>(),
-	jaccardBigram: () => 0,
-}));
-
-mock.module('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: (...args: unknown[]) =>
-		mockReadSwarmFileAsync(...(args as [string, string])),
-	safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),
-	validateSwarmPath: (...args: unknown[]) =>
-		mockValidateSwarmPath(...(args as [string, string])),
-}));
+// Destructure mocks for direct test access
+const {
+	mockAppendRejectedLesson,
+	mockFindNearDuplicate,
+	mockReadKnowledge,
+	mockRewriteKnowledge,
+	mockResolveSwarmKnowledgePath,
+	mockResolveSwarmRejectedPath,
+	mockResolveHiveKnowledgePath,
+	mockComputeConfidence,
+	mockInferTags,
+	mockReadRetractionRecords,
+	mockAppendRetractionRecord,
+	mockReadSwarmFileAsync,
+	mockSafeHook,
+	mockValidateSwarmPath,
+	mockValidateLesson,
+	mockQuarantineEntry,
+	mockNormalize,
+	mockUpdateRetrievalOutcome,
+} = mocks;
 
 // Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)
 // using dynamic import so that the mocks are active before the modules under test are loaded.
@@ -147,44 +48,8 @@ const { transactKnowledge } = await import(
 	'../../../src/hooks/knowledge-store.js'
 );
 
-// ============================================================================
-// Test data
-// ============================================================================
-
-const defaultConfig: KnowledgeConfig = {
-	enabled: true,
-	swarm_max_entries: 100,
-	hive_max_entries: 200,
-	auto_promote_days: 90,
-	max_inject_count: 5,
-	dedup_threshold: 0.6,
-	scope_filter: ['global'],
-	hive_enabled: true,
-	rejected_max_entries: 20,
-	validation_enabled: true,
-	evergreen_confidence: 0.9,
-	evergreen_utility: 0.8,
-	low_utility_threshold: 0.3,
-	min_retrievals_for_utility: 3,
-	schema_version: 1,
-};
-
-function makePlanContent(lessons: string[]): string {
-	const bullets = lessons.map((l) => `- ${l}`).join('\n');
-	return `# My Test Project
-Swarm: mega
-Phase: 2 | Updated: 2026-03-02
-
-## Phase 1: Setup [COMPLETE]
-- [x] 1.1: Init
-
-### Lessons Learned
-${bullets}
-
-## Phase 2: Core [IN PROGRESS]
-- [ ] 2.1: Build
-`;
-}
+// Create the beforeEach reset function
+const curatorBeforeEach = createCuratorBeforeEach(mocks, transactKnowledge);
 
 // ============================================================================
 // Tests

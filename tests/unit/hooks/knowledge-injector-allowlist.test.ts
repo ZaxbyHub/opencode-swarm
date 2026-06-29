@@ -17,7 +17,7 @@
  * receive the orchestrator block — the two paths are mutually exclusive.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -31,19 +31,19 @@ import type {
 
 // mock-prefixed control handle for the retrieval call; the searchKnowledge
 // mock delegates to it so per-test mockResolvedValue setups keep working.
-const mockRetrieve = vi.fn(async (): Promise<unknown[]> => []);
+const mockRetrieve = mock(async (): Promise<unknown[]> => []);
 
-vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
-	readMergedKnowledge: vi.fn(async () => []),
-	scoreDirectiveAgainstContext: vi.fn(() => ({
+mock.module('../../../src/hooks/knowledge-reader.js', () => ({
+	readMergedKnowledge: mock(async () => []),
+	scoreDirectiveAgainstContext: mock(() => ({
 		triggerHit: false,
 		actionHit: false,
 		agentHit: false,
 		score: 0,
 	})),
 }));
-vi.mock('../../../src/hooks/search-knowledge.js', () => ({
-	searchKnowledge: vi.fn(
+mock.module('../../../src/hooks/search-knowledge.js', () => ({
+	searchKnowledge: mock(
 		async (params: {
 			directory?: string;
 			config?: unknown;
@@ -59,15 +59,15 @@ vi.mock('../../../src/hooks/search-knowledge.js', () => ({
 		}),
 	),
 }));
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	readRejectedLessons: vi.fn(async () => []),
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	readRejectedLessons: mock(async () => []),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
 }));
-vi.mock('../../../src/plan/manager.js', () => ({
-	loadPlan: vi.fn(async () => ({
+mock.module('../../../src/plan/manager.js', () => ({
+	loadPlan: mock(async () => ({
 		current_phase: 1,
 		title: 'Test Project',
 		phases: [{ id: 1, name: 'Setup', tasks: [] }],
@@ -75,11 +75,11 @@ vi.mock('../../../src/plan/manager.js', () => ({
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
-vi.mock('../../../src/hooks/extractors.js', () => ({
-	extractCurrentPhaseFromPlan: vi.fn(() => 'Phase 1: Setup'),
+mock.module('../../../src/hooks/extractors.js', () => ({
+	extractCurrentPhaseFromPlan: mock(() => 'Phase 1: Setup'),
 }));
-vi.mock('../../../src/config/schema.js', () => ({
-	stripKnownSwarmPrefix: vi.fn((name: string) => {
+mock.module('../../../src/config/schema.js', () => ({
+	stripKnownSwarmPrefix: mock((name: string) => {
 		const prefixes = ['mega_', 'local_', 'paid_'];
 		for (const p of prefixes) {
 			if (name.startsWith(p)) return name.slice(p.length);
@@ -87,16 +87,16 @@ vi.mock('../../../src/config/schema.js', () => ({
 		return name;
 	}),
 }));
-vi.mock('../../../src/hooks/curator-drift.js', () => ({
-	readPriorDriftReports: vi.fn(async () => []),
-	buildDriftInjectionText: vi.fn(() => ''),
+mock.module('../../../src/hooks/curator-drift.js', () => ({
+	readPriorDriftReports: mock(async () => []),
+	buildDriftInjectionText: mock(() => ''),
 }));
-vi.mock('../../../src/services/run-memory.js', () => ({
-	getRunMemorySummary: vi.fn(async () => null),
+mock.module('../../../src/services/run-memory.js', () => ({
+	getRunMemorySummary: mock(async () => null),
 }));
-vi.mock('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: vi.fn(async () => null),
-	safeHook: vi.fn((fn: (...args: unknown[]) => unknown) => fn),
+mock.module('../../../src/hooks/utils.js', () => ({
+	readSwarmFileAsync: mock(async () => null),
+	safeHook: mock((fn: (...args: unknown[]) => unknown) => fn),
 }));
 
 import { extractCurrentPhaseFromPlan } from '../../../src/hooks/extractors.js';
@@ -199,17 +199,15 @@ function hasAnyInjection(output: { messages: MessageWithParts[] }): boolean {
 
 describe('Knowledge injection — architect vs delegate vs none', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+		mock.reset();
+		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test',
 			phases: [{ id: 1, name: 'Setup', tasks: [] }],
 		});
-		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([makeEntry()]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
+		mockRetrieve.mockResolvedValue([makeEntry()]);
+		readRejectedLessons.mockResolvedValue([]);
+		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
 	});
 
 	// --- Architect → orchestrator block, never a delegate block ---

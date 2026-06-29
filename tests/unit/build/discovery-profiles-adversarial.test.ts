@@ -8,9 +8,9 @@
  * - Error propagation
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Test directory
 const TEST_DIR = path.join(
@@ -21,18 +21,18 @@ const TEST_DIR = path.join(
 // ============ Mock Pattern Setup ============
 // Always use local mock variables, not vi.mocked()
 
-const mockDetectProjectLanguages = vi.fn();
-const mockLangRegistryGet = vi.fn();
-const mockIsCommandAvailable = vi.fn();
+const mockDetectProjectLanguages = mock();
+const mockLangRegistryGet = mock();
+const mockIsCommandAvailable = mock();
 
 // Mock the detector module
-vi.mock('../../../src/lang/detector', () => ({
+mock.module('../../../src/lang/detector', () => ({
 	detectProjectLanguages: (...args: unknown[]) =>
 		mockDetectProjectLanguages(...args),
 }));
 
 // Mock the profiles module
-vi.mock('../../../src/lang/profiles', () => ({
+mock.module('../../../src/lang/profiles', () => ({
 	LANGUAGE_REGISTRY: {
 		get: (...args: unknown[]) => mockLangRegistryGet(...args),
 	},
@@ -87,6 +87,7 @@ afterEach(() => {
 	if (fs.existsSync(TEST_DIR)) {
 		fs.rmSync(TEST_DIR, { recursive: true, force: true });
 	}
+	mock.restore();
 });
 
 // ============ Test Suite 1: Malformed workingDir Input ============

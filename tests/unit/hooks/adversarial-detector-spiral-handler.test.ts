@@ -3,7 +3,15 @@
  * Tests: event logging, checkpoint creation, architect notification, non-fatal failures, label format
  */
 
-import { afterEach, beforeEach, describe, expect, jest, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	jest,
+	mock,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,8 +21,8 @@ import {
 } from '../../../src/hooks/adversarial-detector';
 
 // Mock the checkpoint module
-jest.mock('../../../src/tools/checkpoint.js', () => ({
-	saveCheckpointRecord: jest.fn(),
+mock.module('../../../src/tools/checkpoint.js', () => ({
+	saveCheckpointRecord: mock(),
 }));
 
 import * as checkpointModule from '../../../src/tools/checkpoint.js';
@@ -37,7 +45,6 @@ describe('handleDebuggingSpiral', () => {
 		fs.mkdirSync(tempDir, { recursive: true });
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 
-		// Reset mock
 		jest.clearAllMocks();
 	});
 
@@ -61,7 +68,9 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -92,14 +101,17 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
 			// Verify saveCheckpointRecord was called
 			expect(saveCheckpointRecord).toHaveBeenCalledTimes(1);
 
-			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const callArgs = (saveCheckpointRecord as ReturnType<typeof mock>).mock
+				.calls[0];
 			const label = callArgs[0];
 			const directory = callArgs[1];
 
@@ -116,7 +128,9 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -132,7 +146,7 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to fail
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
 				success: false,
 				error: 'No changes to save',
 			});
@@ -152,7 +166,9 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -174,7 +190,9 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -189,7 +207,9 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: false });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: false,
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -204,7 +224,9 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -227,9 +249,11 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to throw
-			(saveCheckpointRecord as jest.Mock).mockImplementation(() => {
-				throw new Error('Checkpoint service unavailable');
-			});
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockImplementation(
+				() => {
+					throw new Error('Checkpoint service unavailable');
+				},
+			);
 
 			// Should not throw
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
@@ -249,7 +273,7 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to return undefined (falsy)
-			(saveCheckpointRecord as jest.Mock).mockReturnValue(null);
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue(null);
 
 			// Should not throw
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
@@ -270,11 +294,14 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			await handleDebuggingSpiral(match, '5.7.1', tempDir);
 
-			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const callArgs = (saveCheckpointRecord as ReturnType<typeof mock>).mock
+				.calls[0];
 			const label = callArgs[0];
 
 			// Check format: spiral-{taskId}-{timestamp}
@@ -289,11 +316,14 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
-			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const callArgs = (saveCheckpointRecord as ReturnType<typeof mock>).mock
+				.calls[0];
 			const label = callArgs[0];
 			const timestampPart = label.split('-')[2];
 			const timestamp = parseInt(timestampPart, 10);
@@ -311,11 +341,14 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '3.2', tempDir);
 
-			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const callArgs = (saveCheckpointRecord as ReturnType<typeof mock>).mock
+				.calls[0];
 			const label = callArgs[0];
 
 			expect(result.message).toContain(`✓ Auto-checkpoint created: ${label}`);
@@ -331,7 +364,9 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'MEDIUM',
 			};
 
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
+			(saveCheckpointRecord as ReturnType<typeof mock>).mockReturnValue({
+				success: true,
+			});
 
 			const result = await handleDebuggingSpiral(match, '5.7', tempDir);
 

@@ -8,7 +8,7 @@
  * 4. Event spam
  */
 
-import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -39,13 +39,13 @@ import {
 } from '../../../src/services/evidence-summary-service';
 
 // Mocks
-jest.mock('../../../src/plan/manager', () => ({
-	loadPlanJsonOnly: jest.fn(),
+mock.module('../../../src/plan/manager', () => ({
+	loadPlanJsonOnly: mock(),
 }));
 
-jest.mock('../../../src/evidence/manager', () => ({
-	loadEvidence: jest.fn(),
-	listEvidenceTaskIds: jest.fn(),
+mock.module('../../../src/evidence/manager', () => ({
+	loadEvidence: mock(),
+	listEvidenceTaskIds: mock(),
 }));
 
 import {
@@ -54,15 +54,9 @@ import {
 } from '../../../src/evidence/manager';
 import { loadPlanJsonOnly } from '../../../src/plan/manager';
 
-const mockLoadPlanJsonOnly = loadPlanJsonOnly as jest.MockedFunction<
-	typeof loadPlanJsonOnly
->;
-const mockLoadEvidence = loadEvidence as jest.MockedFunction<
-	typeof loadEvidence
->;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as jest.MockedFunction<
-	typeof listEvidenceTaskIds
->;
+const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof mock>;
+const mockLoadEvidence = loadEvidence as ReturnType<typeof mock>;
+const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof mock>;
 
 let tempDir: string;
 let swarmDir: string;
@@ -72,7 +66,7 @@ beforeEach(() => {
 	tempDir = join(tmpdir(), `evidence-adv-test-${uniqueId}`);
 	swarmDir = join(tempDir, 'project');
 	mkdirSync(join(swarmDir, '.swarm'), { recursive: true });
-	jest.clearAllMocks();
+	mock.restore();
 	resetGlobalEventBus();
 });
 

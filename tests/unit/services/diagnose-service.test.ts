@@ -1,55 +1,59 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Plan } from '../../../src/config/plan-schema.js';
-import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
-
-// Mock all the imported modules
-vi.mock('../../../src/plan/manager.js', () => ({
-	loadPlanJsonOnly: vi.fn(),
-	closePlanTerminalState: async () => {},
-	_snapshot_test_exports: {},
-}));
-vi.mock('../../../src/evidence/manager.js', () => ({
-	listEvidenceTaskIds: vi.fn(),
-}));
-vi.mock('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: vi.fn(),
-}));
-vi.mock('../../../src/config/loader.js', () => ({
-	loadPluginConfig: vi.fn(),
-}));
-vi.mock('../../../src/sdd/effective-spec.js', () => ({
-	readEffectiveSpecSync: vi.fn(),
-}));
-vi.mock('node:fs', () => ({
-	readdirSync: vi.fn(),
-	existsSync: vi.fn(),
-	statSync: vi.fn(),
-}));
-vi.mock('node:child_process', () => ({
-	execSync: vi.fn(),
-}));
-
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realChildProcess from 'node:child_process';
 import { execSync } from 'node:child_process';
+
+import * as realFs from 'node:fs';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { loadPluginConfig } from '../../../src/config/loader.js';
+import type { Plan } from '../../../src/config/plan-schema.js';
 import { listEvidenceTaskIds } from '../../../src/evidence/manager.js';
 import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 // Import mocked modules
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec.js';
+import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+
+// Mock all the imported modules
+mock.module('../../../src/plan/manager.js', () => ({
+	loadPlanJsonOnly: mock(() => Promise.resolve(null)),
+	closePlanTerminalState: async () => {},
+	_snapshot_test_exports: {},
+}));
+mock.module('../../../src/evidence/manager.js', () => ({
+	listEvidenceTaskIds: mock(() => Promise.resolve([])),
+}));
+mock.module('../../../src/hooks/utils.js', () => ({
+	readSwarmFileAsync: mock(() => Promise.resolve(null)),
+}));
+mock.module('../../../src/config/loader.js', () => ({
+	loadPluginConfig: mock(() => null),
+}));
+mock.module('../../../src/sdd/effective-spec.js', () => ({
+	readEffectiveSpecSync: mock(() => null),
+}));
+mock.module('node:fs', () => ({
+	...realFs,
+	readdirSync: mock(() => []),
+	existsSync: mock(() => true),
+	statSync: mock(() => ({ isDirectory: () => true })),
+}));
+mock.module('node:child_process', () => ({
+	...realChildProcess,
+	execSync: mock(() => Buffer.from('.git')),
+}));
 
 // Type assertions for mocks
-const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof vi.fn>;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
-const mockReadSwarmFileAsync = readSwarmFileAsync as ReturnType<typeof vi.fn>;
-const mockLoadPluginConfig = loadPluginConfig as ReturnType<typeof vi.fn>;
+const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof mock>;
+const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof mock>;
+const mockReadSwarmFileAsync = readSwarmFileAsync as ReturnType<typeof mock>;
+const mockLoadPluginConfig = loadPluginConfig as ReturnType<typeof mock>;
 const mockReadEffectiveSpecSync = readEffectiveSpecSync as ReturnType<
-	typeof vi.fn
+	typeof mock
 >;
-const mockReaddirSync = readdirSync as ReturnType<typeof vi.fn>;
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockStatSync = statSync as ReturnType<typeof vi.fn>;
-const mockExecSync = execSync as ReturnType<typeof vi.fn>;
+const mockReaddirSync = readdirSync as ReturnType<typeof mock>;
+const mockExistsSync = existsSync as ReturnType<typeof mock>;
+const mockStatSync = statSync as ReturnType<typeof mock>;
+const mockExecSync = execSync as ReturnType<typeof mock>;
 
 // Helper to create minimal valid plan object
 function makePlan(
@@ -98,7 +102,7 @@ function effectiveSpec(content: string) {
 }
 
 beforeEach(() => {
-	vi.clearAllMocks();
+	mock.clearAllMocks();
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
 	mockListEvidenceTaskIds.mockResolvedValue([]);
 	mockReadSwarmFileAsync.mockResolvedValue(null);

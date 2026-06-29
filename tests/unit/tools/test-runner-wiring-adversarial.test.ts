@@ -3,12 +3,20 @@
  * Testing Task 3.3: 9 new test framework detectors and their wiring
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
 import { detectTestFramework } from '../../../src/tools/test-runner';
 
 // Mock isCommandAvailable using module mock
-const mockIsCommandAvailable = vi.fn<[string], boolean>();
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) =>
 		mockIsCommandAvailable(...(args as [string])),
 }));
@@ -16,16 +24,16 @@ vi.mock('../../../src/build/discovery', () => ({
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-// Use vi.spyOn instead of vi.mock for fs.existsSync so the spy can be properly
+// Use spyOn instead of vi.mock for fs.existsSync so the spy can be properly
 // restored in afterEach and does not contaminate other test files in the same process.
-let fsExistsSyncSpy: ReturnType<typeof vi.spyOn<typeof fs, 'existsSync'>>;
+let fsExistsSyncSpy: ReturnType<typeof spyOn<typeof fs, 'existsSync'>>;
 
 describe('detectTestFramework - Adversarial Security Tests', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(false);
+		mock.reset();
+		mockIsCommandAvailable.mockImplementation(() => false);
 		// Spy on existsSync per-test so it's automatically restored in afterEach
-		fsExistsSyncSpy = vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+		fsExistsSyncSpy = spyOn(fs, 'existsSync').mockImplementation(() => false);
 	});
 
 	afterEach(() => {

@@ -78,7 +78,10 @@ const mockPathModule = {
 };
 
 // Mock the node:child_process module BEFORE importing pr
+import * as realChildProcess from 'node:child_process';
+
 mock.module('node:child_process', () => ({
+	...realChildProcess,
 	spawnSync: mockSpawnSync,
 }));
 
