@@ -44,7 +44,10 @@ const mockSpawnSync = mock(
 );
 
 // Mock node:child_process BEFORE importing checkpoint
+import * as realChildProcess from 'node:child_process';
+
 mock.module('node:child_process', () => ({
+	...realChildProcess,
 	spawnSync: mockSpawnSync,
 }));
 

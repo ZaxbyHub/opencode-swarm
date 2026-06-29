@@ -3,13 +3,18 @@
  * Covers directory injection, fallback behavior, args passthrough, and return values
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import type { ToolContext } from '@opencode-ai/plugin';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 // Mock the tool function from @opencode-ai/plugin
-const mockTool = vi.fn();
-vi.mock('@opencode-ai/plugin', () => ({
+const mockTool = mock();
+mock.module('@opencode-ai/plugin', () => ({
 	tool: (...args: unknown[]) => mockTool(...args),
 	type: {},
 }));
@@ -19,7 +24,7 @@ import { createSwarmTool } from '../../../src/tools/create-tool';
 
 describe('createSwarmTool', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 	});
 
 	describe('Group 1: Directory from ctx', () => {

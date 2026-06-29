@@ -8,10 +8,14 @@
  * - Args/options are passed through correctly
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+afterEach(() => {
+	mock.restore();
+});
 
 // ===== MOCK TRACKERS =====
 
@@ -23,8 +27,8 @@ const detectDarkMatterCalls: Array<{ directory: string; options: unknown }> =
 	[];
 
 // ===== MOCK saveEvidence =====
-vi.mock('../../../src/evidence/manager', () => ({
-	saveEvidence: vi.fn().mockResolvedValue(undefined),
+mock.module('../../../src/evidence/manager', () => ({
+	saveEvidence: mock().mockImplementation(async () => undefined),
 }));
 
 // ===== MOCK sast-scan module =====
@@ -57,7 +61,7 @@ const mockSastScan = async (
 };
 
 // Mock the entire module
-vi.mock('../../../src/tools/sast-scan', () => ({
+mock.module('../../../src/tools/sast-scan', () => ({
 	...originalSastScanModule,
 	sastScan: mockSastScan,
 }));
@@ -75,20 +79,20 @@ const mockDetectDarkMatter = async (directory: string, options?: unknown) => {
 };
 
 // Mock the entire module
-vi.mock('../../../src/tools/co-change-analyzer', () => ({
+mock.module('../../../src/tools/co-change-analyzer', () => ({
 	...originalCoChangeModule,
 	detectDarkMatter: mockDetectDarkMatter,
 }));
 
 // ===== MOCK semgrep module =====
-vi.mock('../../../src/sast/semgrep', () => ({
-	isSemgrepAvailable: vi.fn(() => false),
-	runSemgrep: vi.fn().mockResolvedValue({
+mock.module('../../../src/sast/semgrep', () => ({
+	isSemgrepAvailable: mock(() => false),
+	runSemgrep: mock().mockImplementation(async () => ({
 		available: false,
 		findings: [],
 		engine: 'tier_a',
-	}),
-	resetSemgrepCache: vi.fn(),
+	})),
+	resetSemgrepCache: mock(),
 }));
 
 import { co_change_analyzer } from '../../../src/tools/co-change-analyzer';

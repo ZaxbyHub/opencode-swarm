@@ -12,6 +12,7 @@
  * 5. Stale temp file: pre-existing .tmp from crash
  */
 
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import {
 	mkdir,
@@ -23,7 +24,6 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PluginConfig } from '../../../src/config';
 import { _flushForTesting } from '../../../src/hooks/agent-activity';
 import { resetSwarmState, swarmState } from '../../../src/state';
@@ -228,7 +228,7 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			await writeFile(contextPath, largeContent);
 
 			// Mock console.warn to suppress any warnings
-			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Flush should complete successfully
 			await _flushForTesting(tempDir);
@@ -264,7 +264,7 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			swarmState.pendingEvents = 1000;
 
 			// Mock console.warn to suppress any warnings
-			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Flush should complete successfully
 			await _flushForTesting(tempDir);
@@ -357,7 +357,7 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			await writeFile(contextPath, '# Initial\n');
 
 			// Mock console.warn to suppress expected errors
-			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
 			// Flush should handle this gracefully
 			try {
@@ -387,9 +387,9 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			await writeFile(contextPath, '# Initial\n');
 
 			// Mock Bun.write to simulate write error
-			const writeSpy = vi
-				.spyOn(Bun, 'write')
-				.mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
+			const writeSpy = spyOn(Bun, 'write').mockImplementation(async () => {
+				throw new Error('ENOSPC: no space left on device');
+			});
 
 			// Flush should fail gracefully
 			await _flushForTesting(tempDir);

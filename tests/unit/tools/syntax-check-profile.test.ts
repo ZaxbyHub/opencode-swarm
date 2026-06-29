@@ -1,46 +1,48 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realFs from 'node:fs';
 import type { PluginConfig } from '../../../src/config';
 import { syntaxCheck } from '../../../src/tools/syntax-check';
 
 // Mock fs to avoid actual file system access
-vi.mock('node:fs', () => ({
-	readFileSync: vi.fn(() => 'valid code content'),
+mock.module('node:fs', () => ({
+	...realFs,
+	readFileSync: mock(() => 'valid code content'),
 }));
 
 // Mock path to keep paths consistent
-vi.mock('path', () => ({
-	isAbsolute: vi.fn((p: string) => p.startsWith('/') || p.match(/^[A-Z]:/)),
-	extname: vi.fn((p: string) => {
+mock.module('path', () => ({
+	isAbsolute: mock((p: string) => p.startsWith('/') || p.match(/^[A-Z]:/)),
+	extname: mock((p: string) => {
 		const lastDot = p.lastIndexOf('.');
 		return lastDot >= 0 ? p.slice(lastDot) : '';
 	}),
-	join: vi.fn((...parts: string[]) => parts.join('/')),
+	join: mock((...parts: string[]) => parts.join('/')),
 }));
 
 // Mock detector
-const mockGetProfileForFile = vi.fn();
-vi.mock('../../../src/lang/detector', () => ({
+const mockGetProfileForFile = mock();
+mock.module('../../../src/lang/detector', () => ({
 	getProfileForFile: (...args: unknown[]) => mockGetProfileForFile(...args),
 }));
 
 // Mock registry
-const mockGetLanguageForExtension = vi.fn();
-const mockGetParserForFile = vi.fn();
-vi.mock('../../../src/lang/registry', () => ({
+const mockGetLanguageForExtension = mock();
+const mockGetParserForFile = mock();
+mock.module('../../../src/lang/registry', () => ({
 	getLanguageForExtension: (...args: unknown[]) =>
 		mockGetLanguageForExtension(...args),
 	getParserForFile: (...args: unknown[]) => mockGetParserForFile(...args),
 }));
 
 // Mock runtime
-const mockLoadGrammar = vi.fn();
-vi.mock('../../../src/lang/runtime', () => ({
+const mockLoadGrammar = mock();
+mock.module('../../../src/lang/runtime', () => ({
 	loadGrammar: (...args: unknown[]) => mockLoadGrammar(...args),
 }));
 
 // Mock evidence manager
-vi.mock('../../../src/evidence/manager', () => ({
-	saveEvidence: vi.fn(async () => {}),
+mock.module('../../../src/evidence/manager', () => ({
+	saveEvidence: mock(async () => {}),
 }));
 
 // Fake parser helper - creates a parser with no errors
@@ -52,7 +54,7 @@ function createFakeParser(language: string = 'test') {
 				children: [],
 				startPosition: { row: 0, column: 0 },
 			},
-			delete: vi.fn(),
+			delete: mock(),
 		}),
 		language,
 	};
@@ -73,14 +75,15 @@ function createErrorParser() {
 				],
 				startPosition: { row: 0, column: 0 },
 			},
-			delete: vi.fn(),
+			delete: mock(),
 		}),
 	};
 }
 
 describe('syntaxCheck - Profile-Driven Grammar Resolution (Task 2.5)', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockGetProfileForFile.mockReset();
 		mockGetLanguageForExtension.mockReset();
 		mockGetParserForFile.mockReset();

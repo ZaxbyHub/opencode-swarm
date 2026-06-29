@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
 import { createHivePromoterHook } from '../../../src/hooks/hive-promoter.js';

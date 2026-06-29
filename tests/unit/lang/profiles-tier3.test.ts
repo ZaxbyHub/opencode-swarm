@@ -4,7 +4,7 @@
  * Tests for Dart and Ruby language profiles in the Language Registry.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 
 describe('Tier 3 Language Profiles - Verification', () => {

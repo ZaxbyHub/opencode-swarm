@@ -3,7 +3,7 @@
  * Focus: Attack vectors, bypass attempts, and edge case handling.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import {
 	DANGEROUS_COMMAND_PATTERNS,
 	INJECTION_PATTERNS,

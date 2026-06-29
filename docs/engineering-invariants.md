@@ -96,6 +96,31 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established:** plugin init must be fast, bounded, and side-effect minimal. Yield to the event loop before doing any work. Use `queueMicrotask` + a watchdog (`unref`'d 30 s) for deferred init. `withTimeout` (5 s) for snapshot loads. Symlink cycles must be detected with `realpathSync`/`realpath` and a `seenRealPaths` set. `maxFiles` enforced inside the traversal loop. All `Bun.*` calls go through `src/utils/bun-compat.ts`.
 - **Maps to AGENTS.md:** invariants 1 (plugin init), 2 (runtime portability), 3 (subprocesses).
 
+### Issue #1231 Phase 3 — Structural debt: delegation-gate split + Lean Turbo behavioral tests
+
+- **Symptom:** `delegation-gate.test.ts` (2835 lines) was a monolithic test file that caused mock isolation issues, slow CI runs, and made parallel lane execution (FR-009) untestable due to missing DI seams.
+- **Fix applied:**
+  - Split `delegation-gate.test.ts` into 45 focused files (all <500 lines, FR-006 SC-006.1)
+  - Created `tests/unit/commands/sync-plan.test.ts` (10 tests, FR-007)
+  - Parameterized `tests/unit/agents/sme.test.ts` (24 tests, 75% parameterized, FR-008)
+  - Created 7 Lean Turbo behavioral test files for FR-009 (100 tests total)
+- **Invariants established:** test files must stay under 500 lines; monolithic files must be split by behavioral aspect; Lean Turbo requires DI seams (`src/parallel/file-locks.ts:_internals`) for testability.
+- **Maps to AGENTS.md:** invariant 7 (test writing).
+
+### Issue #1231 Phase 4 — vitest→bun:test + hook coverage completion
+
+- **Symptom:** vitest remained in 50+ test files across 11 directories despite AGENTS.md requiring `bun:test`; 9 previously untested hooks lacked test coverage (FR-010/011/012).
+- **Fix applied:**
+  - Converted 50+ files from vitest to bun:test across 11 directories (cli, services, session, evidence, commands, build, lang, scripts, config, knowledge, context-map, hooks, tools)
+  - Created 11 new test files for 9 previously untested hooks: `conflict-resolution`, `curator-types` (3 files), `delegate-ack-collector`, `delegate-directive-injection` (2 files + fixtures), `knowledge-reinforcement`, `normalize-tool-name`, `phase-complete-directive-gate`, `phase-directives`, `semantic-diff-injection`
+  - Consolidated knowledge-curator tests with shared fixture `curator-test-fixtures.ts`
+  - Replaced `jest.fn()` with `mock()` in 7 files
+  - Fixed `RankedEntry` broken import path
+  - Rewrote `check-mock-cleanup.test.ts` to TypeScript for cross-platform compatibility
+  - Fixed delegation-gate task isolation
+- **Invariants established:** all tests use `bun:test` exclusively; `mock.module` calls must spread real exports; test files stay under 500 lines; fixture files consolidate shared setup.
+- **Maps to AGENTS.md:** invariant 7 (test writing).
+
 ### v7.3.3 — Git hygiene runs on the init path without bounds
 
 - **Symptom:** `ensureSwarmGitExcluded` correctly fixed `.swarm/` Git pollution but did so by `await`ing four sequential `git` subprocess calls on the plugin-init critical path with **no** outer `withTimeout` and **no** per-call `timeout` / `stdin: 'ignore'` / `proc.kill()`. On hosts where any one git child fails to exit promptly (Windows antivirus interception, credential helper prompts, NFS-stalled `.git`, Bun-on-Windows stdin pipe semantics) the plugin entry never resolved; OpenCode silently dropped the plugin; users saw "no agents in TUI/GUI" with no error.
@@ -340,6 +365,15 @@ await mock.module('../src/utils/bun-compat', () => ({ bunSpawn: stub }));
 // leaks into every other test file in the same Bun process
 ```
 
+**Anti-pattern (node:* mock without spread):**
+
+```ts
+// in tests/foo.test.ts
+mock.module('node:fs', () => ({
+  readFileSync: mockFn, // missing ...realFs spread — pollutes other tests
+}));
+```
+
 **Required pattern (file-scoped DI seam):**
 
 ```ts
@@ -358,9 +392,56 @@ test('...', () => {
 });
 ```
 
+**Required pattern (spread-real-exports for node:\* mocks):**
+
+```ts
+// in tests/foo.test.ts
+import * as realFs from 'node:fs';
+const mockReadFileSync = mock(() => '');
+mock.module('node:fs', () => ({
+  ...realFs,                    // mandatory — preserves all other exports
+  readFileSync: mockReadFileSync, // override only what you need
+}));
+```
+
+**Current `_internals` seams (Phase 2 additions in bold, Phase 3 additions in *italic*, Phase 4 additions in **double-italic**):**
+
+| Module | Exposed for testing | Use case |
+|---|---|---|
+| `src/utils/gitignore-warning.ts` | `bunSpawn` | bounded subprocess tests |
+| `src/hooks/diff-scope.ts` | `bunSpawn` | diff-scope bounded tests |
+| `src/hooks/knowledge-migrator.ts` | `writeSentinel`, `mkdir`, `writeFile`, `existsSync`, `readFileSync`, `readFile` | FR-005 evidence-spoofing tests |
+| **`src/evidence/manager.ts`** | **`validateEvidence`** | FR-005 evidence integrity tests |
+| `src/hooks/guardrails/index.ts` | guardrail hook internals | FR-004 adversarial tests |
+| `src/hooks/curator.ts` | curator internals | curator phase tests |
+| *`src/hooks/guardrails/index.ts`* | *guardrail internals* | *FR-009 Lean Turbo behavioral tests* |
+| *`src/parallel/file-locks.ts`* | *acquireLaneLocks, releaseLaneLocks* | *FR-009 acquire-locks behavioral tests* |
+| **`src/hooks/delegate-ack-collector.ts`** | **delegate ack internals** | **FR-011 delegate-ack-collector hook tests** |
+| **`src/hooks/delegate-directive-injection.ts`** | **delegate directive injection internals** | **FR-011 delegate-directive-injection hook tests** |
+| **`src/hooks/knowledge-reinforcement.ts`** | **knowledge-reinforcement internals** | **FR-011 knowledge-reinforcement hook tests** |
+
+**Delegation-gate split pattern (FR-006 SC-006.1):**
+
+`tests/unit/agents/delegation-gate.test.ts` (2835 lines) was split into 45 focused files, each under 500 lines:
+
+```
+tests/unit/agents/delegation-gate/
+  delegation-gate-authority.test.ts        # primary agent authority
+  delegation-gate-session-keying.test.ts   # sessionID-based isolation
+  delegation-gate-cooldown.test.ts        # spiral-detection cooldown
+  delegation-gate-circuit-breaker.test.ts # consecutiveErrors accounting
+  ... (41 more focused files)
+```
+
+Split criteria: one behavioral aspect per file, shared test utilities extracted to `tests/unit/agents/delegation-gate/_fixtures.ts`.
+
 **Verification:**
 
+- Run `scripts/check-mock-cleanup.sh` — it enforces Check 2: every `mock.module('node:*', ...)` must spread real exports (e.g., `...realFs`, `...realChildProcess`).
 - Run the new bounded tests alongside the existing real-git tests; no cross-file pollution.
+- New test files must be under 500 lines — `delegation-gate.test.ts` split is the exemplar pattern.
+- FR-009 Lean Turbo tests cover: acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, get-qa-gate-profile.
+- FR-010/011/012 hook tests (Phase 4): 11 new files covering conflict-resolution, curator-types, delegate-ack-collector, delegate-directive-injection, knowledge-reinforcement, normalize-tool-name, phase-complete-directive-gate, phase-directives, semantic-diff-injection; shared fixtures consolidated in `curator-test-fixtures.ts`.
 
 ## PR checklist (pasteable into PR descriptions)
 

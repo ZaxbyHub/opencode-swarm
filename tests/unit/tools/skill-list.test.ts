@@ -22,6 +22,7 @@ const mockListSkills = mock(async () => ({
 			path: '.opencode/skills/generated/active-skill/SKILL.md',
 		},
 	],
+	stale: [],
 }));
 
 // Module-level mock — must be before the tool import
@@ -69,7 +70,7 @@ describe('skill_list tool', () => {
 	});
 
 	it('returns empty lists when no skills exist', async () => {
-		mockListSkills.mockResolvedValueOnce({ drafts: [], active: [] });
+		mockListSkills.mockResolvedValueOnce({ drafts: [], active: [], stale: [] });
 		const result = JSON.parse(await skill_list.execute({}, tmp));
 		expect(result.drafts).toEqual([]);
 		expect(result.active).toEqual([]);

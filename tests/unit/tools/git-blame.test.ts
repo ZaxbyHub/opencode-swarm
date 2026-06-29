@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as realFs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -151,6 +152,7 @@ describe('git_blame tool', () => {
 		// These tests mock fs.existsSync to return true so the binary check runs
 		test('rejects .png file', async () => {
 			mock.module('node:fs', () => ({
+				...realFs,
 				existsSync: () => true,
 				statSync: () => ({
 					isDirectory: () => false,
@@ -168,6 +170,7 @@ describe('git_blame tool', () => {
 
 		test('rejects .pdf file', async () => {
 			mock.module('node:fs', () => ({
+				...realFs,
 				existsSync: () => true,
 				statSync: () => ({
 					isDirectory: () => false,
@@ -184,6 +187,7 @@ describe('git_blame tool', () => {
 
 		test('rejects .exe file', async () => {
 			mock.module('node:fs', () => ({
+				...realFs,
 				existsSync: () => true,
 				statSync: () => ({
 					isDirectory: () => false,
@@ -200,6 +204,7 @@ describe('git_blame tool', () => {
 
 		test('rejects .zip file', async () => {
 			mock.module('node:fs', () => ({
+				...realFs,
 				existsSync: () => true,
 				statSync: () => ({
 					isDirectory: () => false,
@@ -216,6 +221,7 @@ describe('git_blame tool', () => {
 
 		test('rejects binary extension regardless of case', async () => {
 			mock.module('node:fs', () => ({
+				...realFs,
 				existsSync: () => true,
 				statSync: () => ({
 					isDirectory: () => false,
@@ -488,6 +494,7 @@ describe('git_blame - error handling with mocked fs', () => {
 
 	test('returns error when file does not exist', async () => {
 		mock.module('node:fs', () => ({
+			...realFs,
 			existsSync: () => false,
 			statSync: () => ({
 				isDirectory: () => false,
@@ -504,6 +511,7 @@ describe('git_blame - error handling with mocked fs', () => {
 
 	test('returns error when path is a directory', async () => {
 		mock.module('node:fs', () => ({
+			...realFs,
 			existsSync: () => true,
 			statSync: () => ({
 				isDirectory: () => true,

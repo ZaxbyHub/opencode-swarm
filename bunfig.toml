@@ -1,0 +1,9 @@
+# bunfig.toml — Bun runtime configuration
+# See https://bun.sh/docs/runtime/bunfig for all options
+
+[test]
+# Coverage configuration for `bun test --coverage`
+coverageReporter = ["lcov", "text"]
+# Generate lcov.info for CI artifacts + text for human readability
+coverageDir = "./coverage"
+# Coverage output directory

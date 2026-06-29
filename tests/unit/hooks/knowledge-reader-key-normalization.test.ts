@@ -17,25 +17,25 @@
  * 6. Case-insensitive match ('phase 3: something' → 'Phase 3')
  */
 
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ============================================================================
 // Mocks
 // ============================================================================
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => {
-	const readKnowledge = vi.fn(async () => []);
+mock.module('../../../src/hooks/knowledge-store.js', () => {
+	const readKnowledge = mock(async () => []);
 	return {
-		jaccardBigram: vi.fn((a: Set<string>, b: Set<string>) => {
+		jaccardBigram: mock((a: Set<string>, b: Set<string>) => {
 			if (a.size === 0 && b.size === 0) return 1.0;
 			const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
 			const union = new Set([...Array.from(a), ...Array.from(b)]);
 			return intersection.size / union.size;
 		}),
-		normalize: vi.fn((text: string) =>
+		normalize: mock((text: string) =>
 			text
 				.toLowerCase()
 				.replace(/[^\w\s]/g, ' ')
@@ -43,10 +43,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => {
 				.trim(),
 		),
 		readKnowledge,
-		readRetractionRecords: vi.fn(async () => []),
-		rewriteKnowledge: vi.fn(async () => {}),
-		transactFile: vi.fn(async () => true),
-		transactKnowledge: vi.fn(
+		readRetractionRecords: mock(async () => []),
+		rewriteKnowledge: mock(async () => {}),
+		transactFile: mock(async () => true),
+		transactKnowledge: mock(
 			async <T>(filePath: string, mutate: (entries: T[]) => T[] | null) => {
 				// Apply mutation to entries read via readKnowledge mock
 				const entries = await readKnowledge(filePath);
@@ -54,9 +54,9 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => {
 				return result !== null;
 			},
 		),
-		resolveSwarmKnowledgePath: vi.fn(() => '/mock/.swarm/knowledge.jsonl'),
-		resolveHiveKnowledgePath: vi.fn(() => '/mock/hive/shared-learnings.jsonl'),
-		wordBigrams: vi.fn((text: string) => {
+		resolveSwarmKnowledgePath: mock(() => '/mock/.swarm/knowledge.jsonl'),
+		resolveHiveKnowledgePath: mock(() => '/mock/hive/shared-learnings.jsonl'),
+		wordBigrams: mock((text: string) => {
 			const words = text
 				.toLowerCase()
 				.replace(/[^\w\s]/g, ' ')
@@ -93,12 +93,13 @@ beforeEach(() => {
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	shownFile = path.join(tmpDir, '.swarm', '.knowledge-shown.json');
-	vi.clearAllMocks();
+	mock.restore();
+	mock.clearAllMocks();
 });
 
 afterEach(() => {
 	fs.rmSync(tmpDir, { recursive: true, force: true });
-	vi.restoreAllMocks();
+	mock.restore();
 });
 
 // Helper to write a .knowledge-shown.json with a given key mapping

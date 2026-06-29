@@ -5,11 +5,11 @@
  * These tests verify that the snapshot writer is resilient to abuse.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
 	createSnapshotWriterHook,
 	serializeAgentSession,

@@ -9,6 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import * as realFs from 'node:fs';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -90,6 +91,7 @@ mock.module('../../../src/sdd/effective-spec.js', () => ({
 }));
 
 mock.module('node:fs', () => ({
+	...realFs,
 	readdirSync: () => [],
 	existsSync: (p: string) => {
 		if (typeof p !== 'string') return false;
@@ -102,7 +104,10 @@ mock.module('node:fs', () => ({
 	readFileSync: () => '{}',
 }));
 
+import * as realChildProcess from 'node:child_process';
+
 mock.module('node:child_process', () => ({
+	...realChildProcess,
 	execSync: () => Buffer.from('.git'),
 }));
 

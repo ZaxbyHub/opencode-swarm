@@ -6,9 +6,9 @@
  * 2. The export is consumable (importable) by plugin registration code
  */
 
+import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
 
 // Test 1: Verify the export appears exactly once in the source
 describe('check_gate_status export surface', () => {

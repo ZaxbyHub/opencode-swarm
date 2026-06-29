@@ -8,7 +8,7 @@
  * Uses dependency injection (curatorRunner parameter) for the curator init function.
  */
 
-import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -22,13 +22,13 @@ import { createPhaseMonitorHook } from '../../../src/hooks/phase-monitor';
 
 // Injected curator runner mock — does NOT use mock.module to avoid leakage
 const mockRunCuratorInit =
-	jest.fn<
+	mock<
 		(_directory: string, _config: CuratorConfig) => Promise<CuratorInitResult>
 	>();
 
 // Mock the preflightManager
 const mockCheckAndTrigger =
-	jest.fn<
+	mock<
 		(
 			_phase: number,
 			_completedTasks: number,
@@ -169,10 +169,10 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 				{ id: 1, tasks: [{ id: '1.1', status: 'pending' }] },
 			]);
 
-			const mockDelegate = jest.fn();
-			const mockFactory = jest
-				.fn<CuratorDelegateFactory>()
-				.mockReturnValue(mockDelegate as any);
+			const mockDelegate = mock();
+			const mockFactory = mock<CuratorDelegateFactory>().mockReturnValue(
+				mockDelegate as any,
+			);
 
 			mockRunCuratorInit.mockResolvedValue({
 				briefing: 'Test briefing',

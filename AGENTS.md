@@ -78,8 +78,17 @@ Every PR that touches a relevant area must list which of these invariants it tou
 ### 7. Test writing — bun:test, mock isolation, DI over `mock.module`
 
 - All tests use `bun:test` only. No Jest, Vitest, etc. Bun's vitest-compat layer has known isolation bugs.
-- Load the writing-tests skill (`.opencode/skills/writing-tests/SKILL.md` or `.claude/skills/writing-tests/SKILL.md`) before modifying tests.
-- `mock.module(...)` leaks across test files in Bun's shared test-runner process. Spread the real module when mocking, or — preferred — use **dependency injection** via a small `_internals` seam (see `src/utils/gitignore-warning.ts:_internals` and `src/hooks/diff-scope.ts:_internals` introduced by the v7.3.4 fix). Restore the seam in `afterEach`.
+- Load the writing-tests skill (`.opencode/skills/writing-tests/SKILL.md` or `.claude/skills/willing-tests/SKILL.md`) before modifying tests.
+- `mock.module(...)` leaks across test files in Bun's shared test-runner process. Spread the real module when mocking, or — preferred — use **dependency injection** via a small `_internals` seam (see `src/utils/gitignore-warning.ts:_internals` and `src/hooks/diff-scope.ts:_internals` introduced by the v7.3.4 fix). Restore the seam in `afterEach`. Current `_internals` seams include: `src/hooks/knowledge-migrator.ts:_internals` (writeSentinel, mkdir, writeFile for evidence-spoofing tests), `src/evidence/manager.ts:_internals` (validateEvidence for evidence integrity tests), `src/hooks/guardrails/index.ts:_internals`, `src/hooks/curator.ts:_internals`, and others listed in `docs/engineering-invariants.md`.
+- **FR-006/007/008/009/010/011/012 enforcement:** All new test files must be under 500 lines. `delegation-gate.test.ts` (2835 lines) was split into 45 focused files for FR-006 SC-006.1. SME tests (FR-008) use parameterization for coverage. Lean Turbo behavioral tests (FR-009) cover acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, and get-qa-gate-profile. FR-010/FR-011/FR-012 (Phase 3–4 structural debt) added 11 new hook test files covering previously untested hooks (conflict-resolution, curator-types, delegate-ack-collector, delegate-directive-injection, knowledge-reinforcement, normalize-tool-name, phase-complete-directive-gate, phase-directives, semantic-diff-injection) and consolidated knowledge-curator tests with shared fixtures.
+- **Spread-real-exports pattern for `node:*` mocks:** When mocking Node built-ins (`node:fs`, `node:child_process`, `node:fs/promises`, etc.), always spread the real module's exports into the mock return object. This prevents test pollution and ensures only the intended functions are overridden. CI enforces this via `scripts/check-mock-cleanup.sh` (Check 2).
+  ```typescript
+  import * as realFs from 'node:fs';
+  mock.module('node:fs', () => ({
+    ...realFs,           // mandatory — preserves all other exports
+    readFileSync: mockFn, // override only what you need
+  }));
+  ```
 - Use `os.tmpdir()` + `path.join(...)` for temp paths. No hardcoded `/tmp` or `C:\` strings.
 - `mkdtempSync` must be wrapped in `realpathSync` if the result is `chdir`'d on macOS.
 

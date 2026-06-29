@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,14 +27,14 @@ function foundResult(bundle: {
 const NOT_FOUND: LoadEvidenceResult = { status: 'not_found' };
 
 // Mock the plan manager
-jest.mock('../../../src/plan/manager', () => ({
-	loadPlanJsonOnly: jest.fn(),
+mock.module('../../../src/plan/manager', () => ({
+	loadPlanJsonOnly: mock(),
 }));
 
 // Mock the evidence manager
-jest.mock('../../../src/evidence/manager', () => ({
-	loadEvidence: jest.fn(),
-	listEvidenceTaskIds: jest.fn(),
+mock.module('../../../src/evidence/manager', () => ({
+	loadEvidence: mock(),
+	listEvidenceTaskIds: mock(),
 }));
 
 import {
@@ -43,15 +43,9 @@ import {
 } from '../../../src/evidence/manager';
 import { loadPlanJsonOnly } from '../../../src/plan/manager';
 
-const mockLoadPlanJsonOnly = loadPlanJsonOnly as jest.MockedFunction<
-	typeof loadPlanJsonOnly
->;
-const mockLoadEvidence = loadEvidence as jest.MockedFunction<
-	typeof loadEvidence
->;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as jest.MockedFunction<
-	typeof listEvidenceTaskIds
->;
+const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof mock>;
+const mockLoadEvidence = loadEvidence as ReturnType<typeof mock>;
+const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof mock>;
 
 let tempDir: string;
 
@@ -63,7 +57,7 @@ beforeEach(() => {
 	mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 
 	// Reset mocks
-	jest.clearAllMocks();
+	mock.restore();
 });
 
 afterEach(() => {

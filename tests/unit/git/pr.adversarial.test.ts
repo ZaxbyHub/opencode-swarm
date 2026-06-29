@@ -24,6 +24,8 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import * as realFs from 'node:fs';
+import * as realPath from 'node:path';
 
 // Track all calls to spawnSync for security verification
 interface SpawnCall {
@@ -67,6 +69,7 @@ const mockSpawnSync = mock(
 // Mock fs and path modules properly
 const mockFs: Record<string, unknown> = {};
 const mockFsModule = {
+	...realFs,
 	existsSync: mock((path: string) => mockFs[`existsSync:${path}`] ?? false),
 	readFileSync: mock(
 		(path: string, _encoding: string) => mockFs[`readFileSync:${path}`] ?? '',
@@ -74,11 +77,15 @@ const mockFsModule = {
 };
 
 const mockPathModule = {
+	...realPath,
 	join: (...parts: string[]) => parts.join('/'),
 };
 
 // Mock the node:child_process module BEFORE importing pr
+import * as realChildProcess from 'node:child_process';
+
 mock.module('node:child_process', () => ({
+	...realChildProcess,
 	spawnSync: mockSpawnSync,
 }));
 

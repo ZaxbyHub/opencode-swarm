@@ -1,19 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 // Mock console methods BEFORE importing
-const mockConsoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
-const mockConsoleError = vi
-	.spyOn(console, 'error')
-	.mockImplementation(() => {});
+const mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
+const mockConsoleError = spyOn(console, 'error').mockImplementation(() => {});
 
 // Mock process.argv to prevent default 'install' command
 const originalArgv = process.argv;
 process.argv = ['node', 'cli.js', '--help'];
 
 // Mock process.exit to prevent CLI from exiting
-const mockProcessExit = vi
-	.spyOn(process, 'exit')
-	.mockImplementation(() => undefined as never);
+const mockProcessExit = spyOn(process, 'exit').mockImplementation(
+	() => undefined as never,
+);
 
 // Now import after mocks are set up - this will execute main() once
 import { run } from '../../../src/cli/index.js';
@@ -21,7 +19,9 @@ import { run } from '../../../src/cli/index.js';
 describe('Task 1.2: CLI Main Wiring - run command', () => {
 	beforeEach(() => {
 		// Clear all mocks between tests
-		vi.clearAllMocks();
+		mockConsoleLog.mockClear();
+		mockConsoleError.mockClear();
+		mockProcessExit.mockClear();
 	});
 
 	afterEach(() => {

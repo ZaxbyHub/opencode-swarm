@@ -1,4 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
+import * as realFs from 'node:fs';
+import * as realPath from 'node:path';
 
 import {
 	type SyntaxCheckInput,
@@ -6,37 +13,39 @@ import {
 } from '../../../src/tools/syntax-check';
 
 // Declare local mock variables
-const mockGetProfileForFile = vi.fn();
-const mockGetLanguageForExtension = vi.fn();
-const mockGetParserForFile = vi.fn();
-const mockLoadGrammar = vi.fn();
-const mockSaveEvidence = vi.fn();
-const mockReadFileSync = vi.fn();
+const mockGetProfileForFile = mock();
+const mockGetLanguageForExtension = mock();
+const mockGetParserForFile = mock();
+const mockLoadGrammar = mock();
+const mockSaveEvidence = mock();
+const mockReadFileSync = mock();
 
 // Mock modules using factory functions
-vi.mock('../../../src/lang/detector', () => ({
+mock.module('../../../src/lang/detector', () => ({
 	getProfileForFile: (...args: unknown[]) => mockGetProfileForFile(...args),
 }));
 
-vi.mock('../../../src/lang/registry', () => ({
+mock.module('../../../src/lang/registry', () => ({
 	getLanguageForExtension: (...args: unknown[]) =>
 		mockGetLanguageForExtension(...args),
 	getParserForFile: (...args: unknown[]) => mockGetParserForFile(...args),
 }));
 
-vi.mock('../../../src/lang/runtime', () => ({
+mock.module('../../../src/lang/runtime', () => ({
 	loadGrammar: (...args: unknown[]) => mockLoadGrammar(...args),
 }));
 
-vi.mock('../../../src/evidence/manager', () => ({
+mock.module('../../../src/evidence/manager', () => ({
 	saveEvidence: (...args: unknown[]) => mockSaveEvidence(...args),
 }));
 
-vi.mock('node:fs', () => ({
+mock.module('node:fs', () => ({
+	...realFs,
 	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
 }));
 
-vi.mock('node:path', () => ({
+mock.module('node:path', () => ({
+	...realPath,
 	isAbsolute: (p: string) => p.startsWith('/') || /^[A-Z]:/.test(p),
 	extname: (p: string) => {
 		const i = p.lastIndexOf('.');
@@ -47,26 +56,27 @@ vi.mock('node:path', () => ({
 
 // Mock parser
 const mockParser = {
-	parse: vi.fn().mockReturnValue({
+	parse: mock(() => ({
 		rootNode: {
 			type: 'source_file',
 			children: [],
 		},
-		delete: vi.fn(),
-	}),
+		delete: mock(),
+	})),
 };
 
 describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 
 		// Default mock behaviors
-		mockGetProfileForFile.mockReturnValue(null);
-		mockGetLanguageForExtension.mockReturnValue(null);
-		mockGetParserForFile.mockResolvedValue(null);
-		mockLoadGrammar.mockResolvedValue(null);
-		mockSaveEvidence.mockResolvedValue(undefined);
-		mockReadFileSync.mockReturnValue('valid code');
+		mockGetProfileForFile.mockImplementation(() => null);
+		mockGetLanguageForExtension.mockImplementation(() => null);
+		mockGetParserForFile.mockImplementation(async () => null);
+		mockLoadGrammar.mockImplementation(async () => null);
+		mockSaveEvidence.mockImplementation(async () => undefined);
+		mockReadFileSync.mockImplementation(() => 'valid code');
 	});
 
 	describe('ADVERSARIAL 1: Control character injection in filePath', () => {
@@ -77,7 +87,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// Mock returns null (no profile) → falls back to getParserForFile → null → skipped
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -93,7 +103,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -109,7 +119,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -128,7 +138,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// Mock profile with malicious grammarId
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'kotlin',
 				treeSitter: {
 					grammarId: '../../../etc/passwd',
@@ -139,7 +149,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			mockLoadGrammar.mockRejectedValue(new Error('WASM not found'));
 
 			// Should fall back to getParserForFile
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -155,7 +165,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'typescript',
 				treeSitter: {
 					grammarId: '/etc/passwd',
@@ -163,7 +173,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			});
 
 			mockLoadGrammar.mockRejectedValue(new Error('WASM not found'));
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -181,7 +191,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// Mock profile with empty grammarId
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'kotlin',
 				treeSitter: {
 					grammarId: '',
@@ -189,9 +199,9 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			});
 
 			// Should NOT call loadGrammar (falsy check)
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 			// Should call getParserForFile as fallback
-			mockGetParserForFile.mockResolvedValue(mockParser);
+			mockGetParserForFile.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -210,15 +220,15 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: '',
 				treeSitter: {
 					grammarId: 'kotlin',
 				},
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
-			mockGetLanguageForExtension.mockReturnValue({ id: 'kotlin' });
+			mockLoadGrammar.mockImplementation(async () => mockParser);
+			mockGetLanguageForExtension.mockImplementation({ id: 'kotlin' });
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -234,15 +244,15 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: '',
 				treeSitter: {
 					grammarId: 'something',
 				},
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
-			mockGetLanguageForExtension.mockReturnValue(null); // No langDef
+			mockLoadGrammar.mockImplementation(async () => mockParser);
+			mockGetLanguageForExtension.mockImplementation(null); // No langDef
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -258,7 +268,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				mode: 'changed',
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'typescript',
 				treeSitter: {
 					grammarId: 'typescript',
@@ -266,10 +276,10 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			});
 
 			// loadGrammar returns null (not throws)
-			mockLoadGrammar.mockResolvedValue(null);
+			mockLoadGrammar.mockImplementation(async () => null);
 
 			// Should fall back to getParserForFile
-			mockGetParserForFile.mockResolvedValue(mockParser);
+			mockGetParserForFile.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -297,7 +307,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				return { id: 'typescript', treeSitter: { grammarId: 'typescript' } };
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -317,12 +327,12 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				languages: ['<script>alert(1)</script>', 'kotlin\x00', '; DROP TABLE'],
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'kotlin',
 				treeSitter: { grammarId: 'kotlin' },
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -348,7 +358,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				return { id: 'typescript', treeSitter: { grammarId: 'typescript' } };
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -391,8 +401,8 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// getProfileForFile should handle this
-			mockGetProfileForFile.mockReturnValue(null);
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetProfileForFile.mockImplementation(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -408,12 +418,12 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// Simulate a profile that handles .kt extension
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'kotlin',
 				treeSitter: { grammarId: 'kotlin' },
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -436,7 +446,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				throw new Error('unexpected crash');
 			});
 
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -458,7 +468,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				throw 'string error';
 			});
 
-			mockGetParserForFile.mockResolvedValue(null);
+			mockGetParserForFile.mockImplementation(async () => null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -476,7 +486,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			};
 
 			// Profile exists with grammarId
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: 'custom',
 				treeSitter: { grammarId: 'custom' },
 			});
@@ -485,7 +495,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			mockLoadGrammar.mockRejectedValue(new Error('not found'));
 
 			// getParserForFile returns parser
-			mockGetParserForFile.mockResolvedValue(mockParser);
+			mockGetParserForFile.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -502,13 +512,13 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				changed_files: [{ path: 'test.rs', additions: 10 }],
 			};
 
-			mockGetProfileForFile.mockReturnValue({
+			mockGetProfileForFile.mockImplementation({
 				id: null as unknown as string,
 				treeSitter: { grammarId: 'rust' },
 			});
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
-			mockGetLanguageForExtension.mockReturnValue({ id: 'rust' });
+			mockLoadGrammar.mockImplementation(async () => mockParser);
+			mockGetLanguageForExtension.mockImplementation({ id: 'rust' });
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -533,7 +543,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				treeSitter: { grammarId: 'kotlin' },
 			}));
 
-			mockLoadGrammar.mockResolvedValue(mockParser);
+			mockLoadGrammar.mockImplementation(async () => mockParser);
 
 			const result = await syntaxCheck(input, '/test/dir');
 
@@ -551,8 +561,8 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 				languages: ['unknown'],
 			};
 
-			mockGetProfileForFile.mockReturnValue(null);
-			mockGetLanguageForExtension.mockReturnValue(null);
+			mockGetProfileForFile.mockImplementation(null);
+			mockGetLanguageForExtension.mockImplementation(null);
 
 			const result = await syntaxCheck(input, '/test/dir');
 

@@ -51,6 +51,15 @@ mock.module('node:child_process', () => ({
 
 **Always add `afterEach(mock.restore())` for cross-module mocks.** Even though unreliable in Bun v1.3.11, it provides best-effort cleanup. **Exception — Windows EBUSY:** Test files that spawn async child processes (pre-check-batch suite) must NOT call `mock.restore()` on Windows. Child process handles hold directory locks and trigger `EBUSY` errors. Skip affected tests with `test.skipIf(process.platform === 'win32')`.
 
+**Mock cleanup enforcement:** `scripts/check-mock-cleanup.sh` runs in CI (quality job) and enforces two checks:
+1. All `mock.module` calls have `afterEach(mock.restore())` cleanup or file-scoped `mockClear`/`mockReset` pattern
+2. All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
+
+Run locally before pushing:
+```bash
+bash scripts/check-mock-cleanup.sh
+```
+
 Intentionally skipped on Windows (async child process handles cause EBUSY):
 - `tests/unit/tools/pre-check-batch.test.ts`
 - `tests/unit/tools/pre-check-batch.adversarial.test.ts`
@@ -74,7 +83,7 @@ import { execFileSync } from 'node:child_process';
 ### CI Pipeline Steps
 
 | Step | Directories | Isolation |
-|------|-------------|----------|
+|------|-------------|-----------|
 | 1a | hooks (mock.module files — 15 files) | Per-file isolation (dedicated step) |
 | 1b | hooks (remaining groups) | Per-file loop per group |
 | 2 | cli | Batch |
@@ -82,6 +91,85 @@ import { execFileSync } from 'node:child_process';
 | 4 | tools | Per-file loop |
 | 5 | services, build, quality, sast, sbom, scripts | Per-file loop |
 | 6 | adversarial, agents, background, context, diff, evidence, git, helpers, knowledge, lang, output, parallel, plan, session, skills, types, utils | Per-file loop |
+
+### Test File Size Limits
+
+To prevent monolithic test files that cause mock isolation issues and slow CI:
+- **Maximum 500 lines per test file** (enforced by convention, not CI)
+- `delegation-gate.test.ts` was split into 45 focused files (FR-006 SC-006.1) — all under 500 lines
+- When a test file exceeds 500 lines, split it by behavior/feature into focused files
+
+### New Behavioral Test Files (Phase 3–4 — Issue #1231 Structural Debt)
+
+Phase 3 files:
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/unit/commands/sync-plan.test.ts` | 10 | FR-007 (sync-plan command) |
+| `tests/unit/agents/sme.test.ts` | 24 (75% parameterized) | FR-008 (SME delegation) |
+| `tests/unit/parallel/lean-turbo-acquire-locks.test.ts` | 14 | FR-009 (Lean Turbo locking) |
+| `tests/unit/parallel/lean-turbo-plan-lanes.test.ts` | 16 | FR-009 (lane planning) |
+| `tests/unit/parallel/lean-turbo-review.test.ts` | 13 | FR-009 (Lean Turbo review) |
+| `tests/unit/parallel/lean-turbo-runner-status.test.ts` | 18 | FR-009 (runner status) |
+| `tests/unit/tools/generate-mutants.test.ts` | 11 | FR-009 (mutation testing) |
+| `tests/unit/config/set-qa-gates.test.ts` | 19 | FR-009 (QA gate config) |
+| `tests/unit/config/get-qa-gate-profile.test.ts` | 9 | FR-009 (QA gate profile) |
+
+Phase 4 files (FR-010/011/012 — previously untested hooks):
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/unit/hooks/conflict-resolution.test.ts` | — | FR-010 (conflict-resolution hook) |
+| `tests/unit/hooks/curator-types.test.ts` | — | FR-010 (curator types) |
+| `tests/unit/hooks/curator.test.ts` | — | FR-010 (curator consolidated) |
+| `tests/unit/hooks/delegate-ack-collector.test.ts` | — | FR-011 (delegate-ack-collector hook) |
+| `tests/unit/hooks/delegate-directive-injection.test.ts` | — | FR-011 (delegate-directive-injection hook) |
+| `tests/unit/hooks/knowledge-reinforcement.test.ts` | — | FR-011 (knowledge-reinforcement hook) |
+| `tests/unit/hooks/normalize-tool-name.test.ts` | — | FR-011 (normalize-tool-name hook) |
+| `tests/unit/hooks/phase-complete-directive-gate.test.ts` | — | FR-011 (phase-complete-directive-gate hook) |
+| `tests/unit/hooks/phase-directives.test.ts` | — | FR-011 (phase-directives hook) |
+| `tests/unit/hooks/semantic-diff-injection.test.ts` | — | FR-011 (semantic-diff-injection hook) |
+
+Phase 4 also consolidated knowledge-curator tests with shared fixtures (`tests/unit/hooks/curator-test-fixtures.ts`) and completed the vitest→bun:test migration across all 11 directories (cli, services, session, evidence, commands, build, lang, scripts, config, knowledge, context-map, hooks, tools).
+
+### Coverage Gate
+
+CI enforces a minimum code coverage threshold (41.48%) on the merge queue. Coverage is measured using `bun test --coverage` with output configured in `bunfig.toml`:
+
+```toml
+# bunfig.toml
+[test]
+coverageReporter = ["lcov", "text"]
+coverageDir = "./coverage"
+```
+
+The coverage gate runs as part of the `unit` job but only on `merge_group` events (not on every PR for speed). To measure coverage locally:
+
+```bash
+bun test --coverage tests/unit/ --timeout 60000
+```
+
+The coverage report is output to `./coverage/` as `lcov.info` and text summary.
+
+### Adversarial Tests
+
+Adversarial tests (`tests/adversarial/`) verify security boundaries against crafted malicious inputs. They cover:
+
+- **FR-003 / SC-003.1–SC-003.7**: Subprocess injection — command injection vectors via `shell.safeify`, bunSpawn routing, PATH traversal, null-byte injection, argument injection
+- **FR-004 / SC-004.1–SC-004.4**: Guardrail bypass attempts — prompt injection, capability escalation, schema override, context capsule exfiltration
+- **FR-005 / SC-005.1–SC-005.3**: Evidence spoofing — plan mutations, phase伪造, retrospective fabrication
+
+Run adversarial tests with the same isolation rules as unit tests:
+
+```bash
+# Per-file loop (required — adversarial tests may mock global state)
+for f in tests/adversarial/*.test.ts; do bun --smol test "$f" --timeout 30000; done
+```
+
+Adversarial tests use `_internals` DI seams for mocking (avoiding `mock.module` cross-file leakage):
+
+- `src/hooks/knowledge-migrator.ts:_internals` — exposes `writeSentinel`, `mkdir`, `writeFile`, `existsSync`, `readFileSync`, `readFile` for evidence-spoofing tests
+- `src/evidence/manager.ts:_internals` — exposes `validateEvidence` for evidence integrity tests
 
 ### Cross-Platform
 
