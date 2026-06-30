@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.99.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.3...v7.99.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** remove --smol from coverage gate to fix SIGILL crash on merge queue ([bbab36c](https://github.com/ZaxbyHub/opencode-swarm/commit/bbab36c90849c0754eed547240a07e2e04f66063))
+* **ci:** shard coverage gate and remove --smol to fix SIGILL crash ([f7dd87a](https://github.com/ZaxbyHub/opencode-swarm/commit/f7dd87a8d0b9828bffe592c79c81ff17ad4ad05a))
+* **planning:** resolve residual audit findings ([#660](https://github.com/ZaxbyHub/opencode-swarm/issues/660), [#1267](https://github.com/ZaxbyHub/opencode-swarm/issues/1267), [#1269](https://github.com/ZaxbyHub/opencode-swarm/issues/1269), [#1270](https://github.com/ZaxbyHub/opencode-swarm/issues/1270)) ([deeb155](https://github.com/ZaxbyHub/opencode-swarm/commit/deeb15539f8d2cec9f2f7188c7027329bb249b85))
+* **planning:** resolve residual audit findings ([#660](https://github.com/ZaxbyHub/opencode-swarm/issues/660), [#1267](https://github.com/ZaxbyHub/opencode-swarm/issues/1267), [#1269](https://github.com/ZaxbyHub/opencode-swarm/issues/1269), [#1270](https://github.com/ZaxbyHub/opencode-swarm/issues/1270)) ([b8b4d23](https://github.com/ZaxbyHub/opencode-swarm/commit/b8b4d23256a82c6ca412032bf687a371796b3d6b))
+* **pr-1568:** fallbackWritePlanWithTrace use validation.data for defense-in-depth consistency ([90c92f3](https://github.com/ZaxbyHub/opencode-swarm/commit/90c92f3ca237f01de8c2ed199e854ebf7e173ded))
+
 ## [7.99.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.2...v7.99.3) (2026-06-30)
 
 
