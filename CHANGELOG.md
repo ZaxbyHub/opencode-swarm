@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.99.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.2...v7.99.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** extract line coverage from correct awk column ([f03cfa5](https://github.com/ZaxbyHub/opencode-swarm/commit/f03cfa56937f1ed970c07ded4151b3c875e4f2d5))
+* **ci:** extract line coverage from correct awk column ([c6d3567](https://github.com/ZaxbyHub/opencode-swarm/commit/c6d3567f269e6588ffd893668e5ad26c1de9243a))
+
 ## [7.99.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.1...v7.99.2) (2026-06-30)
 
 
