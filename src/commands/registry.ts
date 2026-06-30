@@ -1,5 +1,6 @@
 import type { AgentDefinition } from '../agents/index.js';
 import { syncBundledProjectSkillsIfMissingAsync } from '../config/bundled-skills.js';
+import { warn } from '../utils/logger.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -160,6 +161,14 @@ function findSimilarCommands(query: string): string[] {
 
 	scored.sort((a, b) => a.score - b.score);
 	return scored.slice(0, 3).map((s) => s.cmd);
+}
+
+function emitValidationWarnings(
+	prefix: string,
+	warnings: readonly string[],
+): void {
+	if (warnings.length === 0) return;
+	warn(`${prefix}:\n${warnings.join('\n')}`);
 }
 
 function buildDetailedHelp(commandName: string, entry: CommandEntry): string {
@@ -1473,6 +1482,7 @@ export const _internals: {
 	handleHelpCommand: typeof handleHelpCommand;
 	validateAliases: typeof validateAliases;
 	validateToolPolicy: typeof validateToolPolicy;
+	emitValidationWarnings: typeof emitValidationWarnings;
 	resolveCommand: typeof resolveCommand;
 	levenshteinDistance: typeof levenshteinDistance;
 	findSimilarCommands: typeof findSimilarCommands;
@@ -1481,6 +1491,7 @@ export const _internals: {
 	handleHelpCommand,
 	validateAliases,
 	validateToolPolicy,
+	emitValidationWarnings,
 	resolveCommand,
 	levenshteinDistance,
 	findSimilarCommands,
@@ -1494,24 +1505,22 @@ if (!validation.valid) {
 		`COMMAND_REGISTRY alias validation failed:\n${validation.errors.join('\n')}`,
 	);
 }
-if (validation.warnings.length > 0) {
-	console.warn(
-		`COMMAND_REGISTRY alias warnings:\n${validation.warnings.join('\n')}`,
-	);
-}
+_internals.emitValidationWarnings(
+	'COMMAND_REGISTRY alias warnings',
+	validation.warnings,
+);
 
 // Non-fatal toolPolicy validation: warn for any standalone command missing toolPolicy,
 // but do NOT throw — fail-open per AGENTS.md invariant #1.
 try {
 	const toolPolicyValidation = _internals.validateToolPolicy();
-	if (toolPolicyValidation.warnings.length > 0) {
-		console.warn(
-			`COMMAND_REGISTRY toolPolicy warnings:\n${toolPolicyValidation.warnings.join('\n')}`,
-		);
-	}
+	_internals.emitValidationWarnings(
+		'COMMAND_REGISTRY toolPolicy warnings',
+		toolPolicyValidation.warnings,
+	);
 } catch (e) {
 	// Validation itself must not block module load; log and continue.
-	console.warn(
+	warn(
 		`COMMAND_REGISTRY toolPolicy validation failed (non-fatal): ${(e as Error).message}`,
 	);
 }
