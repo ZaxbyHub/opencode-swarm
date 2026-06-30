@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.99.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.0...v7.99.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** add shell: bash and scope coverage gate to single cell ([f9a6890](https://github.com/ZaxbyHub/opencode-swarm/commit/f9a689031c9c33c9e20a321c37b97ccb23373929))
+* **ci:** add shell: bash and scope coverage gate to single matrix cell ([47206c4](https://github.com/ZaxbyHub/opencode-swarm/commit/47206c4f682291b70c728c791119099da0b222f8))
+* **ci:** remove command substitution from coverage gate step ([5bf2e98](https://github.com/ZaxbyHub/opencode-swarm/commit/5bf2e98a9713c96f186809cbe8a3290e4fbc7752))
+* **docs:** reconcile overstated SAST/language counts, de-pin version, archive root review artifacts ([76c69ab](https://github.com/ZaxbyHub/opencode-swarm/commit/76c69ab92214da6c0bee2c925430b526ab8809fe))
+* **test:** issue 1231 testing infrastructure audit ([6e327ca](https://github.com/ZaxbyHub/opencode-swarm/commit/6e327caa11c9f8ac98af4738e5d2574483ce9d15))
+* **test:** regenerate mock-allowlist with PR-introduced mock targets ([87a61eb](https://github.com/ZaxbyHub/opencode-swarm/commit/87a61eb9b23ad842907866f1391ad8245c9b61ec))
+* **test:** resolve PR [#1562](https://github.com/ZaxbyHub/opencode-swarm/issues/1562) review findings ([7b23e5e](https://github.com/ZaxbyHub/opencode-swarm/commit/7b23e5e56350f3972e33a0c64a66e1062dee7933))
+
 ## [7.99.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.98.2...v7.99.0) (2026-06-29)
 
 
