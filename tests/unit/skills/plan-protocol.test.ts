@@ -73,8 +73,24 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 		});
 
 		it('teaches worktree isolation in the parallel-coders sub-item', () => {
-			expect(skillContent).toContain('isolated git worktree');
-			expect(skillContent).toMatch(/file[- ]disjoint|do NOT overlap/i);
+			const parallelCodersStart = skillContent.indexOf(
+				'- Parallel coders (default: 1, range: 1-6)',
+			);
+			const commitFrequencyStart = skillContent.indexOf(
+				'- Commit frequency',
+				parallelCodersStart,
+			);
+			const section = skillContent.slice(
+				parallelCodersStart,
+				commitFrequencyStart,
+			);
+
+			expect(section).toContain('isolated git worktree');
+			expect(section).toMatch(/file[- ]disjoint|do NOT overlap/i);
+			expect(section).toContain('COMMON MISCONCEPTION');
+			expect(section).toContain('worktree.policy');
+			expect(section).toContain('one possible SOURCE');
+			expect(section).toContain('Do not recommend Lean Turbo or Epic SOLELY');
 		});
 	});
 
@@ -107,9 +123,24 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 		for (const [label, relPath] of Object.entries(earlyModeSkills)) {
 			it(`${label} teaches worktrees and defers the recommendation to plan time`, () => {
 				const content = readFileSync(join(process.cwd(), relPath), 'utf-8');
-				expect(content).toContain('isolated git worktree');
-				expect(content).toMatch(/do NOT overlap/i);
-				expect(content).toContain('not known until the plan is finalized');
+				const parallelCodersStart = content.indexOf(
+					'- Parallel coders (default: 1, range: 1-6)',
+				);
+				const commitFrequencyStart = content.indexOf(
+					'- Commit frequency',
+					parallelCodersStart,
+				);
+				const section = content.slice(
+					parallelCodersStart,
+					commitFrequencyStart,
+				);
+				expect(section).toContain('isolated git worktree');
+				expect(section).toMatch(/do NOT overlap/i);
+				expect(section).toContain('not known until the plan is finalized');
+				expect(section).toContain('COMMON MISCONCEPTION');
+				expect(section).toContain('worktree.policy');
+				expect(section).toContain('one possible SOURCE');
+				expect(section).toContain('Do not recommend Lean Turbo or Epic SOLELY');
 				expect(content).not.toContain('Inspect the plan and recommend a count');
 			});
 		}

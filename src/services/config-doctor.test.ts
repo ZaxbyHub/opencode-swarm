@@ -1752,6 +1752,59 @@ describe('Schema introspection: every top-level key has validation', () => {
 			// Empty array matches Zod default → suppressed
 			expect(deprecatedFindings).toHaveLength(0);
 		});
+		it('warns that baseline worktree isolation is already active for standard parallel coders (#1552)', () => {
+			const config = createTestConfigObj({
+				parallelization: {
+					enabled: true,
+					maxConcurrentTasks: 2,
+					evidenceLockTimeoutMs: 60000,
+					max_coders: 3,
+					max_reviewers: 2,
+				},
+				worktree: {
+					policy: 'required',
+					merge_strategy: 'merge',
+					deps_strategy: 'skip',
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			const finding = result.findings.find(
+				(f) => f.id === 'worktree-isolation-baseline-active',
+			);
+			expect(finding).toBeDefined();
+			expect(finding!.severity).toBe('warn');
+			expect(finding!.path).toBe('worktree.policy');
+			expect(finding!.autoFixable).toBe(false);
+			expect(finding!.description).toContain('baseline worktree isolation');
+			expect(finding!.description).toContain('not requirements');
+		});
+
+		it('does not warn when baseline worktree isolation is disabled (#1552)', () => {
+			const config = createTestConfigObj({
+				parallelization: {
+					enabled: true,
+					maxConcurrentTasks: 2,
+					evidenceLockTimeoutMs: 60000,
+					max_coders: 3,
+					max_reviewers: 2,
+				},
+				worktree: {
+					policy: 'disabled',
+					merge_strategy: 'merge',
+					deps_strategy: 'skip',
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			expect(
+				result.findings.some(
+					(f) => f.id === 'worktree-isolation-baseline-active',
+				),
+			).toBe(false);
+		});
 	});
 
 	/**
