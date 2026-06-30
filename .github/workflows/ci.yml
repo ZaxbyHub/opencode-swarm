@@ -174,7 +174,8 @@ jobs:
           exit $failed
 
       - name: Coverage gate enforcement
-        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        if: github.event_name == 'merge_group' && matrix.os == 'ubuntu-latest' && matrix.shard == 1 && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
         run: |
           set -e
           echo "Running coverage measurement for gate enforcement..."
@@ -200,7 +201,7 @@ jobs:
           fi
           echo "Coverage gate passed: ${COVERAGE}% >= ${THRESHOLD}%"
       - name: Upload coverage report
-        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        if: always() && github.event_name == 'merge_group' && matrix.os == 'ubuntu-latest' && matrix.shard == 1 && needs.detect-release.outputs.is-release != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
