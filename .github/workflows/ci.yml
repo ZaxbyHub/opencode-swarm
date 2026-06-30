@@ -216,13 +216,13 @@ jobs:
     # (the measurement alone has been observed at 30.6 min, PR #1566) = ~29-34 min
     # worst case. This job does NOT run the sharded suite, so it sheds the ~3.5 min
     # that helped push the old in-`unit` cell to its 40m cap. The cap balances two
-    # ceilings: it must clear the ~34 min worst-observed run (45m leaves ~11 min
+    # ceilings: it must clear the ~34 min worst-observed run (60m leaves ~26 min
     # for slow-runner / cache-miss variance) AND stay under the merge_queue
     # ruleset's check_response_timeout_minutes: 60 end-to-end, since coverage runs
-    # after `quality` (~5-10 min) via `needs` — quality(~10) + 45 = 55 < 60. This
+    # after `quality` (~1 min) via `needs` — total ~35 min < 60. This
     # makes a timeout very unlikely for a normal run by removing the structural
     # double-run; it is not an absolute guarantee against a pathologically slow runner.
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
@@ -251,24 +251,19 @@ jobs:
         run: |
           set -e
           echo "Running coverage measurement for gate enforcement..."
-          # Run the full unit test suite with coverage
-          bun --smol test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
-          # Extract line coverage from "All files" row using awk (no command substitution).
-          # Bun's coverage table columns are: File | % Funcs | % Lines | Uncovered Line #s
-          # so line coverage is the 3rd pipe-delimited field ($3), not $2 (which is % Funcs).
+          # Run the full unit test suite with coverage (no --smol: that flag
+          # crashes Bun with SIGILL when combined with --coverage on large suites).
+          bun test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
+          # Extract line coverage from "All files" row using awk.
+          # Bun's coverage table columns: File | % Funcs | % Lines | Uncovered Line #s
           awk -F'|' '/All files/ { gsub(/ /,"",$3); print substr($3, 1, 5); exit }' coverage-output.txt > coverage-value.txt
           if [ ! -s coverage-value.txt ]; then
             echo "::warning::Could not parse coverage output"
-            : > coverage-value.txt
+            echo "0" > coverage-value.txt
           fi
-          head -c 5 coverage-value.txt > coverage-trimmed.txt
-          read -r COVERAGE < coverage-trimmed.txt || true
-          if [ -z "$COVERAGE" ]; then
-            COVERAGE="0"
-          fi
+          read -r COVERAGE < coverage-value.txt || COVERAGE="0"
           THRESHOLD=41.48
           echo "Coverage: ${COVERAGE}% (threshold: ${THRESHOLD}%)"
-          # Compare using awk for floating-point
           if awk "BEGIN {exit !($COVERAGE < $THRESHOLD)}"; then
             echo "::error::Coverage gate failed: ${COVERAGE}% < ${THRESHOLD}%"
             exit 1
