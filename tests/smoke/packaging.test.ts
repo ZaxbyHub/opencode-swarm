@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 5.5 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 6.5 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,12 +38,17 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5.5MB)', () => {
+	test('dist/index.js file size is reasonable (< 6.5MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
-		// Raised from 5MiB by #1302 Wave 2's eval-gated skill machinery and
-		// #1263 config-doctor validation expansion: 62+ switch cases, Levenshtein
-		// suggestion, atomic writes, symlink rejection; keep the cap narrow so
-		// future bundle growth remains visible in smoke CI.
+		// History: 5MiB → 5.5MiB (#1302 Wave 2 eval-gated skill machinery +
+		// #1263 config-doctor validation) → 6.5MiB here. The 5.5MiB cap became a
+		// merge-queue flake: the unminified bundle sat ~1KB from the limit, and
+		// builds vary ~2KB across platforms/toolchains (Windows ~5,766,141 under;
+		// Linux CI ~5,768,289 over), so the gate flipped pass/fail by runner and
+		// intermittently blocked unrelated PRs. 6.5MiB restores ~1MiB headroom,
+		// far above that variance, while staying tight enough to keep growth
+		// visible in smoke CI. The structural alternative (minify the bundle,
+		// ~43% smaller) is tracked in #1582.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);
