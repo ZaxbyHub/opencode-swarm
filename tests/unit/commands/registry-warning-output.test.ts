@@ -36,38 +36,15 @@ describe('command registry validation warnings', () => {
 			"Multiple aliases point to 'diagnose': diagnosis, health",
 		]);
 
-		const messages = warnSpy.mock.calls
-			.map((call) => call[0])
-			.filter((value): value is string => typeof value === 'string');
-
-		expect(messages.length).toBeGreaterThan(0);
-		expect(
-			messages.some((message) =>
-				message.includes('COMMAND_REGISTRY alias warnings'),
-			),
-		).toBe(true);
-		expect(
-			messages.some((message) =>
-				message.includes(
-					"Multiple aliases point to 'config doctor': config-doctor, doctor",
-				),
-			),
-		).toBe(true);
-		expect(
-			messages.some((message) =>
-				message.includes(
-					"Multiple aliases point to 'diagnose': diagnosis, health",
-				),
-			),
-		).toBe(true);
-		expect(
-			messages.some(
-				(message) =>
-					message.includes('COMMAND_REGISTRY alias warnings') &&
-					message.includes(
-						"Multiple aliases point to 'config doctor': config-doctor, doctor",
-					),
-			),
-		).toBe(true);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const [message] = warnSpy.mock.calls[0] ?? [];
+		expect(typeof message).toBe('string');
+		expect(message).toContain('COMMAND_REGISTRY alias warnings');
+		expect(message).toContain(
+			"Multiple aliases point to 'config doctor': config-doctor, doctor",
+		);
+		expect(message).toContain(
+			"Multiple aliases point to 'diagnose': diagnosis, health",
+		);
 	});
 });
