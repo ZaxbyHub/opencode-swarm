@@ -7,6 +7,9 @@ const INDEX_SRC = readFileSync(
 	'utf-8',
 );
 
+// Scope: console.warn calls only. Unconditional console.error / logger.error()
+// calls on exceptional paths (init failure, pr-monitor errors) are intentionally
+// out of scope — they are not covered by these assertions.
 describe('Plugin TUI safety', () => {
 	test('no process.exit in SIGINT/SIGTERM handlers', () => {
 		const sigintBlock = /process\.once\(\s*['"]SIGINT['"][\s\S]*?process\.exit/;
