@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.99.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.1...v7.99.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** detect release-please in merge queue via head commit message ([f7a8082](https://github.com/ZaxbyHub/opencode-swarm/commit/f7a808279bf24f0be6140d1ae816f15e447271d4))
+* **ci:** detect release-please in merge queue via head commit message ([1d41517](https://github.com/ZaxbyHub/opencode-swarm/commit/1d4151739d4d056226b9ea597a3920dcb6c47f75))
+* **ci:** drop backticks from detect-release comment ([2e5883d](https://github.com/ZaxbyHub/opencode-swarm/commit/2e5883d92e2570b82ee2e49537f9fa87b8eccfcc))
+* **dispatch-lanes:** link advisory lane sessions to parent ([ef818ed](https://github.com/ZaxbyHub/opencode-swarm/commit/ef818edd6f10a202f93ce93a68149e28222d3c7e))
+* **final-council:** harden evidence binding ([5d32aa8](https://github.com/ZaxbyHub/opencode-swarm/commit/5d32aa8e1acedf6984e678ff7ad6045a37e8689d))
+
 ## [7.99.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.0...v7.99.1) (2026-06-30)
 
 
