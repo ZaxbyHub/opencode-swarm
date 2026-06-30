@@ -28,6 +28,7 @@ import {
 	loadLastApprovedPlan,
 	readLedgerEvents,
 } from '../../../src/plan/ledger';
+import { derivePlanId } from '../../../src/plan/utils';
 // Import the function to test
 import {
 	executeWriteDriftEvidence,
@@ -68,7 +69,7 @@ async function setupSwarmDirWithPlan(dir: string, plan: Plan): Promise<void> {
 		JSON.stringify(plan, null, 2),
 		'utf-8',
 	);
-	await initLedger(dir, `${plan.swarm}-${plan.title}`.replace(/\W/g, '_'));
+	await initLedger(dir, derivePlanId(plan));
 }
 
 describe('executeWriteDriftEvidence', () => {

@@ -22,6 +22,7 @@ import {
 	initLedger,
 	takeSnapshotEvent,
 } from '../../src/plan/ledger';
+import { derivePlanId } from '../../src/plan/utils';
 import { get_approved_plan } from '../../src/tools/get-approved-plan';
 
 function createTestPlan(overrides?: Partial<Plan>): Plan {
@@ -67,7 +68,7 @@ describe('get_approved_plan integration: full drift detection flow', () => {
 			'utf-8',
 		);
 
-		const planId = `${plan.swarm}-${plan.title}`.replace(/\W/g, '_');
+		const planId = derivePlanId(plan);
 		await initLedger(dir, planId);
 	});
 

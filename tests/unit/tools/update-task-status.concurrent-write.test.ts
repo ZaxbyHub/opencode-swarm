@@ -200,7 +200,10 @@ describe('executeUpdateTaskStatus concurrent writes', () => {
 
 	describe('lock winner persists data correctly', () => {
 		test('a winning call that returns success actually persists its status', async () => {
-			// Run 10 parallel updates - exactly 1 should win (the lock is on plan.json, not per-task)
+			// Run 10 parallel updates. The lock is on plan.json (not per-task), and
+			// file-locks.ts now retries with backoff (F-09, retries:5), so one OR MORE
+			// callers serialize through the lock and win; the loser count depends on
+			// timing. Every winner's status must be durably persisted (asserted below).
 			const statuses: UpdateTaskStatusArgs['status'][] = [
 				'blocked',
 				'in_progress',
@@ -226,8 +229,19 @@ describe('executeUpdateTaskStatus concurrent writes', () => {
 			// Find the winner(s) - calls that returned success: true
 			const winners = results.filter((r) => r.success);
 
-			// Exactly one should win - proper-lockfile retries:0 means only 1 acquires the lock
-			expect(winners.length).toBe(1);
+			// F-09 serialization rationale: file-locks.ts now uses proper-lockfile
+			// `retries:5` + exponential backoff (src/parallel/file-locks.ts:163-172)
+			// instead of the old `retries:0`. Contending callers therefore SERIALIZE
+			// and more than one can win within the retry budget; the exact winner
+			// count is timing/platform-dependent (it is NOT deterministically 1, and
+			// NOT necessarily all 10 — some contenders still exhaust the bounded retry
+			// budget and return success:false). The real correctness guarantee is the
+			// per-winner "status actually persisted" check below: every call that
+			// reported success must have its status durably written to plan.json with
+			// no lost update. That holds because the mutation (updateTaskStatus:
+			// loadPlan→modify→savePlan) runs INSIDE the lock, so each serialized winner
+			// reads fresh state.
+			expect(winners.length).toBeGreaterThanOrEqual(1);
 
 			// For each winner, verify its task's status in the final plan.json matches what it wrote
 			const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
@@ -243,6 +257,14 @@ describe('executeUpdateTaskStatus concurrent writes', () => {
 				expect(winner.new_status).toBeDefined();
 				const persistedStatus = taskStatusMap.get(winner.task_id!);
 				expect(persistedStatus).toBe(winner.new_status);
+			}
+
+			// Any loser (retry budget exhausted) must fail visibly with recovery guidance,
+			// never silently — so the bounded winner count is not a weak assertion.
+			const losers = results.filter((r) => !r.success);
+			for (const loser of losers) {
+				expect(typeof loser.recovery_guidance).toBe('string');
+				expect(loser.recovery_guidance!.toLowerCase()).toContain('retry');
 			}
 		});
 

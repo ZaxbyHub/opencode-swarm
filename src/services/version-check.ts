@@ -23,6 +23,30 @@ const NPM_REGISTRY_URL = 'https://registry.npmjs.org/opencode-swarm/latest';
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const FETCH_TIMEOUT_MS = 5_000;
 
+/**
+ * Upper bound on the registry response body (issue #1270-4). The npm `latest`
+ * document is a few KB; anything close to this is either an error page or a
+ * hostile/compromised endpoint. We refuse to buffer more than this.
+ */
+const MAX_RESPONSE_BYTES = 256 * 1024; // 256 KiB
+
+/**
+ * Strict semver matcher (semver.org 2.0.0 grammar). Used to validate the
+ * version string from the registry BEFORE it is cached, compared, or shown to
+ * the user. Rejects anything that is not `MAJOR.MINOR.PATCH` with optional
+ * `-prerelease` / `+build` metadata — including HTML, empty strings, ranges,
+ * and `latest`-style dist-tags.
+ */
+const STRICT_SEMVER =
+	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/**
+ * Returns true if `value` is a strictly-valid semver string. Pure; never throws.
+ */
+export function isStrictSemver(value: unknown): value is string {
+	return typeof value === 'string' && STRICT_SEMVER.test(value);
+}
+
 interface VersionCheckCache {
 	checkedAt: number;
 	npmLatest: string | null;
@@ -87,19 +111,82 @@ export function compareVersions(a: string, b: string): number {
 	return 0;
 }
 
-async function fetchLatestVersion(signal: AbortSignal): Promise<string | null> {
+/**
+ * Fetch the latest published version from the npm registry with strict,
+ * fail-safe validation (issue #1270-4):
+ *   (a) HTTP status must be ok.
+ *   (b) Content-Type must look like JSON — a mislabeled HTML error page or
+ *       proxy interstitial is rejected rather than parsed.
+ *   (c) The body is length-bounded both by the advertised Content-Length and
+ *       by the actual decoded length, so a hostile endpoint cannot make us
+ *       buffer an unbounded response.
+ *   (d) The `version` field must be a STRICT semver string before it is
+ *       returned (and thus before it is cached, compared, or surfaced).
+ *
+ * Any validation failure returns null. This function NEVER throws into its
+ * caller — staleness checking must never disrupt plugin startup.
+ *
+ * Exported so tests can exercise the validation directly via the
+ * `_internals.fetch` seam (mocking the global `fetch` would leak across files
+ * in Bun's shared test process).
+ */
+export async function fetchLatestVersion(
+	signal: AbortSignal,
+): Promise<string | null> {
 	try {
-		const res = await fetch(NPM_REGISTRY_URL, {
+		const res = await _internals.fetch(NPM_REGISTRY_URL, {
 			signal,
 			headers: { Accept: 'application/json' },
 		});
 		if (!res.ok) return null;
-		const body = (await res.json()) as { version?: unknown };
-		return typeof body.version === 'string' ? body.version : null;
+
+		// (b) Content-Type must be JSON. Accept `application/json`,
+		// `application/vnd.npm.install-v1+json`, and `; charset=...` suffixes;
+		// reject `text/html`, `text/plain`, `application/octet-stream`, etc.
+		const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+		if (!contentType.includes('json')) return null;
+
+		// (c) Reject an oversized body up front via the advertised length.
+		const lengthHeader = res.headers.get('content-length');
+		if (lengthHeader) {
+			const advertised = Number.parseInt(lengthHeader, 10);
+			if (Number.isFinite(advertised) && advertised > MAX_RESPONSE_BYTES) {
+				return null;
+			}
+		}
+
+		// Defense in depth: bound the actual decoded body too, in case the
+		// Content-Length header was absent or lied.
+		const text = await res.text();
+		if (text.length > MAX_RESPONSE_BYTES) return null;
+
+		let body: { version?: unknown };
+		try {
+			body = JSON.parse(text) as { version?: unknown };
+		} catch {
+			return null;
+		}
+
+		// (d) Strict semver validation before the value escapes this function.
+		return isStrictSemver(body.version) ? body.version : null;
 	} catch {
 		return null;
 	}
 }
+
+/**
+ * Test-only dependency-injection seam. Production reads `_internals.fetch(...)`
+ * at the call site so tests can replace it without `mock.module` (which leaks
+ * across files in Bun's shared test-runner process). Restore in `afterEach`.
+ */
+export const _internals: {
+	fetch: (
+		input: string | URL | Request,
+		init?: RequestInit,
+	) => Promise<Response>;
+} = {
+	fetch: (input, init) => fetch(input, init),
+};
 
 /**
  * Schedule a one-shot, fully detached version check. Returns immediately.

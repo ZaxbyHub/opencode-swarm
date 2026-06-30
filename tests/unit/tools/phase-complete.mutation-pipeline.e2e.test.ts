@@ -30,6 +30,7 @@ import {
 	type MutationResult,
 } from '../../../src/mutation/engine.js';
 import { evaluateMutationGate } from '../../../src/mutation/gate.js';
+import { derivePlanId } from '../../../src/plan/utils.js';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -43,7 +44,7 @@ const { phase_complete } = await import('../../../src/tools/phase-complete.js');
 // planId must match what loadPlan derives: "${swarm}-${title}".replace(...)
 const PLAN_SWARM = 'mega';
 const PLAN_TITLE = 'E2E Pipeline Test';
-const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+const PLAN_ID = derivePlanId({ swarm: PLAN_SWARM, title: PLAN_TITLE });
 
 // ─── Setup helpers (mirroring phase-complete.mutation-gate.test.ts pattern) ──
 

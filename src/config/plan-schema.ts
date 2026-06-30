@@ -112,11 +112,32 @@ export type Plan = z.infer<typeof PlanSchema>;
  * `_midLoadRemovals` is attached by loadPlan-recovery paths that auto-
  * acknowledged task removals (issue #853) so the system-enhancer Layer A
  * can disclose the count to the model without re-reading the ledger.
+ *
+ * `_ledgerReplayStale` / `_ledgerReplayStaleReason` are attached by loadPlan
+ * when it returns a STALE plan.json: the plan.json hash mismatched the ledger,
+ * ledger replay failed (threw), AND no critic-approved snapshot was available,
+ * so the loader fell back to the (stale) plan.json (#1269 finding 2). Consumers
+ * in phase-complete.ts and update-task-status.ts read these to surface a
+ * structured staleness signal instead of silently trusting plan.json.
+ *
+ * RUNTIME-ONLY CONTRACT (mirrors `_specStale`): every field on RuntimePlan is a
+ * TypeScript-only overlay on the persisted `Plan`. It is NOT part of the durable
+ * `PlanSchema` (see this file ~line 95 — a plain `z.object`, no `.passthrough()`,
+ * so Zod strips unknown keys), so `savePlan`'s `JSON.stringify(PlanSchema.parse(...))`
+ * can never write these to .swarm/plan.json. It is also excluded from plan hashing:
+ * both `computePlanHash` (src/plan/ledger.ts) and `computePlanContentHash`
+ * (src/plan/manager.ts) hash an explicit allow-list of fields, never the whole
+ * object. Because of this, AGENTS.md invariant-5's "six places" (ledger replay,
+ * projection, checkpoint import/export, get_approved_plan, tests, docs) do NOT
+ * all apply — these are not durable schema fields. Do NOT move these into
+ * `PlanSchema`.
  */
 export type RuntimePlan = Plan & {
 	_specStale?: boolean;
 	_specStaleReason?: string;
 	_midLoadRemovals?: { count: number; source: string };
+	_ledgerReplayStale?: boolean;
+	_ledgerReplayStaleReason?: string;
 };
 
 /**

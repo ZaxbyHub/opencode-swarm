@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
+	composeBlockingHandlers,
 	composeHandlers,
 	estimateTokens,
+	markFailClosed,
 	readSwarmFileAsync,
 	safeHook,
 	validateSwarmPath,
@@ -258,6 +260,49 @@ describe('Hook Utilities', () => {
 
 			expect(called).toBe(true);
 			expect(output.called).toBe(true);
+		});
+	});
+
+	describe('composeHandlers — fail-closed footgun guard (#1270-5)', () => {
+		it('throws synchronously when handed a markFailClosed-tagged handler', () => {
+			// A fail-closed policy handler tagged via markFailClosed must never be
+			// wrapped in safeHook (which swallows throws and fails OPEN). The guard
+			// must reject it at composition time, before any wiring.
+			const policyHook = markFailClosed(async () => {
+				throw new Error('policy denied');
+			});
+
+			expect(() => composeHandlers(policyHook)).toThrow(/fail-closed handler/i);
+		});
+
+		it('rejects a tagged handler even when mixed with untagged handlers', () => {
+			const advisory = async () => {};
+			const policyHook = markFailClosed(async () => {});
+
+			expect(() => composeHandlers(advisory, policyHook)).toThrow(
+				/composeBlockingHandlers/i,
+			);
+		});
+
+		it('does not affect ordinary (untagged) handlers', () => {
+			const advisory = async () => {};
+			expect(() => composeHandlers(advisory, advisory)).not.toThrow();
+		});
+
+		it('composeBlockingHandlers accepts a tagged handler and propagates its throw', async () => {
+			const policyHook = markFailClosed(async () => {
+				throw new Error('policy denied');
+			});
+			const composed = composeBlockingHandlers(policyHook);
+
+			await expect(
+				composed('input' as never, 'output' as never),
+			).rejects.toThrow('policy denied');
+		});
+
+		it('markFailClosed returns the same function reference', () => {
+			const fn = async () => {};
+			expect(markFailClosed(fn)).toBe(fn);
 		});
 	});
 

@@ -14,6 +14,7 @@ import {
 	takeSnapshotEvent,
 } from './ledger';
 import { savePlan } from './manager';
+import { derivePlanId } from './utils';
 
 function createTempDir(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-snap-adv-'));
@@ -108,10 +109,10 @@ describe('in-ledger snapshot adversarial tests', () => {
 			const legacyEvent = {
 				seq: 1,
 				timestamp: new Date().toISOString(),
-				plan_id: `${initialPlan.swarm}-${initialPlan.title}`.replace(
-					/[^a-zA-Z0-9-_]/g,
-					'_',
-				),
+				plan_id: derivePlanId({
+					swarm: initialPlan.swarm,
+					title: initialPlan.title,
+				}),
 				event_type: 'plan_created',
 				source: 'initLedger',
 				plan_hash_before: '',
