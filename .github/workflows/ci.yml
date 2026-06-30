@@ -40,7 +40,20 @@ jobs:
             echo "is-release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ "$EVENT" == "merge_group" ]] && git log --format='%s' --max-count=10 | grep -q '^chore(main): release'; then
+          # Inspect ONLY the merge-group head commit (-1), not a window of
+          # history. The queued merge commit is "Merge pull request #N from
+          # <owner>/release-please--..." with the release commit "chore(main):
+          # release X.Y.Z" in its body, so its full message (%B) identifies a
+          # release merge. Two traps this avoids:
+          #   1. The release commit is the merge commit's SECOND parent, so it
+          #      is absent from the first-parent history the shallow merge-queue
+          #      checkout traverses — the old "git log --max-count=10" grep for
+          #      the release subject silently missed it and ran the full suite.
+          #   2. A 10-commit window false-positives: a recent release MERGE
+          #      ("Merge pull request ... release-please--...") lingers in the
+          #      window of later, non-release PRs and would wrongly skip them.
+          # HEAD-only is both robust (no traversal) and specific (this group).
+          if [[ "$EVENT" == "merge_group" ]] && git log -1 --format='%B' | grep -qE 'release-please--|^chore\(main\): release'; then
             echo "is-release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
