@@ -47,7 +47,7 @@ jobs:
           # release merge. Two traps this avoids:
           #   1. The release commit is the merge commit's SECOND parent, so it
           #      is absent from the first-parent history the shallow merge-queue
-          #      checkout traverses — the old `git log --max-count=10` grep for
+          #      checkout traverses — the old "git log --max-count=10" grep for
           #      the release subject silently missed it and ran the full suite.
           #   2. A 10-commit window false-positives: a recent release MERGE
           #      ("Merge pull request ... release-please--...") lingers in the
