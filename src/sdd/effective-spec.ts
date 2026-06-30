@@ -12,6 +12,21 @@ const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_SPEC_FILES = 100;
 const MAX_WALK_DEPTH = 10;
 
+/**
+ * Required top-level section headers for a Spec-Kit feature spec.md (FR-007).
+ *
+ * Justification for the minimal list:
+ * - `## Functional Requirements` — the content basis for all drift / coverage / projection
+ *   work; absent means nothing can be enforced (FR-007, FR-013).
+ * - `## Success Criteria` — the only Spec-Kit-required acceptance gate; the malformed
+ *   fixture deliberately drops it to exercise the validator.
+ * Keeping the list small and justified avoids over-specifying the Spec-Kit template.
+ */
+const SPECKIT_REQUIRED_SECTIONS = [
+	'## Functional Requirements',
+	'## Success Criteria',
+] as const;
+
 export type EffectiveSpecSource = 'swarm' | 'openspec_projection' | 'speckit_projection';
 
 export interface OpenSpecArtifact {
@@ -592,7 +607,10 @@ export function buildSpeckitProjectionSync(
 	return resolution.kind === 'ok' ? resolution.spec : null;
 }
 
-export function loadSddStatusSync(directory: string): SddStatus {
+export function loadSddStatusSync(
+	directory: string,
+	opts?: ReadEffectiveSpecOpts,
+): SddStatus {
 	const root = path.resolve(directory);
 	const swSpecPath = path.join(root, SWARM_SPEC_REL);
 	const openSpecPath = path.join(root, OPENSPEC_ROOT);
@@ -602,7 +620,9 @@ export function loadSddStatusSync(directory: string): SddStatus {
 	const openSpecExists = fs.existsSync(openSpecPath);
 	const currentSpecs = walkSpecFiles(root, path.join(OPENSPEC_ROOT, 'specs'));
 	const changes = listOpenSpecChanges(root);
-	const effectiveSpec = readEffectiveSpecSync(root);
+	// Forward opts so an explicit --source selection is honored (FR-009); with no
+	// opts this is byte-identical to the prior auto-detect behavior.
+	const effectiveSpec = readEffectiveSpecSync(root, opts);
 
 	if (openSpecExists && currentSpecs.length === 0 && changes.length === 0) {
 		errors.push('openspec/ exists but contains no specs or active changes.');
@@ -757,9 +777,74 @@ export function buildOpenSpecProjectionSync(
 	};
 }
 
-export function readEffectiveSpecSync(directory: string): EffectiveSpec | null {
+/**
+ * Resolver options for {@link readEffectiveSpecSync} (task 2.1, FR-009).
+ *
+ * Both fields are optional so that all 13 existing single-argument call sites
+ * continue to work unchanged.
+ */
+export interface ReadEffectiveSpecOpts {
+	/**
+	 * Explicit provider selection (FR-009 step b).
+	 * When given, the specified provider is used directly after the native swarm
+	 * spec check.  A `'swarm'` selection with no `.swarm/spec.md` returns null.
+	 */
+	source?: 'swarm' | 'openspec' | 'speckit';
+	/**
+	 * Feature selector forwarded to {@link buildSpeckitProjectionSync} when the
+	 * effective provider is Spec-Kit.  Ignored for `source: 'openspec'` or
+	 * `source: 'swarm'` (feature-vs-non-speckit source validation is enforced at
+	 * the command layer in task 2.2, not here).
+	 */
+	feature?: string;
+}
+
+/**
+ * Read (or build) the effective spec for a directory, applying deterministic
+ * source precedence (FR-009, FR-010, FR-011).
+ *
+ * **Precedence:**
+ * a. `.swarm/spec.md` present → return the native swarm spec.  This branch is
+ *    IDENTICAL to the pre-task-2.1 code and wins even over an explicit
+ *    `opts.source` — native swarm spec always wins (FR-009).
+ * b. `opts.source` given → use that provider: `'openspec'` calls
+ *    {@link buildOpenSpecProjectionSync}; `'speckit'` calls
+ *    {@link buildSpeckitProjectionSync}; `'swarm'` with no `.swarm/spec.md`
+ *    returns null.
+ * c. Auto-detect:
+ *    - **No `.specify/` marker** → byte-identical to pre-task-2.1 behavior:
+ *      call {@link buildOpenSpecProjectionSync} and return its result (FR-011).
+ *    - **`.specify/` present but no feature dirs** (empty marker) → Spec-Kit is
+ *      NOT counted as a competing source; behaves like the no-marker case.
+ *    - **`.specify/` with ≥1 feature dir and no openspec projection** → return
+ *      the Spec-Kit projection.
+ *    - **`.specify/` with ≥1 feature dir AND openspec yields a projection** →
+ *      AMBIGUOUS (FR-010): emit a concrete diagnostic via `console.warn` (the
+ *      anti-silent-suppression requirement; critic Finding 2) and return null.
+ *      The diagnostic is independent of the return value so it fires even when
+ *      no consumer inspects the null return (e.g. the drift gate, which only
+ *      checks for null to decide advisory-vs-blocking mode).
+ *
+ * **Backward-compat (FR-011):** when `.detectSpeckit(directory).markerPresent`
+ * is false, the function is byte-identical to pre-task-2.1.  The additional
+ * `detectSpeckit` call (a single `fs.existsSync`) is the only overhead.
+ *
+ * **Deviation from task-2.1 literal text:** the task body says "Spec-Kit
+ * present (`detectSpeckit(dir).markerPresent`)" but plan.md task 3.1 and the
+ * test note both state that an empty `.specify/` "would never reach the
+ * ambiguity branch."  `markerPresent` is true for empty-specify, so it cannot
+ * be the discriminator.  We use `features.length > 0` instead, which is
+ * symmetric with "OpenSpec present (yields a projection)" and makes empty
+ * `.specify/` a non-competing source, matching both citations.
+ */
+export function readEffectiveSpecSync(
+	directory: string,
+	opts?: ReadEffectiveSpecOpts,
+): EffectiveSpec | null {
 	const root = path.resolve(directory);
 	const swSpecPath = path.join(root, SWARM_SPEC_REL);
+
+	// a. Native swarm spec always wins — EXACTLY today's behavior, unchanged.
 	try {
 		const stat = fs.lstatSync(swSpecPath);
 		if (stat.isFile() && stat.size <= MAX_SPEC_BYTES) {
@@ -778,12 +863,73 @@ export function readEffectiveSpecSync(directory: string): EffectiveSpec | null {
 			throw error;
 		}
 	}
-	return buildOpenSpecProjectionSync(root);
+
+	// b. Explicit source selection — use the named provider directly.
+	if (opts?.source) {
+		switch (opts.source) {
+			case 'openspec':
+				return buildOpenSpecProjectionSync(root);
+			case 'speckit':
+				return buildSpeckitProjectionSync(root, { feature: opts.feature });
+			case 'swarm':
+				// No .swarm/spec.md present (already checked above) → null.
+				return null;
+		}
+	}
+
+	// c. Auto-detect: determine which projection sources are present.
+
+	// BACKWARD-COMPAT (FR-011): when no .specify/ marker, behavior is
+	// byte-identical to today — swarm spec (handled above) else openspec.
+	const speckitDetection = detectSpeckit(root);
+	if (!speckitDetection.markerPresent) {
+		return buildOpenSpecProjectionSync(root);
+	}
+
+	// "Spec-Kit present" = marker present AND at least one valid feature dir.
+	// An empty .specify/ (features.length === 0) is NOT a competing source —
+	// fall through to openspec as if the marker were absent (plan.md task 3.1;
+	// test note: "NOT empty, or it won't register as a competing source").
+	const speckitPresent = speckitDetection.features.length > 0;
+
+	if (!speckitPresent) {
+		// .specify/ exists but is empty — not a competing source.
+		return buildOpenSpecProjectionSync(root);
+	}
+
+	// Spec-Kit present: check whether OpenSpec is also present.
+	// "OpenSpec present" = openspec/ layout yields a non-null projection.
+	const openspecProjection = buildOpenSpecProjectionSync(root);
+	const openspecPresent = openspecProjection !== null;
+
+	if (openspecPresent) {
+		// FR-010 / critic Finding 2: BOTH sources present, no --source given.
+		// Emit a concrete resolver-side diagnostic BEFORE returning null.
+		// This is INDEPENDENT of the null return value: the drift gate (and all
+		// other consumers) see only the null; this warn fires regardless of
+		// whether any consumer checks the return or its contents.
+		console.warn(
+			'[opencode-swarm] Multiple SDD sources detected (openspec and speckit). ' +
+				'Enforcement/projection is suppressed until you disambiguate. ' +
+				'Pass --source openspec or --source speckit to select a provider.',
+		);
+		return null;
+	}
+
+	// Only Spec-Kit present — return the Spec-Kit projection.
+	return buildSpeckitProjectionSync(root, { feature: opts?.feature });
 }
 
 export function writeProjectedSpecSync(
 	directory: string,
-	options: { changeId?: string; dryRun?: boolean } = {},
+	options: {
+		changeId?: string;
+		dryRun?: boolean;
+		/** When `'speckit'`, builds a Spec-Kit projection instead of OpenSpec (task 2.2). */
+		source?: 'openspec' | 'speckit';
+		/** Feature selector forwarded to buildSpeckitProjectionSync when source is speckit. */
+		feature?: string;
+	} = {},
 ): {
 	written: boolean;
 	projection: EffectiveSpec | null;
@@ -791,9 +937,10 @@ export function writeProjectedSpecSync(
 	path: string;
 } {
 	const root = path.resolve(directory);
-	const projection = buildOpenSpecProjectionSync(root, {
-		changeId: options.changeId,
-	});
+	const projection =
+		options.source === 'speckit'
+			? buildSpeckitProjectionSync(root, { feature: options.feature })
+			: buildOpenSpecProjectionSync(root, { changeId: options.changeId });
 	const target = path.join(root, SWARM_SPEC_REL);
 	if (!projection || options.dryRun) {
 		return { written: false, projection, path: target };
@@ -816,4 +963,111 @@ export function writeProjectedSpecSync(
 	fs.writeFileSync(tmp, projection.content, 'utf-8');
 	fs.renameSync(tmp, target);
 	return { written: true, projection, archivePath, path: target };
+}
+
+/**
+ * Validate Spec-Kit artifacts READ-ONLY (FR-007, task 2.3).
+ *
+ * MUST NOT write or modify any Spec-Kit artifact — it only reads spec.md and
+ * tasks.md to report structural problems.
+ *
+ * Returns the {@link SpeckitResolution} from {@link resolveSpeckitProjection}
+ * alongside a flat `problems` array.  Returning both avoids a second
+ * `resolveSpeckitProjection` call in the command layer (which would need the
+ * projection's hash / sourcePaths from `resolution.spec`).
+ *
+ * **Problems reported** (only when `resolution.kind` is `'ok'` or
+ * `'zero_requirements'` — i.e. when we have a feature to inspect):
+ * - Zero parsable functional requirements (`zero_requirements` kind, FR-013).
+ * - Missing required spec.md sections (`SPECKIT_REQUIRED_SECTIONS`).
+ * - `tasks.md` task lines that carry no `[US#]` user-story reference (FR-007).
+ *
+ * For other resolution kinds (`not_speckit`, `empty`, `ambiguous`,
+ * `unknown_feature`, `too_large`) the command layer uses
+ * {@link formatSpeckitError} on the returned resolution — same messaging path
+ * as task 2.2 (plan.md task 2.3 requirement: no second messaging scheme).
+ */
+export function validateSpeckit(
+	directory: string,
+	options: { feature?: string } = {},
+): { resolution: SpeckitResolution; problems: string[] } {
+	const root = path.resolve(directory);
+	const resolution = resolveSpeckitProjection(root, options);
+	const problems: string[] = [];
+
+	// Structural validation only applies when we resolved to a specific feature.
+	if (resolution.kind !== 'ok' && resolution.kind !== 'zero_requirements') {
+		return { resolution, problems };
+	}
+
+	// FR-013: surface zero parsable requirements as a problem.
+	if (resolution.kind === 'zero_requirements') {
+		problems.push(
+			`Feature '${resolution.feature}' contains no parsable functional requirements.`,
+		);
+	}
+
+	// Locate the feature entry to derive spec.md / tasks.md absolute paths.
+	// detectSpeckit is read-only (no side effects) and deterministic.
+	const detection = detectSpeckit(root);
+	const featureEntry = detection.features.find(
+		(f) => f.featureId === resolution.feature,
+	);
+	if (!featureEntry) {
+		// Race condition: feature disappeared between the two reads. Be defensive.
+		return { resolution, problems };
+	}
+
+	const specAbs = path.join(root, featureEntry.specRelPath);
+
+	// --- spec.md structural check (READ-ONLY) ---
+	let specContent: string | null = null;
+	try {
+		specContent = readTextBounded(specAbs);
+	} catch {
+		// File missing or unreadable — skip section checks.
+	}
+
+	if (specContent !== null) {
+		const specLines = specContent.replace(/\r\n/g, '\n').split('\n');
+		for (const requiredHeader of SPECKIT_REQUIRED_SECTIONS) {
+			// Exact line match after stripping trailing whitespace.  This correctly
+			// rejects `### Functional Requirements` (wrong level) and ignores
+			// `## Functional Requirements Details` (extra text on the same line).
+			if (!specLines.some((line) => line.trimEnd() === requiredHeader)) {
+				problems.push(`Missing required spec.md section: ${requiredHeader}`);
+			}
+		}
+	}
+
+	// --- tasks.md structural check (READ-ONLY) ---
+	// tasks.md sits alongside spec.md in the same feature directory.
+	const tasksAbs = path.join(path.dirname(specAbs), 'tasks.md');
+	let tasksContent: string | null = null;
+	try {
+		tasksContent = readTextBounded(tasksAbs);
+	} catch {
+		// tasks.md absent or unreadable — skip; it is optional.
+	}
+
+	if (tasksContent !== null) {
+		const tasksLines = tasksContent.replace(/\r\n/g, '\n').split('\n');
+		for (const line of tasksLines) {
+			// Match a task checkbox line and capture the task id (T### pattern).
+			const taskMatch = line.match(/^\s*-\s+\[[ xX]\]\s+(T\d+)/);
+			if (!taskMatch) continue;
+			const taskId = taskMatch[1]!;
+			// FR-007: a task must carry a spec/requirement reference. Accept EITHER a
+			// `[US#]` user-story tag OR an `FR-###` requirement id — flag only when the
+			// task has neither (a task that explicitly references FR-001, or a setup task
+			// tagged to a story, is a legitimate reference and must not be flagged).
+			const hasStoryRef = /\[US\d+\]/i.test(line);
+			const hasReqRef = /\bFR-\d{3}\b/i.test(line);
+			if (!hasStoryRef && !hasReqRef) {
+				problems.push(`Task ${taskId} has no spec/requirement reference.`);
+			}
+		}
+	}
+
+	return { resolution, problems };
 }

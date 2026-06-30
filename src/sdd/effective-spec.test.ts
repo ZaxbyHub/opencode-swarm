@@ -11,6 +11,7 @@ import {
 	loadSddStatusSync,
 	readEffectiveSpecSync,
 	resolveSpeckitProjection,
+	validateSpeckit,
 	writeProjectedSpecSync,
 } from './effective-spec';
 
@@ -442,5 +443,301 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 		}
 		expect(resolution.feature).toBe('001-huge');
 		expect(resolution.bytes).toBeGreaterThan(256 * 1024);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// readEffectiveSpecSync — resolver precedence (task 2.1, FR-009/010/011)
+// ---------------------------------------------------------------------------
+describe('readEffectiveSpecSync — resolver precedence (task 2.1)', () => {
+	test('openspec-only (no .specify/): returns byte-identical output to buildOpenSpecProjectionSync (FR-011)', () => {
+		// OpenSpec layout with no .specify/ marker at all.
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow users to sign in.\n',
+		);
+
+		const viaResolver = readEffectiveSpecSync(tempDir);
+		const viaDirect = buildOpenSpecProjectionSync(tempDir);
+
+		// Byte-identical proof (FR-011): not just non-null, but the same content.
+		expect(viaResolver).not.toBeNull();
+		expect(viaResolver?.source).toBe('openspec_projection');
+		expect(viaResolver?.content).toBe(viaDirect?.content);
+	});
+
+	test('.swarm/spec.md + speckit layout, no opts → swarm wins (native spec always takes precedence)', () => {
+		write(
+			path.join('.swarm', 'spec.md'),
+			'# Specification: Swarm Native\n\n## Requirements\n- FR-001 MUST use the native Swarm spec.\n',
+		);
+		// Also write a speckit layout so the resolver would have a speckit candidate.
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const spec = readEffectiveSpecSync(tempDir);
+
+		expect(spec?.source).toBe('swarm');
+		expect(spec?.content).toContain('Swarm Native');
+	});
+
+	test('.swarm/spec.md present: swarm wins even when opts.source explicitly names another provider (FR-009 1a)', () => {
+		// This test guards the "native swarm spec always wins, even over opts.source"
+		// invariant.  A refactor that checked opts.source before the swarm-file read
+		// would break this test while still passing the no-opts tests above.
+		write(
+			path.join('.swarm', 'spec.md'),
+			'# Specification: Swarm Native\n\n## Requirements\n- FR-001 MUST use the native Swarm spec.\n',
+		);
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		// opts.source: 'speckit' explicitly requests Spec-Kit — swarm must still win.
+		const specViaSpeckit = readEffectiveSpecSync(tempDir, { source: 'speckit' });
+		expect(specViaSpeckit?.source).toBe('swarm');
+		expect(specViaSpeckit?.content).toContain('Swarm Native');
+
+		// opts.source: 'openspec' — same invariant.
+		const specViaOpenspec = readEffectiveSpecSync(tempDir, { source: 'openspec' });
+		expect(specViaOpenspec?.source).toBe('swarm');
+	});
+
+	test('opts.source swarm with no .swarm/spec.md → null (explicit swarm source, file absent)', () => {
+		// No .swarm/spec.md is written.  opts.source: 'swarm' with no file → null.
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const spec = readEffectiveSpecSync(tempDir, { source: 'swarm' });
+
+		expect(spec).toBeNull();
+	});
+
+	test('speckit-only (no openspec, no .swarm/spec.md): returns speckit projection (source speckit_projection)', () => {
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const spec = readEffectiveSpecSync(tempDir);
+
+		expect(spec).not.toBeNull();
+		expect(spec?.source).toBe('speckit_projection');
+		expect(spec?.sourcePaths).toEqual(['specs/001-auth-service/spec.md']);
+	});
+
+	test('opts.source speckit: selects Spec-Kit even when openspec is also present', () => {
+		// Write both sources.
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
+		);
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const spec = readEffectiveSpecSync(tempDir, { source: 'speckit' });
+
+		expect(spec?.source).toBe('speckit_projection');
+	});
+
+	test('opts.source openspec: selects OpenSpec even when .specify/ also exists', () => {
+		// Write both sources.
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
+		);
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const spec = readEffectiveSpecSync(tempDir, { source: 'openspec' });
+
+		expect(spec?.source).toBe('openspec_projection');
+	});
+
+	test('BOTH openspec + valid single-feature speckit, no source: returns null AND console.warn fires (FR-010, anti-silent-suppression)', () => {
+		// OpenSpec layout that yields a real projection (needs a parsable requirement).
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow users to sign in.\n',
+		);
+		// Valid single-feature Spec-Kit layout — must be non-empty so it registers
+		// as a competing source (plan.md task 3.1; test note: "NOT empty, or it
+		// won't register as a competing source").
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		// Manual console.warn capture: portable across bun:test versions where
+		// spyOn(console, 'warn') + mockRestore() before assertions clears call history.
+		// This approach intercepts console.warn at the JS property level — the diagnostic
+		// fires through the same `console.warn(...)` call in effective-spec.ts.
+		const warnMessages: string[] = [];
+		const realWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			warnMessages.push(args.map(String).join(' '));
+		};
+
+		let result: ReturnType<typeof readEffectiveSpecSync>;
+		try {
+			result = readEffectiveSpecSync(tempDir);
+		} finally {
+			// Restore before any throw so the test suite output stays clean.
+			console.warn = realWarn;
+		}
+
+		// Return value must be null (ambiguous → no effective spec).
+		expect(result!).toBeNull();
+
+		// Diagnostic MUST have fired — independent of the null return.
+		// This is the anti-silent-suppression contract from critic Finding 2:
+		// returning null downgrades the drift gate to advisory-only; without this
+		// warn a repo that had ONE source (enforcing) would silently stop enforcing
+		// when a second inert source is added, with no observable signal.
+		expect(warnMessages.length).toBeGreaterThan(0);
+		const firstMsg = warnMessages[0] ?? '';
+		// Message must name the disambiguation flag.
+		expect(firstMsg).toContain('--source');
+		// Message must name the detected sources so the developer knows what to pick.
+		expect(firstMsg.toLowerCase()).toContain('openspec');
+		expect(firstMsg.toLowerCase()).toContain('speckit');
+	});
+
+	test('empty .specify/ + valid openspec: returns openspec projection, console.warn NOT called (discriminator proof)', () => {
+		// This test proves "Spec-Kit present" uses features.length > 0, NOT just
+		// markerPresent.  An empty .specify/ (no feature dirs) must NOT be treated
+		// as a competing source — the resolver must fall through to openspec silently.
+		// If we used markerPresent as the discriminator, this test would fail because
+		// markerPresent=true for empty-specify and we would emit the warn + return null.
+		writeSpeckitFixture(tempDir, { variant: 'empty-specify' });
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow users to sign in.\n',
+		);
+
+		const warnMessages: string[] = [];
+		const realWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			warnMessages.push(args.map(String).join(' '));
+		};
+
+		let result: ReturnType<typeof readEffectiveSpecSync>;
+		try {
+			result = readEffectiveSpecSync(tempDir);
+		} finally {
+			console.warn = realWarn;
+		}
+
+		// Should return the openspec projection — not null, no diagnostic.
+		expect(result?.source).toBe('openspec_projection');
+		expect(warnMessages).toHaveLength(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// validateSpeckit — structural validation, read-only (task 2.3, FR-007/013)
+// ---------------------------------------------------------------------------
+describe('validateSpeckit — structural validation (task 2.3, FR-007, FR-013)', () => {
+	test('valid single-feature Spec-Kit: resolution is ok and no problems reported', () => {
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+
+		const { resolution, problems } = validateSpeckit(tempDir);
+
+		expect(resolution.kind).toBe('ok');
+		expect(problems).toHaveLength(0);
+	});
+
+	test('malformed fixture: reports missing ## Success Criteria AND T001 missing [US#] (FR-007)', () => {
+		writeSpeckitFixture(tempDir, { variant: 'malformed' });
+
+		const { resolution, problems } = validateSpeckit(tempDir);
+
+		// malformed has FR bullets → resolution ok (missing section does not affect resolution)
+		expect(resolution.kind).toBe('ok');
+		// Must flag the missing Success Criteria section.
+		expect(problems.some((p) => p.includes('## Success Criteria'))).toBe(true);
+		// Must flag T001 (which has [P] but no [US#]).
+		expect(problems.some((p) => p.includes('T001'))).toBe(true);
+		// Must NOT flag T002 (which has [US1]).
+		expect(problems.some((p) => p.includes('T002'))).toBe(false);
+		// Both problems detected — at least two problems total.
+		expect(problems.length).toBeGreaterThanOrEqual(2);
+	});
+
+	test('task-reference check accepts an FR-### reference, not only [US#] (FR-007 — no false positive)', () => {
+		// Valid feature (both required sections + FRs → resolution ok), with a custom
+		// tasks.md exercising the three cases: story ref, requirement ref, and neither.
+		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
+		const tasksPath = path.join(tempDir, 'specs', '001-auth-service', 'tasks.md');
+		fs.writeFileSync(
+			tasksPath,
+			[
+				'# Tasks',
+				'',
+				'- [ ] T001 [P] [US1] Implement the story-referenced task in src/a.ts',
+				'- [ ] T002 [P] [FR-001] Implement the requirement-referenced task in src/b.ts',
+				'- [ ] T003 [P] Setup task with no reference at all in src/c.ts',
+				'',
+			].join('\n'),
+			'utf-8',
+		);
+
+		const { resolution, problems } = validateSpeckit(tempDir);
+
+		expect(resolution.kind).toBe('ok');
+		// T001 ([US1]) and T002 ([FR-001]) both carry a valid reference → NOT flagged.
+		expect(problems.some((p) => p.includes('T001'))).toBe(false);
+		expect(problems.some((p) => p.includes('T002'))).toBe(false);
+		// T003 references neither a story nor a requirement → flagged.
+		expect(problems.some((p) => p.includes('T003'))).toBe(true);
+	});
+
+	test('zero-fr fixture: reports zero_requirements problem and no false missing-section error (FR-013)', () => {
+		// zero-fr has BOTH required sections but no FR bullets.
+		writeSpeckitFixture(tempDir, { variant: 'zero-fr' });
+
+		const { resolution, problems } = validateSpeckit(tempDir);
+
+		expect(resolution.kind).toBe('zero_requirements');
+		// Zero-requirements problem must be present.
+		expect(
+			problems.some((p) =>
+				p.toLowerCase().includes('no parsable functional requirements'),
+			),
+		).toBe(true);
+		// Section check still runs on the readable spec.md and MUST NOT flag
+		// missing sections (zero-fr has both ## Functional Requirements and ## Success Criteria).
+		expect(problems.some((p) => p.includes('## Functional Requirements'))).toBe(
+			false,
+		);
+		expect(problems.some((p) => p.includes('## Success Criteria'))).toBe(false);
+	});
+
+	test('READ-ONLY proof: spec.md and tasks.md bytes unchanged after validateSpeckit (FR-007)', () => {
+		writeSpeckitFixture(tempDir, { variant: 'malformed' });
+
+		const specPath = path.join(
+			tempDir,
+			'specs',
+			'001-broken-feature',
+			'spec.md',
+		);
+		const tasksPath = path.join(
+			tempDir,
+			'specs',
+			'001-broken-feature',
+			'tasks.md',
+		);
+		const specBefore = fs.readFileSync(specPath, 'utf-8');
+		const tasksBefore = fs.readFileSync(tasksPath, 'utf-8');
+
+		validateSpeckit(tempDir);
+
+		// File content must be byte-for-byte identical after the call.
+		expect(fs.readFileSync(specPath, 'utf-8')).toBe(specBefore);
+		expect(fs.readFileSync(tasksPath, 'utf-8')).toBe(tasksBefore);
+		// The .swarm directory must NOT have been created (no write-back of any kind).
+		expect(fs.existsSync(path.join(tempDir, '.swarm', 'spec.md'))).toBe(false);
+	});
+
+	test('not_speckit resolution: no problems, resolution.kind is not_speckit', () => {
+		// No .specify/ marker — validate on an openspec-only repo should get not_speckit.
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
+		);
+
+		const { resolution, problems } = validateSpeckit(tempDir);
+
+		expect(resolution.kind).toBe('not_speckit');
+		expect(problems).toHaveLength(0);
 	});
 });
