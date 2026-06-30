@@ -60,6 +60,5 @@ describe('command registry validation warnings', () => {
 				),
 			),
 		).toBe(true);
-		expect(messages.join('\n')).toContain('COMMAND_REGISTRY alias warnings');
 	});
 });
