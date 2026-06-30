@@ -60,5 +60,14 @@ describe('command registry validation warnings', () => {
 				),
 			),
 		).toBe(true);
+		expect(
+			messages.some(
+				(message) =>
+					message.includes('COMMAND_REGISTRY alias warnings') &&
+					message.includes(
+						"Multiple aliases point to 'config doctor': config-doctor, doctor",
+					),
+			),
+		).toBe(true);
 	});
 });
