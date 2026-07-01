@@ -1105,14 +1105,6 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		prEventCleanup?.();
 	};
 	process.on('exit', cleanupAutomation);
-	process.once('SIGINT', () => {
-		cleanupAutomation();
-		process.exit(130);
-	});
-	process.once('SIGTERM', () => {
-		cleanupAutomation();
-		process.exit(143);
-	});
 
 	// v6.7 Task 5.7: Config Doctor - run on startup if automation flags permit
 	// Runs in background-safe way (non-blocking, no errors propagate)
@@ -1138,8 +1130,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							autofixEnabled: enableAutofix,
 						});
 
-						// Emit chat-visible advisory for auto-fixable findings.
-						// Uses console.warn (always visible, non-blocking).
+						// Emit advisory for auto-fixable findings.
+						// Guarded by config.quiet to avoid stderr writes that bypass the host TUI.
 						// Wrapped in try/catch per AGENTS.md invariant #1 (fail-open).
 						try {
 							const autoFixableCount = doctorResult.result.findings.filter(
@@ -1147,16 +1139,22 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							).length;
 
 							if (!enableAutofix && autoFixableCount > 0) {
-								console.warn(
-									`[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`,
-								);
+								const msg = `[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`;
+								if (!config.quiet) {
+									console.warn(msg);
+								} else {
+									addDeferredWarning(msg);
+								}
 							} else if (
 								enableAutofix &&
 								doctorResult.appliedFixes.length > 0
 							) {
-								console.warn(
-									`[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`,
-								);
+								const msg = `[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`;
+								if (!config.quiet) {
+									console.warn(msg);
+								} else {
+									addDeferredWarning(msg);
+								}
 							}
 						} catch {
 							// Advisory emission must never block startup
@@ -1988,9 +1986,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							if (qualified.length === 0) {
 								// No skills above threshold — inject SKILLS: none
 								argsRecord.prompt = `SKILLS: none\n\n${promptRaw}`;
-								console.warn(
-									'[skill-propagation-gate] No skills above threshold 0.5 — injected SKILLS: none',
-								);
+								if (!config.quiet) {
+									console.warn(
+										'[skill-propagation-gate] No skills above threshold 0.5 — injected SKILLS: none',
+									);
+								}
 							} else {
 								// Take top 5 by score
 								const topSkills = qualified.slice(0, 5);
@@ -2022,9 +2022,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 											`${path.basename(s.skillPath)} (score: ${s.score.toFixed(2)})`,
 									)
 									.join(', ');
-								console.warn(
-									`[skill-propagation-gate] Injected skills: ${skillNames}`,
-								);
+								if (!config.quiet) {
+									console.warn(
+										`[skill-propagation-gate] Injected skills: ${skillNames}`,
+									);
+								}
 
 								// Record each injected skill to skill-usage.jsonl
 								for (const skill of topSkills) {
