@@ -34,9 +34,25 @@ export const _internals: {
 	readCachedTextFile,
 };
 
-export function safeHook<I, O>(
-	fn: (input: I, output: O) => Promise<void>,
-): (input: I, output: O) => Promise<void> {
+type HookHandler<I, O> = (input: I, output: O) => Promise<void>;
+
+export function markFailClosed<I, O>(
+	fn: HookHandler<I, O>,
+): HookHandler<I, O> & { __failClosed?: true } {
+	return Object.assign(fn, { __failClosed: true }) as HookHandler<I, O> & {
+		__failClosed?: true;
+	};
+}
+
+function isFailClosedHandler(value: unknown): boolean {
+	return (
+		typeof value === 'function' &&
+		Object.hasOwn(value, '__failClosed') &&
+		(value as { __failClosed?: boolean }).__failClosed === true
+	);
+}
+
+export function safeHook<I, O>(fn: HookHandler<I, O>): HookHandler<I, O> {
 	return async (input: I, output: O) => {
 		try {
 			await fn(input, output);
@@ -69,14 +85,19 @@ export function safeHook<I, O>(
  * Reference: AGENTS.md invariant 11 + Full-Auto v2 fail-closed contract.
  */
 export function composeHandlers<I, O>(
-	...fns: Array<(input: I, output: O) => Promise<void>>
-): (input: I, output: O) => Promise<void> {
+	...fns: Array<HookHandler<I, O>>
+): HookHandler<I, O> {
 	if (fns.length === 0) {
 		return async () => {};
 	}
 
 	return async (input: I, output: O) => {
 		for (const fn of fns) {
+			if (isFailClosedHandler(fn)) {
+				throw new Error(
+					'composeHandlers cannot wrap fail-closed handlers; use composeBlockingHandlers or await them directly',
+				);
+			}
 			const safeFn = _internals.safeHook(fn);
 			await safeFn(input, output);
 		}
@@ -108,8 +129,8 @@ export function composeHandlers<I, O>(
  * fail-open and is a critical regression.
  */
 export function composeBlockingHandlers<I, O>(
-	...fns: Array<(input: I, output: O) => Promise<void>>
-): (input: I, output: O) => Promise<void> {
+	...fns: Array<HookHandler<I, O>>
+): HookHandler<I, O> {
 	if (fns.length === 0) {
 		return async () => {};
 	}

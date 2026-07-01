@@ -22,6 +22,10 @@ import { join } from 'node:path';
 const NPM_REGISTRY_URL = 'https://registry.npmjs.org/opencode-swarm/latest';
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const FETCH_TIMEOUT_MS = 5_000;
+// Enforce strict semver: three numeric core segments, optional prerelease/build
+// metadata, and no leading 'v' or other non-semver prefixes.
+const SEMVER_REGEX =
+	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
 /**
  * Upper bound on the registry response body (issue #1270-4). The npm `latest`
@@ -93,21 +97,55 @@ function writeVersionCache(entry: VersionCheckCache): void {
  * Compare two semver-ish version strings. Returns 1 if `a > b`, -1 if `a < b`,
  * 0 if equal. Treats prerelease tags as lower than the release. Pure function.
  */
+interface ParsedVersion {
+	major: number;
+	minor: number;
+	patch: number;
+	prerelease: string | null;
+}
+
+function parseVersion(version: string): ParsedVersion | null {
+	const trimmed = version.trim();
+	const match = SEMVER_REGEX.exec(trimmed);
+	if (!match) return null;
+	return {
+		major: Number.parseInt(match[1], 10),
+		minor: Number.parseInt(match[2], 10),
+		patch: Number.parseInt(match[3], 10),
+		prerelease: match[4] ?? null,
+	};
+}
+
+function normalizeVersionCandidate(version: string | null): string | null {
+	if (typeof version !== 'string') return null;
+	const trimmed = version.trim();
+	return SEMVER_REGEX.test(trimmed) ? trimmed : null;
+}
+
 export function compareVersions(a: string, b: string): number {
-	const [aBase, aPre] = a.split('-', 2);
-	const [bBase, bPre] = b.split('-', 2);
-	const aParts = aBase.split('.').map((n) => Number.parseInt(n, 10) || 0);
-	const bParts = bBase.split('.').map((n) => Number.parseInt(n, 10) || 0);
-	const len = Math.max(aParts.length, bParts.length);
-	for (let i = 0; i < len; i++) {
-		const av = aParts[i] ?? 0;
-		const bv = bParts[i] ?? 0;
-		if (av > bv) return 1;
-		if (av < bv) return -1;
+	const aParsed = parseVersion(a);
+	const bParsed = parseVersion(b);
+	if (!aParsed || !bParsed) return 0;
+
+	if (aParsed.major !== bParsed.major) {
+		return aParsed.major > bParsed.major ? 1 : -1;
 	}
-	if (aPre && !bPre) return -1;
-	if (!aPre && bPre) return 1;
-	if (aPre && bPre) return aPre < bPre ? -1 : aPre > bPre ? 1 : 0;
+	if (aParsed.minor !== bParsed.minor) {
+		return aParsed.minor > bParsed.minor ? 1 : -1;
+	}
+	if (aParsed.patch !== bParsed.patch) {
+		return aParsed.patch > bParsed.patch ? 1 : -1;
+	}
+
+	if (aParsed.prerelease && !bParsed.prerelease) return -1;
+	if (!aParsed.prerelease && bParsed.prerelease) return 1;
+	if (aParsed.prerelease && bParsed.prerelease) {
+		return aParsed.prerelease < bParsed.prerelease
+			? -1
+			: aParsed.prerelease > bParsed.prerelease
+				? 1
+				: 0;
+	}
 	return 0;
 }
 
@@ -239,7 +277,8 @@ async function runVersionCheck(
 	const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	let npmLatest: string | null = null;
 	try {
-		npmLatest = await fetchImpl(controller.signal);
+		const fetchedVersion = await fetchImpl(controller.signal);
+		npmLatest = normalizeVersionCandidate(fetchedVersion);
 	} finally {
 		clearTimeout(timeout);
 	}

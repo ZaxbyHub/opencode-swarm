@@ -144,4 +144,19 @@ describe('write_mutation_evidence — real path validation (no mocks)', () => {
 			true,
 		);
 	});
+
+	test('validateSwarmPath rejects paths that escape via an existing .swarm symlink', () => {
+		const swarmDir = path.join(tempDir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		const escapeTarget = path.join(tempDir, 'out-of-swarm');
+		fs.mkdirSync(escapeTarget, { recursive: true });
+		const escapedFile = path.join(escapeTarget, 'secret.txt');
+		fs.writeFileSync(escapedFile, 'secret');
+		const linkPath = path.join(swarmDir, 'escape-link');
+		fs.symlinkSync(escapeTarget, linkPath, 'dir');
+
+		expect(() =>
+			validateSwarmPath(tempDir, path.join('escape-link', 'secret.txt')),
+		).toThrow(/path escapes/);
+	});
 });

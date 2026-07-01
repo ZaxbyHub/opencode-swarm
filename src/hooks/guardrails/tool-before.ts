@@ -100,6 +100,8 @@ import {
 	redactShellCommand,
 } from './helpers';
 
+let hasWarnedSandboxUnavailable = false;
+
 /**
  * Creates a toolBefore handler with the given shared context.
  *
@@ -914,6 +916,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const executor = await getExecutor();
 		if (!executor || !executor.isAvailable()) {
+			if (!hasWarnedSandboxUnavailable) {
+				hasWarnedSandboxUnavailable = true;
+				warn(
+					'[guardrails] sandbox executor unavailable; shell commands will run unsandboxed',
+				);
+			}
 			void appendGuardrailDecision(
 				{
 					type: 'sandbox_skip',
@@ -1798,6 +1806,25 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Block full test suite execution without file argument
 		handleTestSuiteBlocking(input.tool, output.args);
 
+		// Apply sandbox wrapping / advisories for shell tools before other checks
+		const agentNameForSandbox = (() => {
+			const rawAgent = swarmState.activeAgent.get(input.sessionID);
+			return rawAgent ? stripKnownSwarmPrefix(rawAgent) : 'unknown';
+		})();
+		const rawShellCommand = (() => {
+			const bashArgs = output.args as Record<string, unknown> | undefined;
+			return typeof bashArgs?.command === 'string' ? bashArgs.command : '';
+		})();
+		await applySandboxExecution(
+			input.sessionID,
+			input.tool,
+			output.args,
+			agentNameForSandbox,
+			rawShellCommand,
+			shellAuditPath,
+			shellAuditEnabled,
+		);
+
 		// Shell audit log
 		const normalizedAuditTool = normalizeToolName(input.tool).toLowerCase();
 		if (normalizedAuditTool === 'bash' || normalizedAuditTool === 'shell') {
@@ -2311,25 +2338,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			elapsedMinutes,
 			repetitionCount,
 		});
-
-		// OS-level sandbox enforcement
-		await applySandboxExecution(
-			input.sessionID,
-			input.tool,
-			output.args,
-			(() => {
-				const rawAgent = swarmState.activeAgent.get(input.sessionID);
-				return rawAgent ? stripKnownSwarmPrefix(rawAgent) : 'unknown';
-			})(),
-			(() => {
-				const bashArgs = output.args as Record<string, unknown> | undefined;
-				const rawCmd =
-					typeof bashArgs?.command === 'string' ? bashArgs.command : '';
-				return rawCmd;
-			})(),
-			shellAuditPath,
-			shellAuditEnabled,
-		);
 
 		// v6.12: Store input args for delegation detection in toolAfter
 		setStoredInputArgs(input.callID, output.args);
