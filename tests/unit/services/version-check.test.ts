@@ -11,8 +11,11 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	_internals,
 	_resetVersionCheckLatchForTests,
 	compareVersions,
+	fetchLatestVersion,
+	isStrictSemver,
 	readVersionCache,
 	scheduleVersionCheck,
 } from '../../../src/services/version-check';
@@ -243,6 +246,162 @@ describe('readVersionCache', () => {
 		);
 		const entry = readVersionCache();
 		expect(entry).toEqual({ checkedAt: 42, npmLatest: '1.2.3' });
+	});
+});
+
+describe('fetchLatestVersion — strict response validation (#1270-4)', () => {
+	const realFetch = _internals.fetch;
+
+	afterEach(() => {
+		// Restore the DI seam so the real global fetch is reinstated. The seam
+		// is file-scoped state; leaving a mock in place would corrupt other
+		// suites in the shared test-runner process.
+		_internals.fetch = realFetch;
+	});
+
+	// Minimal Response-shaped fake: fetchLatestVersion only reads `.ok`,
+	// `.headers.get(...)`, and `.text()`. Using a plain object keeps the test
+	// deterministic and avoids runtime-specific Response/Content-Length quirks.
+	function fakeResponse(opts: {
+		ok?: boolean;
+		contentType?: string | null;
+		contentLength?: string | null;
+		body: string;
+	}): Response {
+		const headers = new Map<string, string>();
+		if (opts.contentType != null) headers.set('content-type', opts.contentType);
+		if (opts.contentLength != null)
+			headers.set('content-length', opts.contentLength);
+		return {
+			ok: opts.ok ?? true,
+			headers: { get: (k: string) => headers.get(k.toLowerCase()) ?? null },
+			text: async () => opts.body,
+		} as unknown as Response;
+	}
+
+	const signal = new AbortController().signal;
+
+	test('accepts a well-formed JSON response with a strict semver', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'application/json; charset=utf-8',
+				body: JSON.stringify({ version: '6.86.7' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBe('6.86.7');
+	});
+
+	test('accepts the npm install-v1 +json content-type variant', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'application/vnd.npm.install-v1+json',
+				body: JSON.stringify({ version: '7.0.0-rc.1' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBe('7.0.0-rc.1');
+	});
+
+	test('rejects a non-JSON content-type (HTML error page)', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'text/html; charset=utf-8',
+				body: '<!doctype html><html><body>502 Bad Gateway</body></html>',
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects a text/plain content-type', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'text/plain',
+				body: JSON.stringify({ version: '6.86.7' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects an oversized body via advertised content-length', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'application/json',
+				contentLength: String(5 * 1024 * 1024), // 5 MiB > 256 KiB cap
+				body: JSON.stringify({ version: '6.86.7' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects an oversized actual body even without a content-length header', async () => {
+		const huge = `{"version":"6.86.7","pad":"${'x'.repeat(300 * 1024)}"}`;
+		_internals.fetch = async () =>
+			fakeResponse({ contentType: 'application/json', body: huge });
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects a non-semver version string', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'application/json',
+				body: JSON.stringify({ version: 'latest' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects a version field that is not a string', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				contentType: 'application/json',
+				body: JSON.stringify({ version: { major: 6 } }),
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('rejects a non-ok HTTP status', async () => {
+		_internals.fetch = async () =>
+			fakeResponse({
+				ok: false,
+				contentType: 'application/json',
+				body: JSON.stringify({ version: '6.86.7' }),
+			});
+		expect(await fetchLatestVersion(signal)).toBeNull();
+	});
+
+	test('returns null (never throws) when fetch itself rejects', async () => {
+		_internals.fetch = async () => {
+			throw new Error('network down');
+		};
+		let result: string | null = 'unset';
+		await expect(
+			(async () => {
+				result = await fetchLatestVersion(signal);
+			})(),
+		).resolves.toBeUndefined();
+		expect(result).toBeNull();
+	});
+});
+
+describe('isStrictSemver (#1270-4)', () => {
+	test('accepts the live package.json version (guards against over-strict regex)', () => {
+		const pkg = JSON.parse(
+			readFileSync(
+				join(import.meta.dir, '..', '..', '..', 'package.json'),
+				'utf-8',
+			),
+		) as { version: string };
+		// If this fails, the strict regex would silently reject a legitimate
+		// npm `latest` response and disable update checks for everyone.
+		expect(isStrictSemver(pkg.version)).toBe(true);
+	});
+
+	test('accepts standard release and prerelease forms', () => {
+		expect(isStrictSemver('6.86.7')).toBe(true);
+		expect(isStrictSemver('7.0.0-rc.1')).toBe(true);
+		expect(isStrictSemver('1.2.3+build.5')).toBe(true);
+	});
+
+	test('rejects dist-tags, ranges, partials, and junk', () => {
+		expect(isStrictSemver('latest')).toBe(false);
+		expect(isStrictSemver('^6.86.7')).toBe(false);
+		expect(isStrictSemver('6.86')).toBe(false);
+		expect(isStrictSemver('')).toBe(false);
+		expect(isStrictSemver('6.86.7 ')).toBe(false);
+		expect(isStrictSemver(42 as unknown)).toBe(false);
 	});
 });
 

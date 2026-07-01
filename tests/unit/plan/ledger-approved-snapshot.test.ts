@@ -29,6 +29,7 @@ import {
 	loadLastApprovedPlan,
 	takeSnapshotEvent,
 } from '../../../src/plan/ledger';
+import { derivePlanId } from '../../../src/plan/utils';
 
 function createTestPlan(overrides?: Partial<Plan>): Plan {
 	return {
@@ -81,7 +82,7 @@ async function setupDirWithInitializedLedger(): Promise<{
 		'utf-8',
 	);
 
-	await initLedger(dir, `${plan.swarm}-${plan.title}`.replace(/\W/g, '_'));
+	await initLedger(dir, derivePlanId(plan));
 	return { dir, plan };
 }
 

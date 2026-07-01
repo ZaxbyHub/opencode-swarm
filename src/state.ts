@@ -508,6 +508,10 @@ export function resetSwarmState(): void {
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetPct = 0;
 	swarmState.agentSessions.clear();
+	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
+	// sweeps on first session activity (invariant 8: bounded global state with
+	// an explicit reset path).
+	_lastIdleSweepAtMs = 0;
 	clearTrajectoryCache();
 	clearTrajectoryStepCounters();
 	swarmState.pendingRehydrations.clear();
@@ -582,6 +586,95 @@ export function resetSwarmStatePreservingSingletons(): void {
 }
 
 /**
+ * Default idle-TTL (ms) after which a session with no tool activity is
+ * considered stale and eligible for eviction (2 hours). Extracted to a single
+ * constant so startAgentSession (eager eviction) and the opportunistic idle
+ * sweep share one source of truth instead of duplicating the literal.
+ */
+const STALE_SESSION_TTL_MS = 7_200_000;
+
+/**
+ * Minimum interval (ms) between opportunistic idle sweeps triggered from the
+ * per-tool-call hot path. Bounds the O(n) stale scan to at most once per
+ * window so per-tool-call accounting stays effectively O(1) in the common
+ * case while still reclaiming idle session state on a long-lived host.
+ */
+const IDLE_SWEEP_COOLDOWN_MS = 60_000;
+
+/**
+ * Cooldown timestamp (ms epoch) of the most recent opportunistic idle sweep.
+ * Module-level state, but bounded by IDLE_SWEEP_COOLDOWN_MS and reset to 0 by
+ * resetSwarmState so a fresh process / test sweeps on first activity
+ * (invariant 8: keyed/bounded global state with an explicit reset path).
+ */
+let _lastIdleSweepAtMs = 0;
+
+/**
+ * Evict every agent session whose last tool activity is older than
+ * staleDurationMs, and drop the delegation chain keyed by that same sessionID
+ * (delegationChains is keyed by sessionID — see delegation-tracker.ts, which
+ * does `delegationChains.set(input.sessionID, ...)`). This is the single
+ * eviction loop reused by BOTH startAgentSession (eager, on new session start)
+ * and maybeSweepStaleSessions (opportunistic, on the hot path) so the logic is
+ * never duplicated.
+ *
+ * @param staleDurationMs - Age threshold in ms (default 2h)
+ * @param now - Current time in ms (injectable for deterministic tests)
+ * @returns The list of evicted session IDs
+ */
+export function sweepStaleSessions(
+	staleDurationMs = STALE_SESSION_TTL_MS,
+	now = Date.now(),
+): string[] {
+	// Preserve the original strict-greater-than comparison so the existing
+	// eager-eviction behavior and tests are byte-for-byte unchanged.
+	const staleIds: string[] = [];
+	for (const [id, session] of swarmState.agentSessions) {
+		if (now - session.lastToolCallTime > staleDurationMs) {
+			staleIds.push(id);
+		}
+	}
+	for (const id of staleIds) {
+		swarmState.agentSessions.delete(id);
+		// delegationChains is keyed by sessionID; the evicted session's chain is
+		// now unreachable, so drop it in the same pass to reclaim its memory.
+		swarmState.delegationChains.delete(id);
+	}
+	return staleIds;
+}
+
+/**
+ * Opportunistic, cooldown-guarded wrapper around sweepStaleSessions, intended
+ * to be called from a frequently-hit code path (per-tool-call accounting in
+ * ensureAgentSession). This reclaims accumulated session state even when no
+ * new session is ever started — closing the gap where eager eviction only ran
+ * inside startAgentSession, so a long-lived host that stopped creating
+ * sessions never reclaimed old ones.
+ *
+ * Bounded work (invariant 8): the O(n) scan runs at most once per
+ * IDLE_SWEEP_COOLDOWN_MS. The cooldown timestamp advances whenever the cooldown
+ * has elapsed — even when zero sessions are evicted — so an idle/empty map does
+ * not re-scan on every call.
+ *
+ * No timers, no init-path work (invariant 1): this only runs when a hook
+ * actively calls it on the hot path; it never schedules background work.
+ *
+ * @param staleDurationMs - Age threshold in ms (default 2h)
+ * @param now - Current time in ms (injectable for deterministic tests)
+ * @returns Evicted session IDs ([] when the cooldown blocks this run)
+ */
+export function maybeSweepStaleSessions(
+	staleDurationMs = STALE_SESSION_TTL_MS,
+	now = Date.now(),
+): string[] {
+	if (now - _lastIdleSweepAtMs < IDLE_SWEEP_COOLDOWN_MS) {
+		return [];
+	}
+	_lastIdleSweepAtMs = now;
+	return sweepStaleSessions(staleDurationMs, now);
+}
+
+/**
  * Start a new agent session with initialized guardrail state.
  * Also removes any stale sessions older than staleDurationMs.
  * @param sessionId - The session identifier
@@ -592,22 +685,16 @@ export function resetSwarmStatePreservingSingletons(): void {
 export function startAgentSession(
 	sessionId: string,
 	agentName: string,
-	staleDurationMs = 7200000,
+	staleDurationMs = STALE_SESSION_TTL_MS,
 	directory?: string,
 ): void {
 	const now = Date.now();
 
-	// Evict stale sessions based on last activity, not start time
-	// Default: 2 hours — should exceed typical agent durations (evicts inactive sessions)
-	const staleIds: string[] = [];
-	for (const [id, session] of swarmState.agentSessions) {
-		if (now - session.lastToolCallTime > staleDurationMs) {
-			staleIds.push(id);
-		}
-	}
-	for (const id of staleIds) {
-		swarmState.agentSessions.delete(id);
-	}
+	// Evict stale sessions based on last activity, not start time.
+	// Default: 2 hours — should exceed typical agent durations (evicts inactive
+	// sessions). Reuses the shared eviction loop (also used by the opportunistic
+	// idle sweep) so the logic stays single-sourced.
+	sweepStaleSessions(staleDurationMs, now);
 
 	// Create new session state
 	const sessionState: AgentSessionState = {
@@ -966,6 +1053,13 @@ export function ensureAgentSession(
 		}
 
 		session.lastToolCallTime = now;
+		// Opportunistic idle-TTL sweep (cooldown-guarded) on the per-tool-call
+		// hot path. Reclaims stale SIBLING sessions even when this long-lived
+		// host has stopped starting new sessions — independent of
+		// startAgentSession. The session just refreshed above (lastToolCallTime
+		// = now) is never its own victim, so there is no cross-session
+		// pollution.
+		maybeSweepStaleSessions();
 		return session;
 	}
 

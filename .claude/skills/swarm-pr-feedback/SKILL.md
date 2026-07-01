@@ -27,8 +27,11 @@ canonical workflow.
   handoff artifacts.
 - For async verification lanes, treat `output` as a preview and call
   `retrieve_lane_output` for full `output_ref` artifacts before classifying or
-  resolving feedback; degraded or incomplete lane outputs keep the affected
-  items open as evidence gaps.
+  resolving feedback; degraded or incomplete lane outputs are coverage gaps that
+  must be closed by retry, a verified-equivalent alternative, or Task-tool
+  dispatch as the final fallback when lane tools do not work. If the gap cannot
+  be closed, stop and surface the affected items to the user as BLOCKED rather
+  than producing degraded closure.
 - Do not resolve GitHub review threads unless the user explicitly instructs it.
 - Use the repository commit/PR workflow before pushing or updating the PR.
 

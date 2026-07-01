@@ -13,16 +13,13 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import { derivePlanId } from '../../../src/plan/utils';
 import {
 	ensureAgentSession,
 	getTaskState,
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
-
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
 
 const PLAN_FIXTURE = {
 	schema_version: '1.0.0' as const,

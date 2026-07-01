@@ -858,7 +858,7 @@ export const COMMAND_REGISTRY = {
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
-			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes through the deterministic dispatch_lanes join barrier (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, launches all 6 fixed base explorer lanes through dispatch_lanes_async while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, runs every triggered micro-lane, validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. If lane tools cannot close coverage, Task-tool dispatch is the final verified-equivalent fallback; if equivalence cannot be proven, the review is BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},

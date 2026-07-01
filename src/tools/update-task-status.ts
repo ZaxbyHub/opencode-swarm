@@ -8,13 +8,13 @@ import * as path from 'node:path';
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
-import type { TaskStatus } from '../config/plan-schema';
+import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { getProfile } from '../db/qa-gate-profile.js';
 import { readTaskEvidenceRaw } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { updateTaskStatus } from '../plan/manager';
+import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import {
 	advanceTaskState,
@@ -41,6 +41,7 @@ export const _internals = {
 	tryAcquireLock,
 	updateTaskStatus,
 	resolveWorkingDirectory,
+	loadPlan,
 } as const;
 
 /**
@@ -970,6 +971,35 @@ export async function executeUpdateTaskStatus(
 				],
 			};
 		}
+	}
+
+	// #1269 finding 2: consult the ledger-replay staleness signal BEFORE any mutation.
+	// loadPlan attaches `_ledgerReplayStale` when it fell back to a stale plan.json
+	// (plan.json hash mismatched the ledger, ledger replay threw, AND no critic-approved
+	// snapshot was available). Mutating on top of that stale projection would silently
+	// overwrite the authoritative ledger view, so refuse with structured recovery guidance
+	// (mirroring the lock-blocked return shape) instead of relying on a logged warning.
+	// Placed before the evidence write and lock acquisition so no mutation occurs on stale state.
+	let loadedPlan: RuntimePlan | null = null;
+	try {
+		loadedPlan = await _internals.loadPlan(directory);
+	} catch {
+		// loadPlan failure is non-fatal here — the mutation path (updateTaskStatus) performs
+		// its own load and will surface a hard error; we only gate on a positive stale signal.
+		loadedPlan = null;
+	}
+	if (loadedPlan?._ledgerReplayStale === true) {
+		const staleReason =
+			loadedPlan._ledgerReplayStaleReason ??
+			'plan.json is stale relative to the authoritative ledger (.swarm/plan-ledger.jsonl)';
+		return {
+			success: false,
+			message: `Task status update refused: plan.json is stale relative to the ledger (ledger replay failed). ${staleReason}`,
+			errors: [staleReason],
+			recovery_guidance:
+				'Plan state could not be reconciled with the authoritative ledger (.swarm/plan-ledger.jsonl). ' +
+				'Restore from a critic-approved snapshot or re-run plan recovery to rebuild plan.json from the ledger, then retry update_task_status.',
+		};
 	}
 
 	// Write minimal gate-tracking evidence to persist across session restarts.

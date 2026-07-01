@@ -88,8 +88,11 @@ export function resolveWorkingDirectory(
 		}
 	}
 
-	// Check for traversal in raw input before normalizing (normalize resolves .. before we can detect it)
-	const rawPathParts = workingDirectory.split(path.sep);
+	// Check for traversal in raw input before normalizing (normalize resolves .. before we can detect it).
+	// Split on BOTH separators (`/` and `\`) so a forward-slash input is detected on Windows too.
+	// On Windows path.sep === '\\', so splitting only on path.sep left forward-slash traversal like
+	// `foo/../../../bar` as a single unsplit segment, bypassing the `..` check (invariant 4 security bug).
+	const rawPathParts = workingDirectory.split(/[\\/]/);
 	if (rawPathParts.includes('..')) {
 		return {
 			success: false,

@@ -122,6 +122,32 @@ function emitObjectTypeMismatch(
 	}
 }
 
+function emitWorktreeIsolationLayeringAdvisory(
+	config: PluginConfig,
+	findings: ConfigFinding[],
+): void {
+	const parallelization = config.parallelization;
+	const worktreePolicy = config.worktree?.policy ?? 'auto';
+
+	if (
+		parallelization?.enabled === true &&
+		(parallelization.maxConcurrentTasks ?? 1) > 1 &&
+		worktreePolicy !== 'disabled'
+	) {
+		findings.push({
+			id: 'worktree-isolation-baseline-active',
+			title:
+				'Worktree isolation is already active for standard parallel coders',
+			description:
+				'Standard parallel coders already use baseline worktree isolation through the parallel execution profile plus top-level worktree.policy. Lean Turbo and Epic are additive strategies, not requirements for obtaining worktree isolation.',
+			severity: 'warn',
+			path: 'worktree.policy',
+			currentValue: worktreePolicy,
+			autoFixable: false,
+		});
+	}
+}
+
 /** Severity levels for config findings */
 export type FindingSeverity = 'info' | 'warn' | 'error';
 
@@ -971,6 +997,16 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'auto_review': {
+			emitObjectTypeMismatch('auto_review', value, findings);
+			break;
+		}
+
+		case 'repo_graph': {
+			emitObjectTypeMismatch('repo_graph', value, findings);
+			break;
+		}
+
 		case 'review_passes': {
 			emitObjectTypeMismatch('review_passes', value, findings);
 			break;
@@ -1063,6 +1099,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 
 		case 'skill_improver': {
 			emitObjectTypeMismatch('skill_improver', value, findings);
+			break;
+		}
+
+		case 'skills': {
+			emitObjectTypeMismatch('skills', value, findings);
 			break;
 		}
 
@@ -1307,6 +1348,7 @@ export function runConfigDoctor(
 
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', findings);
+	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity
 	const summary = {

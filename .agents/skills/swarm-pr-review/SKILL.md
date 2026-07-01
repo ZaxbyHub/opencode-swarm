@@ -34,6 +34,11 @@ canonical workflow.
   only when no independent work remains, and to blocking `dispatch_lanes`
   only when async collection is unavailable. All lanes must be settled
   before synthesis or phase transitions.
+- If lane tools cannot close required coverage after retry/re-collection,
+  Task-tool dispatch is the final fallback, but only as a verified equivalent:
+  same agent type, same prompt, same scope, same isolation. If equivalence cannot
+  be proven, stop and surface the lane failure as BLOCKED; do not produce a
+  degraded review or partial verdict.
 - When lane results include `output_ref`, call `retrieve_lane_output` for
   full text, then `parse_lane_candidates` to extract structured candidates
   for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
@@ -51,6 +56,6 @@ The `[CRITIC]` row in the format above is **mandatory contract**, not advisory o
 
 **Re-dispatch trigger:** when a critic lane response is missing the verdict row, the orchestrator must automatically re-dispatch that lane with the explicit instruction: "Your final line MUST be exactly the Phase 8 contract row: `[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change`. A response without that exact row will be treated as a planning message and re-dispatched." Do not synthesize findings from the planning preamble; only from the re-dispatched verdict.
 
-**COVERAGE GATE alignment:** Critic lane failures follow the same COVERAGE GATE as explorer lanes: retry (max 2 attempts) with materially different parameters. If retries fail, deploy a verified equivalent alternative (same agent type, same prompt, same scope, same isolation). If no equivalent can be verified, report INCOMPLETE to the user — do NOT mark findings UNVERIFIED to continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, or by silently accepting reduced coverage.
+**COVERAGE GATE alignment:** Critic lane failures follow the same COVERAGE GATE as explorer lanes: retry (max 2 attempts) with materially different parameters. If retries fail, deploy a verified equivalent alternative (same agent type, same prompt, same scope, same isolation), including Task-tool dispatch as the final fallback when lane tools do not work. If no equivalent can be verified, stop and surface the critic-lane failure to the user as BLOCKED — do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
 
 Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.

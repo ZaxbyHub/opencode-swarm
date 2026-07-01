@@ -102,6 +102,24 @@ import { derivePlanId } from './utils';
 // per process lifetime, even when a long-lived process touches multiple repos.
 const startupLedgerCheckedWorkspaces = new Set<string>();
 
+// #1269 finding-2 (hardened): persist the unrecoverable ledger-stale condition
+// per-workspace so it can be surfaced on EVERY loadPlan return, not just the
+// first one per process. The expensive replay that DETECTS staleness is gated to
+// startup-only (startupLedgerCheckedWorkspaces) because active-session hash
+// mismatches are expected from concurrent writes — but the flag set there landed
+// only on a throwaway clone and never reached later update_task_status /
+// phase_complete loads. This Set records "this workspace genuinely failed ledger
+// replay at startup with no approved snapshot," and the chokepoint near
+// `return validated` re-attaches `_ledgerReplayStale` after a CHEAP self-heal
+// recheck (plan↔ledger hash) that auto-clears once the workspace reconverges.
+//
+// Invariant 8: keyed by `path.resolve(directory)` and bounded by the number of
+// distinct workspaces a single process touches — identical lifetime, keying, and
+// eviction profile to `startupLedgerCheckedWorkspaces` above. It is NOT
+// session-keyed, so MAX_TRACKED_SESSIONS / FIFO session eviction does not apply;
+// it mirrors the pre-existing per-workspace precedent.
+const ledgerStaleWorkspaces = new Set<string>();
+
 // In-process mutex for the loadPlan recovery path (Step 4b).
 // Prevents two concurrent loadPlan calls from racing through the
 // approved-snapshot recovery and both calling savePlan (#444 item 6).
@@ -112,6 +130,10 @@ const PLAN_JSON_CACHE_NAMESPACE = 'plan-json:validated:v1';
 /** Reset the startup ledger check flag. For testing only. */
 export function resetStartupLedgerCheck(): void {
 	startupLedgerCheckedWorkspaces.clear();
+	// Clear the persisted ledger-stale set alongside the startup-check set: a
+	// reset re-opens the expensive startup replay, so any prior staleness verdict
+	// must be re-derived from scratch rather than lingering as a stuck refusal.
+	ledgerStaleWorkspaces.clear();
 	recoveryMutexes.clear();
 }
 
@@ -264,6 +286,67 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
 	}
 }
 
+/**
+ * #1269 finding-2 (hardened): surface the persisted ledger-stale verdict on the
+ * live-plan return chokepoint, with a CHEAP self-heal recheck.
+ *
+ * The expensive startup-only replay (gated by `startupLedgerCheckedWorkspaces`)
+ * records a workspace in `ledgerStaleWorkspaces` when it genuinely failed to
+ * reconverge plan.json with the ledger AND no critic-approved snapshot existed.
+ * That detection attaches `_ledgerReplayStale` to the plan it returns, but every
+ * later loadPlan gets a fresh `structuredClone` of plan.json (see
+ * `parsePlanJsonCached` → `readCachedParsedFile`) and skips the startup block, so
+ * the flag never reached `update_task_status` / `phase_complete` in long-lived
+ * hosts. This re-attaches it on every return for a persisted-stale workspace.
+ *
+ * Self-heal: before flagging, recompute `computePlanHash(plan)` vs the latest
+ * ledger hash. If they now MATCH the projection reconverged (e.g. an architect
+ * `save_plan` rewrote plan.json + appended a ledger event) — clear the verdict
+ * and return clean. This is the mechanism (together with `resetStartupLedgerCheck`
+ * and a `/swarm reset-session` follow-up) that prevents a permanent stuck refusal:
+ * the refusal lasts only until the workspace's state actually recovers.
+ *
+ * Invariant 5: `_ledgerReplayStale` / `_ledgerReplayStaleReason` are RuntimePlan
+ * overlays only. They are never written by `savePlan` (PlanSchema strips unknown
+ * keys) and never hashed (`computePlanHash` uses an explicit allow-list), so the
+ * mutation below cannot leak into durable plan.json or any hash.
+ */
+async function surfaceLedgerStaleIfPersisted(
+	directory: string,
+	plan: RuntimePlan,
+): Promise<RuntimePlan> {
+	const resolvedWorkspace = path.resolve(directory);
+	if (!ledgerStaleWorkspaces.has(resolvedWorkspace)) {
+		return plan;
+	}
+	// Cheap recheck only — never the expensive replay (that stays startup-gated).
+	try {
+		const planHash = computePlanHash(plan);
+		const ledgerHash = await getLatestLedgerHash(directory);
+		if (ledgerHash !== '' && planHash === ledgerHash) {
+			// Reconverged → the workspace recovered. Auto-clear and return clean.
+			ledgerStaleWorkspaces.delete(resolvedWorkspace);
+			return plan;
+		}
+	} catch {
+		// If the recheck itself fails (e.g. transient ledger read error), fall
+		// through and surface staleness conservatively. Better a visible refusal
+		// the architect can clear than a silent stale-read of plan.json.
+	}
+	plan._ledgerReplayStale = true;
+	if (
+		typeof plan._ledgerReplayStaleReason !== 'string' ||
+		plan._ledgerReplayStaleReason.length === 0
+	) {
+		// Preserve the detailed startup-detection reason when it is already set
+		// (the first load, where the replay error string is available); only
+		// supply a generic reason for the later persisted-surface loads.
+		plan._ledgerReplayStaleReason =
+			'plan.json still hash-mismatches the ledger after a startup ledger-replay failure (replay could not be applied and no critic-approved snapshot was available). Run /swarm reset-session if this persists.';
+	}
+	return plan;
+}
+
 async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
 	const planJsonPath = path.resolve(directory, '.swarm', 'plan.json');
 	return readCachedParsedFile<Plan>(
@@ -350,7 +433,7 @@ function extractPlanHashFromMarkdown(markdown: string): string | null {
  * Returns true if plan.md exists and matches the plan's content hash.
  * This avoids timestamp comparison issues by using a deterministic hash.
  */
-async function isPlanMdInSync(
+export async function isPlanMdInSync(
 	directory: string,
 	plan: Plan,
 	cache?: Map<string, Promise<string | null>>,
@@ -382,14 +465,20 @@ async function isPlanMdInSync(
 		return true;
 	}
 
-	// F-11: Fuzzy substring matching fallback — permissive for backward compatibility
-	// Once PLAN_HASH headers are universally present (no old plan.md files), this check
-	// should be removed or replaced with an exact-match-only check to reduce false positives.
-	// For now, keep it to support plan.md files generated before hashing was added.
-	return (
-		normalizedActual.includes(normalizedExpected) ||
-		normalizedExpected.includes(normalizedActual.replace(/^#.*$/gm, '').trim())
-	);
+	// F-11 (FR-001): the former permissive substring fallback
+	// (`normalizedActual.includes(normalizedExpected) || ...`) is intentionally
+	// REMOVED. It produced false positives: a plan.md that merely CONTAINS the
+	// expected rendering as a strict superset (extra phases/tasks appended) was
+	// reported "in sync" even though it is not equivalent to plan.json. The two
+	// legitimate paths above cover every real case:
+	//   1. PLAN_HASH header match — robust, timestamp-independent (every plan.md
+	//      written by savePlan/regeneratePlanMarkdown carries this header).
+	//   2. Normalized exact equality — the backward-compat path for legacy
+	//      plan.md files generated before hashing was added.
+	// Anything else is treated as OUT of sync so loadPlan regenerates plan.md
+	// from the authoritative plan.json (plan.md is a derived projection —
+	// AGENTS.md invariant 5).
+	return false;
 }
 
 /**
@@ -558,6 +647,28 @@ export async function loadPlan(
 										} catch {
 											// Fall through to the stale-plan warning below
 										}
+										// #1269 finding 2: we are about to return the STALE
+										// plan.json (hash mismatched the ledger, ledger replay
+										// threw, and no critic-approved snapshot was available).
+										// Attach a structured runtime-only staleness signal so
+										// consumers (phase-complete.ts, update-task-status.ts) can
+										// detect this instead of silently trusting plan.json.
+										// Mirrors the `_specStale` attach pattern above. These
+										// fields live on RuntimePlan (a TS overlay) and are never
+										// persisted (PlanSchema strips unknown keys) nor hashed
+										// (computePlanHash/computePlanContentHash use explicit
+										// field allow-lists).
+										{
+											const runtimeStale = validated as RuntimePlan;
+											runtimeStale._ledgerReplayStale = true;
+											runtimeStale._ledgerReplayStaleReason = `Ledger replay failed during hash-mismatch rebuild and no approved snapshot was available: ${replayError instanceof Error ? replayError.message : String(replayError)}`;
+											// #1269 finding-2 (hardened): persist the verdict so it is
+											// re-surfaced on EVERY subsequent loadPlan (the startup
+											// replay above runs at most once per workspace per process).
+											// The chokepoint near `return validated` re-attaches the
+											// flag and self-heals when plan↔ledger reconverge.
+											ledgerStaleWorkspaces.add(resolvedWorkspace);
+										}
 										warn(
 											`[loadPlan] Ledger replay failed during hash-mismatch rebuild: ${replayError instanceof Error ? replayError.message : String(replayError)}. Returning stale plan.json. To recover: check .swarm/plan-export/SWARM_PLAN.md for a checkpoint, or run /swarm reset-session.`,
 										);
@@ -638,7 +749,15 @@ export async function loadPlan(
 							}
 						}
 					}
-					return validated;
+					// #1269 finding-2 (hardened) chokepoint: this is the only return
+					// that yields the live (potentially stale) plan.json. Re-surface a
+					// persisted ledger-stale verdict here — and self-heal it if plan and
+					// ledger have reconverged — so the signal reaches consumers on EVERY
+					// load, not just the first per process.
+					return await surfaceLedgerStaleIfPersisted(
+						directory,
+						validated as RuntimePlan,
+					);
 				}
 			} catch (error) {
 				// Step 2: Validation failed, log warning and fall through to legacy

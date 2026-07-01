@@ -86,6 +86,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder 
 
 Additionally, present these two sub-items as part of the same exchange:
 - Parallel coders (default: 1, range: 1-6) -- how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files -- safe and faster, but only for tasks whose file scopes do NOT overlap. The per-task file scopes that determine a safe parallel count are not known until the plan is finalized, so default to 1 (serial) here; the precise recommendation is made at plan time once the tasks and their scopes exist.
+  > COMMON MISCONCEPTION: worktree isolation is baseline for standard parallel coders, governed by the parallel execution profile plus top-level `worktree.policy`. It is not provided by Lean Turbo or Epic. Do not recommend Lean Turbo or Epic to obtain worktree isolation; recommend them only for what they add beyond baseline (Lean Turbo: lane planning, file locks, phase reviewer, integrated diff; Epic: co-change awareness and auto-decide). Worktrees also do not make overlapping scopes safe: dependency readiness, file-disjoint scopes, and merge-back ownership are still required.
 - Commit frequency (default: phase-level only) -- optional per-task checkpoint commit after each task completion.
 - auto_proceed (boolean, default: false) -- when true, auto-advance to the next phase without asking "Ready for Phase N+1?"; runtime toggle via /swarm auto-proceed on|off.
 
