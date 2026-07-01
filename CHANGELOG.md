@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.99.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.4...v7.99.5) (2026-07-01)
+
+
+### Bug Fixes
+
+* **architect-knowledge:** disambiguate worktree isolation from Lean Turbo ([#1552](https://github.com/ZaxbyHub/opencode-swarm/issues/1552)) ([b9b84ed](https://github.com/ZaxbyHub/opencode-swarm/commit/b9b84edc80751672f1d276cb23d64014a57074bb))
+* **pr-review:** enforce lane coverage closure ([27f062f](https://github.com/ZaxbyHub/opencode-swarm/commit/27f062f4fbebe5819944a6a22369d4d3ef113457))
+* **pr-review:** enforce lane coverage closure ([4a1fbfc](https://github.com/ZaxbyHub/opencode-swarm/commit/4a1fbfcd4f25a2d09cb2c21aa9b61cf692f2b59b))
+
 ## [7.99.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.3...v7.99.4) (2026-06-30)
 
 
