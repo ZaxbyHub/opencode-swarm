@@ -593,6 +593,23 @@ export interface ResetToMainAfterMergeResult {
 }
 
 /**
+ * Gitignored build-artifact paths the post-merge alignment (`/swarm finalize`) is
+ * allowed to delete. Scoped to an explicit allowlist on purpose: `git clean -fdX`
+ * removes EVERY gitignored path under cwd — which in this repo also includes
+ * `.swarm/` (the cumulative runtime knowledge store), the gitignored
+ * `.claude/issue-traces/` directory (investigation traces), the gitignored files
+ * inside `.opencode/` (its `node_modules/`, `package.json`, lockfiles — via a
+ * nested `.opencode/.gitignore`), and root `node_modules/` (dependencies). A
+ * blanket `git clean -fdX` therefore silently destroyed `.swarm/knowledge.jsonl` —
+ * the exact file the finalize clean stage (`runCleanStage`) deliberately preserves.
+ * Restricting removal to this allowlist clears stale build output across the
+ * reset while leaving runtime/durable state and dependencies untouched.
+ * `dist/` is the repo's only committed build output (see the `clean`/`build`
+ * scripts in package.json); extend this list only with regenerable build output.
+ */
+export const GITIGNORED_BUILD_ARTIFACTS: readonly string[] = ['dist'];
+
+/**
  * Aggressive git reset for post-merge cleanup.
  * Handles the common scenario: feature branch PR merged, local has uncommitted artifacts.
  * Steps: detect default branch → safety check → fetch → checkout → discard changes → reset → delete branch.
@@ -783,12 +800,23 @@ export async function resetToMainAfterMerge(
 			changesDiscarded = discardSucceeded;
 		}
 
-		// Step 7b: Remove only gitignored files/directories (build artifacts); user-created untracked files are preserved (FR-013).
+		// Step 7b: Remove stale gitignored BUILD ARTIFACTS left over from the feature
+		// branch, restricted to an explicit allowlist (GITIGNORED_BUILD_ARTIFACTS).
+		// `-X` limits removal to gitignored paths; the trailing pathspec limits it
+		// further to the allowlist. This pathspec is REQUIRED, not cosmetic: a bare
+		// `git clean -fdX` also deletes `.swarm/` (gitignored runtime knowledge store),
+		// `.claude/issue-traces/`, gitignored files under `.opencode/`, and
+		// `node_modules/` — destroying cumulative knowledge that the finalize clean
+		// stage deliberately preserves (FR-013 only guarded non-ignored user files;
+		// ignored runtime state was still wiped).
 		// git checkout -- . only resets tracked files; git clean removes untracked.
 		try {
-			_internals.gitExec(['clean', '-fdX'], cwd);
+			_internals.gitExec(
+				['clean', '-fdX', '--', ...GITIGNORED_BUILD_ARTIFACTS],
+				cwd,
+			);
 		} catch {
-			warnings.push('Could not clean untracked files');
+			warnings.push('Could not clean build artifacts');
 		}
 
 		// Step 8: Delete previous branch if it's not the default

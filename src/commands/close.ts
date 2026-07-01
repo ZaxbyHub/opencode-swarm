@@ -341,6 +341,16 @@ const ACTIVE_STATE_TO_CLEAN = [
 ];
 
 /**
+ * Terminal plan-state files that must be removed at finalize UNCONDITIONALLY — even
+ * when archiving them failed — so the next session cannot resurrect the CLOSED plan
+ * (loadPlan Step 1 / replayFromLedger have no terminal-status filter). Kept as a
+ * shared constant so the archive-failure diagnostics and the unconditional removal
+ * below agree on the set; otherwise the "Preserved …" warning would contradict the
+ * removal that always follows for these files.
+ */
+const TERMINAL_STATE_FILES = ['plan.json', 'plan-ledger.jsonl'] as const;
+
+/**
  * Knowledge-family artifacts whose backing store redirects to a shared link
  * directory when the worktree is linked (`.swarm/link.json`). A single
  * worktree's `/swarm close` must NOT archive or delete the cohort-shared store —
@@ -1218,10 +1228,22 @@ export async function runCleanStage(
 				continue;
 			}
 			if (!ctx.archivedActiveStateFiles.has(artifact)) {
+				const reason = ctx.archiveFailureReasons?.get(artifact);
+				if ((TERMINAL_STATE_FILES as readonly string[]).includes(artifact)) {
+					// Terminal plan-state is removed unconditionally below (resurrection
+					// prevention), so it is NOT preserved here even though archiving failed.
+					// Warn accurately that the forensic copy is missing but the file is still
+					// removed — do not claim it was "preserved" (the removal contradicts that).
+					ctx.warnings.push(
+						reason
+							? `${artifact} was not archived (${reason}); removing it anyway to prevent CLOSED-plan resurrection next session — no archive copy retained.`
+							: `${artifact} was not archived; removing it anyway to prevent CLOSED-plan resurrection next session — no archive copy retained.`,
+					);
+					continue;
+				}
 				// This file was NOT successfully archived — do not delete it.
 				// Include the failure reason when one was recorded (e.g. EBUSY,
 				// EPERM, ENOSPC) so operators can diagnose without digging into logs.
-				const reason = ctx.archiveFailureReasons?.get(artifact);
 				ctx.warnings.push(
 					reason
 						? `Preserved ${artifact} because it was not successfully archived: ${reason}.`
@@ -1393,6 +1415,40 @@ export async function runCleanStage(
 	}
 	if (tmpFilesRemoved > 0) {
 		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
+	}
+
+	// Terminal-state removal (finalize knowledge-preservation fix): unconditionally
+	// remove plan.json + plan-ledger.jsonl so the next session cannot resurrect the
+	// CLOSED plan. loadPlan Step 1 and replayFromLedger have NO terminal-status filter
+	// (see the CRITICAL note on ACTIVE_STATE_TO_CLEAN above), so a surviving terminal
+	// plan.json OR ledger is materialized back into an active plan next session.
+	//
+	// Why here, unconditionally: the align stage's `git clean` previously deleted these
+	// as a backstop even when the archive-first guard preserved them (archive failure).
+	// Now that align only cleans an explicit build-artifact allowlist
+	// (GITIGNORED_BUILD_ARTIFACTS) and no longer touches `.swarm/`, the clean stage must
+	// own terminal-state removal itself. This is behavior-preserving for these two files
+	// (the old blanket clean removed them regardless of archive success). They are copied
+	// into the archive bundle first in stage 2 (ARCHIVE_ARTIFACTS), so the forensic trail
+	// is retained whenever archiving succeeds; the ENOENT branch below covers the case
+	// where the archive-gated cleanup already removed them.
+	for (const terminalFile of TERMINAL_STATE_FILES) {
+		try {
+			await fs.unlink(path.join(ctx.swarmDir, terminalFile));
+			if (!cleanedFiles.includes(terminalFile)) {
+				cleanedFiles.push(terminalFile);
+			}
+		} catch (err) {
+			const errno = (err as NodeJS.ErrnoException)?.code;
+			if (errno === 'ENOENT') {
+				// Already removed by the archive-gated cleanup above — expected; silent skip.
+			} else {
+				const reason = err instanceof Error ? err.message : String(err);
+				ctx.warnings.push(
+					`Failed to remove terminal-state file ${terminalFile} [${errno ?? 'unknown'}]: ${reason}`,
+				);
+			}
+		}
 	}
 
 	// #519 (v6.71.1): clear persisted declare_scope files so the next session
