@@ -40,9 +40,12 @@ mock.module('../../../src/lang/runtime', () => ({
 	loadGrammar: (...args: unknown[]) => mockLoadGrammar(...args),
 }));
 
-// Mock evidence manager
+// Mock evidence manager. syntax-check.ts calls saveEvidence via the
+// `_internals` DI seam, so both keys must resolve to the same mock.
+const mockSaveEvidenceInternal = mock(async () => {});
 mock.module('../../../src/evidence/manager', () => ({
-	saveEvidence: mock(async () => {}),
+	saveEvidence: mockSaveEvidenceInternal,
+	_internals: { saveEvidence: mockSaveEvidenceInternal },
 }));
 
 // Fake parser helper - creates a parser with no errors

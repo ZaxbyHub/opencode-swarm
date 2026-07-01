@@ -3,19 +3,16 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { _internals as evidenceInternals } from '../../../src/evidence/manager';
 import {
 	type SyntaxCheckInput,
 	syntaxCheck,
 } from '../../../src/tools/syntax-check';
 
-// Mock the saveEvidence function
-vi.mock('../../../src/evidence/manager', () => ({
-	saveEvidence: vi.fn().mockResolvedValue(undefined),
-}));
-
 describe('syntax_check tool', () => {
 	let tmpDir: string;
 	let originalCwd: string;
+	let originalSaveEvidence: typeof evidenceInternals.saveEvidence;
 
 	beforeEach(async () => {
 		originalCwd = process.cwd();
@@ -23,6 +20,11 @@ describe('syntax_check tool', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'syntax-check-test-')),
 		);
 		process.chdir(tmpDir);
+		// _internals DI seam (not vi.mock — AGENTS.md invariant 7: mock.module
+		// leaks across files in Bun's shared test-runner process; a plain
+		// property assignment is trivially and reliably restorable).
+		originalSaveEvidence = evidenceInternals.saveEvidence;
+		evidenceInternals.saveEvidence = vi.fn().mockResolvedValue(undefined);
 	});
 
 	afterEach(() => {
@@ -30,8 +32,7 @@ describe('syntax_check tool', () => {
 		if (tmpDir && fs.existsSync(tmpDir)) {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
-		vi.clearAllMocks();
-		vi.restoreAllMocks();
+		evidenceInternals.saveEvidence = originalSaveEvidence;
 	});
 
 	// ============ Valid File Parsing ============

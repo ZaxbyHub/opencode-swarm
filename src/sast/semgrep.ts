@@ -211,7 +211,19 @@ function mapSemgrepSeverity(
 async function executeWithTimeout(
 	command: string,
 	args: string[],
-	options: { cwd?: string; timeoutMs: number; maxOutputBytes?: number },
+	options: {
+		cwd?: string;
+		timeoutMs: number;
+		maxOutputBytes?: number;
+		/**
+		 * Test-only hook invoked once with the spawned child's pid, immediately
+		 * after `spawn()` returns. Lets tests assert the child is actually
+		 * reaped (not just that a placeholder exit code was set) without
+		 * mocking `node:child_process` (which would leak across test files —
+		 * AGENTS.md invariant 7). No production caller passes this.
+		 */
+		onSpawn?: (pid: number | undefined) => void;
+	},
 ): Promise<{
 	stdout: string;
 	stderr: string;
@@ -228,6 +240,7 @@ async function executeWithTimeout(
 			cwd: options.cwd,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		});
+		options.onSpawn?.(child.pid);
 
 		let stdout = '';
 		let stderr = '';

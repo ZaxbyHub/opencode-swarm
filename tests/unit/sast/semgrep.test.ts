@@ -21,6 +21,34 @@ describe('executeWithTimeout subprocess hardening', () => {
 		return p;
 	};
 
+	/**
+	 * Polls process liveness via `process.kill(pid, 0)` (throws ESRCH once the
+	 * OS has actually reaped the process) until it's dead or `timeoutMs`
+	 * elapses. Used to prove a child was *actually* killed, not just that a
+	 * placeholder exit code was set (see issue #1248 item 3).
+	 */
+	const waitForProcessDeath = async (
+		pid: number | undefined,
+		timeoutMs: number,
+	): Promise<boolean> => {
+		if (pid === undefined) return true;
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			try {
+				process.kill(pid, 0);
+			} catch {
+				return true; // ESRCH (or any signal failure) — process is gone
+			}
+			await new Promise((r) => setTimeout(r, 50));
+		}
+		try {
+			process.kill(pid, 0);
+			return false; // still alive after the deadline
+		} catch {
+			return true;
+		}
+	};
+
 	beforeAll(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'semgrep-exec-test-'));
 	});
@@ -159,18 +187,36 @@ describe('executeWithTimeout subprocess hardening', () => {
 				'setInterval(() => process.stdout.write("😀".repeat(100)), 5);',
 			].join('\n'),
 		);
+		let spawnedPid: number | undefined;
 		const result = await _internals.executeWithTimeout(
 			process.execPath,
 			[script],
-			{ timeoutMs: 30_000, maxOutputBytes: 1024 }, // Long timeout but low byte cap
+			{
+				timeoutMs: 30_000, // Long timeout but low byte cap
+				maxOutputBytes: 1024,
+				onSpawn: (pid) => {
+					spawnedPid = pid;
+				},
+			},
 		);
 		// Must detect truncation
 		expect(result.truncated).toBe(true);
 		// Byte count must be bounded
 		const stdoutBytes = Buffer.byteLength(result.stdout ?? '', 'utf8');
 		expect(stdoutBytes).toBeLessThanOrEqual(1024);
-		// Child must have been killed (exit code or signal)
-		expect(result.exitCode).not.toBe(0);
+		// Guard against a vacuous pass: waitForProcessDeath treats an
+		// undefined pid as "already dead", so without this assertion a
+		// broken onSpawn wiring could silently short-circuit the check below.
+		expect(spawnedPid).toBeGreaterThan(0);
+		// exitCode is set synchronously by the overflow branch's settle() call
+		// and is NOT derived from the real process signal — it does not prove
+		// the child was actually killed (see issue #1248 item 3). Assert real
+		// process death instead: the script traps SIGTERM, so only the
+		// SIGKILL escalation inside settle() (after KILL_GRACE_MS=2000ms) can
+		// reap it. Poll bound mirrors the 4s buffer used by the sibling
+		// SIGKILL-escalation test below.
+		const died = await waitForProcessDeath(spawnedPid, 6_000);
+		expect(died).toBe(true);
 	});
 
 	it('terminates the child via SIGKILL after SIGTERM grace period (KILL_GRACE_MS escalation)', async () => {

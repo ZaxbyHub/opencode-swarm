@@ -36,9 +36,13 @@ import {
 	syntaxCheck,
 } from '../../../src/tools/syntax-check';
 
-// Mock the saveEvidence function
+// Mock the saveEvidence function. syntax-check.ts calls it via the
+// `_internals` DI seam (see src/evidence/manager.ts), so the mock factory
+// must expose the same mock function under both keys.
+const mockSaveEvidence = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../../src/evidence/manager', () => ({
-	saveEvidence: vi.fn().mockResolvedValue(undefined),
+	saveEvidence: mockSaveEvidence,
+	_internals: { saveEvidence: mockSaveEvidence },
 }));
 
 const { saveEvidence } = await import('../../../src/evidence/manager');

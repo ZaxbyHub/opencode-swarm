@@ -692,10 +692,12 @@ export const _internals: {
 	listEvidenceTaskIds: typeof listEvidenceTaskIds;
 	validateProjectRoot: typeof validateProjectRoot;
 	validateEvidence: typeof validateEvidence;
+	saveEvidence: typeof saveEvidence;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
 	listEvidenceTaskIds,
 	validateProjectRoot,
 	validateEvidence,
+	saveEvidence,
 } as const;
