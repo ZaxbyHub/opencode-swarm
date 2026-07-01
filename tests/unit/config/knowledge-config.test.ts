@@ -534,5 +534,31 @@ describe('KnowledgeConfigSchema', () => {
 				});
 			}).toThrow();
 		});
+
+		it('should accept and reject boundary values for tool-call thresholds', () => {
+			const result1 = KnowledgeConfigSchema.parse({
+				realtime_learning_nudge: { first_after_tool_calls: 1000 },
+			});
+			expect(result1.realtime_learning_nudge.first_after_tool_calls).toBe(1000);
+
+			expect(() => {
+				KnowledgeConfigSchema.parse({
+					realtime_learning_nudge: { first_after_tool_calls: 1001 },
+				});
+			}).toThrow();
+
+			const result2 = KnowledgeConfigSchema.parse({
+				realtime_learning_nudge: { repeat_after_tool_calls: 1000 },
+			});
+			expect(result2.realtime_learning_nudge.repeat_after_tool_calls).toBe(
+				1000,
+			);
+
+			expect(() => {
+				KnowledgeConfigSchema.parse({
+					realtime_learning_nudge: { repeat_after_tool_calls: 1001 },
+				});
+			}).toThrow();
+		});
 	});
 });

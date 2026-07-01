@@ -208,6 +208,31 @@ describe('System Enhancer real-time learning nudge', () => {
 		expect(prompt).toContain('curator');
 		expect(prompt).toContain('knowledge_application_findings');
 		expect(prompt).toContain('skill_improve');
+		expect(prompt).toContain(
+			'generated skills stay proposal/draft gated and must not auto-activate',
+		);
 		expect(prompt.length).toBeLessThan(1100);
+	});
+
+	it('injects the nudge via the candidate-ranking path when scoring is enabled', async () => {
+		const config = {
+			...defaultConfig,
+			context_budget: { scoring: { enabled: true } },
+			knowledge: {
+				enabled: true,
+				realtime_learning_nudge: {
+					enabled: true,
+					first_after_tool_calls: 10,
+					repeat_after_tool_calls: 25,
+				},
+			} as PluginConfig['knowledge'],
+		};
+
+		await recordCompletedToolCalls('learning-session', 10);
+		const output = await invokeHook(config);
+		expect(
+			output.some((entry) => entry.includes('[SWARM LEARNING NUDGE]')),
+		).toBe(true);
+		expect(output.some((entry) => entry.includes('knowledge_add'))).toBe(true);
 	});
 });
