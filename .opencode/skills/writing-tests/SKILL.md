@@ -736,6 +736,7 @@ The `--timeout 120000` flag sets per-test timeout to 120 seconds. Individual tes
 3. Verify no `process.cwd()` usage — use the `directory` parameter from `createSwarmTool` or hook constructor
 4. Verify no hardcoded paths (`/tmp/...`, `C:\...`) — use `os.tmpdir()` + `path.join()`
 5. Verify mocks are restored in `afterEach` if using `spyOn` or `mock.module`
+6. Run `bunx @biomejs/biome@2.3.14 check --write <touched-test-files>` to auto-format only the files you created or modified. Formatting issues are a common first-pass failure — scoping the command to touched files avoids accidental workspace-wide rewrites.
 
 ## Known Pre-existing Test Failures
 
