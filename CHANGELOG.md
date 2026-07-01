@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.102.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.101.0...v7.102.0) (2026-07-01)
+
+
+### Features
+
+* **repo-graph:** add symbol visibility semantics ([f2c895f](https://github.com/ZaxbyHub/opencode-swarm/commit/f2c895f80e5e0b015c3840565dec33c3ab8fa6f9))
+
 ## [7.101.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.1...v7.101.0) (2026-07-01)
 
 
