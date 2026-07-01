@@ -540,6 +540,40 @@ High-confidence candidates (>= `curator.min_skill_confidence`) trigger
 `skill_generate` in **draft** mode; activation always requires a human or
 architect to call `skill_apply`.
 
+### Real-time learning nudge
+
+The system enhancer injects an architect-only `[SWARM LEARNING NUDGE]` during
+longer sessions. The nudge is cadence-gated by total session tool calls and
+asks the architect to decide whether the current work revealed a durable,
+actionable lesson that should be captured immediately with `knowledge_add` or
+left for curator phase/postmortem review.
+
+This is intentionally not automatic skill mutation. It mirrors the safe part of
+Hermes-style in-session learning - review while context is fresh - but keeps
+opencode-swarm's existing boundaries:
+
+- `knowledge_add` remains the write path for active knowledge and still runs
+  validation, deduplication, reinforcement, and quarantine rules.
+- The curator remains the review engine for evidence-level learning. Phase and
+  postmortem curator passes can emit `knowledge_application_findings`,
+  `skill_candidates`, draft skills, skill revisions, and stale-skill signals.
+- `skill_improve` remains quota-bounded and proposal/draft gated; generated
+  skills are never auto-activated.
+- Transient environment failures, stale negative tool claims, and one-off
+  repo accidents should not be captured unless they have a reusable trigger.
+
+Configure the cadence under `knowledge.realtime_learning_nudge`:
+
+```jsonc
+"knowledge": {
+  "realtime_learning_nudge": {
+    "enabled": true,
+    "first_after_tool_calls": 10,
+    "repeat_after_tool_calls": 25
+  }
+}
+```
+
 ### Maturity gate
 
 An entry passes the maturity gate according to the following decision logic:

@@ -1099,6 +1099,21 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
+	realtime_learning_nudge: z
+		.object({
+			/** Enable/disable the real-time learning nudge. */
+			enabled: z.boolean().default(true),
+			/** First total session tool-call count at which to nudge the architect. */
+			first_after_tool_calls: z.number().int().min(1).max(1000).default(10),
+			/** Minimum additional tool calls before repeating the nudge. */
+			repeat_after_tool_calls: z.number().int().min(1).max(1000).default(25),
+		})
+		.default({
+			enabled: true,
+			first_after_tool_calls: 10,
+			repeat_after_tool_calls: 25,
+		}),
 	/** Change 5: retrieval-upgrade tuning (MMR diversity, cold-start, synonyms). */
 	retrieval: z
 		.object({

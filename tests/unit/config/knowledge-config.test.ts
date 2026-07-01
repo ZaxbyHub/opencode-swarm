@@ -40,6 +40,11 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				realtime_learning_nudge: {
+					enabled: true,
+					first_after_tool_calls: 10,
+					repeat_after_tool_calls: 25,
+				},
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
 				enrichment: {
@@ -94,6 +99,11 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				realtime_learning_nudge: {
+					enabled: false,
+					first_after_tool_calls: 5,
+					repeat_after_tool_calls: 15,
+				},
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
 				enrichment: {
@@ -214,6 +224,11 @@ describe('KnowledgeConfigSchema', () => {
 					default_max_phases: 10,
 					todo_max_phases: 3,
 					sweep_enabled: true,
+					realtime_learning_nudge: {
+						enabled: false,
+						first_after_tool_calls: 5,
+						repeat_after_tool_calls: 15,
+					},
 					// v7.10.0+ directive retrieval threshold
 					directive_min_confidence: 0.75,
 					enrichment: {
@@ -476,6 +491,48 @@ describe('KnowledgeConfigSchema', () => {
 			expect(result.default_max_phases).toBe(20);
 			expect(result.todo_max_phases).toBe(5);
 			expect(result.sweep_enabled).toBe(false);
+		});
+	});
+
+	describe('real-time learning nudge config', () => {
+		it('should use real-time learning nudge defaults when not provided', () => {
+			const result = KnowledgeConfigSchema.parse({});
+
+			expect(result.realtime_learning_nudge).toEqual({
+				enabled: true,
+				first_after_tool_calls: 10,
+				repeat_after_tool_calls: 25,
+			});
+		});
+
+		it('should preserve custom real-time learning nudge values', () => {
+			const result = KnowledgeConfigSchema.parse({
+				realtime_learning_nudge: {
+					enabled: false,
+					first_after_tool_calls: 3,
+					repeat_after_tool_calls: 7,
+				},
+			});
+
+			expect(result.realtime_learning_nudge).toEqual({
+				enabled: false,
+				first_after_tool_calls: 3,
+				repeat_after_tool_calls: 7,
+			});
+		});
+
+		it('should reject non-positive real-time learning nudge thresholds', () => {
+			expect(() => {
+				KnowledgeConfigSchema.parse({
+					realtime_learning_nudge: { first_after_tool_calls: 0 },
+				});
+			}).toThrow();
+
+			expect(() => {
+				KnowledgeConfigSchema.parse({
+					realtime_learning_nudge: { repeat_after_tool_calls: 0 },
+				});
+			}).toThrow();
 		});
 	});
 });

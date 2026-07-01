@@ -33,6 +33,10 @@ import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
+import {
+	clearRealtimeLearningNudgeSession,
+	resetRealtimeLearningNudgeState,
+} from './hooks/realtime-learning-nudge.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
@@ -524,6 +528,7 @@ export function resetSwarmState(): void {
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
+	resetRealtimeLearningNudgeState();
 	swarmState.generatedAgentNames = [];
 	_rehydrationCache = null;
 	// Full Auto Mode (Phase 4)
@@ -841,6 +846,7 @@ export function startAgentSession(
  */
 export function endAgentSession(sessionId: string): void {
 	swarmState.agentSessions.delete(sessionId);
+	clearRealtimeLearningNudgeSession(sessionId);
 }
 
 /**

@@ -748,6 +748,33 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
 
+## Real-Time Learning Nudges
+
+Architect sessions can receive a cadence-bounded learning nudge while work is
+still in progress. The nudge asks the architect to capture durable procedural
+lessons with `knowledge_add` when the lesson is obvious, and to leave
+evidence-level review to the existing curator phase/postmortem path when the
+signal depends on repeated outcomes or generated-skill health. It does not
+auto-activate skills.
+
+```jsonc
+{
+  "knowledge": {
+    "realtime_learning_nudge": {
+      "enabled": true,
+      "first_after_tool_calls": 10,
+      "repeat_after_tool_calls": 25
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `knowledge.realtime_learning_nudge.enabled` | boolean | `true` | Enables the architect-only in-session learning nudge when knowledge is enabled. |
+| `knowledge.realtime_learning_nudge.first_after_tool_calls` | number | `10` | First total session tool-call count that can trigger the nudge. |
+| `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
+
 ## Skill Improver Consolidation
 
 `skill_improver` can run manually or at safe scheduled cadence points.
