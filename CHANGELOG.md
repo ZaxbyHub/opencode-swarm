@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.100.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.0...v7.100.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **cache:** diagnose missing treesitter wasm caches ([a2ac943](https://github.com/ZaxbyHub/opencode-swarm/commit/a2ac943fecb2c30d9e6d3f5986602cb29c714af7))
+* **finalize:** stop git clean -fdX from deleting .swarm/ knowledge ([df75571](https://github.com/ZaxbyHub/opencode-swarm/commit/df75571ad114800fedd9b2e67631dba92bca9757))
+* **test:** make diagnose cache grammar test platform-agnostic ([b63925c](https://github.com/ZaxbyHub/opencode-swarm/commit/b63925c870b43c2b0b8be55f2399edd1fc816a20))
+
 ## [7.100.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.7...v7.100.0) (2026-07-01)
 
 
