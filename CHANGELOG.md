@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.99.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.5...v7.99.6) (2026-07-01)
+
+
+### Bug Fixes
+
+* **commands:** silence registry validation warnings ([f4c1b97](https://github.com/ZaxbyHub/opencode-swarm/commit/f4c1b974f8dbf083f7668d1832f4d5045d4adaf3))
+* **plugin:** remove SIGINT/SIGTERM handlers and guard console.warn calls ([760f5d2](https://github.com/ZaxbyHub/opencode-swarm/commit/760f5d2d059fdb2b7b29ef898d9aa4e512d44481))
+* **plugin:** remove SIGINT/SIGTERM handlers and guard console.warn calls ([a569e20](https://github.com/ZaxbyHub/opencode-swarm/commit/a569e2028cda78f1cea92396d1513198f3f5ae04))
+* **repo-graph:** preserve fallback context and add graph health ([ef046ab](https://github.com/ZaxbyHub/opencode-swarm/commit/ef046ab10c1385f895f52a24bf193fc5a95e0da6))
+
 ## [7.99.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.4...v7.99.5) (2026-07-01)
 
 
