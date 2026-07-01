@@ -795,7 +795,10 @@ describe('/swarm sdd validate --source swarm', () => {
 	});
 
 	test('validate --source swarm without --json outputs human-readable text', async () => {
-		const out = await handleSddValidateCommand(nativeDir, ['--source', 'swarm']);
+		const out = await handleSddValidateCommand(nativeDir, [
+			'--source',
+			'swarm',
+		]);
 
 		expect(out).toContain('SDD validation: valid');
 		expect(out).toContain('Provider: swarm');
@@ -809,7 +812,8 @@ describe('/swarm sdd validate --source swarm', () => {
 		);
 		fs.mkdirSync(path.join(oversizedDir, '.swarm'), { recursive: true });
 		// Write a spec larger than MAX_SPEC_BYTES (256 KiB)
-		const largeContent = '# Specification: Oversized\n\n## Requirements\n' +
+		const largeContent =
+			'# Specification: Oversized\n\n## Requirements\n' +
 			'### Requirement: Large\n' +
 			'The system MUST handle large content.'.repeat(20000); // ~1MB
 		fs.writeFileSync(
