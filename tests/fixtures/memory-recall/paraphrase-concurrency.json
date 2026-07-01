@@ -1,0 +1,64 @@
+{
+	"name": "paraphrase-concurrency",
+	"query": "running tasks in parallel safely",
+	"task": "Run tasks in parallel without race conditions.",
+	"agentRole": "backend-engineer",
+	"scopes": [
+		{
+			"type": "repository",
+			"repoId": "opencode-swarm"
+		}
+	],
+	"kinds": ["code_pattern", "failure_pattern"],
+	"k": 2,
+	"maxItems": 2,
+	"tokenBudget": 1000,
+	"expectedLabels": ["concurrency-mutex-deadlock"],
+	"records": [
+		{
+			"label": "concurrency-mutex-deadlock",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "code_pattern",
+			"text": "mutex lock contention deadlock avoidance",
+			"tags": ["concurrency", "mutex", "deadlock"],
+			"confidence": 0.95,
+			"source": {
+				"type": "manual",
+				"ref": "concurrency-mutex-deadlock"
+			}
+		},
+		{
+			"label": "concurrency-noise-1",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "code_pattern",
+			"text": "Parallel tasks should use mutex locks to avoid race conditions.",
+			"tags": ["parallel", "mutex", "race"],
+			"confidence": 0.9,
+			"source": {
+				"type": "file",
+				"filePath": "src/concurrency/mutex.ts"
+			}
+		},
+		{
+			"label": "concurrency-noise-2",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "failure_pattern",
+			"text": "Running tasks in parallel caused data corruption due to unsynchronized access.",
+			"tags": ["parallel", "corruption", "unsynchronized"],
+			"confidence": 0.85,
+			"source": {
+				"type": "file",
+				"filePath": "src/concurrency/race.ts"
+			}
+		}
+	]
+}

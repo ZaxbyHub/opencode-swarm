@@ -4,7 +4,12 @@ import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
-import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
+import { warn } from '../utils';
+import {
+	DEFAULT_MEMORY_CONFIG,
+	DURABLE_MEMORY_KINDS,
+	type MemoryConfig,
+} from './config';
 import {
 	applyPatchToMemory,
 	buildCuratorDecisionEvent,
@@ -13,6 +18,19 @@ import {
 	validateCuratorPromotableMemory,
 	validateDecisionMatchesProposal,
 } from './curator-decision-helpers';
+import { EmbeddingCache } from './embeddings/cache';
+import { type FusionWeights, fuseRankings } from './embeddings/fusion';
+import { LocalEmbeddingProvider } from './embeddings/local-provider';
+import {
+	CrossEncoderReranker,
+	type RerankCandidate,
+	shouldRerank,
+} from './embeddings/reranker';
+import type { EmbeddingProvider } from './embeddings/types';
+import {
+	EmbeddingUnavailableError,
+	EmbeddingVersionMismatchError,
+} from './embeddings/types';
 import { MemoryValidationError } from './errors';
 import {
 	backupLegacyJsonl,
@@ -33,6 +51,7 @@ import type {
 	MemoryRecallUsageFilter,
 } from './provider';
 import {
+	normalizeMemoryText,
 	stableScopeKey,
 	validateMemoryProposal,
 	validateMemoryRecordRules,
@@ -211,6 +230,16 @@ export const MIGRATIONS: Migration[] = [
 				ON memory_recall_usage(timestamp DESC);
 		`,
 	},
+	{
+		version: 6,
+		name: 'create_embedding_config_table',
+		sql: `
+			CREATE TABLE IF NOT EXISTS embedding_config (
+				key TEXT PRIMARY KEY,
+				value TEXT
+			);
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -261,6 +290,10 @@ export class SQLiteMemoryProvider
 	private initPromise: Promise<void> | null = null;
 	private db: Database | null = null;
 	private ftsAvailable = false;
+	private vecAvailable = false;
+	private embeddingProvider: EmbeddingProvider | null = null;
+	private embeddingCache: EmbeddingCache | null = null;
+	private reranker: CrossEncoderReranker | null = null;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
 	private lastAutomaticJsonlMigration: SQLiteJsonlImportResult | null = null;
@@ -331,6 +364,37 @@ export class SQLiteMemoryProvider
 		this.runMigrations();
 		this.backfillScopeKeys();
 		this.ftsAvailable = this.initializeFtsIndex();
+		this.initializeVecExtension();
+		if (this.config.embeddings.enabled && !this.embeddingProvider) {
+			try {
+				this.embeddingProvider = new LocalEmbeddingProvider({
+					model: this.config.embeddings.model,
+					dimension: this.config.embeddings.dimension,
+					version: this.config.embeddings.version,
+				});
+			} catch (err) {
+				this.embeddingProvider = null;
+				warn(
+					'Failed to construct embedding provider — dense retrieval disabled',
+					{
+						reason: err instanceof Error ? err.message : String(err),
+					},
+				);
+			}
+			try {
+				this.embeddingCache = new EmbeddingCache(
+					this.config.embeddings.cacheSize,
+				);
+			} catch (err) {
+				this.embeddingCache = null;
+				warn(
+					'Failed to construct embedding cache — recall works without cache',
+					{
+						reason: err instanceof Error ? err.message : String(err),
+					},
+				);
+			}
+		}
 		this.lastAutomaticJsonlMigration = null;
 		await this.migrateLegacyJsonlIfNeeded();
 		const memoryLoad = this.loadMemories();
@@ -375,6 +439,7 @@ export class SQLiteMemoryProvider
 		);
 		this.memories.set(next.id, next);
 		this.writeMemory(next);
+		await this.writeMemoryVec(next);
 		await this.event('upsert', next.id);
 		return next;
 	}
@@ -392,6 +457,7 @@ export class SQLiteMemoryProvider
 			this.memories.delete(id);
 			this.requireDb().run('DELETE FROM memory_items WHERE id = ?', [id]);
 			this.deleteMemoryFts(id);
+			this.deleteMemoryVec(id);
 		} else {
 			const tombstone: MemoryRecord = {
 				...existing,
@@ -413,25 +479,214 @@ export class SQLiteMemoryProvider
 		diagnostics: RecallScoringDiagnostics;
 	}> {
 		await this.initialize();
+
+		// ── Disabled-path guard: byte-identical to the legacy lexical-only flow ──
+		// When embeddings are off (config flag, vec extension, or provider missing),
+		// execute the existing path verbatim so golden fixtures pass unchanged.
+		if (
+			!this.config.embeddings.enabled ||
+			!this.vecAvailable ||
+			!this.embeddingProvider
+		) {
+			const scopedRecords = await this.list({
+				scopes: request.scopes,
+				kinds: request.kinds,
+				includeExpired: request.includeExpired,
+				limit: RECALL_CANDIDATE_LIMIT,
+			});
+			const candidates = this.selectRecallCandidates(request, scopedRecords);
+			const result = scoreMemoryRecordsWithDiagnostics(
+				candidates.records,
+				request,
+			);
+			const reranked = candidates.ftsOrder
+				? rerankWithFts(result.items, candidates.ftsOrder)
+				: result.items;
+			return {
+				items: reranked.slice(0, request.maxItems),
+				diagnostics: {
+					...result.diagnostics,
+					returnedCount: Math.min(reranked.length, request.maxItems),
+				},
+			};
+		}
+
+		// ── Enabled path: lexical + dense RRF fusion ──
+		const recallElapsedStart = Date.now();
+
+		// Stage 1 – lexical (FTS5-ranked candidates, unchanged from legacy path).
 		const scopedRecords = await this.list({
 			scopes: request.scopes,
 			kinds: request.kinds,
 			includeExpired: request.includeExpired,
 			limit: RECALL_CANDIDATE_LIMIT,
 		});
-		const candidates = this.selectRecallCandidates(request, scopedRecords);
-		const result = scoreMemoryRecordsWithDiagnostics(
-			candidates.records,
+		const lexicalCandidates = this.selectRecallCandidates(
+			request,
+			scopedRecords,
+		);
+		const lexicalResult = scoreMemoryRecordsWithDiagnostics(
+			lexicalCandidates.records,
 			request,
 		);
-		const reranked = candidates.ftsOrder
-			? rerankWithFts(result.items, candidates.ftsOrder)
-			: result.items;
+		const lexicalReranked = lexicalCandidates.ftsOrder
+			? rerankWithFts(lexicalResult.items, lexicalCandidates.ftsOrder)
+			: lexicalResult.items;
+		// best-first id list for fusion (already sorted by score desc)
+		const lexicalIds = lexicalReranked.map((item) => item.record.id);
+
+		// Stage 2 – dense (sqlite-vec kNN). Non-fatal fallback to lexical-only on
+		// EmbeddingVersionMismatchError or any provider failure.
+		let denseIds: string[] = [];
+		try {
+			const modelVersion = this.embeddingProvider.modelVersion;
+			const normalizedQuery = normalizeMemoryText(request.query).toLowerCase();
+			let queryEmbedding =
+				this.embeddingCache?.get(modelVersion, normalizedQuery)?.vector ?? null;
+			if (queryEmbedding === null) {
+				queryEmbedding = await this.embeddingProvider.embed(normalizedQuery);
+				this.embeddingCache?.set(modelVersion, normalizedQuery, {
+					vector: queryEmbedding,
+					modelVersion,
+					queryHash: normalizedQuery,
+				});
+			}
+			const denseRecords = await this.selectDenseCandidates(
+				request,
+				queryEmbedding,
+			);
+			denseIds = denseRecords.map((record) => record.id);
+		} catch (err) {
+			if (
+				err instanceof EmbeddingVersionMismatchError ||
+				err instanceof EmbeddingUnavailableError
+			) {
+				warn('Dense retrieval failed — falling back to lexical-only', {
+					reason: err instanceof Error ? err.message : String(err),
+				});
+			} else {
+				warn('Dense retrieval failed — falling back to lexical-only', {
+					reason: err instanceof Error ? err.message : String(err),
+				});
+			}
+			// True lexical-only fallback — identical shape to the disabled path.
+			return {
+				items: lexicalReranked.slice(0, request.maxItems),
+				diagnostics: {
+					...lexicalResult.diagnostics,
+					returnedCount: Math.min(lexicalReranked.length, request.maxItems),
+				},
+			};
+		}
+
+		// Stage 3 – metadata ranking (scope/kind match from lexical candidates).
+		const metadataIds = buildMetadataRankedIds(lexicalReranked, request);
+
+		// Stage 4 – fuse via RRF.
+		const weights: FusionWeights = this.config.retrieval.weights;
+		const rrfK = this.config.retrieval.rrfK;
+		const fused = fuseRankings(
+			lexicalIds,
+			denseIds,
+			metadataIds,
+			weights,
+			rrfK,
+		);
+
+		// Stage 5 – map back to RecallResultItem with normalised fusedScore.
+		// Build a lookup from the lexical-scored items (carry forward their signals).
+		const lexicalItemMap = new Map(
+			lexicalReranked.map((item) => [item.record.id, item]),
+		);
+		const minScore = request.minScore ?? this.config.recall.minScore;
+		const fusedItems: RecallResultItem[] = [];
+		for (const candidate of fused) {
+			if (candidate.fusedScore < minScore) continue;
+			const lexicalItem = lexicalItemMap.get(candidate.id);
+			if (lexicalItem) {
+				fusedItems.push({
+					record: lexicalItem.record,
+					score: candidate.fusedScore,
+					reason: `${lexicalItem.reason}, rrf_fused=${candidate.fusedScore.toFixed(4)}`,
+					signals: lexicalItem.signals,
+				});
+			} else {
+				// Dense-only hit: look up the record directly.
+				const record = this.memories.get(candidate.id);
+				if (record) {
+					fusedItems.push({
+						record,
+						score: candidate.fusedScore,
+						reason: `rrf_fused=${candidate.fusedScore.toFixed(4)}`,
+						signals: {
+							textOverlap: 0,
+							tagOverlap: 0,
+							fileOverlap: 0,
+							symbolOverlap: 0,
+							kindMatch: false,
+							scopeMatch: false,
+						},
+					});
+				}
+			}
+		}
+
+		// ── Stage 6 – cross-encoder rerank (enabled path only, latency-gated) ──
+		const previousRecallElapsedMs = Date.now() - recallElapsedStart;
+		let rerankedItems = fusedItems;
+		if (
+			this.config.retrieval.rerank.enabled &&
+			shouldRerank(
+				previousRecallElapsedMs,
+				this.config.retrieval.latencyBudgetMs,
+			)
+		) {
+			try {
+				if (!this.reranker) {
+					this.reranker = new CrossEncoderReranker({
+						model: this.config.retrieval.rerank.model,
+					});
+				}
+				const topN = Math.min(20, fusedItems.length);
+				const rerankCandidates: RerankCandidate[] = fusedItems
+					.slice(0, topN)
+					.map((item) => ({
+						id: item.record.id,
+						text: item.record.text,
+						score: item.score,
+					}));
+				const rerankResult = await this.reranker.rerank(
+					rerankCandidates,
+					request.query,
+					topN,
+				);
+				// Reorder ONLY the top-N prefix by the reranker's returned order.
+				// The untouched tail (candidates beyond topN) is appended after the
+				// reranked prefix in their original fused order, so unreranked
+				// candidates can never precede reranked ones.
+				const topNPrefix = fusedItems.slice(0, topN);
+				const tail = fusedItems.slice(topN);
+				const rerankOrder = new Map(rerankResult.map((c, idx) => [c.id, idx]));
+				const reorderedTopN = [...topNPrefix].sort(
+					(a, b) =>
+						(rerankOrder.get(a.record.id) ?? 0) -
+						(rerankOrder.get(b.record.id) ?? 0),
+				);
+				rerankedItems = [...reorderedTopN, ...tail];
+			} catch (err) {
+				warn('Rerank failed — returning fused order', {
+					reason: err instanceof Error ? err.message : String(err),
+				});
+				rerankedItems = fusedItems;
+			}
+		}
+
 		return {
-			items: reranked.slice(0, request.maxItems),
+			items: rerankedItems.slice(0, request.maxItems),
 			diagnostics: {
-				...result.diagnostics,
-				returnedCount: Math.min(reranked.length, request.maxItems),
+				...lexicalResult.diagnostics,
+				returnedCount: Math.min(rerankedItems.length, request.maxItems),
+				fusionActive: true,
 			},
 		};
 	}
@@ -665,6 +920,11 @@ export class SQLiteMemoryProvider
 		for (const memory of result.memories) {
 			this.memories.set(memory.id, memory);
 		}
+		for (const memory of result.memories) {
+			if (memory.metadata.deleted !== true) {
+				await this.writeMemoryVec(memory);
+			}
+		}
 		return result.change;
 	}
 
@@ -676,6 +936,81 @@ export class SQLiteMemoryProvider
 		this.initialized = false;
 		this.initPromise = null;
 		this.lastAutomaticJsonlMigration = null;
+	}
+
+	/**
+	 * Re-embed all durable memory records with the current embedding provider
+	 * model, update the stored global model_version, and clear the embedding
+	 * cache. This is the recovery path for EmbeddingVersionMismatchError.
+	 *
+	 * No-op (with a warning) when vec or the embedding provider is unavailable.
+	 * Individual record failures are caught per-record so one bad embedding
+	 * does not abort the whole rebuild.
+	 */
+	async rebuildEmbeddingIndex(): Promise<void> {
+		await this.initialize();
+		if (!this.vecAvailable || !this.embeddingProvider) {
+			warn(
+				'rebuildEmbeddingIndex skipped — sqlite-vec or embedding provider not available',
+			);
+			return;
+		}
+
+		const currentVersion = this.embeddingProvider.modelVersion;
+		const durableRecords = Array.from(this.memories.values()).filter(
+			(record) =>
+				DURABLE_MEMORY_KINDS.has(record.kind) &&
+				record.metadata.deleted !== true &&
+				record.supersededBy === undefined &&
+				record.stability !== 'ephemeral',
+		);
+
+		let successCount = 0;
+		let failureCount = 0;
+		const db = this.requireDb();
+
+		// Per-record embedding with try/catch so one failure doesn't abort the rebuild.
+		for (const record of durableRecords) {
+			try {
+				const normalizedText = normalizeMemoryText(record.text).toLowerCase();
+				if (normalizedText.length === 0) continue;
+				const vector = await this.embeddingProvider.embed(normalizedText);
+				db.run(
+					'INSERT OR REPLACE INTO memory_items_vec (id, embedding) VALUES (?, ?)',
+					[record.id, vector],
+				);
+				successCount++;
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				warn('rebuildEmbeddingIndex: failed to embed record', {
+					id: record.id,
+					reason,
+				});
+				failureCount++;
+			}
+		}
+
+		// Only advance the version if ALL records re-embedded successfully.
+		// Partial rebuilds leave old-version vectors; the mismatch guard will
+		// signal the incomplete rebuild on next query.
+		if (failureCount === 0) {
+			db.run(
+				'INSERT OR REPLACE INTO embedding_config (key, value) VALUES (?, ?)',
+				['model_version', currentVersion],
+			);
+		}
+
+		// Clear the embedding cache so stale vectors from the previous index
+		// are not served on subsequent recall queries.
+		this.embeddingCache?.clear();
+
+		if (failureCount > 0) {
+			warn('rebuildEmbeddingIndex completed with failures', {
+				successCount,
+				failureCount,
+				total: durableRecords.length,
+			});
+		}
 	}
 
 	async importJsonl(): Promise<SQLiteJsonlImportResult> {
@@ -751,6 +1086,7 @@ export class SQLiteMemoryProvider
 			for (const id of removeIds) {
 				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
 				this.deleteMemoryFts(id);
+				this.deleteMemoryVec(id);
 			}
 			this.insertEvent(
 				'compact',
@@ -825,6 +1161,76 @@ export class SQLiteMemoryProvider
 			this.ftsAvailable = false;
 			return { records: scopedRecords, usedFts: false };
 		}
+	}
+
+	private getStoredModelVersion(): string | null {
+		const row = this.requireDb()
+			.query<{ value: string }, [string]>(
+				`SELECT value FROM embedding_config WHERE key = 'model_version' LIMIT 1`,
+			)
+			.get('model_version');
+		return row?.value ?? null;
+	}
+
+	private async selectDenseCandidates(
+		request: RecallRequest,
+		queryEmbedding: Float32Array,
+	): Promise<MemoryRecord[]> {
+		if (
+			!this.config.embeddings.enabled ||
+			!this.vecAvailable ||
+			!this.embeddingProvider
+		) {
+			return [];
+		}
+
+		const storedVersion = this.getStoredModelVersion();
+		const queryVersion = this.embeddingProvider.modelVersion;
+		if (storedVersion !== null && storedVersion !== queryVersion) {
+			throw new EmbeddingVersionMismatchError(queryVersion, storedVersion);
+		}
+
+		// Oversample the KNN to mitigate post-filter scope/kind recall loss —
+		// we fetch max(100, 20×maxItems) neighbors then filter by
+		// scope/kind/superseded/deleted/expired (mirroring lexical scoping).
+		// For tight scope filters this oversampling reduces (but may not
+		// eliminate) recall loss; pre-filtering via vec0 WHERE is a future improvement.
+		const k = Math.max(100, request.maxItems * 20);
+		const rows = this.requireDb()
+			.query<{ id: string; distance: number }, SQLQueryBindings[]>(
+				`SELECT id, distance FROM memory_items_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`,
+			)
+			.all(queryEmbedding, k);
+
+		const scopeKeys = request.scopes?.map((s) => stableScopeKey(s)) ?? [];
+		const kinds = request.kinds ?? [];
+		const includeInactive = false;
+		const includeExpired = request.includeExpired ?? false;
+
+		const allowedIds = new Set<string>();
+		for (const record of this.memories.values()) {
+			if (
+				scopeKeys.length > 0 &&
+				!scopeKeys.includes(stableScopeKey(record.scope))
+			)
+				continue;
+			if (kinds.length > 0 && !kinds.includes(record.kind)) continue;
+			if (!includeInactive && record.supersededBy) continue;
+			if (!includeInactive && record.metadata.deleted === true) continue;
+			if (!includeExpired && record.expiresAt) {
+				const expires = Date.parse(record.expiresAt);
+				if (Number.isFinite(expires) && expires <= Date.now()) continue;
+			}
+			allowedIds.add(record.id);
+		}
+
+		const results: MemoryRecord[] = [];
+		for (const row of rows) {
+			if (!allowedIds.has(row.id)) continue;
+			const record = this.memories.get(row.id);
+			if (record) results.push(record);
+		}
+		return results;
 	}
 
 	private runMigrations(): void {
@@ -933,6 +1339,47 @@ export class SQLiteMemoryProvider
 		} catch {
 			this.ftsAvailable = false;
 			return false;
+		}
+	}
+
+	private initializeVecExtension(): void {
+		const db = this.requireDb();
+		try {
+			const dimension = Math.max(
+				1,
+				Math.trunc(this.config.embeddings.dimension ?? 384),
+			);
+			const req = createRequire(import.meta.url);
+			const pkgDir = path.dirname(
+				req.resolve('@sqlite/sqlite-vec/package.json'),
+			);
+			const ext =
+				process.platform === 'win32'
+					? '.dll'
+					: process.platform === 'darwin'
+						? '.dylib'
+						: '.so';
+			const vec0Path = path.join(pkgDir, `vec0${ext}`);
+			db.loadExtension(vec0Path);
+			db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_vec USING vec0(
+				id TEXT PRIMARY KEY, embedding FLOAT[${dimension}]
+			)`);
+			const modelVersion =
+				this.config.embeddings.version ??
+				`${this.config.embeddings.model}:${dimension}`;
+			// Seed model_version only on first run; rebuildEmbeddingIndex() is the
+			// sole path that advances it after re-embedding.
+			db.run(
+				'INSERT OR IGNORE INTO embedding_config (key, value) VALUES (?, ?)',
+				['model_version', modelVersion],
+			);
+			this.vecAvailable = true;
+		} catch (err) {
+			this.vecAvailable = false;
+			warn(
+				'sqlite-vec extension not available — dense retrieval disabled',
+				err,
+			);
 		}
 	}
 
@@ -1073,12 +1520,50 @@ export class SQLiteMemoryProvider
 		}
 	}
 
+	private async writeMemoryVec(record: MemoryRecord): Promise<void> {
+		if (!this.config.embeddings.enabled) return;
+		if (!this.vecAvailable) return;
+		if (!this.embeddingProvider) return;
+		if (!DURABLE_MEMORY_KINDS.has(record.kind)) return;
+		if (record.stability === 'ephemeral') return;
+
+		const normalizedText = normalizeMemoryText(record.text).toLowerCase();
+		if (normalizedText.length === 0) return;
+
+		try {
+			const vector = await this.embeddingProvider.embed(normalizedText);
+			this.requireDb().run(
+				'INSERT OR REPLACE INTO memory_items_vec (id, embedding) VALUES (?, ?)',
+				[record.id, vector],
+			);
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
+			if (err instanceof EmbeddingUnavailableError) {
+				warn('Embedding provider unavailable during write — skipping vector', {
+					reason,
+				});
+			} else {
+				warn('Embedding computation failed — skipping vector', { reason });
+			}
+		}
+	}
+
 	private deleteMemoryFts(id: string): void {
 		if (!this.ftsAvailable) return;
 		try {
 			this.requireDb().run(`DELETE FROM ${FTS_TABLE_NAME} WHERE id = ?`, [id]);
 		} catch {
 			this.ftsAvailable = false;
+		}
+	}
+
+	private deleteMemoryVec(id: string): void {
+		if (!this.vecAvailable) return;
+		try {
+			this.requireDb().run('DELETE FROM memory_items_vec WHERE id = ?', [id]);
+		} catch {
+			// vec table might not exist if vecAvailable was set true during init
+			// but the extension is no longer loadable; degrade gracefully.
 		}
 	}
 
@@ -1508,6 +1993,33 @@ function rerankWithFts(
 		.sort(
 			(a, b) => b.score - a.score || a.record.id.localeCompare(b.record.id),
 		);
+}
+
+function buildMetadataRankedIds(
+	lexicalItems: RecallResultItem[],
+	request: RecallRequest,
+): string[] {
+	const scopeKeys = request.scopes?.map((s) => stableScopeKey(s)) ?? [];
+	const kinds = new Set(request.kinds ?? []);
+	const hasScopeFilter = scopeKeys.length > 0;
+	const hasKindFilter = kinds.size > 0;
+
+	const both: string[] = [];
+	const scopeOnly: string[] = [];
+	const kindOnly: string[] = [];
+	const neither: string[] = [];
+
+	for (const item of lexicalItems) {
+		const scopeMatch =
+			!hasScopeFilter || scopeKeys.includes(stableScopeKey(item.record.scope));
+		const kindMatch = !hasKindFilter || kinds.has(item.record.kind);
+		if (scopeMatch && kindMatch) both.push(item.record.id);
+		else if (scopeMatch) scopeOnly.push(item.record.id);
+		else if (kindMatch) kindOnly.push(item.record.id);
+		else neither.push(item.record.id);
+	}
+
+	return [...both, ...scopeOnly, ...kindOnly, ...neither];
 }
 
 export const _test_exports = {

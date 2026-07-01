@@ -38,6 +38,26 @@ export interface MemoryConfig {
 	/** Reflection / consolidation pass (issue #1464, Phase 3). */
 	consolidation: ConsolidationConfig;
 	hardDelete: boolean;
+	embeddings: {
+		enabled: boolean;
+		model: string;
+		dimension: number;
+		version?: string;
+		cacheSize: number;
+	};
+	retrieval: {
+		rrfK: number;
+		weights: {
+			lexical: number;
+			dense: number;
+			metadata: number;
+		};
+		rerank: {
+			enabled: boolean;
+			model?: string;
+		};
+		latencyBudgetMs: number;
+	};
 }
 
 export interface ImportanceConfig {
@@ -105,6 +125,26 @@ export const DEFAULT_CONSOLIDATION_CONFIG: ConsolidationConfig = {
 	decayHalfLifeDays: { ...DEFAULT_DECAY_HALF_LIFE_DAYS },
 };
 
+export const DEFAULT_EMBEDDINGS_CONFIG = {
+	enabled: false,
+	model: 'Xenova/all-MiniLM-L6-v2',
+	dimension: 384,
+	cacheSize: 256,
+};
+
+export const DEFAULT_RETRIEVAL_CONFIG = {
+	rrfK: 60,
+	weights: {
+		lexical: 0.5,
+		dense: 0.4,
+		metadata: 0.1,
+	},
+	rerank: {
+		enabled: false,
+	},
+	latencyBudgetMs: 250,
+};
+
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	enabled: false,
 	provider: 'sqlite',
@@ -141,6 +181,8 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 		...DEFAULT_CONSOLIDATION_CONFIG,
 		decayHalfLifeDays: { ...DEFAULT_DECAY_HALF_LIFE_DAYS },
 	},
+	embeddings: { ...DEFAULT_EMBEDDINGS_CONFIG },
+	retrieval: { ...DEFAULT_RETRIEVAL_CONFIG },
 	hardDelete: false,
 };
 
@@ -201,6 +243,22 @@ export function resolveMemoryConfig(
 			decayHalfLifeDays: {
 				...DEFAULT_MEMORY_CONFIG.consolidation.decayHalfLifeDays,
 				...(input?.consolidation?.decayHalfLifeDays ?? {}),
+			},
+		},
+		embeddings: {
+			...DEFAULT_MEMORY_CONFIG.embeddings,
+			...(input?.embeddings ?? {}),
+		},
+		retrieval: {
+			...DEFAULT_MEMORY_CONFIG.retrieval,
+			...(input?.retrieval ?? {}),
+			weights: {
+				...DEFAULT_MEMORY_CONFIG.retrieval.weights,
+				...(input?.retrieval?.weights ?? {}),
+			},
+			rerank: {
+				...DEFAULT_MEMORY_CONFIG.retrieval.rerank,
+				...(input?.retrieval?.rerank ?? {}),
 			},
 		},
 	};

@@ -1,0 +1,64 @@
+{
+	"name": "paraphrase-auth",
+	"query": "how do I handle a failed login",
+	"task": "Handle failed login authentication securely.",
+	"agentRole": "security-engineer",
+	"scopes": [
+		{
+			"type": "repository",
+			"repoId": "opencode-swarm"
+		}
+	],
+	"kinds": ["security_note", "code_pattern"],
+	"k": 2,
+	"maxItems": 2,
+	"tokenBudget": 1000,
+	"expectedLabels": ["auth-failure-bcrypt"],
+	"records": [
+		{
+			"label": "auth-failure-bcrypt",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "security_note",
+			"text": "bcrypt session invalidation on authentication failure",
+			"tags": ["session", "invalidation", "bcrypt"],
+			"confidence": 0.95,
+			"source": {
+				"type": "manual",
+				"ref": "auth-failure-bcrypt"
+			}
+		},
+		{
+			"label": "auth-noise-1",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "code_pattern",
+			"text": "Handle failed login by clearing active user tokens.",
+			"tags": ["login", "token", "clear"],
+			"confidence": 0.9,
+			"source": {
+				"type": "file",
+				"filePath": "src/auth/token.ts"
+			}
+		},
+		{
+			"label": "auth-noise-2",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "code_pattern",
+			"text": "Login failures should redirect to the password reset page.",
+			"tags": ["login", "failure", "redirect"],
+			"confidence": 0.85,
+			"source": {
+				"type": "file",
+				"filePath": "src/auth/redirect.ts"
+			}
+		}
+	]
+}

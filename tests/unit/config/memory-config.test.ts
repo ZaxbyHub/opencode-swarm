@@ -71,6 +71,24 @@ describe('MemoryConfigSchema', () => {
 					scratch: 7,
 				},
 			},
+			embeddings: {
+				enabled: false,
+				model: 'Xenova/all-MiniLM-L6-v2',
+				dimension: 384,
+				cacheSize: 256,
+			},
+			retrieval: {
+				rrfK: 60,
+				weights: {
+					lexical: 0.5,
+					dense: 0.4,
+					metadata: 0.1,
+				},
+				rerank: {
+					enabled: false,
+				},
+				latencyBudgetMs: 250,
+			},
 			hardDelete: false,
 		});
 	});
