@@ -115,9 +115,11 @@ Do NOT share other agents' responses at this stage.
    use `wait: true` if lanes are still pending and no more independent work
    remains. All three lanes must be settled before proceeding to synthesis.
    If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`
-   and record that async advisory lanes were unavailable; do not substitute
-   per-agent Task calls for this fallback unless lane tools are unavailable and
-   you explicitly verify equivalent agent type, prompt, scope, and isolation. The
+   as the first fallback and record that async advisory lanes were unavailable.
+   This changes only when the architect waits, not whether all council lanes
+   must settle. Do not substitute Task-tool dispatch unless lane tools are
+   unavailable; when they are unavailable, Task is the final fallback and must be
+   verified as equivalent by agent type, prompt, scope, and isolation. The
    `round1Responses` array will contain entries with `memberId` of
    `council_generalist`, `council_skeptic`, and `council_domain_expert` and
    `role` of `generalist`, `skeptic`, and `domain_expert` respectively. If

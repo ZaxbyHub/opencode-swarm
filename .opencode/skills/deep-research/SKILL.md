@@ -127,10 +127,13 @@ lanes are still pending and no independent work remains. Do not advance to Step 
 until every synthesis lane is settled. Collect all completed worker responses into
 a candidate findings set, each finding tagged with its subtopic, evidence refs,
 and the worker's confidence. Treat missing, stale, cancelled, or failed lanes as
-explicit coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking
-`dispatch_lanes` and record that async advisory lanes were unavailable; do not
-substitute per-agent Task calls for this fallback unless lane tools are unavailable
-and you explicitly verify equivalent agent type, prompt, scope, and isolation.
+explicit coverage gaps. If `dispatch_lanes_async` is unavailable, use
+blocking `dispatch_lanes` as the first fallback and record that async advisory lanes were
+unavailable. This changes only when the architect waits, not whether every
+synthesis lane must settle before Step 5. Do not substitute Task-tool dispatch
+unless lane tools are unavailable; when they are unavailable, Task is the final fallback
+and must be verified as equivalent by agent type, prompt, scope, and
+isolation.
 
 ## Step 5 — Dual-Reviewer Claim Verification
 

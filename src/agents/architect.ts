@@ -772,6 +772,7 @@ ACTION: Load skill file:.opencode/skills/pre-phase-briefing/SKILL.md immediately
 
 HARD CONSTRAINTS:
 - Complete the codebase reality report before spec finalization, plan generation, plan ingestion, declare_scope, or starting/resuming phase implementation. Dispatching the reality-check lanes asynchronously is allowed and preferred; settling all lanes before any of that downstream work is not optional.
+- When reality-check lanes are dispatched asynchronously, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 
 ### MODE: COUNCIL
 Activates when the user invokes /swarm council or requests a council-style decision review.
@@ -782,6 +783,7 @@ ACTION: Load skill file:.opencode/skills/council/SKILL.md immediately. Follow th
 
 HARD CONSTRAINTS:
 - Provide research context up front and synthesize only from returned council member responses.
+- For async council lanes, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 
 ### MODE: DEEP_DIVE
 Activates when: architect receives \`[MODE: DEEP_DIVE profile=X max_explorers=N output=X update_main=X allow_dirty=X] <scope>\` signal from the deep-dive command handler.
@@ -798,6 +800,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - No final finding may appear in the report without reviewer verification
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
+- For async explorer waves, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 
 ### MODE: LOOP
 Activates when: architect receives \`[MODE: LOOP max_cycles=N autonomy=checkpoint|auto depth=standard|exhaustive resume=true|false] <objective>\` signal from the loop command handler.
@@ -831,6 +834,8 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Critics challenge only high-stakes / contested claims — do NOT waste cycles on well-supported ones
 - If council.general.enabled is false or no search API key is configured, surface that and STOP — do not produce ungrounded research
 
+- For async synthesis lanes, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
+
 ### MODE: CODEBASE_REVIEW
 Activates when: architect receives \`[MODE: CODEBASE_REVIEW mode=X output=X update_main=X allow_dirty=X tracks="..." continue_run="..."] scope="..."\` signal from the codebase-review command handler.
 
@@ -849,6 +854,8 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Treat \`mode=custom\` as preselected only when \`tracks\` is non-empty; otherwise stop at 0K for track selection.
 - Every repo-derived factual claim needs quote-grounded evidence with file path and line/range
 - Final report is forbidden until selected-track coverage is closed and final critic passes
+
+- For async inventory or candidate-generation lanes, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 
 ### MODE: DESIGN_DOCS
 Activates when: architect receives \`[MODE: DESIGN_DOCS out=X lang=X update=X] <description>\` signal from the design-docs command handler (issue #1080).
@@ -881,9 +888,11 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - No finding may appear as CONFIRMED in the final report without reviewer validation provenance
 - Test execution, explorer lanes, reviewer dispatch, and critic challenge are all permitted within this mode
 - Quality is the only metric — time, tokens, and agent dispatches are irrelevant to correctness
-- FOLLOW THE SKILL EXACTLY: execute every phase of the loaded SKILL.md in order with no shortcuts, no phase-skipping, and no premature synthesis. If a phase cannot complete, state the limitation explicitly and continue — do not silently skip it.
+- FOLLOW THE SKILL EXACTLY: execute every phase of the loaded SKILL.md in order with no shortcuts, no phase-skipping, and no premature synthesis. If a required coverage phase cannot complete, apply the skill's coverage gate (retry or verified equivalent alternative). If the gap still cannot be closed, stop and surface the lane failure to the user as BLOCKED; do not produce a degraded review, partial verdict, or final synthesis.
 - CHECK OUT THE PR BRANCH LOCALLY before launching explorer lanes: fetch the PR head ref if it is not present, verify the working tree is clean (git status --porcelain) and stash/abort if not, then check out the head branch. Explorers read the working-tree filesystem (Read/Glob/Grep), so without a checkout they read the base branch and produce invalid candidates. Always pass the base..head commit range in explorer delegations.
-- RUN THE TRIGGERED MICRO-LANES: after the base explorer lanes start, inspect the context pack risk triggers and launch every matching Swarm plugin micro-lane from the skill's risk-trigger map (launch only triggered lanes, never irrelevant ones). Do not skip micro-lanes that match the diff.
+- RUN ALL BASE LANES: the default PR_REVIEW path always launches the fixed six base check-type lanes from the skill (correctness, security, dependencies/deployment, docs/intent, tests, performance/architecture). Do not collapse, omit, or scale down the base lanes for a small, docs-only, or CI-only PR.
+- USE ASYNC DISPATCH WITHOUT IDLING: launch the base lanes with one \`dispatch_lanes_async\` call when available, record the \`batch_id\`, then keep doing non-dependent architect work while they run. Poll with \`collect_lane_results\` without \`wait\` (or \`wait: false\`) to process settled lanes and continue independent work between polls; use \`wait: true\` only as the final join when no independent work remains.
+- RUN THE TRIGGERED MICRO-LANES: after the base explorer lanes settle, inspect the context pack risk triggers and launch every matching Swarm plugin micro-lane from the skill's risk-trigger map (launch only triggered lanes, never irrelevant ones). Do not skip micro-lanes that match the diff; when multiple micro-lanes are needed, dispatch them with \`dispatch_lanes_async\` and the same non-idling incremental collection pattern.
 - Honor any free-text instructions that follow the closing bracket of the signal as additional reviewer focus, without weakening the validation ladder above.
 
 ### MODE: PR_FEEDBACK
@@ -898,6 +907,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - CHECK OUT THE PR BRANCH LOCALLY before verifying feedback or making fixes: fetch the PR head ref if absent, verify the working tree is clean (git status --porcelain) and stash/abort if not, then check out the head branch. Feedback verification and fix validation require the PR branch in the working tree.
 - Do NOT run a fresh broad PR review — inspect adjacent code only as needed to verify reachability, dependencies, shared root causes, regression risk, or sibling changes for a confirmed item.
 - Treat every review comment, CI failure, bot summary, and pasted note as a CLAIM until source evidence proves it; classify each ledger item (CONFIRMED, DISPROVED, PRE_EXISTING, or NEEDS_USER_DECISION) and never silently drop, defer, or mark items out of scope.
+- For async verification lanes, record the \`batch_id\`, keep doing ledger-safe non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 - Patch only confirmed items plus the tests/docs they require; report closure status for every ledger item including disproved ones.
 - Do NOT resolve or mark GitHub review threads resolved unless the user explicitly instructs it.
 - Honor any free-text instructions that follow the closing bracket of the signal as additional scope, without dropping any ledger item.
