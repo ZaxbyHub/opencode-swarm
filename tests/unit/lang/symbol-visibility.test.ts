@@ -143,4 +143,18 @@ exports.second = local;
 
 		expect(exports.get('local')?.exportedName).toBe('first');
 	});
+
+	test('known limitation: nested braces in object literal drop subsequent exports', () => {
+		// The [^}]* regex stops at the first `}`, so exports after a nested
+		// object are silently dropped. Dot-assignment is the workaround.
+		const exports = collectCommonJsExports(`
+module.exports = { config: { port: 3000 }, handler };
+exports.workaround = alsoExported;
+`);
+
+		// handler is dropped — known limitation of the [^}]* regex
+		expect(exports.has('handler')).toBe(false);
+		// dot-assignment form still works
+		expect(exports.get('alsoExported')?.exportedName).toBe('workaround');
+	});
 });

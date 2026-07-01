@@ -114,6 +114,11 @@ export function collectCommonJsExports(
 		add(match[1], match[1], match.index ?? 0);
 	}
 
+	// Limitation: [^}]* cannot span nested braces — exports after the first nested
+	// `}` in `module.exports = { config: { port: 3000 }, handler }` are silently
+	// dropped. Use dot-assignment (`exports.handler = handler`) for such patterns.
+	// A brace-balanced parser would fix this but adds complexity for an uncommon
+	// pattern; documented here as a known conservative limitation.
 	for (const match of sanitized.matchAll(
 		/\bmodule\s*\.\s*exports\s*=\s*\{([^}]*)\}/g,
 	)) {
