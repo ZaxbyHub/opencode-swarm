@@ -138,12 +138,64 @@ describe('resetToMainAfterMerge — FR-013: git clean -fdX regression', () => {
 
 		restore();
 
-		// Assert: the clean command uses -fdX, NOT -fd
+		// Assert: the clean command uses -fdX AND is scoped to the build-artifact
+		// allowlist via a `--` pathspec — NOT a bare `-fd` and NOT a blanket `-fdX`
+		// (which would also delete the gitignored `.swarm/` knowledge store).
 		const cleanCalls = capturedArgs.filter((args) => args[0] === 'clean');
 		expect(cleanCalls.length).toBeGreaterThan(0);
 
 		for (const cleanArgs of cleanCalls) {
-			expect(cleanArgs).toEqual(['clean', '-fdX']);
+			expect(cleanArgs).toEqual([
+				'clean',
+				'-fdX',
+				'--',
+				...branch.GITIGNORED_BUILD_ARTIFACTS,
+			]);
+		}
+	});
+
+	test('regression: clean is scoped to an allowlist and never wipes .swarm/ (blanket -fdX)', async () => {
+		// Prior bug: `git clean -fdX` with no pathspec removed EVERY gitignored path,
+		// including `.swarm/knowledge.jsonl`, silently defeating the finalize clean
+		// stage's deliberate preservation of cumulative knowledge.
+		const { capturedArgs, restore } = setup();
+
+		mockSpawnSync.mockImplementation(
+			(command: string, args: string[], options: { cwd: string }) => {
+				spawnCalls.push({ command, args: args as string[], cwd: options.cwd });
+				if (
+					args[0] === 'rev-parse' &&
+					args[1] === '--abbrev-ref' &&
+					args[2] === 'HEAD'
+				) {
+					return { status: 0, stdout: 'feat/x\n', stderr: '' };
+				}
+				return { status: 0, stdout: '', stderr: '' };
+			},
+		);
+
+		try {
+			await branch.resetToMainAfterMerge(testCwd);
+		} catch {
+			// ignore — capturing args only
+		}
+
+		restore();
+
+		const cleanCalls = capturedArgs.filter((args) => args[0] === 'clean');
+		expect(cleanCalls.length).toBeGreaterThan(0);
+		for (const cleanArgs of cleanCalls) {
+			// Must include a `--` pathspec separator (i.e. scoped, not blanket).
+			expect(cleanArgs).toContain('--');
+			const sepIndex = cleanArgs.indexOf('--');
+			const pathspec = cleanArgs.slice(sepIndex + 1);
+			// Must clean at least one path, and none may be `.swarm/`, `.swarm`, or a
+			// blanket `.` that would recurse into `.swarm/`.
+			expect(pathspec.length).toBeGreaterThan(0);
+			for (const p of pathspec) {
+				expect(p).not.toBe('.');
+				expect(p.replace(/[\\/]+$/, '')).not.toBe('.swarm');
+			}
 		}
 	});
 
