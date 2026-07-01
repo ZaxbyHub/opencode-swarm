@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.101.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.1...v7.101.0) (2026-07-01)
+
+
+### Features
+
+* **sdd:** GitHub Spec-Kit interop for /swarm sdd (v1) ([075e535](https://github.com/ZaxbyHub/opencode-swarm/commit/075e535a502b75fe4118186a6a4d3a6fd2673bfe))
+
 ## [7.100.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.0...v7.100.1) (2026-07-01)
 
 
