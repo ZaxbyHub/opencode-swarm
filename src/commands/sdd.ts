@@ -365,6 +365,51 @@ export async function handleSddValidateCommand(
 		].join('\n');
 	}
 
+	if (parsed.source === 'swarm') {
+		// Native-only validation branch for --source swarm (bugfix).
+		// Placed before OpenSpec path so provider/valid reflect native spec only.
+		const status = loadSddStatusSync(directory, {
+			source: 'swarm',
+			feature: parsed.feature,
+		});
+		const filteredErrors = status.errors.filter(
+			(e) =>
+				!e.includes('openspec/') &&
+				!e.includes('proposal.md') &&
+				!e.includes('tasks.md') &&
+				!e.includes('specs/**/spec.md'),
+		);
+		const filteredWarnings = status.warnings.filter(
+			(w) =>
+				!w.includes('openspec/') &&
+				!w.includes('proposal.md') &&
+				!w.includes('tasks.md') &&
+				!w.includes('specs/**/spec.md'),
+		);
+		const result = {
+			valid: status.effectiveSpec !== null && filteredErrors.length === 0,
+			provider: status.provider,
+			changeId: null as string | null,
+			sourcePaths: status.effectiveSpec?.sourcePaths ?? [],
+			hash: status.effectiveSpec?.hash ?? null,
+			errors: filteredErrors,
+			warnings: [
+				...filteredWarnings,
+				...(status.effectiveSpec?.warnings ?? []),
+			],
+		};
+		if (parsed.json) return JSON.stringify(result, null, 2);
+		return [
+			`SDD validation: ${result.valid ? 'valid' : 'invalid'}`,
+			`Provider: ${result.provider}`,
+			`Projected sources: ${result.sourcePaths.length}`,
+			result.errors.length > 0 ? `\nErrors:\n${formatList(result.errors)}` : '',
+			result.warnings.length > 0
+				? `\nWarnings:\n${formatList(result.warnings)}`
+				: '',
+		].join('\n');
+	}
+
 	// OpenSpec path — byte-identical to pre-task behavior (regression-guard, FR-011).
 	// Thread parsed.source/feature so --source openspec on a both-present repo does not
 	// trigger the resolver's console.warn inside loadSddStatusSync (advisor item 1).

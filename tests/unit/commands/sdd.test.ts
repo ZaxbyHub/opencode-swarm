@@ -658,3 +658,176 @@ describe('/swarm sdd — native .swarm/spec.md precedence (FR-009)', () => {
 		expect(warnMessages).toEqual([]);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// validate --source swarm (bugfix for PR #1589)
+// ---------------------------------------------------------------------------
+describe('/swarm sdd validate --source swarm', () => {
+	let nativeDir: string;
+	let emptyDir: string;
+	let mixedDir: string;
+
+	beforeEach(() => {
+		nativeDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-validate-swarm-native-')),
+		);
+		emptyDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-validate-swarm-empty-')),
+		);
+		mixedDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-validate-swarm-mixed-')),
+		);
+
+		// nativeDir: only native .swarm/spec.md
+		fs.mkdirSync(path.join(nativeDir, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(nativeDir, '.swarm', 'spec.md'),
+			'# Specification: Native\n\n## Requirements\n### Requirement: Native\nThe system MUST use native.\n#### Scenario: Works\n- **WHEN** native\n- **THEN** works\n',
+			'utf-8',
+		);
+
+		// emptyDir: no native spec (and no other sources)
+		// (left empty)
+
+		// mixedDir: native + OpenSpec
+		fs.mkdirSync(path.join(mixedDir, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(mixedDir, '.swarm', 'spec.md'),
+			'# Specification: Native Mixed\n\n## Requirements\n### Requirement: Mixed\nThe system MUST prefer native.\n#### Scenario: Native wins\n- **WHEN** source=swarm\n- **THEN** provider=swarm\n',
+			'utf-8',
+		);
+		fs.mkdirSync(path.join(mixedDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(mixedDir, 'openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
+			'utf-8',
+		);
+	});
+
+	afterEach(() => {
+		fs.rmSync(nativeDir, { recursive: true, force: true });
+		fs.rmSync(emptyDir, { recursive: true, force: true });
+		fs.rmSync(mixedDir, { recursive: true, force: true });
+	});
+
+	test('validate --source swarm with native spec present returns valid:true, provider:swarm', async () => {
+		const out = await handleSddValidateCommand(nativeDir, [
+			'--source',
+			'swarm',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.valid).toBe(true);
+		expect(parsed.provider).toBe('swarm');
+		expect(parsed.sourcePaths).toContain('.swarm/spec.md');
+		expect(parsed.errors).toHaveLength(0);
+	});
+
+	test('validate --source swarm with no native spec returns valid:false, provider:none', async () => {
+		const out = await handleSddValidateCommand(emptyDir, [
+			'--source',
+			'swarm',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.valid).toBe(false);
+		expect(parsed.provider).toBe('none');
+		expect(parsed.sourcePaths).toHaveLength(0);
+	});
+
+	test('validate --source swarm with native + OpenSpec present uses provider:swarm and filters OpenSpec errors', async () => {
+		const out = await handleSddValidateCommand(mixedDir, [
+			'--source',
+			'swarm',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.provider).toBe('swarm');
+		expect(parsed.valid).toBe(true);
+		// Must not contain OpenSpec-specific error strings
+		const allText = JSON.stringify(parsed);
+		expect(allText).not.toContain('openspec/');
+		expect(allText).not.toContain('proposal.md');
+		expect(allText).not.toContain('tasks.md');
+		expect(allText).not.toContain('specs/**/spec.md');
+		// sourcePaths must be native only
+		expect(parsed.sourcePaths).toContain('.swarm/spec.md');
+		expect(parsed.sourcePaths.some((p: string) => p.includes('openspec'))).toBe(
+			false,
+		);
+	});
+
+	test('validate --source swarm without --json outputs human-readable text', async () => {
+		const out = await handleSddValidateCommand(nativeDir, ['--source', 'swarm']);
+
+		expect(out).toContain('SDD validation: valid');
+		expect(out).toContain('Provider: swarm');
+		expect(out).toContain('Projected sources: 1');
+	});
+
+	test('validate --source swarm with oversized native spec (>256KiB) returns valid:false with size error', async () => {
+		// Create an oversized native spec
+		const oversizedDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-validate-swarm-oversized-')),
+		);
+		fs.mkdirSync(path.join(oversizedDir, '.swarm'), { recursive: true });
+		// Write a spec larger than MAX_SPEC_BYTES (256 KiB)
+		const largeContent = '# Specification: Oversized\n\n## Requirements\n' +
+			'### Requirement: Large\n' +
+			'The system MUST handle large content.'.repeat(20000); // ~1MB
+		fs.writeFileSync(
+			path.join(oversizedDir, '.swarm', 'spec.md'),
+			largeContent,
+			'utf-8',
+		);
+
+		const out = await handleSddValidateCommand(oversizedDir, [
+			'--source',
+			'swarm',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.valid).toBe(false);
+		// Provider should be 'none' because the oversized spec was not used
+		expect(parsed.provider).toBe('none');
+		// sourcePaths should be empty since no valid spec was loaded
+		expect(parsed.sourcePaths).toHaveLength(0);
+
+		fs.rmSync(oversizedDir, { recursive: true, force: true });
+	});
+
+	test('validate --source swarm with native spec containing non-OpenSpec errors surfaces those errors', async () => {
+		// Create a native spec with a malformed structure that might cause errors
+		const errorDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-validate-swarm-error-')),
+		);
+		fs.mkdirSync(path.join(errorDir, '.swarm'), { recursive: true });
+		// Write a minimal but valid native spec - no errors expected here
+		// The key edge case is that non-OpenSpec errors should pass through
+		fs.writeFileSync(
+			path.join(errorDir, '.swarm', 'spec.md'),
+			'# Specification: Valid Native\n\n## Requirements\n### Requirement: Valid\nThe system MUST work correctly.\n#### Scenario: Works\n- **WHEN** valid\n- **THEN** works\n',
+			'utf-8',
+		);
+
+		const out = await handleSddValidateCommand(errorDir, [
+			'--source',
+			'swarm',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		// Valid native spec should pass
+		expect(parsed.valid).toBe(true);
+		expect(parsed.provider).toBe('swarm');
+		expect(parsed.errors).toHaveLength(0);
+
+		fs.rmSync(errorDir, { recursive: true, force: true });
+	});
+});
