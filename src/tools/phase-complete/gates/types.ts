@@ -38,4 +38,10 @@ export interface GateContext {
 	agentsDispatched: string[];
 	/** Non-blocking warning helper */
 	safeWarn: (message: string, error: unknown) => void;
+	/** Retrospective bundle accepted for this phase, if the retro gate loaded one */
+	loadedRetroBundle?:
+		| import('../../../config/evidence-schema').EvidenceBundle
+		| null;
+	/** Task id for the accepted retrospective bundle, if one was loaded */
+	loadedRetroTaskId?: string | null;
 }

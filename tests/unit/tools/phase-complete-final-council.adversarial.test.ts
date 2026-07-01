@@ -15,11 +15,20 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PlanSchema } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { computePlanHash } from '../../../src/plan/ledger';
+import { derivePlanIdentityHash } from '../../../src/plan/utils';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let tempDir: string;
@@ -108,6 +117,12 @@ function enableFinalCouncil() {
 	setGates(tempDir, PLAN_ID, { final_council: true });
 }
 
+function readCurrentPlan() {
+	return PlanSchema.parse(
+		JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
+	);
+}
+
 function writeFinalCouncilEvidence(options: {
 	verdict: string;
 	entries?: Array<Record<string, unknown>>;
@@ -116,10 +131,13 @@ function writeFinalCouncilEvidence(options: {
 	const evidencePath = join(tempDir, '.swarm', 'evidence');
 	mkdirSync(evidencePath, { recursive: true });
 	const ts = new Date().toISOString();
+	const plan = readCurrentPlan();
 	const defaultEntry = {
 		type: 'final-council',
 		timestamp: ts,
 		plan_id: PLAN_ID,
+		plan_hash: computePlanHash(plan),
+		plan_identity_hash: derivePlanIdentityHash(plan),
 		verdict: options.verdict,
 		summary: options.summary ?? 'Final council verdict',
 	};
@@ -269,6 +287,7 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 		const evidencePath = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(evidencePath, { recursive: true });
 		const ts = new Date().toISOString();
+		const plan = readCurrentPlan();
 		writeFileSync(
 			join(evidencePath, 'final-council.json'),
 			JSON.stringify({
@@ -281,6 +300,8 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 						type: 'final-council',
 						timestamp: ts,
 						plan_id: PLAN_ID,
+						plan_hash: computePlanHash(plan),
+						plan_identity_hash: derivePlanIdentityHash(plan),
 						verdict: 'rejected',
 						summary: 'First verdict - rejected',
 						quorumSize: 5,
@@ -297,6 +318,8 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 						type: 'final-council',
 						timestamp: ts,
 						plan_id: PLAN_ID,
+						plan_hash: computePlanHash(plan),
+						plan_identity_hash: derivePlanIdentityHash(plan),
 						verdict: 'approved',
 						summary: 'Second verdict - approved',
 						quorumSize: 5,
@@ -503,9 +526,9 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 
 	// =======================================================================
 	// ATTACK VECTOR 9: Missing plan.json entirely
-	// Gate should skip gracefully (no plan means no last phase to compare)
+	// Gate should fail closed when a persisted final_council profile exists
 	// =======================================================================
-	test('ATTACK-9: skips gate gracefully when plan.json is missing', async () => {
+	test('ATTACK-9: blocks when plan.json is missing but final_council is enabled', async () => {
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 		// No plan.json written
 		writePluginConfig();
@@ -518,10 +541,9 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 			tempDir,
 		);
 		const parsed = JSON.parse(result);
-		// Gate code: if (!plan) { /* skips gate entirely */ }
-		// Missing plan.json means gate skips, but phase_complete still fails
-		// on a different check (plan.json not available for phase status update)
-		expect(parsed.success).toBe(true); // Gate skipped, phase completes (plan status update is non-blocking)
+		expect(parsed.success).toBe(false);
+		expect(parsed.status).toBe('blocked');
+		expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_REQUIRED');
 	});
 
 	// =======================================================================

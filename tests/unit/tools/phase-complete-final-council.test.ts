@@ -12,12 +12,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PlanSchema } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
-import { resetSwarmState } from '../../../src/state';
+import { computePlanHash } from '../../../src/plan/ledger';
+import { derivePlanIdentityHash } from '../../../src/plan/utils';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let tempDir: string;
@@ -72,20 +81,24 @@ function writePluginConfig() {
 }
 
 function writeRetro(phase: number) {
-	const retroPath = join(tempDir, '.swarm', 'evidence', `retro-${phase}`);
+	writeRetroBundle(`retro-${phase}`, phase, new Date().toISOString());
+}
+
+function writeRetroBundle(taskId: string, phase: number, timestamp: string) {
+	const retroPath = join(tempDir, '.swarm', 'evidence', taskId);
 	mkdirSync(retroPath, { recursive: true });
 	writeFileSync(
 		join(retroPath, 'evidence.json'),
 		JSON.stringify({
 			schema_version: '1.0.0',
-			task_id: `retro-${phase}`,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			task_id: taskId,
+			created_at: timestamp,
+			updated_at: timestamp,
 			entries: [
 				{
-					task_id: `retro-${phase}`,
+					task_id: taskId,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp,
 					agent: 'architect',
 					verdict: 'pass',
 					summary: `Phase ${phase} done`,
@@ -118,10 +131,18 @@ function writeFinalCouncilEvidence(options: {
 	omitQuorum?: boolean;
 	membersVoted?: string[];
 	membersAbsent?: string[];
+	timestamp?: string;
+	omitPlanHash?: boolean;
+	planHash?: string;
+	omitPlanIdentityHash?: boolean;
+	planIdentityHash?: string;
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence');
 	mkdirSync(evidencePath, { recursive: true });
-	const ts = new Date().toISOString();
+	const ts = options.timestamp ?? new Date().toISOString();
+	const plan = PlanSchema.parse(
+		JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
+	);
 	writeFileSync(
 		join(evidencePath, 'final-council.json'),
 		JSON.stringify({
@@ -134,6 +155,15 @@ function writeFinalCouncilEvidence(options: {
 					type: 'final-council',
 					timestamp: ts,
 					plan_id: PLAN_ID,
+					...(options.omitPlanHash
+						? {}
+						: { plan_hash: options.planHash ?? computePlanHash(plan) }),
+					...(options.omitPlanIdentityHash
+						? {}
+						: {
+								plan_identity_hash:
+									options.planIdentityHash ?? derivePlanIdentityHash(plan),
+							}),
 					verdict: options.verdict,
 					summary: options.summary ?? 'Final council verdict',
 					...(options.omitQuorum
@@ -450,7 +480,7 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.reason).toBe('FINAL_COUNCIL_INVALID_VERDICT');
 		});
 
-		test('emits warning but allows completion when evidence timestamp is older than 24 hours', async () => {
+		test('blocks when evidence timestamp is older than 24 hours', async () => {
 			setupLastPhaseOnly(true);
 			// Manually write evidence with a timestamp 25 hours in the past so the
 			// stale-timestamp branch fires.  writeFinalCouncilEvidence does not accept
@@ -477,6 +507,20 @@ describe('final_council gate (Gate 6)', () => {
 							type: 'final-council',
 							timestamp: staleTimestamp,
 							plan_id: PLAN_ID,
+							plan_hash: computePlanHash(
+								PlanSchema.parse(
+									JSON.parse(
+										readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
+									),
+								),
+							),
+							plan_identity_hash: derivePlanIdentityHash(
+								PlanSchema.parse(
+									JSON.parse(
+										readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
+									),
+								),
+							),
 							verdict: 'approved',
 							summary: 'Stale final council evidence',
 							quorumSize: 5,
@@ -498,18 +542,14 @@ describe('final_council gate (Gate 6)', () => {
 				tempDir,
 			);
 			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('success');
-			expect(parsed.warnings).toBeDefined();
-			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
-			expect(
-				parsed.warnings.some((w: string) => w.includes('older than 24 hours')),
-			).toBe(true);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_STALE_EVIDENCE');
 		});
 
-		test('fail-open when plan is missing: returns blocked:false with warning', async () => {
-			// Enable final_council but do NOT write a plan.json — the gate should
-			// fail-open (non-blocking) with a warning instead of throwing.
+		test('blocks when final_council is enabled but plan is missing', async () => {
+			// Enable final_council but do NOT write a plan.json; the gate should
+			// fail closed because it cannot verify current plan identity.
 			mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 			writePluginConfig();
 			writeRetro(3);
@@ -521,16 +561,225 @@ describe('final_council gate (Gate 6)', () => {
 				tempDir,
 			);
 			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_REQUIRED');
+		});
+
+		test('blocks when a session-only final_council override exists but plan is missing', async () => {
+			mkdirSync(join(tempDir, '.swarm'), { recursive: true });
+			writePluginConfig();
+			writeRetro(3);
+			ensureAgentSession(SESSION_ID).qaGateSessionOverrides = {
+				final_council: true,
+			};
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_REQUIRED');
+		});
+
+		test('allows approved evidence with a session-only final_council override and no persisted profile', async () => {
+			setupLastPhaseOnly(false);
+			ensureAgentSession(SESSION_ID).qaGateSessionOverrides = {
+				final_council: true,
+			};
+			writeFinalCouncilEvidence({ verdict: 'approved' });
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
-			expect(parsed.status).not.toBe('blocked');
-			expect(parsed.warnings).toBeDefined();
-			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
-			expect(
-				parsed.warnings.some((w: string) => w.includes('plan.json is missing')),
-			).toBe(true);
+			expect(parsed.status).toBe('success');
+		});
+
+		test('blocks approved evidence that predates a fallback retrospective bundle', async () => {
+			writePlan([
+				{
+					id: 1,
+					name: 'Phase 1',
+					tasks: [
+						{ id: '1.1', phase: 1, status: 'completed', description: 'Task 1' },
+					],
+				},
+				{
+					id: 2,
+					name: 'Phase 2',
+					tasks: [
+						{ id: '2.1', phase: 2, status: 'completed', description: 'Task 2' },
+					],
+				},
+				{
+					id: 3,
+					name: 'Phase 3 (last)',
+					tasks: [
+						{ id: '3.1', phase: 3, status: 'completed', description: 'Task 3' },
+					],
+				},
+			]);
+			writePluginConfig();
+			enableFinalCouncil();
+			const finalCouncilTimestamp = new Date(
+				Date.now() - 60 * 1000,
+			).toISOString();
+			const retroTimestamp = new Date().toISOString();
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				timestamp: finalCouncilTimestamp,
+			});
+			writeRetroBundle('retro-99', 3, retroTimestamp);
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_STALE_EVIDENCE');
+		});
+
+		test('blocks approved evidence when the current plan hash changed', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Evidence for older plan content',
+				planHash: '0'.repeat(64),
+			});
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_STALE_PLAN');
+		});
+
+		test('blocks approved evidence when collision-resistant plan identity is missing', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Evidence without raw identity binding',
+				omitPlanIdentityHash: true,
+			});
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_IDENTITY_REQUIRED');
+		});
+
+		test('blocks approved evidence when collision-resistant plan identity does not match', async () => {
+			setupLastPhaseOnly(true);
+			// Correct plan_hash but WRONG plan_identity_hash (64-char hex, non-matching).
+			// The cross-binding scenario: a previously-valid swarm/title now has a different
+			// raw identity (e.g. title was renamed), but the legacy plan_hash happens to
+			// recompute to the same value. The identity hash must catch this.
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Evidence with mismatched identity hash',
+				planHash: undefined, // let helper compute correct plan_hash
+				planIdentityHash: '0'.repeat(64), // wrong identity hash (all zeros)
+			});
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_IDENTITY_MISMATCH');
+		});
+
+		test('blocks approved evidence when plan_hash is missing entirely', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Evidence without plan_hash binding',
+				omitPlanHash: true,
+			});
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_HASH_REQUIRED');
+		});
+
+		test('blocks approved evidence when timestamp is missing or invalid', async () => {
+			setupLastPhaseOnly(true);
+			// Write evidence directly so we can omit the timestamp on the entry
+			// (the helper always injects a timestamp).
+			const evidencePath = join(tempDir, '.swarm', 'evidence');
+			mkdirSync(evidencePath, { recursive: true });
+			const plan = PlanSchema.parse(
+				JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
+			);
+			writeFileSync(
+				join(evidencePath, 'final-council.json'),
+				JSON.stringify({
+					schema_version: '1.0.0',
+					task_id: 'final-council',
+					created_at: new Date().toISOString(),
+					updated_at: new Date().toISOString(),
+					entries: [
+						{
+							type: 'final-council',
+							// No `timestamp` field — triggers FINAL_COUNCIL_TIMESTAMP_REQUIRED
+							plan_id: PLAN_ID,
+							plan_hash: computePlanHash(plan),
+							plan_identity_hash: derivePlanIdentityHash(plan),
+							verdict: 'approved',
+							summary: 'Evidence without timestamp',
+							quorumSize: 5,
+							membersVoted: [
+								'critic',
+								'reviewer',
+								'sme',
+								'test_engineer',
+								'explorer',
+							],
+							membersAbsent: [],
+						},
+					],
+				}),
+			);
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_TIMESTAMP_REQUIRED');
 		});
 	});
-
 	describe('final_council enabled but phase is not last phase', () => {
 		test('skips gate for intermediate phase (phase 1 when phase 3 is last)', async () => {
 			setupIntermediatePhase(true);

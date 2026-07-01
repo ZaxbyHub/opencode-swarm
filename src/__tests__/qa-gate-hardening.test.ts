@@ -171,6 +171,30 @@ describe('Architect prompt behavioral guidance markers', () => {
 		expect(dialogue).toContain('## Task Completion Commit Policy');
 		expect(dialogue).toContain('commit_after_each_completed_task: true');
 	});
+
+	test('architect prompt disambiguates worktree isolation from Lean Turbo (#1552)', () => {
+		// Regression guard: architects were repeatedly pattern-completing
+		// "isolated git worktree" with Lean Turbo. The prompt must now contain
+		// an explicit anti-misconception block right next to the positive fact.
+		expect(renderedPrompt).toContain('WORKTREE ISOLATION IS BASELINE');
+		// Must name BOTH config keys so the architect cannot collapse them.
+		expect(renderedPrompt).toContain('worktree.policy');
+		expect(renderedPrompt).toContain('turbo.lean.worktree_isolation');
+		// Must include the explicit negation (the actual defense).
+		expect(renderedPrompt).toMatch(
+			/NOT the recommended one|secondary\/legacy path/i,
+		);
+		// Must keep the existing positive statement intact (sibling of line 135).
+		expect(renderedPrompt).toContain('isolated git worktree');
+		// Negative assertions — guard against the factual errors the PR_REVIEW
+		// round 1 caught (F-001 config path error, F-003 over-absolute advice).
+		expect(renderedPrompt).toMatch(/sibling of `parallelization:/i);
+		expect(renderedPrompt).toMatch(
+			/NOT the recommended one|secondary\/legacy path/i,
+		);
+		expect(renderedPrompt).not.toMatch(/under the parallel execution profile/);
+		expect(renderedPrompt).not.toMatch(/never Lean Turbo/);
+	});
 });
 
 describe('save_plan QA_GATE_SELECTION_CHECK', () => {

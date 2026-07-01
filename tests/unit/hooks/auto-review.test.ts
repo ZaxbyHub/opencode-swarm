@@ -17,6 +17,7 @@ import {
 import { swarmState } from '../../../src/state';
 
 let tmpDir: string;
+let origClient: typeof swarmState.opencodeClient;
 const origComputeDiff = _internals.computeExecutionDiff;
 const origDispatch = _internals.dispatchReviewer;
 const origRun = _internals.runAutoReview;
@@ -31,10 +32,12 @@ beforeEach(() => {
 		fs.mkdtempSync(path.join(os.tmpdir(), 'auto-review-')),
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+	origClient = swarmState.opencodeClient;
 	resetAutoReviewTracking();
 });
 
 afterEach(() => {
+	swarmState.opencodeClient = origClient;
 	_internals.computeExecutionDiff = origComputeDiff;
 	_internals.dispatchReviewer = origDispatch;
 	_internals.runAutoReview = origRun;
@@ -218,6 +221,73 @@ function readReceipts(): Array<Record<string, unknown>> {
 }
 
 describe('runAutoReview', () => {
+	test('dispatchReviewer binds the reviewer session under the calling session', async () => {
+		let capturedBody: { parentID?: string; title?: string } | undefined;
+		swarmState.opencodeClient = {
+			session: {
+				create: async (params: {
+					body?: { parentID?: string; title?: string };
+					query: { directory: string };
+				}) => {
+					capturedBody = params.body;
+					return { data: { id: 'review-session-1' } };
+				},
+				prompt: async () => ({
+					data: { parts: [{ type: 'text', text: APPROVED }] },
+				}),
+				delete: async () => ({}),
+			},
+		} as typeof swarmState.opencodeClient;
+
+		const transcript = await origDispatch(
+			tmpDir,
+			'review this diff',
+			'test_reviewer',
+			30_000,
+			'parent-session-1',
+		);
+
+		expect(transcript).toBe(APPROVED);
+		expect(capturedBody).toMatchObject({
+			parentID: 'parent-session-1',
+			title: 'auto-review (test_reviewer) background',
+		});
+	});
+
+	test('dispatchReviewer omits parentID when parentSessionId is empty string', async () => {
+		let capturedBody: { parentID?: string; title?: string } | undefined;
+		swarmState.opencodeClient = {
+			session: {
+				create: async (params: {
+					body?: { parentID?: string; title?: string };
+					query: { directory: string };
+				}) => {
+					capturedBody = params.body;
+					return { data: { id: 'review-session-1' } };
+				},
+				prompt: async () => ({
+					data: { parts: [{ type: 'text', text: APPROVED }] },
+				}),
+				delete: async () => ({}),
+			},
+		} as typeof swarmState.opencodeClient;
+
+		const transcript = await origDispatch(
+			tmpDir,
+			'review this diff',
+			'test_reviewer',
+			30_000,
+			'',
+		);
+
+		expect(transcript).toBe(APPROVED);
+		// parentID must be absent (not undefined, not empty string)
+		expect(Object.hasOwn(capturedBody!, 'parentID')).toBe(false);
+		expect(capturedBody).toMatchObject({
+			title: 'auto-review (test_reviewer) background',
+		});
+	});
+
 	test('APPROVED verdict: persists receipt + event, no advisory', async () => {
 		_internals.computeExecutionDiff = async () => ({
 			status: 'ok' as const,

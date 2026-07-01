@@ -204,6 +204,26 @@ function writeValidTurboState(
 	);
 }
 
+function writeLaneEvidence(dir: string, phase: number, laneId: string): void {
+	const evidenceDir = path.join(
+		dir,
+		'.swarm',
+		'evidence',
+		String(phase),
+		'lean-turbo',
+	);
+	fs.mkdirSync(evidenceDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(evidenceDir, `${laneId}.json`),
+		JSON.stringify({
+			laneId,
+			phase,
+			status: 'completed',
+			timestamp: new Date().toISOString(),
+		}),
+	);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -333,6 +353,7 @@ describe('phase_complete — Lean Turbo adversarial', () => {
 				status: 'failed',
 			},
 		]);
+		writeLaneEvidence(tempDir, 1, 'lane-1');
 
 		const result = JSON.parse(
 			await phase_complete.execute({ phase: 1, sessionID: 'sess1' }),
@@ -716,6 +737,7 @@ describe('phase_complete — Lean Turbo adversarial', () => {
 				status: 'completed',
 			},
 		]);
+		writeLaneEvidence(tempDir, 1, 'lane-1');
 
 		// Degraded task is in lane-1, which is completed
 		const turboPath = path.join(tempDir, '.swarm', 'turbo-state.json');

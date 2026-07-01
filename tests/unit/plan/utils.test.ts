@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { derivePlanId } from '../../../src/plan/utils';
+import { derivePlanId, derivePlanIdentityHash } from '../../../src/plan/utils';
 
 describe('derivePlanId', () => {
 	it('combines swarm and title with hyphen', () => {
@@ -59,5 +59,25 @@ describe('derivePlanId', () => {
 			'_',
 		);
 		expect(canonical).toBe(inline);
+	});
+
+	it('derives distinct identity hashes for plan IDs that collide after sanitization', () => {
+		const planA = { swarm: 'a', title: 'b c' };
+		const planB = { swarm: 'a', title: 'b_c' };
+
+		expect(derivePlanId(planA)).toBe(derivePlanId(planB));
+		expect(derivePlanIdentityHash(planA)).not.toBe(
+			derivePlanIdentityHash(planB),
+		);
+	});
+
+	it('derives distinct identity hashes for separator-ambiguous swarm and title pairs', () => {
+		const planA = { swarm: 'a-b', title: 'c' };
+		const planB = { swarm: 'a', title: 'b-c' };
+
+		expect(derivePlanId(planA)).toBe(derivePlanId(planB));
+		expect(derivePlanIdentityHash(planA)).not.toBe(
+			derivePlanIdentityHash(planB),
+		);
 	});
 });

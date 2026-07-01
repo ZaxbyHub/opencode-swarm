@@ -216,12 +216,12 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 **Workflow:**
 0. **Phase 0A: Existing Signal Ingestion** - Capture PR comments, review summaries, requested changes, bot findings, CI/check failures, merge conflicts, stale branch state, PR body claims, linked issues, and commit messages in the initial evidence ledger before the explorer lanes run
 1. **Intent Reconstruction** â€” Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
-2. **Parallel Explorer Lanes** â€” 6 lanes launched through deterministic `dispatch_lanes_async` while the architect continues non-dependent PR inspection, then joined with `collect_lane_results`: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+2. **Parallel Explorer Lanes** â€” all 6 fixed base lanes launched through deterministic `dispatch_lanes_async` while the architect continues non-dependent PR inspection, then incrementally polled and joined with `collect_lane_results`: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
 3. **Independent Reviewer Confirmation** â€” Validate each finding with file:line evidence
 4. **Critic Challenge** â€” Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** â€” Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; if async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`. Lane results expose bounded `output` previews plus `output_ref` for full artifact retrieval; the review protocol retrieves `output_ref` before candidate extraction or routing. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
+The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs every triggered micro-lane from the skill's risk-trigger map. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; while lanes run or collect, the architect keeps doing non-dependent work and only blocks with `wait: true` when no independent work remains. If lane tools cannot close coverage, the workflow falls back to blocking `dispatch_lanes`, then Task-tool dispatch as the final verified-equivalent fallback. If equivalence cannot be proven, the review is BLOCKED and surfaced to the user rather than degraded. Lane results expose bounded `output` previews plus `output_ref` for full artifact retrieval; the review protocol retrieves `output_ref` before candidate extraction or routing. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -453,7 +453,7 @@ Run a compound-engineering loop: brainstorm â†’ plan â†’ build â†�
 ```text
 /swarm loop "add rate limiting to the public API"
 /swarm loop "harden auth session handling" --depth exhaustive --max-cycles 2
-/swarm loop "migrate config loader" --autonomy auto
+/swarm loop "migrate config loader" --autonomy checkpoint
 /swarm loop --resume
 ```
 
@@ -462,7 +462,7 @@ Run a compound-engineering loop: brainstorm â†’ plan â†’ build â†�
 | Flag | Values | Default | Effect |
 |------|--------|---------|--------|
 | `--max-cycles` | `1`â€“`5` | `3` | Outer improvement cycles before budget stop |
-| `--autonomy` | `checkpoint`, `auto` | `checkpoint` | `checkpoint` pauses at phase gates; `auto` runs unattended (hard stop conditions still apply) |
+| `--autonomy` | `checkpoint`, `auto` | `auto` | `auto` runs unattended with hard stops still enforced; `checkpoint` pauses at phase gates |
 | `--depth` | `standard`, `exhaustive` | `standard` | `exhaustive` widens exploration in brainstorm/review phases |
 | `--resume` | _(boolean)_ | `false` | Resume the most recent unfinished loop run from `.swarm/loop/<run-id>/state.json` |
 

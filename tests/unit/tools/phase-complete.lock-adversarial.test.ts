@@ -573,8 +573,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 			try {
 				fs.symlinkSync(parentDir, linkName);
 			} catch {
-				// symlinks may require admin on Windows — skip if it fails
-				test.skip('symlink creation failed (likely no admin)', () => {});
+				// symlinks may require admin on Windows.
 				return;
 			}
 

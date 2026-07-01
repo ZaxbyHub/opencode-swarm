@@ -9,6 +9,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import type { EvidenceBundle } from '../config/evidence-schema';
+import { PlanSchema, type RuntimePlan } from '../config/plan-schema';
 import {
 	CuratorConfigSchema,
 	KnowledgeConfigSchema,
@@ -283,6 +284,74 @@ interface PhaseCompleteEvent {
 	agents_missing: string[];
 	status: PhaseCompleteResult['status'];
 	summary: string | null;
+}
+
+/**
+ * Last-resort emergency plan.json writer, made traceable + validated (FR-002,
+ * issue #660 / F-08).
+ *
+ * INVARIANT 5 (plan durability): this is NOT a new plan.json writer. It is the
+ * EXISTING "Last resort: direct write" emergency fallback — the only path that
+ * persists a phase-status flip when both ledger-replay and the normal savePlan
+ * path are unavailable — refactored so that it (a) refuses to persist a
+ * schema-invalid candidate and (b) records a traceability event when it does
+ * write. The durable `PlanSchema` is unchanged and no additional plan.json write
+ * site is introduced; `candidate` is the JSON-parsed + mutated copy of the
+ * on-disk plan that the legacy code already wrote verbatim.
+ *
+ * @param dir - Project root directory (.swarm/ lives under it).
+ * @param planPath - Pre-resolved path to .swarm/plan.json.
+ * @param candidate - The mutated plan object about to be persisted.
+ * @param phase - The phase whose status was flipped (for the trace event).
+ * @param warnings - Warnings array; failures are surfaced here, never thrown.
+ * @returns true if the candidate validated and was written, false otherwise.
+ */
+async function fallbackWritePlanWithTrace(
+	dir: string,
+	planPath: string,
+	candidate: unknown,
+	phase: number,
+	warnings: string[],
+): Promise<boolean> {
+	// Defense-in-depth: never persist a schema-invalid plan.json. The candidate
+	// is a parsed+mutated copy of the on-disk plan, so this should normally pass;
+	// if it does not, the on-disk plan was already corrupt and we must not make it
+	// worse by rewriting it.
+	const validation = PlanSchema.safeParse(candidate);
+	if (!validation.success) {
+		const detail = validation.error.issues
+			.slice(0, 5)
+			.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+			.join('; ');
+		logger.warn(
+			'[phase_complete] Last-resort plan.json write aborted — mutated plan failed PlanSchema validation:',
+			detail,
+		);
+		warnings.push(
+			`Warning: last-resort plan.json write skipped — mutated plan failed schema validation (${detail})`,
+		);
+		return false;
+	}
+
+	await atomicWriteFile(planPath, JSON.stringify(validation.data, null, 2));
+
+	// Best-effort traceability event. Reuses the canonical events.jsonl append
+	// pattern used for the phase_complete event above
+	// (validateSwarmPath + fs.appendFileSync). Never throw out of the fallback.
+	try {
+		const traceEvent = {
+			event: 'phase_complete_fallback_write' as const,
+			phase,
+			timestamp: new Date().toISOString(),
+		};
+		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
+		fs.appendFileSync(eventsPath, `${JSON.stringify(traceEvent)}\n`, 'utf-8');
+	} catch (eventError) {
+		warnings.push(
+			`Warning: failed to record phase_complete_fallback_write trace event: ${eventError instanceof Error ? eventError.message : String(eventError)}`,
+		);
+	}
+	return true;
 }
 
 /**
@@ -697,6 +766,8 @@ export async function executePhaseComplete(
 		pluginConfig: config,
 		agentsDispatched,
 		safeWarn,
+		loadedRetroBundle,
+		loadedRetroTaskId,
 	};
 
 	// Turbo mode: skip gates 1-5 (but NOT 5b Architecture Supervision).
@@ -1570,6 +1641,30 @@ export async function executePhaseComplete(
 
 		try {
 			const plan = await loadPlan(dir);
+			// #1269 finding 2: if loadPlan fell back to a STALE plan.json (the ledger
+			// hash mismatched, ledger replay threw, AND no critic-approved snapshot was
+			// available), refuse to mutate phase status against it instead of silently
+			// trusting plan.json. This MUST sit before any savePlan / plan.json write
+			// below; the plan.json lock acquired above is released by the finally block
+			// on this early return.
+			const runtimePlan = plan as RuntimePlan | null;
+			if (runtimePlan?._ledgerReplayStale === true) {
+				const staleReason =
+					runtimePlan._ledgerReplayStaleReason ?? 'unknown reason';
+				return JSON.stringify({
+					success: false,
+					phase: args.phase,
+					status: 'incomplete' as const,
+					message: `Plan write refused: plan.json is stale from a failed ledger replay (${staleReason}). Refusing to complete phase ${args.phase} against a known-stale plan.`,
+					agentsDispatched,
+					agentsMissing,
+					warnings,
+					errors: [`Stale plan from failed ledger replay: ${staleReason}`],
+					recovery_guidance:
+						'The ledger replay failed and no critic-approved snapshot was available, so loadPlan fell back to a stale plan.json. Do NOT retry blindly. Recover first: re-verify the plan (re-run completion verification), reset the session, or restore from the latest checkpoint under .swarm/plan-export/, then retry phase_complete.',
+					_ledgerReplayStaleReason: staleReason,
+				});
+			}
 			if (plan === null) {
 				// loadPlan() returned null (malformed JSON and no plan.md to migrate from)
 				// Try ledger-first rebuild before direct write
@@ -1615,7 +1710,14 @@ export async function executePhaseComplete(
 					);
 					if (phaseObj) {
 						phaseObj.status = 'complete';
-						await atomicWriteFile(planPath, JSON.stringify(plan, null, 2));
+						// FR-002: validate + traceable emergency write (not a new writer).
+						await fallbackWritePlanWithTrace(
+							dir,
+							planPath,
+							plan,
+							phase,
+							warnings,
+						);
 					}
 				} catch {
 					/* fallback failed */
@@ -1683,7 +1785,14 @@ export async function executePhaseComplete(
 				);
 				if (phaseObj) {
 					phaseObj.status = 'complete';
-					await atomicWriteFile(planPath, JSON.stringify(plan, null, 2));
+					// FR-002: validate + traceable emergency write (not a new writer).
+					await fallbackWritePlanWithTrace(
+						dir,
+						planPath,
+						plan,
+						phase,
+						warnings,
+					);
 				}
 			} catch {
 				/* fallback failed */

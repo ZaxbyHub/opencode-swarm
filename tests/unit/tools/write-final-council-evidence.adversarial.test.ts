@@ -37,6 +37,34 @@ function allVerdicts(): CouncilMemberVerdict[] {
 	return members.map((member) => verdict(member));
 }
 
+async function writePlanFixture(tempDir: string) {
+	await fs.promises.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
+	await fs.promises.writeFile(
+		path.join(tempDir, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Final Council Adversarial Test Plan',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'completed',
+							description: 'Test task',
+						},
+					],
+				},
+			],
+		}),
+	);
+}
+
 async function readEvidence(tempDir: string) {
 	const filePath = path.join(
 		tempDir,
@@ -55,7 +83,7 @@ describe('write_final_council_evidence adversarial security tests', () => {
 		tempDir = fs.realpathSync(
 			await fs.promises.mkdtemp(path.join(os.tmpdir(), 'final-council-adv-')),
 		);
-		await fs.promises.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
+		await writePlanFixture(tempDir);
 	});
 
 	afterEach(async () => {

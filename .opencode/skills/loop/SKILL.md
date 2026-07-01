@@ -43,11 +43,11 @@ Parse the `[MODE: LOOP ...]` header to extract:
 - `objective`: the goal text after the header (the WHAT to achieve). Empty only
   when `resume=true`.
 - `max_cycles`: integer 1..5 (default 3) — hard cap on outer improvement cycles.
-- `autonomy`: `checkpoint` (default) or `auto`.
-  - `checkpoint`: pause at each phase gate and wait for explicit user approval
-    before continuing.
+- `autonomy`: `auto` (default) or `checkpoint`.
   - `auto`: proceed across gates without prompting, but still enforce every
     hard stop condition and the mandatory review/critic gates.
+  - `checkpoint`: pause at each phase gate and wait for explicit user approval
+    before continuing.
 - `depth`: `standard` (default) or `exhaustive` (wider exploration in
   BRAINSTORM and PLAN: more candidate approaches, deeper localization).
 - `resume`: `true` | `false`. When true, resume the existing run from durable
@@ -99,6 +99,15 @@ One cycle is five phases run in order: **BRAINSTORM → PLAN → BUILD → REVIE
 IMPROVE**. Do not skip or collapse phases. Each phase has an entry gate
 (precondition) and an exit gate (positive evidence required before the next
 phase begins). In `checkpoint` autonomy, pause at each gate for user approval.
+
+When `autonomy=auto`, use the balanced-speed defaults instead of asking the user
+for execution preferences: reviewer ON, test_engineer ON, sme_enabled ON,
+critic_pre_plan ON, sast_enabled ON, drift_check ON, and council_mode,
+hallucination_guard, mutation_test, phase_council, final_council OFF. Keep
+commit frequency at phase-level only. During PLAN, choose the largest safe
+parallel coder count from dependency-ready, file-disjoint task groups, clamped to
+the configured limit (currently 6); if scopes overlap or are unknown, use 1.
+This does not weaken QA; it removes only the preference prompt.
 
 On cycle 2+, BRAINSTORM is replaced by a lightweight **refinement** step: feed
 the prior cycle's captured improvements and residual findings into PLAN
@@ -281,7 +290,7 @@ A minimal, append-friendly shape — extend as needed but keep these fields:
 
 ## Autonomy Quick Reference
 
-| Behavior | `checkpoint` (default) | `auto` |
+| Behavior | `auto` (default) | `checkpoint` |
 | --- | --- | --- |
 | Pause at phase gates | Yes — wait for user approval | No |
 | Confirm before next cycle | Yes | No |

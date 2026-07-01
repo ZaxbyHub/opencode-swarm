@@ -222,7 +222,9 @@ independent work is exhausted, to confirm every lane is settled.
 Missing, stale, cancelled, or failed lanes are coverage gaps that must be closed
 before marking any item RESOLVED/DISPROVED/PRE_EXISTING. Apply the COVERAGE GATE:
 retry failed lanes (max 2), deploy a verified equivalent alternative (same agent
-type, same prompt, same scope, same isolation), or report INCOMPLETE to the user.
+type, same prompt, same scope, same isolation, with Task-tool dispatch as the
+final fallback when lane tools do not work), or stop and surface the lane failure
+to the user as BLOCKED.
 Do not proceed with "blocking verification and record that async advisory lanes
 were unavailable" — record-and-continue is not coverage closure.
 

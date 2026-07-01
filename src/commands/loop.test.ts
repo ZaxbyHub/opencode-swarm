@@ -1,6 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
-import { handleLoopCommand } from './loop.js';
+import * as path from 'node:path';
+import { _internals, handleLoopCommand } from './loop.js';
 
 const TEST_DIR = tmpdir();
 
@@ -19,10 +21,19 @@ describe('handleLoopCommand', () => {
 		]);
 		expect(result.startsWith('[MODE: LOOP')).toBe(true);
 		expect(result).toContain('max_cycles=3');
-		expect(result).toContain('autonomy=checkpoint');
+		expect(result).toContain('autonomy=auto');
 		expect(result).toContain('depth=standard');
 		expect(result).toContain('resume=false');
 		expect(result).toContain('add rate limiting');
+	});
+
+	test('parses --autonomy checkpoint', async () => {
+		const result = await handleLoopCommand(TEST_DIR, [
+			'obj',
+			'--autonomy',
+			'checkpoint',
+		]);
+		expect(result).toContain('autonomy=checkpoint');
 	});
 
 	test('parses --max-cycles within range', async () => {
@@ -112,10 +123,35 @@ describe('handleLoopCommand', () => {
 		expect(result).toContain('requires a value');
 	});
 
-	test('rejects unknown flags', async () => {
-		const result = await handleLoopCommand(TEST_DIR, ['obj', '--turbo']);
+	test('rejects leading unknown flags', async () => {
+		const result = await handleLoopCommand(TEST_DIR, ['--turbo', 'obj']);
 		expect(result).toContain('Error:');
 		expect(result).toContain('--turbo');
+	});
+
+	test('treats unknown flag-like tokens after objective start as objective text', async () => {
+		const result = await handleLoopCommand(TEST_DIR, [
+			'run',
+			'tests',
+			'with',
+			'`--all`',
+		]);
+		expect(result.startsWith('[MODE: LOOP')).toBe(true);
+		expect(result).toContain('run tests with `--all`');
+	});
+
+	test('supports -- delimiter before objective text', async () => {
+		const result = await handleLoopCommand(TEST_DIR, [
+			'--autonomy',
+			'auto',
+			'--',
+			'--all',
+			'is',
+			'objective',
+			'text',
+		]);
+		expect(result.startsWith('[MODE: LOOP')).toBe(true);
+		expect(result).toContain('--all is objective text');
 	});
 
 	test('strips injected [MODE: ...] headers from objective', async () => {
@@ -151,6 +187,65 @@ describe('handleLoopCommand', () => {
 		expect(result.startsWith('[MODE: LOOP')).toBe(true);
 		expect(result).toContain('resume=true');
 		expect(result).toContain('new objective');
+	});
+
+	describe('--resume autonomy restoration', () => {
+		const swarmLoopDir = path.join(TEST_DIR, '.swarm', 'loop');
+
+		beforeEach(() => {
+			// Clean up any leftover loop state
+			try {
+				fs.rmSync(swarmLoopDir, { recursive: true, force: true });
+			} catch {
+				// ignore
+			}
+		});
+
+		test('--resume with state.json params.autonomy checkpoint → uses checkpoint', async () => {
+			// Create a loop run directory with state.json containing autonomy: checkpoint
+			const runDir = path.join(swarmLoopDir, 'test-run-1', 'state.json');
+			fs.mkdirSync(path.dirname(runDir), { recursive: true });
+			fs.writeFileSync(
+				runDir,
+				JSON.stringify({ params: { autonomy: 'checkpoint' } }),
+			);
+
+			const result = await handleLoopCommand(TEST_DIR, ['--resume']);
+			expect(result).toContain('autonomy=checkpoint');
+		});
+
+		test('--resume without state.json → falls back to default auto', async () => {
+			// No .swarm/loop/ directory at all
+			const result = await handleLoopCommand(TEST_DIR, ['--resume']);
+			expect(result).toContain('autonomy=auto');
+		});
+
+		test('--resume --autonomy checkpoint (explicit) → wins over persisted state', async () => {
+			// Create state with auto, but user explicitly asks for checkpoint
+			const runDir = path.join(swarmLoopDir, 'test-run-2', 'state.json');
+			fs.mkdirSync(path.dirname(runDir), { recursive: true });
+			fs.writeFileSync(
+				runDir,
+				JSON.stringify({ params: { autonomy: 'auto' } }),
+			);
+
+			const result = await handleLoopCommand(TEST_DIR, [
+				'--resume',
+				'--autonomy',
+				'checkpoint',
+			]);
+			expect(result).toContain('autonomy=checkpoint');
+		});
+
+		test('--resume with corrupted state.json → falls back to default', async () => {
+			// Create a corrupt state file
+			const runDir = path.join(swarmLoopDir, 'test-run-3', 'state.json');
+			fs.mkdirSync(path.dirname(runDir), { recursive: true });
+			fs.writeFileSync(runDir, 'not valid json {{{');
+
+			const result = await handleLoopCommand(TEST_DIR, ['--resume']);
+			expect(result).toContain('autonomy=auto');
+		});
 	});
 
 	test('is registered in COMMAND_REGISTRY as a none-policy mode command', async () => {

@@ -253,6 +253,54 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		expect(section).toContain('Use blocking `dispatch_lanes` only');
 		expect(section).toContain('NOT a per-agent Task/run-in-background pattern');
 	});
+
+	it('PR_REVIEW mode hard constraints require all lanes, non-idling async work, and blocked coverage gaps', () => {
+		const idx = p.indexOf('### MODE: PR_REVIEW');
+		const next = p.indexOf('### MODE: PR_FEEDBACK', idx + 1);
+		const section = p.slice(idx, next);
+
+		expect(section).toContain('RUN ALL BASE LANES');
+		expect(section).toContain('fixed six base check-type lanes');
+		expect(section).toContain('USE ASYNC DISPATCH WITHOUT IDLING');
+		expect(section).toContain('dispatch_lanes_async');
+		expect(section).toContain('collect_lane_results');
+		expect(section).toContain('without `wait`');
+		expect(section).toContain('wait: true');
+		expect(section).toContain('RUN THE TRIGGERED MICRO-LANES');
+		expect(section).toContain('after the base explorer lanes settle');
+		expect(section).toContain('Do not skip micro-lanes');
+		expect(section).not.toContain('after the base explorer lanes start');
+		expect(section).toContain(
+			'surface the lane failure to the user as BLOCKED',
+		);
+		expect(section).toContain('do not produce a degraded review');
+		expect(section).toContain('partial verdict');
+		expect(section).not.toContain('continue — do not silently skip it');
+		expect(section).not.toContain('INCOMPLETE');
+	});
+
+	it('async signal-triggered mode stubs direct architect work while lanes run', () => {
+		const modeNeedles = [
+			'When reality-check lanes are dispatched asynchronously',
+			'For async council lanes',
+			'For async explorer waves',
+			'For async synthesis lanes',
+			'For async inventory or candidate-generation lanes',
+			'For async verification lanes',
+		];
+
+		for (const needle of modeNeedles) {
+			const idx = p.indexOf(needle);
+			const section = p.slice(idx, idx + 400);
+			expect(idx).toBeGreaterThan(-1);
+			expect(section).toContain('batch_id');
+			expect(section).toContain('keep doing');
+			expect(section).toContain('collect_lane_results');
+			expect(section).toContain('without `wait`');
+			expect(section).toContain('process settled lanes immediately');
+			expect(section).toContain('wait: true');
+		}
+	});
 });
 
 describe('Architect Agent - Tool References', () => {

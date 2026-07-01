@@ -325,7 +325,7 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 			// Should succeed with advisory warning about missing drift evidence
 			expect(parsed.success).toBe(true);
 			expect(parsed.warnings).toContainEqual(
-				expect.stringContaining('No spec.md found'),
+				expect.stringContaining('No effective spec'),
 			);
 
 			// runDeterministicDriftCheck should NOT have been called to "fix" the missing evidence
@@ -352,7 +352,7 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 
 			// Should contain advisory warning about missing drift evidence
 			expect(parsed.warnings).toContainEqual(
-				expect.stringContaining('No spec.md found'),
+				expect.stringContaining('No effective spec'),
 			);
 		});
 

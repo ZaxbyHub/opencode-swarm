@@ -15,6 +15,7 @@ import {
 	PIPELINE_AGENTS,
 	QA_AGENTS,
 	SKILL_AGENT_TOOL_MAP,
+	TOOL_DESCRIPTIONS,
 	TURBO_AGENT_TOOL_MAP,
 } from '../../../src/config/constants';
 import { TOOL_NAMES } from '../../../src/tools/tool-names';
@@ -33,6 +34,18 @@ describe('constants.ts', () => {
 		it('contains exactly explorer, coder, and test_engineer', () => {
 			expect(PIPELINE_AGENTS).toEqual(['explorer', 'coder', 'test_engineer']);
 			expect(PIPELINE_AGENTS).toHaveLength(3);
+		});
+	});
+
+	describe('TOOL_DESCRIPTIONS', () => {
+		it('documents write_final_council_evidence with actionable final-council guidance', () => {
+			const description = TOOL_DESCRIPTIONS.write_final_council_evidence;
+
+			expect(description).toContain('project-scoped final council evidence');
+			expect(description).toContain(
+				'critic, reviewer, sme, test_engineer, and explorer',
+			);
+			expect(description).toContain('insufficient quorum');
 		});
 	});
 

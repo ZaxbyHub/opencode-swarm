@@ -34,6 +34,11 @@ canonical workflow.
   only when no independent work remains, and to blocking `dispatch_lanes`
   only when async collection is unavailable. All lanes must be settled
   before synthesis or phase transitions.
+- If lane tools cannot close required coverage after retry/re-collection,
+  Task-tool dispatch is the final fallback, but only as a verified equivalent:
+  same agent type, same prompt, same scope, same isolation. If equivalence cannot
+  be proven, stop and surface the lane failure as BLOCKED; do not produce a
+  degraded review or partial verdict.
 - When lane results include `output_ref`, call `retrieve_lane_output` for
   full text, then `parse_lane_candidates` to extract structured candidates
   for reviewer dispatch; degraded or incomplete outputs are coverage gaps.

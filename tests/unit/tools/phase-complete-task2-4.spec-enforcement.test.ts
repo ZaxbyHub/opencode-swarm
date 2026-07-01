@@ -398,7 +398,7 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 	});
 
 	describe('3. Missing spec.md + missing drift evidence + no plan.json', () => {
-		test('warning includes "No spec.md found" and "consider running critic_drift_verifier", phase succeeds', async () => {
+		test('warning includes "No effective spec" and "consider running critic_drift_verifier", phase succeeds', async () => {
 			// Ensure NO plan.json exists
 			const planPath = path.join(tempDir, '.swarm', 'plan.json');
 			if (fs.existsSync(planPath)) {
@@ -415,12 +415,12 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('success');
 
-			// Warning should mention no spec.md and suggest running critic_drift_verifier
+			// Warning should mention no effective spec and suggest running critic_drift_verifier
 			const warning = parsed.warnings.find((w: string) =>
-				w.includes('No spec.md found'),
+				w.includes('No effective spec'),
 			);
 			expect(warning).toBeDefined();
-			expect(warning).toContain('No spec.md found');
+			expect(warning).toContain('No effective spec');
 			expect(warning).toContain('consider running critic_drift_verifier');
 		});
 
@@ -607,12 +607,12 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			// Phase should succeed (advisory-only mode)
 			expect(parsed.success).toBe(true);
 
-			// Warning should mention no spec.md and suggest running critic_drift_verifier
+			// Warning should mention no effective spec and suggest running critic_drift_verifier
 			const warning = parsed.warnings.find((w: string) =>
-				w.includes('No spec.md found'),
+				w.includes('No effective spec'),
 			);
 			expect(warning).toBeDefined();
-			expect(warning).toContain('No spec.md found');
+			expect(warning).toContain('No effective spec');
 			expect(warning).toContain('consider running critic_drift_verifier');
 		});
 	});

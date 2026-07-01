@@ -10,7 +10,12 @@
 
 import type { RuntimePlan } from '../../../config/plan-schema';
 import type { QaGates } from '../../../db/qa-gate-profile.js';
-import { getEffectiveGates, getProfile } from '../../../db/qa-gate-profile.js';
+import {
+	DEFAULT_QA_GATES,
+	getEffectiveGates,
+	getProfile,
+} from '../../../db/qa-gate-profile.js';
+import { computePlanHash } from '../../../plan/ledger';
 import { loadPlan } from '../../../plan/manager';
 import { derivePlanId } from '../../../plan/utils';
 import { swarmState } from '../../../state';
@@ -28,6 +33,8 @@ import { swarmState } from '../../../state';
 export interface GatePreambleResult {
 	resolved: boolean;
 	plan?: RuntimePlan;
+	planId?: string;
+	planHash?: string;
 	effectiveGates?: QaGates;
 }
 
@@ -50,14 +57,24 @@ export async function resolveGatePreamble(
 		return { resolved: false };
 	}
 	const planId = derivePlanId(plan);
+	const planHash = computePlanHash(plan);
 	const profile = getProfile(dir, planId);
-	if (!profile) {
-		return { resolved: false, plan };
-	}
 	const session = sessionID
 		? swarmState.agentSessions.get(sessionID)
 		: undefined;
 	const overrides = session?.qaGateSessionOverrides ?? {};
+	if (!profile) {
+		const hasOverrides = Object.keys(overrides).length > 0;
+		return {
+			resolved: hasOverrides,
+			plan,
+			planId,
+			planHash,
+			effectiveGates: hasOverrides
+				? ({ ...DEFAULT_QA_GATES, ...overrides } as QaGates)
+				: undefined,
+		};
+	}
 	const effective = getEffectiveGates(profile, overrides);
-	return { resolved: true, plan, effectiveGates: effective };
+	return { resolved: true, plan, planId, planHash, effectiveGates: effective };
 }

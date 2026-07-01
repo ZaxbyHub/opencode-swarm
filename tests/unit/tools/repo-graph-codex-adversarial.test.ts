@@ -334,7 +334,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 				'dir',
 			);
 		} catch {
-			test.skip('symlinks not supported on this filesystem', () => {});
 			return;
 		}
 
@@ -375,7 +374,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 		try {
 			await fsPromises.symlink(parentDir, symlinkToParent, 'dir');
 		} catch {
-			test.skip('symlinks not supported on this filesystem', () => {});
 			return;
 		}
 
@@ -596,7 +594,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 				'file',
 			);
 		} catch {
-			test.skip('symlinks to files not supported', () => {});
 			return;
 		}
 

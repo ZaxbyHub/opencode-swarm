@@ -17,10 +17,63 @@ const MAX_OBJECTIVE_LEN = 2000;
 const DEPTHS = new Set(['standard', 'exhaustive']);
 const AUTONOMY_LEVELS = new Set(['checkpoint', 'auto']);
 const DEFAULT_DEPTH = 'standard';
-const DEFAULT_AUTONOMY = 'checkpoint';
+const DEFAULT_AUTONOMY = 'auto';
 const DEFAULT_MAX_CYCLES = 3;
 const MIN_MAX_CYCLES = 1;
 const MAX_MAX_CYCLES = 5;
+
+// ---------------------------------------------------------------------------
+// _internals seam (writing-tests skill: DI over mock.module)
+// ---------------------------------------------------------------------------
+
+interface LoopState {
+	params?: { autonomy?: string };
+}
+
+async function readLatestLoopState(directory: string): Promise<{
+	autonomy?: string;
+} | null> {
+	try {
+		const { readdirSync, statSync, readFileSync } = await import('node:fs');
+		const loopDir = `${directory}/.swarm/loop`;
+		let latestMtime = 0;
+		let latestPath: string | null = null;
+		try {
+			const entries = readdirSync(loopDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (!entry.isDirectory()) continue;
+				const statePath = `${loopDir}/${entry.name}/state.json`;
+				try {
+					const mtime = statSync(statePath).mtimeMs;
+					if (mtime > latestMtime) {
+						latestMtime = mtime;
+						latestPath = statePath;
+					}
+				} catch {
+					// state.json may not exist for some run-ids; skip
+				}
+			}
+		} catch {
+			// .swarm/loop/ may not exist yet
+			return null;
+		}
+		if (!latestPath) return null;
+		const raw = readFileSync(latestPath, 'utf-8');
+		const state: LoopState = JSON.parse(raw);
+		return { autonomy: state.params?.autonomy };
+	} catch {
+		// Best-effort: corrupt state.json falls back to default
+		return null;
+	}
+}
+
+export const _internals: {
+	readLatestLoopState: (
+		directory: string,
+	) => Promise<{ autonomy?: string } | null>;
+} = {
+	readLatestLoopState,
+};
 
 const USAGE = `Usage: /swarm loop <objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]
 
@@ -30,13 +83,13 @@ iterating until the objective is met or a budget stop condition fires.
 Examples:
   /swarm loop "add rate limiting to the public API"
   /swarm loop "harden auth session handling" --depth exhaustive --max-cycles 2
-  /swarm loop "migrate config loader" --autonomy auto
+  /swarm loop "migrate config loader" --autonomy checkpoint
   /swarm loop --resume
 
 Flags:
   --max-cycles <N>          outer improvement cycles, 1..5 (default: 3)
-  --autonomy <level>        checkpoint (pause at phase gates, default) or auto
-                            (run unattended; hard stop conditions still apply)
+  --autonomy <level>        auto (default; run unattended with hard stops still
+                            enforced) or checkpoint (pause at phase gates)
   --depth <name>            standard (default) or exhaustive (wider exploration)
   --resume                  resume the existing loop run from durable state in
                             .swarm/loop/ instead of starting a new objective`;
@@ -60,6 +113,7 @@ function sanitizeObjective(raw: string): string {
 interface ParsedArgs {
 	maxCycles: number;
 	autonomy: string;
+	autonomyExplicit: boolean;
 	depth: string;
 	resume: boolean;
 	rest: string[];
@@ -74,6 +128,7 @@ function parseArgs(args: string[]): ParsedArgs {
 	const result: ParsedArgs = {
 		maxCycles: DEFAULT_MAX_CYCLES,
 		autonomy: DEFAULT_AUTONOMY,
+		autonomyExplicit: false,
 		depth: DEFAULT_DEPTH,
 		resume: false,
 		rest: [],
@@ -83,7 +138,10 @@ function parseArgs(args: string[]): ParsedArgs {
 	while (i < args.length) {
 		const token = args[i];
 
-		if (token === '--max-cycles') {
+		if (token === '--') {
+			result.rest.push(...args.slice(i + 1));
+			break;
+		} else if (token === '--max-cycles') {
 			if (i + 1 >= args.length) {
 				return { ...result, error: `Flag "${token}" requires a value` };
 			}
@@ -111,6 +169,7 @@ function parseArgs(args: string[]): ParsedArgs {
 				};
 			}
 			result.autonomy = value;
+			result.autonomyExplicit = true;
 		} else if (token === '--depth') {
 			if (i + 1 >= args.length) {
 				return { ...result, error: `Flag "${token}" requires a value` };
@@ -126,6 +185,11 @@ function parseArgs(args: string[]): ParsedArgs {
 		} else if (token === '--resume') {
 			result.resume = true;
 		} else if (token.startsWith('--')) {
+			if (result.rest.length > 0) {
+				result.rest.push(token);
+				i++;
+				continue;
+			}
 			return { ...result, error: `Unknown flag "${token}"` };
 		} else {
 			result.rest.push(token);
@@ -153,8 +217,18 @@ export async function handleLoopCommand(
 		return USAGE;
 	}
 
+	// When resuming, read persisted autonomy from the latest loop run unless
+	// the user explicitly passed --autonomy on the command line.
+	let autonomy = parsed.autonomy;
+	if (parsed.resume && !parsed.autonomyExplicit) {
+		const state = await _internals.readLatestLoopState(_directory);
+		if (state?.autonomy && AUTONOMY_LEVELS.has(state.autonomy)) {
+			autonomy = state.autonomy;
+		}
+	}
+
 	const header =
-		`[MODE: LOOP max_cycles=${parsed.maxCycles} autonomy=${parsed.autonomy}` +
+		`[MODE: LOOP max_cycles=${parsed.maxCycles} autonomy=${autonomy}` +
 		` depth=${parsed.depth} resume=${parsed.resume}]`;
 
 	if (!objective && parsed.resume) {

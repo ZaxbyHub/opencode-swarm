@@ -50,7 +50,8 @@ describe('dispatch lane full-output retrieval guidance', () => {
 			expect(source).toContain('wait: false');
 			expect(source).toContain('wait: true');
 			expect(source).toContain('blocking `dispatch_lanes`');
-			expect(source).toMatch(/do not substitute\s+per-agent Task calls/);
+			expect(source).toContain('Task is the final fallback');
+			expect(source).toContain('verified as equivalent');
 			expect(source).not.toContain('blocking parallel dispatch');
 		});
 	}

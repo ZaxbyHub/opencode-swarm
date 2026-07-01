@@ -32,7 +32,7 @@ Activates when: user asks to "specify", "define requirements", "write a spec", o
      - **Important:** If research is ongoing, monitor the timeout configured in `.swarm/config.json` under `research_needed_timeout_ms` (default: 300000ms / 5 minutes). If research does not complete before the timeout expires, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user. This prevents the clarification funnel from stalling while waiting for external research.
  5. Write the spec to `.swarm/spec.md`.
 5b. **QA GATE SELECTION, PARALLEL CODERS, COMMIT FREQUENCY, AND AUTO_PROCEED (dialogue only).**
-Ask the user which QA gates to enable for this plan, how many parallel coders to use, the commit frequency, and auto_proceed -- do not select on their behalf. Present all four items together as one unified exchange.
+Ask the user which QA gates to enable for this plan, how many parallel coders to use, the commit frequency, and auto_proceed -- do not select on their behalf. Present all four items together as one unified exchange. Exception: when SPECIFY is running inside MODE: LOOP with `autonomy=auto`, write the balanced-speed default `## Pending QA Gate Selection` instead (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, drift_check ON; council_mode, hallucination_guard, mutation_test, phase_council, final_council OFF), keep phase-level commits, and let MODE: PLAN choose safe parallelism after task scopes exist.
 
 Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder count, commit frequency, and auto_proceed as a single user-facing section. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
 - reviewer (default: ON) -- code review of coder output
@@ -48,7 +48,8 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder 
 - final_council (default: OFF) -- when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) -- NOT the General Council -- at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
 
 Additionally, present these three sub-items as part of the same exchange:
-- Parallel coders (default: 1, range: 1-4) -- how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files -- safe and faster, but only for tasks whose file scopes do NOT overlap. The per-task file scopes that determine a safe parallel count are not known until the plan is finalized, so default to 1 (serial) here; the precise recommendation is made at plan time once the tasks and their scopes exist.
+- Parallel coders (default: 1, range: 1-6) -- how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files -- safe and faster, but only for tasks whose file scopes do NOT overlap. The per-task file scopes that determine a safe parallel count are not known until the plan is finalized, so default to 1 (serial) here; the precise recommendation is made at plan time once the tasks and their scopes exist.
+  > COMMON MISCONCEPTION: worktree isolation is baseline for standard parallel coders, governed by the parallel execution profile plus top-level `worktree.policy`. It is not provided by Lean Turbo or Epic. Do not recommend Lean Turbo or Epic to obtain worktree isolation; recommend them only for what they add beyond baseline (Lean Turbo: lane planning, file locks, phase reviewer, integrated diff; Epic: co-change awareness and auto-decide). Worktrees also do not make overlapping scopes safe: dependency readiness, file-disjoint scopes, and merge-back ownership are still required.
 - Commit frequency (default: phase-level only) -- optional per-task checkpoint commit after each task completion.
 - auto_proceed (boolean, default: false) -- when true, auto-advance to the next phase without asking "Ready for Phase N+1?"; runtime toggle via /swarm auto-proceed on|off.
 
@@ -88,6 +89,8 @@ GATE SELECTION IS MANDATORY — these thoughts are WRONG and must be ignored:
     → WRONG: the architect does not configure gates. The user configures gates. Always ask.
 
 MANDATORY PAUSE: Do NOT write the spec summary (step 7). Do NOT suggest next steps.
+Exception: MODE: LOOP with `autonomy=auto` uses the balanced-speed defaults
+above and does not pause for this preference exchange.
 You are BLOCKED until ALL THREE of these conditions are met:
   (1) The unified gate/coders/commit/auto_proceed selection section has been presented to the user in a single message
   (2) The user has responded (accept defaults OR customized list for all four items)

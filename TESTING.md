@@ -143,7 +143,7 @@ coverageReporter = ["lcov", "text"]
 coverageDir = "./coverage"
 ```
 
-The coverage gate runs as part of the `unit` job but only on `merge_group` events (not on every PR for speed). To measure coverage locally:
+The coverage gate runs in a dedicated `coverage` job (a required status check) but only on `merge_group` events (not on every PR for speed). It runs the full unit suite once with coverage in its own job, separate from the sharded `unit` job, so the long full-suite measurement does not stack onto a unit shard's timeout budget. To measure coverage locally:
 
 ```bash
 bun test --coverage tests/unit/ --timeout 60000

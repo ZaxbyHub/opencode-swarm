@@ -203,6 +203,13 @@ save_plan({
 })
 
 **POST-SAVE_PLAN: APPLY QA GATE SELECTION.**
+Auto-loop exception: when this PLAN step is running inside MODE: LOOP with
+`autonomy=auto`, do not ask the gate/parallelism/commit-frequency question. Use
+the balanced-speed defaults from the loop skill, call `set_qa_gates` with those
+values after `save_plan`, keep phase-level commits, and set a locked
+`execution_profile` automatically when the plan has dependency-ready,
+file-disjoint tasks. Choose the largest safe count, clamped to the configured
+limit (currently 6); use serial execution when scopes overlap or are unknown.
 After `save_plan` succeeds, read `.swarm/context.md`:
 - If a `## Pending QA Gate Selection` section exists: parse the gate values, call `set_qa_gates` with those flags, confirm with the user ("QA gates applied: <list>"), then remove the section from context.md.
 - If a `## Pending Parallelization Config` section also exists: parse the values and call `save_plan` again with `execution_profile` set to `{ parallelization_enabled: <parsed>, max_concurrent_tasks: <parsed>, council_parallel: false, locked: true }`. Then remove the section from context.md. If the plan already had `execution_profile.locked: true`, skip this step — the profile is already locked and immutable.
@@ -220,7 +227,8 @@ After `save_plan` succeeds, read `.swarm/context.md`:
   - drift_check (default: ON) - mandatory per-phase drift verification at PHASE-WRAP
   - final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) -- NOT the General Council -- at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
   Additionally, present these two sub-items as part of the same exchange:
-  - Parallel coders (default: 1, range: 1-4) - how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files - safe and faster, but only for tasks whose file scopes do NOT overlap. Inspect the plan and recommend a count equal to the number of dependency-ready, file-disjoint task groups (clamped 1-4); recommend 1 (serial) when scopes overlap or are unknown. State your recommendation and reasoning when you ask.
+  - Parallel coders (default: 1, range: 1-6) - how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files - safe and faster, but only for tasks whose declared file scopes do NOT overlap. Inspect the plan and recommend a count equal to the number of dependency-ready, file-disjoint task groups (clamped 1-6); recommend 1 (serial) when scopes overlap or are unknown. State your recommendation and reasoning when you ask.
+  > COMMON MISCONCEPTION: worktree isolation is baseline for standard parallel coders, governed by the parallel execution profile plus top-level `worktree.policy`. It is not provided by Lean Turbo or Epic. Do not recommend Lean Turbo or Epic to obtain worktree isolation; recommend them only for what they add beyond baseline (Lean Turbo: lane planning, file locks, phase reviewer, integrated diff; Epic: co-change awareness and auto-decide). Worktrees also do not make overlapping scopes safe: dependency readiness, file-disjoint scopes, and merge-back ownership are still required.
   - Commit frequency (default: phase-level only) - optional per-task checkpoint commit after each task completion.
   The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
   If the user says parallel coders > 1, write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:

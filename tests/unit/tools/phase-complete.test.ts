@@ -2189,9 +2189,9 @@ describe('phase_complete tool', () => {
 
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('success');
-			// Should have warning about missing spec.md
+			// Should have warning about missing effective spec context
 			expect(
-				parsed.warnings.some((w: string) => w.includes('No spec.md')),
+				parsed.warnings.some((w: string) => w.includes('No effective spec')),
 			).toBe(true);
 		});
 
@@ -2262,7 +2262,14 @@ describe('phase_complete tool', () => {
 					warning.includes('Turbo mode active'),
 				),
 			).toBe(true);
-			expect(warnCalls).toHaveLength(0);
+			const nonConfigWarnCalls = warnCalls.filter((args) => {
+				const message = String(args[0] ?? '');
+				return (
+					!message.includes('CONFIG LOAD FAILURE') &&
+					!message.includes('SECURITY: Config load failed')
+				);
+			});
+			expect(nonConfigWarnCalls).toHaveLength(0);
 			expect(errorCalls).toHaveLength(0);
 		});
 

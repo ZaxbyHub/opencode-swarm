@@ -6,6 +6,7 @@
  * token estimation for swarm-related operations.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
 import { bunFile } from '../utils/bun-compat';
@@ -171,7 +172,68 @@ export function validateSwarmPath(directory: string, filename: string): string {
 		}
 	}
 
+	let realBaseDir: string;
+	try {
+		if (fs.lstatSync(baseDir).isSymbolicLink()) {
+			throw new Error('Invalid filename: path escapes .swarm directory');
+		}
+		realBaseDir = fs.realpathSync(baseDir);
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.message === 'Invalid filename: path escapes .swarm directory'
+		) {
+			throw error;
+		}
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return resolved;
+		}
+		throw new Error('Invalid filename: failed to resolve .swarm directory');
+	}
+
+	let existingPath = resolved;
+	while (!fs.existsSync(existingPath)) {
+		const parent = path.dirname(existingPath);
+		if (parent === existingPath || !isPathWithin(parent, baseDir)) {
+			existingPath = baseDir;
+			break;
+		}
+		existingPath = parent;
+	}
+
+	let realExistingPath: string;
+	try {
+		realExistingPath = fs.realpathSync(existingPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			realExistingPath = realBaseDir;
+		} else {
+			throw new Error('Invalid filename: failed to resolve path');
+		}
+	}
+
+	if (!isPathWithin(realExistingPath, realBaseDir)) {
+		throw new Error('Invalid filename: path escapes .swarm directory');
+	}
+
 	return resolved;
+}
+
+function isPathWithin(candidate: string, base: string): boolean {
+	const normalizedCandidate = path.normalize(candidate);
+	const normalizedBase = path.normalize(base);
+	if (process.platform === 'win32') {
+		const candidateLower = normalizedCandidate.toLowerCase();
+		const baseLower = normalizedBase.toLowerCase();
+		return (
+			candidateLower === baseLower ||
+			candidateLower.startsWith(`${baseLower}${path.sep}`)
+		);
+	}
+	return (
+		normalizedCandidate === normalizedBase ||
+		normalizedCandidate.startsWith(`${normalizedBase}${path.sep}`)
+	);
 }
 
 export async function readSwarmFileAsync(

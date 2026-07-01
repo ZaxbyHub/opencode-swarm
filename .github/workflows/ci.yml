@@ -40,7 +40,20 @@ jobs:
             echo "is-release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ "$EVENT" == "merge_group" ]] && git log --format='%s' --max-count=10 | grep -q '^chore(main): release'; then
+          # Inspect ONLY the merge-group head commit (-1), not a window of
+          # history. The queued merge commit is "Merge pull request #N from
+          # <owner>/release-please--..." with the release commit "chore(main):
+          # release X.Y.Z" in its body, so its full message (%B) identifies a
+          # release merge. Two traps this avoids:
+          #   1. The release commit is the merge commit's SECOND parent, so it
+          #      is absent from the first-parent history the shallow merge-queue
+          #      checkout traverses — the old "git log --max-count=10" grep for
+          #      the release subject silently missed it and ran the full suite.
+          #   2. A 10-commit window false-positives: a recent release MERGE
+          #      ("Merge pull request ... release-please--...") lingers in the
+          #      window of later, non-release PRs and would wrongly skip them.
+          # HEAD-only is both robust (no traversal) and specific (this group).
+          if [[ "$EVENT" == "merge_group" ]] && git log -1 --format='%B' | grep -qE 'release-please--|^chore\(main\): release'; then
             echo "is-release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -160,7 +173,11 @@ jobs:
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
-            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 --coverage > "$tmp" 2>&1 || exit_code=$?
+            # No --coverage here: per-file coverage is overwritten each invocation
+            # and never aggregated. The coverage gate (the dedicated coverage job)
+            # owns the full-suite measurement; instrumenting every sharded test
+            # process was pure overhead on every cell.
+            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
             if [ $exit_code -ne 0 ]; then
               if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp"; then
                 echo "::error file=$f::FAILED: $f"
@@ -172,28 +189,81 @@ jobs:
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
           exit $failed
+      # NOTE: the coverage gate used to run here as an extra step on
+      # `unit (ubuntu-latest, 1)`, which made that one cell execute the entire
+      # unit suite twice (sharded run + full-suite coverage run) inside the 40m
+      # budget — ~30-35 min in practice, intermittently timing out and blocking
+      # the merge queue (PR #1573). It now lives in the dedicated `coverage` job
+      # below so the full-suite run gets its own timeout and the unit cells stay
+      # fast. Blocking power is NOT automatic: nothing here `needs: coverage`, so
+      # the gate only blocks the queue once `coverage` is added to ruleset
+      # 17809658's required status checks. That must happen AFTER this lands on
+      # main (adding it earlier blocks other open PRs whose merge groups don't
+      # yet define this job). Until then the gate runs but does not block.
 
+  # Merge-queue-only coverage gate. Runs the full unit suite once with coverage
+  # and enforces the line-coverage threshold. Isolated from the `unit` job so the
+  # inherently ~26-31 min full-suite coverage measurement gets its own generous
+  # timeout instead of stacking onto a sharded unit cell's 40m budget (see the
+  # NOTE in the `unit` job above and PR #1573). On pull_request all steps are
+  # skipped and the job reports success to satisfy the required check without
+  # doing work (same pattern as integration/smoke). Skipped for release-please
+  # branches (version bumps don't change coverage).
+  coverage:
+    needs: [detect-release, quality]
+    runs-on: ubuntu-latest
+    # Standalone cost: ~2-3 min setup/build + ~26-31 min full-suite coverage
+    # (the measurement alone has been observed at 30.6 min, PR #1566) = ~29-34 min
+    # worst case. This job does NOT run the sharded suite, so it sheds the ~3.5 min
+    # that helped push the old in-`unit` cell to its 40m cap. The cap balances two
+    # ceilings: it must clear the ~34 min worst-observed run (60m leaves ~26 min
+    # for slow-runner / cache-miss variance) AND stay under the merge_queue
+    # ruleset's check_response_timeout_minutes: 60 end-to-end, since coverage runs
+    # after `quality` (~1 min) via `needs` — total ~35 min < 60. This
+    # makes a timeout very unlikely for a normal run by removing the structural
+    # double-run; it is not an absolute guarantee against a pathologically slow runner.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        with:
+          bun-version: "1.3.13"
+      - name: Cache bun dependencies
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - name: Install dependencies
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        run: bun install --frozen-lockfile
+      # The full suite includes tests/unit/build/ tests that load the bundle, so
+      # dist/ must exist (matches the unit job's rationale).
+      - name: Build
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        run: bun run build
       - name: Coverage gate enforcement
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
         run: |
           set -e
           echo "Running coverage measurement for gate enforcement..."
-          # Run the full unit test suite with coverage
-          bun --smol test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
-          # Extract line coverage from "All files" row using awk (no command substitution)
-          awk -F'|' '/All files/ { gsub(/ /,"",$2); print substr($2, 1, 5); exit }' coverage-output.txt > coverage-value.txt
+          # Run the full unit test suite with coverage (no --smol: that flag
+          # crashes Bun with SIGILL when combined with --coverage on large suites).
+          bun test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
+          # Extract line coverage from "All files" row using awk.
+          # Bun's coverage table columns: File | % Funcs | % Lines | Uncovered Line #s
+          awk -F'|' '/All files/ { gsub(/ /,"",$3); print substr($3, 1, 5); exit }' coverage-output.txt > coverage-value.txt
           if [ ! -s coverage-value.txt ]; then
             echo "::warning::Could not parse coverage output"
-            : > coverage-value.txt
+            echo "0" > coverage-value.txt
           fi
-          head -c 5 coverage-value.txt > coverage-trimmed.txt
-          read -r COVERAGE < coverage-trimmed.txt || true
-          if [ -z "$COVERAGE" ]; then
-            COVERAGE="0"
-          fi
+          read -r COVERAGE < coverage-value.txt || COVERAGE="0"
           THRESHOLD=41.48
           echo "Coverage: ${COVERAGE}% (threshold: ${THRESHOLD}%)"
-          # Compare using awk for floating-point
           if awk "BEGIN {exit !($COVERAGE < $THRESHOLD)}"; then
             echo "::error::Coverage gate failed: ${COVERAGE}% < ${THRESHOLD}%"
             exit 1
@@ -201,7 +271,7 @@ jobs:
           echo "Coverage gate passed: ${COVERAGE}% >= ${THRESHOLD}%"
       - name: Upload coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-report
           path: |

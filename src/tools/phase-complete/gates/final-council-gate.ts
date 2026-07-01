@@ -6,9 +6,68 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { derivePlanId } from '../../../plan/utils';
+import type { EvidenceBundle } from '../../../config/evidence-schema';
+import { hasAnyProfileWithEnabledGate } from '../../../db/qa-gate-profile';
+import { derivePlanIdentityHash } from '../../../plan/utils';
+import { swarmState } from '../../../state';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
+
+function parseTimestampMs(value: unknown): number | null {
+	if (typeof value !== 'string') return null;
+	const parsed = new Date(value).getTime();
+	return Number.isNaN(parsed) ? null : parsed;
+}
+
+function latestRetroTimestampMsFromBundle(
+	bundle: EvidenceBundle | null | undefined,
+	phase: number,
+): number | null {
+	if (!bundle) return null;
+	const timestamps = [
+		parseTimestampMs(bundle.created_at),
+		parseTimestampMs(bundle.updated_at),
+		...(bundle.entries ?? [])
+			.filter(
+				(entry) =>
+					entry.type === 'retrospective' && entry.phase_number === phase,
+			)
+			.map((entry) => parseTimestampMs(entry.timestamp)),
+	].filter((timestamp): timestamp is number => timestamp !== null);
+	return timestamps.length > 0 ? Math.max(...timestamps) : null;
+}
+
+function readLatestRetroTimestampMs(dir: string, phase: number): number | null {
+	const baseDir = path.normalize(path.resolve(dir, '.swarm'));
+	// Defense-in-depth: ensure the constructed path is within .swarm
+	// before reading. Mirrors validateSwarmPath's containment check.
+	const retroPath = path.normalize(
+		path.join(baseDir, 'evidence', `retro-${phase}`, 'evidence.json'),
+	);
+	const isWindows = process.platform === 'win32';
+	const pathInSwarm = isWindows
+		? retroPath.toLowerCase().startsWith(baseDir.toLowerCase() + path.sep) ||
+			retroPath.toLowerCase() === baseDir.toLowerCase()
+		: retroPath.startsWith(baseDir + path.sep) || retroPath === baseDir;
+	if (!pathInSwarm) return null;
+	try {
+		const content = fs.readFileSync(retroPath, 'utf-8');
+		return latestRetroTimestampMsFromBundle(
+			JSON.parse(content) as EvidenceBundle,
+			phase,
+		);
+	} catch {
+		return null;
+	}
+}
+
+function sessionHasEnabledFinalCouncil(sessionID: string | undefined): boolean {
+	if (!sessionID) return false;
+	return (
+		swarmState.agentSessions.get(sessionID)?.qaGateSessionOverrides
+			?.final_council === true
+	);
+}
 
 export async function runFinalCouncilGate(
 	ctx: GateContext,
@@ -22,8 +81,21 @@ export async function runFinalCouncilGate(
 		const preamble = await resolveGatePreamble(dir, sessionID);
 
 		if (!preamble.resolved || !preamble.plan) {
+			if (
+				hasAnyProfileWithEnabledGate(dir, 'final_council') ||
+				sessionHasEnabledFinalCouncil(sessionID)
+			) {
+				return {
+					blocked: true,
+					reason: 'FINAL_COUNCIL_PLAN_REQUIRED',
+					message: `Phase ${phase} cannot be completed: final_council is enabled but plan.json is missing or invalid, so the final council gate cannot verify the current plan identity. Restore a valid .swarm/plan.json and re-run the final council.`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [],
+				};
+			}
 			const warning =
-				'Final council gate: plan.json is missing. If final_council is required, the gate cannot be verified.';
+				'Final council gate: plan.json is missing and no enabled final_council profile was found. If final_council is required, the gate cannot be verified.';
 			gateWarnings.push(warning);
 			safeWarn(`[phase_complete] ${warning}`, undefined);
 			return {
@@ -63,14 +135,18 @@ export async function runFinalCouncilGate(
 
 								// Timestamp freshness: block if timestamp is in the future, warn if older than 24h.
 								const now = new Date();
-								const fcTime = entry.timestamp
-									? new Date(entry.timestamp)
-									: null;
-								if (
-									fcTime &&
-									!Number.isNaN(fcTime.getTime()) &&
-									fcTime.getTime() > now.getTime()
-								) {
+								const fcTimeMs = parseTimestampMs(entry.timestamp);
+								if (fcTimeMs === null) {
+									return {
+										blocked: true,
+										reason: 'FINAL_COUNCIL_TIMESTAMP_REQUIRED',
+										message: `Phase ${phase} cannot be completed: final council evidence is missing a valid timestamp. Re-run the final council to generate fresh evidence.`,
+										agentsDispatched,
+										agentsMissing: [],
+										warnings: [],
+									};
+								}
+								if (fcTimeMs > now.getTime()) {
 									return {
 										blocked: true,
 										reason: 'FINAL_COUNCIL_FUTURE_TIMESTAMP',
@@ -80,20 +156,39 @@ export async function runFinalCouncilGate(
 										warnings: [],
 									};
 								}
+								if (now.getTime() - fcTimeMs > 24 * 60 * 60 * 1000) {
+									return {
+										blocked: true,
+										reason: 'FINAL_COUNCIL_STALE_EVIDENCE',
+										message: `Phase ${phase} cannot be completed: final council evidence is older than 24 hours. Re-run the final council for fresh review.`,
+										agentsDispatched,
+										agentsMissing: [],
+										warnings: [],
+									};
+								}
+
+								const latestRetroTimestampMs =
+									latestRetroTimestampMsFromBundle(
+										ctx.loadedRetroBundle,
+										phase,
+									) ?? readLatestRetroTimestampMs(dir, phase);
 								if (
-									fcTime &&
-									!Number.isNaN(fcTime.getTime()) &&
-									now.getTime() - fcTime.getTime() > 24 * 60 * 60 * 1000
+									latestRetroTimestampMs !== null &&
+									fcTimeMs < latestRetroTimestampMs
 								) {
-									const warning =
-										'Final council evidence is older than 24 hours. Consider re-running the final council for fresh review.';
-									gateWarnings.push(warning);
-									safeWarn(`[phase_complete] ${warning}`, undefined);
+									return {
+										blocked: true,
+										reason: 'FINAL_COUNCIL_STALE_EVIDENCE',
+										message: `Phase ${phase} cannot be completed: final council evidence predates the current phase retrospective. Re-run the final council after the latest project evidence is available.`,
+										agentsDispatched,
+										agentsMissing: [],
+										warnings: [],
+									};
 								}
 
 								// Plan ID binding: prevent stale evidence from prior project
 								if (preamble.plan) {
-									const currentPlanId = derivePlanId(preamble.plan);
+									const currentPlanId = preamble.planId;
 									if (entry.plan_id && entry.plan_id !== currentPlanId) {
 										return {
 											blocked: true,
@@ -109,6 +204,37 @@ export async function runFinalCouncilGate(
 											blocked: true,
 											reason: 'FINAL_COUNCIL_PLAN_ID_REQUIRED',
 											message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing plan_id binding. Re-run the final council to generate evidence with plan identity.`,
+											agentsDispatched,
+											agentsMissing: [],
+											warnings: [],
+										};
+									}
+									if (entry.plan_hash !== preamble.planHash) {
+										return {
+											blocked: true,
+											reason: entry.plan_hash
+												? 'FINAL_COUNCIL_STALE_PLAN'
+												: 'FINAL_COUNCIL_PLAN_HASH_REQUIRED',
+											message: entry.plan_hash
+												? `Phase ${phase} cannot be completed: final council evidence was produced for an older plan hash. Re-run the final council for the current plan.`
+												: `Phase ${phase} cannot be completed: final council evidence is missing plan_hash binding. Re-run the final council to generate evidence tied to the current plan content.`,
+											agentsDispatched,
+											agentsMissing: [],
+											warnings: [],
+										};
+									}
+									const currentIdentityHash = derivePlanIdentityHash(
+										preamble.plan,
+									);
+									if (entry.plan_identity_hash !== currentIdentityHash) {
+										return {
+											blocked: true,
+											reason: entry.plan_identity_hash
+												? 'FINAL_COUNCIL_PLAN_IDENTITY_MISMATCH'
+												: 'FINAL_COUNCIL_PLAN_IDENTITY_REQUIRED',
+											message: entry.plan_identity_hash
+												? `Phase ${phase} cannot be completed: final council evidence belongs to a different raw plan identity. Re-run the final council.`
+												: `Phase ${phase} cannot be completed: final council evidence is missing plan_identity_hash binding. Re-run the final council to generate collision-resistant plan identity evidence.`,
 											agentsDispatched,
 											agentsMissing: [],
 											warnings: [],

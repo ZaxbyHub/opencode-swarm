@@ -9,10 +9,12 @@ import {
 	getAgentSession,
 	getTaskState,
 	type InvocationWindow,
+	maybeSweepStaleSessions,
 	pruneOldWindows,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
+	sweepStaleSessions,
 	type TaskWorkflowState,
 	type ToolAggregate,
 	type ToolCallEntry,
@@ -539,6 +541,110 @@ describe('state module', () => {
 			expect(getAgentSession('recent-session')).toBeDefined();
 			// New session should exist
 			expect(getAgentSession('new-session')).toBeDefined();
+		});
+	});
+
+	describe('idle-TTL session sweep (issue #1269 finding 1, residual)', () => {
+		const STALE_TTL_MS = 7_200_000; // 2h, matches the production default
+		const COOLDOWN_MS = 60_000; // matches IDLE_SWEEP_COOLDOWN_MS
+
+		it('reclaims a stale session via the hot path WITHOUT a new startAgentSession', () => {
+			// Two live sessions. Only the SECOND startAgentSession (and no later
+			// one) is allowed — the reclaim of the stale session must come from
+			// the per-tool-call hot path, not a fresh session start.
+			startAgentSession('active-session', 'coder');
+			startAgentSession('stale-session', 'reviewer');
+
+			// Give the stale session a delegation chain so we can prove the chain
+			// (keyed by sessionID) is reclaimed alongside the session.
+			swarmState.delegationChains.set('stale-session', [
+				{ from: 'architect', to: 'reviewer', timestamp: Date.now() },
+			]);
+
+			// Age the stale session past the 2h idle TTL.
+			const stale = getAgentSession('stale-session');
+			expect(stale).toBeDefined();
+			stale!.lastToolCallTime = Date.now() - (STALE_TTL_MS + 100_000);
+
+			// From here on: NO startAgentSession call. Only the per-tool-call
+			// accounting path (ensureAgentSession on an existing session) runs.
+			ensureAgentSession('active-session', 'coder');
+
+			// Stale session AND its delegation chain are reclaimed.
+			expect(getAgentSession('stale-session')).toBeUndefined();
+			expect(swarmState.delegationChains.has('stale-session')).toBe(false);
+			// The active session that drove the sweep survives.
+			expect(getAgentSession('active-session')).toBeDefined();
+		});
+
+		it('does NOT evict a fresh/active session', () => {
+			// A single recently-active session must survive a sweep — it is never
+			// its own victim because its lastToolCallTime was just refreshed.
+			startAgentSession('fresh-session', 'coder');
+			const fresh = getAgentSession('fresh-session');
+			expect(fresh).toBeDefined();
+			fresh!.lastToolCallTime = Date.now() - 300_000; // 5 min ago, well within TTL
+
+			// Drive the hot path repeatedly; the fresh session must persist.
+			ensureAgentSession('fresh-session', 'coder');
+			ensureAgentSession('fresh-session', 'coder');
+
+			expect(getAgentSession('fresh-session')).toBeDefined();
+			expect(swarmState.agentSessions.size).toBe(1);
+		});
+
+		it('cooldown bounds the sweep so it does not run on every call', () => {
+			const t0 = 1_000_000_000_000; // fixed virtual clock — no real time/sleep
+
+			// Seed two already-stale sessions relative to the injected clock.
+			startAgentSession('stale-1', 'coder');
+			startAgentSession('stale-2', 'reviewer');
+			getAgentSession('stale-1')!.lastToolCallTime = t0 - (STALE_TTL_MS + 1);
+			getAgentSession('stale-2')!.lastToolCallTime = t0 - (STALE_TTL_MS + 1);
+
+			// First sweep at t0: cooldown is open (reset to 0), so stale-1 and
+			// stale-2 are both old enough — both evicted.
+			const firstEvicted = maybeSweepStaleSessions(STALE_TTL_MS, t0);
+			expect(firstEvicted.sort()).toEqual(['stale-1', 'stale-2']);
+
+			// Add a third stale session AFTER the first sweep.
+			startAgentSession('stale-3', 'explorer');
+			getAgentSession('stale-3')!.lastToolCallTime = t0 - (STALE_TTL_MS + 1);
+
+			// Second call WITHIN the cooldown window: the O(n) scan is skipped
+			// entirely, so stale-3 survives. This survival IS the bounded-work
+			// proof — the sweep did not run despite a reclaimable session.
+			const blocked = maybeSweepStaleSessions(STALE_TTL_MS, t0 + 1_000);
+			expect(blocked).toEqual([]);
+			expect(getAgentSession('stale-3')).toBeDefined();
+
+			// Once the cooldown elapses, the next call sweeps again and reclaims
+			// stale-3 — proving the cooldown bounds frequency, not capability.
+			const afterCooldown = maybeSweepStaleSessions(
+				STALE_TTL_MS,
+				t0 + COOLDOWN_MS + 1,
+			);
+			expect(afterCooldown).toEqual(['stale-3']);
+			expect(getAgentSession('stale-3')).toBeUndefined();
+		});
+
+		it('sweepStaleSessions reuses one eviction loop and drops the keyed delegation chain', () => {
+			// Direct unit coverage of the extracted loop used by both eager and
+			// opportunistic paths.
+			startAgentSession('keep', 'coder');
+			startAgentSession('drop', 'reviewer');
+			swarmState.delegationChains.set('drop', [
+				{ from: 'architect', to: 'reviewer', timestamp: Date.now() },
+			]);
+			getAgentSession('drop')!.lastToolCallTime =
+				Date.now() - (STALE_TTL_MS + 1);
+
+			const evicted = sweepStaleSessions();
+
+			expect(evicted).toEqual(['drop']);
+			expect(getAgentSession('drop')).toBeUndefined();
+			expect(swarmState.delegationChains.has('drop')).toBe(false);
+			expect(getAgentSession('keep')).toBeDefined();
 		});
 	});
 

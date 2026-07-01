@@ -317,10 +317,12 @@ describe('update-task-status ADVERSARIAL LOCKING security tests', () => {
 	// ─────────────────────────────────────────────────────────────────────────────
 
 	describe('GROUP 4: Real lock race conditions', () => {
-		it('concurrent lock acquisition for SAME task - second should fail', async () => {
-			// Simulate two concurrent calls trying to update the SAME task
-			// Both will pass validation and reach the lock acquisition stage
-			// The second should fail to acquire the lock
+		it('concurrent SAME-task updates both succeed (serialized last-writer-wins)', async () => {
+			// Simulate two concurrent calls trying to update the SAME task.
+			// Both pass validation and reach the lock acquisition stage. Under the
+			// F-09 retries:5 + backoff policy (src/parallel/file-locks.ts:163-172) the
+			// second caller serializes on the plan.json lock and succeeds after the
+			// first releases — this is correct, not a lock bypass.
 
 			const args = {
 				task_id: '1.1',
@@ -334,23 +336,29 @@ describe('update-task-status ADVERSARIAL LOCKING security tests', () => {
 				executeUpdateTaskStatus(args),
 			]);
 
-			// At least one should succeed, one should be blocked
-			// (exact outcome depends on timing, but both shouldn't fully succeed)
+			// At least one should succeed.
 			const successes = [result1, result2].filter((r) => r.success);
 			expect(successes.length).toBeGreaterThanOrEqual(1);
 
-			// The key assertion: if both succeeded, there would be no lock protection
-			// One must be blocked due to lock
-			if (successes.length === 2) {
-				// Both succeeded - check if plan.json was actually protected
-				const plan = JSON.parse(
-					fs.readFileSync(path.join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
-				);
-				// This is a race condition vulnerability if we get here
-				expect('RACE_CONDITION_DETECTED').toBe(
-					'Both calls succeeded - possible lock bypass',
-				);
-			}
+			// F-09 serialization rationale: file-locks.ts now uses proper-lockfile
+			// `retries:5` + backoff (src/parallel/file-locks.ts:163-172). Two concurrent
+			// SAME-task updates therefore SERIALIZE on the plan.json lock and can BOTH
+			// succeed (last-writer-wins) — this is correct behavior, NOT a lock bypass.
+			// The mutation (updateTaskStatus: loadPlan→modify→savePlan) runs INSIDE the
+			// lock, so the second winner reads the first winner's committed state; there
+			// is no lost update and no corruption. Assert that invariant directly instead
+			// of treating "both succeeded" as a race-condition failure.
+			const plan = JSON.parse(
+				fs.readFileSync(path.join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
+			);
+			// plan.json is well-formed and structurally intact after serialized writes.
+			expect(Array.isArray(plan.phases)).toBe(true);
+			expect(plan.phases[0].tasks).toHaveLength(3);
+			// Both calls set task 1.1 to in_progress; serialized last-writer-wins leaves it in_progress.
+			const task11 = plan.phases[0].tasks.find(
+				(t: { id: string }) => t.id === '1.1',
+			);
+			expect(task11?.status).toBe('in_progress');
 		}, 30000);
 
 		it('concurrent lock acquisition for DIFFERENT tasks - both should succeed', async () => {

@@ -1126,10 +1126,18 @@ describe('Adversarial Path Validation', () => {
 			path.join(tempDir, 'original.ts'),
 			'export const x = 1;\n',
 		);
-		fs.symlinkSync(
-			path.join(tempDir, 'original.ts'),
-			path.join(tempDir, 'link.ts'),
-		);
+		try {
+			fs.symlinkSync(
+				path.join(tempDir, 'original.ts'),
+				path.join(tempDir, 'link.ts'),
+			);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'EPERM' || code === 'EACCES') {
+				return;
+			}
+			throw error;
+		}
 
 		const input: PreCheckBatchInput = {
 			files: ['link.ts'],

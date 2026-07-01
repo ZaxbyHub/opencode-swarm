@@ -138,7 +138,6 @@ describe('updateGraphForFiles adversarial path handling', () => {
 		try {
 			await fsPromises.symlink(srcDir, symlinkPath, 'dir');
 		} catch {
-			test.skip('symlinks not supported', () => {});
 			return;
 		}
 

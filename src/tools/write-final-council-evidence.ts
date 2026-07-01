@@ -14,8 +14,9 @@ import { loadPluginConfig } from '../config/loader';
 import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
 import type { CouncilAgent, CouncilMemberVerdict } from '../council/types';
 import { validateSwarmPath } from '../hooks/utils';
+import { computePlanHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
-import { derivePlanId } from '../plan/utils.js';
+import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { createSwarmTool } from './create-tool';
 
 const FINAL_COUNCIL_MEMBERS = [
@@ -175,6 +176,8 @@ export async function executeWriteFinalCouncilEvidence(
 		);
 	}
 	const planId = derivePlanId(plan);
+	const planHash = computePlanHash(plan);
+	const planIdentityHash = derivePlanIdentityHash(plan);
 	const normalizedVerdict = normalizeFinalVerdict(
 		synthesis.overallVerdict,
 		synthesis.requiredFixes.length,
@@ -184,6 +187,8 @@ export async function executeWriteFinalCouncilEvidence(
 		type: 'final-council',
 		phase: input.phase,
 		plan_id: planId,
+		plan_hash: planHash,
+		plan_identity_hash: planIdentityHash,
 		verdict: normalizedVerdict,
 		rawCouncilVerdict: synthesis.overallVerdict,
 		quorumSize: synthesis.quorumSize,
@@ -283,6 +288,7 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 			.number()
 			.int()
 			.min(1)
+			.max(1000)
 			.describe('The final phase number for the project being reviewed'),
 		projectSummary: z
 			.string()

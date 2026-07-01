@@ -181,6 +181,24 @@ function setupLeanTurboSession(
 		path.join(dir, '.swarm', 'turbo-state.json'),
 		JSON.stringify(turboState, null, 2),
 	);
+
+	const laneEvidenceDir = path.join(
+		dir,
+		'.swarm',
+		'evidence',
+		String(phase),
+		'lean-turbo',
+	);
+	fs.mkdirSync(laneEvidenceDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(laneEvidenceDir, 'lane-1.json'),
+		JSON.stringify({
+			laneId: 'lane-1',
+			phase,
+			status: 'completed',
+			timestamp: new Date().toISOString(),
+		}),
+	);
 }
 
 // ---------------------------------------------------------------------------

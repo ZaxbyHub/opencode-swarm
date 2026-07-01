@@ -8,7 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { CouncilMemberVerdict } from '../../../src/council/types';
-import { executeWriteFinalCouncilEvidence } from '../../../src/tools/write-final-council-evidence';
+import {
+	executeWriteFinalCouncilEvidence,
+	write_final_council_evidence,
+} from '../../../src/tools/write-final-council-evidence';
 
 const members = [
 	'critic',
@@ -36,6 +39,34 @@ function verdict(
 
 function allApprovedVerdicts(): CouncilMemberVerdict[] {
 	return members.map((member) => verdict(member));
+}
+
+async function writePlanFixture(tempDir: string) {
+	await fs.promises.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
+	await fs.promises.writeFile(
+		path.join(tempDir, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Final Council Test Plan',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'completed',
+							description: 'Test task',
+						},
+					],
+				},
+			],
+		}),
+	);
 }
 
 function rejectingVerdicts(): CouncilMemberVerdict[] {
@@ -86,7 +117,7 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		tempDir = await fs.promises.mkdtemp(
 			path.join(os.tmpdir(), 'final-council-evidence-test-'),
 		);
-		await fs.promises.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
+		await writePlanFixture(tempDir);
 	});
 
 	afterEach(async () => {
@@ -128,6 +159,10 @@ describe('executeWriteFinalCouncilEvidence', () => {
 
 		expect(entry.type).toBe('final-council');
 		expect(entry.phase).toBe(3);
+		expect(typeof entry.plan_hash).toBe('string');
+		expect(entry.plan_hash).toHaveLength(64);
+		expect(typeof entry.plan_identity_hash).toBe('string');
+		expect(entry.plan_identity_hash).toHaveLength(64);
 		expect(entry.verdict).toBe('approved');
 		expect(entry.rawCouncilVerdict).toBe('APPROVE');
 		expect(entry.quorumSize).toBe(5);
@@ -301,6 +336,12 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		expect(
 			parsed.errors.map((error: { path: string }) => error.path),
 		).toContain('phase');
+	});
+
+	test('exposed tool schema rejects phase > 1000 by zod schema', () => {
+		const result = write_final_council_evidence.args.phase.safeParse(1001);
+
+		expect(result.success).toBe(false);
 	});
 
 	test('uses atomic temp+rename pattern', async () => {

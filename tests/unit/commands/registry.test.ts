@@ -210,6 +210,7 @@ describe('validateAliases()', () => {
 		const result = validateAliases();
 		expect(result.valid).toBe(true);
 		expect(result.errors).toEqual([]);
+		expect(result.warnings).toEqual([]);
 	});
 
 	test('module-level validation throws on load if aliases are invalid', () => {

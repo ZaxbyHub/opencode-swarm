@@ -68,6 +68,7 @@ function writePluginConfig(
 		config.council = null;
 	} else if (councilOverrides !== undefined) {
 		config.council = {
+			enabled: true,
 			phaseConcernsAllowComplete: true,
 			...councilOverrides,
 		};
@@ -116,7 +117,7 @@ function writeRetro() {
 
 function enableCouncilMode() {
 	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { council_mode: true });
+	setGates(tempDir, PLAN_ID, { phase_council: true });
 }
 
 function writePhaseCouncil(options: {
@@ -156,7 +157,7 @@ function writePhaseCouncil(options: {
 
 function setup(councilMode: boolean) {
 	writePlan();
-	writePluginConfig();
+	writePluginConfig(councilMode ? {} : undefined);
 	writeRetro();
 	ensureAgentSession(SESSION_ID);
 	recordPhaseAgentDispatch(SESSION_ID, 'coder');
@@ -473,7 +474,7 @@ describe('adversarial: config.council empty object', () => {
 					require_docs: false,
 					policy: 'warn',
 				},
-				council: {},
+				council: { enabled: true },
 			}),
 		);
 		writePhaseCouncil({ verdict: 'CONCERNS', quorumSize: 3, phaseNumber: 1 });
@@ -510,6 +511,7 @@ describe('adversarial: extra unknown keys in council config', () => {
 					policy: 'warn',
 				},
 				council: {
+					enabled: true,
 					phaseConcernsAllowComplete: true,
 					unknownField: 'should cause strict rejection',
 				},

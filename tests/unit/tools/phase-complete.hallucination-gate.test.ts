@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { derivePlanId } from '../../../src/plan/utils';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -17,7 +18,7 @@ const { phase_complete } = await import('../../../src/tools/phase-complete');
 // planId must match what loadPlan derives: "${swarm}-${title}".replace(...)
 const PLAN_SWARM = 'mega';
 const PLAN_TITLE = 'Test Plan';
-const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+const PLAN_ID = derivePlanId({ swarm: PLAN_SWARM, title: PLAN_TITLE });
 
 function setupSwarmDir(dir: string): void {
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });

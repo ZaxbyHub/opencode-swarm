@@ -22,12 +22,14 @@ export const _internals: {
 	setGates: typeof setGates;
 	getEffectiveGates: typeof getEffectiveGates;
 	computeProfileHash: typeof computeProfileHash;
+	hasAnyProfileWithEnabledGate: typeof hasAnyProfileWithEnabledGate;
 } = {
 	getProfile,
 	getOrCreateProfile,
 	setGates,
 	getEffectiveGates,
 	computeProfileHash,
+	hasAnyProfileWithEnabledGate,
 };
 
 /**
@@ -153,6 +155,34 @@ export function getProfile(
 		)
 		.get(planId);
 	return row ? rowToProfile(row) : null;
+}
+
+/**
+ * Return true if any existing QA gate profile has `gate` enabled.
+ *
+ * This is intentionally read-only and does not create the project DB. It is used
+ * by fail-closed gates when plan.json is unavailable, so they can still honor a
+ * previously persisted hard gate instead of silently passing because plan
+ * identity could not be derived.
+ */
+export function hasAnyProfileWithEnabledGate(
+	directory: string,
+	gate: keyof QaGates,
+): boolean {
+	if (!projectDbExists(directory)) return false;
+	const db = getProjectDb(directory);
+	const rows = db
+		.query<Pick<QaGateProfileRow, 'gates'>, []>(
+			'SELECT gates FROM qa_gate_profile',
+		)
+		.all();
+	for (const row of rows) {
+		try {
+			const parsed = JSON.parse(row.gates) as Partial<QaGates>;
+			if (parsed?.[gate] === true) return true;
+		} catch {}
+	}
+	return false;
 }
 
 /**

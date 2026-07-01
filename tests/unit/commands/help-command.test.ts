@@ -279,6 +279,13 @@ describe('buildDetailedHelp() — via handleHelpCommand for single-token command
 		const result = await handleHelpCommand(ctx);
 		expect(result).toContain('**Args:**');
 		expect(result).toContain('<pr-url|owner/repo#N|N>');
+		expect(result).toContain('launches all 6 fixed base explorer lanes');
+		expect(result).toContain('architect keeps doing non-dependent work');
+		expect(result).toContain('runs every triggered micro-lane');
+		expect(result).toContain(
+			'Task-tool dispatch is the final verified-equivalent fallback',
+		);
+		expect(result).toContain('review is BLOCKED rather than degraded');
 	});
 
 	test('shows detailed help for pr-feedback optional PR ref and pasted-feedback mode', async () => {

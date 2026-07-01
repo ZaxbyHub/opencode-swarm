@@ -124,6 +124,7 @@ describe('executeDispatchLanes', () => {
 				],
 			},
 			directory,
+			{ sessionID: 'parent-session-1' },
 		);
 
 		await allStarted.promise;
@@ -138,6 +139,15 @@ describe('executeDispatchLanes', () => {
 			'completed',
 		]);
 		expect(ops.create).toHaveBeenCalledTimes(3);
+		expect(
+			(ops.create as ReturnType<typeof mock>).mock.calls.map(
+				(call) => call[0].body,
+			),
+		).toEqual([
+			{ parentID: 'parent-session-1', title: 'runtime (explorer)' },
+			{ parentID: 'parent-session-1', title: 'tests (reviewer)' },
+			{ parentID: 'parent-session-1', title: 'docs (critic)' },
+		]);
 		expect(ops.prompt).toHaveBeenCalledTimes(3);
 		expect(ops.delete).toHaveBeenCalledTimes(3);
 		for (const call of (ops.prompt as ReturnType<typeof mock>).mock.calls) {
@@ -179,11 +189,122 @@ describe('executeDispatchLanes', () => {
 		);
 
 		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(ops.create.mock.calls[0][0].body).toEqual({
+			title: 'scan (explorer)',
+		});
 		expect(ops.prompt).toHaveBeenCalledTimes(1);
 		expect(ops.prompt.mock.calls[0][0].body.tools).toMatchObject({
 			summarize_work: false,
 			doc_scan: false,
 		});
+	});
+
+	test('sessionID edge cases: empty string omits parentID in blocking lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-1' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan docs' }],
+			},
+			directory,
+			{ sessionID: '' },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
+		);
+		expect(ops.create.mock.calls[0][0].body).toEqual({
+			title: 'scan (explorer)',
+		});
+	});
+
+	test('sessionID edge cases: whitespace-only string omits parentID in blocking lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-1' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan docs' }],
+			},
+			directory,
+			{ sessionID: '   ' },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
+		);
+	});
+
+	test('sessionID edge cases: explicit undefined omits parentID in blocking lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-1' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan docs' }],
+			},
+			directory,
+			{ sessionID: undefined },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
+		);
+	});
+
+	test('lane agent with parentheses produces escaped title', () => {
+		// Test the escaping logic directly via buildLaneSessionCreateArgs,
+		// bypassing role validation (which requires generatedAgentNames setup
+		// that is complex to replicate across module boundaries).
+		// ROOT-004 fix: parentheses in agent names must be HTML-escaped
+		// in lane session titles to prevent ambiguous bracket nesting.
+		const result = _test_exports.buildLaneSessionCreateArgs(
+			'/tmp/test',
+			{ id: 'scan', agent: 'reviewer (special)', prompt: 'scan docs' },
+			{ sessionID: undefined },
+		);
+		expect(result.body.title).toBe('scan (reviewer &#40;special&#41;)');
 	});
 
 	test('honors max_concurrent while preserving a join barrier', async () => {
@@ -985,6 +1106,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				],
 			},
 			directory,
+			{ sessionID: 'parent-async-1' },
 		);
 
 		expect(result.success).toBe(true);
@@ -1000,6 +1122,15 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(result.lane_results.map((lane) => lane.status)).toEqual([
 			'pending',
 			'pending',
+		]);
+		expect(ops.create).toHaveBeenCalledTimes(2);
+		expect(
+			(ops.create as ReturnType<typeof mock>).mock.calls.map(
+				(call) => call[0].body,
+			),
+		).toEqual([
+			{ parentID: 'parent-async-1', title: 'runtime (explorer)' },
+			{ parentID: 'parent-async-1', title: 'tests (reviewer)' },
 		]);
 		expect(ops.promptAsync).toHaveBeenCalledTimes(2);
 		const promptAsyncCalls = (ops.promptAsync as ReturnType<typeof mock>).mock
@@ -1022,6 +1153,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		const records = findByBatchId(directory, 'batch-async-1');
 		expect(records).toHaveLength(2);
 		expect(records[0].status).toBe('running');
+		expect(records[0].parentSessionId).toBe('parent-async-1');
 		expect(records[0].workspace?.prHeadSha).toBe('abc123');
 		expect(records[0].generation).toBe(1);
 		expect(records[0].workspace?.scope).toBe('src');
@@ -1052,6 +1184,102 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(_test_exports.DEFAULT_ASYNC_STALE_TIMEOUT_MS).toBe(30 * 60_000);
 		expect(_test_exports.DEFAULT_COLLECT_TIMEOUT_MS).toBe(
 			_test_exports.DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+		);
+	});
+
+	test('sessionID edge cases: empty string omits parentID in async lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-async-empty' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-async-empty',
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan' }],
+			},
+			directory,
+			{ sessionID: '' },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
+		);
+	});
+
+	test('sessionID edge cases: whitespace-only string omits parentID in async lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-async-whitespace' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-async-whitespace',
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan' }],
+			},
+			directory,
+			{ sessionID: '   ' },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
+		);
+	});
+
+	test('sessionID edge cases: explicit undefined omits parentID in async lanes', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-async-undefined' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-async-undefined',
+				lanes: [{ id: 'scan', agent: 'explorer', prompt: 'scan' }],
+			},
+			directory,
+			{ sessionID: undefined },
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(Object.hasOwn(ops.create.mock.calls[0][0].body, 'parentID')).toBe(
+			false,
 		);
 	});
 
@@ -1100,6 +1328,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				session_id: 'session-nonblocking',
 			}),
 		);
+		expect(ops.create).toHaveBeenCalledTimes(1);
+		expect(ops.create.mock.calls[0][0].body).toEqual({
+			title: 'runtime (explorer)',
+		});
 		await promptStarted.promise;
 		expect(promptResolved).toBe(false);
 		expect(findByBatchId(directory, 'batch-nonblocking-launch')[0].status).toBe(

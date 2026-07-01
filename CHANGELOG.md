@@ -1,5 +1,57 @@
 # Changelog
 
+## [7.99.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.4...v7.99.5) (2026-07-01)
+
+
+### Bug Fixes
+
+* **architect-knowledge:** disambiguate worktree isolation from Lean Turbo ([#1552](https://github.com/ZaxbyHub/opencode-swarm/issues/1552)) ([b9b84ed](https://github.com/ZaxbyHub/opencode-swarm/commit/b9b84edc80751672f1d276cb23d64014a57074bb))
+* **pr-review:** enforce lane coverage closure ([27f062f](https://github.com/ZaxbyHub/opencode-swarm/commit/27f062f4fbebe5819944a6a22369d4d3ef113457))
+* **pr-review:** enforce lane coverage closure ([4a1fbfc](https://github.com/ZaxbyHub/opencode-swarm/commit/4a1fbfcd4f25a2d09cb2c21aa9b61cf692f2b59b))
+
+## [7.99.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.3...v7.99.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** remove --smol from coverage gate to fix SIGILL crash on merge queue ([bbab36c](https://github.com/ZaxbyHub/opencode-swarm/commit/bbab36c90849c0754eed547240a07e2e04f66063))
+* **ci:** shard coverage gate and remove --smol to fix SIGILL crash ([f7dd87a](https://github.com/ZaxbyHub/opencode-swarm/commit/f7dd87a8d0b9828bffe592c79c81ff17ad4ad05a))
+* **planning:** resolve residual audit findings ([#660](https://github.com/ZaxbyHub/opencode-swarm/issues/660), [#1267](https://github.com/ZaxbyHub/opencode-swarm/issues/1267), [#1269](https://github.com/ZaxbyHub/opencode-swarm/issues/1269), [#1270](https://github.com/ZaxbyHub/opencode-swarm/issues/1270)) ([deeb155](https://github.com/ZaxbyHub/opencode-swarm/commit/deeb15539f8d2cec9f2f7188c7027329bb249b85))
+* **planning:** resolve residual audit findings ([#660](https://github.com/ZaxbyHub/opencode-swarm/issues/660), [#1267](https://github.com/ZaxbyHub/opencode-swarm/issues/1267), [#1269](https://github.com/ZaxbyHub/opencode-swarm/issues/1269), [#1270](https://github.com/ZaxbyHub/opencode-swarm/issues/1270)) ([b8b4d23](https://github.com/ZaxbyHub/opencode-swarm/commit/b8b4d23256a82c6ca412032bf687a371796b3d6b))
+* **pr-1568:** fallbackWritePlanWithTrace use validation.data for defense-in-depth consistency ([90c92f3](https://github.com/ZaxbyHub/opencode-swarm/commit/90c92f3ca237f01de8c2ed199e854ebf7e173ded))
+
+## [7.99.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.2...v7.99.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** extract line coverage from correct awk column ([f03cfa5](https://github.com/ZaxbyHub/opencode-swarm/commit/f03cfa56937f1ed970c07ded4151b3c875e4f2d5))
+* **ci:** extract line coverage from correct awk column ([c6d3567](https://github.com/ZaxbyHub/opencode-swarm/commit/c6d3567f269e6588ffd893668e5ad26c1de9243a))
+
+## [7.99.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.1...v7.99.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** detect release-please in merge queue via head commit message ([f7a8082](https://github.com/ZaxbyHub/opencode-swarm/commit/f7a808279bf24f0be6140d1ae816f15e447271d4))
+* **ci:** detect release-please in merge queue via head commit message ([1d41517](https://github.com/ZaxbyHub/opencode-swarm/commit/1d4151739d4d056226b9ea597a3920dcb6c47f75))
+* **ci:** drop backticks from detect-release comment ([2e5883d](https://github.com/ZaxbyHub/opencode-swarm/commit/2e5883d92e2570b82ee2e49537f9fa87b8eccfcc))
+* **dispatch-lanes:** link advisory lane sessions to parent ([ef818ed](https://github.com/ZaxbyHub/opencode-swarm/commit/ef818edd6f10a202f93ce93a68149e28222d3c7e))
+* **final-council:** harden evidence binding ([5d32aa8](https://github.com/ZaxbyHub/opencode-swarm/commit/5d32aa8e1acedf6984e678ff7ad6045a37e8689d))
+
+## [7.99.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.99.0...v7.99.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** add shell: bash and scope coverage gate to single cell ([f9a6890](https://github.com/ZaxbyHub/opencode-swarm/commit/f9a689031c9c33c9e20a321c37b97ccb23373929))
+* **ci:** add shell: bash and scope coverage gate to single matrix cell ([47206c4](https://github.com/ZaxbyHub/opencode-swarm/commit/47206c4f682291b70c728c791119099da0b222f8))
+* **ci:** remove command substitution from coverage gate step ([5bf2e98](https://github.com/ZaxbyHub/opencode-swarm/commit/5bf2e98a9713c96f186809cbe8a3290e4fbc7752))
+* **docs:** reconcile overstated SAST/language counts, de-pin version, archive root review artifacts ([76c69ab](https://github.com/ZaxbyHub/opencode-swarm/commit/76c69ab92214da6c0bee2c925430b526ab8809fe))
+* **test:** issue 1231 testing infrastructure audit ([6e327ca](https://github.com/ZaxbyHub/opencode-swarm/commit/6e327caa11c9f8ac98af4738e5d2574483ce9d15))
+* **test:** regenerate mock-allowlist with PR-introduced mock targets ([87a61eb](https://github.com/ZaxbyHub/opencode-swarm/commit/87a61eb9b23ad842907866f1391ad8245c9b61ec))
+* **test:** resolve PR [#1562](https://github.com/ZaxbyHub/opencode-swarm/issues/1562) review findings ([7b23e5e](https://github.com/ZaxbyHub/opencode-swarm/commit/7b23e5e56350f3972e33a0c64a66e1062dee7933))
+
 ## [7.99.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.98.2...v7.99.0) (2026-06-29)
 
 

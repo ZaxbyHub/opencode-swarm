@@ -52,10 +52,17 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'Task is not an early-poll or empty-partial-output fallback',
 		);
 		expect(phase3Section).toContain(
-			'last-resort equivalent dispatch mechanism',
+			'the Task tool as the last-resort equivalent dispatch mechanism',
+		);
+		expect(phase3Section).toContain('STOP and surface the lane failure');
+		expect(phase3Section).toContain('Do not present partial findings');
+		expect(phase3Section).toContain(
+			'A low-quality partial review is worse than no review',
 		);
 		expect(phase3Section).toContain('UNVERIFIED');
 		expect(phase3Section).toContain('dispatch_lanes');
+		expect(phase3Section).not.toContain('report to the user as INCOMPLETE');
+		expect(phase3Section).not.toContain('Present partial findings');
 		expect(phase3Section).not.toContain('run_in_background');
 		expect(phase3Section).not.toContain(
 			'single message with multiple Agent tool calls',
@@ -89,7 +96,7 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			const source = readSkill(skillPath);
 			const lineCount = source.trimEnd().split(/\r?\n/).length;
 
-			expect(lineCount).toBeLessThan(60);
+			expect(lineCount).toBeLessThan(70);
 			expect(source).toContain(
 				'../../../.opencode/skills/swarm-pr-review/SKILL.md',
 			);
@@ -97,6 +104,10 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			expect(source).toContain('read-only');
 			expect(source).toContain('dispatch_lanes_async');
 			expect(source).toContain('collect_lane_results');
+			expect(source).toContain('Task-tool dispatch is the final fallback');
+			expect(source).toContain('same agent type, same prompt, same scope');
+			expect(source).toContain('BLOCKED');
+			expect(source).toContain('degraded review');
 			expect(source).toContain('retrieve_lane_output');
 			expect(source).toContain('output_ref');
 			expect(source).not.toContain('## Phase 0A:');
