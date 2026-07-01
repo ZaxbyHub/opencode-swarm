@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { validateSpecContent } from '../config/spec-schema';
 import { writeSpeckitFixture } from '../../tests/helpers/speckit-fixture';
+import { validateSpecContent } from '../config/spec-schema';
 import {
 	buildOpenSpecProjectionSync,
 	buildSpeckitProjectionSync,
@@ -149,7 +149,9 @@ describe('detectSpeckit', () => {
 		expect(result.markerPresent).toBe(true);
 		expect(result.features).toHaveLength(1);
 		expect(result.features[0]?.featureId).toBe('001-auth-service');
-		expect(result.features[0]?.specRelPath).toBe('specs/001-auth-service/spec.md');
+		expect(result.features[0]?.specRelPath).toBe(
+			'specs/001-auth-service/spec.md',
+		);
 	});
 
 	test('detects a multi-feature layout and enumerates both features in sorted order', () => {
@@ -226,7 +228,9 @@ describe('detectSpeckit', () => {
 			'utf-8',
 		);
 		// 002-nospec is a dir under specs/ with NO spec.md → excluded
-		fs.mkdirSync(path.join(tempDir, 'specs', '002-nospec'), { recursive: true });
+		fs.mkdirSync(path.join(tempDir, 'specs', '002-nospec'), {
+			recursive: true,
+		});
 		fs.writeFileSync(
 			path.join(tempDir, 'specs', '002-nospec', 'notes.md'),
 			'# Not a spec\n',
@@ -273,7 +277,9 @@ describe('buildSpeckitProjectionSync', () => {
 		// No bold-markup id prefix — confirms synthesis, not preservation of an existing id.
 		expect(spec?.content).not.toContain('**FR-');
 		// Obligation text survived into the projected output.
-		expect(spec?.content).toContain('System MUST authenticate users with valid credentials.');
+		expect(spec?.content).toContain(
+			'System MUST authenticate users with valid credentials.',
+		);
 	});
 
 	test('golden stability: byte-identical output across two calls — explicit-fr fixture (SC-003)', () => {
@@ -358,10 +364,14 @@ describe('FR-003 — explicit ids survive an id-less bullet placed before them (
 		// DISCRIMINATING (advisor): the id-less bullet must synthesize FR-002, NOT steal FR-001.
 		// Pre-fix this line renders as `FR-001: The system MUST log out idle users.` and fails.
 		expect(content).toContain('FR-002: The system MUST log out idle users.');
-		expect(content).not.toContain('FR-001: The system MUST log out idle users.');
+		expect(content).not.toContain(
+			'FR-001: The system MUST log out idle users.',
+		);
 
 		// The explicit requirement keeps its original id unchanged (bold-markup preserve form).
-		expect(content).toContain('**FR-001**: The system MUST authenticate valid users.');
+		expect(content).toContain(
+			'**FR-001**: The system MUST authenticate valid users.',
+		);
 
 		// DISCRIMINATING: synthesis must not have stolen the explicit id, so no duplicate warning.
 		// Pre-fix the renderer emits "Duplicate requirement id FR-001 ...; generated FR-002.".
@@ -399,8 +409,12 @@ describe('FR-003 — explicit ids survive an id-less bullet placed before them (
 
 		expect(spec).not.toBeNull();
 		// First keeps FR-001; second is renumbered to FR-002 with the duplicate warning.
-		expect(spec!.warnings.some((w) => w.includes('Duplicate requirement id FR-001'))).toBe(true);
-		expect(spec!.content).toContain('FR-002: **FR-001**: The system MUST do the second thing.');
+		expect(
+			spec!.warnings.some((w) => w.includes('Duplicate requirement id FR-001')),
+		).toBe(true);
+		expect(spec!.content).toContain(
+			'FR-002: **FR-001**: The system MUST do the second thing.',
+		);
 	});
 });
 
@@ -452,7 +466,9 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 	test('unknown_feature: multi-feature, non-existent feature id given', () => {
 		writeSpeckitFixture(tempDir, { variant: 'multi-feature' });
 
-		const resolution = resolveSpeckitProjection(tempDir, { feature: '999-nope' });
+		const resolution = resolveSpeckitProjection(tempDir, {
+			feature: '999-nope',
+		});
 
 		expect(resolution).toEqual({
 			kind: 'unknown_feature',
@@ -487,13 +503,17 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 		expect(resolution.spec.content).toContain('**FR-001**');
 		expect(resolution.spec.content).toContain('**FR-002**');
 		expect(resolution.spec.content).toContain('**FR-003**');
-		expect(resolution.spec.sourcePaths).toEqual(['specs/001-auth-service/spec.md']);
+		expect(resolution.spec.sourcePaths).toEqual([
+			'specs/001-auth-service/spec.md',
+		]);
 	});
 
 	test('ok: multi-feature with explicit valid feature yields projection for that feature only', () => {
 		writeSpeckitFixture(tempDir, { variant: 'multi-feature' });
 
-		const resolution = resolveSpeckitProjection(tempDir, { feature: '002-beta' });
+		const resolution = resolveSpeckitProjection(tempDir, {
+			feature: '002-beta',
+		});
 
 		if (resolution.kind !== 'ok') {
 			throw new Error(`Expected kind 'ok', got '${resolution.kind}'`);
@@ -577,12 +597,16 @@ describe('readEffectiveSpecSync — resolver precedence (task 2.1)', () => {
 		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
 
 		// opts.source: 'speckit' explicitly requests Spec-Kit — swarm must still win.
-		const specViaSpeckit = readEffectiveSpecSync(tempDir, { source: 'speckit' });
+		const specViaSpeckit = readEffectiveSpecSync(tempDir, {
+			source: 'speckit',
+		});
 		expect(specViaSpeckit?.source).toBe('swarm');
 		expect(specViaSpeckit?.content).toContain('Swarm Native');
 
 		// opts.source: 'openspec' — same invariant.
-		const specViaOpenspec = readEffectiveSpecSync(tempDir, { source: 'openspec' });
+		const specViaOpenspec = readEffectiveSpecSync(tempDir, {
+			source: 'openspec',
+		});
 		expect(specViaOpenspec?.source).toBe('swarm');
 	});
 
@@ -742,7 +766,12 @@ describe('validateSpeckit — structural validation (task 2.3, FR-007, FR-013)',
 		// Valid feature (both required sections + FRs → resolution ok), with a custom
 		// tasks.md exercising the three cases: story ref, requirement ref, and neither.
 		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
-		const tasksPath = path.join(tempDir, 'specs', '001-auth-service', 'tasks.md');
+		const tasksPath = path.join(
+			tempDir,
+			'specs',
+			'001-auth-service',
+			'tasks.md',
+		);
 		fs.writeFileSync(
 			tasksPath,
 			[

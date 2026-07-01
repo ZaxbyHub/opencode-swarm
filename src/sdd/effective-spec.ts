@@ -27,7 +27,10 @@ const SPECKIT_REQUIRED_SECTIONS = [
 	'## Success Criteria',
 ] as const;
 
-export type EffectiveSpecSource = 'swarm' | 'openspec_projection' | 'speckit_projection';
+export type EffectiveSpecSource =
+	| 'swarm'
+	| 'openspec_projection'
+	| 'speckit_projection';
 
 export interface OpenSpecArtifact {
 	relPath: string;
@@ -509,7 +512,9 @@ export function resolveSpeckitProjection(
 	// Feature selection.
 	let selectedFeature: SpeckitFeatureEntry;
 	if (options.feature) {
-		const found = detection.features.find((f) => f.featureId === options.feature);
+		const found = detection.features.find(
+			(f) => f.featureId === options.feature,
+		);
 		if (!found) {
 			return {
 				kind: 'unknown_feature',
@@ -541,7 +546,10 @@ export function resolveSpeckitProjection(
 	const warnings: string[] = [];
 	const usedIds = new Set<string>();
 
-	const requirements = parseSpeckitRequirements(content, selectedFeature.specRelPath);
+	const requirements = parseSpeckitRequirements(
+		content,
+		selectedFeature.specRelPath,
+	);
 
 	// Mirror buildOpenSpecProjectionSync :450-453 — zero FRs → advisory (FR-013).
 	if (requirements.length === 0) {

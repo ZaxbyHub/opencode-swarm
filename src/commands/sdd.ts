@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { SpeckitResolution } from '../sdd/effective-spec';
 import {
 	buildOpenSpecProjectionSync,
 	detectSpeckit,
@@ -8,7 +9,6 @@ import {
 	validateSpeckit,
 	writeProjectedSpecSync,
 } from '../sdd/effective-spec';
-import type { SpeckitResolution } from '../sdd/effective-spec';
 
 /**
  * Native swarm-spec relative path — MUST match the engine's
@@ -79,7 +79,8 @@ function parseArgs(args: string[]): ParsedSddArgs {
 			if (isUnsafeId(value)) {
 				return {
 					...parsed,
-					error: '--change must be a single OpenSpec change id with no path separators, traversal, or brackets',
+					error:
+						'--change must be a single OpenSpec change id with no path separators, traversal, or brackets',
 				};
 			}
 			parsed.changeId = value;
@@ -103,7 +104,8 @@ function parseArgs(args: string[]): ParsedSddArgs {
 			if (isUnsafeId(value)) {
 				return {
 					...parsed,
-					error: '--feature must be a single Spec-Kit feature directory name with no path separators, traversal, or brackets',
+					error:
+						'--feature must be a single Spec-Kit feature directory name with no path separators, traversal, or brackets',
 				};
 			}
 			parsed.feature = value;
@@ -356,9 +358,7 @@ export async function handleSddValidateCommand(
 			`SDD validation: ${result.valid ? 'valid' : 'invalid'}`,
 			`Provider: ${result.provider}`,
 			`Projected sources: ${result.sourcePaths.length}`,
-			result.errors.length > 0
-				? `\nErrors:\n${formatList(result.errors)}`
-				: '',
+			result.errors.length > 0 ? `\nErrors:\n${formatList(result.errors)}` : '',
 			result.warnings.length > 0
 				? `\nWarnings:\n${formatList(result.warnings)}`
 				: '',

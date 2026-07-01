@@ -301,7 +301,10 @@ export function writeSpeckitFixture(
 
 	// Always write the marker directory
 	const specifyDir = path.join(dir, '.specify');
-	writeFile(path.join(specifyDir, 'memory', 'constitution.md'), CONSTITUTION_CONTENT);
+	writeFile(
+		path.join(specifyDir, 'memory', 'constitution.md'),
+		CONSTITUTION_CONTENT,
+	);
 
 	const specsRoot = path.join(dir, 'specs');
 

@@ -164,19 +164,25 @@ describe('parseArgs — --source and --feature flags', () => {
 	test('rejects --feature with a path separator (same check as --change)', () => {
 		const result = parseArgs(['--feature', '001/escape']);
 		expect(result.error).toBeDefined();
-		expect(result.error).toContain('--feature must be a single Spec-Kit feature directory name');
+		expect(result.error).toContain(
+			'--feature must be a single Spec-Kit feature directory name',
+		);
 	});
 
 	test('rejects --feature with a traversal sequence (same check as --change)', () => {
 		const result = parseArgs(['--feature', '../traverse']);
 		expect(result.error).toBeDefined();
-		expect(result.error).toContain('--feature must be a single Spec-Kit feature directory name');
+		expect(result.error).toContain(
+			'--feature must be a single Spec-Kit feature directory name',
+		);
 	});
 
 	test('rejects --feature with bracket characters (same check as --change)', () => {
 		const result = parseArgs(['--feature', 'bad[value]']);
 		expect(result.error).toBeDefined();
-		expect(result.error).toContain('--feature must be a single Spec-Kit feature directory name');
+		expect(result.error).toContain(
+			'--feature must be a single Spec-Kit feature directory name',
+		);
 	});
 
 	test('rejects --feature with no value', () => {
@@ -201,9 +207,7 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 	let skDir: string;
 
 	beforeEach(() => {
-		skDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-sk-')),
-		);
+		skDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-sk-')));
 	});
 
 	afterEach(() => {
@@ -257,7 +261,9 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 	test('status with both openspec and speckit and no --source errors naming both sources (FR-010)', async () => {
 		// Write both sources.
 		writeSpeckitFixture(skDir, { variant: 'single-explicit-fr' });
-		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), { recursive: true });
+		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
 		fs.writeFileSync(
 			path.join(skDir, 'openspec', 'specs', 'auth', 'spec.md'),
 			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
@@ -276,7 +282,9 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 	// report that provider and must NOT leak the resolver's ambiguity console.warn.
 	test('status --source openspec on a both-present repo honors the selection and emits no warning (FR-009)', async () => {
 		writeSpeckitFixture(skDir, { variant: 'single-explicit-fr' });
-		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), { recursive: true });
+		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
 		fs.writeFileSync(
 			path.join(skDir, 'openspec', 'specs', 'auth', 'spec.md'),
 			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
@@ -302,7 +310,9 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 
 	test('project with both openspec and speckit and no --source errors naming both sources (FR-010)', async () => {
 		writeSpeckitFixture(skDir, { variant: 'single-explicit-fr' });
-		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), { recursive: true });
+		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
 		fs.writeFileSync(
 			path.join(skDir, 'openspec', 'specs', 'auth', 'spec.md'),
 			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
@@ -332,7 +342,9 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 	// --source speckit selects speckit when openspec is also present (SC-005).
 	test('project --source speckit selects speckit when openspec also present (SC-005)', async () => {
 		writeSpeckitFixture(skDir, { variant: 'single-explicit-fr' });
-		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), { recursive: true });
+		fs.mkdirSync(path.join(skDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
 		fs.writeFileSync(
 			path.join(skDir, 'openspec', 'specs', 'auth', 'spec.md'),
 			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
@@ -486,7 +498,9 @@ describe('/swarm sdd validate — Spec-Kit (task 2.3)', () => {
 		expect(parsed.valid).toBe(false);
 		expect(parsed.provider).toBe('speckit_projection');
 		// Missing section must be named.
-		expect(parsed.errors.some((e: string) => e.includes('## Success Criteria'))).toBe(true);
+		expect(
+			parsed.errors.some((e: string) => e.includes('## Success Criteria')),
+		).toBe(true);
 		// T001 with no [US#] must be named.
 		expect(parsed.errors.some((e: string) => e.includes('T001'))).toBe(true);
 		// T002 (which has [US1]) must NOT be flagged.

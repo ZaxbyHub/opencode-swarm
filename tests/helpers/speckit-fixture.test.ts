@@ -43,7 +43,11 @@ function readFile(absPath: string): string {
 describe('writeSpeckitFixture — single-explicit-fr', () => {
 	test('writes .specify/memory/constitution.md', () => {
 		const d = writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
-		const constitutionPath = path.join(d.specifyDir, 'memory', 'constitution.md');
+		const constitutionPath = path.join(
+			d.specifyDir,
+			'memory',
+			'constitution.md',
+		);
 		expect(fs.existsSync(constitutionPath)).toBe(true);
 		expect(readFile(constitutionPath)).toContain('Spec-Kit');
 	});
@@ -115,12 +119,16 @@ describe('writeSpeckitFixture — single-explicit-fr', () => {
 
 describe('writeSpeckitFixture — single-idless-requirements', () => {
 	test('descriptor has exactly one feature dir', () => {
-		const d = writeSpeckitFixture(tempDir, { variant: 'single-idless-requirements' });
+		const d = writeSpeckitFixture(tempDir, {
+			variant: 'single-idless-requirements',
+		});
 		expect(d.featureDirs).toHaveLength(1);
 	});
 
 	test('spec.md has no FR-### ids at all (any form)', () => {
-		const d = writeSpeckitFixture(tempDir, { variant: 'single-idless-requirements' });
+		const d = writeSpeckitFixture(tempDir, {
+			variant: 'single-idless-requirements',
+		});
 		const content = readFile(d.specPaths[0]!);
 		// There must be NO FR-### token in any form — the FR-004 synthesis path
 		// depends on this variant being genuinely id-less.
@@ -128,13 +136,17 @@ describe('writeSpeckitFixture — single-idless-requirements', () => {
 	});
 
 	test('spec.md still contains obligation keywords (MUST/SHALL/SHOULD)', () => {
-		const d = writeSpeckitFixture(tempDir, { variant: 'single-idless-requirements' });
+		const d = writeSpeckitFixture(tempDir, {
+			variant: 'single-idless-requirements',
+		});
 		const content = readFile(d.specPaths[0]!);
 		expect(content).toMatch(/\b(MUST|SHALL|SHOULD)\b/);
 	});
 
 	test('spec.md has all three required Spec-Kit sections', () => {
-		const d = writeSpeckitFixture(tempDir, { variant: 'single-idless-requirements' });
+		const d = writeSpeckitFixture(tempDir, {
+			variant: 'single-idless-requirements',
+		});
 		const content = readFile(d.specPaths[0]!);
 		expect(content).toContain('## Functional Requirements');
 		expect(content).toContain('## User Scenarios & Testing');
@@ -142,10 +154,14 @@ describe('writeSpeckitFixture — single-idless-requirements', () => {
 	});
 
 	test('has at least two obligation bullets so synthesis ordering can be tested', () => {
-		const d = writeSpeckitFixture(tempDir, { variant: 'single-idless-requirements' });
+		const d = writeSpeckitFixture(tempDir, {
+			variant: 'single-idless-requirements',
+		});
 		const content = readFile(d.specPaths[0]!);
 		// Each obligation bullet starts with "- System"
-		const bullets = content.split('\n').filter((line) => /^- System\s+(MUST|SHALL|SHOULD)/.test(line));
+		const bullets = content
+			.split('\n')
+			.filter((line) => /^- System\s+(MUST|SHALL|SHOULD)/.test(line));
 		expect(bullets.length).toBeGreaterThanOrEqual(2);
 	});
 });
@@ -204,7 +220,11 @@ describe('writeSpeckitFixture — empty-specify', () => {
 
 	test('.specify/memory/constitution.md is still written', () => {
 		const d = writeSpeckitFixture(tempDir, { variant: 'empty-specify' });
-		const constitutionPath = path.join(d.specifyDir, 'memory', 'constitution.md');
+		const constitutionPath = path.join(
+			d.specifyDir,
+			'memory',
+			'constitution.md',
+		);
 		expect(fs.existsSync(constitutionPath)).toBe(true);
 	});
 
@@ -281,7 +301,7 @@ describe('writeSpeckitFixture — malformed', () => {
 		// T001 has [P] (parallelizable flag) but deliberately has no [US#] reference
 		const t001Line = content.split('\n').find((l) => l.includes('T001'));
 		expect(t001Line).toBeDefined();
-		expect(t001Line).toContain('[P]');       // has the parallelizable flag
+		expect(t001Line).toContain('[P]'); // has the parallelizable flag
 		expect(t001Line).not.toMatch(/\[US\d+\]/); // but no story/requirement reference
 	});
 
@@ -312,7 +332,9 @@ describe('writeSpeckitFixture — cross-variant invariants', () => {
 		test(`variant "${variant}" — .specify/ is always written`, () => {
 			const d = writeSpeckitFixture(tempDir, { variant });
 			expect(fs.existsSync(d.specifyDir)).toBe(true);
-			expect(fs.existsSync(path.join(d.specifyDir, 'memory', 'constitution.md'))).toBe(true);
+			expect(
+				fs.existsSync(path.join(d.specifyDir, 'memory', 'constitution.md')),
+			).toBe(true);
 		});
 
 		test(`variant "${variant}" — descriptor paths are absolute`, () => {
