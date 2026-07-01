@@ -299,6 +299,10 @@ Adding stubs for ESM resolution is NOT test theater — it's a Bun runtime requi
 
 The stubs exist solely to satisfy the module loader. Test assertions must verify behavior through the real-mocked functions (the ones your test actually calls), not through the stubs.
 
+### Scope discipline when completing a pre-existing incomplete mock
+
+If you complete a `mock.module()` factory for a pre-existing broken test (e.g. the target module gained exports after the mock was written) and doing so surfaces a *cascade* — the same test then fails on a second, unrelated module's incomplete mock, then a third — stop and back out rather than chasing the cascade to green inside an unrelated bug-fix PR. Revert the test file to its original (broken) state, verify with `git stash`/a worktree that the failure is identical on a clean base branch, and document it as a pre-existing failure with that evidence. Fixing a multi-module mock-completeness cascade is its own test-infrastructure task — pulling it into an unrelated change bloats the diff and risks introducing new drift under time pressure. One or two missing exports in the module you're actually testing is worth completing; a cascade across several unrelated modules is a signal to stop.
+
 ### Files Intentionally Using File-Scoped Mocks
 
 Some test files use top-level `mock.module` that must persist across all tests in the file. These files use `mockReset()`/`mockClear()` in `beforeEach` instead of `mock.restore()` in `afterEach`:

@@ -264,6 +264,14 @@ Use `references/critic-gate.md`.
 
 For high-risk or close-call fixes, do not commit to a single patch shape prematurely. Draft 2-3 concrete candidate patches for the selected root cause, and choose between them by which one makes the reproduction test pass while keeping the regression suite green and the diff minimal. On a genuine tie, prefer the smallest, most contract-preserving patch and record why the alternatives were rejected. This mirrors validate-then-select repair: a patch is chosen on evidence (tests + minimality), not on first-draft intuition.
 
+#### Diagnosis correctness does not imply fix correctness
+
+A pasted second opinion, an external agent's finding, or your own recollection of CLI/shell flag semantics can localize the root cause correctly while proposing a fix that does not actually work. Treat the diagnosis and the proposed fix as two separate claims requiring separate verification — do not adopt a suggested patch just because the file:line diagnosis it came with checked out. This risk is sharpest for fixes that hinge on subtle CLI/subprocess flag semantics (e.g. `git clean -e/-x/-X` interactions, gitignore pattern anchoring, `chmod`/`sed`/`awk` flag combinations): these read as plausible in prose but are easy to get wrong. Before finalizing such a fix, empirically run the *exact* candidate invocation in an isolated throwaway environment (a scratch git repo, a temp directory) and observe the actual result — do not rely on documented or remembered semantics alone.
+
+#### Verify the fix against the real blast radius, not a minimal repro
+
+A minimal two-file reproduction can validate that a fix's *mechanism* works while hiding that its *scope* is wrong. Before finalizing a fix for a destructive or broad-acting operation (recursive deletes, blanket cleans, glob-based rewrites), also run a dry-run/no-op form of the fixed operation against the actual target environment (e.g. `git clean -fdXn` in the real repo, not a synthetic one) to see everything it would still touch. A fix that passes its toy reproduction can still leave real, higher-value paths unprotected or under/over-scoped.
+
 ### Phase 3 Gate
 
 Do not write production code until:
