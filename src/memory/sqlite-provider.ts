@@ -252,6 +252,11 @@ export const MIGRATIONS: Migration[] = [
 	{
 		version: 7,
 		name: 'add_recall_learning_columns',
+		// Migration version 7 (not v5 as issue #1467 spec stated):
+		//   v2 is reserved by LEGACY_JSONL_MIGRATION_VERSION (src/memory/jsonl-migration.ts:9).
+		//   v5 was occupied by the recall_usage timestamp index migration.
+		//   v6 was occupied by the embedding_config migration.
+		//   v7 is the first available slot for this change.
 		sql: `
 			ALTER TABLE memory_recall_usage ADD COLUMN q_value REAL DEFAULT 0.5;
 			ALTER TABLE memory_recall_usage ADD COLUMN last_reward REAL;
@@ -323,6 +328,14 @@ export class SQLiteMemoryProvider
 	private lastAutomaticJsonlMigration: SQLiteJsonlImportResult | null = null;
 	private recallCountSinceLastCompaction = 0;
 	private isCompacting = false;
+
+	/**
+	 * _internals DI seam for testing. Exposes key methods so tests can inject
+	 * failures without touching the module-level mock surface.
+	 */
+	readonly _internals = {
+		writeMemory: (record: MemoryRecord): void => this.writeMemory(record),
+	};
 
 	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
 		this.rootDirectory = rootDirectory;
@@ -812,54 +825,83 @@ export class SQLiteMemoryProvider
 				directUpdates.set(memoryId, nextQValue);
 			}
 		}
-		for (const targetId of this.findPropagationTargets(sourceIds)) {
-			const propagatedSignal = propagatedRewardSignal(
-				reward,
-				this.config.learning.propagationFactor,
-			);
-			const nextQValue = this.updateMemoryQValue(
-				targetId,
-				propagatedSignal,
-				updatedAt,
-			);
-			if (nextQValue !== null) {
-				propagatedUpdates.set(targetId, nextQValue);
+
+		// FB-002: Auto-promote session memories that crossed the threshold during this update.
+		// Runs AFTER directUpdates so we use the post-reward qValue.
+		const promotionThreshold = this.config.learning.promotionThreshold;
+		const promotionRecallThreshold = 5; // must match listMemoryValueLog's promotionCandidate logic
+		const usageSummary = summarizeRecallUsage(this.listRecallUsageSync());
+		for (const [memoryId, nextQValue] of directUpdates) {
+			const memory = this.memories.get(memoryId);
+			const recallCount = usageSummary.get(memoryId)?.count ?? 0;
+			if (
+				memory &&
+				memory.stability === 'session' &&
+				nextQValue > promotionThreshold &&
+				recallCount > promotionRecallThreshold
+			) {
+				memory.stability = 'durable';
+				this._internals.writeMemory(memory);
 			}
 		}
-		const updatedMemoryIds = [...directUpdates.keys()];
-		const propagatedMemoryIds = [...propagatedUpdates.keys()];
-		const combinedQValues = [
-			...directUpdates.values(),
-			...propagatedUpdates.values(),
-		];
-		const qValue =
-			combinedQValues.length > 0
-				? averageNumbers(combinedQValues)
-				: usageRow.event.qValue;
-		const verdictJson = truncateJsonPayload(input.verdictPayload);
-		const updatedEvent: MemoryRecallUsageEvent = {
-			...usageRow.event,
-			qValue,
-			lastReward: reward,
-			taskOutcome: input.outcome,
-		};
-		this.requireDb().run(
-			`UPDATE memory_recall_usage
-			SET usage_json = ?,
-				q_value = ?,
-				last_reward = ?,
-				task_outcome = ?,
-				council_verdict_json = ?
-			WHERE id = ?`,
-			[
-				JSON.stringify(updatedEvent),
-				qValue ?? null,
-				reward,
-				input.outcome,
-				verdictJson,
-				usageRow.id,
-			],
-		);
+
+		const db = this.requireDb();
+		// FB-003: Wrap the multi-write body in a transaction for atomicity.
+		const result = db.transaction(() => {
+			for (const targetId of this.findPropagationTargets(sourceIds)) {
+				const propagatedSignal = propagatedRewardSignal(
+					reward,
+					this.config.learning.propagationFactor,
+				);
+				const nextQValue = this.updateMemoryQValue(
+					targetId,
+					propagatedSignal,
+					updatedAt,
+				);
+				if (nextQValue !== null) {
+					propagatedUpdates.set(targetId, nextQValue);
+				}
+			}
+			const updatedMemoryIds = [...directUpdates.keys()];
+			const propagatedMemoryIds = [...propagatedUpdates.keys()];
+			const combinedQValues = [
+				...directUpdates.values(),
+				...propagatedUpdates.values(),
+			];
+			const qValue =
+				combinedQValues.length > 0
+					? averageNumbers(combinedQValues)
+					: usageRow.event.qValue;
+			const verdictJson = truncateJsonPayload(input.verdictPayload);
+			const updatedEvent: MemoryRecallUsageEvent = {
+				...usageRow.event,
+				qValue,
+				lastReward: reward,
+				taskOutcome: input.outcome,
+			};
+			db.run(
+				`UPDATE memory_recall_usage
+				SET usage_json = ?,
+					q_value = ?,
+					last_reward = ?,
+					task_outcome = ?,
+					council_verdict_json = ?
+				WHERE id = ?`,
+				[
+					JSON.stringify(updatedEvent),
+					qValue ?? null,
+					reward,
+					input.outcome,
+					verdictJson,
+					usageRow.id,
+				],
+			);
+			return {
+				updatedMemoryIds,
+				propagatedMemoryIds,
+				qValue,
+			};
+		})();
 		await this.event(
 			'recall',
 			usageRow.event.bundleId,
@@ -871,9 +913,9 @@ export class SQLiteMemoryProvider
 			outcome: input.outcome,
 			memoryIds: sourceIds,
 			reward,
-			updatedMemoryIds,
-			propagatedMemoryIds,
-			qValue,
+			updatedMemoryIds: result.updatedMemoryIds,
+			propagatedMemoryIds: result.propagatedMemoryIds,
+			qValue: result.qValue,
 		};
 	}
 
@@ -1246,10 +1288,25 @@ export class SQLiteMemoryProvider
 				LIMIT ?`,
 			)
 			.all(100);
+		// FB-001: Try exact runId match first (ROOT-001 / PR #1636).
 		for (const row of rows) {
 			if (!row.id) continue;
 			const event = parseRecallUsageRow(row);
 			if (event?.runId === runId) return { id: row.id, event };
+		}
+		// Fallback: most recent row within 30 minutes regardless of runId.
+		// This handles cross-session recall events where the task-agent session
+		// differs from the council/session that called applyRecallReward.
+		const FALLBACK_LOOKBACK_SECONDS = 1800;
+		const cutoffMs = Date.now() - FALLBACK_LOOKBACK_SECONDS * 1000;
+		for (const row of rows) {
+			if (!row.id) continue;
+			const event = parseRecallUsageRow(row);
+			if (!event) continue;
+			const eventMs = Date.parse(event.timestamp);
+			if (Number.isFinite(eventMs) && eventMs >= cutoffMs) {
+				return { id: row.id, event };
+			}
 		}
 		return null;
 	}

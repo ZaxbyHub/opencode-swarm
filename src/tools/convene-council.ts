@@ -63,6 +63,13 @@ export const ArgsSchema = z.object({
 	roundNumber: z.number().int().min(1).max(10).default(1),
 	verdicts: z.array(VerdictSchema).min(1).max(5),
 	working_directory: z.string().optional(),
+	provenanceSessionId: z
+		.string()
+		.min(1)
+		.optional()
+		.describe(
+			'Session ID of the agent that produced the recall context (optional provenance for memory reward lookup)',
+		),
 });
 
 export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
@@ -332,7 +339,11 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 				workingDir,
 				config.memory,
 				{
-					runId: sessionID ?? input.swarmId,
+					runId:
+						input.provenanceSessionId ??
+						ctx?.sessionID ??
+						sessionID ??
+						input.swarmId,
 					verdict: synthesis.overallVerdict,
 					verdictPayload: {
 						taskId: synthesis.taskId,
@@ -381,6 +392,13 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 					quorumSize: membersVoted.length,
 					quorumMet: true,
 					memoryReward,
+					...(memoryReward?.success === false &&
+					memoryReward?.reason &&
+					memoryReward.reason !== 'memory_disabled'
+						? {
+								memoryRewardWarning: `memory reward lookup failed: ${memoryReward.reason}`,
+							}
+						: {}),
 					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
 				},
 				null,

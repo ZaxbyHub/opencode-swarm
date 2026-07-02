@@ -104,6 +104,84 @@ describe('council verdict memory reward wiring', () => {
 		});
 		expect(updated.qValue).toBeCloseTo(0.55, 5);
 	});
+
+	// FB-001: runId mismatch — seed with task-agent session, call with architect session.
+	// The 30-minute fallback in latestRecallUsageForRun should still find the event.
+	test('applyRecallRewardForCouncil falls back to recent recall when runId differs', async () => {
+		const { submit_phase_council_verdicts } = await import(
+			'../../../src/tools/submit-phase-council-verdicts'
+		);
+		const record = await seedRecall('task-agent-run-abc');
+		await writePassingMutationGate(1);
+
+		// Call with a completely different runId — no exact match possible.
+		// The 30-minute fallback should still match the recent recall.
+		const raw = await submit_phase_council_verdicts.execute(
+			{
+				phaseNumber: 1,
+				swarmId: 'mega',
+				phaseSummary: 'Phase with cross-session recall fallback.',
+				roundNumber: 1,
+				verdicts: [memberVerdict('reviewer', 'APPROVE')],
+				provenanceSessionId: 'architect-session-xyz', // different from task-agent-run-abc
+				working_directory: tmpDir,
+			},
+			tmpDir,
+		);
+		const parsed = JSON.parse(raw as string) as {
+			success: boolean;
+			memoryReward?: {
+				success: boolean;
+				updatedMemoryIds: string[];
+				reason?: string;
+			};
+		};
+		const updated = await readMemory(record.id);
+
+		expect(parsed).toMatchObject({ success: true });
+		expect(parsed.memoryReward).toMatchObject({
+			success: true,
+			updatedMemoryIds: [record.id],
+		});
+		expect(updated.qValue).toBeCloseTo(0.55, 5);
+	});
+
+	// FB-001: unknown runId outside the 30-minute window should return no match.
+	test('applyRecallRewardForCouncil returns no_recall_usage_for_run for stale runId', async () => {
+		const { submit_phase_council_verdicts } = await import(
+			'../../../src/tools/submit-phase-council-verdicts'
+		);
+		// Seed a recall with a timestamp older than the 30-minute fallback window.
+		const record = await seedRecallWithTimestamp(
+			'stale-run',
+			new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+		);
+		await writePassingMutationGate(1);
+
+		// Use a runId that has no recall and is outside the fallback window.
+		const raw = await submit_phase_council_verdicts.execute(
+			{
+				phaseNumber: 1,
+				swarmId: 'mega',
+				phaseSummary: 'No matching recall for this run.',
+				roundNumber: 1,
+				verdicts: [memberVerdict('reviewer', 'APPROVE')],
+				provenanceSessionId: 'completely-unknown-session',
+				working_directory: tmpDir,
+			},
+			tmpDir,
+		);
+		const parsed = JSON.parse(raw as string) as {
+			success: boolean;
+			memoryReward?: { success: boolean; reason?: string };
+		};
+
+		expect(parsed).toMatchObject({ success: true });
+		expect(parsed.memoryReward).toMatchObject({
+			success: false,
+			reason: 'no_recall_usage_for_run',
+		});
+	});
 });
 
 async function writePassingMutationGate(phaseNumber: number): Promise<void> {
@@ -121,6 +199,36 @@ async function writePassingMutationGate(phaseNumber: number): Promise<void> {
 		}),
 		'utf-8',
 	);
+}
+
+async function seedRecallWithTimestamp(
+	runId: string,
+	timestamp: string,
+): Promise<MemoryRecord> {
+	const provider = new SQLiteMemoryProvider(tmpDir, {
+		enabled: true,
+		provider: 'sqlite',
+	});
+	try {
+		const record = await provider.upsert(
+			makeRecord(`Memory reward record for ${runId}.`),
+		);
+		await provider.recordRecallUsage?.({
+			bundleId: `bundle-${runId}`,
+			query: 'memory reward',
+			scopes: [{ type: 'repository', repoId: 'repo-a' }],
+			kinds: ['repo_convention'],
+			memoryIds: [record.id],
+			scores: [0.8],
+			tokenEstimate: 12,
+			agentRole: 'architect',
+			runId,
+			timestamp,
+		});
+		return record;
+	} finally {
+		provider.close();
+	}
 }
 
 async function seedRecall(runId: string): Promise<MemoryRecord> {

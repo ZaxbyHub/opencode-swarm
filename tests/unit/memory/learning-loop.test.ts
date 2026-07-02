@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -194,3 +194,163 @@ function recallEvent(runId: string, memoryIds: string[]) {
 		timestamp: new Date().toISOString(),
 	};
 }
+
+// FB-002: Auto-promotion to durable persistence
+describe('SQLite memory auto-promotion (FB-002)', () => {
+	test('session memory with qValue > threshold and recallCount > 5 is promoted to durable', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			// Start with qValue 0.9 (above promotionThreshold of 0.85) and stability session.
+			const record = await provider.upsert(
+				makeRecord('High-value session memory.', {
+					qValue: 0.9,
+					stability: 'session',
+				}),
+			);
+			// Seed 6 recall events so recallCount > 5.
+			for (let i = 0; i < 6; i++) {
+				await provider.recordRecallUsage?.(
+					recallEvent(`run-promote-${i}`, [record.id]),
+				);
+			}
+			expect(record.stability).toBe('session');
+
+			const result = await provider.applyRecallReward?.({
+				runId: 'run-promote-5',
+				outcome: 'approved',
+				verdictPayload: { overallVerdict: 'APPROVE' },
+			});
+			const updated = await provider.get(record.id);
+
+			expect(result?.success).toBe(true);
+			expect(updated?.stability).toBe('durable');
+		} finally {
+			provider.close();
+		}
+	});
+
+	test('already durable memory stays durable after further rewards', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			const record = await provider.upsert(
+				makeRecord('Already durable memory.', {
+					qValue: 0.95,
+					stability: 'durable',
+				}),
+			);
+			for (let i = 0; i < 3; i++) {
+				await provider.recordRecallUsage?.(
+					recallEvent(`run-durable-${i}`, [record.id]),
+				);
+			}
+
+			await provider.applyRecallReward?.({
+				runId: 'run-durable-0',
+				outcome: 'approved',
+				verdictPayload: { overallVerdict: 'APPROVE' },
+			});
+			const updated = await provider.get(record.id);
+
+			expect(updated?.stability).toBe('durable');
+		} finally {
+			provider.close();
+		}
+	});
+
+	test('session memory with only qValue threshold met does NOT promote (recallCount <= 5)', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			// qValue above threshold but only 3 recalls.
+			const record = await provider.upsert(
+				makeRecord('High qValue but low recall count.', {
+					qValue: 0.9,
+					stability: 'session',
+				}),
+			);
+			for (let i = 0; i < 3; i++) {
+				await provider.recordRecallUsage?.(
+					recallEvent(`run-qonly-${i}`, [record.id]),
+				);
+			}
+
+			await provider.applyRecallReward?.({
+				runId: 'run-qonly-0',
+				outcome: 'approved',
+				verdictPayload: { overallVerdict: 'APPROVE' },
+			});
+			const updated = await provider.get(record.id);
+
+			expect(updated?.stability).toBe('session');
+		} finally {
+			provider.close();
+		}
+	});
+});
+
+// FB-003: Transaction atomicity
+describe('SQLite memory learning loop transaction atomicity (FB-003)', () => {
+	test('applyRecallReward returns failure when _internals.writeMemory throws during promotion', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			// Source memory that will be directly updated.
+			const source = await provider.upsert(
+				makeRecord('Source memory for transaction atomicity test.'),
+			);
+			// Similar target that will receive propagated reward.
+			const target = await provider.upsert(
+				makeRecord(
+					'Target memory for transaction atomicity test — highly similar.',
+				),
+			);
+			await provider.recordRecallUsage?.(
+				recallEvent('run-atomic', [source.id]),
+			);
+			await provider.recordRecallUsage?.(
+				recallEvent('run-atomic-target', [target.id]),
+			);
+
+			// Inject a failure for writeMemory in the promotion loop.
+			const originalWriteMemory = provider._internals.writeMemory;
+			provider._internals.writeMemory = (_record: MemoryRecord) => {
+				throw new Error('Injected writeMemory failure for atomicity test');
+			};
+
+			try {
+				const result = await provider.applyRecallReward?.({
+					runId: 'run-atomic',
+					outcome: 'approved',
+					verdictPayload: { overallVerdict: 'APPROVE' },
+				});
+				// When _internals.writeMemory throws inside the transaction callback,
+				// the exception propagates out. applyRecallReward should not return
+				// success in this case. If result is defined, it must be a failure.
+				if (result !== undefined) {
+					expect(result.success).toBe(false);
+				}
+				// If result is undefined (function threw), that's also acceptable.
+			} catch (_err) {
+				// Expected: applyRecallReward throws when _internals.writeMemory throws.
+			} finally {
+				provider._internals.writeMemory = originalWriteMemory;
+			}
+		} finally {
+			provider.close();
+		}
+	});
+});

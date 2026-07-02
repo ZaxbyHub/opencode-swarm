@@ -324,6 +324,13 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					quorumSize: membersVoted.length,
 					quorumMet: true,
 					memoryReward,
+					...(memoryReward?.success === false &&
+					memoryReward?.reason &&
+					memoryReward.reason !== 'memory_disabled'
+						? {
+								memoryRewardWarning: `memory reward lookup failed: ${memoryReward.reason}`,
+							}
+						: {}),
 					evidencePath: synthesis.evidencePath,
 					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
 				},
