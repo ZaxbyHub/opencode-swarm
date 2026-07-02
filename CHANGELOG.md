@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.103.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.1...v7.103.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* **skills:** apply swarm-pr-review feedback for PR [#1631](https://github.com/ZaxbyHub/opencode-swarm/issues/1631) ([6c1d0a5](https://github.com/ZaxbyHub/opencode-swarm/commit/6c1d0a56d9f7487f70a73edae00c3cdbb501c65e))
+
 ## [7.103.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.0...v7.103.1) (2026-07-02)
 
 
