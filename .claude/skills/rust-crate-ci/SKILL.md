@@ -22,11 +22,12 @@ cd runners/swarm-sandbox-runner
 # 1. Format check — CI fails here first; clippy will not run if this fails
 cargo fmt --check
 
-# 2. Clippy — -D warnings makes all warnings hard errors, matching CI
-cargo clippy -- -D warnings
+# 2. Clippy — -D warnings makes all warnings hard errors; --all-targets matches CI,
+#    which also lints tests, examples, and benches (ci.yml rust-sandbox-runner job)
+cargo clippy --all-targets -- -D warnings
 
-# 3. Tests — run on the current platform; Windows-specific tests are gated with #[cfg(windows)]
-cargo test
+# 3. Tests — --all-targets matches CI; Windows-specific tests are gated with #[cfg(windows)]
+cargo test --all-targets
 
 # 4. Release build — confirms the binary compiles with optimizations
 cargo build --release
@@ -41,7 +42,8 @@ at what failed.
 
 ## How rustfmt makes decisions
 
-rustfmt 1.95.0 applies line-length thresholds per syntax item, not per file or per block.
+rustfmt (current stable — `rust-toolchain.toml` floats on `channel = "stable"`)
+applies line-length thresholds per syntax item, not per file or per block.
 Two patterns that look equivalent locally can format differently:
 
 **Long `format!` macros:** If the total length of `format!("...", arg)` exceeds the

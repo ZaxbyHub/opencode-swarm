@@ -249,7 +249,7 @@ Use `references/critic-gate.md`.
    - rollout/risk/rollback
    - explicit "unwired functionality" checklist
 5. Send the plan to an independent critic:
-   - If running in the main session and the `Agent` tool is available, launch a separate critic subagent with `references/critic-gate.md` and the trace artifacts as context.
+   - If running in the main session and the subagent tool is available (named `Agent` or `Task` depending on Claude Code version), launch a separate critic subagent with `references/critic-gate.md` and the trace artifacts as context.
    - If running as a subagent through `.claude/agents/issue-tracer.md`, do not attempt nested subagent invocation. Claude Code subagents cannot spawn other subagents. Run the full fallback self-critic pass from `references/critic-gate.md` and disclose this to the user.
    - If no independent subagent is available in the current environment, run the fallback adversarial critic pass and clearly label it "Fallback self-critic: independent critic unavailable."
 6. The critic must return one of:
