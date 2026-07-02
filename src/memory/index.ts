@@ -58,8 +58,13 @@ export type {
 	MemoryCompactResult,
 	MemoryProposalStore,
 	MemoryProvider,
+	MemoryRecallRewardInput,
+	MemoryRecallRewardResult,
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
+	MemoryTaskOutcome,
+	MemoryValueLogEntry,
+	MemoryValueLogFilter,
 } from './provider';
 export {
 	buildMemoryRecallPlan,
@@ -67,6 +72,11 @@ export {
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
 export { findSecrets, redactSecrets } from './redaction';
+export {
+	applyRecallRewardForCouncil,
+	councilVerdictToMemoryOutcome,
+	resolveRewardRunIds,
+} from './reward';
 export {
 	MEMORY_RECALL_PROFILES,
 	type MemoryRecallProfile,

@@ -6,9 +6,9 @@ import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import {
-	DEFAULT_MEMORY_CONFIG,
 	DURABLE_MEMORY_KINDS,
 	type MemoryConfig,
+	resolveMemoryConfig,
 } from './config';
 import {
 	applyPatchToMemory,
@@ -47,8 +47,13 @@ import type {
 	MemoryCompactResult,
 	MemoryProposalStore,
 	MemoryProvider,
+	MemoryRecallRewardInput,
+	MemoryRecallRewardResult,
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
+	MemoryTaskOutcome,
+	MemoryValueLogEntry,
+	MemoryValueLogFilter,
 } from './provider';
 import {
 	normalizeMemoryText,
@@ -57,7 +62,11 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
-import { scoreMemoryRecordsWithDiagnostics } from './scoring';
+import {
+	DEFAULT_MEMORY_Q_VALUE,
+	memoryQValue,
+	scoreMemoryRecordsWithDiagnostics,
+} from './scoring';
 import type {
 	AppliedMemoryChange,
 	MemoryListFilter,
@@ -240,6 +249,32 @@ export const MIGRATIONS: Migration[] = [
 			);
 		`,
 	},
+	{
+		version: 7,
+		name: 'add_recall_learning_columns',
+		// Migration version 7 (not v5 as issue #1467 spec stated):
+		//   v2 is reserved by LEGACY_JSONL_MIGRATION_VERSION (src/memory/jsonl-migration.ts:9).
+		//   v5 was occupied by the recall_usage timestamp index migration.
+		//   v6 was occupied by the embedding_config migration.
+		//   v7 is the first available slot for this change.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN q_value REAL DEFAULT 0.5;
+			ALTER TABLE memory_recall_usage ADD COLUMN last_reward REAL;
+			ALTER TABLE memory_recall_usage ADD COLUMN task_outcome TEXT;
+			ALTER TABLE memory_recall_usage ADD COLUMN council_verdict_json TEXT;
+		`,
+	},
+	{
+		version: 8,
+		name: 'add_recall_reward_idempotency_key',
+		// Stores a stable "swarmId:taskOrPhase:roundNumber" key (see
+		// deriveRewardKey below) on the recall-usage row a reward was last
+		// applied against, so a duplicate council-verdict submission for the
+		// SAME round does not re-apply the EMA update indefinitely.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN reward_key TEXT;
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -258,7 +293,13 @@ interface ProposalRow {
 }
 
 interface RecallUsageRow {
+	id?: string;
 	usage_json: string;
+	q_value?: number | null;
+	last_reward?: number | null;
+	task_outcome?: string | null;
+	council_verdict_json?: string | null;
+	reward_key?: string | null;
 }
 
 interface DecisionTransactionResult {
@@ -300,36 +341,27 @@ export class SQLiteMemoryProvider
 	private recallCountSinceLastCompaction = 0;
 	private isCompacting = false;
 
+	/**
+	 * _internals DI seam for testing. Exposes key methods so tests can inject
+	 * failures without touching the module-level mock surface.
+	 */
+	readonly _internals = {
+		writeMemory: (record: MemoryRecord): void => this.writeMemory(record),
+		/**
+		 * Test-only seam: inject a fake embedding provider so propagation's
+		 * cosine-similarity path can be exercised without the real
+		 * `@xenova/transformers` model dependency. Must be called AFTER
+		 * `initialize()` (which may otherwise construct/overwrite the real
+		 * provider when `embeddings.enabled` is true).
+		 */
+		setEmbeddingProvider: (provider: EmbeddingProvider | null): void => {
+			this.embeddingProvider = provider;
+		},
+	};
+
 	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
 		this.rootDirectory = rootDirectory;
-		this.config = {
-			...DEFAULT_MEMORY_CONFIG,
-			...config,
-			sqlite: {
-				...DEFAULT_MEMORY_CONFIG.sqlite,
-				...(config.sqlite ?? {}),
-			},
-			recall: {
-				...DEFAULT_MEMORY_CONFIG.recall,
-				...(config.recall ?? {}),
-				injection: {
-					...DEFAULT_MEMORY_CONFIG.recall.injection,
-					...(config.recall?.injection ?? {}),
-				},
-			},
-			writes: {
-				...DEFAULT_MEMORY_CONFIG.writes,
-				...(config.writes ?? {}),
-			},
-			redaction: {
-				...DEFAULT_MEMORY_CONFIG.redaction,
-				...(config.redaction ?? {}),
-			},
-			maintenance: {
-				...DEFAULT_MEMORY_CONFIG.maintenance,
-				...(config.maintenance ?? {}),
-			},
-		};
+		this.config = resolveMemoryConfig(config);
 	}
 
 	private databasePath(): string {
@@ -693,14 +725,32 @@ export class SQLiteMemoryProvider
 
 	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {
 		await this.initialize();
+		const recalledRecords = event.memoryIds
+			.map((id) => this.memories.get(id))
+			.filter(isMemoryRecord);
+		const qValue =
+			typeof event.qValue === 'number' && Number.isFinite(event.qValue)
+				? clamp01(event.qValue)
+				: averageMemoryQValue(recalledRecords);
+		const eventWithQValue: MemoryRecallUsageEvent = {
+			...event,
+			qValue,
+		};
 		this.requireDb().run(
 			`INSERT INTO memory_recall_usage (
 				id,
 				bundle_id,
 				timestamp,
-				usage_json
-			) VALUES (?, ?, ?, ?)`,
-			[randomUUID(), event.bundleId, event.timestamp, JSON.stringify(event)],
+				usage_json,
+				q_value
+			) VALUES (?, ?, ?, ?, ?)`,
+			[
+				randomUUID(),
+				event.bundleId,
+				event.timestamp,
+				JSON.stringify(eventWithQValue),
+				qValue,
+			],
 		);
 		this.recallCountSinceLastCompaction++;
 		const threshold = this.config.maintenance?.autoCompactEveryNRecalls ?? 50;
@@ -756,7 +806,7 @@ export class SQLiteMemoryProvider
 			typeof filter.limit === 'number'
 				? this.requireDb()
 						.query<RecallUsageRow, [number]>(
-							`SELECT usage_json
+							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				LIMIT ?`,
@@ -764,7 +814,7 @@ export class SQLiteMemoryProvider
 						.all(Math.max(1, Math.trunc(filter.limit)))
 				: this.requireDb()
 						.query<RecallUsageRow, []>(
-							`SELECT usage_json
+							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				`,
@@ -772,19 +822,206 @@ export class SQLiteMemoryProvider
 						.all();
 		const events: MemoryRecallUsageEvent[] = [];
 		for (const row of rows) {
-			try {
-				const parsed = JSON.parse(row.usage_json) as MemoryRecallUsageEvent;
-				if (
-					Array.isArray(parsed.memoryIds) &&
-					typeof parsed.query === 'string'
-				) {
-					events.push(parsed);
-				}
-			} catch {
-				// Ignore corrupt recall usage rows; maintenance reports are advisory.
-			}
+			const parsed = parseRecallUsageRow(row);
+			if (parsed) events.push(parsed);
 		}
 		return events;
+	}
+
+	async applyRecallReward(
+		input: MemoryRecallRewardInput,
+	): Promise<MemoryRecallRewardResult> {
+		await this.initialize();
+		const matches = this.matchingRecallUsageRows(input.runIds);
+		if (matches.length === 0) {
+			return emptyRewardResult(input.outcome, 'no_recall_usage_for_run');
+		}
+		const rewardKey = deriveRewardKey(input.verdictPayload);
+		// Skip bundles that already carry this exact reward key (same
+		// swarmId+task/phase+round) so a duplicate council-verdict submission
+		// does not re-apply the EMA update indefinitely (idempotency).
+		const pending =
+			rewardKey === null
+				? matches
+				: matches.filter((match) => match.rewardKey !== rewardKey);
+		if (pending.length === 0) {
+			const first = matches[0];
+			return {
+				success: true,
+				bundleId: first?.event.bundleId,
+				bundleIds: matches.map((match) => match.event.bundleId),
+				outcome: input.outcome,
+				memoryIds: uniqueStrings(
+					matches.flatMap((match) => match.event.memoryIds),
+				),
+				reward: rewardForOutcome(input.outcome),
+				updatedMemoryIds: [],
+				propagatedMemoryIds: [],
+				qValue: first?.event.qValue,
+				reason: 'already_rewarded',
+			};
+		}
+		const reward = rewardForOutcome(input.outcome);
+		const updatedAt = input.timestamp ?? new Date().toISOString();
+		const sourceIds = uniqueStrings(
+			pending.flatMap((match) => match.event.memoryIds),
+		);
+		const directUpdates = new Map<string, number>();
+		const propagatedUpdates = new Map<string, number>();
+		for (const memoryId of sourceIds) {
+			const nextQValue = this.updateMemoryQValue(memoryId, reward, updatedAt);
+			if (nextQValue !== null) {
+				directUpdates.set(memoryId, nextQValue);
+			}
+		}
+
+		// FB-002: Auto-promote session memories that crossed the threshold during this update.
+		// Runs AFTER directUpdates so we use the post-reward qValue.
+		const promotionThreshold = this.config.learning.promotionThreshold;
+		const promotionRecallThreshold = 5; // must match listMemoryValueLog's promotionCandidate logic
+		const usageSummary = summarizeRecallUsage(this.listRecallUsageSync());
+		for (const [memoryId, nextQValue] of directUpdates) {
+			const memory = this.memories.get(memoryId);
+			const recallCount = usageSummary.get(memoryId)?.count ?? 0;
+			if (
+				memory &&
+				memory.stability === 'session' &&
+				nextQValue > promotionThreshold &&
+				recallCount > promotionRecallThreshold
+			) {
+				memory.stability = 'durable';
+				this._internals.writeMemory(memory);
+			}
+		}
+
+		// Propagation target selection may compute embedding similarity
+		// asynchronously (embedding-cosine path) and must resolve BEFORE the
+		// synchronous db.transaction() below — its callback cannot await.
+		const propagationTargets = await this.findPropagationTargets(sourceIds);
+
+		const db = this.requireDb();
+		const verdictJson = truncateJsonPayload(input.verdictPayload);
+		// FB-003: Wrap the multi-write body in a transaction for atomicity.
+		const result = db.transaction(() => {
+			for (const targetId of propagationTargets) {
+				const propagatedSignal = propagatedRewardSignal(
+					reward,
+					this.config.learning.propagationFactor,
+				);
+				const nextQValue = this.updateMemoryQValue(
+					targetId,
+					propagatedSignal,
+					updatedAt,
+				);
+				if (nextQValue !== null) {
+					propagatedUpdates.set(targetId, nextQValue);
+				}
+			}
+			const updatedMemoryIds = [...directUpdates.keys()];
+			const propagatedMemoryIds = [...propagatedUpdates.keys()];
+			const combinedQValues = [
+				...directUpdates.values(),
+				...propagatedUpdates.values(),
+			];
+			const qValue =
+				combinedQValues.length > 0
+					? averageNumbers(combinedQValues)
+					: pending[0]?.event.qValue;
+			for (const match of pending) {
+				const updatedEvent: MemoryRecallUsageEvent = {
+					...match.event,
+					qValue,
+					lastReward: reward,
+					taskOutcome: input.outcome,
+				};
+				db.run(
+					`UPDATE memory_recall_usage
+					SET usage_json = ?,
+						q_value = ?,
+						last_reward = ?,
+						task_outcome = ?,
+						council_verdict_json = ?,
+						reward_key = ?
+					WHERE id = ?`,
+					[
+						JSON.stringify(updatedEvent),
+						qValue ?? null,
+						reward,
+						input.outcome,
+						verdictJson,
+						rewardKey,
+						match.id,
+					],
+				);
+			}
+			return {
+				updatedMemoryIds,
+				propagatedMemoryIds,
+				qValue,
+			};
+		})();
+		for (const match of pending) {
+			await this.event(
+				'recall',
+				match.event.bundleId,
+				`applied ${input.outcome} recall reward`,
+			);
+		}
+		return {
+			success: true,
+			bundleId: pending[0]?.event.bundleId,
+			bundleIds: pending.map((match) => match.event.bundleId),
+			outcome: input.outcome,
+			memoryIds: sourceIds,
+			reward,
+			updatedMemoryIds: result.updatedMemoryIds,
+			propagatedMemoryIds: result.propagatedMemoryIds,
+			qValue: result.qValue,
+		};
+	}
+
+	async listMemoryValueLog(
+		filter: MemoryValueLogFilter = {},
+	): Promise<MemoryValueLogEntry[]> {
+		await this.initialize();
+		const usageSummary = summarizeRecallUsage(this.listRecallUsageSync());
+		const threshold = this.config.learning.suppressionThreshold;
+		const promotionThreshold = this.config.learning.promotionThreshold;
+		const entries = Array.from(this.memories.values()).map((record) => {
+			const recall = usageSummary.get(record.id);
+			const qValue = memoryQValue(record);
+			const recallCount = recall?.count ?? 0;
+			return {
+				memoryId: record.id,
+				kind: record.kind,
+				scopeKey: stableScopeKey(record.scope),
+				textPreview: truncateText(record.text, 120),
+				qValue,
+				recallCount,
+				lastRecalledAt: recall?.lastRecalledAt,
+				lastReward: recall?.lastReward,
+				taskOutcome: recall?.taskOutcome,
+				promotionCandidate: qValue > promotionThreshold && recallCount > 5,
+				suppressionCandidate: qValue < threshold,
+			} satisfies MemoryValueLogEntry;
+		});
+		const filtered = entries
+			.filter((entry) => {
+				if (filter.includePromotionCandidatesOnly) {
+					return entry.promotionCandidate;
+				}
+				if (filter.includeSuppressionCandidatesOnly) {
+					return entry.suppressionCandidate;
+				}
+				return true;
+			})
+			.sort(
+				(a, b) =>
+					(b.lastRecalledAt ?? '').localeCompare(a.lastRecalledAt ?? '') ||
+					b.qValue - a.qValue ||
+					a.memoryId.localeCompare(b.memoryId),
+			);
+		return filtered.slice(0, Math.max(1, Math.trunc(filter.limit ?? 20)));
 	}
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
@@ -1100,6 +1337,222 @@ export class SQLiteMemoryProvider
 		return result;
 	}
 
+	/**
+	 * Find, across the given candidate session/run ids, the most recent
+	 * recall-usage bundle for EACH distinct matching id (exact match only —
+	 * no unscoped time-window fallback, which would risk rewarding an
+	 * unrelated task/session's recall bundle). Every distinct matched runId
+	 * contributes its own latest bundle, so a council review informed by
+	 * several sessions (e.g. dispatched council-member sub-agents) rewards
+	 * all of their recalls, not just one.
+	 */
+	private matchingRecallUsageRows(runIds: string[]): Array<{
+		id: string;
+		event: MemoryRecallUsageEvent;
+		rewardKey: string | null;
+	}> {
+		const idSet = new Set(runIds.filter((id) => id.length > 0));
+		if (idSet.size === 0) return [];
+		const rows = this.requireDb()
+			.query<RecallUsageRow, [number]>(
+				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				LIMIT ?`,
+			)
+			.all(100);
+		const matches: Array<{
+			id: string;
+			event: MemoryRecallUsageEvent;
+			rewardKey: string | null;
+		}> = [];
+		const seenRunIds = new Set<string>();
+		for (const row of rows) {
+			if (!row.id) continue;
+			const event = parseRecallUsageRow(row);
+			if (!event?.runId || !idSet.has(event.runId)) continue;
+			if (seenRunIds.has(event.runId)) continue;
+			seenRunIds.add(event.runId);
+			matches.push({ id: row.id, event, rewardKey: row.reward_key ?? null });
+		}
+		return matches;
+	}
+
+	private updateMemoryQValue(
+		memoryId: string,
+		rewardSignal: number,
+		updatedAt: string,
+	): number | null {
+		const current = this.memories.get(memoryId);
+		if (!current) return null;
+		if (current.metadata.deleted === true || current.supersededBy) return null;
+		const eta = this.config.learning.learningRate;
+		const nextQValue = clamp01(
+			(1 - eta) * memoryQValue(current) + eta * rewardSignal,
+		);
+		const next: MemoryRecord = {
+			...current,
+			updatedAt,
+			qValue: nextQValue,
+		};
+		this.memories.set(memoryId, next);
+		this.writeMemory(next);
+		return nextQValue;
+	}
+
+	/**
+	 * Select soft-propagation targets among recently-recalled, same-scope
+	 * memories via two independent qualifying paths (issue #1467 O-004):
+	 * lexical token-overlap (Jaccard, gated additionally on same `kind`), OR
+	 * embedding cosine similarity when `embeddings.enabled` and a provider is
+	 * available (not gated on `kind` — semantic similarity can legitimately
+	 * cross kinds). A candidate qualifies if EITHER path clears its
+	 * threshold; the higher of the two scores is used for fanout-cap
+	 * ranking. When embeddings are disabled (the default), this reduces to
+	 * the original token-overlap-only behavior with no extra cost.
+	 */
+	private async findPropagationTargets(
+		sourceMemoryIds: string[],
+	): Promise<string[]> {
+		const lookbackIds = this.recentlyRecalledMemoryIds(
+			this.config.learning.propagationLookbackDays,
+		);
+		if (lookbackIds.size === 0) return [];
+		const sourceRecords = sourceMemoryIds
+			.map((id) => this.memories.get(id))
+			.filter(isMemoryRecord);
+		if (sourceRecords.length === 0) return [];
+		const targets: Array<{ id: string; overlap: number }> = [];
+		const sourceTokenSets = sourceRecords.map((record) =>
+			tokenizeText(record.text),
+		);
+		const cosineEnabled =
+			this.config.embeddings.enabled && Boolean(this.embeddingProvider);
+		const cosineThreshold =
+			this.config.learning.propagationEmbeddingCosineThreshold;
+		const sourceVectors = cosineEnabled
+			? await Promise.all(
+					sourceRecords.map((record) =>
+						this.getCachedEmbeddingForPropagation(record.text),
+					),
+				)
+			: [];
+		for (const candidate of this.memories.values()) {
+			if (sourceMemoryIds.includes(candidate.id)) continue;
+			if (!lookbackIds.has(candidate.id)) continue;
+			if (candidate.metadata.deleted === true || candidate.supersededBy)
+				continue;
+			const candidateTokens = tokenizeText(candidate.text);
+			let bestOverlap = 0;
+			let sameScopeAsAnySource = false;
+			const sameScopeBySourceIndex: boolean[] = [];
+			for (let i = 0; i < sourceRecords.length; i++) {
+				const source = sourceRecords[i];
+				const sameScope =
+					stableScopeKey(candidate.scope) === stableScopeKey(source.scope);
+				sameScopeBySourceIndex[i] = sameScope;
+				if (sameScope) sameScopeAsAnySource = true;
+				if (!sameScope || candidate.kind !== source.kind) continue;
+				bestOverlap = Math.max(
+					bestOverlap,
+					jaccard(sourceTokenSets[i] ?? new Set(), candidateTokens),
+				);
+			}
+			let bestCosine = 0;
+			if (cosineEnabled && sameScopeAsAnySource) {
+				const candidateVector = await this.getCachedEmbeddingForPropagation(
+					candidate.text,
+				);
+				if (candidateVector) {
+					// Same-scope gate applies per-source here too — only compare
+					// against vectors from sources that actually share this
+					// candidate's scope, not any source in the batch. Comparing
+					// against a same-batch but different-scope source's vector
+					// would leak reward propagation across scopes even though the
+					// candidate never matched that source's own scope.
+					for (let i = 0; i < sourceVectors.length; i++) {
+						if (!sameScopeBySourceIndex[i]) continue;
+						const sourceVector = sourceVectors[i];
+						if (!sourceVector) continue;
+						bestCosine = Math.max(
+							bestCosine,
+							cosineSimilarity(sourceVector, candidateVector),
+						);
+					}
+				}
+			}
+			const qualifiesByOverlap =
+				bestOverlap >= this.config.learning.propagationTokenOverlapThreshold;
+			const qualifiesByCosine = cosineEnabled && bestCosine >= cosineThreshold;
+			if (qualifiesByOverlap || qualifiesByCosine) {
+				targets.push({
+					id: candidate.id,
+					overlap: Math.max(bestOverlap, bestCosine),
+				});
+			}
+		}
+		return targets
+			.sort((a, b) => b.overlap - a.overlap || a.id.localeCompare(b.id))
+			.slice(0, this.config.learning.propagationFanout)
+			.map((target) => target.id);
+	}
+
+	/**
+	 * Embed `text` (cache-first, same pattern as the recall-time query
+	 * embedding lookup) for use in propagation's cosine-similarity path.
+	 * Returns null on any embedding failure or when no provider is
+	 * configured — callers must treat that as "no cosine signal available"
+	 * and fall back to the token-overlap path rather than throwing, since
+	 * this is a best-effort enhancement to an already-approximate feature.
+	 */
+	private async getCachedEmbeddingForPropagation(
+		text: string,
+	): Promise<Float32Array | null> {
+		if (!this.embeddingProvider) return null;
+		const modelVersion = this.embeddingProvider.modelVersion;
+		const normalized = normalizeMemoryText(text).toLowerCase();
+		if (!normalized) return null;
+		const cached = this.embeddingCache?.get(modelVersion, normalized)?.vector;
+		if (cached) return cached;
+		try {
+			const vector = await this.embeddingProvider.embed(normalized);
+			this.embeddingCache?.set(modelVersion, normalized, {
+				vector,
+				modelVersion,
+				queryHash: normalized,
+			});
+			return vector;
+		} catch {
+			return null;
+		}
+	}
+
+	private recentlyRecalledMemoryIds(lookbackDays: number): Set<string> {
+		const cutoffMs =
+			Date.now() - Math.max(0, lookbackDays) * 24 * 60 * 60 * 1000;
+		const memoryIds = new Set<string>();
+		for (const event of this.listRecallUsageSync(500)) {
+			const timestamp = Date.parse(event.timestamp);
+			if (Number.isFinite(timestamp) && timestamp < cutoffMs) continue;
+			for (const memoryId of event.memoryIds) memoryIds.add(memoryId);
+		}
+		return memoryIds;
+	}
+
+	private listRecallUsageSync(limit = 1000): MemoryRecallUsageEvent[] {
+		const rows = this.requireDb()
+			.query<RecallUsageRow, [number]>(
+				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				LIMIT ?`,
+			)
+			.all(Math.max(1, Math.trunc(limit)));
+		return rows
+			.map((row) => parseRecallUsageRow(row))
+			.filter(isRecallUsageEvent);
+	}
+
 	hasMigration(name: string): boolean {
 		const row = this.requireDb()
 			.query<MigrationRow, [string]>(
@@ -1250,7 +1703,19 @@ export class SQLiteMemoryProvider
 			if (migration.version <= currentVersion) continue;
 			const apply = db.transaction(() => {
 				for (const statement of splitSql(migration.sql)) {
-					db.run(statement);
+					try {
+						db.run(statement);
+					} catch (err) {
+						// No cross-process migration lock exists: two processes can both
+						// read the same stale currentVersion before either commits, then
+						// both attempt this migration. The loser's ALTER TABLE ADD COLUMN
+						// throws "duplicate column name" once it acquires the lock — that
+						// specific error means this exact statement already succeeded
+						// elsewhere, so treat it as a no-op and continue. Any other error
+						// still aborts the transaction.
+						const message = err instanceof Error ? err.message : String(err);
+						if (!/duplicate column name/i.test(message)) throw err;
+					}
 				}
 				db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
 					migration.version,
@@ -1828,6 +2293,252 @@ export class SQLiteMemoryProvider
 			);
 		return this.db;
 	}
+}
+
+function averageMemoryQValue(records: MemoryRecord[]): number {
+	if (records.length === 0) return DEFAULT_MEMORY_Q_VALUE;
+	return averageNumbers(records.map((record) => memoryQValue(record)));
+}
+
+function averageNumbers(values: number[]): number {
+	const finite = values.filter((value) => Number.isFinite(value));
+	if (finite.length === 0) return DEFAULT_MEMORY_Q_VALUE;
+	return finite.reduce((sum, value) => sum + value, 0) / finite.length;
+}
+
+function isMemoryRecord(
+	record: MemoryRecord | undefined,
+): record is MemoryRecord {
+	return record !== undefined;
+}
+
+function isRecallUsageEvent(
+	event: MemoryRecallUsageEvent | null,
+): event is MemoryRecallUsageEvent {
+	return event !== null;
+}
+
+function rewardForOutcome(outcome: MemoryTaskOutcome): number {
+	switch (outcome) {
+		case 'approved':
+			return 1;
+		case 'rejected':
+			return -1;
+		case 'concerns':
+		case 'unknown':
+			return 0;
+	}
+}
+
+function propagatedRewardSignal(
+	reward: number,
+	propagationFactor: number,
+): number {
+	const factor = Math.max(0, Math.min(1, propagationFactor));
+	return DEFAULT_MEMORY_Q_VALUE + factor * (reward - DEFAULT_MEMORY_Q_VALUE);
+}
+
+function emptyRewardResult(
+	outcome: MemoryTaskOutcome,
+	reason: string,
+): MemoryRecallRewardResult {
+	return {
+		success: false,
+		outcome,
+		memoryIds: [],
+		reward: rewardForOutcome(outcome),
+		updatedMemoryIds: [],
+		propagatedMemoryIds: [],
+		reason,
+	};
+}
+
+function parseRecallUsageRow(
+	row: RecallUsageRow,
+): MemoryRecallUsageEvent | null {
+	try {
+		const parsed = JSON.parse(row.usage_json) as MemoryRecallUsageEvent;
+		if (!Array.isArray(parsed.memoryIds) || typeof parsed.query !== 'string') {
+			return null;
+		}
+		const event: MemoryRecallUsageEvent = { ...parsed };
+		if (typeof row.q_value === 'number' && Number.isFinite(row.q_value)) {
+			event.qValue = clamp01(row.q_value);
+		}
+		if (
+			typeof row.last_reward === 'number' &&
+			Number.isFinite(row.last_reward)
+		) {
+			event.lastReward = row.last_reward;
+		}
+		const taskOutcome = normalizeTaskOutcome(row.task_outcome);
+		if (taskOutcome) event.taskOutcome = taskOutcome;
+		return event;
+	} catch {
+		return null;
+	}
+}
+
+function normalizeTaskOutcome(
+	value: string | null | undefined,
+): MemoryTaskOutcome | undefined {
+	if (
+		value === 'approved' ||
+		value === 'rejected' ||
+		value === 'concerns' ||
+		value === 'unknown'
+	) {
+		return value;
+	}
+	return undefined;
+}
+
+function truncateJsonPayload(value: unknown): string | null {
+	if (value === undefined) return null;
+	let json: string;
+	try {
+		json = JSON.stringify(value);
+	} catch (err) {
+		// Circular references, BigInt, etc. — verdictPayload is typed `unknown`
+		// on the public MemoryProvider interface, so a future caller could pass
+		// a non-serializable value. Never let a serialization failure abort
+		// the whole reward application; store a diagnostic placeholder instead.
+		return JSON.stringify({
+			unserializable: true,
+			reason: err instanceof Error ? err.message : String(err),
+		});
+	}
+	const maxLength = 8192;
+	if (json.length <= maxLength) return json;
+	return JSON.stringify({
+		truncated: true,
+		preview: json.slice(0, maxLength - 32),
+	});
+}
+
+/**
+ * Derive a stable idempotency key from a council-verdict payload, so a
+ * duplicate submission for the SAME swarm+task/phase+round does not
+ * re-apply the EMA reward update. Returns null (no idempotency key — always
+ * apply) when the payload does not carry the expected shape, preserving
+ * prior behavior for any caller that supplies an unstructured payload.
+ */
+function deriveRewardKey(verdictPayload: unknown): string | null {
+	if (!verdictPayload || typeof verdictPayload !== 'object') return null;
+	const payload = verdictPayload as Record<string, unknown>;
+	const swarmId = payload.swarmId;
+	const roundNumber = payload.roundNumber;
+	const unit = payload.taskId ?? payload.phaseNumber;
+	const unitOk = typeof unit === 'string' || typeof unit === 'number';
+	const roundOk =
+		typeof roundNumber === 'string' || typeof roundNumber === 'number';
+	if (
+		typeof swarmId !== 'string' ||
+		swarmId.length === 0 ||
+		!unitOk ||
+		!roundOk
+	) {
+		return null;
+	}
+	return `${swarmId}:${unit}:${roundNumber}`;
+}
+
+function summarizeRecallUsage(events: MemoryRecallUsageEvent[]): Map<
+	string,
+	{
+		count: number;
+		lastRecalledAt: string;
+		lastReward?: number;
+		taskOutcome?: MemoryTaskOutcome;
+	}
+> {
+	const summary = new Map<
+		string,
+		{
+			count: number;
+			lastRecalledAt: string;
+			lastReward?: number;
+			taskOutcome?: MemoryTaskOutcome;
+		}
+	>();
+	for (const event of events) {
+		for (const memoryId of event.memoryIds) {
+			const existing =
+				summary.get(memoryId) ??
+				({
+					count: 0,
+					lastRecalledAt: event.timestamp,
+				} satisfies {
+					count: number;
+					lastRecalledAt: string;
+					lastReward?: number;
+					taskOutcome?: MemoryTaskOutcome;
+				});
+			existing.count++;
+			if (event.timestamp >= existing.lastRecalledAt) {
+				existing.lastRecalledAt = event.timestamp;
+				existing.lastReward = event.lastReward;
+				existing.taskOutcome = event.taskOutcome;
+			}
+			summary.set(memoryId, existing);
+		}
+	}
+	return summary;
+}
+
+function uniqueStrings(values: string[]): string[] {
+	return Array.from(new Set(values.filter((value) => value.length > 0)));
+}
+
+function truncateText(value: string, maxLength: number): string {
+	if (value.length <= maxLength) return value;
+	return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function tokenizeText(value: string): Set<string> {
+	const tokens = new Set<string>();
+	for (const match of value.toLowerCase().matchAll(/[a-z0-9_]{3,}/g)) {
+		const token = match[0];
+		if (!FTS_STOP_WORDS.has(token)) tokens.add(token);
+	}
+	return tokens;
+}
+
+function jaccard(left: Set<string>, right: Set<string>): number {
+	if (left.size === 0 || right.size === 0) return 0;
+	let intersection = 0;
+	for (const token of left) {
+		if (right.has(token)) intersection++;
+	}
+	const union = left.size + right.size - intersection;
+	return union > 0 ? intersection / union : 0;
+}
+
+/**
+ * Cosine similarity between two equal-length embedding vectors, computed
+ * directly from the raw float values (not reliant on sqlite-vec's internal
+ * MATCH distance metric, which is not guaranteed to be cosine for this
+ * table's plain `FLOAT[N]` column declaration). Returns 0 for mismatched
+ * lengths, zero-length vectors, or a zero-norm vector — never NaN/Infinity.
+ */
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+	if (a.length === 0 || a.length !== b.length) return 0;
+	let dot = 0;
+	let normA = 0;
+	let normB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		normA += a[i] * a[i];
+		normB += b[i] * b[i];
+	}
+	if (normA === 0 || normB === 0) return 0;
+	const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+	return Number.isFinite(similarity) ? similarity : 0;
+}
+
+function clamp01(value: number): number {
+	if (!Number.isFinite(value)) return DEFAULT_MEMORY_Q_VALUE;
+	return Math.min(1, Math.max(0, value));
 }
 
 // Naive split-on-';' was replaced with a stateful parser that respects single-quoted

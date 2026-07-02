@@ -506,7 +506,7 @@ describe('Command registration parity', () => {
 	// ── PART B: No-regression classification snapshot (FR-008/SC-12) ──
 
 	describe('no-regression classification snapshot (FR-008/SC-12)', () => {
-		// Authoritative pre-existing baseline (28 allowlist entries)
+		// Authoritative pre-existing baseline (29 allowlist entries)
 		const BASELINE_28_ALLOWLIST = new Set([
 			'agents',
 			'config',
@@ -527,6 +527,7 @@ describe('Command registration parity', () => {
 			'memory status',
 			'memory pending',
 			'memory recall-log',
+			'memory value-log',
 			'memory stale',
 			'memory export',
 			'memory evaluate',
@@ -552,7 +553,7 @@ describe('Command registration parity', () => {
 			'sdd project',
 		]);
 
-		// Authoritative pre-existing baseline (32 tool commands = 28 allowlist + 4 human-only)
+		// Authoritative pre-existing baseline (33 tool commands = 29 allowlist + 4 human-only)
 		const BASELINE_32_TOOL_COMMANDS = new Set([
 			...BASELINE_28_ALLOWLIST,
 			'memory compact',

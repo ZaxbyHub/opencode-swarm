@@ -12,6 +12,7 @@ import {
 	type MemoryRecallUsageByMemory,
 	type MemoryRecallUsageByRole,
 	type MemoryRecord,
+	type MemoryValueLogEntry,
 	readMigrationReport,
 	resolveMemoryConfig,
 	resolveMemoryStorageDir,
@@ -43,6 +44,7 @@ export async function handleMemoryCommand(
 		'- `/swarm memory status` - show provider, SQLite path, JSONL files, and last migration report',
 		'- `/swarm memory pending` - show pending proposals and recent rejection reasons',
 		'- `/swarm memory recall-log` - summarize recall usage by agent role and memory ID',
+		'- `/swarm memory value-log` - show recent Q-value, reward, suppression, and promotion signals',
 		'- `/swarm memory stale` - list expired scratch, superseded, deleted, and low-utility memories',
 		'- `/swarm memory compact` - dry-run compaction; pass `--confirm` to remove deleted, superseded, and expired scratch records',
 		'- `/swarm memory export` - export current memory and proposals to `.swarm/memory/export/*.jsonl`',
@@ -163,12 +165,18 @@ export async function handleMemoryPendingCommand(
 			'',
 			`- Pending proposals shown: \`${report.pendingProposals.length}\``,
 			`- Rejected proposal reasons shown: \`${report.rejectedProposalReasons.length}\``,
+			`- Promotion candidates shown: \`${report.promotionCandidates.length}\``,
 		];
 		appendProposalLines(lines, 'Pending proposals', report.pendingProposals);
 		appendProposalLines(
 			lines,
 			'Rejected proposal reasons',
 			report.rejectedProposalReasons,
+		);
+		appendValueLogLines(
+			lines,
+			'Promotion candidates',
+			report.promotionCandidates,
 		);
 		return lines.join('\n');
 	} finally {
@@ -212,6 +220,45 @@ export async function handleMemoryRecallLogCommand(
 	}
 }
 
+export async function handleMemoryValueLogCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage: 'Usage: /swarm memory value-log [--limit <n>]',
+		allowConfirm: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const config = resolveCommandMemoryConfig(directory);
+	const provider = createMaintenanceProvider(directory, config);
+	try {
+		await provider.initialize?.();
+		if (!provider.listMemoryValueLog) {
+			return 'Memory provider does not support value-log reporting.';
+		}
+		const valueLog = await provider.listMemoryValueLog({ limit: parsed.limit });
+		const promotionCandidates = valueLog.filter(
+			(entry) => entry.promotionCandidate,
+		);
+		const suppressionCandidates = valueLog.filter(
+			(entry) => entry.suppressionCandidate,
+		);
+		const lines = [
+			'## Swarm Memory Value Log',
+			'',
+			`- Entries shown: \`${valueLog.length}\``,
+			`- Promotion candidates shown: \`${promotionCandidates.length}\``,
+			`- Suppression candidates shown: \`${suppressionCandidates.length}\``,
+		];
+		appendValueLogLines(lines, 'Recent Q-value updates', valueLog);
+		appendValueLogLines(lines, 'Promotion candidates', promotionCandidates);
+		appendValueLogLines(lines, 'Suppression candidates', suppressionCandidates);
+		return lines.join('\n');
+	} finally {
+		await provider.close?.();
+	}
+}
+
 export async function handleMemoryStaleCommand(
 	directory: string,
 	args: string[],
@@ -236,6 +283,7 @@ export async function handleMemoryStaleCommand(
 			`- Deleted tombstones shown: \`${report.deletedMemories.length}\``,
 			`- Superseded memories shown: \`${report.supersededMemories.length}\``,
 			`- Low-utility memories shown: \`${report.lowUtilityMemories.length}\``,
+			`- Low-Q memories shown: \`${report.lowQValueMemories.length}\``,
 		];
 		appendMemoryLines(
 			lines,
@@ -245,6 +293,7 @@ export async function handleMemoryStaleCommand(
 		appendMemoryLines(lines, 'Deleted tombstones', report.deletedMemories);
 		appendSupersededChains(lines, report);
 		appendMemoryLines(lines, 'Low-utility memories', report.lowUtilityMemories);
+		appendValueLogLines(lines, 'Low-Q memories', report.lowQValueMemories);
 		return lines.join('\n');
 	} finally {
 		await provider.close?.();
@@ -624,6 +673,29 @@ function appendRecallMemoryLines(
 	for (const memory of memories) {
 		lines.push(
 			`- \`${memory.memoryId}\`: ${memory.count} hit(s), last=${memory.lastRecalledAt}, avgScore=${memory.averageScore.toFixed(3)}`,
+		);
+	}
+}
+
+function appendValueLogLines(
+	lines: string[],
+	title: string,
+	entries: MemoryValueLogEntry[],
+): void {
+	lines.push('', `### ${title}`);
+	if (entries.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const entry of entries) {
+		const outcome = entry.taskOutcome ? ` outcome=${entry.taskOutcome}` : '';
+		const reward =
+			typeof entry.lastReward === 'number'
+				? ` reward=${entry.lastReward.toFixed(2)}`
+				: '';
+		const last = entry.lastRecalledAt ? ` last=${entry.lastRecalledAt}` : '';
+		lines.push(
+			`- \`${entry.memoryId}\` ${entry.kind} q=${entry.qValue.toFixed(3)} recalls=${entry.recallCount}${reward}${outcome}${last} - ${entry.textPreview}`,
 		);
 	}
 }

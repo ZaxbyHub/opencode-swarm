@@ -169,6 +169,48 @@ describe('memory scoring', () => {
 			noSignalCount: 0,
 		});
 	});
+
+	test('recall suppresses low-Q memories unless includeLowQ is set', () => {
+		const lowQ = makeRecord({
+			text: 'This repository uses bun for tests.',
+			qValue: 0.1,
+		});
+		const suppressed = scoreMemoryRecord(lowQ, {
+			...makeRequest(),
+			suppressionThreshold: 0.15,
+		});
+		const included = scoreMemoryRecord(lowQ, {
+			...makeRequest(),
+			suppressionThreshold: 0.15,
+			includeLowQ: true,
+		});
+
+		expect(suppressed).toBeNull();
+		expect(included).not.toBeNull();
+		expect(included?.signals.qValue).toBe(0.1);
+	});
+
+	test('Q-value boost changes ranking for otherwise equivalent memories', () => {
+		const highQ = makeRecord({
+			id: 'mem_highq000000000',
+			qValue: 0.9,
+		});
+		const lowQ = makeRecord({
+			id: 'mem_lowq0000000000',
+			qValue: 0.2,
+		});
+		const result = scoreMemoryRecordsWithDiagnostics([lowQ, highQ], {
+			...makeRequest(),
+			qValueBoostWeight: 0.1,
+			includeLowQ: true,
+		});
+
+		expect(result.items.map((item) => item.record.id)).toEqual([
+			'mem_highq000000000',
+			'mem_lowq0000000000',
+		]);
+		expect(result.items[0]?.reason).toContain('q_value=0.90');
+	});
 });
 
 describe('SCORING_WEIGHTS pinned', () => {

@@ -70,6 +70,7 @@ export interface RecallMemoryInput {
 	maxItems?: number;
 	tokenBudget?: number;
 	minScore?: number;
+	includeLowQ?: boolean;
 	requireQuerySignal?: boolean;
 	includeExpired?: boolean;
 }
@@ -162,6 +163,9 @@ export class MemoryGateway {
 			maxItems,
 			tokenBudget,
 			minScore: input.minScore ?? this.config.recall.minScore,
+			qValueBoostWeight: this.config.learning.qValueBoostWeight,
+			suppressionThreshold: this.config.learning.suppressionThreshold,
+			includeLowQ: input.includeLowQ,
 			requireQuerySignal: input.requireQuerySignal,
 			includeExpired: input.includeExpired,
 		};

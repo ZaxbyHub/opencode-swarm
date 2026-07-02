@@ -42,6 +42,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory status',
 		'memory pending',
 		'memory recall-log',
+		'memory value-log',
 		'memory stale',
 		'memory export',
 		'memory evaluate',

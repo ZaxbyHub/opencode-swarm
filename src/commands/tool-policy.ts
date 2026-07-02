@@ -178,7 +178,7 @@ export function classifySwarmCommandToolUse(
 		return {
 			allowed: false,
 			message:
-				'Use `/swarm memory status`, `/swarm memory pending`, `/swarm memory recall-log`, `/swarm memory stale`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import, migrate, and compact are intentionally excluded from chat-tool execution.',
+				'Use `/swarm memory status`, `/swarm memory pending`, `/swarm memory recall-log`, `/swarm memory value-log`, `/swarm memory stale`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import, migrate, and compact are intentionally excluded from chat-tool execution.',
 		};
 	}
 
@@ -222,6 +222,7 @@ export function classifySwarmCommandToolUse(
 	if (
 		canonicalKey === 'memory pending' ||
 		canonicalKey === 'memory recall-log' ||
+		canonicalKey === 'memory value-log' ||
 		canonicalKey === 'memory stale'
 	) {
 		if (args.length === 0) return { allowed: true };

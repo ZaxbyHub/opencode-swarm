@@ -60,6 +60,15 @@ export interface CouncilMemberVerdict {
 	/** Criteria IDs that failed */
 	criteriaUnmet: string[];
 	durationMs: number;
+	/**
+	 * Optional session id of the dispatched agent that produced this verdict.
+	 * When supplied, the memory reward pathway rewards this member's own
+	 * recall bundle in addition to the submitting session's, so sub-agent
+	 * recalls are not silently skipped. Unvalidated caller input — the
+	 * reward pathway must confirm this resolves to a real tracked session
+	 * before trusting it.
+	 */
+	sessionId?: string;
 }
 
 export interface CouncilSynthesis {

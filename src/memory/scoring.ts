@@ -37,6 +37,8 @@ export const SCORING_WEIGHTS = {
 	confidence: 0.08,
 } as const;
 
+export const DEFAULT_MEMORY_Q_VALUE = 0.5;
+
 interface RecallScoringContext {
 	taskTokens?: Set<string>;
 	queryTokens: Set<string>;
@@ -244,6 +246,15 @@ function scoreMemoryRecordDetailed(
 	if (record.metadata.deleted === true) {
 		return { item: null, skipReason: 'filtered' };
 	}
+	const qValue = memoryQValue(record);
+	const suppressionThreshold = request.suppressionThreshold ?? 0;
+	if (
+		request.includeLowQ !== true &&
+		suppressionThreshold > 0 &&
+		qValue < suppressionThreshold
+	) {
+		return { item: null, skipReason: 'filtered' };
+	}
 	if (!scopeAllowed(record.scope, request.scopes)) {
 		return { item: null, skipReason: 'filtered' };
 	}
@@ -319,7 +330,8 @@ function scoreMemoryRecordDetailed(
 			SCORING_WEIGHTS.scopeSpecificityBoost +
 		kindProfileBoost(record.kind, request) * SCORING_WEIGHTS.kindProfileBoost +
 		roleBoost * SCORING_WEIGHTS.roleBoost +
-		record.confidence * SCORING_WEIGHTS.confidence;
+		record.confidence * SCORING_WEIGHTS.confidence +
+		(qValue - DEFAULT_MEMORY_Q_VALUE) * (request.qValueBoostWeight ?? 0);
 
 	const reasonParts = [
 		textOverlap > 0 ? `text_overlap=${textOverlap.toFixed(2)}` : null,
@@ -329,6 +341,9 @@ function scoreMemoryRecordDetailed(
 		taskTermOverlap > 0 ? `task_terms=${taskTermOverlap.toFixed(2)}` : null,
 		kindQueryOverlap > 0 ? `kind_query=${kindQueryOverlap.toFixed(2)}` : null,
 		roleBoost > 0 ? 'role_profile' : null,
+		request.qValueBoostWeight && request.qValueBoostWeight > 0
+			? `q_value=${qValue.toFixed(2)}`
+			: null,
 		`scope=${record.scope.type}`,
 		`confidence=${record.confidence.toFixed(2)}`,
 	].filter(Boolean);
@@ -343,11 +358,27 @@ function scoreMemoryRecordDetailed(
 				tagOverlap,
 				fileOverlap,
 				symbolOverlap,
+				qValue,
 				kindMatch,
 				scopeMatch,
 			},
 		},
 	};
+}
+
+export function memoryQValue(record: MemoryRecord): number {
+	if (typeof record.qValue === 'number' && Number.isFinite(record.qValue)) {
+		return clamp01(record.qValue);
+	}
+	const metadataValue = record.metadata.qValue;
+	if (typeof metadataValue === 'number' && Number.isFinite(metadataValue)) {
+		return clamp01(metadataValue);
+	}
+	return DEFAULT_MEMORY_Q_VALUE;
+}
+
+function clamp01(value: number): number {
+	return Math.min(1, Math.max(0, value));
 }
 
 export function scoreMemoryRecords(

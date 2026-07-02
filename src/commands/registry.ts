@@ -58,6 +58,7 @@ import {
 	handleMemoryRecallLogCommand,
 	handleMemoryStaleCommand,
 	handleMemoryStatusCommand,
+	handleMemoryValueLogCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePostMortemCommand } from './post-mortem.js';
@@ -1273,6 +1274,14 @@ export const COMMAND_REGISTRY = {
 	'memory recall-log': {
 		handler: (ctx) => handleMemoryRecallLogCommand(ctx.directory, ctx.args),
 		description: 'Summarize Swarm memory recall usage',
+		subcommandOf: 'memory',
+		args: '--limit <n>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'memory value-log': {
+		handler: (ctx) => handleMemoryValueLogCommand(ctx.directory, ctx.args),
+		description: 'Show Swarm memory Q-value and reward updates',
 		subcommandOf: 'memory',
 		args: '--limit <n>',
 		category: 'diagnostics',

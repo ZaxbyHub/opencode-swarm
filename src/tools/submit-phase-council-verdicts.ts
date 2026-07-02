@@ -12,6 +12,12 @@ import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { synthesizePhaseCouncilAdvisory } from '../council/council-service';
 import type { CouncilFinding, CouncilMemberVerdict } from '../council/types';
+import {
+	applyRecallRewardForCouncil,
+	councilVerdictToMemoryOutcome,
+	resolveRewardRunIds,
+} from '../memory/reward';
+import { getAgentSession } from '../state';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -32,6 +38,7 @@ const VerdictSchema = z.object({
 	criteriaAssessed: z.array(z.string()),
 	criteriaUnmet: z.array(z.string()),
 	durationMs: z.number().nonnegative(),
+	sessionId: z.string().min(1).optional(),
 });
 
 export const ArgsSchema = z.object({
@@ -99,6 +106,13 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 						criteriaAssessed: z.array(z.string()),
 						criteriaUnmet: z.array(z.string()),
 						durationMs: z.number(),
+						sessionId: z
+							.string()
+							.min(1)
+							.optional()
+							.describe(
+								"Session id of the dispatched agent that produced this verdict, if known — used so this member's own recall bundle is rewarded, not just the submitting session's.",
+							),
 					}),
 				)
 				.min(1)
@@ -125,7 +139,11 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					'Session ID of the agent that produced this evidence (optional provenance)',
 				),
 		},
-		async execute(args: unknown, directory: string): Promise<string> {
+		async execute(
+			args: unknown,
+			directory: string,
+			ctx?: { sessionID?: string },
+		): Promise<string> {
 			const parsed = ArgsSchema.safeParse(args);
 			if (!parsed.success) {
 				return JSON.stringify(
@@ -283,6 +301,51 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					: undefined;
 
 			writePhaseCouncilEvidence(workingDir, synthesis, provenance);
+			// Memory reward is a best-effort side effect of phase-council synthesis,
+			// not the primary outcome — writePhaseCouncilEvidence above already
+			// succeeded, so a reward-path failure must never fail the whole tool
+			// call and discard that already-durable evidence.
+			const rewardRunIds = resolveRewardRunIds({
+				trustedSessionIds: [ctx?.sessionID],
+				untrustedSessionIds: [
+					input.provenanceSessionId,
+					...input.verdicts.map((v) => v.sessionId),
+				],
+				isKnownSession: (id) => getAgentSession(id) !== undefined,
+			});
+			let memoryReward: Awaited<
+				ReturnType<typeof applyRecallRewardForCouncil>
+			> | null = null;
+			try {
+				memoryReward = await applyRecallRewardForCouncil(
+					workingDir,
+					config.memory,
+					{
+						runIds: rewardRunIds,
+						verdict: synthesis.overallVerdict,
+						verdictPayload: {
+							phaseNumber: synthesis.phaseNumber,
+							swarmId: input.swarmId,
+							roundNumber: synthesis.roundNumber,
+							overallVerdict: synthesis.overallVerdict,
+							vetoedBy: synthesis.vetoedBy,
+							allCriteriaMet: synthesis.allCriteriaMet,
+							requiredFixesCount: synthesis.requiredFixes?.length ?? 0,
+							advisoryFindingsCount: synthesis.advisoryFindings?.length ?? 0,
+						},
+					},
+				);
+			} catch (err) {
+				memoryReward = {
+					success: false,
+					outcome: councilVerdictToMemoryOutcome(synthesis.overallVerdict),
+					memoryIds: [],
+					reward: 0,
+					updatedMemoryIds: [],
+					propagatedMemoryIds: [],
+					reason: `reward_threw: ${err instanceof Error ? err.message : String(err)}`,
+				};
+			}
 
 			return JSON.stringify(
 				{
@@ -300,6 +363,14 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					membersAbsent,
 					quorumSize: membersVoted.length,
 					quorumMet: true,
+					memoryReward,
+					...(memoryReward?.success === false &&
+					memoryReward?.reason &&
+					memoryReward.reason !== 'memory_disabled'
+						? {
+								memoryRewardWarning: `memory reward lookup failed: ${memoryReward.reason}`,
+							}
+						: {}),
 					evidencePath: synthesis.evidencePath,
 					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
 				},
