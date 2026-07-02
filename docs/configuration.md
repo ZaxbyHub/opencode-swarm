@@ -423,7 +423,7 @@ Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSON
 
 GitHub PR subscription and background polling infrastructure (FR-001). When enabled, the architect can subscribe to GitHub PRs and receive real-time status updates via the AutomationEventBus. Uses the `gh` CLI for all GitHub API calls; requires `gh` to be authenticated (`gh auth login`).
 
-**Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately.
+**Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately via `/swarm pr subscribe`. In addition, when `auto_subscribe_on_pr_create` (default `true`) is set, a successful `gh pr create` run through the bash tool automatically subscribes the current session to the created PR — no manual command needed.
 
 **Durable store**: subscription state is persisted to `.swarm/pr-monitor/subscriptions.jsonl` (append-only JSONL), folded by `correlationId` (sessionID + repoFullName + prNumber). Multiple sessions may independently subscribe to the same PR using a composite key.
 
@@ -451,8 +451,14 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 | `auto_unsubscribe_on_close` | boolean | `true` | Automatically unsubscribe when PR is closed (without merge) |
 | `notify_ci_failure` | boolean | `true` | Emit notification on CI failure |
 | `notify_new_comments` | boolean | `true` | Emit notification on new comments |
-| `notify_merge_conflict` | boolean | `true` | Emit notification on merge conflict detection |
-| `auto_pr_feedback` | boolean | `false` | When enabled, injects `[MODE: PR_FEEDBACK pr="URL"]` signal on CI failure and merge conflict events |
+| `notify_merge_conflict` | boolean | `true` | Emit notification on merge conflict detection and resolution (`pr.merge.conflict` + `pr.merge.conflict_resolved`) |
+| `notify_review_activity` | boolean | `true` | Emit notification on review state changes (`pr.review.changes_requested` + `pr.review.approved`) |
+| `notify_merged` | boolean | `true` | Emit notification when the PR is merged (terminal event) |
+| `notify_closed` | boolean | `true` | Emit notification when the PR is closed without merge (terminal event) |
+| `notify_ci_success` | boolean | `false` | Emit notification when CI recovers / all checks pass (quiet by default) |
+| `auto_pr_feedback` | boolean | `false` | When enabled, injects `[MODE: PR_FEEDBACK pr="URL"]` signal on CI failure and merge conflict events. Advisory-channel only: with `event_delivery: "prompt"` the wake message already routes fix events through the swarm-pr-feedback protocol, so no separate MODE signal is injected on successful wakes |
+| `event_delivery` | string | `"prompt"` | `"prompt"` wakes the subscribed session with a structured `<pr-activity>` message via the SDK session prompt; `"advisory"` is the legacy passive channel (session advisories surface on the next model turn) |
+| `auto_subscribe_on_pr_create` | boolean | `true` | Automatically subscribe the session to a PR created via `gh pr create` in a bash tool call |
 
 **Example** — enable PR Monitor with defaults:
 
@@ -492,12 +498,13 @@ All five wrappers (`getPRStatus`, `getPRChecks`, `getPRComments`, `getMergeState
 1. `computeChanges()` — fetches current PR state (status, comments, merge, review) via async gh wrappers, then diffs against the last stored snapshot to produce a list of events and snapshot updates
 2. `applyChanges()` — atomically emits events and persists snapshot updates
 
-The worker is **lazily started** on first subscription (gated by `pr_monitor.enabled` + `gh` availability check). It is **cooperative** — each poll cycle is interruptible at 6 guard points via a `CancellationToken`. Plugin wiring in `src/index.ts` registers signal handlers (SIGTERM/SIGINT) and ensures the worker is stopped on shutdown. Stale subscriptions are removed via `sweepStale()` on each cycle.
+The worker is **lazily started** on first subscription (gated by `pr_monitor.enabled`). It is **timeout-guarded** — each per-PR poll races a `poll_timeout_ms` deadline, and `isTimedOut` closures guard every state mutation so late results never clobber the snapshot after a timeout. Plugin wiring in `src/index.ts` registers a `process.on('exit')` cleanup handler that stops the worker and unregisters event subscribers/delivery on shutdown. Stale subscriptions are removed via `sweepStale()` on each cycle.
 
-**Event subscribers** (`src/background/pr-event-subscribers.ts`): three subscribers attach to the AutomationEventBus and deliver PR advisories to subscribed sessions:
-- CI failure/passed notifications
-- New comment alerts
-- Merge conflict detection
+**Event subscribers** (`src/background/pr-event-subscribers.ts`): subscribers attach to the AutomationEventBus for all nine gated event types (`pr.ci.failed`, `pr.ci.passed`, `pr.new.comment`, `pr.merge.conflict`, `pr.merge.conflict_resolved`, `pr.review.changes_requested`, `pr.review.approved`, `pr.merged`, `pr.closed`) and deliver each event to every subscribed session. Delivery chooses one channel per event+session (at-least-once: a wake accepted after the acceptance timeout can duplicate onto the advisory channel; duplicates share a dedup token):
+- **Wake delivery** (`event_delivery: "prompt"`, default — `src/background/pr-event-delivery.ts`): the subscribed session is woken with a structured `<pr-activity>` message via the SDK session prompt, so idle sessions act on events immediately. Per-session queues are bounded (20 events, drop-oldest) with FIFO session eviction; events arriving while the session is busy are coalesced into one wake message flushed on `session.idle`. On wake failure the event falls back to the advisory push.
+- **Advisory delivery** (`event_delivery: "advisory"`, legacy): events queue as session-scoped advisories with dedup tokens and surface on the session's next model turn.
+
+After a successful delivery the subscription's `hasUnaddressedEvents` flag is cleared, so delivered events no longer exempt the subscription from the TTL sweep indefinitely.
 
 ### todo_gate
 

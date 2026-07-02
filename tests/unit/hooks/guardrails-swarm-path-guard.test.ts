@@ -665,7 +665,10 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('bunx opencode-swarm run pr subscribe → BLOCKED (compound human-only)', async () => {
+		// Regression note: `pr subscribe` / `pr unsubscribe` moved from
+		// human-only to agent toolPolicy (first-class swarm-pr-subscribe) —
+		// subscriptions are idempotent and capped, so the CLI form is allowed.
+		test('bunx opencode-swarm run pr subscribe → ALLOWED (agent-callable compound)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -673,12 +676,10 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				'bunx opencode-swarm run pr subscribe',
 			);
 			const output = makeBashOutput('bunx opencode-swarm run pr subscribe');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/human-only swarm command/,
-			);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
-		test('bunx opencode-swarm run pr unsubscribe → BLOCKED (compound human-only)', async () => {
+		test('bunx opencode-swarm run pr unsubscribe → ALLOWED (agent-callable compound)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -686,9 +687,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				'bunx opencode-swarm run pr unsubscribe',
 			);
 			const output = makeBashOutput('bunx opencode-swarm run pr unsubscribe');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/human-only swarm command/,
-			);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
 		test('opencode-swarm run memory import → BLOCKED (bare binary compound)', async () => {
@@ -804,14 +803,17 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('bunx opencode-swarm run pr\tsubscribe → BLOCKED (tab-separated compound, normalize then full-form lookup)', async () => {
+		// `pr subscribe` moved to agent toolPolicy (first-class
+		// swarm-pr-subscribe), so tab-normalization coverage for the
+		// full-form compound lookup uses `memory import` (still human-only).
+		test('bunx opencode-swarm run memory\timport → BLOCKED (tab-separated compound, normalize then full-form lookup)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
 				'test-session',
-				'bunx opencode-swarm run pr\tsubscribe',
+				'bunx opencode-swarm run memory\timport',
 			);
-			const output = makeBashOutput('bunx opencode-swarm run pr\tsubscribe');
+			const output = makeBashOutput('bunx opencode-swarm run memory\timport');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
 				/human-only swarm command/,
 			);

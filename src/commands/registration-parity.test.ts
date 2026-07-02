@@ -579,20 +579,26 @@ describe('Command registration parity', () => {
 			'memory export',
 		]);
 
-		// After the fix, only these 5 additions are permitted to differ:
+		// After the fix, only these additions are permitted to differ.
+		// `pr subscribe` / `pr unsubscribe` moved from human-only to agent
+		// (issue: first-class swarm-pr-subscribe): subscriptions are
+		// idempotent and capped, matching Claude Code's agent-callable
+		// subscribe tool, so they now live in the allowlist and their dash
+		// aliases no longer inherit a human-only target.
 		const EXPECTED_ADDITIONS = {
-			allowlist: new Set(['pr status', 'learning', 'post-mortem']),
-			// Space-form human-only commands plus every alias that inherits a
-			// human-only/restricted canonical target (so the Bash CLI guardrail
-			// blocks the alias/dash form too — see HUMAN_ONLY_SWARM_COMMANDS).
-			// `clear` (→ reset-session, restricted) is a pre-existing alias that
-			// the canonical-aware derivation now also covers, closing a latent
-			// bypass.
-			humanOnly: new Set([
+			allowlist: new Set([
+				'pr status',
 				'pr subscribe',
 				'pr unsubscribe',
-				'pr-subscribe',
-				'pr-unsubscribe',
+				'learning',
+				'post-mortem',
+			]),
+			// Aliases that inherit a human-only/restricted canonical target (so
+			// the Bash CLI guardrail blocks the alias/dash form too — see
+			// HUMAN_ONLY_SWARM_COMMANDS). `clear` (→ reset-session, restricted)
+			// is a pre-existing alias that the canonical-aware derivation now
+			// also covers, closing a latent bypass.
+			humanOnly: new Set([
 				'sdd-project',
 				'memory-import',
 				'memory-migrate',
@@ -628,7 +634,7 @@ describe('Command registration parity', () => {
 			...EXPECTED_ADDITIONS.noArgs,
 		]);
 
-		it('SWARM_COMMAND_TOOL_ALLOWLIST matches baseline plus exactly 3 additions', () => {
+		it('SWARM_COMMAND_TOOL_ALLOWLIST matches baseline plus exactly 5 additions', () => {
 			const actual = SWARM_COMMAND_TOOL_ALLOWLIST;
 			const extra = [...actual].filter((x) => !expectedAllowlist.has(x));
 			const missing = [...expectedAllowlist].filter((x) => !actual.has(x));
@@ -640,7 +646,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 8 additions (2 space + 6 canonical-inheriting aliases)', () => {
+		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 4 canonical-inheriting aliases', () => {
 			const actual = HUMAN_ONLY_SWARM_COMMANDS;
 			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
 			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));

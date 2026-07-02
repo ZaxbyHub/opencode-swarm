@@ -29,6 +29,7 @@ const requiredProjectSkillSlugs = [
 	'design-docs',
 	'swarm-pr-review',
 	'swarm-pr-feedback',
+	'swarm-pr-subscribe',
 	'issue-ingest',
 	'plan',
 	'critic-gate',

@@ -55,6 +55,7 @@
 		".opencode/skills/design-docs",
 		".opencode/skills/swarm-pr-review",
 		".opencode/skills/swarm-pr-feedback",
+		".opencode/skills/swarm-pr-subscribe",
 		".opencode/skills/issue-ingest",
 		".opencode/skills/plan",
 		".opencode/skills/critic-gate",

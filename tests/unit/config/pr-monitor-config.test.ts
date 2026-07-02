@@ -31,7 +31,13 @@ describe('PrMonitorConfigSchema', () => {
 			expect(cfg.notify_ci_failure).toBe(true);
 			expect(cfg.notify_new_comments).toBe(true);
 			expect(cfg.notify_merge_conflict).toBe(true);
+			expect(cfg.notify_review_activity).toBe(true);
+			expect(cfg.notify_merged).toBe(true);
+			expect(cfg.notify_closed).toBe(true);
+			expect(cfg.notify_ci_success).toBe(false);
 			expect(cfg.auto_pr_feedback).toBe(false);
+			expect(cfg.event_delivery).toBe('prompt');
+			expect(cfg.auto_subscribe_on_pr_create).toBe(true);
 		});
 
 		test('all fields provided parse correctly', () => {
@@ -51,7 +57,13 @@ describe('PrMonitorConfigSchema', () => {
 				notify_ci_failure: false,
 				notify_new_comments: false,
 				notify_merge_conflict: false,
+				notify_review_activity: false,
+				notify_merged: false,
+				notify_closed: false,
+				notify_ci_success: true,
 				auto_pr_feedback: true,
+				event_delivery: 'advisory' as const,
+				auto_subscribe_on_pr_create: false,
 			};
 			const result = PrMonitorConfigSchema.safeParse(input);
 			expect(result.success).toBe(true);
@@ -73,6 +85,42 @@ describe('PrMonitorConfigSchema', () => {
 			expect(result.success).toBe(true);
 			if (!result.success) return;
 			expect(result.data.auto_pr_feedback).toBe(true);
+		});
+
+		test("event_delivery accepts 'advisory'", () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				event_delivery: 'advisory',
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.event_delivery).toBe('advisory');
+		});
+
+		test("event_delivery accepts 'prompt'", () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				event_delivery: 'prompt',
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.event_delivery).toBe('prompt');
+		});
+
+		test('auto_subscribe_on_pr_create can be disabled', () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				auto_subscribe_on_pr_create: false,
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.auto_subscribe_on_pr_create).toBe(false);
+		});
+
+		test('notify_ci_success can be enabled', () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				notify_ci_success: true,
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.notify_ci_success).toBe(true);
 		});
 
 		test('partial input merges with defaults', () => {
@@ -185,6 +233,32 @@ describe('PrMonitorConfigSchema', () => {
 		test('notify_ci_failure as string rejects', () => {
 			const result = PrMonitorConfigSchema.safeParse({
 				notify_ci_failure: 'true',
+			});
+			expect(result.success).toBe(false);
+		});
+
+		test('event_delivery with invalid enum value rejects', () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				event_delivery: 'webhook',
+			});
+			expect(result.success).toBe(false);
+		});
+
+		test('event_delivery as boolean rejects', () => {
+			const result = PrMonitorConfigSchema.safeParse({ event_delivery: true });
+			expect(result.success).toBe(false);
+		});
+
+		test('auto_subscribe_on_pr_create as string rejects', () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				auto_subscribe_on_pr_create: 'yes',
+			});
+			expect(result.success).toBe(false);
+		});
+
+		test('notify_review_activity as number rejects', () => {
+			const result = PrMonitorConfigSchema.safeParse({
+				notify_review_activity: 1,
 			});
 			expect(result.success).toBe(false);
 		});

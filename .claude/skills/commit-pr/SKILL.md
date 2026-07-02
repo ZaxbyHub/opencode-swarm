@@ -347,15 +347,23 @@ $prBodyPath = Join-Path ([System.IO.Path]::GetTempPath()) "pr_body.txt"
 gh pr create --title "<type>(<scope>): <description>" --body-file $prBodyPath --base main
 ```
 
-## Step 6a - PR auto-subscribe reminder
+## Step 6a - PR monitoring subscription
 
 After PR creation, if the project uses PR monitoring (`pr_monitor.enabled: true`
-in resolved opencode-swarm config), the publisher should subscribe to the new PR
-for background monitoring via `/swarm pr subscribe <pr-url>`.
+in resolved opencode-swarm config), the new PR must be subscribed for background
+monitoring:
 
-This step is advisory — it reminds the publisher to subscribe but does not
-auto-subscribe. The actual subscription requires the `/swarm pr subscribe` command
-which triggers the subscription store and lazy-starts the polling worker.
+- **Automatic (default):** when `pr_monitor.auto_subscribe_on_pr_create` is
+  enabled (default `true`), the subscription is created automatically after
+  `gh pr create` succeeds — no command needed. Verify with `/swarm pr status`
+  if in doubt.
+- **Manual fallback:** when auto-subscribe is disabled or did not fire, run
+  `/swarm pr subscribe <pr-url>`, which records the subscription and
+  lazy-starts the polling worker.
+
+The post-subscription monitoring protocol — event intake, triage
+(fix / ask / skip), bounded-retry escalation, and terminal-state behavior —
+lives in the swarm-pr-subscribe skill (`../swarm-pr-subscribe/SKILL.md`).
 
 ## Step 6.5 - Issue comment
 
