@@ -330,6 +330,10 @@ describe('prompt-mode wake dispatch', () => {
 		expect(session.pendingAdvisoryMessages[0]).toContain(
 			'[pr-monitor:pr.ci.failed:owner/repo#42]',
 		);
+		expect(mocks.scheduleClearUnaddressed).toHaveBeenCalledWith(
+			TEST_DIR,
+			'sess1::owner/repo::42',
+		);
 	});
 
 	test('falls back to advisory when deliverPrActivity throws', async () => {
@@ -451,6 +455,32 @@ describe('hasUnaddressedEvents clear on delivery', () => {
 		// Wait for the zero-delay timer + the promise chain to run.
 		await new Promise((resolve) => setTimeout(resolve, 20));
 
+		expect(updateSnapshot).toHaveBeenCalledWith(
+			TEST_DIR,
+			'sess1::owner/repo::42',
+			{ hasUnaddressedEvents: false },
+		);
+	});
+
+	test('deferred clear refreshes the timer for repeated deliveries', async () => {
+		// Previous code deduped pending clears by correlationId without
+		// refreshing the timer, so a second delivery could still clear the
+		// subscription before the worker's later snapshot write landed.
+		_internals.scheduleClearUnaddressed = saved.scheduleClearUnaddressed;
+		_internals.clearUnaddressedDelayMs = 40;
+		const updateSnapshot = mock(() => Promise.resolve(null));
+		_internals.updateSnapshot =
+			updateSnapshot as unknown as typeof _internals.updateSnapshot;
+
+		saved.scheduleClearUnaddressed(TEST_DIR, 'sess1::owner/repo::42');
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		saved.scheduleClearUnaddressed(TEST_DIR, 'sess1::owner/repo::42');
+		await new Promise((resolve) => setTimeout(resolve, 25));
+
+		expect(updateSnapshot).not.toHaveBeenCalled();
+
+		await new Promise((resolve) => setTimeout(resolve, 35));
+		expect(updateSnapshot).toHaveBeenCalledTimes(1);
 		expect(updateSnapshot).toHaveBeenCalledWith(
 			TEST_DIR,
 			'sess1::owner/repo::42',

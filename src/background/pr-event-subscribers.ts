@@ -58,7 +58,7 @@ const CLEAR_UNADDRESSED_DELAY_MS = 2_000;
 /** Bound on concurrently pending deferred clears (invariant 8). */
 const MAX_PENDING_CLEARS = 200;
 
-const pendingClears = new Set<string>();
+const pendingClears = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
  * DI seam for testability. Exposes internal functions that are replaced
@@ -292,12 +292,17 @@ function scheduleClearUnaddressed(
 	correlationId: string,
 ): void {
 	if (!correlationId) return;
-	if (pendingClears.has(correlationId)) return;
-	if (pendingClears.size >= MAX_PENDING_CLEARS) return;
-	pendingClears.add(correlationId);
+	const existing = pendingClears.get(correlationId);
+	if (existing) {
+		clearTimeout(existing);
+	} else if (pendingClears.size >= MAX_PENDING_CLEARS) {
+		return;
+	}
 
 	const timer = setTimeout(() => {
-		pendingClears.delete(correlationId);
+		if (pendingClears.get(correlationId) === timer) {
+			pendingClears.delete(correlationId);
+		}
 		void Promise.resolve()
 			.then(() =>
 				_internals.updateSnapshot(directory, correlationId, {
@@ -314,6 +319,7 @@ function scheduleClearUnaddressed(
 	if (typeof (timer as { unref?: () => void }).unref === 'function') {
 		(timer as unknown as { unref: () => void }).unref();
 	}
+	pendingClears.set(correlationId, timer);
 }
 
 /**

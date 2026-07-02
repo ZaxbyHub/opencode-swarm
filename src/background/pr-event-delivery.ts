@@ -172,17 +172,20 @@ export async function deliverPrActivity(
 		// from a previously failed idle flush).
 		const previouslyQueued = state.queue.splice(0, state.queue.length);
 		const toSend = [...previouslyQueued, ...fresh];
+		state.busy = true;
 		const ok = await _internals.sendWakePrompt(sessionID, toSend);
 		if (!ok) {
 			// Restore the previously queued events (the caller only owns the
 			// advisory fallback for the `events` it passed in this call).
-			if (previouslyQueued.length > 0) {
-				const current = sessionStates.get(sessionID);
-				if (current) enqueueBounded(current, previouslyQueued);
+			const current = sessionStates.get(sessionID);
+			if (current) {
+				current.busy = false;
+				if (previouslyQueued.length > 0) {
+					enqueueBounded(current, previouslyQueued);
+				}
 			}
 			return false;
 		}
-		state.busy = true;
 		return true;
 	} catch (err) {
 		_internals.log('[pr-monitor] deliverPrActivity failed', {
@@ -255,6 +258,13 @@ function sanitizeAttribute(value: string): string {
 	return value.replace(/["<>\r\n]/g, '');
 }
 
+function sanitizeWakeBody(value: string): string {
+	return value
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/\[(MODE|SYSTEM|DEVELOPER|USER|ASSISTANT)\s*:/gi, '($1:');
+}
+
 /**
  * Build the single-text-part wake message. Events are grouped per PR into
  * one `<pr-activity>` block each, followed by the standing instruction.
@@ -275,7 +285,9 @@ export function buildWakeMessage(events: FormattedPrEvent[]): string {
 	for (const [prKey, groupEvents] of groups) {
 		const types = [...new Set(groupEvents.map((e) => e.type))].join(',');
 		const url = sanitizeAttribute(groupEvents[0]?.prUrl ?? '');
-		const lines = groupEvents.map((e) => e.message).join('\n');
+		const lines = groupEvents
+			.map((e) => sanitizeWakeBody(e.message))
+			.join('\n');
 		blocks.push(
 			[
 				`<pr-activity pr="${sanitizeAttribute(prKey)}" url="${url}" events="${sanitizeAttribute(types)}">`,
@@ -319,11 +331,12 @@ async function sendWakePrompt(
 				? session.promptAsync(args)
 				: session.prompt(args);
 
-		const result = await withTimeout(
+		const timeoutMs = _internals.wakePromptTimeoutMs;
+		const result = await _internals.withTimeout(
 			call,
-			WAKE_PROMPT_TIMEOUT_MS,
+			timeoutMs,
 			new Error(
-				`PR wake prompt timed out after ${WAKE_PROMPT_TIMEOUT_MS}ms for session ${sessionID}`,
+				`PR wake prompt timed out after ${timeoutMs}ms for session ${sessionID}`,
 			),
 		);
 
@@ -356,9 +369,13 @@ async function sendWakePrompt(
 
 export const _internals: {
 	sendWakePrompt: typeof sendWakePrompt;
+	withTimeout: typeof withTimeout;
+	wakePromptTimeoutMs: number;
 	log: typeof log;
 } = {
 	sendWakePrompt,
+	withTimeout,
+	wakePromptTimeoutMs: WAKE_PROMPT_TIMEOUT_MS,
 	log,
 };
 
