@@ -347,6 +347,16 @@ export class SQLiteMemoryProvider
 	 */
 	readonly _internals = {
 		writeMemory: (record: MemoryRecord): void => this.writeMemory(record),
+		/**
+		 * Test-only seam: inject a fake embedding provider so propagation's
+		 * cosine-similarity path can be exercised without the real
+		 * `@xenova/transformers` model dependency. Must be called AFTER
+		 * `initialize()` (which may otherwise construct/overwrite the real
+		 * provider when `embeddings.enabled` is true).
+		 */
+		setEmbeddingProvider: (provider: EmbeddingProvider | null): void => {
+			this.embeddingProvider = provider;
+		},
 	};
 
 	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
@@ -1435,10 +1445,12 @@ export class SQLiteMemoryProvider
 			const candidateTokens = tokenizeText(candidate.text);
 			let bestOverlap = 0;
 			let sameScopeAsAnySource = false;
+			const sameScopeBySourceIndex: boolean[] = [];
 			for (let i = 0; i < sourceRecords.length; i++) {
 				const source = sourceRecords[i];
 				const sameScope =
 					stableScopeKey(candidate.scope) === stableScopeKey(source.scope);
+				sameScopeBySourceIndex[i] = sameScope;
 				if (sameScope) sameScopeAsAnySource = true;
 				if (!sameScope || candidate.kind !== source.kind) continue;
 				bestOverlap = Math.max(
@@ -1452,7 +1464,15 @@ export class SQLiteMemoryProvider
 					candidate.text,
 				);
 				if (candidateVector) {
-					for (const sourceVector of sourceVectors) {
+					// Same-scope gate applies per-source here too — only compare
+					// against vectors from sources that actually share this
+					// candidate's scope, not any source in the batch. Comparing
+					// against a same-batch but different-scope source's vector
+					// would leak reward propagation across scopes even though the
+					// candidate never matched that source's own scope.
+					for (let i = 0; i < sourceVectors.length; i++) {
+						if (!sameScopeBySourceIndex[i]) continue;
+						const sourceVector = sourceVectors[i];
 						if (!sourceVector) continue;
 						bestCosine = Math.max(
 							bestCosine,

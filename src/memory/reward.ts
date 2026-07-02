@@ -29,9 +29,21 @@ export function councilVerdictToMemoryOutcome(
  * always included when present — they cannot be spoofed by tool-call
  * arguments. `untrustedSessionIds` are caller-supplied strings (e.g. a
  * `provenanceSessionId` arg or a per-verdict `sessionId` reported by the
- * architect) and are included ONLY when `isKnownSession` confirms the id
- * resolves to a real, currently-tracked session — an arbitrary or spoofed
- * string is silently dropped rather than trusted as a reward-targeting key.
+ * architect) and are included ONLY when `isKnownSession` returns true — an
+ * arbitrary, made-up string is silently dropped rather than trusted as a
+ * reward-targeting key.
+ *
+ * Important scope limitation: `isKnownSession` (backed by `getAgentSession`)
+ * proves only that the id belongs to SOME currently-tracked session
+ * process-wide — it does NOT prove that session actually participated in
+ * THIS council review. There is no swarmId/taskId cross-check available on
+ * `AgentSessionState` today, so a hallucinated or copied session id that
+ * happens to match a real, unrelated, concurrently-running session's id
+ * would still be accepted here. The blast radius is bounded to Q-value
+ * corruption of that other session's recalled memories (not privilege
+ * escalation or data exfiltration), but this is a real residual gap, not a
+ * complete fix — closing it fully requires a session→task ownership
+ * registry that does not exist in this codebase yet.
  *
  * A bare swarm identifier is never a valid session id substitute and must
  * never be passed into either list.

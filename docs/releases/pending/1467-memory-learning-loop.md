@@ -8,9 +8,11 @@ Council and phase-council submissions update the Q-value of memories recalled fo
 
 ### Reward targeting: validated multi-session matching, not an unscoped fallback
 
-The reward is applied to every recall bundle whose session id is confirmed to belong to the current review: the submitting session's own id (trusted, host-derived), plus — when supplied — each dispatched council member's own `sessionId` reported on their verdict and an optional `provenanceSessionId`. Caller-supplied ids are validated against the real, currently-tracked session registry before being trusted; an unrecognized or spoofed id is dropped rather than matched. A submission with no matching recall bundle returns `no_recall_usage_for_run` — there is no "grab whatever was recalled recently" fallback, since that could reward an unrelated task's recall bundle. Repeated submissions for the same swarm/task/round are idempotent.
+The reward is applied to every recall bundle whose session id is either host-derived (the submitting session's own id, trusted without further checks) or caller-supplied and validated against the tracked session registry before being trusted: each dispatched council member's own `sessionId` reported on their verdict, and an optional `provenanceSessionId`. An unrecognized or made-up caller-supplied id is dropped rather than matched. A submission with no matching recall bundle returns `no_recall_usage_for_run` — there is no "grab whatever was recalled recently" fallback, since that could reward an unrelated task's recall bundle. Repeated submissions for the same swarm/task/round are idempotent.
 
-Known limitation: matching is still per-session, not per-task/round — a session that recalls memory across more than one task/round only has its single most recent bundle considered unless distinct member session ids are reported per verdict.
+Known limitations:
+- Matching is still per-session, not per-task/round — a session that recalls memory across more than one task/round only has its single most recent bundle considered unless distinct member session ids are reported per verdict.
+- Validating a caller-supplied session id against the tracked session registry proves the id belongs to *some* currently-active session, not that it belongs to *this specific* review — there is no session→task ownership registry today. A hallucinated or copied session id matching an unrelated, concurrently-running session would still be accepted; the risk is bounded to Q-value corruption of that other session's recalled memories, not privilege escalation.
 
 ### Atomicity via `db.transaction`
 

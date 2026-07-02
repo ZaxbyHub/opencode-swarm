@@ -672,11 +672,11 @@ describe('SQLite memory learning loop EMA multi-round convergence (L5-002)', () 
 
 // Embedding-cosine propagation OR-path (issue #1467 O-004: token overlap>0.4
 // OR embedding cosine>0.7). Uses a deterministic fake embedding provider via
-// config injection is not available on the public constructor, so this
-// exercises the disabled-by-default path explicitly and documents the
-// enabled-but-unavailable-provider fallback; full vector-similarity behavior
-// is covered at the `cosineSimilarity`/`findPropagationTargets` unit level
-// via the exported test surface where available.
+// config injection is not available on the public constructor, so the first
+// two tests below exercise the disabled-by-default path and the
+// enabled-but-unavailable-provider fallback. The remaining tests inject a
+// deterministic fake embedding provider via the `_internals.setEmbeddingProvider`
+// test seam to actually exercise the cosine-qualifies branch end-to-end.
 describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 	test('embeddings disabled (default): propagation still works via token-overlap only, unaffected by the new cosine code path', async () => {
 		const root = tempRoot();
@@ -755,4 +755,138 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 			provider.close();
 		}
 	});
+
+	test('candidate with low token overlap but high embedding cosine similarity to a same-scope source propagates', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+			embeddings: { enabled: true },
+			learning: {
+				...DEFAULT_MEMORY_CONFIG.learning,
+				propagationTokenOverlapThreshold: 0.9, // effectively disable token-overlap qualification
+				propagationEmbeddingCosineThreshold: 0.7,
+				propagationFanout: 5,
+			},
+		});
+		try {
+			await provider.initialize();
+			provider._internals.setEmbeddingProvider(new FakeEmbeddingProvider());
+
+			const source = await provider.upsert(
+				makeRecord('gammamarker uniquesourcewords only here'),
+			);
+			const target = await provider.upsert(
+				makeRecord('gammamarker completely different remaining text'),
+			);
+			await provider.recordRecallUsage?.(
+				recallEvent('run-cosine-old', [target.id]),
+			);
+			await provider.recordRecallUsage?.(
+				recallEvent('run-cosine-source', [source.id]),
+			);
+
+			const result = await provider.applyRecallReward?.({
+				runIds: ['run-cosine-source'],
+				outcome: 'approved',
+				verdictPayload: { overallVerdict: 'APPROVE' },
+			});
+
+			expect(result?.propagatedMemoryIds).toContain(target.id);
+		} finally {
+			provider.close();
+		}
+	});
+
+	// Regression test for a reviewer-confirmed cross-scope leak: the cosine
+	// path must only compare a candidate against SAME-SCOPE source vectors,
+	// not any source vector in the reward bundle. Without the per-source
+	// scope gate, a candidate could qualify via high cosine similarity to a
+	// DIFFERENT-scope source merely because some OTHER source in the same
+	// bundle happened to share the candidate's scope.
+	test('does NOT propagate via cosine similarity to a different-scope source, even when another source in the same bundle shares the candidate scope', async () => {
+		const root = tempRoot();
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+			embeddings: { enabled: true },
+			learning: {
+				...DEFAULT_MEMORY_CONFIG.learning,
+				propagationTokenOverlapThreshold: 0.9,
+				propagationEmbeddingCosineThreshold: 0.7,
+				propagationFanout: 5,
+			},
+		});
+		try {
+			await provider.initialize();
+			provider._internals.setEmbeddingProvider(new FakeEmbeddingProvider());
+
+			// candidate and sourceSameScope share a scope but have LOW cosine
+			// similarity to each other (different fake-vector keywords) and no
+			// meaningful token overlap.
+			const candidate = await provider.upsert(
+				makeRecord('gammamarker uniquewordc only here', {
+					scope: { type: 'repository', repoId: 'repo-a' },
+				}),
+			);
+			const sourceSameScope = await provider.upsert(
+				makeRecord('alphamarker uniqueworda only here', {
+					scope: { type: 'repository', repoId: 'repo-a' },
+				}),
+			);
+			// sourceDifferentScope has HIGH cosine similarity to the candidate
+			// (same "gammamarker" keyword -> same fake vector) but lives in a
+			// DIFFERENT scope than the candidate.
+			const sourceDifferentScope = await provider.upsert(
+				makeRecord('gammamarker uniquewordb only here', {
+					scope: { type: 'repository', repoId: 'repo-b' },
+				}),
+			);
+
+			await provider.recordRecallUsage?.(
+				recallEvent('run-leak-target', [candidate.id]),
+			);
+			await provider.recordRecallUsage?.(
+				recallEvent('run-leak-source', [
+					sourceSameScope.id,
+					sourceDifferentScope.id,
+				]),
+			);
+
+			const result = await provider.applyRecallReward?.({
+				runIds: ['run-leak-source'],
+				outcome: 'approved',
+				verdictPayload: { overallVerdict: 'APPROVE' },
+			});
+
+			// The candidate must NOT be propagated to: it has low cosine
+			// similarity to its own same-scope source, and its only high-cosine
+			// match is a source in a different scope.
+			expect(result?.propagatedMemoryIds ?? []).not.toContain(candidate.id);
+		} finally {
+			provider.close();
+		}
+	});
 });
+
+/**
+ * Deterministic fake embedding provider for tests: maps specific keywords to
+ * fixed orthogonal/identical vectors so cosine-similarity outcomes are
+ * predictable, without depending on the real (optional, not installed in
+ * this environment) @xenova/transformers model.
+ */
+class FakeEmbeddingProvider {
+	readonly modelVersion = 'fake-test-provider:2';
+	readonly dimension = 2;
+	readonly available = true;
+
+	async embed(text: string): Promise<Float32Array> {
+		if (text.includes('gammamarker')) return new Float32Array([0, 1]);
+		if (text.includes('alphamarker')) return new Float32Array([1, 0]);
+		return new Float32Array([0.5, 0.5]);
+	}
+
+	async embedBatch(texts: string[]): Promise<Float32Array[]> {
+		return Promise.all(texts.map((text) => this.embed(text)));
+	}
+}
