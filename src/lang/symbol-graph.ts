@@ -580,6 +580,27 @@ function buildFacts(
 			defNode = asTs(defNode.parent);
 		}
 
+		// For Python methods, determine if the parent class is exported
+		let pythonParentClassExported = false;
+		if (grammarId === 'python' && kind === 'method') {
+			let current: TsNode | null = originalDefNode.parent;
+			while (current) {
+				if (current.type === 'class_definition') {
+					const classNameNode = current.children?.find(
+						(c): c is TsNode => c != null && c.type === 'identifier',
+					);
+					if (classNameNode) {
+						const className = classNameNode.text;
+						pythonParentClassExported = pythonAllNames
+							? pythonAllNames.has(className)
+							: !className.startsWith('_');
+					}
+					break;
+				}
+				current = current.parent;
+			}
+		}
+
 		for (const nc of nameCaps) {
 			const nameNode = asTs(nc.node);
 			const localName = nameNode.text;
@@ -594,6 +615,7 @@ function buildFacts(
 				explicitExported,
 				commonJsExport,
 				pythonAllNames,
+				pythonParentClassExported,
 			});
 			const exportedName = isDefaultExport
 				? 'default'

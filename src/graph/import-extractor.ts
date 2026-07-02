@@ -650,7 +650,12 @@ function parseRustUses(content: string): ParsedImport[] {
 			const importedSymbols = grouped[2]
 				.split(',')
 				.map((part) => part.trim())
-				.map((part) => part.match(/^(\w+)(?:\s+as\s+\w+)?$/)?.[1])
+				.map((part) => {
+					const [_full, _path_prefix, symbol, alias] =
+						part.match(/^(?:(.+?)::)?(\w+)(?:\s+as\s+(\w+))?$/) ?? [];
+					// If there's an alias, use it; otherwise use the symbol (last path segment)
+					return alias ?? symbol;
+				})
 				.filter((part): part is string => Boolean(part));
 			out.push({
 				rawModule: grouped[1].trim(),

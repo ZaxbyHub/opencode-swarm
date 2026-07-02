@@ -544,7 +544,7 @@ class Service:
 		const service = facts!.defs.find((d) => d.name === 'Service');
 		const run = facts!.defs.find((d) => d.name === 'run');
 		expect(service).toMatchObject({ kind: 'class', exported: true });
-		expect(run).toMatchObject({ kind: 'method', exported: false });
+		expect(run).toMatchObject({ kind: 'method', exported: true });
 		expect(run!.startLine).toBe(6);
 
 		expect(facts!.imports).toEqual(
@@ -574,6 +574,97 @@ class Service:
 				}),
 			]),
 		);
+	});
+
+	test('FB-002: exported class methods are marked exported, private methods are not', async () => {
+		// Regression test: tree-sitter path should match regex extractor behavior
+		// for Python class method exported determination
+		const source = `class Foo:
+    def public_method(self): pass
+    def _private_method(self): pass
+`;
+		const facts = await extractFileSymbols('python', source);
+		expect(facts).not.toBeNull();
+
+		const foo = facts!.defs.find((d) => d.name === 'Foo');
+		const publicMethod = facts!.defs.find((d) => d.name === 'public_method');
+		const privateMethod = facts!.defs.find((d) => d.name === '_private_method');
+
+		// Foo is exported (public naming convention, no __all__)
+		expect(foo).toMatchObject({ kind: 'class', exported: true });
+
+		// public_method is exported because its parent class is exported
+		expect(publicMethod).toMatchObject({ kind: 'method', exported: true });
+
+		// _private_method is NOT exported (starts with _)
+		expect(privateMethod).toMatchObject({ kind: 'method', exported: false });
+	});
+
+	test('FB-002: __init__ method is not exported even on exported class', async () => {
+		const source = `class Foo:
+    def __init__(self): pass
+`;
+		const facts = await extractFileSymbols('python', source);
+		expect(facts).not.toBeNull();
+
+		const foo = facts!.defs.find((d) => d.name === 'Foo');
+		const init = facts!.defs.find((d) => d.name === '__init__');
+
+		expect(foo).toMatchObject({ kind: 'class', exported: true });
+		// __init__ is special: not exported even on exported class
+		expect(init).toMatchObject({ kind: 'method', exported: false });
+	});
+
+	test('FB-002: methods on private class are not exported', async () => {
+		const source = `class _Private:
+    def public_method(self): pass
+`;
+		const facts = await extractFileSymbols('python', source);
+		expect(facts).not.toBeNull();
+
+		const privateClass = facts!.defs.find((d) => d.name === '_Private');
+		const publicMethod = facts!.defs.find((d) => d.name === 'public_method');
+
+		// _Private is not exported (starts with _)
+		expect(privateClass).toMatchObject({ kind: 'class', exported: false });
+
+		// public_method is NOT exported because its parent class is private
+		expect(publicMethod).toMatchObject({ kind: 'method', exported: false });
+	});
+
+	test('FB-002: __all__ controls class export status, methods follow parent', async () => {
+		const source = `__all__ = ['Foo', 'Bar']
+
+class Foo:
+    def foo_method(self): pass
+
+class Bar:
+    def bar_method(self): pass
+
+class Baz:
+    def baz_method(self): pass
+`;
+		const facts = await extractFileSymbols('python', source);
+		expect(facts).not.toBeNull();
+
+		const foo = facts!.defs.find((d) => d.name === 'Foo');
+		const bar = facts!.defs.find((d) => d.name === 'Bar');
+		const baz = facts!.defs.find((d) => d.name === 'Baz');
+		const fooMethod = facts!.defs.find((d) => d.name === 'foo_method');
+		const barMethod = facts!.defs.find((d) => d.name === 'bar_method');
+		const bazMethod = facts!.defs.find((d) => d.name === 'baz_method');
+
+		// Foo and Bar are in __all__, Baz is not
+		expect(foo).toMatchObject({ kind: 'class', exported: true });
+		expect(bar).toMatchObject({ kind: 'class', exported: true });
+		expect(baz).toMatchObject({ kind: 'class', exported: false });
+
+		// Methods on exported classes are exported
+		expect(fooMethod).toMatchObject({ kind: 'method', exported: true });
+		expect(barMethod).toMatchObject({ kind: 'method', exported: true });
+
+		// Method on non-exported class is not exported
+		expect(bazMethod).toMatchObject({ kind: 'method', exported: false });
 	});
 });
 

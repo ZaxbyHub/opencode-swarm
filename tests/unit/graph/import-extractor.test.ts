@@ -183,7 +183,20 @@ describe('extractImports - Go and Rust', () => {
 		expect(edges[0]).toMatchObject({
 			rawModule: 'crate::models',
 			importType: 'named',
-			importedSymbols: ['User', 'Account'],
+			importedSymbols: ['User', 'Acct'],
+		});
+	});
+
+	it('extracts symbols with :: paths inside grouped braces (FB-003)', () => {
+		const a = write(
+			'lib.rs',
+			'use crate::{Item, submodule::Item2, alias_name::Item3 as Renamed};\n',
+		);
+		const edges = extractImports({ absoluteFilePath: a, workspaceRoot: tmp });
+		expect(edges[0]).toMatchObject({
+			rawModule: 'crate',
+			importType: 'named',
+			importedSymbols: ['Item', 'Item2', 'Renamed'],
 		});
 	});
 });

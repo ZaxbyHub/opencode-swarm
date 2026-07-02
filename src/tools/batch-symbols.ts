@@ -288,7 +288,7 @@ export const batch_symbols: ToolDefinition = createSwarmTool({
 				);
 			}
 			files = obj.files.map((f) => String(f));
-			exportedOnly = obj.exported_only === true;
+			exportedOnly = obj.exported_only !== false;
 		} catch {
 			return JSON.stringify(
 				{
