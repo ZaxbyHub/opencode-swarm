@@ -27,10 +27,16 @@ import type {
 	MemoryProvider,
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
+	MemoryRewardEvent,
+	MemoryRewardEventFilter,
 } from './provider';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
-import { scopeAllowed, scoreMemoryRecordsWithDiagnostics } from './scoring';
+import {
+	scopeAllowed,
+	scoreMemoryRecordsWithDiagnostics,
+	sliceRecallItemsWithExploration,
+} from './scoring';
 import type {
 	AppliedMemoryChange,
 	MemoryListFilter,
@@ -74,14 +80,18 @@ export class LocalJsonlMemoryProvider
 		this.config = { ...DEFAULT_MEMORY_CONFIG, ...config };
 	}
 
-	private pathFor(file: 'memories' | 'proposals' | 'audit'): string {
+	private pathFor(
+		file: 'memories' | 'proposals' | 'audit' | 'reward-events',
+	): string {
 		const storageDir = this.config.storageDir.replace(/^\.swarm[/\\]?/, '');
 		const filename =
 			file === 'memories'
 				? 'memories.jsonl'
 				: file === 'proposals'
 					? 'proposals.jsonl'
-					: 'audit.jsonl';
+					: file === 'audit'
+						? 'audit.jsonl'
+						: 'reward-events.jsonl';
 		return validateSwarmPath(
 			this.rootDirectory,
 			path.join(storageDir, filename),
@@ -182,15 +192,27 @@ export class LocalJsonlMemoryProvider
 			kinds: request.kinds,
 			includeExpired: request.includeExpired,
 		});
-		const result = scoreMemoryRecordsWithDiagnostics(records, request);
+		const result = scoreMemoryRecordsWithDiagnostics(
+			records,
+			request,
+			this.config.qLearning,
+		);
+		// Fix 1 (C.1 reviewer fix): cap normal hits at maxItems, then append the
+		// single explored item (if any) beyond the cap so exploration can never
+		// evict a legitimate ranked hit. See `sliceRecallItemsWithExploration`.
+		const sliced = sliceRecallItemsWithExploration(
+			result.items,
+			request.maxItems,
+		);
 		return {
-			items: result.items.slice(0, request.maxItems),
+			items: sliced,
 			diagnostics: {
 				...result.diagnostics,
-				returnedCount: Math.min(
-					result.diagnostics.returnedCount,
-					request.maxItems,
-				),
+				// Fix 3: derive exploredCount from what actually survived
+				// slicing, not the pre-slice diagnostics, so the count always
+				// matches an item present in the returned bundle.
+				exploredCount: sliced.some((item) => item.explored) ? 1 : 0,
+				returnedCount: sliced.length,
 			},
 		};
 	}
@@ -205,14 +227,43 @@ export class LocalJsonlMemoryProvider
 	): Promise<MemoryRecallUsageEvent[]> {
 		await this.initialize();
 		const events = await readAuditEvents(this.pathFor('audit'));
-		const usage: MemoryRecallUsageEvent[] = [];
+		let usage: MemoryRecallUsageEvent[] = [];
 		for (const event of events) {
 			if (event.operation !== 'recall') continue;
 			const parsed = parseRecallUsageEvent(event);
 			if (parsed) usage.push(parsed);
 		}
 		usage.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+		if (typeof filter.runId === 'string' && filter.runId.length > 0) {
+			usage = usage.filter((event) => event.runId === filter.runId);
+		}
+		if (typeof filter.unitId === 'string' && filter.unitId.length > 0) {
+			usage = usage.filter((event) => event.unitId === filter.unitId);
+		}
 		return usage.slice(0, filter.limit ?? usage.length);
+	}
+
+	async appendRewardEvent(event: Omit<MemoryRewardEvent, 'id'>): Promise<void> {
+		await this.initialize();
+		const record: MemoryRewardEvent = { ...event, id: randomUUID() };
+		await appendJsonl(this.pathFor('reward-events'), record);
+	}
+
+	async listRewardEvents(
+		filter: MemoryRewardEventFilter = {},
+	): Promise<MemoryRewardEvent[]> {
+		await this.initialize();
+		const values = await readJsonl(this.pathFor('reward-events'));
+		let events: MemoryRewardEvent[] = [];
+		for (const value of values) {
+			const parsed = parseRewardEvent(value);
+			if (parsed) events.push(parsed);
+		}
+		if (typeof filter.memoryId === 'string' && filter.memoryId.length > 0) {
+			events = events.filter((event) => event.memoryId === filter.memoryId);
+		}
+		events.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+		return events.slice(0, filter.limit ?? events.length);
 	}
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
@@ -582,6 +633,11 @@ function parseRecallUsageEvent(
 			agentRole:
 				typeof parsed.agentRole === 'string' ? parsed.agentRole : undefined,
 			runId: typeof parsed.runId === 'string' ? parsed.runId : undefined,
+			// Field-by-field rebuild: the whole event is stored as eventJson but
+			// reconstructed here, so unitId MUST be carried explicitly or the jsonl
+			// round-trip silently drops it (sqlite parses usage_json whole and does
+			// not need this — the asymmetry is deliberate to guard against).
+			unitId: typeof parsed.unitId === 'string' ? parsed.unitId : undefined,
 			timestamp:
 				typeof parsed.timestamp === 'string'
 					? parsed.timestamp
@@ -590,6 +646,36 @@ function parseRecallUsageEvent(
 	} catch {
 		return null;
 	}
+}
+
+function parseRewardEvent(value: unknown): MemoryRewardEvent | null {
+	if (!value || typeof value !== 'object') return null;
+	const candidate = value as Partial<MemoryRewardEvent>;
+	if (
+		typeof candidate.id !== 'string' ||
+		typeof candidate.memoryId !== 'string' ||
+		typeof candidate.verdict !== 'string' ||
+		typeof candidate.reward !== 'number' ||
+		typeof candidate.timestamp !== 'string'
+	) {
+		return null;
+	}
+	return {
+		id: candidate.id,
+		memoryId: candidate.memoryId,
+		runId: typeof candidate.runId === 'string' ? candidate.runId : undefined,
+		unitId: typeof candidate.unitId === 'string' ? candidate.unitId : undefined,
+		verdict: candidate.verdict,
+		reward: candidate.reward,
+		qBefore:
+			typeof candidate.qBefore === 'number' ? candidate.qBefore : undefined,
+		qAfter: typeof candidate.qAfter === 'number' ? candidate.qAfter : undefined,
+		verdictSynthesisJson:
+			typeof candidate.verdictSynthesisJson === 'string'
+				? candidate.verdictSynthesisJson
+				: undefined,
+		timestamp: candidate.timestamp,
+	};
 }
 
 async function appendJsonl(filePath: string, value: unknown): Promise<void> {

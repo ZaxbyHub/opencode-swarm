@@ -1269,6 +1269,58 @@ export const MemoryConfigSchema = z.object({
 				threshold: 0.2,
 			},
 		}),
+	/** Q-learning-style utility tracking for memory recall/promotion/suppression. */
+	qLearning: z
+		.object({
+			/** EMA learning rate η for q ← (1-η)·q + η·reward. */
+			learningRate: z.number().min(0).max(1).default(0.1),
+			/** Weight of the q-value term added to recall scoring. */
+			qValueBoostWeight: z.number().min(0).max(1).default(0.1),
+			/** Memories with qValue below this are suppressed from default recall. */
+			suppressionThreshold: z.number().min(0).max(1).default(0.15),
+			/** Memories with qValue above this (and enough retrievals) are promotion candidates. */
+			promotionThreshold: z.number().min(0).max(1).default(0.85),
+			/** Minimum retrieval count before a high-q memory is a promotion candidate. */
+			promotionMinRetrievals: z.number().int().min(0).max(100000).default(5),
+			/** Fraction of a reward propagated to closely-related memories. */
+			propagationFraction: z.number().min(0).max(1).default(0.3),
+			/** Max related memories a single reward may propagate to. */
+			propagationFanoutCap: z.number().int().min(0).max(10000).default(20),
+			/** Only propagate to memories retrieved within this window (days). */
+			propagationWindowDays: z.number().int().min(0).max(3650).default(30),
+			/**
+			 * Jaccard token-overlap bar for treating two same-scope+kind memories
+			 * as "related" for reward propagation (B.5). Deliberately HIGH — see
+			 * `QLearningConfig.propagationRelatednessThreshold` in
+			 * `src/memory/config.ts` for the full blast-radius rationale.
+			 */
+			propagationRelatednessThreshold: z.number().min(0).max(1).default(0.7),
+			/** Bounded rate at which suppressed memories are surfaced for exploration. */
+			explorationRate: z.number().min(0).max(1).default(0.05),
+			/** Max bytes of the retained council-synthesis payload (truncated with a marker beyond this). */
+			verdictPayloadCapBytes: z
+				.number()
+				.int()
+				.min(0)
+				.max(1048576)
+				.default(8192),
+			/** Neutral starting utility for a new memory. */
+			initialQValue: z.number().min(0).max(1).default(0.5),
+		})
+		.default({
+			learningRate: 0.1,
+			qValueBoostWeight: 0.1,
+			suppressionThreshold: 0.15,
+			promotionThreshold: 0.85,
+			promotionMinRetrievals: 5,
+			propagationFraction: 0.3,
+			propagationFanoutCap: 20,
+			propagationWindowDays: 30,
+			propagationRelatednessThreshold: 0.7,
+			explorationRate: 0.05,
+			verdictPayloadCapBytes: 8192,
+			initialQValue: 0.5,
+		}),
 	/** Reflection / consolidation pass (issue #1464, Phase 3). */
 	consolidation: z
 		.object({

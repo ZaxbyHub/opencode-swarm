@@ -18,6 +18,20 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed).toEqual({
 			enabled: false,
 			provider: 'sqlite',
+			qLearning: {
+				learningRate: 0.1,
+				qValueBoostWeight: 0.1,
+				suppressionThreshold: 0.15,
+				promotionThreshold: 0.85,
+				promotionMinRetrievals: 5,
+				propagationFraction: 0.3,
+				propagationFanoutCap: 20,
+				propagationWindowDays: 30,
+				propagationRelatednessThreshold: 0.7,
+				explorationRate: 0.05,
+				verdictPayloadCapBytes: 8192,
+				initialQValue: 0.5,
+			},
 			storageDir: '.swarm/memory',
 			sqlite: {
 				path: '.swarm/memory/memory.db',

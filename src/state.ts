@@ -231,6 +231,13 @@ export interface AgentSessionState {
 			 * quorumSize: 1 — conservative; forces a fresh council run.
 			 */
 			quorumSize: number;
+			/**
+			 * A.4 dedup guard: set true once the positive council reward
+			 * (EMA step on session-recalled memories) has fired for this task.
+			 * Ensures the reward is applied at most once per task even if the
+			 * APPROVE→complete path is re-entered.
+			 */
+			rewarded?: boolean;
 		}
 	>;
 	/**

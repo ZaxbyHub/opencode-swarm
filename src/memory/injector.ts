@@ -1,3 +1,5 @@
+import { appendFile, mkdir } from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	extractCuratorMemoryDecisionsFromAgentOutput,
 	extractMemoryProposalsFromAgentOutput,
@@ -5,6 +7,7 @@ import {
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
 import { normalizeToolName } from '../hooks/normalize-tool-name';
+import { validateSwarmPath } from '../hooks/utils';
 import { type MemoryConfig, resolveMemoryConfig } from './config';
 import type {
 	MemoryGateway,
@@ -31,6 +34,16 @@ export interface MemoryLifecycleHookOptions {
 	directory: string;
 	config?: Partial<MemoryConfig>;
 	getActiveAgentName?: (sessionID: string | undefined) => string | undefined;
+	/**
+	 * Resolve the task/phase unit-of-work id (e.g. plan task "1.1") for the
+	 * session being processed. ADDITIVE join key threaded onto recorded recall
+	 * bundles (B.1). Injectable seam (mirrors getActiveAgentName) so the injector
+	 * stays swarmState-free; the production default reads the SAME session's
+	 * `currentTaskId` in index.ts. MUST resolve only from the recall's OWN session
+	 * — never a parent/orchestrator — because a wrong id corrupts B.2 attribution
+	 * (a false join is worse than NULL). Returns undefined when unresolvable.
+	 */
+	getActiveTaskId?: (sessionID: string | undefined) => string | undefined;
 	createGateway?: (
 		context: {
 			directory: string;
@@ -38,6 +51,7 @@ export interface MemoryLifecycleHookOptions {
 			agentRole?: string;
 			agentId?: string;
 			runId?: string;
+			unitId?: string;
 		},
 		options: { config?: Partial<MemoryConfig> },
 	) => Pick<
@@ -85,6 +99,12 @@ async function injectIntoMessages(
 	const latestUserText = latestTextForRole(messages, 'user');
 	if (!latestUserText) return;
 	const agentTask = extractTaskToolPrompt(messages) ?? latestUserText;
+	// ADDITIVE unit identity (B.1). Resolve ONLY from this same session's
+	// currentTaskId via the injectable seam; on the dominant subagent-injection
+	// path this is typically undefined (currentTaskId is populated on the
+	// orchestrator session, not the subagent), so recall degrades to
+	// session-scoped runId — the intended graceful degrade.
+	const unitId = options.getActiveTaskId?.(sessionID);
 	const result = await recallForAgent({
 		directory: options.directory,
 		config: options.config,
@@ -93,9 +113,20 @@ async function injectIntoMessages(
 		agentId: agentRole,
 		userGoal: latestUserText,
 		agentTask,
+		unitId,
 		createGateway: internals.createGateway,
 		appendRunLog: internals.appendRunLog,
 	});
+	if (result) {
+		await maybeWriteUnitIdProbe({
+			directory: options.directory,
+			sessionID,
+			agentRole,
+			unitId,
+			agentTask,
+			bundleId: result.bundle.id,
+		});
+	}
 	if (!result || result.bundle.items.length === 0) return;
 	const insertAt = recallMessageInsertIndex(messages);
 	const recallMessage: MessageWithParts = {
@@ -280,6 +311,7 @@ async function recallForAgent(input: {
 	agentId: string;
 	userGoal: string;
 	agentTask: string;
+	unitId?: string;
 	createGateway: RequiredInternals['createGateway'];
 	appendRunLog: RequiredInternals['appendRunLog'];
 }): Promise<{ bundle: RecallBundle; scopes: MemoryScopeRef[] } | null> {
@@ -290,6 +322,7 @@ async function recallForAgent(input: {
 			agentRole: input.agentRole,
 			agentId: input.agentId,
 			runId: input.sessionID,
+			unitId: input.unitId,
 		},
 		{ config: input.config },
 	);
@@ -391,6 +424,64 @@ async function logInjectionSkipped(
 			belowThresholdCount: bundle?.diagnostics?.belowThresholdCount,
 		},
 	});
+}
+
+/**
+ * TEMPORARY empirical-verification probe for issue #1467 Phase B attribution.
+ *
+ * Purpose: let an operator confirm, in a REAL swarm session, whether a
+ * dispatched subagent's memory injection can see a parseable plan-task-id in
+ * its own dispatch prompt (via a `TASK: <id>` marker) even when the
+ * session-state resolver (`getActiveTaskId`) returns nothing for that
+ * session — the dominant subagent-injection case. That comparison
+ * (`resolvedUnitId` vs. `promptTaskIdCandidate`) is the load-bearing unknown
+ * for a future prompt-parse-based attribution enhancement.
+ *
+ * Fires for every produced bundle, INCLUDING zero-item recalls where nothing
+ * is actually injected into the message stream. This is intentional, not an
+ * oversight: cold-memory subagent recalls that return zero items are likely
+ * the majority real-world case, and they still answer the question this probe
+ * exists to answer (can the injector see a parseable task id in the prompt).
+ * Gating on `items.length > 0` would blind the probe to exactly the case it
+ * needs to observe.
+ *
+ * Gated by `OPENCODE_SWARM_MEMORY_UNITID_PROBE=1`. Inert by default: the env
+ * check is the very first thing this function does, so with the flag unset
+ * this is a single string comparison and an early return — zero behavior
+ * change, zero measurable perf cost. Safe to leave in. All I/O is wrapped in
+ * try/catch so a probe failure can never break or slow real injection.
+ */
+const UNITID_PROBE_TASK_ID_PATTERN = /\bTASK:\s*(\d+(?:\.\d+)+)\b/;
+
+async function maybeWriteUnitIdProbe(input: {
+	directory: string;
+	sessionID: string | undefined;
+	agentRole: string;
+	unitId: string | undefined;
+	agentTask: string;
+	bundleId: string;
+}): Promise<void> {
+	if (process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE !== '1') return;
+	try {
+		const match = input.agentTask.match(UNITID_PROBE_TASK_ID_PATTERN);
+		const record = {
+			sessionID: input.sessionID,
+			agentRole: input.agentRole,
+			resolvedUnitId: input.unitId ?? null,
+			promptTaskIdCandidate: match ? match[1] : null,
+			agentTaskSnippet: input.agentTask.slice(0, 160),
+			bundleId: input.bundleId,
+			timestamp: new Date().toISOString(),
+		};
+		const filePath = validateSwarmPath(
+			input.directory,
+			path.join('memory', 'unitid-probe.jsonl'),
+		);
+		await mkdir(path.dirname(filePath), { recursive: true });
+		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	} catch {
+		// Probe I/O must never affect real injection behavior.
+	}
 }
 
 interface ParsedTaskInput {

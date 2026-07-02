@@ -275,6 +275,38 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE memory_recall_usage ADD COLUMN reward_key TEXT;
 		`,
 	},
+	{
+		version: 9,
+		name: 'add_reward_events_and_recall_run_id',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_reward_events (
+				id TEXT PRIMARY KEY,
+				memory_id TEXT NOT NULL,
+				run_id TEXT,
+				unit_id TEXT,
+				verdict TEXT NOT NULL,
+				reward REAL NOT NULL,
+				q_before REAL,
+				q_after REAL,
+				verdict_synthesis_json TEXT,
+				timestamp TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_reward_events_memory
+				ON memory_reward_events(memory_id);
+			ALTER TABLE memory_recall_usage ADD COLUMN run_id TEXT;
+			CREATE INDEX IF NOT EXISTS idx_memory_recall_usage_run_id
+				ON memory_recall_usage(run_id);
+		`,
+	},
+	{
+		version: 10,
+		name: 'add_recall_usage_unit_id',
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN unit_id TEXT;
+			CREATE INDEX IF NOT EXISTS idx_memory_recall_usage_unit_id
+				ON memory_recall_usage(unit_id);
+		`,
+	},
 ];
 
 interface MemoryItemRow {

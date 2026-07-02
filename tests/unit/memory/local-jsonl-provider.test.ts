@@ -11,6 +11,7 @@ import {
 	type MemoryProposal,
 	type MemoryRecord,
 } from '../../../src/memory';
+import { DEFAULT_QLEARNING_CONFIG } from '../../../src/memory/config';
 
 let tmpDir: string;
 
@@ -250,5 +251,131 @@ describe('LocalJsonlMemoryProvider', () => {
 		expect(
 			existsSync(path.join(tmpDir, '.swarm', 'memory', 'proposals.jsonl')),
 		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// C.1 reviewer fix — maxItems-additive exploration slicing (Fix 1 / Fix 3)
+// ---------------------------------------------------------------------------
+//
+// `explorationRate: 1` makes the C.1 exploration draw fire on every recall
+// deterministically (any `Math.random()` draw in [0,1) is < 1), so this test
+// does not need an injectable RNG seam — LocalJsonlMemoryProvider does not
+// expose one for `recall`/`recallWithDiagnostics`.
+describe('C.1 reviewer fix — maxItems-additive exploration slicing', () => {
+	function makeExplorableRecord(
+		text: string,
+		overrides: Partial<MemoryRecord> = {},
+	): MemoryRecord {
+		const base = {
+			scope: {
+				type: 'repository' as const,
+				repoId: 'repo-explore',
+				repoRoot: path.join(tmpDir, 'repo-explore'),
+			},
+			kind: 'repo_convention' as const,
+			text,
+		};
+		return {
+			id: createMemoryId(base),
+			...base,
+			tags: [],
+			confidence: 0.9,
+			stability: 'durable',
+			source: { type: 'file', filePath: 'package.json' },
+			createdAt: '2026-05-24T12:00:00.000Z',
+			updatedAt: '2026-05-24T12:00:00.000Z',
+			contentHash: computeMemoryContentHash(base),
+			metadata: {},
+			...overrides,
+		};
+	}
+
+	test('explored item is appended additively beyond maxItems — never evicts a normal hit (falsifiable: pre-fix slice(0,maxItems) drops one)', async () => {
+		const provider = new LocalJsonlMemoryProvider(tmpDir, {
+			enabled: true,
+			qLearning: { ...DEFAULT_QLEARNING_CONFIG, explorationRate: 1 },
+		});
+
+		// Two normal (non-suppressed) hits with an EQUAL, LOWER baseScore than
+		// the suppressed candidate below (no tag overlap: baseScore ≈ 0.578).
+		const normal1 = makeExplorableRecord(
+			'The database pool timeout configuration is documented here in module one.',
+		);
+		const normal2 = makeExplorableRecord(
+			'The database pool timeout configuration is documented here in module two.',
+		);
+		// Suppressed candidate with a deliberately HIGHER baseScore (tag overlap
+		// on all 3 query tokens: baseScore ≈ 0.738) than both normal hits, so a
+		// naive `[...items].sort(scoreDesc).slice(0, maxItems)` would rank it
+		// ABOVE one of the normal hits and evict it — exactly the regression
+		// this additive fix prevents.
+		const suppressed = makeExplorableRecord(
+			'The database pool timeout configuration is documented here for exploration.',
+			{ tags: ['database', 'pool', 'timeout'], metadata: { qValue: 0.05 } },
+		);
+
+		await provider.upsert(normal1);
+		await provider.upsert(normal2);
+		await provider.upsert(suppressed);
+
+		const { items, diagnostics } = await provider.recallWithDiagnostics({
+			query: 'database pool timeout',
+			scopes: [normal1.scope],
+			maxItems: 2,
+			tokenBudget: 1000,
+			minScore: 0,
+		});
+
+		// Additive result: 2 normal hits (the maxItems cap) + 1 explored item.
+		expect(items).toHaveLength(3);
+		const ids = items.map((item) => item.record.id);
+		expect(ids).toContain(normal1.id);
+		expect(ids).toContain(normal2.id);
+		expect(ids).toContain(suppressed.id);
+
+		const exploredItems = items.filter((item) => item.explored === true);
+		expect(exploredItems).toHaveLength(1);
+		expect(exploredItems[0].record.id).toBe(suppressed.id);
+
+		// Diagnostics reflect what is actually present in the returned bundle
+		// (Fix 3).
+		expect(diagnostics.exploredCount).toBe(1);
+		expect(diagnostics.returnedCount).toBe(3);
+	});
+
+	test('no explored candidate: maxItems still caps normal hits exactly (unchanged behavior)', async () => {
+		const provider = new LocalJsonlMemoryProvider(tmpDir, {
+			enabled: true,
+			qLearning: { ...DEFAULT_QLEARNING_CONFIG, explorationRate: 1 },
+		});
+
+		const normal1 = makeExplorableRecord(
+			'The database pool timeout configuration is documented here in module one.',
+		);
+		const normal2 = makeExplorableRecord(
+			'The database pool timeout configuration is documented here in module two.',
+		);
+		const normal3 = makeExplorableRecord(
+			'The database pool timeout configuration is documented here in module three.',
+		);
+		await provider.upsert(normal1);
+		await provider.upsert(normal2);
+		await provider.upsert(normal3);
+
+		const { items, diagnostics } = await provider.recallWithDiagnostics({
+			query: 'database pool timeout',
+			scopes: [normal1.scope],
+			maxItems: 2,
+			tokenBudget: 1000,
+			minScore: 0,
+		});
+
+		// Nothing was suppressed, so exploration is a no-op regardless of the
+		// forced explorationRate: 1 — plain maxItems capping applies.
+		expect(items).toHaveLength(2);
+		expect(items.every((item) => item.explored === undefined)).toBe(true);
+		expect(diagnostics.exploredCount).toBe(0);
+		expect(diagnostics.returnedCount).toBe(2);
 	});
 });

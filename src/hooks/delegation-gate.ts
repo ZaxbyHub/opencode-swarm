@@ -47,6 +47,9 @@ import {
 } from './delegation-gate/worktree-isolation';
 export { resetStandardWorktreeIsolationState };
 
+import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
+import { createConfiguredMemoryProvider } from '../memory/gateway';
+import { applyCouncilReward } from '../memory/reward-capture';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
 	initDurableStatusPath,
@@ -1280,6 +1283,13 @@ export function createDelegationGateHook(
 					if (taskId) {
 						if (!session.taskCouncilApproved)
 							session.taskCouncilApproved = new Map();
+						// Preserve a prior reward dedup flag: this .set overwrites the
+						// entry on every submit_council_verdicts resolution, so without
+						// carrying `rewarded` forward a re-submission for an already-
+						// rewarded task would clear the guard and reward twice (A.4
+						// requires at-most-once per task).
+						const priorRewarded =
+							session.taskCouncilApproved.get(taskId)?.rewarded === true;
 						session.taskCouncilApproved.set(taskId, {
 							verdict: result.overallVerdict,
 							roundNumber:
@@ -1289,6 +1299,7 @@ export function createDelegationGateHook(
 							// will reject this against the default minimumMembers=3.
 							quorumSize:
 								typeof result.quorumSize === 'number' ? result.quorumSize : 1,
+							rewarded: priorRewarded,
 						});
 						if (
 							councilActive &&
@@ -1309,6 +1320,85 @@ export function createDelegationGateHook(
 									{ telemetrySessionId: input.sessionID },
 									config.council,
 								);
+								// A.4 — positive terminal reward capture. Fires ONLY after
+								// the APPROVE→complete advance above SUCCEEDS. Wrapped in its
+								// OWN try/catch: this is a HOT hook path and reward capture
+								// must NEVER throw into the gate or change task completion.
+								// Behavior is identical whether it succeeds, fails, or skips.
+								try {
+									const memoryConfig = config.memory;
+									// Post-condition (C-6): reward ONLY when the advance above
+									// actually moved the task to 'complete'. advanceTaskState
+									// silently no-ops (returns without throwing AND without
+									// advancing) on an invalid taskId — e.g. a whitespace-only id
+									// that passed the truthiness `if (taskId)` gate above but
+									// fails isValidTaskId — so a non-throwing await does not by
+									// itself prove completion. getTaskState also returns a
+									// non-'complete' state (or 'idle' for an invalid id) in every
+									// non-advance case, so this check closes the false-positive
+									// reward path without depending on advanceTaskState internals.
+									const advancedToComplete =
+										getTaskState(session, taskId) === 'complete';
+									if (advancedToComplete && memoryConfig?.enabled === true) {
+										const approvedEntry =
+											session.taskCouncilApproved?.get(taskId);
+										// Dedup: apply at most once per task.
+										if (approvedEntry?.rewarded !== true) {
+											const provider = createConfiguredMemoryProvider(
+												directory,
+												memoryConfig,
+											);
+											try {
+												// FR-010: compact synthesis payload, truncated to the
+												// configured byte cap with a marker beyond it.
+												const synthesis = {
+													overallVerdict: result.overallVerdict,
+													allCriteriaMet: result.allCriteriaMet === true,
+													requiredFixesCount: result.requiredFixesCount ?? 0,
+													roundNumber:
+														typeof result.roundNumber === 'number'
+															? result.roundNumber
+															: undefined,
+													quorumSize:
+														typeof result.quorumSize === 'number'
+															? result.quorumSize
+															: undefined,
+												};
+												let verdictSynthesisJson = JSON.stringify(synthesis);
+												const cap =
+													memoryConfig.qLearning.verdictPayloadCapBytes;
+												if (
+													typeof cap === 'number' &&
+													cap > 0 &&
+													verdictSynthesisJson.length > cap
+												) {
+													verdictSynthesisJson = `${verdictSynthesisJson.slice(0, cap)}…[truncated]`;
+												}
+												await applyCouncilReward(provider, {
+													runId: input.sessionID,
+													unitId: taskId,
+													reward: COUNCIL_VERDICT_REWARDS.APPROVE,
+													eta: memoryConfig.qLearning.learningRate,
+													initialQValue: memoryConfig.qLearning.initialQValue,
+													// B.5: thread the full q-learning config so soft
+													// Q-propagation reads propagationFraction /
+													// propagationFanoutCap / propagationWindowDays.
+													qLearning: memoryConfig.qLearning,
+													verdictSynthesisJson,
+													timestamp: new Date().toISOString(),
+												});
+												if (approvedEntry) approvedEntry.rewarded = true;
+											} finally {
+												// Release the pool refcount acquired above (no leak).
+												await provider.close?.();
+											}
+										}
+									}
+								} catch (rewardErr) {
+									logger.warn(
+										`[delegation-gate] council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
+									);
+								}
 							} catch (err) {
 								logger.warn(
 									`[delegation-gate] toolAfter submit_council_verdicts: could not advance ${taskId} → complete: ${err instanceof Error ? err.message : String(err)}`,

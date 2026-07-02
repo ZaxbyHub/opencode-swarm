@@ -666,6 +666,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		config: config.memory,
 		getActiveAgentName: (sessionID) =>
 			sessionID ? swarmState.activeAgent.get(sessionID) : undefined,
+		// B.1 — resolve the unit-of-work (task) id from the SAME session's
+		// currentTaskId. `?? undefined` normalizes the null sentinel so an absent
+		// id persists as NULL and recall degrades to session-scoped runId.
+		getActiveTaskId: (sessionID) =>
+			sessionID
+				? (swarmState.agentSessions.get(sessionID)?.currentTaskId ?? undefined)
+				: undefined,
 	});
 	// Fail-secure: honor explicit guardrails.enabled === false (preserving the full
 	// guardrails block), otherwise let Zod schema defaults fill in enabled: true.
