@@ -3,21 +3,15 @@ name: widen-return-type
 description: widen return type
 triggers:
   - widen return type
-  - extensibility
-  - overloads
   - opt-in tool map
   - feature flag gating
   - tool registration
-generated_from_knowledge:
-  - f4a42419-d0bc-4f80-8a52-eb44233aadb9
-  - 15870ee2-0813-406f-afd6-f34a05343584
-source_knowledge_ids:
-  - f4a42419-d0bc-4f80-8a52-eb44233aadb9
-  - 15870ee2-0813-406f-afd6-f34a05343584
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:11:00.606Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -28,8 +22,6 @@ skill_origin: generated
 ## Trigger
 
 - widen return type
-- extensibility
-- overloads
 - opt-in tool map
 - feature flag gating
 - tool registration
@@ -53,9 +45,4 @@ SKILLS: file:.opencode/skills/generated/widen-return-type/SKILL.md
 
 ## Reviewer Checks
 
-- Verify each required action above appears in the diff.
-
-## Source Knowledge IDs
-
-- f4a42419-d0bc-4f80-8a52-eb44233aadb9 — When widening a function's return type (e.g. string instead of union) to support extensibility, use TypeScript overloads to preserve narrow types for known inputs — saves build-error round trips.
-- 15870ee2-0813-406f-afd6-f34a05343584 — Pre-existing opt-in maps (memory, external_skills, skills) follow a consistent pattern — when implementing new gates, mirror the existing structure (separate SKILL_AGENT_TOOL_MAP, conditional merge in agents/index.ts) rather than inventing new mechanisms.</item>
+- Verify each required action above appears in the diff.</item>

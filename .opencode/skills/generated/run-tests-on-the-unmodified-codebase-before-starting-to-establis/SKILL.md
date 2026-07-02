@@ -1,14 +1,15 @@
 ---
 name: run-tests-on-the-unmodified-codebase-before-starting-to-establis
 description: run tests on the unmodified codebase before starting to establish a failure baseline
-generated_from_knowledge:
-  - 2041997b-c527-4cc0-bcf1-08f0cfd6777f
-source_knowledge_ids:
-  - 2041997b-c527-4cc0-bcf1-08f0cfd6777f
+triggers:
+  - pre-existing test failures
+  - baseline before change
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.911Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -18,7 +19,8 @@ skill_origin: generated
 
 ## Trigger
 
-- (no explicit trigger metadata; cluster derived from category/tags)
+- pre-existing test failures
+- baseline before change
 
 ## Required Procedure
 
@@ -43,7 +45,3 @@ SKILLS: file:.opencode/skills/generated/run-tests-on-the-unmodified-codebase-bef
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- 2041997b-c527-4cc0-bcf1-08f0cfd6777f — A test failure observed after your changes cannot be classified as 'pre-existing' without a pre-change baseline run — post-hoc attribution to pre-existing failures is unreliable and masks genuine regressions

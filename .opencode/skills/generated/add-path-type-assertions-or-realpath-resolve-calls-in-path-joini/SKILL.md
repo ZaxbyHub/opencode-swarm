@@ -1,14 +1,16 @@
 ---
 name: add-path-type-assertions-or-realpath-resolve-calls-in-path-joini
 description: Add path-type assertions or realpath/resolve calls in path-joining utility functions
-generated_from_knowledge:
-  - a1bd8582-b969-4cc2-80cf-4ecf2ff90ae5
-source_knowledge_ids:
-  - a1bd8582-b969-4cc2-80cf-4ecf2ff90ae5
+triggers:
+  - path.join
+  - realpath
+  - fs path
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.870Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -18,7 +20,9 @@ skill_origin: generated
 
 ## Trigger
 
-- (no explicit trigger metadata; cluster derived from category/tags)
+- path.join
+- realpath
+- fs path
 
 ## Required Procedure
 
@@ -44,7 +48,3 @@ SKILLS: file:.opencode/skills/generated/add-path-type-assertions-or-realpath-res
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- a1bd8582-b969-4cc2-80cf-4ecf2ff90ae5 — Path-joining utilities must either assert input paths are absolute or explicitly absolutize them before joining; relying on callers to provide correct paths creates silent corruption in tests.

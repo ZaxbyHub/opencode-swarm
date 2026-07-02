@@ -1,14 +1,15 @@
 ---
 name: grep-for-mock-module-across-the-entire-test-file-and-confirm-eve
 description: "grep for 'mock.module' across the entire test file and confirm every occurrence uses spread-real-exports before marking the file as converted"
-generated_from_knowledge:
-  - 29cd29e2-c46f-46c8-aceb-41429ff06dc0
-source_knowledge_ids:
-  - 29cd29e2-c46f-46c8-aceb-41429ff06dc0
+triggers:
+  - mock.module conversion
+  - vitest to bun migration
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.878Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -18,7 +19,8 @@ skill_origin: generated
 
 ## Trigger
 
-- (no explicit trigger metadata; cluster derived from category/tags)
+- mock.module conversion
+- vitest to bun migration
 
 ## Required Procedure
 
@@ -43,7 +45,3 @@ SKILLS: file:.opencode/skills/generated/grep-for-mock-module-across-the-entire-t
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- 29cd29e2-c46f-46c8-aceb-41429ff06dc0 — When converting mock.module calls, grep for ALL mock.module invocations in the file before declaring the file fixed — a single missed mock.module call will keep tests failing.

@@ -2,17 +2,14 @@
 name: propagation-test
 description: propagation test
 triggers:
-  - propagation test
-  - single-source
-  - _internals
-generated_from_knowledge:
-  - 6a9afaf9-4194-422e-8922-4c501d79a06b
-source_knowledge_ids:
-  - 6a9afaf9-4194-422e-8922-4c501d79a06b
+  - knowledge propagation test
+  - single-source update
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.897Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -22,9 +19,8 @@ skill_origin: generated
 
 ## Trigger
 
-- propagation test
-- single-source
-- _internals
+- knowledge propagation test
+- single-source update
 
 ## Required Procedure
 
@@ -49,7 +45,3 @@ SKILLS: file:.opencode/skills/generated/propagation-test/SKILL.md
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- 6a9afaf9-4194-422e-8922-4c501d79a06b — For "single-source propagation" tests, the test must touch ONLY the shared module's seam and exercise all consumers without per-consumer seam overrides. Patching each consumer's _internals in the test defeats the purpose of testing propagation.

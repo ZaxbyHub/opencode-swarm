@@ -2,20 +2,15 @@
 name: phase-complete
 description: phase_complete
 triggers:
-  - phase_complete
-  - reconcile-from-plan
-  - snapshot-load
-  - reconcile
-generated_from_knowledge:
-  - d2a1a000-0004-4000-8000-000000000004
-  - d2a1a000-0006-4000-8000-000000000006
-source_knowledge_ids:
-  - d2a1a000-0004-4000-8000-000000000004
-  - d2a1a000-0006-4000-8000-000000000006
+  - phase gate
+  - phase complete directive
+  - multi-phase plan
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:11:00.605Z
 confidence: 0.93
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -25,10 +20,9 @@ skill_origin: generated
 
 ## Trigger
 
-- phase_complete
-- reconcile-from-plan
-- snapshot-load
-- reconcile
+- phase gate
+- phase complete directive
+- multi-phase plan
 
 ## Required Procedure
 
@@ -51,8 +45,3 @@ SKILLS: file:.opencode/skills/generated/phase-complete/SKILL.md
 
 - session restart recovers task state from plan.json
 - task states correctly reconciled from plan.json after restart
-
-## Source Knowledge IDs
-
-- d2a1a000-0004-4000-8000-000000000004 — plan.json fallback: when in-memory state is lost on session restart, use plan.json as the durable source of truth. Tasks marked completed in plan.json indicate agent dispatch occurred (since update_task_status(completed) requires QA gates to pass).
-- d2a1a000-0006-4000-8000-000000000006 — reconcile-from-plan: when session state is lost on snapshot load, re-derive task states from plan.json. plan.json is the durable ground truth; in-memory state is a cache that can be reconstructed.

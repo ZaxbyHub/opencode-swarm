@@ -1,19 +1,14 @@
 ---
 name: pr-readiness
-description: pr-readiness
+description: "Legacy compatibility shim — use swarm-pr-feedback instead"
 triggers:
-  - mock.module
-  - "node:fs"
-  - "node:child_process"
-  - "node:fs/promises"
-generated_from_knowledge:
-  - 5248c75b-d88e-479b-b2ff-72f426eb1977
-source_knowledge_ids:
-  - 5248c75b-d88e-479b-b2ff-72f426eb1977
+  - pr-readiness
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:50.054Z
 confidence: 0.60
 status: active
-version: 5
+version: 6
 skill_origin: generated
 ---
 
@@ -23,31 +18,7 @@ skill_origin: generated
 
 ## Trigger
 
-- mock.module
-- node:fs
-- node:child_process
-- node:fs/promises
+- pr-readiness
 
-## Required Procedure
-
-- spread real module exports when mocking node: built-ins to prevent cross-test pollution
-
-## Forbidden Shortcuts
-
-- mock.node.builtins without spreading the real module's exports
-
-## Delegation Template
-
-When delegating a task affected by this skill, include:
-
-```
-SKILLS: file:.opencode/skills/generated/pr-readiness/SKILL.md
-```
-
-## Reviewer Checks
-
-- Verify each required action above appears in the diff.
-
-## Source Knowledge IDs
-
-- 5248c75b-d88e-479b-b2ff-72f426eb1977 — [object Object]
+This skill is a legacy compatibility shim. Use `swarm-pr-feedback` skill instead.
+See `.claude/skills/swarm-pr-feedback/SKILL.md`.

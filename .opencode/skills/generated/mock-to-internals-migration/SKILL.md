@@ -2,35 +2,15 @@
 name: mock-to-internals-migration
 description: mock-to-internals-migration
 triggers:
-  - opt-in tool map
-  - feature flag gating
-  - tool registration
-generated_from_knowledge:
-  - 15870ee2-0813-406f-afd6-f34a05343584
-  - c3bbb12e-f8de-429d-9d3a-983e7929786c
-  - ece661ed-3626-4e1d-b95b-b6ab96a059e9
-  - 4d22c8a2-335b-46bd-91da-7968306c6107
-  - a152c109-c6f1-4338-8e18-1b98d2d358cf
-  - 1baf97e1-b58e-4287-acdd-7b8c150b0e6b
-  - 939330c8-be3d-4c11-842f-4a93433b7d1a
-  - c66e7212-82ca-4b03-ad06-fece8199e401
-  - 2041997b-c527-4cc0-bcf1-08f0cfd6777f
-  - d07cf04b-05c2-4e80-b291-e2d0446d9d09
-source_knowledge_ids:
-  - 15870ee2-0813-406f-afd6-f34a05343584
-  - c3bbb12e-f8de-429d-9d3a-983e7929786c
-  - ece661ed-3626-4e1d-b95b-b6ab96a059e9
-  - 4d22c8a2-335b-46bd-91da-7968306c6107
-  - a152c109-c6f1-4338-8e18-1b98d2d358cf
-  - 1baf97e1-b58e-4287-acdd-7b8c150b0e6b
-  - 939330c8-be3d-4c11-842f-4a93433b7d1a
-  - c66e7212-82ca-4b03-ad06-fece8199e401
-  - 2041997b-c527-4cc0-bcf1-08f0cfd6777f
-  - d07cf04b-05c2-4e80-b291-e2d0446d9d09
+  - vitest to bun mock
+  - mock-to-internals
+  - _internals seam
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.991Z
 confidence: 0.60
 status: active
-version: 5
+version: 6
 skill_origin: generated
 ---
 
@@ -40,9 +20,9 @@ skill_origin: generated
 
 ## Trigger
 
-- opt-in tool map
-- feature flag gating
-- tool registration
+- vitest to bun mock
+- mock-to-internals
+- _internals seam
 
 ## Required Procedure
 
@@ -82,16 +62,3 @@ SKILLS: file:.opencode/skills/generated/mock-to-internals-migration/SKILL.md
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- 15870ee2-0813-406f-afd6-f34a05343584 — Pre-existing opt-in maps (memory, external_skills, skills) follow a consistent pattern — when implementing new gates, mirror the existing structure (separate SKILL_AGENT_TOOL_MAP, conditional merge in agents/index.ts) rather than inventing new mechanisms.</item>
-- c3bbb12e-f8de-429d-9d3a-983e7929786c — When adding new exports to barrel files (e.g. src/tools/index.ts), verify all existing test files that import from that barrel still resolve correctly — new exports should not shadow or break existing import paths used by dependent tests.
-- ece661ed-3626-4e1d-b95b-b6ab96a059e9 — Verify baseline code structure is sound before making modifications; an incomplete refactor split leaves structure broken and causes edits to fail validation
-- 4d22c8a2-335b-46bd-91da-7968306c6107 — Partial Vitest→bun:test mock conversion causes runtime TypeErrors; when converting any test file, audit ALL mock.api usage to ensure complete migration — a single unconverted vi.fn() left next to a bun.mock() causes reset() to fail at runtime
-- a152c109-c6f1-4338-8e18-1b98d2d358cf — Always spread real module exports into mock.module returns to prevent undeclared overrides from leaking across tests and causing intermittent failures
-- 1baf97e1-b58e-4287-acdd-7b8c150b0e6b — Always load the writing-tests skill before modifying test files — SKILL_COMPLIANCE:none on a test-refactor task means the required skill was bypassed, increasing risk of mock isolation bugs and test pollution.
-- 939330c8-be3d-4c11-842f-4a93433b7d1a — Coders must run lint alongside build before submitting — a clean build does not imply a clean lint, and lint failures force revision rounds that are entirely preventable.
-- c66e7212-82ca-4b03-ad06-fece8199e401 — wrapCommand and similar command-transformation functions must be idempotent: detect and skip re-wrapping if the target executor has already applied its sandbox envelope (check for existing bwrap/sandbox-exec/Win32 wrapper patterns before wrapping again).
-- 2041997b-c527-4cc0-bcf1-08f0cfd6777f — A test failure observed after your changes cannot be classified as 'pre-existing' without a pre-change baseline run — post-hoc attribution to pre-existing failures is unreliable and masks genuine regressions
-- d07cf04b-05c2-4e80-b291-e2d0446d9d09 — When confirming a change in review, ensure the change is actually present and causally attributable to the PR; unverifiable attributions break the review gate.

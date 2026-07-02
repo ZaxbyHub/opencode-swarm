@@ -3,17 +3,12 @@ name: mock-module
 description: mock.module
 triggers:
   - mock.module
-  - "node:fs"
-  - "node:child_process"
-  - "node:fs/promises"
-generated_from_knowledge:
-  - 5248c75b-d88e-479b-b2ff-72f426eb1977
-source_knowledge_ids:
-  - 5248c75b-d88e-479b-b2ff-72f426eb1977
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.881Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -24,9 +19,6 @@ skill_origin: generated
 ## Trigger
 
 - mock.module
-- node:fs
-- node:child_process
-- node:fs/promises
 
 ## Required Procedure
 
@@ -47,7 +39,3 @@ SKILLS: file:.opencode/skills/generated/mock-module/SKILL.md
 ## Reviewer Checks
 
 - Verify each required action above appears in the diff.
-
-## Source Knowledge IDs
-
-- 5248c75b-d88e-479b-b2ff-72f426eb1977 — [object Object]

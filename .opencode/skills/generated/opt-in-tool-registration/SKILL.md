@@ -1,30 +1,16 @@
 ---
 name: opt-in-tool-registration
 description: opt-in-tool-registration
-generated_from_knowledge:
-  - 0c7cadd9-4c76-42e7-ba06-c1b475d95f81
-  - 5b89a93a-e54c-4da9-9667-fd6eb583eb2d
-  - 630ca3b5-556b-480b-bfc2-460b1955411d
-  - ee3dec8a-ad0e-406f-858a-8f02ebedb66d
-  - 23e538c0-aca7-46fb-af5e-f591c359fa6e
-  - 80559952-e9a4-44c1-b30d-52f02f35d6c4
-  - 53ecc9e8-b6c9-42b9-a364-15e6890235fb
-  - 7128b66c-66f6-44c3-b98f-10070754ca9a
-  - b50901c1-1027-4e6d-8612-cc38fa8327a9
-source_knowledge_ids:
-  - 0c7cadd9-4c76-42e7-ba06-c1b475d95f81
-  - 5b89a93a-e54c-4da9-9667-fd6eb583eb2d
-  - 630ca3b5-556b-480b-bfc2-460b1955411d
-  - ee3dec8a-ad0e-406f-858a-8f02ebedb66d
-  - 23e538c0-aca7-46fb-af5e-f591c359fa6e
-  - 80559952-e9a4-44c1-b30d-52f02f35d6c4
-  - 53ecc9e8-b6c9-42b9-a364-15e6890235fb
-  - 7128b66c-66f6-44c3-b98f-10070754ca9a
-  - b50901c1-1027-4e6d-8612-cc38fa8327a9
+triggers:
+  - opt-in tool map
+  - feature flag gating
+  - tool registration
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:50.021Z
 confidence: 0.60
 status: active
-version: 5
+version: 6
 skill_origin: generated
 ---
 
@@ -34,27 +20,18 @@ skill_origin: generated
 
 ## Trigger
 
-- (no explicit trigger metadata; cluster derived from category/tags)
+- opt-in tool map
+- feature flag gating
+- tool registration
 
 ## Required Procedure
 
-- Verify task description matches target file/scope before implementing
-- Test all six subprocess attack surfaces: command injection, spawn-arg injection, stdio pipe injection, timeout bypass, path traversal, cross-platform escape sequence neutralization
-- derive writer verdict schemas from the shared normalization module
-- add a regression test proving new shared verdicts propagate to all writers without per-writer edits
-- execute all tasks in the assigned scope before reporting completion
-- run verification checks on completed work
-- When failures are pre-existing per constraint, emit outcome=skip or separate pre_existing failure category instead of failure_test
-- Before reporting outcome=failure_test, verify the failures are attributable to the current PR/changes and not pre-existing in the test suite
-- run the test suite targeted by changed test files before declaring verification complete
-- include test execution as a mandatory checklist item when test files are modified
-- Confirm the file appears in `git diff` output before marking introduced_by_pr: YES
+- mirror existing opt-in pattern: separate tool map constant, conditional merge in agents/index.ts, gating tests verifying disabled and enabled states
 
 ## Forbidden Shortcuts
 
 - maintain independent verdict allowlists in individual evidence-writer modules
-- using linter pass as proxy for test pass
-- rely solely on syntax checks, naming checks, or grep-based reuse scans to validate test-file changes
+- invent new tool-gating mechanisms for opt-in feature flags
 
 ## Delegation Template
 
@@ -66,25 +43,8 @@ SKILLS: file:.opencode/skills/generated/opt-in-tool-registration/SKILL.md
 
 ## Reviewer Checks
 
-- Cross-reference task ID with the file being modified
-- verify the source file after any extraction/split still exports what consumers expect
-- verify all importers reference the correct new locations after any extraction/split
-- bun test <file> after any edit
-- grep for 'pre-existing' in test output before labeling outcome
-- compare failed tests against baseline test run to confirm new vs legacy
+- (none recorded beyond the required procedure above)
 
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- 0c7cadd9-4c76-42e7-ba06-c1b475d95f81 — Before writing any code, confirm the task description and acceptance criteria match the file/scope you're working on. Misaligned task routing wastes effort and produces wrong artifacts.
-- 5b89a93a-e54c-4da9-9667-fd6eb583eb2d — When testing subprocess security, always cover all six attack surfaces: command injection, spawn-arg injection, stdio pipe injection, timeout bypass, path traversal, and cross-platform escape sequences — a gap in any one surface can compromise the entire sandbox.
-- 630ca3b5-556b-480b-bfc2-460b1955411d — Evidence writers must derive verdict allowlists from the shared normalization module rather than maintaining independent copies; adding a new verdict should never require per-writer edits
-- ee3dec8a-ad0e-406f-858a-8f02ebedb66d — When a phase has multiple tasks, coders must execute ALL assigned tasks and run verification before reporting done — completing one task and asking for direction is a partial, not a completion.
-- 23e538c0-aca7-46fb-af5e-f591c359fa6e — When code has been extracted or split, confirm the extraction is complete and all references are updated before proceeding with dependent changes
-- 80559952-e9a4-44c1-b30d-52f02f35d6c4 — biome check passes only syntax/style — it does not verify test logic or assertion correctness. A passing linter on a test file is not evidence the tests pass.
-- 53ecc9e8-b6c9-42b9-a364-15e6890235fb — Test_engineer outcome=failure_test must distinguish pre-existing failures from regressions: flag pre-existing failures as SKIP or document them as expected-legacy rather than reporting them as failures of the current work.
-- 7128b66c-66f6-44c3-b98f-10070754ca9a — A self-verification checklist that includes syntax/naming checks but omits running the actual test suite is a false positive trap. Coders must execute failing tests and assert green before reporting done.
-- b50901c1-1027-4e6d-8612-cc38fa8327a9 — Before marking a finding 'introduced_by_pr: YES', verify the file actually appears in the PR diff; a confirmed finding on an unchanged file causes spurious review failures.

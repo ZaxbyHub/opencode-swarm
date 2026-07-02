@@ -1,14 +1,15 @@
 ---
 name: spread-real-module-exports-as-base-of-every-mock-module-return-o
 description: spread real module exports as base of every mock.module return object
-generated_from_knowledge:
-  - a152c109-c6f1-4338-8e18-1b98d2d358cf
-source_knowledge_ids:
-  - a152c109-c6f1-4338-8e18-1b98d2d358cf
+triggers:
+  - mock.module spread pattern
+  - node: built-in mock
+generated_from_knowledge: []
+source_knowledge_ids: []
 generated_at: 2026-07-02T02:35:49.913Z
 confidence: 0.60
 status: active
-version: 1
+version: 2
 skill_origin: generated
 ---
 
@@ -18,7 +19,8 @@ skill_origin: generated
 
 ## Trigger
 
-- (no explicit trigger metadata; cluster derived from category/tags)
+- mock.module spread pattern
+- node: built-in mock
 
 ## Required Procedure
 
@@ -43,7 +45,3 @@ SKILLS: file:.opencode/skills/generated/spread-real-module-exports-as-base-of-ev
 ## Test Engineer Checks
 
 - Add or update tests covering the trigger condition and the forbidden shortcut.
-
-## Source Knowledge IDs
-
-- a152c109-c6f1-4338-8e18-1b98d2d358cf — Always spread real module exports into mock.module returns to prevent undeclared overrides from leaking across tests and causing intermittent failures
