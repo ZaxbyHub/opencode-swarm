@@ -119,6 +119,21 @@ function boundaryForModule(moduleName: string): string {
 	return parts[0];
 }
 
+function sourceBoundaryForLanguage(
+	language: string,
+	content: string,
+): string | null {
+	if (language === 'java' || language === 'kotlin') {
+		const pkg = content.match(/^\s*package\s+([A-Za-z_][\w.]*)\s*;?/m);
+		if (pkg) return pkg[1];
+	}
+	if (language === 'csharp') {
+		const ns = content.match(/^\s*namespace\s+([A-Za-z_][\w.]*)\s*[;{]/m);
+		if (ns) return ns[1];
+	}
+	return null;
+}
+
 function inferRoles(moduleName: string, content: string): FileRole[] {
 	const normalized = normalizeModuleName(moduleName).toLowerCase();
 	const roles = new Set<FileRole>();
@@ -487,7 +502,9 @@ export function extractFileOntology(
 
 	return {
 		roles,
-		packageBoundary: boundaryForModule(moduleName),
+		packageBoundary:
+			sourceBoundaryForLanguage(input.language, content) ??
+			boundaryForModule(moduleName),
 		routes,
 		dataOperations,
 		security,

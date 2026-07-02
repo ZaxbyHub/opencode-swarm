@@ -1,10 +1,5 @@
 import * as path from 'node:path';
-import {
-	extractGoSymbols,
-	extractPythonSymbols,
-	extractRustSymbols,
-	extractTSSymbols,
-} from '../tools/symbols';
+import { extractSymbolsForFile } from '../tools/symbols';
 import { getLanguageFromExtension } from './import-extractor';
 import type { ExportedSymbol, SymbolKind } from './types';
 
@@ -32,23 +27,8 @@ export function extractExportedSymbols(
 	const language = getLanguageFromExtension(ext);
 	if (!language) return [];
 
-	if (language === 'typescript' || language === 'javascript') {
-		const raw = extractTSSymbols(relativeFilePath, workspaceRoot);
-		return raw.filter((s) => s.exported).map(toExported);
-	}
-	if (language === 'python') {
-		const raw = extractPythonSymbols(relativeFilePath, workspaceRoot);
-		return raw.filter((s) => s.exported).map(toExported);
-	}
-	if (language === 'rust') {
-		const raw = extractRustSymbols(relativeFilePath, workspaceRoot);
-		return raw.filter((s) => s.exported).map(toExported);
-	}
-	if (language === 'go') {
-		const raw = extractGoSymbols(relativeFilePath, workspaceRoot);
-		return raw.filter((s) => s.exported).map(toExported);
-	}
-	return [];
+	const raw = extractSymbolsForFile(relativeFilePath, workspaceRoot);
+	return raw ? raw.filter((s) => s.exported).map(toExported) : [];
 }
 
 interface RawSymbol {

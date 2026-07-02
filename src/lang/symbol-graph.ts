@@ -461,7 +461,7 @@ export async function extractFileSymbols(
 					const qs = QUERIES[grammarId];
 					if (!qs) return null;
 
-					return buildFacts(treeRef.value, qs, grammarId);
+					return buildFacts(treeRef.value, qs, grammarId, source);
 				} finally {
 					if (treeRef.value) {
 						treeRef.value.delete();
@@ -495,6 +495,7 @@ function buildFacts(
 	tree: Tree,
 	qs: { defs: string; imports: string; refs: string; exports: string },
 	grammarId: string,
+	source: string,
 ): FileSymbolFacts {
 	const root = asTs(tree.rootNode);
 	const lang = tree.language;
@@ -634,6 +635,8 @@ function buildFacts(
 		}
 	}
 
+	augmentJvmDotnetDefs(grammarId, source, defs);
+
 	const importsWithIndex: Array<{
 		index: number;
 		entry: FileSymbolFacts['imports'][0];
@@ -772,6 +775,255 @@ function buildFacts(
 	}
 
 	return { defs, imports, refs };
+}
+
+function visibilityInfoForModifier(
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+): SymbolVisibilityInfo {
+	return {
+		exported,
+		visibility,
+		exportedReason:
+			visibility === 'private'
+				? 'unknown'
+				: visibility === 'package'
+					? 'module_public'
+					: 'modifier',
+		apiSurfaceKind: visibility === 'private' ? 'private' : 'public',
+	};
+}
+
+function lineNumberAt(text: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index && i < text.length; i++) {
+		if (text.charCodeAt(i) === 10) line++;
+	}
+	return line;
+}
+
+function findMatchingBrace(text: string, openIndex: number): number | null {
+	let depth = 0;
+	for (let i = openIndex; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return null;
+}
+
+function upsertAugmentedDef(
+	defs: FileSymbolFacts['defs'],
+	def: FileSymbolFacts['defs'][0],
+): void {
+	const existing = defs.find(
+		(item) =>
+			item.name === def.name &&
+			item.kind === def.kind &&
+			item.startLine === def.startLine,
+	);
+	if (existing) {
+		existing.kind = def.kind;
+		existing.exported = def.exported;
+		existing.visibilityInfo = def.visibilityInfo;
+		existing.endLine = Math.max(existing.endLine, def.endLine);
+		return;
+	}
+	defs.push(def);
+}
+
+function augmentJvmDotnetDefs(
+	grammarId: string,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+): void {
+	if (!['java', 'kotlin', 'csharp'].includes(grammarId)) return;
+
+	type TypeBlock = {
+		name: string;
+		kind: FileSymbolFacts['defs'][0]['kind'];
+		visibility: SymbolVisibilityInfo['visibility'];
+		exported: boolean;
+		start: number;
+		bodyStart: number | null;
+		bodyEnd: number | null;
+	};
+
+	const typeBlocks: TypeBlock[] = [];
+	const addTypeBlocks = (
+		re: RegExp,
+		kindFor: (rawKind: string) => FileSymbolFacts['defs'][0]['kind'],
+		defaultVisibility: SymbolVisibilityInfo['visibility'],
+	) => {
+		for (let m = re.exec(source); m !== null; m = re.exec(source)) {
+			const rawVisibility = m[1] as
+				| SymbolVisibilityInfo['visibility']
+				| undefined;
+			const visibility = rawVisibility ?? defaultVisibility;
+			const exported = visibility !== 'private';
+			const bodyStart = source.indexOf('{', m.index);
+			const nextSemi = source.indexOf(';', m.index);
+			const hasBody =
+				bodyStart !== -1 && (nextSemi === -1 || bodyStart < nextSemi);
+			const bodyEnd = hasBody ? findMatchingBrace(source, bodyStart) : null;
+			const block: TypeBlock = {
+				name: m[3],
+				kind: kindFor(m[2]),
+				visibility,
+				exported,
+				start: m.index,
+				bodyStart: hasBody ? bodyStart : null,
+				bodyEnd,
+			};
+			for (const existing of defs) {
+				if (existing.name === block.name && existing.kind === 'method') {
+					existing.name = `${block.name}.${block.name}`;
+				}
+			}
+			typeBlocks.push(block);
+			upsertAugmentedDef(defs, {
+				name: block.name,
+				kind: block.kind,
+				exported,
+				visibilityInfo: visibilityInfoForModifier(visibility, exported),
+				startLine: lineNumberAt(source, m.index),
+				endLine:
+					bodyEnd !== null
+						? lineNumberAt(source, bodyEnd)
+						: lineNumberAt(source, m.index),
+			});
+		}
+	};
+
+	if (grammarId === 'java') {
+		addTypeBlocks(
+			/\b(?:(public|protected|private)\s+)?(?:(?:abstract|final|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+			(rawKind) =>
+				rawKind === 'interface'
+					? 'interface'
+					: rawKind === 'enum'
+						? 'enum'
+						: 'class',
+			'package',
+		);
+	}
+	if (grammarId === 'kotlin') {
+		addTypeBlocks(
+			/\b(?:(public|internal|private|protected)\s+)?(?:(?:data|sealed|open|abstract)\s+)*(class|interface|object|enum\s+class)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+			(rawKind) =>
+				rawKind === 'interface'
+					? 'interface'
+					: rawKind === 'enum class'
+						? 'enum'
+						: 'class',
+			'public',
+		);
+	}
+	if (grammarId === 'csharp') {
+		addTypeBlocks(
+			/\b(?:(public|internal|private|protected)\s+)?(?:(?:static|abstract|sealed|partial)\s+)*(class|interface|struct|record)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+			(rawKind) =>
+				rawKind === 'interface'
+					? 'interface'
+					: rawKind === 'struct'
+						? 'type'
+						: 'class',
+			'internal',
+		);
+	}
+
+	const methodRe =
+		grammarId === 'kotlin'
+			? /\b(?:(public|internal|private|protected)\s+)?fun\s+(?:[A-Za-z_][A-Za-z0-9_<>]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g
+			: /\b(?:(public|internal|protected|private)\s+)?(?:(?:static|final|abstract|virtual|override|async|sealed|synchronized)\s+)*(?:[A-Za-z_][A-Za-z0-9_<>[\],.?]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	const augmentedMethods: FileSymbolFacts['defs'] = [];
+	const skip = new Set([
+		'if',
+		'for',
+		'while',
+		'switch',
+		'catch',
+		'return',
+		'new',
+	]);
+	for (const block of typeBlocks) {
+		if (block.bodyStart === null || block.bodyEnd === null) continue;
+		const body = source.slice(block.bodyStart + 1, block.bodyEnd);
+		for (let m = methodRe.exec(body); m !== null; m = methodRe.exec(body)) {
+			const name = m[2];
+			if (!name || skip.has(name)) continue;
+			const firstToken = m[0].trim().split(/\s+/)[0];
+			if (skip.has(firstToken)) continue;
+			if (braceDepthBefore(body, m.index) > 0) continue;
+			const visibility =
+				(m[1] as SymbolVisibilityInfo['visibility'] | undefined) ??
+				(grammarId === 'csharp' ? 'private' : 'public');
+			const exported = block.exported && visibility !== 'private';
+			const start = block.bodyStart + 1 + m.index;
+			if (!hasStatementBoundaryBefore(source, start)) continue;
+			const defName = name === block.name ? `${block.name}.${name}` : name;
+			augmentedMethods.push({
+				name: defName,
+				kind: 'method',
+				exported,
+				visibilityInfo: visibilityInfoForModifier(visibility, exported),
+				startLine: lineNumberAt(source, start),
+				endLine: lineNumberAt(source, start),
+			});
+		}
+	}
+	if (augmentedMethods.length > 0) {
+		const augmentedNames = new Set(augmentedMethods.map((def) => def.name));
+		const typeLineRanges = typeBlocks
+			.filter(
+				(block): block is TypeBlock & { bodyStart: number; bodyEnd: number } =>
+					block.bodyStart !== null && block.bodyEnd !== null,
+			)
+			.map((block) => ({
+				start: lineNumberAt(source, block.bodyStart),
+				end: lineNumberAt(source, block.bodyEnd),
+			}));
+		const isInsideTypeBody = (line: number): boolean =>
+			typeLineRanges.some((range) => line >= range.start && line <= range.end);
+		const replacesParserMethod = (def: FileSymbolFacts['defs'][0]): boolean => {
+			if (!augmentedNames.has(def.name)) return false;
+			if (grammarId === 'java' || grammarId === 'csharp') return true;
+			return isInsideTypeBody(def.startLine);
+		};
+		for (let i = defs.length - 1; i >= 0; i--) {
+			const def = defs[i];
+			if (
+				(def.kind === 'function' || def.kind === 'method') &&
+				replacesParserMethod(def)
+			) {
+				defs.splice(i, 1);
+			}
+		}
+		defs.push(...augmentedMethods);
+	}
+}
+
+function braceDepthBefore(source: string, index: number): number {
+	let depth = 0;
+	for (let i = 0; i < index; i++) {
+		if (source[i] === '{') depth++;
+		else if (source[i] === '}') depth = Math.max(0, depth - 1);
+	}
+	return depth;
+}
+
+function hasStatementBoundaryBefore(source: string, index: number): boolean {
+	let i = index - 1;
+	let sawNewline = false;
+	while (i >= 0 && /\s/.test(source[i])) {
+		if (source[i] === '\n' || source[i] === '\r') sawNewline = true;
+		i--;
+	}
+	if (sawNewline) return true;
+	return i < 0 || source[i] === '{' || source[i] === ';' || source[i] === '}';
 }
 
 function safeMatches(
@@ -1278,9 +1530,21 @@ function parseJavaImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// import foo.Bar;
 	// import static foo.Bar.baz;
-	const m = t.match(/^import\s+(?:static\s+)?([^;\s]+)\s*;?\s*$/);
+	const m = t.match(/^import\s+(static\s+)?([^;\s]+)\s*;?\s*$/);
 	if (m) {
-		return { specifier: m[1], importType: 'namespace', bindings: [] };
+		const isStatic = Boolean(m[1]);
+		const raw = m[2];
+		if (raw.endsWith('.*')) {
+			return { specifier: raw, importType: 'namespace', bindings: [] };
+		}
+		const parts = raw.split('.');
+		const imported = parts[parts.length - 1] ?? raw;
+		const specifier = isStatic ? parts.slice(0, -1).join('.') : raw;
+		return {
+			specifier,
+			importType: 'named',
+			bindings: [{ imported, local: imported }],
+		};
 	}
 	return null;
 }
@@ -1292,15 +1556,24 @@ function parseKotlinImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	const aliased = t.match(/^import\s+([^;\s]+)\s+as\s+(\w+)/);
 	if (aliased) {
+		const imported = aliased[1].split('.').filter(Boolean).at(-1) ?? aliased[1];
 		return {
 			specifier: aliased[1],
 			importType: 'named',
-			bindings: [{ imported: aliased[1], local: aliased[2] }],
+			bindings: [{ imported, local: aliased[2] }],
 		};
 	}
 	const simple = t.match(/^import\s+([^;\s]+)/);
 	if (simple) {
-		return { specifier: simple[1], importType: 'namespace', bindings: [] };
+		if (simple[1].endsWith('.*')) {
+			return { specifier: simple[1], importType: 'namespace', bindings: [] };
+		}
+		const imported = simple[1].split('.').filter(Boolean).at(-1) ?? simple[1];
+		return {
+			specifier: simple[1],
+			importType: 'named',
+			bindings: [{ imported, local: imported }],
+		};
 	}
 	return null;
 }
@@ -1316,10 +1589,11 @@ function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
 	if (m) {
 		const specifier = m[2] ? m[2].trim() : m[1].trim();
 		if (m[2]) {
+			const imported = specifier.split('.').filter(Boolean).at(-1) ?? specifier;
 			return {
 				specifier,
 				importType: 'named',
-				bindings: [{ imported: specifier, local: m[1].trim() }],
+				bindings: [{ imported, local: m[1].trim() }],
 			};
 		}
 		return { specifier: m[1].trim(), importType: 'namespace', bindings: [] };
