@@ -70,6 +70,8 @@ export interface SymbolVisibilityContext {
 	explicitExported: boolean;
 	commonJsExport?: CommonJsExportInfo;
 	pythonAllNames?: Set<string> | null;
+	/** For Python methods: true if the enclosing class is exported (in __all__ or public naming convention) */
+	pythonParentClassExported?: boolean;
 }
 
 const PUBLIC_INFO: SymbolVisibilityInfo = {
@@ -182,6 +184,29 @@ export function getSymbolVisibilityInfo(
 
 	const ownVisibility = visibilityFromText(ctx.grammarId, ctx.defNode.text);
 	if (ctx.kind === 'method') {
+		if (ctx.grammarId === 'go') {
+			return isUppercasePublic(ctx.localName)
+				? {
+						...PUBLIC_INFO,
+						exportedReason: 'naming_convention',
+					}
+				: { ...PRIVATE_INFO };
+		}
+		if (ctx.grammarId === 'python' && ctx.pythonParentClassExported) {
+			// Python methods are exported if their parent class is exported
+			// (unless the method starts with _ or is __init__)
+			const isPrivate = ctx.localName.startsWith('_');
+			const isInit = ctx.localName === '__init__';
+			if (isPrivate || isInit) {
+				return { ...PRIVATE_INFO };
+			}
+			return {
+				exported: true,
+				visibility: 'public',
+				exportedReason: 'modifier',
+				apiSurfaceKind: 'public',
+			};
+		}
 		return {
 			exported: false,
 			visibility: ownVisibility,

@@ -21,7 +21,12 @@ import { extractFileSymbols } from '../../lang/symbol-graph';
 import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 import { yieldToEventLoop } from '../../utils/timeout';
-import { extractPythonSymbols, extractTSSymbols } from '../symbols';
+import {
+	extractGoSymbols,
+	extractPythonSymbols,
+	extractRustSymbols,
+	extractTSSymbols,
+} from '../symbols';
 import { extractFileOntology } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
 import type {
@@ -54,6 +59,8 @@ export const _internals: {
 	safeRealpathSync: typeof safeRealpathSync;
 	extractTSSymbols: typeof extractTSSymbols;
 	extractPythonSymbols: typeof extractPythonSymbols;
+	extractRustSymbols: typeof extractRustSymbols;
+	extractGoSymbols: typeof extractGoSymbols;
 	parseFileImports: typeof parseFileImports;
 	extractFileOntology: typeof extractFileOntology;
 	stripComments: typeof stripComments;
@@ -63,6 +70,8 @@ export const _internals: {
 	safeRealpathSync,
 	extractTSSymbols,
 	extractPythonSymbols,
+	extractRustSymbols,
+	extractGoSymbols,
 	parseFileImports,
 	extractFileOntology,
 	stripComments,
@@ -275,10 +284,37 @@ export function resolveModuleSpecifier(
 	}
 
 	try {
+		let normalizedSpecifier = specifier;
+		const rustParts = specifier.split('::').filter(Boolean);
+		if (rustParts[0] === 'crate') {
+			let target = path.join(workspaceRoot, ...rustParts.slice(1));
+			const targetExists =
+				existsSync(target) ||
+				existsSync(`${target}.rs`) ||
+				existsSync(path.join(target, 'mod.rs'));
+			if (!targetExists) {
+				target = path.join(path.dirname(sourceFile), ...rustParts.slice(1));
+			}
+			normalizedSpecifier = path
+				.relative(path.dirname(sourceFile), target)
+				.replace(/\\/g, '/');
+			if (!normalizedSpecifier.startsWith('.')) {
+				normalizedSpecifier = `./${normalizedSpecifier}`;
+			}
+		} else if (rustParts[0] === 'self') {
+			normalizedSpecifier = `./${rustParts.slice(1).join('/')}`;
+		} else if (rustParts[0] === 'super') {
+			let superCount = 0;
+			while (rustParts[superCount] === 'super') superCount++;
+			normalizedSpecifier = `${'../'.repeat(superCount)}${rustParts
+				.slice(superCount)
+				.join('/')}`;
+		}
+
 		// Resolve relative to source file
-		if (specifier.startsWith('.')) {
+		if (normalizedSpecifier.startsWith('.')) {
 			const sourceDir = path.dirname(sourceFile);
-			let resolved = path.resolve(sourceDir, specifier);
+			let resolved = path.resolve(sourceDir, normalizedSpecifier);
 
 			// SECURITY: Resolve symlinks to get the real path, then verify the
 			// real path is still within the workspace boundary. This prevents
@@ -301,20 +337,79 @@ export function resolveModuleSpecifier(
 				return null;
 			}
 
+			const findDirectoryEntry = (directory: string): string | null => {
+				for (const initName of ['__init__.py', '__init__.pyw', 'mod.rs']) {
+					const candidate = path.join(directory, initName);
+					if (existsSync(candidate)) return candidate;
+				}
+				if (path.extname(sourceFile).toLowerCase() === '.go') {
+					const basenameCandidate = path.join(
+						directory,
+						`${path.basename(directory)}.go`,
+					);
+					if (existsSync(basenameCandidate)) return basenameCandidate;
+					try {
+						const firstGo = fsSync
+							.readdirSync(directory)
+							.filter(
+								(entry) => entry.endsWith('.go') && !entry.endsWith('_test.go'),
+							)
+							.sort((a, b) => a.localeCompare(b))[0];
+						if (firstGo) return path.join(directory, firstGo);
+					} catch {
+						return null;
+					}
+				}
+				return null;
+			};
+
+			if (existsSync(resolved)) {
+				try {
+					if (fsSync.statSync(resolved).isDirectory()) {
+						const found = findDirectoryEntry(resolved);
+						if (!found) return null;
+						const foundRealPath = _internals.safeRealpathSync(found, found);
+						if (foundRealPath === null) return null;
+						realResolved = foundRealPath;
+						resolved = found;
+					}
+				} catch {
+					return null;
+				}
+			}
+
 			// Try to resolve the extensionless path to a real file.
 			// TypeScript/JavaScript imports commonly omit extensions: import { foo } from './utils'
 			// We need to find the actual file: ./utils.ts, ./utils.js, etc.
 			if (!existsSync(resolved)) {
-				const EXTENSIONS = [
-					'.ts',
-					'.tsx',
-					'.js',
-					'.jsx',
-					'.mjs',
-					'.cjs',
-					'.py',
-					'.json',
-				];
+				const EXTENSIONS =
+					path.extname(sourceFile).toLowerCase() === '.pyw'
+						? [
+								'.pyw',
+								'.py',
+								'.rs',
+								'.go',
+								'.ts',
+								'.tsx',
+								'.js',
+								'.jsx',
+								'.mjs',
+								'.cjs',
+								'.json',
+							]
+						: [
+								'.ts',
+								'.tsx',
+								'.js',
+								'.jsx',
+								'.mjs',
+								'.cjs',
+								'.py',
+								'.pyw',
+								'.rs',
+								'.go',
+								'.json',
+							];
 				let found: string | null = null;
 				for (const ext of EXTENSIONS) {
 					const candidate = resolved + ext;
@@ -322,6 +417,9 @@ export function resolveModuleSpecifier(
 						found = candidate;
 						break;
 					}
+				}
+				if (!found) {
+					found = findDirectoryEntry(resolved);
 				}
 				if (found) {
 					// Re-resolve symlinks for the found file
@@ -675,7 +773,22 @@ function stripComments(content: string): string {
 	return out;
 }
 
-function parseFileImports(rawContent: string): ParsedImport[] {
+function parseFileImports(
+	rawContent: string,
+	sourceFile?: string,
+	workspaceRoot?: string,
+): ParsedImport[] {
+	const ext = sourceFile ? path.extname(sourceFile).toLowerCase() : '';
+	if (ext === '.py' || ext === '.pyw') {
+		return parsePythonFileImports(rawContent, sourceFile);
+	}
+	if (ext === '.rs') {
+		return parseRustFileImports(rawContent, sourceFile, workspaceRoot);
+	}
+	if (ext === '.go') {
+		return parseGoFileImports(rawContent);
+	}
+
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
 
@@ -737,6 +850,228 @@ function parseFileImports(rawContent: string): ParsedImport[] {
 		});
 	}
 
+	return imports;
+}
+
+function makeParsedImport(
+	specifier: string,
+	importType: ParsedImport['importType'],
+	bindings: ImportBinding[],
+	reExport = false,
+): ParsedImport | null {
+	if (!specifier || containsControlChars(specifier)) return null;
+	return {
+		specifier,
+		importType,
+		importedSymbols: bindings.map((binding) => binding.imported),
+		bindings,
+		reExport,
+	};
+}
+
+function parsePythonFileImports(
+	rawContent: string,
+	sourceFile?: string,
+): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const isPackageInit = sourceFile
+		? ['__init__.py', '__init__.pyw'].includes(path.basename(sourceFile))
+		: false;
+
+	for (const line of rawContent.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith('#')) continue;
+
+		const fullImport = trimmed.match(/^import\s+(.+?)(?:\s*#.*)?$/);
+		if (fullImport) {
+			for (const rawPart of fullImport[1].split(',')) {
+				const part = rawPart.trim();
+				if (!part) continue;
+				const alias = part.match(/^([\w.]+)\s+as\s+(\w+)$/);
+				const specifier = alias ? alias[1] : part;
+				const local = alias ? alias[2] : specifier.split('.')[0];
+				if (!/^\w+$/.test(local)) continue;
+				const parsed = makeParsedImport(specifier, 'namespace', [
+					{ imported: specifier, local },
+				]);
+				if (parsed) imports.push(parsed);
+			}
+			continue;
+		}
+
+		const fromImport = trimmed.match(
+			/^from\s+(\S+)\s+import\s+(.+?)(?:\s*#.*)?$/,
+		);
+		if (!fromImport) continue;
+		if (fromImport[2].trim() === '*') {
+			const parsed = makeParsedImport(
+				normalizePythonModuleSpecifier(fromImport[1]),
+				'namespace',
+				[],
+				isPackageInit,
+			);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+
+		const bindings: ImportBinding[] = [];
+		for (const rawPart of fromImport[2].split(',')) {
+			const part = rawPart.trim();
+			if (!part) continue;
+			const alias = part.match(/^(\w+)\s+as\s+(\w+)$/);
+			if (alias) {
+				bindings.push({ imported: alias[1], local: alias[2] });
+			} else if (/^\w+$/.test(part)) {
+				bindings.push({ imported: part, local: part });
+			}
+		}
+		const parsed = makeParsedImport(
+			normalizePythonModuleSpecifier(fromImport[1]),
+			'named',
+			bindings,
+			isPackageInit,
+		);
+		if (parsed) imports.push(parsed);
+	}
+
+	return imports;
+}
+
+function normalizePythonModuleSpecifier(specifier: string): string {
+	const leadingDots = specifier.match(/^\.+/)?.[0].length ?? 0;
+	if (leadingDots === 0) return specifier;
+	const rest = specifier.slice(leadingDots).replace(/\./g, '/');
+	const prefix = leadingDots === 1 ? './' : '../'.repeat(leadingDots - 1);
+	return `${prefix}${rest}`;
+}
+
+function rustModulePathToSpecifier(
+	modulePath: string,
+	sourceFile?: string,
+	workspaceRoot?: string,
+): string {
+	const parts = modulePath.split('::').filter(Boolean);
+	if (parts.length === 0) return modulePath;
+	if (parts[0] === 'self') {
+		return `./${parts.slice(1).join('/')}`;
+	}
+	if (parts[0] === 'super') {
+		let superCount = 0;
+		while (parts[superCount] === 'super') superCount++;
+		return `${'../'.repeat(superCount)}${parts.slice(superCount).join('/')}`;
+	}
+	if (parts[0] === 'crate' && sourceFile && workspaceRoot) {
+		const target = path.join(workspaceRoot, ...parts.slice(1));
+		let relative = path
+			.relative(path.dirname(sourceFile), target)
+			.replace(/\\/g, '/');
+		if (!relative.startsWith('.')) relative = `./${relative}`;
+		return relative;
+	}
+	return modulePath;
+}
+
+function parseRustFileImports(
+	rawContent: string,
+	sourceFile?: string,
+	workspaceRoot?: string,
+): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const line of rawContent.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('use ')) continue;
+
+		const grouped = trimmed.match(/^use\s+(.+?)::\{(.+)\}\s*;?\s*$/);
+		if (grouped) {
+			const specifier = rustModulePathToSpecifier(
+				grouped[1].trim(),
+				sourceFile,
+				workspaceRoot,
+			);
+			const bindings: ImportBinding[] = [];
+			for (const rawPart of grouped[2].split(',')) {
+				const part = rawPart.trim();
+				if (!part) continue;
+				const alias = part.match(/^(\w+)\s+as\s+(\w+)$/);
+				if (alias) {
+					bindings.push({ imported: alias[1], local: alias[2] });
+				} else if (/^\w+$/.test(part)) {
+					const local =
+						part === 'self' ? grouped[1].split('::').pop() || grouped[1] : part;
+					bindings.push({ imported: part, local });
+				}
+			}
+			const parsed = makeParsedImport(specifier, 'named', bindings);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+
+		const simple = trimmed.match(/^use\s+(.+?)\s*;?\s*$/);
+		if (!simple) continue;
+		const rawPath = simple[1].trim();
+		const alias = rawPath.match(/^(.+?)\s+as\s+(\w+)$/);
+		const fullPath = (alias ? alias[1] : rawPath).trim();
+		const parts = fullPath.split('::').filter(Boolean);
+		const imported = parts.pop() ?? fullPath;
+		const specifier = rustModulePathToSpecifier(
+			parts.join('::') || fullPath,
+			sourceFile,
+			workspaceRoot,
+		);
+		const local = alias ? alias[2] : imported;
+		const parsed = makeParsedImport(
+			specifier,
+			'named',
+			/^\w+$/.test(imported) && /^\w+$/.test(local)
+				? [{ imported, local }]
+				: [],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseGoFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const parseSpec = (text: string) => {
+		const spec = text.trim();
+		if (!spec) return;
+		const aliased = spec.match(/^([\w._]+)\s+["`]([^"`]+)["`]$/);
+		if (aliased) {
+			if (aliased[1] === '_') {
+				const parsed = makeParsedImport(aliased[2], 'sideeffect', []);
+				if (parsed) imports.push(parsed);
+				return;
+			}
+			if (aliased[1] === '.') {
+				const parsed = makeParsedImport(aliased[2], 'namespace', [
+					{ imported: '*', local: '.' },
+				]);
+				if (parsed) imports.push(parsed);
+				return;
+			}
+			const parsed = makeParsedImport(aliased[2], 'named', [
+				{ imported: aliased[2], local: aliased[1] },
+			]);
+			if (parsed) imports.push(parsed);
+			return;
+		}
+
+		const simple = spec.match(/^["`]([^"`]+)["`]$/);
+		if (simple) {
+			const parsed = makeParsedImport(simple[1], 'namespace', []);
+			if (parsed) imports.push(parsed);
+		}
+	};
+
+	for (const block of content.matchAll(/import\s*\(([\s\S]*?)\)/g)) {
+		for (const line of block[1].split(/\r?\n/)) parseSpec(line);
+	}
+	const withoutBlocks = content.replace(/import\s*\([\s\S]*?\)/g, '');
+	for (const match of withoutBlocks.matchAll(/^\s*import\s+(.+)$/gm)) {
+		parseSpec(match[1]);
+	}
 	return imports;
 }
 
@@ -1249,15 +1584,29 @@ export function scanFile(
 			({ exports, exportLines } = collectExports(
 				_internals.extractTSSymbols(relativePath, absoluteRoot),
 			));
-		} else if (ext === '.py') {
+		} else if (ext === '.py' || ext === '.pyw') {
 			const relativePath = path.relative(absoluteRoot, filePath);
 			({ exports, exportLines } = collectExports(
 				_internals.extractPythonSymbols(relativePath, absoluteRoot),
 			));
+		} else if (ext === '.rs') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractRustSymbols(relativePath, absoluteRoot),
+			));
+		} else if (ext === '.go') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractGoSymbols(relativePath, absoluteRoot),
+			));
 		}
 
 		// Parse imports to get specifiers with types
-		const parsedImports = _internals.parseFileImports(content);
+		const parsedImports = _internals.parseFileImports(
+			content,
+			filePath,
+			absoluteRoot,
+		);
 
 		// Comment-stripped content for conservative call-site usage detection.
 		// Computed once per file; only needed when there are imports to attribute.
@@ -1379,7 +1728,11 @@ export async function scanFileAsync(
 		const fallback = scanFile(filePath, absoluteRoot, maxFileSize);
 		let parsedImports: ParsedImport[] = [];
 		try {
-			parsedImports = _internals.parseFileImports(content);
+			parsedImports = _internals.parseFileImports(
+				content,
+				filePath,
+				absoluteRoot,
+			);
 		} catch {
 			parsedImports = [];
 		}
@@ -1414,9 +1767,25 @@ export async function scanFileAsync(
 		exportRanges[d.name] = { startLine: d.startLine, endLine: d.endLine };
 	}
 	const exportsSet = new Set(exports);
+	const isPythonPackageInit =
+		grammarId === 'python' &&
+		['__init__.py', '__init__.pyw'].includes(path.basename(filePath));
 	for (const imp of facts.imports) {
-		if (!imp.reExport || !imp.exportedBindings) continue;
-		for (const binding of imp.exportedBindings) {
+		const packageInitBindings =
+			isPythonPackageInit && imp.bindings.length > 0
+				? imp.bindings
+						.filter((binding) => !binding.local.startsWith('_'))
+						.map((binding) => ({
+							imported: binding.imported,
+							exported: binding.local,
+						}))
+				: [];
+		const exportedBindings =
+			imp.reExport && imp.exportedBindings
+				? imp.exportedBindings
+				: packageInitBindings;
+		if (exportedBindings.length === 0) continue;
+		for (const binding of exportedBindings) {
 			if (binding.imported === '*') {
 				// Include namespace re-export name in exports for dead_exports
 				// visibility, but skip per-symbol edge creation (conservative).
@@ -1597,14 +1966,27 @@ export async function scanFileAsync(
 		});
 	}
 	for (const imp of facts.imports) {
-		if (!imp.reExport || !imp.exportedBindings) continue;
+		const packageInitBindings =
+			isPythonPackageInit && imp.bindings.length > 0
+				? imp.bindings
+						.filter((binding) => !binding.local.startsWith('_'))
+						.map((binding) => ({
+							imported: binding.imported,
+							exported: binding.local,
+						}))
+				: [];
+		const exportedBindings =
+			imp.reExport && imp.exportedBindings
+				? imp.exportedBindings
+				: packageInitBindings;
+		if (exportedBindings.length === 0) continue;
 		const resolvedTarget = resolveModuleSpecifier(
 			absoluteRoot,
 			filePath,
 			imp.specifier,
 		);
 		if (!resolvedTarget) continue;
-		for (const binding of imp.exportedBindings) {
+		for (const binding of exportedBindings) {
 			if (binding.imported === '*') continue;
 			const key =
 				filePath +
@@ -1746,14 +2128,28 @@ export function buildWorkspaceGraph(
 				({ exports, exportLines } = collectExports(
 					_internals.extractTSSymbols(relativePath, absoluteRoot),
 				));
-			} else if (ext === '.py') {
+			} else if (ext === '.py' || ext === '.pyw') {
 				const relativePath = path.relative(absoluteRoot, filePath);
 				({ exports, exportLines } = collectExports(
 					_internals.extractPythonSymbols(relativePath, absoluteRoot),
 				));
+			} else if (ext === '.rs') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractRustSymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.go') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractGoSymbols(relativePath, absoluteRoot),
+				));
 			}
 
-			parsedImports = _internals.parseFileImports(content);
+			parsedImports = _internals.parseFileImports(
+				content,
+				filePath,
+				absoluteRoot,
+			);
 		} catch {
 			// Skip malformed file without aborting entire graph build
 			continue;

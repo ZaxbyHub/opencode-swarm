@@ -171,7 +171,15 @@ const QUERIES: Record<
 			(struct_item
 				name: (type_identifier) @struct.name
 			) @struct.def
-			(impl_item type: (type_identifier) @impl.name) @impl.def
+			(enum_item
+				name: (type_identifier) @enum.name
+			) @enum.def
+			(trait_item
+				name: (type_identifier) @trait.name
+			) @trait.def
+			(mod_item
+				name: (identifier) @mod.name
+			) @mod.def
 		`,
 		imports: `
 			(use_declaration) @import
@@ -184,7 +192,10 @@ const QUERIES: Record<
 	go: {
 		defs: `
 			(function_declaration name: (identifier) @func.name) @func.def
+			(method_declaration name: (field_identifier) @method.name) @method.def
 			(type_declaration (type_spec name: (type_identifier) @type.name)) @type.def
+			(var_declaration (var_spec name: (identifier) @const.name)) @const.def
+			(const_declaration (const_spec name: (identifier) @const.name)) @const.def
 		`,
 		imports: `
 			(import_declaration) @import
@@ -347,7 +358,8 @@ const CAPTURE_KIND: Record<string, FileSymbolFacts['defs'][0]['kind']> = {
 	enum: 'enum',
 	method: 'method',
 	struct: 'type',
-	impl: 'type',
+	trait: 'interface',
+	mod: 'type',
 	object: 'class',
 	mixin: 'type',
 	protocol: 'interface',
@@ -377,6 +389,11 @@ const DEF_TYPES = new Set([
 	'class_definition',
 	'lexical_declaration',
 	'impl_item',
+	'enum_item',
+	'trait_item',
+	'mod_item',
+	'var_declaration',
+	'const_declaration',
 	'method',
 	'class',
 ]);
@@ -509,9 +526,23 @@ function buildFacts(
 		if (!defCap || nameCaps.length === 0) continue;
 
 		const kindKey = defCap.name.replace(/\.def$/, '');
-		const kind = CAPTURE_KIND[kindKey] ?? 'function';
 		const originalDefNode = asTs(defCap.node);
 		let defNode = originalDefNode;
+		let kind = CAPTURE_KIND[kindKey] ?? 'function';
+		if (
+			grammarId === 'python' &&
+			kindKey === 'func' &&
+			hasAncestorOfType(originalDefNode, 'class_definition')
+		) {
+			kind = 'method';
+		}
+		if (
+			grammarId === 'rust' &&
+			kindKey === 'func' &&
+			hasAncestorOfType(originalDefNode, 'impl_item')
+		) {
+			kind = 'method';
+		}
 		const explicitExported = exportNodes.some((en) =>
 			isNodeInside(en, defNode),
 		);
@@ -542,6 +573,33 @@ function buildFacts(
 				}
 			}
 		}
+		if (
+			grammarId === 'python' &&
+			defNode.parent?.type === 'decorated_definition'
+		) {
+			defNode = asTs(defNode.parent);
+		}
+
+		// For Python methods, determine if the parent class is exported
+		let pythonParentClassExported = false;
+		if (grammarId === 'python' && kind === 'method') {
+			let current: TsNode | null = originalDefNode.parent;
+			while (current) {
+				if (current.type === 'class_definition') {
+					const classNameNode = current.children?.find(
+						(c): c is TsNode => c != null && c.type === 'identifier',
+					);
+					if (classNameNode) {
+						const className = classNameNode.text;
+						pythonParentClassExported = pythonAllNames
+							? pythonAllNames.has(className)
+							: !className.startsWith('_');
+					}
+					break;
+				}
+				current = current.parent;
+			}
+		}
 
 		for (const nc of nameCaps) {
 			const nameNode = asTs(nc.node);
@@ -557,6 +615,7 @@ function buildFacts(
 				explicitExported,
 				commonJsExport,
 				pythonAllNames,
+				pythonParentClassExported,
 			});
 			const exportedName = isDefaultExport
 				? 'default'
@@ -580,20 +639,39 @@ function buildFacts(
 		entry: FileSymbolFacts['imports'][0];
 	}> = [];
 	const addImport = (
-		entry: FileSymbolFacts['imports'][0] | null,
+		entry: FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null,
 		node: TsNode,
 	) => {
 		if (!entry) return;
-		importsWithIndex.push({
-			index: node.startIndex,
-			entry: entry.reExport
-				? {
-						...entry,
-						startLine: node.startPosition.row + 1,
-						endLine: node.endPosition.row + 1,
-					}
-				: entry,
-		});
+		for (const item of Array.isArray(entry) ? entry : [entry]) {
+			const pythonExportedBindings =
+				grammarId === 'python' && pythonAllNames && item.bindings.length > 0
+					? item.bindings
+							.filter((binding) => pythonAllNames.has(binding.local))
+							.map((binding) => ({
+								imported: binding.imported,
+								exported: binding.local,
+							}))
+					: [];
+			const normalizedItem =
+				pythonExportedBindings.length > 0
+					? {
+							...item,
+							reExport: true,
+							exportedBindings: pythonExportedBindings,
+						}
+					: item;
+			importsWithIndex.push({
+				index: node.startIndex,
+				entry: normalizedItem.reExport
+					? {
+							...normalizedItem,
+							startLine: node.startPosition.row + 1,
+							endLine: node.endPosition.row + 1,
+						}
+					: normalizedItem,
+			});
+		}
 	};
 	for (const m of importMatches) {
 		const importCap = m.captures.find((c) => c.name === 'import');
@@ -603,16 +681,22 @@ function buildFacts(
 			// Go block import: `import ( "fmt" "os" )` — find the
 			// import_spec_list child, then iterate its import_spec children.
 			if (grammarId === 'go' && rawText.startsWith('import (')) {
+				const seenGoSpecifiers = new Set<string>();
 				const specListNode = importNode.children.find(
 					(c): c is TsNode => c !== null && c.type === 'import_spec_list',
 				);
 				if (specListNode) {
 					for (const spec of asTs(specListNode).children) {
 						if (spec && spec.type === 'import_spec') {
-							const parsed = parseGoImport(spec.text.trim());
+							const parsed = parseGoImportHardened(spec.text.trim());
+							if (parsed) seenGoSpecifiers.add(parsed.specifier);
 							addImport(parsed, asTs(spec));
 						}
 					}
+				}
+				for (const parsed of parseGoBlockImports(rawText)) {
+					if (seenGoSpecifiers.has(parsed.specifier)) continue;
+					addImport(parsed, importNode);
 				}
 			} else {
 				const parsed = parseImport(grammarId, rawText);
@@ -899,14 +983,14 @@ function parseEsmImport(text: string): FileSymbolFacts['imports'][0] | null {
 function parseImport(
 	grammarId: string,
 	text: string,
-): FileSymbolFacts['imports'][0] | null {
+): FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null {
 	switch (grammarId) {
 		case 'python':
-			return parsePythonImport(text);
+			return parsePythonImportHardened(text);
 		case 'rust':
-			return parseRustUse(text);
+			return parseRustUseHardened(text);
 		case 'go':
-			return parseGoImport(text);
+			return parseGoImportHardened(text);
 		case 'java':
 			return parseJavaImport(text);
 		case 'kotlin':
@@ -932,7 +1016,9 @@ function parseImport(
 	}
 }
 
-function parsePythonImport(text: string): FileSymbolFacts['imports'][0] | null {
+function _parsePythonImport(
+	text: string,
+): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// import foo            → specifier: 'foo',  bindings: []
 	// import foo as bar     → specifier: 'foo',  bindings: [{imported:'foo', local:'bar'}]
@@ -970,7 +1056,66 @@ function parsePythonImport(text: string): FileSymbolFacts['imports'][0] | null {
 	return null;
 }
 
-function parseRustUse(text: string): FileSymbolFacts['imports'][0] | null {
+function parsePythonImportHardened(
+	text: string,
+): FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null {
+	const t = text.trim();
+	const fullImport = t.match(/^import\s+(.+)$/);
+	if (fullImport) {
+		const entries: FileSymbolFacts['imports'] = [];
+		for (const rawPart of fullImport[1].split(',')) {
+			const part = rawPart.trim();
+			if (!part) continue;
+			const alias = part.match(/^([\w.]+)\s+as\s+(\w+)$/);
+			const specifier = alias ? alias[1] : part;
+			const local = alias ? alias[2] : specifier.split('.')[0];
+			if (!specifier || !/^\w+$/.test(local)) continue;
+			entries.push({
+				specifier,
+				importType: alias ? 'named' : 'namespace',
+				bindings: [{ imported: specifier, local }],
+			});
+		}
+		if (entries.length === 0) return null;
+		return entries.length === 1 ? entries[0] : entries;
+	}
+
+	const fromImport = t.match(/^from\s+(\S+)\s+import\s+(.+)$/);
+	if (!fromImport) return null;
+	const bindings: Array<{ imported: string; local: string }> = [];
+	for (const rawPart of fromImport[2].split(',')) {
+		const part = rawPart.trim();
+		if (!part) continue;
+		if (part === '*') {
+			return {
+				specifier: normalizePythonModuleSpecifier(fromImport[1]),
+				importType: 'namespace',
+				bindings: [],
+			};
+		}
+		const alias = part.match(/^(\w+)\s+as\s+(\w+)$/);
+		if (alias) {
+			bindings.push({ imported: alias[1], local: alias[2] });
+		} else if (/^\w+$/.test(part)) {
+			bindings.push({ imported: part, local: part });
+		}
+	}
+	return {
+		specifier: normalizePythonModuleSpecifier(fromImport[1]),
+		importType: 'named',
+		bindings,
+	};
+}
+
+function normalizePythonModuleSpecifier(specifier: string): string {
+	const leadingDots = specifier.match(/^\.+/)?.[0].length ?? 0;
+	if (leadingDots === 0) return specifier;
+	const rest = specifier.slice(leadingDots).replace(/\./g, '/');
+	const prefix = leadingDots === 1 ? './' : '../'.repeat(leadingDots - 1);
+	return `${prefix}${rest}`;
+}
+
+function _parseRustUse(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// use foo::bar::baz;
 	// use foo::bar::baz as alias;
@@ -994,7 +1139,67 @@ function parseRustUse(text: string): FileSymbolFacts['imports'][0] | null {
 	return null;
 }
 
-function parseGoImport(text: string): FileSymbolFacts['imports'][0] | null {
+function parseRustUseHardened(
+	text: string,
+): FileSymbolFacts['imports'][0] | null {
+	const t = text.trim();
+	const aliased = t.match(/^use\s+(.+?)\s+as\s+(\w+)\s*;?\s*$/);
+	if (aliased) {
+		const parts = aliased[1].trim().split('::').filter(Boolean);
+		const imported = parts.pop() ?? aliased[1].trim();
+		const specifier = parts.length > 0 ? parts.join('::') : aliased[1].trim();
+		return {
+			specifier,
+			importType: 'named',
+			bindings: [{ imported, local: aliased[2] }],
+		};
+	}
+
+	const grouped = t.match(/^use\s+(.+?)::\{(.+)\}\s*;?\s*$/);
+	if (grouped) {
+		const base = grouped[1].trim();
+		const bindings: Array<{ imported: string; local: string }> = [];
+		for (const rawPart of grouped[2].split(',')) {
+			const part = rawPart.trim();
+			if (!part) continue;
+			const alias = part.match(/^(\w+)\s+as\s+(\w+)$/);
+			if (alias) {
+				bindings.push({ imported: alias[1], local: alias[2] });
+			} else if (/^\w+$/.test(part)) {
+				const local = part === 'self' ? base.split('::').pop() || base : part;
+				bindings.push({ imported: part, local });
+			}
+		}
+		return { specifier: base, importType: 'named', bindings };
+	}
+
+	const simple = t.match(/^use\s+(.+?)\s*;?\s*$/);
+	if (!simple) return null;
+	const parts = simple[1].trim().split('::').filter(Boolean);
+	const imported = parts.pop() ?? simple[1].trim();
+	const specifier = parts.length > 0 ? parts.join('::') : simple[1].trim();
+	const local = imported;
+	return {
+		specifier,
+		importType: 'named',
+		bindings: /^\w+$/.test(imported) ? [{ imported, local }] : [],
+	};
+}
+
+function parseGoBlockImports(text: string): FileSymbolFacts['imports'] {
+	const entries: FileSymbolFacts['imports'] = [];
+	const body = text.match(/^import\s*\(([\s\S]*?)\)\s*$/)?.[1];
+	if (!body) return entries;
+	for (const line of body.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith('//')) continue;
+		const parsed = parseGoImportHardened(trimmed);
+		if (parsed) entries.push(parsed);
+	}
+	return entries;
+}
+
+function _parseGoImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// Block import: `import ( "fmt" "os" )` — return null here; buildFacts
 	// detects block imports via the raw text starting with 'import (' and
@@ -1031,6 +1236,42 @@ function parseGoImport(text: string): FileSymbolFacts['imports'][0] | null {
 		};
 	}
 	return null;
+}
+
+function parseGoImportHardened(
+	text: string,
+): FileSymbolFacts['imports'][0] | null {
+	const t = text.trim();
+	if (t.startsWith('import (')) return null;
+
+	const aliased =
+		t.match(/^([\w._]+)\s+["`]([^"`]+)["`]$/) ??
+		t.match(/^import\s+([\w._]+)\s+["`]([^"`]+)["`]/);
+	if (aliased) {
+		if (aliased[1] === '_') {
+			return { specifier: aliased[2], importType: 'sideeffect', bindings: [] };
+		}
+		if (aliased[1] === '.') {
+			return {
+				specifier: aliased[2],
+				importType: 'namespace',
+				bindings: [{ imported: '*', local: '.' }],
+			};
+		}
+		return {
+			specifier: aliased[2],
+			importType: 'named',
+			bindings: [{ imported: aliased[2], local: aliased[1] }],
+		};
+	}
+
+	const simple = t.match(/^import\s+["`]([^"`]+)["`]|^["`]([^"`]+)["`]$/);
+	if (!simple) return null;
+	return {
+		specifier: simple[1] ?? simple[2],
+		importType: 'namespace',
+		bindings: [],
+	};
 }
 
 function parseJavaImport(text: string): FileSymbolFacts['imports'][0] | null {

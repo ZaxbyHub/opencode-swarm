@@ -528,6 +528,89 @@ describe('repo_map: context_pack', () => {
 		}
 	});
 
+	it('returns context for Python package-root exports and Rust/Go symbols', async () => {
+		fs.mkdirSync(path.join(tmp, 'src/pkg'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'src/pkg/__init__.py'),
+			"__all__ = ['public_fn']\nfrom .api import public_fn\n",
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src/pkg/api.py'),
+			'@cached\nasync def public_fn():\n    return 1\n',
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src/consumer.py'),
+			'from .pkg import public_fn\n\n\ndef call_it():\n    return public_fn()\n',
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src/lib.rs'),
+			'use crate::helper::Worker;\npub enum Mode { Fast }\npub trait Runner {}\npub fn run(_: Worker) {}\n',
+		);
+		fs.writeFileSync(path.join(tmp, 'src/helper.rs'), 'pub struct Worker;\n');
+		fs.writeFileSync(
+			path.join(tmp, 'src/main.go'),
+			'package main\n\nfunc PublicFunc() {}\n',
+		);
+
+		await call({ action: 'build' });
+
+		const py = JSON.parse(
+			await call({
+				action: 'context_pack',
+				file: 'src/pkg/__init__.py',
+				symbol: 'public_fn',
+			}),
+		) as {
+			success: boolean;
+			target: { file: string; symbol: string };
+			spans: Array<{ file: string; startLine: number }>;
+		};
+		expect(py.success).toBe(true);
+		expect(py.target).toEqual({
+			file: 'src/pkg/__init__.py',
+			symbol: 'public_fn',
+		});
+		expect(py.spans).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					file: 'src/pkg/__init__.py',
+					startLine: 2,
+				}),
+			]),
+		);
+
+		const rust = JSON.parse(
+			await call({
+				action: 'context_pack',
+				file: 'src/lib.rs',
+				symbol: 'Mode',
+			}),
+		) as { success: boolean; spans: Array<{ file: string }> };
+		expect(rust.success).toBe(true);
+		expect(rust.spans).toEqual(
+			expect.arrayContaining([expect.objectContaining({ file: 'src/lib.rs' })]),
+		);
+		const rustDeps = JSON.parse(
+			await call({ action: 'dependencies', file: 'src/lib.rs' }),
+		) as { success: boolean; dependencies: Array<{ file: string }> };
+		expect(rustDeps.success).toBe(true);
+		expect(rustDeps.dependencies.map((d) => d.file)).toContain('src/helper.rs');
+
+		const go = JSON.parse(
+			await call({
+				action: 'context_pack',
+				file: 'src/main.go',
+				symbol: 'PublicFunc',
+			}),
+		) as { success: boolean; spans: Array<{ file: string }> };
+		expect(go.success).toBe(true);
+		expect(go.spans).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ file: 'src/main.go' }),
+			]),
+		);
+	});
+
 	it('missing file: rejects context_pack without file', async () => {
 		await call({ action: 'build' });
 		const out = await call({ action: 'context_pack', symbol: 'add' });
