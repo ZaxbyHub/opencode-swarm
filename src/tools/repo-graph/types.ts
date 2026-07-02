@@ -225,6 +225,7 @@ export const IMPORT_TYPE_VALUES = [
 	'namespace',
 	'require',
 	'sideeffect',
+	'type',
 ] as const;
 export type ImportType = (typeof IMPORT_TYPE_VALUES)[number];
 
