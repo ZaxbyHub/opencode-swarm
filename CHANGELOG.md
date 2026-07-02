@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.103.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.0...v7.103.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **repo-graph:** add type to IMPORT_TYPE_VALUES union (was unstaged) ([fcebb05](https://github.com/ZaxbyHub/opencode-swarm/commit/fcebb05df97aa2ef9134d54b7e74c84a8d26d045))
+* **repo-graph:** address review findings for ts js symbol graph ([f5d12ea](https://github.com/ZaxbyHub/opencode-swarm/commit/f5d12ea35b89f506f621b1c6d5334df2341acd06))
+* **repo-graph:** harden ts js symbol graph ([b654aa6](https://github.com/ZaxbyHub/opencode-swarm/commit/b654aa6b01d6f6bdf012713517f6c7e8b9a5f7ad))
+
 ## [7.103.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.102.0...v7.103.0) (2026-07-02)
 
 
