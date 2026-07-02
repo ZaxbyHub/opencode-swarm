@@ -53,6 +53,39 @@ import { readSwarmFileAsync, safeHook } from './utils.js';
 const INJECTION_SENTINEL = `${String.fromCharCode(0x200c)}[[KNOWLEDGE-INJECTED]]`;
 const defaultSearchKnowledge = searchKnowledge;
 
+function getRenderedEntryIds(
+	entries: RankedEntry[],
+	renderedBlock: string | null,
+	cfg: KnowledgeConfig,
+	currentProject?: string,
+): string[] {
+	if (!renderedBlock) return [];
+	const maxDisplayChars = cfg.max_lesson_display_chars ?? 120;
+	const ids: string[] = [];
+	for (const entry of entries) {
+		if (renderedBlock.includes(`- id: ${entry.id}`)) {
+			ids.push(entry.id);
+			continue;
+		}
+		let lessonText = sanitizeLessonForContext(entry.lesson);
+		if (lessonText.length > maxDisplayChars) {
+			lessonText = `${lessonText.slice(0, maxDisplayChars)}…`;
+		}
+		const rawSource =
+			entry.tier === 'hive' && 'source_project' in entry
+				? ((entry as { source_project?: string }).source_project ?? null)
+				: null;
+		const source =
+			rawSource !== null && rawSource !== currentProject
+				? ` (from: ${sanitizeLessonForContext(rawSource)})`
+				: '';
+		if (renderedBlock.includes(`${lessonText}${source}`)) {
+			ids.push(entry.id);
+		}
+	}
+	return ids;
+}
+
 /**
  * Builds a compact knowledge block from ranked entries, respecting a character budget.
  * Returns the formatted block string, or null if entries is empty.
@@ -604,6 +637,12 @@ export function createKnowledgeInjectorHook(
 			ctx.targetAgent ?? '',
 			ctx.taskId ?? '',
 			(ctx.filePaths ?? []).slice(0, 8).join(','),
+			ctx.lastUserMessage
+				? createHash('sha1')
+						.update(ctx.lastUserMessage)
+						.digest('hex')
+						.slice(0, 16)
+				: '',
 		].join('|');
 		return createHash('sha1').update(parts).digest('hex').slice(0, 16);
 	}
@@ -611,6 +650,7 @@ export function createKnowledgeInjectorHook(
 	let lastSeenCacheKey: string | null = null;
 	let cachedInjectionText: string | null = null;
 	let cachedShownIds: string[] = [];
+	let cachedCriticalIds: string[] = [];
 
 	return safeHook(
 		async (
@@ -721,10 +761,24 @@ export function createKnowledgeInjectorHook(
 			if (cacheKey === lastSeenCacheKey && cachedInjectionText !== null) {
 				// Same context, cached text available — re-inject (handles compaction).
 				injectKnowledgeMessage(output, cachedInjectionText);
+				const sessionID = systemMsg?.info?.sessionID;
+				if (sessionID) {
+					if (cachedCriticalIds.length > 0) {
+						setCriticalShownIds(sessionID, {
+							ids: cachedCriticalIds,
+							phase: `Phase ${currentPhase}`,
+							generatedAt: Date.now(),
+						});
+					} else {
+						clearCriticalShownIds(sessionID);
+					}
+				}
 				return;
 			}
 			lastSeenCacheKey = cacheKey;
 			cachedInjectionText = null;
+			cachedShownIds = [];
+			cachedCriticalIds = [];
 
 			// Build legacy ProjectContext for the lesson-block fallback path.
 			const _context: ProjectContext = {
@@ -753,8 +807,6 @@ export function createKnowledgeInjectorHook(
 			// in-scope, low-confidence directive could never surface. Ranking +
 			// MMR + the cold-start bonus now govern which entries appear.
 			const filteredEntries = search.results;
-			// Track which IDs we showed so application-tracking can split shown from applied.
-			cachedShownIds = filteredEntries.map((e) => e.id);
 
 			// Build drift/briefing preamble into a LOCAL variable so cachedInjectionText
 			// is never mutated before we know whether entries exist. This prevents the
@@ -798,6 +850,12 @@ export function createKnowledgeInjectorHook(
 
 			// If no knowledge entries AND no drift/briefing, nothing to inject
 			if (filteredEntries.length === 0) {
+				const sessionID = systemMsg?.info?.sessionID;
+				if (sessionID) {
+					clearCriticalShownIds(sessionID);
+				}
+				cachedShownIds = [];
+				cachedCriticalIds = [];
 				if (freshPreamble === null) return;
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
@@ -839,6 +897,25 @@ export function createKnowledgeInjectorHook(
 				config,
 				projectName,
 			);
+			const renderedDirectiveIds = getRenderedEntryIds(
+				directiveEntries,
+				directiveBlock,
+				config,
+				projectName,
+			);
+			const renderedIdSet = new Set([
+				...renderedDirectiveIds,
+				...getRenderedEntryIds(
+					filteredEntries,
+					lessonBlock,
+					config,
+					projectName,
+				),
+			]);
+			const renderedDirectiveIdSet = new Set(renderedDirectiveIds);
+			cachedShownIds = filteredEntries
+				.map((entry) => entry.id)
+				.filter((id) => renderedIdSet.has(id));
 
 			const parts: string[] = [];
 			let remaining = effectiveBudget;
@@ -919,11 +996,13 @@ export function createKnowledgeInjectorHook(
 			const sessionID = systemMsg?.info?.sessionID;
 			if (sessionID) {
 				const criticalIds = filteredEntries
+					.filter((e) => renderedDirectiveIdSet.has(e.id))
 					.filter(
 						(e) =>
 							e.directive_priority === 'critical' && e.status !== 'archived',
 					)
 					.map((e) => e.id);
+				cachedCriticalIds = criticalIds;
 				if (criticalIds.length > 0) {
 					setCriticalShownIds(sessionID, {
 						ids: criticalIds,

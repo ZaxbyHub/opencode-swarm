@@ -12,11 +12,14 @@ import {
 	it,
 	mock,
 } from 'bun:test';
-import { rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import type {
+	HiveKnowledgeEntry,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
 import { knowledge_query } from '../../../src/tools/knowledge-query';
 
 describe('knowledge-query tool verification tests', () => {
@@ -69,6 +72,25 @@ describe('knowledge-query tool verification tests', () => {
 		writeFileSync(
 			swarmPath,
 			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+			'utf-8',
+		);
+	}
+
+	function writeHiveKnowledge(entries: HiveKnowledgeEntry[]): void {
+		const hivePath = path.join(tmpDir, '.swarm', 'shared-learnings.jsonl');
+		writeFileSync(
+			hivePath,
+			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+			'utf-8',
+		);
+	}
+
+	function writeProjectConfig(config: Record<string, unknown>): void {
+		const configDir = path.join(tmpDir, '.opencode');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			path.join(configDir, 'opencode-swarm.json'),
+			JSON.stringify(config),
 			'utf-8',
 		);
 	}
@@ -1122,6 +1144,63 @@ describe('knowledge-query tool verification tests', () => {
 		it('Hive tier returns no results when no hive file exists', async () => {
 			const result = await knowledge_query.execute({ tier: 'hive' });
 			expect(result).toContain("No knowledge entries found for tier 'hive'");
+		});
+
+		it('regression KQ-001: scope_filter applies to hive query results', async () => {
+			writeProjectConfig({
+				knowledge: {
+					scope_filter: ['global'],
+				},
+			});
+			writeHiveKnowledge([
+				{
+					id: 'hive-global-visible',
+					tier: 'hive',
+					lesson: 'Global hive lesson',
+					category: 'process',
+					tags: [],
+					scope: 'global',
+					confidence: 0.9,
+					status: 'promoted',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					source_project: 'shared-project',
+					encounter_score: 0.8,
+				} as HiveKnowledgeEntry,
+				{
+					id: 'hive-project-hidden',
+					tier: 'hive',
+					lesson: 'Project hive lesson',
+					category: 'process',
+					tags: [],
+					scope: 'project',
+					confidence: 0.9,
+					status: 'promoted',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					source_project: 'shared-project',
+					encounter_score: 0.8,
+				} as HiveKnowledgeEntry,
+			]);
+
+			const result = await knowledge_query.execute({ tier: 'hive' });
+
+			expect(result).toContain('hive-global-visible');
+			expect(result).not.toContain('hive-project-hidden');
 		});
 	});
 

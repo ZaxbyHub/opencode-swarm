@@ -187,6 +187,7 @@ function filterHiveEntries(
 	entries: HiveKnowledgeEntry[],
 	filters: FilterOptions,
 	suppressedLessons: Set<string>,
+	scopeFilter?: string[],
 ): HiveKnowledgeEntry[] {
 	return entries.filter((entry) => {
 		if (filters.status) {
@@ -201,6 +202,12 @@ function filterHiveEntries(
 		}
 		if (filters.minScore !== undefined && entry.confidence < filters.minScore) {
 			return false;
+		}
+		if (scopeFilter && scopeFilter.length > 0) {
+			const entryScope = entry.scope ?? 'global';
+			if (!scopeFilter.some((pattern) => entryScope === pattern)) {
+				return false;
+			}
 		}
 		if (suppressedLessons.has(normalize(entry.lesson))) {
 			return false;
@@ -363,6 +370,7 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 				hiveEntries,
 				filters,
 				suppressedLessons,
+				scopeFilter,
 			);
 			for (const entry of filtered) {
 				results.push({ entry, tier: 'hive' });

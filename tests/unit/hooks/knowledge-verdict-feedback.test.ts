@@ -51,11 +51,12 @@ function ensureSwarmDir(dir: string): string {
 function makeReceiptEvent(overrides: {
 	type: string;
 	knowledge_id: string;
+	event_id?: string;
 	timestamp?: string;
 }): string {
 	return JSON.stringify({
 		type: overrides.type,
-		event_id: randomUUID(),
+		event_id: overrides.event_id ?? randomUUID(),
 		trace_id: randomUUID(),
 		knowledge_id: overrides.knowledge_id,
 		timestamp: overrides.timestamp ?? new Date().toISOString(),
@@ -70,6 +71,7 @@ function writeEvents(
 	events: Array<{
 		type: string;
 		knowledge_id: string;
+		event_id?: string;
 		timestamp?: string;
 	}>,
 ): void {
@@ -238,6 +240,59 @@ describe('applyKnowledgeVerdictFeedback', () => {
 		// Only the 2 new applied events count → applied (2) > violated+ignored (0) → boost
 		const entries = await readKnowledgeById(dir);
 		expect(entries.get(kid)!.confidence).toBeCloseTo(0.53); // 0.5 + 0.03
+	});
+
+	test('regression FEEDBACK-001: returns max processed event timestamp as marker', async () => {
+		const kid = randomUUID();
+		writeKnowledgeEntries(dir, [
+			{ id: kid, lesson: 'marker tracks processed events', confidence: 0.5 },
+		]);
+		const first = '2026-06-01T12:00:00.001Z';
+		const second = '2026-06-01T12:00:00.003Z';
+		writeEvents(dir, [
+			{ type: 'applied', knowledge_id: kid, timestamp: second },
+			{ type: 'applied', knowledge_id: kid, timestamp: first },
+		]);
+
+		const result = await applyKnowledgeVerdictFeedback(dir);
+
+		expect(result.processed).toBe(1);
+		expect(result.bumps).toBe(1);
+		expect(result.lastProcessedTimestamp).toBe(second);
+	});
+
+	test('regression FEEDBACK-002: event id marker includes same-timestamp tail events', async () => {
+		const kid = randomUUID();
+		writeKnowledgeEntries(dir, [
+			{ id: kid, lesson: 'same timestamp tail marker', confidence: 0.5 },
+		]);
+		const timestamp = '2026-06-01T12:00:00.005Z';
+		writeEvents(dir, [
+			{
+				type: 'violated',
+				knowledge_id: kid,
+				event_id: 'marker-event',
+				timestamp,
+			},
+			{
+				type: 'applied',
+				knowledge_id: kid,
+				event_id: 'tail-event',
+				timestamp,
+			},
+		]);
+
+		const result = await applyKnowledgeVerdictFeedback(dir, {
+			sinceTimestamp: timestamp,
+			sinceEventId: 'marker-event',
+		});
+
+		expect(result.processed).toBe(1);
+		expect(result.bumps).toBe(1);
+		expect(result.lastProcessedTimestamp).toBe(timestamp);
+		expect(result.lastProcessedEventId).toBe('tail-event');
+		const entries = await readKnowledgeById(dir);
+		expect(entries.get(kid)!.confidence).toBeCloseTo(0.53);
 	});
 
 	// --------------------------------------------------------------------------

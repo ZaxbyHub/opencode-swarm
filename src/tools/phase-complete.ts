@@ -1181,33 +1181,38 @@ export async function executePhaseComplete(
 			'verdict-feedback-last-processed.json',
 		);
 		let verdictSinceTimestamp: string | undefined;
+		let verdictSinceEventId: string | undefined;
 		try {
 			const markerData = JSON.parse(
 				fs.readFileSync(verdictMarkerPath, 'utf-8'),
 			);
 			verdictSinceTimestamp = markerData.lastProcessedTimestamp;
+			verdictSinceEventId = markerData.lastProcessedEventId;
 		} catch {
 			// marker doesn't exist yet — process all entries
 		}
 
-		const verdictMarkerTimestamp = new Date().toISOString();
 		const { applyKnowledgeVerdictFeedback } = await import(
 			'../hooks/knowledge-events.js'
 		);
 		const verdictResult = await applyKnowledgeVerdictFeedback(dir, {
 			sinceTimestamp: verdictSinceTimestamp,
+			sinceEventId: verdictSinceEventId,
 		});
 
-		try {
-			fs.writeFileSync(
-				verdictMarkerPath,
-				JSON.stringify({
-					lastProcessedTimestamp: verdictMarkerTimestamp,
-				}),
-				'utf-8',
-			);
-		} catch {
-			// best-effort marker write
+		if (verdictResult.lastProcessedTimestamp) {
+			try {
+				fs.writeFileSync(
+					verdictMarkerPath,
+					JSON.stringify({
+						lastProcessedTimestamp: verdictResult.lastProcessedTimestamp,
+						lastProcessedEventId: verdictResult.lastProcessedEventId,
+					}),
+					'utf-8',
+				);
+			} catch {
+				// best-effort marker write
+			}
 		}
 
 		if (verdictResult.bumps > 0) {

@@ -1030,12 +1030,25 @@ const VERDICT_CONFIDENCE_DECAY = 0.05;
  */
 export async function applyKnowledgeVerdictFeedback(
 	directory: string,
-	options?: { sinceTimestamp?: string },
-): Promise<{ processed: number; bumps: number }> {
+	options?: { sinceTimestamp?: string; sinceEventId?: string },
+): Promise<{
+	processed: number;
+	bumps: number;
+	lastProcessedTimestamp?: string;
+	lastProcessedEventId?: string;
+}> {
 	try {
 		const events = await readKnowledgeEvents(directory);
+		const markerIndex =
+			options?.sinceTimestamp && options.sinceEventId
+				? events.findIndex(
+						(e) =>
+							e.timestamp === options.sinceTimestamp &&
+							e.event_id === options.sinceEventId,
+					)
+				: -1;
 
-		const actionable = events.filter((e): e is ReceiptEvent => {
+		const actionable = events.filter((e, index): e is ReceiptEvent => {
 			if (
 				e.type !== 'applied' &&
 				e.type !== 'violated' &&
@@ -1045,9 +1058,21 @@ export async function applyKnowledgeVerdictFeedback(
 			}
 			if (
 				options?.sinceTimestamp &&
-				(e as ReceiptEvent).timestamp <= options.sinceTimestamp
+				(e as ReceiptEvent).timestamp < options.sinceTimestamp
 			) {
 				return false;
+			}
+			if (
+				options?.sinceTimestamp &&
+				(e as ReceiptEvent).timestamp === options.sinceTimestamp
+			) {
+				if (!options.sinceEventId) {
+					return false;
+				}
+				if (markerIndex < 0) {
+					return false;
+				}
+				return index > markerIndex;
 			}
 			return true;
 		});
@@ -1060,7 +1085,16 @@ export async function applyKnowledgeVerdictFeedback(
 			string,
 			{ applied: number; violated: number; ignored: number }
 		>();
+		let lastProcessedTimestamp: string | undefined;
+		let lastProcessedEventId: string | undefined;
 		for (const event of actionable) {
+			if (
+				typeof event.timestamp === 'string' &&
+				(!lastProcessedTimestamp || event.timestamp >= lastProcessedTimestamp)
+			) {
+				lastProcessedTimestamp = event.timestamp;
+				lastProcessedEventId = event.event_id;
+			}
 			const kid = event.knowledge_id;
 			if (!kid) continue;
 			const g = groups.get(kid) ?? { applied: 0, violated: 0, ignored: 0 };
@@ -1089,7 +1123,12 @@ export async function applyKnowledgeVerdictFeedback(
 			await bumpKnowledgeConfidenceBatch(directory, deltas);
 		}
 
-		return { processed: groups.size, bumps: deltas.length };
+		return {
+			processed: groups.size,
+			bumps: deltas.length,
+			lastProcessedTimestamp,
+			lastProcessedEventId,
+		};
 	} catch (err) {
 		warn(
 			`[knowledge-events] applyKnowledgeVerdictFeedback failed (fail-open): ${

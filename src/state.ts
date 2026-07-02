@@ -469,9 +469,9 @@ export const swarmState = {
 		{ ids: string[]; taskId?: string; phase?: string; generatedAt: number }
 	>(),
 
-	/** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}|${dayKey}`.
+	/** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}`.
 	 *  Prevents the chat.messages.transform path AND a knowledge_ack tool call
-	 *  from double-counting the same ack within a session-day. FIFO-capped —
+	 *  from double-counting the same ack within a session. FIFO-capped —
 	 *  see addKnowledgeAckDedup. */
 	knowledgeAckDedup: new Set<string>(),
 

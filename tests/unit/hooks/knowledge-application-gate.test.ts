@@ -190,6 +190,22 @@ describe('knowledgeApplicationGateBefore', () => {
 		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
 	});
 
+	it('enforce denial text lists all accepted terminal ack markers', async () => {
+		swarmState.currentCriticalShownIds.set('s1', {
+			ids: [ID_A],
+			generatedAt: Date.now(),
+		});
+		await expect(
+			knowledgeApplicationGateBefore(
+				tmp,
+				{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
+			),
+		).rejects.toThrow(
+			/KNOWLEDGE_APPLIED.*KNOWLEDGE_IGNORED.*KNOWLEDGE_VIOLATED/,
+		);
+	});
+
 	it('enforce mode allows when dedup set already records an ack for the id', async () => {
 		swarmState.currentCriticalShownIds.set('s1', {
 			ids: [ID_A],
@@ -213,6 +229,23 @@ describe('knowledgeApplicationGateBefore', () => {
 		await knowledgeApplicationGateBefore(
 			tmp,
 			{ tool: 'phase_complete', agent: 'architect', sessionID: 's1' },
+			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
+		);
+		// no throw
+	});
+
+	it('regression GATE-002: prior-day ack still satisfies same-session gate', async () => {
+		swarmState.currentCriticalShownIds.set('s1', {
+			ids: [ID_A],
+			generatedAt: Date.now(),
+		});
+		swarmState.knowledgeAckDedup.add(
+			buildAckDedupKey('s1', ID_A, 'applied', new Date('2024-01-01T00:00:00Z')),
+		);
+
+		await knowledgeApplicationGateBefore(
+			tmp,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
 			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
 		);
 		// no throw

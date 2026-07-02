@@ -12,8 +12,8 @@ When an architect receives a new message, entries from both stores are merged an
 > `applies_to_agents`, `directive_priority`, `generated_skill_path`). The
 > Architect receives these as a structured `<swarm_knowledge_directives>`
 > block and must acknowledge each applicable directive (`KNOWLEDGE_APPLIED`)
-> or explicitly skip it (`KNOWLEDGE_IGNORED reason=...`). See [Actionable
-> directives](#actionable-directives-v2) and
+> or explicitly close it as skipped or violated (`KNOWLEDGE_IGNORED reason=...`
+> / `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
 > [Knowledge application contract](#knowledge-application-contract-v2) below.
 
 ---
@@ -218,7 +218,7 @@ Defaults:
 
 ## Configuration
 
-All keys live under `knowledge.*` in your config (see `src/config/schema.ts:804`):
+All keys live under `knowledge.*` in your config (see `src/config/schema.ts:1043`):
 
 | Key | Type | Default | Purpose |
 |-----|------|:---:|---------|
@@ -453,7 +453,8 @@ generatedSkillPath, sessionId}`.
 
 In `enforce` mode the gate (`gateKnowledgeApplication` in
 `src/hooks/knowledge-application.ts`) blocks high-risk actions when a critical
-directive was shown but received no acknowledgment.
+directive was shown but received no terminal acknowledgment
+(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`).
 
 **`high_risk_tools`** — optionally override the set of tools that trigger the
 acknowledgment gate. When absent, defaults to `["save_plan",
