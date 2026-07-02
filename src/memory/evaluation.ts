@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
 import { createConfiguredMemoryProvider } from './gateway';
 import type { MemoryProvider } from './provider';
-import { clearPool } from './provider-pool';
+import { evictAndClose } from './provider-pool';
 import {
 	computeMemoryContentHash,
 	createMemoryId,
@@ -156,7 +156,12 @@ export async function evaluateMemoryRecallFixtures(
 			} finally {
 				await provider.close?.();
 				if (!options.keepTempRoots) {
-					clearPool();
+					// Force-close THIS run's own pooled provider so its SQLite file
+					// handle releases before deletion, without touching any other
+					// directory's pooled entry (clearPool() would force-close every
+					// in-process caller's provider, which is unsafe from a
+					// production-reachable command like `/swarm memory evaluate`).
+					evictAndClose(tempRoot);
 					await rmTempRoot(tempRoot);
 				}
 			}

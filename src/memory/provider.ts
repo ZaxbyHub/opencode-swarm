@@ -41,7 +41,16 @@ export type MemoryTaskOutcome =
 	| 'unknown';
 
 export interface MemoryRecallRewardInput {
-	runId?: string;
+	/**
+	 * Candidate session/run identifiers whose recall-usage bundle(s) should
+	 * receive this reward. Every id is matched independently (exact match
+	 * only, no unscoped time-window fallback); all matched bundles are
+	 * rewarded together. Callers should include every session id known to
+	 * have actually recalled memory for this task (e.g. dispatched council
+	 * member sessions), not just the submitting session, so sub-agent
+	 * recalls are not silently skipped.
+	 */
+	runIds: string[];
 	outcome: MemoryTaskOutcome;
 	verdictPayload: unknown;
 	timestamp?: string;
@@ -49,7 +58,10 @@ export interface MemoryRecallRewardInput {
 
 export interface MemoryRecallRewardResult {
 	success: boolean;
+	/** First matched bundle id, for back-compat display. See `bundleIds` for the full set. */
 	bundleId?: string;
+	/** Every recall-usage bundle (across all matched runIds) that received this reward. */
+	bundleIds?: string[];
 	outcome: MemoryTaskOutcome;
 	memoryIds: string[];
 	updatedMemoryIds: string[];

@@ -8,7 +8,7 @@
  * 4. Security-critical guardrails warning is NOT suppressed by quiet:true
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -70,19 +70,14 @@ describe('quiet config schema', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('quiet:true suppresses non-critical warnings', () => {
-	let warningCalls: unknown[][];
-	let originalWarn: typeof console.warn;
+	let warnSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
-		warningCalls = [];
-		originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warningCalls.push(args);
-		};
+		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
-		console.warn = originalWarn;
+		warnSpy.mockRestore();
 	});
 
 	it('2.1 quiet:true suppresses all warnings from createAgents', () => {
@@ -100,6 +95,7 @@ describe('quiet:true suppresses non-critical warnings', () => {
 		createAgents(config as any);
 
 		// With quiet:true, even the variant deprecation warning should be suppressed
+		const warningCalls = warnSpy.mock.calls;
 		const deprecationWarnings = warningCalls.filter(
 			(call) =>
 				typeof call[0] === 'string' &&
@@ -121,6 +117,7 @@ describe('quiet:true suppresses non-critical warnings', () => {
 
 		createAgents(config as any);
 
+		const warningCalls = warnSpy.mock.calls;
 		const deprecationWarnings = warningCalls.filter(
 			(call) =>
 				typeof call[0] === 'string' &&
@@ -142,6 +139,7 @@ describe('quiet:true suppresses non-critical warnings', () => {
 
 		createAgents(config as any);
 
+		const warningCalls = warnSpy.mock.calls;
 		const deprecationWarnings = warningCalls.filter(
 			(call) =>
 				typeof call[0] === 'string' &&
@@ -157,17 +155,12 @@ describe('quiet:true suppresses non-critical warnings', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('security-critical warnings are NOT suppressed by quiet:true', () => {
-	let warningCalls: unknown[][];
+	let warnSpy: ReturnType<typeof spyOn>;
 	let originalEnv: Record<string, string | undefined>;
-	let originalWarn: typeof console.warn;
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(path.join(os.tmpdir(), 'quiet-config-test-'));
-		warningCalls = [];
-		originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warningCalls.push(args);
-		};
+		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 		originalEnv = { ...process.env };
 		// loadPluginConfigWithMeta reads the project config from <dir>/.opencode/opencode-swarm.json
 		const configDir = path.join(tempDir, '.opencode');
@@ -182,7 +175,7 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 	});
 
 	afterEach(() => {
-		console.warn = originalWarn;
+		warnSpy.mockRestore();
 		process.env = originalEnv;
 		try {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -217,6 +210,7 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 			warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
 		}
 
+		const warningCalls = warnSpy.mock.calls;
 		const securityWarnings = warningCalls.filter(
 			(call) =>
 				typeof call[0] === 'string' &&
@@ -338,19 +332,14 @@ describe('quiet config edge cases', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('quiet config is properly threaded through agent creation', () => {
-	let warningCalls: unknown[][];
-	let originalWarn: typeof console.warn;
+	let warnSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
-		warningCalls = [];
-		originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warningCalls.push(args);
-		};
+		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
-		console.warn = originalWarn;
+		warnSpy.mockRestore();
 	});
 
 	it('5.1 both quiet:true and quiet:false create the same number of agents', () => {
@@ -389,7 +378,7 @@ describe('quiet config is properly threaded through agent creation', () => {
 		createAgents(config as any);
 
 		// Should have no deprecation warnings
-		const variantWarnings = warningCalls.filter(
+		const variantWarnings = warnSpy.mock.calls.filter(
 			(call) => typeof call[0] === 'string' && call[0].includes('variant'),
 		);
 		expect(variantWarnings.length).toBe(0);
@@ -408,7 +397,7 @@ describe('quiet config is properly threaded through agent creation', () => {
 		createAgents(config as any);
 
 		// Should have deprecation warnings
-		const variantWarnings = warningCalls.filter(
+		const variantWarnings = warnSpy.mock.calls.filter(
 			(call) => typeof call[0] === 'string' && call[0].includes('variant'),
 		);
 		expect(variantWarnings.length).toBeGreaterThan(0);

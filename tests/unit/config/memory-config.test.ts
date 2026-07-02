@@ -42,6 +42,7 @@ describe('MemoryConfigSchema', () => {
 				suppressionThreshold: 0.15,
 				promotionThreshold: 0.85,
 				propagationTokenOverlapThreshold: 0.4,
+				propagationEmbeddingCosineThreshold: 0.7,
 				propagationFanout: 20,
 				propagationLookbackDays: 30,
 			},
@@ -137,6 +138,81 @@ describe('MemoryConfigSchema', () => {
 		).toThrow();
 		expect(() =>
 			MemoryConfigSchema.parse({ learning: { propagationFanout: -1 } }),
+		).toThrow();
+	});
+
+	test('accepts the propagationEmbeddingCosineThreshold override', () => {
+		const parsed = MemoryConfigSchema.parse({
+			learning: { propagationEmbeddingCosineThreshold: 0.8 },
+		});
+		expect(parsed.learning.propagationEmbeddingCosineThreshold).toBe(0.8);
+	});
+
+	test('rejects a negative learningRate (previously untested lower bound)', () => {
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { learningRate: -0.1 } }),
+		).toThrow();
+	});
+
+	test('rejects out-of-bounds values for every remaining learning.* field', () => {
+		// Each of these fields is bounded [0,1] in the schema; the "accepts
+		// bounded learning overrides" test above only exercised learningRate's
+		// upper bound and propagationFanout's lower bound — every other field
+		// had zero bounds-rejection coverage.
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFactor: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFactor: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { qValueBoostWeight: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { qValueBoostWeight: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { suppressionThreshold: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { suppressionThreshold: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { promotionThreshold: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { promotionThreshold: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationTokenOverlapThreshold: 1.5 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationTokenOverlapThreshold: -0.1 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationEmbeddingCosineThreshold: 1.5 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationEmbeddingCosineThreshold: -0.1 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFanout: 1001 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationLookbackDays: 0 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationLookbackDays: 3651 },
+			}),
 		).toThrow();
 	});
 

@@ -613,7 +613,7 @@ Show the resolved memory provider, SQLite database path, legacy JSONL file statu
 
 ### `/swarm memory pending`
 
-Show pending memory proposals and recent rejected proposal reasons.
+Show pending memory proposals, recent rejected proposal reasons, and promotion candidates (session memories eligible for promotion to durable storage under the recall learning loop).
 
 ### `/swarm memory recall-log`
 
@@ -625,7 +625,7 @@ Show recent memory Q-values, reward outcomes, suppression candidates, and promot
 
 ### `/swarm memory stale`
 
-List expired scratch memories, deleted tombstones, superseded chains, and low-utility memories.
+List expired scratch memories, deleted tombstones, superseded chains, low-utility memories, and low-Q-value memories (suppression candidates under the recall learning loop).
 
 ### `/swarm memory compact`
 

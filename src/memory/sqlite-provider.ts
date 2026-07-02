@@ -264,6 +264,17 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE memory_recall_usage ADD COLUMN council_verdict_json TEXT;
 		`,
 	},
+	{
+		version: 8,
+		name: 'add_recall_reward_idempotency_key',
+		// Stores a stable "swarmId:taskOrPhase:roundNumber" key (see
+		// deriveRewardKey below) on the recall-usage row a reward was last
+		// applied against, so a duplicate council-verdict submission for the
+		// SAME round does not re-apply the EMA update indefinitely.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN reward_key TEXT;
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -288,6 +299,7 @@ interface RecallUsageRow {
 	last_reward?: number | null;
 	task_outcome?: string | null;
 	council_verdict_json?: string | null;
+	reward_key?: string | null;
 }
 
 interface DecisionTransactionResult {
@@ -784,7 +796,7 @@ export class SQLiteMemoryProvider
 			typeof filter.limit === 'number'
 				? this.requireDb()
 						.query<RecallUsageRow, [number]>(
-							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json
+							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				LIMIT ?`,
@@ -792,7 +804,7 @@ export class SQLiteMemoryProvider
 						.all(Math.max(1, Math.trunc(filter.limit)))
 				: this.requireDb()
 						.query<RecallUsageRow, []>(
-							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json
+							`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				`,
@@ -810,13 +822,40 @@ export class SQLiteMemoryProvider
 		input: MemoryRecallRewardInput,
 	): Promise<MemoryRecallRewardResult> {
 		await this.initialize();
-		const usageRow = this.latestRecallUsageForRun(input.runId);
-		if (!usageRow?.event) {
+		const matches = this.matchingRecallUsageRows(input.runIds);
+		if (matches.length === 0) {
 			return emptyRewardResult(input.outcome, 'no_recall_usage_for_run');
+		}
+		const rewardKey = deriveRewardKey(input.verdictPayload);
+		// Skip bundles that already carry this exact reward key (same
+		// swarmId+task/phase+round) so a duplicate council-verdict submission
+		// does not re-apply the EMA update indefinitely (idempotency).
+		const pending =
+			rewardKey === null
+				? matches
+				: matches.filter((match) => match.rewardKey !== rewardKey);
+		if (pending.length === 0) {
+			const first = matches[0];
+			return {
+				success: true,
+				bundleId: first?.event.bundleId,
+				bundleIds: matches.map((match) => match.event.bundleId),
+				outcome: input.outcome,
+				memoryIds: uniqueStrings(
+					matches.flatMap((match) => match.event.memoryIds),
+				),
+				reward: rewardForOutcome(input.outcome),
+				updatedMemoryIds: [],
+				propagatedMemoryIds: [],
+				qValue: first?.event.qValue,
+				reason: 'already_rewarded',
+			};
 		}
 		const reward = rewardForOutcome(input.outcome);
 		const updatedAt = input.timestamp ?? new Date().toISOString();
-		const sourceIds = uniqueStrings(usageRow.event.memoryIds);
+		const sourceIds = uniqueStrings(
+			pending.flatMap((match) => match.event.memoryIds),
+		);
 		const directUpdates = new Map<string, number>();
 		const propagatedUpdates = new Map<string, number>();
 		for (const memoryId of sourceIds) {
@@ -845,10 +884,16 @@ export class SQLiteMemoryProvider
 			}
 		}
 
+		// Propagation target selection may compute embedding similarity
+		// asynchronously (embedding-cosine path) and must resolve BEFORE the
+		// synchronous db.transaction() below — its callback cannot await.
+		const propagationTargets = await this.findPropagationTargets(sourceIds);
+
 		const db = this.requireDb();
+		const verdictJson = truncateJsonPayload(input.verdictPayload);
 		// FB-003: Wrap the multi-write body in a transaction for atomicity.
 		const result = db.transaction(() => {
-			for (const targetId of this.findPropagationTargets(sourceIds)) {
+			for (const targetId of propagationTargets) {
 				const propagatedSignal = propagatedRewardSignal(
 					reward,
 					this.config.learning.propagationFactor,
@@ -871,45 +916,51 @@ export class SQLiteMemoryProvider
 			const qValue =
 				combinedQValues.length > 0
 					? averageNumbers(combinedQValues)
-					: usageRow.event.qValue;
-			const verdictJson = truncateJsonPayload(input.verdictPayload);
-			const updatedEvent: MemoryRecallUsageEvent = {
-				...usageRow.event,
-				qValue,
-				lastReward: reward,
-				taskOutcome: input.outcome,
-			};
-			db.run(
-				`UPDATE memory_recall_usage
-				SET usage_json = ?,
-					q_value = ?,
-					last_reward = ?,
-					task_outcome = ?,
-					council_verdict_json = ?
-				WHERE id = ?`,
-				[
-					JSON.stringify(updatedEvent),
-					qValue ?? null,
-					reward,
-					input.outcome,
-					verdictJson,
-					usageRow.id,
-				],
-			);
+					: pending[0]?.event.qValue;
+			for (const match of pending) {
+				const updatedEvent: MemoryRecallUsageEvent = {
+					...match.event,
+					qValue,
+					lastReward: reward,
+					taskOutcome: input.outcome,
+				};
+				db.run(
+					`UPDATE memory_recall_usage
+					SET usage_json = ?,
+						q_value = ?,
+						last_reward = ?,
+						task_outcome = ?,
+						council_verdict_json = ?,
+						reward_key = ?
+					WHERE id = ?`,
+					[
+						JSON.stringify(updatedEvent),
+						qValue ?? null,
+						reward,
+						input.outcome,
+						verdictJson,
+						rewardKey,
+						match.id,
+					],
+				);
+			}
 			return {
 				updatedMemoryIds,
 				propagatedMemoryIds,
 				qValue,
 			};
 		})();
-		await this.event(
-			'recall',
-			usageRow.event.bundleId,
-			`applied ${input.outcome} recall reward`,
-		);
+		for (const match of pending) {
+			await this.event(
+				'recall',
+				match.event.bundleId,
+				`applied ${input.outcome} recall reward`,
+			);
+		}
 		return {
 			success: true,
-			bundleId: usageRow.event.bundleId,
+			bundleId: pending[0]?.event.bundleId,
+			bundleIds: pending.map((match) => match.event.bundleId),
 			outcome: input.outcome,
 			memoryIds: sourceIds,
 			reward,
@@ -1276,39 +1327,45 @@ export class SQLiteMemoryProvider
 		return result;
 	}
 
-	private latestRecallUsageForRun(
-		runId?: string,
-	): { id: string; event: MemoryRecallUsageEvent } | null {
-		if (!runId) return null;
+	/**
+	 * Find, across the given candidate session/run ids, the most recent
+	 * recall-usage bundle for EACH distinct matching id (exact match only —
+	 * no unscoped time-window fallback, which would risk rewarding an
+	 * unrelated task/session's recall bundle). Every distinct matched runId
+	 * contributes its own latest bundle, so a council review informed by
+	 * several sessions (e.g. dispatched council-member sub-agents) rewards
+	 * all of their recalls, not just one.
+	 */
+	private matchingRecallUsageRows(runIds: string[]): Array<{
+		id: string;
+		event: MemoryRecallUsageEvent;
+		rewardKey: string | null;
+	}> {
+		const idSet = new Set(runIds.filter((id) => id.length > 0));
+		if (idSet.size === 0) return [];
 		const rows = this.requireDb()
 			.query<RecallUsageRow, [number]>(
-				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json
+				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				LIMIT ?`,
 			)
 			.all(100);
-		// FB-001: Try exact runId match first (ROOT-001 / PR #1636).
+		const matches: Array<{
+			id: string;
+			event: MemoryRecallUsageEvent;
+			rewardKey: string | null;
+		}> = [];
+		const seenRunIds = new Set<string>();
 		for (const row of rows) {
 			if (!row.id) continue;
 			const event = parseRecallUsageRow(row);
-			if (event?.runId === runId) return { id: row.id, event };
+			if (!event?.runId || !idSet.has(event.runId)) continue;
+			if (seenRunIds.has(event.runId)) continue;
+			seenRunIds.add(event.runId);
+			matches.push({ id: row.id, event, rewardKey: row.reward_key ?? null });
 		}
-		// Fallback: most recent row within 30 minutes regardless of runId.
-		// This handles cross-session recall events where the task-agent session
-		// differs from the council/session that called applyRecallReward.
-		const FALLBACK_LOOKBACK_SECONDS = 1800;
-		const cutoffMs = Date.now() - FALLBACK_LOOKBACK_SECONDS * 1000;
-		for (const row of rows) {
-			if (!row.id) continue;
-			const event = parseRecallUsageRow(row);
-			if (!event) continue;
-			const eventMs = Date.parse(event.timestamp);
-			if (Number.isFinite(eventMs) && eventMs >= cutoffMs) {
-				return { id: row.id, event };
-			}
-		}
-		return null;
+		return matches;
 	}
 
 	private updateMemoryQValue(
@@ -1333,7 +1390,20 @@ export class SQLiteMemoryProvider
 		return nextQValue;
 	}
 
-	private findPropagationTargets(sourceMemoryIds: string[]): string[] {
+	/**
+	 * Select soft-propagation targets among recently-recalled, same-scope
+	 * memories via two independent qualifying paths (issue #1467 O-004):
+	 * lexical token-overlap (Jaccard, gated additionally on same `kind`), OR
+	 * embedding cosine similarity when `embeddings.enabled` and a provider is
+	 * available (not gated on `kind` — semantic similarity can legitimately
+	 * cross kinds). A candidate qualifies if EITHER path clears its
+	 * threshold; the higher of the two scores is used for fanout-cap
+	 * ranking. When embeddings are disabled (the default), this reduces to
+	 * the original token-overlap-only behavior with no extra cost.
+	 */
+	private async findPropagationTargets(
+		sourceMemoryIds: string[],
+	): Promise<string[]> {
 		const lookbackIds = this.recentlyRecalledMemoryIds(
 			this.config.learning.propagationLookbackDays,
 		);
@@ -1346,6 +1416,17 @@ export class SQLiteMemoryProvider
 		const sourceTokenSets = sourceRecords.map((record) =>
 			tokenizeText(record.text),
 		);
+		const cosineEnabled =
+			this.config.embeddings.enabled && Boolean(this.embeddingProvider);
+		const cosineThreshold =
+			this.config.learning.propagationEmbeddingCosineThreshold;
+		const sourceVectors = cosineEnabled
+			? await Promise.all(
+					sourceRecords.map((record) =>
+						this.getCachedEmbeddingForPropagation(record.text),
+					),
+				)
+			: [];
 		for (const candidate of this.memories.values()) {
 			if (sourceMemoryIds.includes(candidate.id)) continue;
 			if (!lookbackIds.has(candidate.id)) continue;
@@ -1353,27 +1434,77 @@ export class SQLiteMemoryProvider
 				continue;
 			const candidateTokens = tokenizeText(candidate.text);
 			let bestOverlap = 0;
+			let sameScopeAsAnySource = false;
 			for (let i = 0; i < sourceRecords.length; i++) {
 				const source = sourceRecords[i];
-				if (candidate.kind !== source.kind) continue;
-				if (stableScopeKey(candidate.scope) !== stableScopeKey(source.scope)) {
-					continue;
-				}
+				const sameScope =
+					stableScopeKey(candidate.scope) === stableScopeKey(source.scope);
+				if (sameScope) sameScopeAsAnySource = true;
+				if (!sameScope || candidate.kind !== source.kind) continue;
 				bestOverlap = Math.max(
 					bestOverlap,
 					jaccard(sourceTokenSets[i] ?? new Set(), candidateTokens),
 				);
 			}
-			if (
-				bestOverlap >= this.config.learning.propagationTokenOverlapThreshold
-			) {
-				targets.push({ id: candidate.id, overlap: bestOverlap });
+			let bestCosine = 0;
+			if (cosineEnabled && sameScopeAsAnySource) {
+				const candidateVector = await this.getCachedEmbeddingForPropagation(
+					candidate.text,
+				);
+				if (candidateVector) {
+					for (const sourceVector of sourceVectors) {
+						if (!sourceVector) continue;
+						bestCosine = Math.max(
+							bestCosine,
+							cosineSimilarity(sourceVector, candidateVector),
+						);
+					}
+				}
+			}
+			const qualifiesByOverlap =
+				bestOverlap >= this.config.learning.propagationTokenOverlapThreshold;
+			const qualifiesByCosine = cosineEnabled && bestCosine >= cosineThreshold;
+			if (qualifiesByOverlap || qualifiesByCosine) {
+				targets.push({
+					id: candidate.id,
+					overlap: Math.max(bestOverlap, bestCosine),
+				});
 			}
 		}
 		return targets
 			.sort((a, b) => b.overlap - a.overlap || a.id.localeCompare(b.id))
 			.slice(0, this.config.learning.propagationFanout)
 			.map((target) => target.id);
+	}
+
+	/**
+	 * Embed `text` (cache-first, same pattern as the recall-time query
+	 * embedding lookup) for use in propagation's cosine-similarity path.
+	 * Returns null on any embedding failure or when no provider is
+	 * configured — callers must treat that as "no cosine signal available"
+	 * and fall back to the token-overlap path rather than throwing, since
+	 * this is a best-effort enhancement to an already-approximate feature.
+	 */
+	private async getCachedEmbeddingForPropagation(
+		text: string,
+	): Promise<Float32Array | null> {
+		if (!this.embeddingProvider) return null;
+		const modelVersion = this.embeddingProvider.modelVersion;
+		const normalized = normalizeMemoryText(text).toLowerCase();
+		if (!normalized) return null;
+		const cached = this.embeddingCache?.get(modelVersion, normalized)?.vector;
+		if (cached) return cached;
+		try {
+			const vector = await this.embeddingProvider.embed(normalized);
+			this.embeddingCache?.set(modelVersion, normalized, {
+				vector,
+				modelVersion,
+				queryHash: normalized,
+			});
+			return vector;
+		} catch {
+			return null;
+		}
 	}
 
 	private recentlyRecalledMemoryIds(lookbackDays: number): Set<string> {
@@ -1391,7 +1522,7 @@ export class SQLiteMemoryProvider
 	private listRecallUsageSync(limit = 1000): MemoryRecallUsageEvent[] {
 		const rows = this.requireDb()
 			.query<RecallUsageRow, [number]>(
-				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json
+				`SELECT id, usage_json, q_value, last_reward, task_outcome, council_verdict_json, reward_key
 				FROM memory_recall_usage
 				ORDER BY timestamp DESC
 				LIMIT ?`,
@@ -1552,7 +1683,19 @@ export class SQLiteMemoryProvider
 			if (migration.version <= currentVersion) continue;
 			const apply = db.transaction(() => {
 				for (const statement of splitSql(migration.sql)) {
-					db.run(statement);
+					try {
+						db.run(statement);
+					} catch (err) {
+						// No cross-process migration lock exists: two processes can both
+						// read the same stale currentVersion before either commits, then
+						// both attempt this migration. The loser's ALTER TABLE ADD COLUMN
+						// throws "duplicate column name" once it acquires the lock — that
+						// specific error means this exact statement already succeeded
+						// elsewhere, so treat it as a no-op and continue. Any other error
+						// still aborts the transaction.
+						const message = err instanceof Error ? err.message : String(err);
+						if (!/duplicate column name/i.test(message)) throw err;
+					}
 				}
 				db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
 					migration.version,
@@ -2232,13 +2375,52 @@ function normalizeTaskOutcome(
 
 function truncateJsonPayload(value: unknown): string | null {
 	if (value === undefined) return null;
-	const json = JSON.stringify(value);
+	let json: string;
+	try {
+		json = JSON.stringify(value);
+	} catch (err) {
+		// Circular references, BigInt, etc. — verdictPayload is typed `unknown`
+		// on the public MemoryProvider interface, so a future caller could pass
+		// a non-serializable value. Never let a serialization failure abort
+		// the whole reward application; store a diagnostic placeholder instead.
+		return JSON.stringify({
+			unserializable: true,
+			reason: err instanceof Error ? err.message : String(err),
+		});
+	}
 	const maxLength = 8192;
 	if (json.length <= maxLength) return json;
 	return JSON.stringify({
 		truncated: true,
 		preview: json.slice(0, maxLength - 32),
 	});
+}
+
+/**
+ * Derive a stable idempotency key from a council-verdict payload, so a
+ * duplicate submission for the SAME swarm+task/phase+round does not
+ * re-apply the EMA reward update. Returns null (no idempotency key — always
+ * apply) when the payload does not carry the expected shape, preserving
+ * prior behavior for any caller that supplies an unstructured payload.
+ */
+function deriveRewardKey(verdictPayload: unknown): string | null {
+	if (!verdictPayload || typeof verdictPayload !== 'object') return null;
+	const payload = verdictPayload as Record<string, unknown>;
+	const swarmId = payload.swarmId;
+	const roundNumber = payload.roundNumber;
+	const unit = payload.taskId ?? payload.phaseNumber;
+	const unitOk = typeof unit === 'string' || typeof unit === 'number';
+	const roundOk =
+		typeof roundNumber === 'string' || typeof roundNumber === 'number';
+	if (
+		typeof swarmId !== 'string' ||
+		swarmId.length === 0 ||
+		!unitOk ||
+		!roundOk
+	) {
+		return null;
+	}
+	return `${swarmId}:${unit}:${roundNumber}`;
 }
 
 function summarizeRecallUsage(events: MemoryRecallUsageEvent[]): Map<
@@ -2310,6 +2492,28 @@ function jaccard(left: Set<string>, right: Set<string>): number {
 	}
 	const union = left.size + right.size - intersection;
 	return union > 0 ? intersection / union : 0;
+}
+
+/**
+ * Cosine similarity between two equal-length embedding vectors, computed
+ * directly from the raw float values (not reliant on sqlite-vec's internal
+ * MATCH distance metric, which is not guaranteed to be cosine for this
+ * table's plain `FLOAT[N]` column declaration). Returns 0 for mismatched
+ * lengths, zero-length vectors, or a zero-norm vector — never NaN/Infinity.
+ */
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+	if (a.length === 0 || a.length !== b.length) return 0;
+	let dot = 0;
+	let normA = 0;
+	let normB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		normA += a[i] * a[i];
+		normB += b[i] * b[i];
+	}
+	if (normA === 0 || normB === 0) return 0;
+	const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+	return Number.isFinite(similarity) ? similarity : 0;
 }
 
 function clamp01(value: number): number {

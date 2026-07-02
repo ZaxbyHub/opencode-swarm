@@ -1196,6 +1196,11 @@ export const MemoryConfigSchema = z.object({
 			suppressionThreshold: z.number().min(0).max(1).default(0.15),
 			promotionThreshold: z.number().min(0).max(1).default(0.85),
 			propagationTokenOverlapThreshold: z.number().min(0).max(1).default(0.4),
+			propagationEmbeddingCosineThreshold: z
+				.number()
+				.min(0)
+				.max(1)
+				.default(0.7),
 			propagationFanout: z.number().int().min(0).max(1000).default(20),
 			propagationLookbackDays: z.number().int().min(1).max(3650).default(30),
 		})
@@ -1206,6 +1211,7 @@ export const MemoryConfigSchema = z.object({
 			suppressionThreshold: 0.15,
 			promotionThreshold: 0.85,
 			propagationTokenOverlapThreshold: 0.4,
+			propagationEmbeddingCosineThreshold: 0.7,
 			propagationFanout: 20,
 			propagationLookbackDays: 30,
 		}),

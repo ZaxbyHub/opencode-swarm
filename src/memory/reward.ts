@@ -21,6 +21,42 @@ export function councilVerdictToMemoryOutcome(
 	}
 }
 
+/**
+ * Resolve the set of session/run ids whose recall-usage bundles should
+ * receive a council-verdict reward, deduplicated and order-preserving.
+ *
+ * `trustedSessionIds` are host/runtime-derived (e.g. `ctx.sessionID`) and are
+ * always included when present — they cannot be spoofed by tool-call
+ * arguments. `untrustedSessionIds` are caller-supplied strings (e.g. a
+ * `provenanceSessionId` arg or a per-verdict `sessionId` reported by the
+ * architect) and are included ONLY when `isKnownSession` confirms the id
+ * resolves to a real, currently-tracked session — an arbitrary or spoofed
+ * string is silently dropped rather than trusted as a reward-targeting key.
+ *
+ * A bare swarm identifier is never a valid session id substitute and must
+ * never be passed into either list.
+ */
+export function resolveRewardRunIds(input: {
+	trustedSessionIds: Array<string | undefined>;
+	untrustedSessionIds: Array<string | undefined>;
+	isKnownSession: (sessionId: string) => boolean;
+}): string[] {
+	const seen = new Set<string>();
+	const resolved: string[] = [];
+	for (const id of input.trustedSessionIds) {
+		if (!id || seen.has(id)) continue;
+		seen.add(id);
+		resolved.push(id);
+	}
+	for (const id of input.untrustedSessionIds) {
+		if (!id || seen.has(id)) continue;
+		if (!input.isKnownSession(id)) continue;
+		seen.add(id);
+		resolved.push(id);
+	}
+	return resolved;
+}
+
 export async function applyRecallRewardForCouncil(
 	directory: string,
 	configInput: Partial<MemoryConfig> | undefined,
@@ -33,6 +69,9 @@ export async function applyRecallRewardForCouncil(
 	if (!config.enabled) {
 		return skippedRewardResult(outcome, 'memory_disabled');
 	}
+	if (input.runIds.length === 0) {
+		return skippedRewardResult(outcome, 'no_recall_usage_for_run');
+	}
 	const provider = createConfiguredMemoryProvider(
 		directory,
 		config,
@@ -43,7 +82,7 @@ export async function applyRecallRewardForCouncil(
 			return skippedRewardResult(outcome, 'provider_does_not_support_learning');
 		}
 		return await provider.applyRecallReward({
-			runId: input.runId,
+			runIds: input.runIds,
 			outcome,
 			verdictPayload: input.verdictPayload,
 			timestamp: input.timestamp,

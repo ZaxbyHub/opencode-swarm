@@ -22,7 +22,11 @@ import { writeCouncilEvidence } from '../council/council-evidence-writer';
 import { synthesizeCouncilVerdicts } from '../council/council-service';
 import { readCriteria } from '../council/criteria-store';
 import type { CouncilMemberVerdict } from '../council/types';
-import { applyRecallRewardForCouncil } from '../memory/reward';
+import {
+	applyRecallRewardForCouncil,
+	councilVerdictToMemoryOutcome,
+	resolveRewardRunIds,
+} from '../memory/reward';
 import { getAgentSession } from '../state';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -47,6 +51,7 @@ const VerdictSchema = z.object({
 	criteriaAssessed: z.array(z.string()),
 	criteriaUnmet: z.array(z.string()),
 	durationMs: z.number().nonnegative(),
+	sessionId: z.string().min(1).optional(),
 });
 
 // Task ID pattern matches the canonical STRICT_TASK_ID_PATTERN in src/validation/task-id.ts.
@@ -123,6 +128,13 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 						criteriaAssessed: z.array(z.string()),
 						criteriaUnmet: z.array(z.string()),
 						durationMs: z.number(),
+						sessionId: z
+							.string()
+							.min(1)
+							.optional()
+							.describe(
+								"Session id of the dispatched agent that produced this verdict, if known — used so this member's own recall bundle is rewarded, not just the submitting session's.",
+							),
 					}),
 				)
 				.min(1)
@@ -335,28 +347,51 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			// and writes atomically (#978). A lock-timeout throw is caught by the
 			// createSwarmTool wrapper and surfaced as a structured failure.
 			await writeCouncilEvidence(workingDir, synthesis);
-			const memoryReward = await applyRecallRewardForCouncil(
-				workingDir,
-				config.memory,
-				{
-					runId:
-						input.provenanceSessionId ??
-						ctx?.sessionID ??
-						sessionID ??
-						input.swarmId,
-					verdict: synthesis.overallVerdict,
-					verdictPayload: {
-						taskId: synthesis.taskId,
-						swarmId: synthesis.swarmId,
-						roundNumber: synthesis.roundNumber,
-						overallVerdict: synthesis.overallVerdict,
-						vetoedBy: synthesis.vetoedBy,
-						allCriteriaMet: synthesis.allCriteriaMet,
-						requiredFixesCount: synthesis.requiredFixes.length,
-						advisoryFindingsCount: synthesis.advisoryFindings.length,
+			// Memory reward is a best-effort side effect of council synthesis, not
+			// the primary outcome — writeCouncilEvidence above already succeeded,
+			// so a reward-path failure (DB lock, provider error, etc.) must never
+			// fail the whole tool call and discard that already-durable evidence.
+			const rewardRunIds = resolveRewardRunIds({
+				trustedSessionIds: [ctx?.sessionID, sessionID],
+				untrustedSessionIds: [
+					input.provenanceSessionId,
+					...input.verdicts.map((v) => v.sessionId),
+				],
+				isKnownSession: (id) => getAgentSession(id) !== undefined,
+			});
+			let memoryReward: Awaited<
+				ReturnType<typeof applyRecallRewardForCouncil>
+			> | null = null;
+			try {
+				memoryReward = await applyRecallRewardForCouncil(
+					workingDir,
+					config.memory,
+					{
+						runIds: rewardRunIds,
+						verdict: synthesis.overallVerdict,
+						verdictPayload: {
+							taskId: synthesis.taskId,
+							swarmId: synthesis.swarmId,
+							roundNumber: synthesis.roundNumber,
+							overallVerdict: synthesis.overallVerdict,
+							vetoedBy: synthesis.vetoedBy,
+							allCriteriaMet: synthesis.allCriteriaMet,
+							requiredFixesCount: synthesis.requiredFixes.length,
+							advisoryFindingsCount: synthesis.advisoryFindings.length,
+						},
 					},
-				},
-			);
+				);
+			} catch (err) {
+				memoryReward = {
+					success: false,
+					outcome: councilVerdictToMemoryOutcome(synthesis.overallVerdict),
+					memoryIds: [],
+					reward: 0,
+					updatedMemoryIds: [],
+					propagatedMemoryIds: [],
+					reason: `reward_threw: ${err instanceof Error ? err.message : String(err)}`,
+				};
+			}
 
 			// ── Architect self-echo advisory ──────────────────────────────────
 			// When the tool is invoked inside an architect session, push the

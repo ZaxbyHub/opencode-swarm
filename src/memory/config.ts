@@ -96,6 +96,14 @@ export interface MemoryLearningConfig {
 	suppressionThreshold: number;
 	promotionThreshold: number;
 	propagationTokenOverlapThreshold: number;
+	/**
+	 * Minimum cosine similarity (embedding space) for a candidate memory to
+	 * qualify for soft propagation via the embedding path, independent of the
+	 * token-overlap path. Only evaluated when `embeddings.enabled` is true and
+	 * the configured embedding provider is available; otherwise propagation
+	 * falls back to token-overlap only (issue #1467 acceptance criteria).
+	 */
+	propagationEmbeddingCosineThreshold: number;
 	propagationFanout: number;
 	propagationLookbackDays: number;
 }
@@ -144,6 +152,7 @@ export const DEFAULT_MEMORY_LEARNING_CONFIG: MemoryLearningConfig = {
 	suppressionThreshold: 0.15,
 	promotionThreshold: 0.85,
 	propagationTokenOverlapThreshold: 0.4,
+	propagationEmbeddingCosineThreshold: 0.7,
 	propagationFanout: 20,
 	propagationLookbackDays: 30,
 };

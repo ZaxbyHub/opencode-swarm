@@ -75,6 +75,7 @@ export { findSecrets, redactSecrets } from './redaction';
 export {
 	applyRecallRewardForCouncil,
 	councilVerdictToMemoryOutcome,
+	resolveRewardRunIds,
 } from './reward';
 export {
 	MEMORY_RECALL_PROFILES,

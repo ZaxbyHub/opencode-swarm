@@ -101,8 +101,22 @@ export async function buildMemoryMaintenanceReport(
 	const recallUsage = provider.listRecallUsage
 		? await provider.listRecallUsage()
 		: [];
-	const valueLog = provider.listMemoryValueLog
-		? await provider.listMemoryValueLog({ limit: Math.max(limit, 50) })
+	// Use the dedicated filter flags rather than fetching a single capped,
+	// unfiltered page and filtering client-side: with more memories than the
+	// fetch cap, a client-side filter over a "top-N by recency" page can
+	// silently miss real suppression/promotion candidates that fall outside
+	// that window, even though the provider can filter-then-slice correctly.
+	const suppressionValueLog = provider.listMemoryValueLog
+		? await provider.listMemoryValueLog({
+				includeSuppressionCandidatesOnly: true,
+				limit,
+			})
+		: [];
+	const promotionValueLog = provider.listMemoryValueLog
+		? await provider.listMemoryValueLog({
+				includePromotionCandidatesOnly: true,
+				limit,
+			})
 		: [];
 	const usageByMemory = summarizeRecallByMemory(recallUsage);
 	const usageByRole = summarizeRecallByRole(recallUsage);
@@ -145,12 +159,8 @@ export async function buildMemoryMaintenanceReport(
 		supersededMemories: supersededMemories.slice(0, limit),
 		supersededChains: buildSupersededChains(memories).slice(0, limit),
 		lowUtilityMemories: lowUtilityMemories.slice(0, limit),
-		lowQValueMemories: valueLog
-			.filter((entry) => entry.suppressionCandidate)
-			.slice(0, limit),
-		promotionCandidates: valueLog
-			.filter((entry) => entry.promotionCandidate)
-			.slice(0, limit),
+		lowQValueMemories: suppressionValueLog.slice(0, limit),
+		promotionCandidates: promotionValueLog.slice(0, limit),
 		neverRecalledMemories: neverRecalledMemories.slice(0, limit),
 		mostRecalledMemories: Array.from(usageByMemory.values())
 			.sort(
