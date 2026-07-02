@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.103.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.2...v7.103.3) (2026-07-02)
+
+
+### Bug Fixes
+
+* **knowledge:** preserve linked injection after optional read failures ([2954523](https://github.com/ZaxbyHub/opencode-swarm/commit/29545230a1a31fd0d72f574c5fe59edb6eba5f3b))
+
 ## [7.103.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.1...v7.103.2) (2026-07-02)
 
 
