@@ -232,6 +232,10 @@ If any of those appear, slow down and return to the workflow.
 
 ## How to behave after activation
 For subsequent complex tasks in this session:
+- load the `orchestrating-subagents` skill for agent-type/model/effort tiering,
+  fan-out limits, and subagent prompt contracts
+- load the `durable-session-state` skill to persist plans, evidence, and
+  reviewer/critic verdicts so gates survive long sessions and compaction
 - spawn subagents in parallel for disjoint scopes
 - use one or more reviewer subagents to validate findings from explorer subagents or to validate implementation quality
 - use critic subagents only after reviewer validation, not as the primary false-positive filter

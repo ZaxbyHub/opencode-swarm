@@ -43,6 +43,12 @@ Large codebases require more disciplined verification, not less.
 ## Required workflow
 
 ### Phase 0 — Inventory first
+In this repository, start from the authoritative contracts: `AGENTS.md`
+(especially invariant 6 — never validate the whole repo through broad
+`test_runner` scopes; use the per-file isolation loops from `TESTING.md` and
+`contributing.md`) and `.github/workflows/ci.yml` for what CI actually
+enforces.
+
 Read enough of the repo to build a quality and CI map:
 - dependency manifests and lockfiles
 - CI workflows and job configs first
@@ -192,7 +198,9 @@ Do not use retries as proof of correctness.
 Retries can help separate flaky from deterministic failures, but they are not a fix.
 
 ### Phase 5 — Final output
-Write the final report to `tech-debt-report.md`.
+Write the final report to `.claude/reports/tech-debt-report.md` (create the
+directory if needed). Do not write it to the repository root, and do not
+commit it unless the user asks — it is working output, not a deliverable.
 
 Use this structure:
 
