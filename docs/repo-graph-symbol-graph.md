@@ -355,5 +355,12 @@ repo_map { "action": "context_pack", "file": "src/foo.ts", "symbol": "doThing", 
 - Reference attribution resolves by name within scope, not by full type
   resolution; overload-heavy (C++/Java) and highly dynamic (Ruby/Python) languages
   are best-effort.
+- C/C++ header declarations, local includes, namespaces, static functions,
+  anonymous namespaces, Swift extensions, Dart exports, Ruby privacy markers, and
+  PHP method visibility are represented conservatively. Build-system include
+  paths, template instantiations, overload resolution, SourceKit/Xcode module
+  metadata, Flutter widget trees, Ruby metaprogramming, PHP variable
+  functions/classes, Composer autoload boundaries, and Blade directives are not
+  resolved.
 - Symbol data requires an async rebuild; the sync builder yields file-level data
   only.

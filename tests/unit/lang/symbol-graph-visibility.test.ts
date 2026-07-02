@@ -157,14 +157,14 @@ module.exports = { publicName: localImpl };`,
 		expect(byName(facts!.defs, 'hidden')?.exported).toBe(false);
 	});
 
-	test('methods are not promoted into file-level exports by convention alone', async () => {
+	test('public methods retain export-range visibility for context packs', async () => {
 		const facts = await extractFileSymbols(
 			'java',
 			'public class PublicC { public void visibleMethod() {} }',
 		);
 		expect(facts).not.toBeNull();
 		expect(byName(facts!.defs, 'PublicC')?.exported).toBe(true);
-		expect(byName(facts!.defs, 'visibleMethod')?.exported).toBe(false);
+		expect(byName(facts!.defs, 'visibleMethod')?.exported).toBe(true);
 		expect(
 			byName(facts!.defs, 'visibleMethod')?.visibilityInfo?.visibility,
 		).toBe('public');

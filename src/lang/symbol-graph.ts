@@ -636,6 +636,7 @@ function buildFacts(
 	}
 
 	augmentJvmDotnetDefs(grammarId, source, defs);
+	augmentNativeDynamicDefs(grammarId, source, defs);
 
 	const importsWithIndex: Array<{
 		index: number;
@@ -747,9 +748,25 @@ function buildFacts(
 			addImport(parseImport(grammarId, exportNode.text.trim()), exportNode);
 		}
 	}
+	for (const fallback of fallbackImportsForSource(grammarId, source)) {
+		importsWithIndex.push(fallback);
+	}
+	const seenImports = new Set<string>();
 	const imports = importsWithIndex
 		.sort((a, b) => a.index - b.index)
-		.map((item) => item.entry);
+		.map((item) => item.entry)
+		.filter((entry) => {
+			const key = JSON.stringify([
+				entry.specifier,
+				entry.importType,
+				entry.bindings,
+				entry.reExport ?? false,
+				entry.exportedBindings ?? [],
+			]);
+			if (seenImports.has(key)) return false;
+			seenImports.add(key);
+			return true;
+		});
 
 	const topLevelDefs = defNodes
 		.filter((d) => isTopLevelDef(d.node, root))
@@ -774,7 +791,11 @@ function buildFacts(
 		});
 	}
 
-	return { defs, imports, refs };
+	const normalizedDefs = defs.map((def) => ({
+		...def,
+		endLine: Math.max(def.endLine, def.startLine),
+	}));
+	return { defs: normalizedDefs, imports, refs };
 }
 
 function visibilityInfoForModifier(
@@ -791,6 +812,19 @@ function visibilityInfoForModifier(
 					? 'module_public'
 					: 'modifier',
 		apiSurfaceKind: visibility === 'private' ? 'private' : 'public',
+	};
+}
+
+function symbolVisibilityInfo(
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): SymbolVisibilityInfo {
+	return {
+		exported,
+		visibility,
+		exportedReason,
+		apiSurfaceKind: exported ? 'public' : 'private',
 	};
 }
 
@@ -888,10 +922,7 @@ function upsertAugmentedDef(
 	def: FileSymbolFacts['defs'][0],
 ): void {
 	const existing = defs.find(
-		(item) =>
-			item.name === def.name &&
-			item.kind === def.kind &&
-			item.startLine === def.startLine,
+		(item) => item.name === def.name && item.startLine === def.startLine,
 	);
 	if (existing) {
 		existing.kind = def.kind;
@@ -901,6 +932,408 @@ function upsertAugmentedDef(
 		return;
 	}
 	defs.push(def);
+}
+
+function augmentNativeDynamicDefs(
+	grammarId: string,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+): void {
+	switch (grammarId) {
+		case 'cpp':
+			augmentCppDefs(source, defs);
+			return;
+		case 'swift':
+			augmentSwiftDefs(source, defs);
+			return;
+		case 'dart':
+			augmentDartDefs(source, defs);
+			return;
+		case 'ruby':
+			augmentRubyDefs(source, defs);
+			return;
+		case 'php':
+			augmentPhpDefs(source, defs);
+			return;
+	}
+}
+
+function addRegexDef(
+	defs: FileSymbolFacts['defs'],
+	source: string,
+	name: string,
+	kind: FileSymbolFacts['defs'][0]['kind'],
+	start: number,
+	end: number,
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): void {
+	upsertAugmentedDef(defs, {
+		name,
+		kind,
+		exported,
+		visibilityInfo: symbolVisibilityInfo(visibility, exported, exportedReason),
+		startLine: lineNumberAt(source, start),
+		endLine: lineNumberAt(source, end),
+	});
+}
+
+function declarationEnd(source: string, start: number): number {
+	const open = source.indexOf('{', start);
+	const semi = source.indexOf(';', start);
+	if (open !== -1 && (semi === -1 || open < semi)) {
+		return findMatchingBrace(source, open) ?? open;
+	}
+	return semi === -1 ? start : semi;
+}
+
+function augmentCppDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const anonymousRanges: Array<{ start: number; end: number }> = [];
+	const anonymousNamespaceRe = /\bnamespace\s*\{/g;
+	for (
+		let m = anonymousNamespaceRe.exec(source);
+		m !== null;
+		m = anonymousNamespaceRe.exec(source)
+	) {
+		const open = source.indexOf('{', m.index);
+		const close = open === -1 ? null : findMatchingBrace(source, open);
+		if (open !== -1 && close !== null) {
+			anonymousRanges.push({ start: open, end: close });
+		}
+	}
+	const isInAnonymousNamespace = (index: number): boolean =>
+		anonymousRanges.some((range) => index >= range.start && index <= range.end);
+
+	const typeRe = /\b(class|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (let m = typeRe.exec(source); m !== null; m = typeRe.exec(source)) {
+		const exported = !isInAnonymousNamespace(m.index);
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			m[1] === 'enum' ? 'enum' : 'type',
+			m.index,
+			declarationEnd(source, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			exported ? 'namespace_public' : 'unknown',
+		);
+	}
+
+	const functionRe =
+		/(?:^|[;\n}])\s*(static\s+)?(?:[A-Za-z_~][A-Za-z0-9_:<>,~*&\s]*?\s+)([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(;|\{)/g;
+	const skip = new Set(['if', 'for', 'while', 'switch', 'catch', 'return']);
+	for (
+		let m = functionRe.exec(source);
+		m !== null;
+		m = functionRe.exec(source)
+	) {
+		const name = m[2];
+		if (skip.has(name)) continue;
+		const isStatic = Boolean(m[1]);
+		const exported = !isStatic && !isInAnonymousNamespace(m.index);
+		const start = m.index + m[0].indexOf(name);
+		addRegexDef(
+			defs,
+			source,
+			name,
+			'function',
+			start,
+			declarationEnd(source, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			m[3] === ';' ? 'header_declaration' : 'namespace_public',
+		);
+	}
+}
+
+function augmentSwiftDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	type Block = {
+		start: number;
+		end: number;
+		exported: boolean;
+		visibility: SymbolVisibilityInfo['visibility'];
+	};
+	const blocks: Block[] = [];
+	const normalizeVisibility = (
+		raw: string | undefined,
+	): SymbolVisibilityInfo['visibility'] => {
+		if (raw === 'open') return 'public';
+		if (raw === 'fileprivate') return 'private';
+		return (
+			(raw as SymbolVisibilityInfo['visibility'] | undefined) ?? 'internal'
+		);
+	};
+	const addBlock = (
+		start: number,
+		visibility: SymbolVisibilityInfo['visibility'],
+		exported: boolean,
+	): void => {
+		const open = source.indexOf('{', start);
+		const close = open === -1 ? null : findMatchingBrace(source, open);
+		if (open !== -1 && close !== null) {
+			blocks.push({ start: open, end: close, visibility, exported });
+		}
+	};
+	const swiftTypeRe =
+		/\b(?:(open|public|internal|fileprivate|private)\s+)?(class|struct|enum|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (
+		let m = swiftTypeRe.exec(source);
+		m !== null;
+		m = swiftTypeRe.exec(source)
+	) {
+		const visibility = normalizeVisibility(m[1]);
+		const exported = visibility !== 'private';
+		const kind =
+			m[2] === 'protocol'
+				? 'interface'
+				: m[2] === 'enum'
+					? 'enum'
+					: m[2] === 'class'
+						? 'class'
+						: 'type';
+		addRegexDef(
+			defs,
+			source,
+			m[3],
+			kind,
+			m.index,
+			declarationEnd(source, m.index),
+			visibility,
+			exported,
+			visibility === 'internal' ? 'module_public' : 'modifier',
+		);
+		addBlock(m.index, visibility, exported);
+	}
+	const swiftExtensionRe =
+		/\b(?:(open|public|internal|fileprivate|private)\s+)?extension\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (
+		let m = swiftExtensionRe.exec(source);
+		m !== null;
+		m = swiftExtensionRe.exec(source)
+	) {
+		const visibility = normalizeVisibility(m[1]);
+		addBlock(m.index, visibility, visibility !== 'private');
+	}
+	const swiftFunctionRe =
+		/\b(?:(open|public|internal|fileprivate|private)\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	for (
+		let m = swiftFunctionRe.exec(source);
+		m !== null;
+		m = swiftFunctionRe.exec(source)
+	) {
+		const container = blocks.find(
+			(block) => m.index >= block.start && m.index <= block.end,
+		);
+		const visibility = m[1]
+			? normalizeVisibility(m[1])
+			: (container?.visibility ?? 'internal');
+		const exported = (container?.exported ?? true) && visibility !== 'private';
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			container ? 'method' : 'function',
+			m.index,
+			declarationEnd(source, m.index),
+			visibility,
+			exported,
+			visibility === 'internal' ? 'module_public' : 'modifier',
+		);
+	}
+}
+
+function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const dartTypeRe =
+		/\b(class|mixin|enum|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (
+		let m = dartTypeRe.exec(source);
+		m !== null;
+		m = dartTypeRe.exec(source)
+	) {
+		const exported = !m[2].startsWith('_');
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			m[1] === 'enum' ? 'enum' : m[1] === 'class' ? 'class' : 'type',
+			m.index,
+			declarationEnd(source, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			exported ? 'naming_convention' : 'unknown',
+		);
+	}
+	const dartFunctionRe =
+		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	for (
+		let m = dartFunctionRe.exec(source);
+		m !== null;
+		m = dartFunctionRe.exec(source)
+	) {
+		const exported = !m[1].startsWith('_');
+		addRegexDef(
+			defs,
+			source,
+			m[1],
+			'function',
+			m.index,
+			declarationEnd(source, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			exported ? 'naming_convention' : 'unknown',
+		);
+	}
+}
+
+function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const lines = source.split(/\r?\n/);
+	let offset = 0;
+	let currentVisibility: SymbolVisibilityInfo['visibility'] = 'public';
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed === 'private' || trimmed === 'protected') {
+			currentVisibility = trimmed;
+		}
+		const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+		if (moduleMatch) {
+			currentVisibility = 'public';
+			addRegexDef(
+				defs,
+				source,
+				moduleMatch[1],
+				'type',
+				offset + line.indexOf(moduleMatch[0]),
+				offset + line.length,
+				'public',
+				true,
+				'module_public',
+			);
+		}
+		const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+		if (classMatch) {
+			currentVisibility = 'public';
+			addRegexDef(
+				defs,
+				source,
+				classMatch[1],
+				'class',
+				offset + line.indexOf(classMatch[0]),
+				offset + line.length,
+				'public',
+				true,
+				'module_public',
+			);
+		}
+		const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+		if (constMatch) {
+			addRegexDef(
+				defs,
+				source,
+				constMatch[1],
+				'const',
+				offset + line.indexOf(constMatch[1]),
+				offset + line.length,
+				'public',
+				true,
+				'module_public',
+			);
+		}
+		const methodMatch = trimmed.match(
+			/^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_]*)/,
+		);
+		if (methodMatch) {
+			const name = methodMatch[1] ? `self.${methodMatch[2]}` : methodMatch[2];
+			const visibility = methodMatch[1] ? 'public' : currentVisibility;
+			const exported = visibility !== 'private' && !name.startsWith('_');
+			addRegexDef(
+				defs,
+				source,
+				name,
+				'method',
+				offset + line.indexOf('def'),
+				offset + line.length,
+				visibility,
+				exported,
+				exported ? 'module_public' : 'unknown',
+			);
+		}
+		offset += line.length + 1;
+	}
+}
+
+function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const namespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
+	for (
+		let m = namespaceRe.exec(source);
+		m !== null;
+		m = namespaceRe.exec(source)
+	) {
+		addRegexDef(
+			defs,
+			source,
+			m[1].trim(),
+			'type',
+			m.index,
+			m.index + m[0].length,
+			'public',
+			true,
+			'namespace_public',
+		);
+	}
+	const phpTypeRe = /\b(trait|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	for (let m = phpTypeRe.exec(source); m !== null; m = phpTypeRe.exec(source)) {
+		const bodyStart = source.indexOf('{', m.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(source, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			m[1] === 'class' ? 'class' : 'interface',
+			m.index,
+			declarationEnd(source, m.index),
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	const phpFunctionRe =
+		/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	for (
+		let m = phpFunctionRe.exec(source);
+		m !== null;
+		m = phpFunctionRe.exec(source)
+	) {
+		const modifiers = m[0].slice(0, m[0].indexOf('function'));
+		const visibility =
+			(modifiers.match(/\b(public|protected|private)\b/)?.[1] as
+				| SymbolVisibilityInfo['visibility']
+				| undefined) ?? 'public';
+		const exported = visibility !== 'private' && !m[2].startsWith('_');
+		const effectiveVisibility = m[2].startsWith('_') ? 'private' : visibility;
+		const kind = typeRanges.some(
+			(range) => m.index >= range.start && m.index <= range.end,
+		)
+			? 'method'
+			: 'function';
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			kind,
+			m.index,
+			declarationEnd(source, m.index),
+			effectiveVisibility,
+			exported,
+			exported ? 'module_public' : 'unknown',
+		);
+	}
 }
 
 function augmentJvmDotnetDefs(
@@ -1674,9 +2107,24 @@ function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 	// #include <foo>
 	// #include "foo"
 	// using foo::bar;
-	const include = t.match(/^#\s*include\s+[<"]([^>"]+)[>"]/);
-	if (include) {
-		return { specifier: include[1], importType: 'namespace', bindings: [] };
+	const quotedInclude = t.match(/^#\s*include\s+\\?"([^"\\]+)\\?"/);
+	if (quotedInclude) {
+		const specifier = quotedInclude[1].startsWith('.')
+			? quotedInclude[1]
+			: `./${quotedInclude[1]}`;
+		return {
+			specifier,
+			importType: 'default',
+			bindings: [],
+		};
+	}
+	const angleInclude = t.match(/^#\s*include\s+<([^>]+)>/);
+	if (angleInclude) {
+		return {
+			specifier: angleInclude[1],
+			importType: 'namespace',
+			bindings: [],
+		};
 	}
 	const using = t.match(/^using\s+(?:namespace\s+)?(.+?)\s*;?\s*$/);
 	if (using) {
@@ -1706,12 +2154,36 @@ function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
 	// import 'foo' as bar;
 	// import 'foo' show A, B;
 	// import 'foo' hide A;
+	// export 'foo' show A, B;
+	const exportMatch = t.match(
+		/^export\s+['"]([^'"]+)['"](?:\s+show\s+([^;]+))?/,
+	);
+	if (exportMatch) {
+		const shown = exportMatch[2]
+			?.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const bindings =
+			shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [{ imported: '*', local: '*' }];
+		return {
+			specifier: exportMatch[1],
+			importType: shown && shown.length > 0 ? 'named' : 'namespace',
+			bindings,
+			reExport: true,
+			exportedBindings: bindings.map((binding) => ({
+				imported: binding.imported,
+				exported: binding.local,
+			})),
+		};
+	}
 	const m = t.match(/^import\s+['"]([^'"]+)['"]\s+as\s+(\w+)/);
 	if (m) {
 		return {
 			specifier: m[1],
-			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			importType: 'namespace',
+			bindings: [],
 		};
 	}
 	const simple = t.match(/^import\s+['"]([^'"]+)['"]/);
@@ -1727,13 +2199,16 @@ function parseRubyRequire(text: string): FileSymbolFacts['imports'][0] | null {
 	// e.g. "json" for require 'json'
 	// e.g. "./foo" for require_relative './foo'
 	// When the require keyword is included (full call text), strip it.
+	const isRequireRelative = /^require_relative\b/.test(t);
 	const stripped = t
 		.replace(/^(?:require(?:_relative)?)\s+['"]?/, '')
 		.replace(/['"]$/, '');
 	if (!stripped || stripped === t) return null;
-	const isRelative = stripped.startsWith('./') || stripped.startsWith('../');
+	const specifier =
+		isRequireRelative && !stripped.startsWith('.') ? `./${stripped}` : stripped;
+	const isRelative = specifier.startsWith('./') || specifier.startsWith('../');
 	return {
-		specifier: stripped,
+		specifier,
 		importType: isRelative ? 'default' : 'namespace',
 		bindings: [],
 	};
@@ -1762,6 +2237,42 @@ function parsePhpUse(text: string): FileSymbolFacts['imports'][0] | null {
 		return { specifier: simple[1], importType: 'namespace', bindings: [] };
 	}
 	return null;
+}
+
+function fallbackImportsForSource(
+	grammarId: string,
+	source: string,
+): Array<{ index: number; entry: FileSymbolFacts['imports'][0] }> {
+	const entries: Array<{
+		index: number;
+		entry: FileSymbolFacts['imports'][0];
+	}> = [];
+	const lines = source.split(/\r?\n/);
+	let offset = 0;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		const startLine = lineNumberAt(source, offset);
+		const withLocation = (
+			entry: FileSymbolFacts['imports'][0] | null,
+		): FileSymbolFacts['imports'][0] | null =>
+			entry ? { ...entry, startLine, endLine: startLine } : null;
+		let parsed: FileSymbolFacts['imports'][0] | null = null;
+		if (grammarId === 'cpp') {
+			parsed = parseCppInclude(trimmed);
+		} else if (grammarId === 'swift') {
+			parsed = parseSwiftImport(trimmed);
+		} else if (grammarId === 'dart') {
+			parsed = parseDartImport(trimmed);
+		} else if (grammarId === 'ruby') {
+			parsed = parseRubyRequire(trimmed);
+		} else if (grammarId === 'php') {
+			parsed = parsePhpUse(trimmed);
+		}
+		const located = withLocation(parsed);
+		if (located) entries.push({ index: offset, entry: located });
+		offset += line.length + 1;
+	}
+	return entries;
 }
 
 function isTopLevelDef(defNode: TsNode, root: TsNode): boolean {
@@ -1837,7 +2348,12 @@ const IMPORT_ANCESTOR_TYPES = new Set([
 	'use_declaration',
 	'using_directive',
 	'namespace_use_declaration',
+	'namespace_use_clause',
+	'namespace_definition',
 	'library_import', // dart
+	'library_export', // dart
+	'export_directive', // dart
+	'preproc_include', // c/c++
 ]);
 
 function isInsideImportStatement(node: TsNode): boolean {
