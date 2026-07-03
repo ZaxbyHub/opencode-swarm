@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { collectPythonAllNames } from '../lang/symbol-visibility';
 import { createSwarmTool } from './create-tool';
 
-interface SymbolInfo {
+export interface SymbolInfo {
 	name: string;
 	kind:
 		| 'function'
@@ -42,7 +42,14 @@ const SYMBOL_EXTENSIONS = new Set([
 	'.pyw',
 	'.rs',
 	'.go',
+	'.java',
+	'.kt',
+	'.kts',
+	'.cs',
+	'.csx',
 ]);
+
+export const SUPPORTED_SYMBOL_EXTENSIONS = [...SYMBOL_EXTENSIONS].sort();
 
 // Directories to skip during workspace scanning
 const SKIP_DIRECTORIES = new Set([
@@ -630,6 +637,425 @@ export function extractGoSymbols(filePath: string, cwd: string): SymbolInfo[] {
 	});
 }
 
+type ModifierVisibility = 'public' | 'protected' | 'internal' | 'private';
+
+interface TypeBlock {
+	name: string;
+	kind: SymbolInfo['kind'];
+	exported: boolean;
+	start: number;
+	bodyStart: number | null;
+	bodyEnd: number | null;
+	line: number;
+	signature: string;
+}
+
+function lineNumberAt(content: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index && i < content.length; i++) {
+		if (content.charCodeAt(i) === 10) line++;
+	}
+	return line;
+}
+
+function lineTextAt(content: string, index: number): string {
+	const start = content.lastIndexOf('\n', index) + 1;
+	const next = content.indexOf('\n', index);
+	const end = next === -1 ? content.length : next;
+	return content.slice(start, end).trim().substring(0, 100);
+}
+
+function stripJvmDotnetComments(content: string): string {
+	return content
+		.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+		.replace(/\/\/[^\n\r]*/g, (m) => ' '.repeat(m.length));
+}
+
+function findMatchingBrace(content: string, openIndex: number): number | null {
+	let depth = 0;
+	let i = openIndex;
+	while (i < content.length) {
+		const ch = content[i];
+		// Skip double-quoted strings (handles \")
+		if (ch === '"') {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === '"') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip single-quoted strings / char literals
+		if (ch === "'") {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === "'") {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip template literals (basic; handles ${...} nesting)
+		if (ch === '`') {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === '`') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip line comments
+		if (ch === '/' && content[i + 1] === '/') {
+			i += 2;
+			while (i < content.length && content[i] !== '\n') i++;
+			continue;
+		}
+		// Skip block comments
+		if (ch === '/' && content[i + 1] === '*') {
+			i += 2;
+			while (i < content.length - 1) {
+				if (content[i] === '*' && content[i + 1] === '/') {
+					i += 2;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+		i++;
+	}
+	return null;
+}
+
+function isInsideRange(
+	index: number,
+	ranges: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+	return ranges.some((range) => index > range.start && index < range.end);
+}
+
+function exportedFromVisibility(
+	visibility: ModifierVisibility | undefined,
+	defaultExported: boolean,
+): boolean {
+	if (visibility === 'private') return false;
+	return defaultExported;
+}
+
+function addUniqueSymbol(
+	symbols: SymbolInfo[],
+	seen: Set<string>,
+	symbol: SymbolInfo,
+): void {
+	const key = `${symbol.name}\0${symbol.kind}\0${symbol.line}`;
+	if (seen.has(key)) return;
+	seen.add(key);
+	symbols.push(symbol);
+}
+
+function collectTypeBlocks(
+	content: string,
+	typeRe: RegExp,
+	kindFor: (rawKind: string) => SymbolInfo['kind'],
+	defaultExported: boolean,
+): TypeBlock[] {
+	const blocks: TypeBlock[] = [];
+	for (let m = typeRe.exec(content); m !== null; m = typeRe.exec(content)) {
+		const visibility = m[1] as ModifierVisibility | undefined;
+		const rawKind = m[2];
+		const name = m[3];
+		const bodyStart = content.indexOf('{', m.index);
+		const nextSemi = content.indexOf(';', m.index);
+		const hasBody =
+			bodyStart !== -1 && (nextSemi === -1 || bodyStart < nextSemi);
+		const bodyEnd = hasBody ? findMatchingBrace(content, bodyStart) : null;
+		blocks.push({
+			name,
+			kind: kindFor(rawKind),
+			exported: exportedFromVisibility(visibility, defaultExported),
+			start: m.index,
+			bodyStart: hasBody ? bodyStart : null,
+			bodyEnd,
+			line: lineNumberAt(content, m.index),
+			signature: lineTextAt(content, m.index),
+		});
+	}
+	return blocks;
+}
+
+function collectClassMethods(
+	content: string,
+	block: TypeBlock,
+	methodRe: RegExp,
+	defaultExported: boolean,
+	defaultVisibility: ModifierVisibility,
+	symbols: SymbolInfo[],
+	seen: Set<string>,
+): void {
+	if (block.bodyStart === null || block.bodyEnd === null) return;
+	const body = content.slice(block.bodyStart + 1, block.bodyEnd);
+	const skip = new Set([
+		'if',
+		'for',
+		'while',
+		'switch',
+		'catch',
+		'return',
+		'new',
+	]);
+	// Precompute depth at every character position — O(B) once per class
+	const depths: number[] = new Array(body.length + 1);
+	depths[0] = 0;
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+		if (ch === '{') depths[i + 1] = depths[i] + 1;
+		else if (ch === '}') depths[i + 1] = Math.max(0, depths[i] - 1);
+		else depths[i + 1] = depths[i];
+	}
+	for (let m = methodRe.exec(body); m !== null; m = methodRe.exec(body)) {
+		const visibility = m[1] as ModifierVisibility | undefined;
+		const name = m[2];
+		if (!name || skip.has(name)) continue;
+		const firstToken = m[0].trim().split(/\s+/)[0];
+		if (skip.has(firstToken)) continue;
+		if (depths[m.index] > 0) continue;
+		const absoluteIndex = block.bodyStart + 1 + m.index;
+		if (!hasStatementBoundaryBefore(content, absoluteIndex)) continue;
+		const exported =
+			block.exported &&
+			exportedFromVisibility(visibility ?? defaultVisibility, defaultExported);
+		addUniqueSymbol(symbols, seen, {
+			name: `${block.name}.${name}`,
+			kind: 'method',
+			exported,
+			signature: lineTextAt(content, absoluteIndex),
+			line: lineNumberAt(content, absoluteIndex),
+		});
+	}
+}
+
+function hasStatementBoundaryBefore(content: string, index: number): boolean {
+	let i = index - 1;
+	let sawNewline = false;
+	while (i >= 0 && /\s/.test(content[i])) {
+		if (content[i] === '\n' || content[i] === '\r') sawNewline = true;
+		i--;
+	}
+	if (sawNewline) return true;
+	return (
+		i < 0 || content[i] === '{' || content[i] === ';' || content[i] === '}'
+	);
+}
+
+export function extractJavaSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeBlocks = collectTypeBlocks(
+		content,
+		/\b(?:(public|protected|private)\s+)?(?:(?:abstract|final|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+		(rawKind) =>
+			rawKind === 'interface'
+				? 'interface'
+				: rawKind === 'enum'
+					? 'enum'
+					: 'class',
+		true,
+	);
+	for (const block of typeBlocks) {
+		addUniqueSymbol(symbols, seen, {
+			name: block.name,
+			kind: block.kind,
+			exported: block.exported,
+			signature: block.signature,
+			line: block.line,
+		});
+		collectClassMethods(
+			content,
+			block,
+			/\b(?:(public|protected|private)\s+)?(?:(?:static|final|abstract|synchronized)\s+)*(?:[A-Za-z_][A-Za-z0-9_<>[\],.?]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+			true,
+			'public',
+			symbols,
+			seen,
+		);
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractKotlinSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeBlocks = collectTypeBlocks(
+		content,
+		/\b(?:(public|internal|private|protected)\s+)?(?:(?:data|sealed|open|abstract)\s+)*(class|interface|object|enum\s+class)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+		(rawKind) =>
+			rawKind === 'interface'
+				? 'interface'
+				: rawKind === 'enum class'
+					? 'enum'
+					: 'class',
+		true,
+	);
+	for (const block of typeBlocks) {
+		addUniqueSymbol(symbols, seen, {
+			name: block.name,
+			kind: block.kind,
+			exported: block.exported,
+			signature: block.signature,
+			line: block.line,
+		});
+		collectClassMethods(
+			content,
+			block,
+			/\b(?:(public|internal|private|protected)\s+)?fun\s+(?:[A-Za-z_][A-Za-z0-9_<>]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+			true,
+			'public',
+			symbols,
+			seen,
+		);
+	}
+
+	const typeRanges = typeBlocks
+		.filter((block) => block.bodyStart !== null && block.bodyEnd !== null)
+		.map((block) => ({ start: block.start, end: block.bodyEnd! }));
+	const topLevelFunctionRe =
+		/\b(?:(public|internal|private|protected)\s+)?fun\s+(?:([A-Za-z_][A-Za-z0-9_<>]*)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	for (
+		let m = topLevelFunctionRe.exec(content);
+		m !== null;
+		m = topLevelFunctionRe.exec(content)
+	) {
+		if (isInsideRange(m.index, typeRanges)) continue;
+		const visibility = m[1] as ModifierVisibility | undefined;
+		const name = m[2] ? `${m[2]}.${m[3]}` : m[3];
+		addUniqueSymbol(symbols, seen, {
+			name,
+			kind: 'function',
+			exported: exportedFromVisibility(visibility, true),
+			signature: lineTextAt(content, m.index),
+			line: lineNumberAt(content, m.index),
+		});
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractCSharpSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeBlocks = collectTypeBlocks(
+		content,
+		/\b(?:(public|internal|private|protected)\s+)?(?:(?:static|abstract|sealed|partial)\s+)*(class|interface|struct|record)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+		(rawKind) =>
+			rawKind === 'interface'
+				? 'interface'
+				: rawKind === 'struct'
+					? 'type'
+					: 'class',
+		true,
+	);
+	for (const block of typeBlocks) {
+		addUniqueSymbol(symbols, seen, {
+			name: block.name,
+			kind: block.kind,
+			exported: block.exported,
+			signature: block.signature,
+			line: block.line,
+		});
+		collectClassMethods(
+			content,
+			block,
+			/\b(?:(public|internal|private|protected)\s+)?(?:(?:static|virtual|override|async|sealed)\s+)*(?:[A-Za-z_][A-Za-z0-9_<>[\],.?]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+			true,
+			'private',
+			symbols,
+			seen,
+		);
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractSymbolsForFile(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] | null {
+	const ext = path.extname(filePath).toLowerCase();
+	switch (ext) {
+		case '.ts':
+		case '.tsx':
+		case '.js':
+		case '.jsx':
+		case '.mjs':
+		case '.cjs':
+			return extractTSSymbols(filePath, cwd);
+		case '.py':
+		case '.pyw':
+			return extractPythonSymbols(filePath, cwd);
+		case '.rs':
+			return extractRustSymbols(filePath, cwd);
+		case '.go':
+			return extractGoSymbols(filePath, cwd);
+		case '.java':
+			return extractJavaSymbols(filePath, cwd);
+		case '.kt':
+		case '.kts':
+			return extractKotlinSymbols(filePath, cwd);
+		case '.cs':
+		case '.csx':
+			return extractCSharpSymbols(filePath, cwd);
+		default:
+			return null;
+	}
+}
+
 // ============ Workspace File Discovery ============
 
 /**
@@ -700,31 +1126,8 @@ function searchWorkspaceSymbols(
 		}
 
 		scannedCount++;
-		let syms: SymbolInfo[];
-
-		const ext = path.extname(relFile).toLowerCase();
-		switch (ext) {
-			case '.ts':
-			case '.tsx':
-			case '.js':
-			case '.jsx':
-			case '.mjs':
-			case '.cjs':
-				syms = extractTSSymbols(relFile, cwd);
-				break;
-			case '.py':
-			case '.pyw':
-				syms = extractPythonSymbols(relFile, cwd);
-				break;
-			case '.rs':
-				syms = extractRustSymbols(relFile, cwd);
-				break;
-			case '.go':
-				syms = extractGoSymbols(relFile, cwd);
-				break;
-			default:
-				continue;
-		}
+		let syms = extractSymbolsForFile(relFile, cwd);
+		if (syms === null) continue;
 
 		// Filter by exported-only
 		if (exportedOnly) {
@@ -902,39 +1305,18 @@ export const symbols: ToolDefinition = createSwarmTool({
 			);
 		}
 
-		const ext = path.extname(file);
-
-		let syms: SymbolInfo[];
-
-		switch (ext) {
-			case '.ts':
-			case '.tsx':
-			case '.js':
-			case '.jsx':
-			case '.mjs':
-			case '.cjs':
-				syms = extractTSSymbols(file, cwd);
-				break;
-			case '.py':
-			case '.pyw':
-				syms = extractPythonSymbols(file, cwd);
-				break;
-			case '.rs':
-				syms = extractRustSymbols(file, cwd);
-				break;
-			case '.go':
-				syms = extractGoSymbols(file, cwd);
-				break;
-			default:
-				return JSON.stringify(
-					{
-						file,
-						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
-						symbols: [],
-					},
-					null,
-					2,
-				);
+		const ext = path.extname(file).toLowerCase();
+		let syms = extractSymbolsForFile(file, cwd);
+		if (syms === null) {
+			return JSON.stringify(
+				{
+					file,
+					error: `Unsupported file extension: ${ext}. Supported: ${SUPPORTED_SYMBOL_EXTENSIONS.join(', ')}`,
+					symbols: [],
+				},
+				null,
+				2,
+			);
 		}
 
 		if (exportedOnly) {

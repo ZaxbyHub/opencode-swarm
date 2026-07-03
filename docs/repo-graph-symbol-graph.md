@@ -23,10 +23,12 @@ server claims to break through:
    The graph can say "file A references symbol `foo` from file B" but not
    "function `bar()` calls `foo()`". Agents still open whole files to act, which
    is where context burden actually accrues.
-2. **Coverage is TS/JS/Python only**, while the repo documents **12 first-class
-   languages** in `src/lang/profiles.ts` (TypeScript, Python, Rust, Go, Java,
-   Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) and already ships tree-sitter
-   grammars for every one of them (`src/lang/runtime.ts:99`).
+ 2. **Coverage was TS/JS/Python only**, while the repo documents **12 first-class
+    languages** in `src/lang/profiles.ts` (TypeScript, Python, Rust, Go, Java,
+    Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) and already ships tree-sitter
+    grammars for every one of them (`src/lang/runtime.ts:99`). PR #1679 extends
+    coverage to Java, Kotlin, and C# via regex-augmented tree-sitter extraction
+    (`src/lang/symbol-graph.ts:885`).
 
 This document specifies schema **1.2.0**: a **symbol-level call graph** built on the
 existing tree-sitter language layer, covering all 12 documented languages, plus a
@@ -234,12 +236,57 @@ async-only symbol extraction.
 
 All **12** profile languages, resolved via `getProfileForFile(path)` →
 `profile.treeSitter.grammarId` (`src/lang/profiles.ts`), each with a grammar in
-`LANGUAGE_WASM_MAP` (`runtime.ts:99`). Each language needs a `.scm` query set in
-`symbol-graph.ts`. `SUPPORTED_EXTENSIONS`/`EXTENSION_TO_LANGUAGE`/`getLanguage` in
-the builder are replaced by a lookup through the language registry so the supported
-set is driven by the profiles, not a hard-coded list. Files whose grammar is
-unavailable or that exceed the size cap degrade to a file-level node (fail-open),
-never crashing the build.
+`LANGUAGE_WASM_MAP` (`runtime.ts:99`).
+
+**TS/JS/Python** use the primary tree-sitter approach: a `.scm` query set per
+grammar in `src/lang/symbol-graph.ts`, keyed by language id — mirroring the
+`QUERIES` shape in `src/diff/ast-diff.ts:36`. These languages have full symbol
+extraction (defs, imports, refs).
+
+**Java, Kotlin, and C#** use a regex-augmented hybrid: tree-sitter provides the
+initial parse, and `augmentJvmDotnetDefs` (`symbol-graph.ts:885`) applies
+language-specific regex patterns to extract member-level facts (visibility, method
+names, nested type names) that the grammar's unaugmented captures miss. This
+avoids the need for hand-written `.scm` queries while still riding the WASM
+grammar. The regex patterns handle type declarations, modifiers, and nested
+blocks for these three languages specifically.
+
+`SUPPORTED_EXTENSIONS`/`EXTENSION_TO_LANGUAGE`/`getLanguage` in the builder are
+replaced by a lookup through the language registry so the supported set is driven
+by the profiles, not a hard-coded list. Files whose grammar is unavailable or
+that exceed the size cap degrade to a file-level node (fail-open), never crashing
+the build.
+
+### `packageBoundary` for JVM/.NET (`src/tools/repo-graph/ontology.ts`)
+
+JVM languages (Java, Kotlin) and C# each have a hierarchical namespace/package
+structure that scopes symbols. The `packageBoundary` field in `FileOntology`
+captures the coarsest such boundary for a source file, enabling consumers of
+`repo_map action="ontology"` to group files by package/namespace without
+parsing the file content.
+
+**Java:** extracts the `package` declaration as a `packageBoundary`:
+```java
+package com.example.myapp;  // → "com.example.myapp"
+```
+
+**Kotlin:** same pattern as Java:
+```kotlin
+package com.example.myapp  // → "com.example.myapp"
+```
+
+**C#:** extracts the `namespace` declaration, including nested namespaces:
+```csharp
+namespace MyApp { }         // → "MyApp"
+namespace MyApp.Inner { }   // → "MyApp.Inner"
+```
+
+**Implementation:** `sourceBoundaryForLanguage` (`ontology.ts:122`) applies a
+single regex scan per file for the relevant declaration. The fallback
+`boundaryForModule` (`ontology.ts:76`) uses the normalized module path when no
+explicit package/namespace declaration is found. `packageBoundary` is
+guaranteed non-null in the returned `FileOntology` — it always falls back to
+the path-derived boundary.
 
 ## Invariant audit (for the implementing PR)
 
@@ -275,8 +322,10 @@ never crashing the build.
 
 ## Milestones
 
-1. `src/lang/symbol-graph.ts` + `.scm` query sets for all 12 grammars (defs +
-   imports + refs), with per-language tests. Behind a flag; nothing else changes.
+1. `src/lang/symbol-graph.ts` + `.scm` query sets for TS/JS/Python (defs +
+   imports + refs), with per-language tests. Java/Kotlin/C# use regex augmentation
+   via `augmentJvmDotnetDefs` (no `.scm` queries required). Behind a flag;
+   nothing else changes.
 2. Rewire the async builder's `scanFile` onto `symbol-graph.ts`; reconcile
    `usedSymbols`/`exportLines`; keep TS/JS/Python output equivalent-or-better.
    Redefine the #1144 parity test.

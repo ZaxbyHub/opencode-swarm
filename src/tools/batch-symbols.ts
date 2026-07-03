@@ -3,12 +3,7 @@ import * as path from 'node:path';
 import { tool } from '@opencode-ai/plugin';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { createSwarmTool } from './create-tool';
-import {
-	extractGoSymbols,
-	extractPythonSymbols,
-	extractRustSymbols,
-	extractTSSymbols,
-} from './symbols';
+import { extractSymbolsForFile, SUPPORTED_SYMBOL_EXTENSIONS } from './symbols';
 
 // Re-export SymbolInfo for use in batch results
 export interface SymbolInfo {
@@ -172,34 +167,14 @@ function processFile(
 		};
 	}
 
-	let syms: SymbolInfo[];
-
-	switch (ext) {
-		case '.ts':
-		case '.tsx':
-		case '.js':
-		case '.jsx':
-		case '.mjs':
-		case '.cjs':
-			syms = extractTSSymbols(file, cwd);
-			break;
-		case '.py':
-		case '.pyw':
-			syms = extractPythonSymbols(file, cwd);
-			break;
-		case '.rs':
-			syms = extractRustSymbols(file, cwd);
-			break;
-		case '.go':
-			syms = extractGoSymbols(file, cwd);
-			break;
-		default:
-			return {
-				file,
-				success: false,
-				error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
-				errorType: 'unsupported-language',
-			};
+	let syms = extractSymbolsForFile(file, cwd);
+	if (syms === null) {
+		return {
+			file,
+			success: false,
+			error: `Unsupported file extension: ${ext}. Supported: ${SUPPORTED_SYMBOL_EXTENSIONS.join(', ')}`,
+			errorType: 'unsupported-language',
+		};
 	}
 
 	// Check for empty file (file exists but has no symbols)

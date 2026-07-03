@@ -22,9 +22,13 @@ import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 import { yieldToEventLoop } from '../../utils/timeout';
 import {
+	extractCSharpSymbols,
 	extractGoSymbols,
+	extractJavaSymbols,
+	extractKotlinSymbols,
 	extractPythonSymbols,
 	extractRustSymbols,
+	extractSymbolsForFile,
 	extractTSSymbols,
 } from '../symbols';
 import { extractFileOntology } from './ontology';
@@ -61,6 +65,10 @@ export const _internals: {
 	extractPythonSymbols: typeof extractPythonSymbols;
 	extractRustSymbols: typeof extractRustSymbols;
 	extractGoSymbols: typeof extractGoSymbols;
+	extractJavaSymbols: typeof extractJavaSymbols;
+	extractKotlinSymbols: typeof extractKotlinSymbols;
+	extractCSharpSymbols: typeof extractCSharpSymbols;
+	extractSymbolsForFile: typeof extractSymbolsForFile;
 	parseFileImports: typeof parseFileImports;
 	extractFileOntology: typeof extractFileOntology;
 	stripComments: typeof stripComments;
@@ -72,6 +80,10 @@ export const _internals: {
 	extractPythonSymbols,
 	extractRustSymbols,
 	extractGoSymbols,
+	extractJavaSymbols,
+	extractKotlinSymbols,
+	extractCSharpSymbols,
+	extractSymbolsForFile,
 	parseFileImports,
 	extractFileOntology,
 	stripComments,
@@ -239,6 +251,80 @@ function appendEdgeFast(
 
 // ============ Path Resolution ============
 
+const JVM_DOTNET_DOTTED_ROOTS = ['', 'src', 'src/main/java', 'src/main/kotlin'];
+
+function tryResolveDottedWorkspaceModule(
+	workspaceRoot: string,
+	sourceFile: string,
+	specifier: string,
+): string | null {
+	if (!/^[A-Za-z_][\w.]*(?:\.\*)?$/.test(specifier)) return null;
+	const sourceExt = path.extname(sourceFile).toLowerCase();
+	const extensions =
+		sourceExt === '.java'
+			? ['.java']
+			: sourceExt === '.kt' || sourceExt === '.kts'
+				? ['.kt', '.kts']
+				: sourceExt === '.cs' || sourceExt === '.csx'
+					? ['.cs', '.csx']
+					: [];
+	if (extensions.length === 0) return null;
+
+	const cleaned = specifier.replace(/\.\*$/, '');
+	const parts = cleaned.split('.');
+	const candidates = [parts.join(path.sep)];
+	if (parts.length > 1) candidates.push(parts.slice(0, -1).join(path.sep));
+	const realRoot = _internals.safeRealpathSync(
+		workspaceRoot,
+		path.normalize(workspaceRoot),
+	);
+	if (realRoot === null) return null;
+
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		for (const candidate of candidates) {
+			const base = path.join(workspaceRoot, rootPrefix, candidate);
+			for (const ext of extensions) {
+				const file = base + ext;
+				if (!existsSync(file)) continue;
+				const realFile = _internals.safeRealpathSync(file, file);
+				if (realFile === null) continue;
+				const normalizedFile = path.normalize(realFile);
+				const normalizedRoot = path.normalize(realRoot);
+				if (
+					normalizedFile === normalizedRoot ||
+					normalizedFile.startsWith(normalizedRoot + path.sep)
+				) {
+					return file;
+				}
+			}
+			try {
+				if (!fsSync.statSync(base).isDirectory()) continue;
+				const first = fsSync
+					.readdirSync(base)
+					.filter((entry) =>
+						extensions.some((ext) => entry.toLowerCase().endsWith(ext)),
+					)
+					.sort((a, b) => a.localeCompare(b))[0];
+				if (!first) continue;
+				const file = path.join(base, first);
+				const realFile = _internals.safeRealpathSync(file, file);
+				if (realFile === null) continue;
+				const normalizedFile = path.normalize(realFile);
+				const normalizedRoot = path.normalize(realRoot);
+				if (
+					normalizedFile === normalizedRoot ||
+					normalizedFile.startsWith(normalizedRoot + path.sep)
+				) {
+					return file;
+				}
+			} catch {
+				// continue
+			}
+		}
+	}
+	return null;
+}
+
 /**
  * Resolve a module specifier relative to a source file within a workspace.
  *
@@ -389,6 +475,11 @@ export function resolveModuleSpecifier(
 								'.py',
 								'.rs',
 								'.go',
+								'.java',
+								'.kt',
+								'.kts',
+								'.cs',
+								'.csx',
 								'.ts',
 								'.tsx',
 								'.js',
@@ -408,6 +499,11 @@ export function resolveModuleSpecifier(
 								'.pyw',
 								'.rs',
 								'.go',
+								'.java',
+								'.kt',
+								'.kts',
+								'.cs',
+								'.csx',
 								'.json',
 							];
 				let found: string | null = null;
@@ -450,7 +546,14 @@ export function resolveModuleSpecifier(
 			return resolved;
 		}
 
-		// Bare specifiers (e.g., 'lodash', '@scope/pkg') cannot be resolved
+		const dottedTarget = tryResolveDottedWorkspaceModule(
+			workspaceRoot,
+			sourceFile,
+			normalizedSpecifier,
+		);
+		if (dottedTarget !== null) return dottedTarget;
+
+		// Bare specifiers (e.g., 'lodash', 'zod', '@scope/pkg') cannot be resolved
 		// without node_modules traversal - return null per contract above
 		return null;
 	} catch {
@@ -788,6 +891,15 @@ function parseFileImports(
 	if (ext === '.go') {
 		return parseGoFileImports(rawContent);
 	}
+	if (ext === '.java') {
+		return parseJavaFileImports(rawContent);
+	}
+	if (ext === '.kt' || ext === '.kts') {
+		return parseKotlinFileImports(rawContent);
+	}
+	if (ext === '.cs' || ext === '.csx') {
+		return parseCSharpFileImports(rawContent);
+	}
 
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
@@ -867,6 +979,78 @@ function makeParsedImport(
 		bindings,
 		reExport,
 	};
+}
+
+function finalDottedName(value: string): string {
+	const parts = value.split('.').filter(Boolean);
+	return parts[parts.length - 1] ?? value;
+}
+
+function parseJavaFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const re = /^\s*import\s+(static\s+)?([A-Za-z_][\w.]*(?:\.\*)?)\s*;?\s*$/gm;
+	for (let m = re.exec(rawContent); m !== null; m = re.exec(rawContent)) {
+		const isStatic = Boolean(m[1]);
+		const raw = m[2];
+		const isStar = raw.endsWith('.*');
+		const specifier =
+			isStatic && !isStar ? raw.split('.').slice(0, -1).join('.') : raw;
+		const imported =
+			isStatic && !isStar ? finalDottedName(raw) : finalDottedName(raw);
+		const parsed = makeParsedImport(
+			specifier,
+			isStar ? 'namespace' : 'named',
+			isStar
+				? [{ imported: '*', local: '*' }]
+				: [{ imported, local: imported }],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseKotlinFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const re =
+		/^\s*import\s+([A-Za-z_][\w.]*(?:\.\*)?)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?/gm;
+	for (let m = re.exec(rawContent); m !== null; m = re.exec(rawContent)) {
+		const raw = m[1];
+		const alias = m[2];
+		const isStar = raw.endsWith('.*');
+		const imported = isStar ? '*' : finalDottedName(raw);
+		const parsed = makeParsedImport(
+			raw,
+			isStar ? 'namespace' : 'named',
+			isStar
+				? [{ imported: '*', local: '*' }]
+				: [{ imported, local: alias ?? imported }],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseCSharpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const re =
+		/^\s*using\s+(static\s+)?(?:(\w+)\s*=\s*)?([A-Za-z_][\w.]*)\s*;?/gm;
+	for (let m = re.exec(rawContent); m !== null; m = re.exec(rawContent)) {
+		const isStatic = Boolean(m[1]);
+		const alias = m[2];
+		const specifier = m[3];
+		const imported = finalDottedName(specifier);
+		const parsed = makeParsedImport(
+			specifier,
+			alias ? 'named' : 'namespace',
+			alias
+				? [{ imported, local: alias }]
+				: isStatic
+					? [{ imported: '*', local: '*' }]
+					: [],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
 }
 
 function parsePythonFileImports(
@@ -1573,33 +1757,14 @@ export function scanFile(
 		return { node: null, edges: [] };
 	}
 
-	// Extract symbol exports based on file extension
-	const ext = path.extname(filePath).toLowerCase();
 	let exports: string[] = [];
 	let exportLines: Record<string, number> = {};
 
 	try {
-		if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractTSSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.py' || ext === '.pyw') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractPythonSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.rs') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractRustSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.go') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractGoSymbols(relativePath, absoluteRoot),
-			));
-		}
+		const relativePath = path.relative(absoluteRoot, filePath);
+		({ exports, exportLines } = collectExports(
+			_internals.extractSymbolsForFile(relativePath, absoluteRoot) ?? [],
+		));
 
 		// Parse imports to get specifiers with types
 		const parsedImports = _internals.parseFileImports(
@@ -1762,9 +1927,15 @@ export async function scanFileAsync(
 	const exportLines: Record<string, number> = {};
 	const exportRanges: Record<string, { startLine: number; endLine: number }> =
 		{};
+	const rangeCounts = new Map<string, number>();
 	for (const d of exportedDefs) {
-		exportLines[d.name] = d.startLine;
-		exportRanges[d.name] = { startLine: d.startLine, endLine: d.endLine };
+		if (exportLines[d.name] === undefined) {
+			exportLines[d.name] = d.startLine;
+		}
+		const count = rangeCounts.get(d.name) ?? 0;
+		const rangeKey = count === 0 ? d.name : `${d.name}#${count + 1}`;
+		rangeCounts.set(d.name, count + 1);
+		exportRanges[rangeKey] = { startLine: d.startLine, endLine: d.endLine };
 	}
 	const exportsSet = new Set(exports);
 	const isPythonPackageInit =
@@ -2117,33 +2288,15 @@ export function buildWorkspaceGraph(
 
 		// Extract symbol exports based on file extension. Mirrors scanFile() so
 		// the sync and async builders stay byte-for-byte equivalent (issue #1144).
-		const ext = path.extname(filePath).toLowerCase();
 		let exports: string[] = [];
 		let exportLines: Record<string, number> = {};
 		let parsedImports: ParsedImport[] = [];
 
 		try {
-			if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractTSSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.py' || ext === '.pyw') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractPythonSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.rs') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractRustSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.go') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractGoSymbols(relativePath, absoluteRoot),
-				));
-			}
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractSymbolsForFile(relativePath, absoluteRoot) ?? [],
+			));
 
 			parsedImports = _internals.parseFileImports(
 				content,

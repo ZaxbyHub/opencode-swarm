@@ -576,6 +576,11 @@ class Service:
 		);
 	});
 
+	// -------------------------------------------------------------------------
+	// FB-002: Python methods on exported classes must be marked exported: true
+	// Restored from PR #1679 review — pythonParentClassExported regression tests
+	// (also addressed in PR #1637 Round 1 closure, commit 789a408e)
+	// -------------------------------------------------------------------------
 	test('FB-002: exported class methods are marked exported, private methods are not', async () => {
 		// Regression test: tree-sitter path should match regex extractor behavior
 		// for Python class method exported determination
@@ -1016,7 +1021,8 @@ public class C {
 		expect(facts!.imports).toHaveLength(1);
 		expect(facts!.imports[0]).toMatchObject({
 			specifier: 'java.util.List',
-			importType: 'namespace',
+			importType: 'named',
+			bindings: [{ imported: 'List', local: 'List' }],
 		});
 
 		// ref: List inside method m → enclosingDecl = 'C' (class, nearest top-level decl)
@@ -1066,13 +1072,19 @@ class C implements I {
 			(i) => i.specifier === 'java.util.Collections',
 		);
 		expect(collImport).toBeDefined();
-		expect(collImport!.importType).toBe('namespace');
+		expect(collImport).toMatchObject({
+			importType: 'named',
+			bindings: [{ imported: 'Collections', local: 'Collections' }],
+		});
 
 		const maxImport = facts!.imports.find(
-			(i) => i.specifier === 'java.lang.Math.max',
+			(i) => i.specifier === 'java.lang.Math',
 		);
 		expect(maxImport).toBeDefined();
-		expect(maxImport!.importType).toBe('namespace');
+		expect(maxImport).toMatchObject({
+			importType: 'named',
+			bindings: [{ imported: 'max', local: 'max' }],
+		});
 
 		// ref: max inside method m → enclosingDecl = 'C' (class, nearest top-level)
 		const maxRef = facts!.refs.find((r) => r.identifier === 'max');
@@ -1118,7 +1130,7 @@ fun main() {
 			importType: 'named',
 		});
 		expect(facts!.imports[0].bindings).toEqual([
-			{ imported: 'kotlin.collections.List', local: 'L' },
+			{ imported: 'List', local: 'L' },
 		]);
 
 		// ref: L inside main → enclosingDecl = 'main'

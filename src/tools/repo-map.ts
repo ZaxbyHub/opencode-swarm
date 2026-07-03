@@ -163,7 +163,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"context_pack" (token-budgeted slice of source spans for a target symbol — definition + transitive callers/callees; advisory/conservative; needs file+symbol; uses max_depth for traversal depth, top_n for span cap), ' +
 		'"graph_health" (freshness and bounded extraction diagnostics; no file required). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
-		'Note: "callers"/"dead_exports"/"context_pack" use conservative regex analysis (TS/JS/Python) and cannot see ' +
+		'Note: "callers"/"dead_exports"/"context_pack" use conservative static analysis across supported graph languages and cannot see ' +
 		'dynamic dispatch or namespace/barrel re-export usage; "dead_exports" results are review candidates, not delete directives.',
 	args: {
 		action: z

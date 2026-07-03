@@ -46,6 +46,11 @@ export const SOURCE_EXTENSIONS = [
 	'.pyw',
 	'.go',
 	'.rs',
+	'.java',
+	'.kt',
+	'.kts',
+	'.cs',
+	'.csx',
 ] as const;
 
 const TS_JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
@@ -73,6 +78,8 @@ const RESOLVE_INDEX_CANDIDATES = [
 
 const PY_EXTENSION_CANDIDATES = ['.py', '.pyw'];
 const PY_INDEX_CANDIDATES = ['__init__.py', '__init__.pyw'];
+const JAVA_KOTLIN_ROOTS = ['', 'src/main/java', 'src/main/kotlin', 'src'];
+const CSHARP_ROOTS = ['', 'src'];
 
 export function getLanguageFromExtension(ext: string): string | null {
 	const lower = ext.toLowerCase();
@@ -82,6 +89,9 @@ export function getLanguageFromExtension(ext: string): string | null {
 	if (lower === '.py' || lower === '.pyw') return 'python';
 	if (lower === '.go') return 'go';
 	if (lower === '.rs') return 'rust';
+	if (lower === '.java') return 'java';
+	if (lower === '.kt' || lower === '.kts') return 'kotlin';
+	if (lower === '.cs' || lower === '.csx') return 'csharp';
 	return null;
 }
 
@@ -174,6 +184,66 @@ function tryResolvePython(
 		// path.join → host-correct separator on Windows.
 		const hit = accept(path.join(baseAbs, indexFile));
 		if (hit) return hit;
+	}
+	return null;
+}
+
+function acceptWorkspaceFile(
+	test: string,
+	workspaceRoot: string,
+): string | null {
+	try {
+		const stat = fs.statSync(test);
+		if (!stat.isFile()) return null;
+		const rel = path.relative(workspaceRoot, test).replace(/\\/g, '/');
+		if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+		return test;
+	} catch {
+		return null;
+	}
+}
+
+function tryResolveDottedModule(
+	rawModule: string,
+	workspaceRoot: string,
+	extensions: readonly string[],
+	roots: readonly string[],
+): string | null {
+	if (!/^[A-Za-z_][\w.]*(?:\.\*)?$/.test(rawModule)) return null;
+	const cleaned = rawModule.replace(/\.\*$/, '');
+	const parts = cleaned.split('.');
+	const candidates = [parts.join(path.sep)];
+	if (parts.length > 1) {
+		candidates.push(parts.slice(0, -1).join(path.sep));
+	}
+
+	for (const rootPrefix of roots) {
+		for (const candidate of candidates) {
+			const base = path.join(workspaceRoot, rootPrefix, candidate);
+			for (const ext of extensions) {
+				const hit = acceptWorkspaceFile(base + ext, workspaceRoot);
+				if (hit) return hit;
+			}
+			try {
+				if (fs.statSync(base).isDirectory()) {
+					const first = fs
+						.readdirSync(base)
+						.filter((entry) =>
+							extensions.some((ext) => entry.toLowerCase().endsWith(ext)),
+						)
+						.sort((a, b) => a.localeCompare(b))[0];
+					if (first) {
+						const hit = acceptWorkspaceFile(
+							path.join(base, first),
+							workspaceRoot,
+						);
+						if (hit) return hit;
+					}
+				}
+			} catch {
+				// continue
+			}
+		}
 	}
 	return null;
 }
@@ -676,6 +746,87 @@ function parseRustUses(content: string): ParsedImport[] {
 	return out;
 }
 
+const JAVA_IMPORT_RE =
+	/^\s*import\s+(static\s+)?([A-Za-z_][\w.]*(?:\.\*)?)\s*;?\s*$/gm;
+
+function finalDottedName(value: string): string {
+	const parts = value.split('.').filter(Boolean);
+	return parts[parts.length - 1] ?? value;
+}
+
+function parseJavaImports(content: string): ParsedImport[] {
+	const out: ParsedImport[] = [];
+	for (
+		let m = JAVA_IMPORT_RE.exec(content);
+		m !== null;
+		m = JAVA_IMPORT_RE.exec(content)
+	) {
+		const isStatic = Boolean(m[1]);
+		const raw = m[2];
+		const isStar = raw.endsWith('.*');
+		const specifier =
+			isStatic && !isStar ? raw.split('.').slice(0, -1).join('.') : raw;
+		const importedSymbols =
+			isStatic && !isStar
+				? [finalDottedName(raw)]
+				: isStar
+					? ['*']
+					: [finalDottedName(raw)];
+		out.push({
+			rawModule: specifier,
+			importedSymbols,
+			importType: isStar ? 'namespace' : 'named',
+			line: lineNumberFor(content, m.index),
+		});
+	}
+	return out;
+}
+
+const KOTLIN_IMPORT_RE =
+	/^\s*import\s+([A-Za-z_][\w.]*(?:\.\*)?)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$/gm;
+
+function parseKotlinImports(content: string): ParsedImport[] {
+	const out: ParsedImport[] = [];
+	for (
+		let m = KOTLIN_IMPORT_RE.exec(content);
+		m !== null;
+		m = KOTLIN_IMPORT_RE.exec(content)
+	) {
+		const raw = m[1];
+		const isStar = raw.endsWith('.*');
+		out.push({
+			rawModule: raw,
+			importedSymbols: isStar ? ['*'] : [finalDottedName(raw)],
+			importType: isStar ? 'namespace' : 'named',
+			line: lineNumberFor(content, m.index),
+		});
+	}
+	return out;
+}
+
+const CSHARP_USING_RE =
+	/^\s*using\s+(static\s+)?(?:(\w+)\s*=\s*)?([A-Za-z_][\w.]*)\s*;?/gm;
+
+function parseCSharpUsings(content: string): ParsedImport[] {
+	const out: ParsedImport[] = [];
+	for (
+		let m = CSHARP_USING_RE.exec(content);
+		m !== null;
+		m = CSHARP_USING_RE.exec(content)
+	) {
+		const isStatic = Boolean(m[1]);
+		const alias = m[2];
+		const raw = m[3];
+		out.push({
+			rawModule: raw,
+			importedSymbols: alias ? [finalDottedName(raw)] : isStatic ? ['*'] : [],
+			importType: alias ? 'named' : 'namespace',
+			line: lineNumberFor(content, m.index),
+		});
+	}
+	return out;
+}
+
 /**
  * Extract import edges for a single file. Returns an empty array when the
  * language is unsupported or the file cannot be parsed.
@@ -710,6 +861,12 @@ export function extractImports(opts: ExtractImportsOptions): ImportEdge[] {
 		parsed = parseGoImports(content);
 	} else if (language === 'rust') {
 		parsed = parseRustUses(content);
+	} else if (language === 'java') {
+		parsed = parseJavaImports(content);
+	} else if (language === 'kotlin') {
+		parsed = parseKotlinImports(content);
+	} else if (language === 'csharp') {
+		parsed = parseCSharpUsings(content);
 	} else {
 		return [];
 	}
@@ -732,6 +889,20 @@ export function extractImports(opts: ExtractImportsOptions): ImportEdge[] {
 				p.rawModule,
 				absoluteFilePath,
 				workspaceRoot,
+			);
+		} else if (language === 'java' || language === 'kotlin') {
+			resolvedAbs = tryResolveDottedModule(
+				p.rawModule,
+				workspaceRoot,
+				language === 'java' ? ['.java'] : ['.kt', '.kts'],
+				JAVA_KOTLIN_ROOTS,
+			);
+		} else if (language === 'csharp') {
+			resolvedAbs = tryResolveDottedModule(
+				p.rawModule,
+				workspaceRoot,
+				['.cs', '.csx'],
+				CSHARP_ROOTS,
 			);
 		}
 

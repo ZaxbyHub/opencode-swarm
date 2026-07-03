@@ -67,6 +67,29 @@ export function getGraphNode(
 	return getQueryIndexes(graph).moduleNameIndex.get(moduleName);
 }
 
+function exportRangesForSymbol(
+	node: GraphNode | undefined,
+	symbol: string,
+): Array<{ symbol: string; range: { startLine: number; endLine: number } }> {
+	if (!node?.exportRanges) return [];
+	const ranges: Array<{
+		symbol: string;
+		range: { startLine: number; endLine: number };
+	}> = [];
+	for (const [key, range] of Object.entries(node.exportRanges)) {
+		if (key === symbol || key.startsWith(`${symbol}#`)) {
+			ranges.push({ symbol, range });
+		}
+	}
+	ranges.sort((a, b) => {
+		if (a.range.startLine !== b.range.startLine) {
+			return a.range.startLine - b.range.startLine;
+		}
+		return a.range.endLine - b.range.endLine;
+	});
+	return ranges;
+}
+
 function moduleNameForEdgePath(graph: RepoGraph, edgePath: string): string {
 	const key = normalizeGraphPath(edgePath);
 	const node = graph.nodes[key];
@@ -724,22 +747,24 @@ export function getContextPack(
 	const spansWithDepth: { span: ContextPackSpan; depth: number }[] = [];
 	for (const { file: symFile, symbol: sym, depth: d } of reached) {
 		const node = graph.nodes[symFile];
-		const range = node?.exportRanges?.[sym];
-		if (!range) continue;
+		const ranges = exportRangesForSymbol(node, sym);
+		if (ranges.length === 0) continue;
 
 		const mode: 'full' | 'signature' =
 			d === 0 ? 'full' : d < maxDepth ? 'full' : 'signature';
 
-		spansWithDepth.push({
-			span: {
-				file: symFile,
-				symbol: sym,
-				startLine: range.startLine,
-				endLine: range.endLine,
-				mode,
-			},
-			depth: d,
-		});
+		for (const { symbol: rangeSymbol, range } of ranges) {
+			spansWithDepth.push({
+				span: {
+					file: symFile,
+					symbol: rangeSymbol,
+					startLine: range.startLine,
+					endLine: range.endLine,
+					mode,
+				},
+				depth: d,
+			});
+		}
 	}
 
 	// Relevance order: target first, then ascending depth, then file, then symbol.
