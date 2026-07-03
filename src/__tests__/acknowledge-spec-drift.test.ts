@@ -228,4 +228,100 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 			expect(event.acknowledgedBy).toBe('cli');
 		});
 	});
+
+	// ─────────────────────────────────────────────────────────────
+	// TEST 11: snapshot refresh after acknowledgment (FR-001)
+	// After acknowledge, `.swarm/spec-snapshot.md` is refreshed to current content.
+	// ─────────────────────────────────────────────────────────────
+	describe('spec-snapshot.md refresh (FR-001)', () => {
+		test('11. after acknowledge, spec-snapshot.md matches current spec.md content', async () => {
+			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
+			const snapshotPath = join(tempDir, '.swarm', 'spec-snapshot.md');
+			const specPath = join(tempDir, '.swarm', 'spec.md');
+			const planPath = join(tempDir, '.swarm', 'plan.json');
+
+			// Set up spec.md with current content
+			const currentSpecContent = '## Install\n\nStep 1: bun install.\n';
+			await writeFile(specPath, currentSpecContent);
+
+			// Set up plan.json with a specHash matching the current spec (required for acknowledgment)
+			// computeSpecHash reads spec.md and hashes it
+			const plan = {
+				schema_version: '1.0.0',
+				title: 'Refresh Test',
+				swarm: 'test',
+				specHash: 'abc123', // must match staleness file's specHash_plan
+				phases: [{ id: 1, name: 'Phase 1', tasks: [] }],
+			};
+			await writeFile(planPath, JSON.stringify(plan, null, 2));
+
+			// Set up spec-snapshot.md with OLD content (different from spec.md)
+			const oldSnapshotContent = '## Install\n\nStep 1: npm install.\n';
+			await writeFile(snapshotPath, oldSnapshotContent);
+
+			// Set up staleness file with planHash matching plan.json's specHash
+			await writeFile(
+				specStalenessPath,
+				JSON.stringify({
+					planTitle: 'Refresh Test',
+					phase: 1,
+					specHash_plan: 'abc123', // matches plan.json's specHash
+					specHash_current: 'def456',
+					reason: 'spec modified',
+					timestamp: new Date().toISOString(),
+				}),
+			);
+
+			await handleAcknowledgeSpecDriftCommand(tempDir, []);
+
+			// Verify spec-snapshot.md was REFRESHED to current spec.md content
+			const refreshedSnapshot = await readFile(snapshotPath, 'utf-8');
+			expect(refreshedSnapshot).toBe(currentSpecContent);
+
+			// Verify spec-staleness.json was deleted
+			await expect(unlink(specStalenessPath)).rejects.toThrow();
+		});
+
+		test('11b. snapshot refresh is best-effort (non-fatal when spec.md is absent)', async () => {
+			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
+			const snapshotPath = join(tempDir, '.swarm', 'spec-snapshot.md');
+			const planPath = join(tempDir, '.swarm', 'plan.json');
+
+			// No spec.md — readEffectiveSpecSync returns null
+
+			// Set up plan.json
+			const plan = {
+				schema_version: '1.0.0',
+				title: 'No Spec',
+				swarm: 'test',
+				specHash: 'abc123',
+				phases: [{ id: 1, name: 'Phase 1', tasks: [] }],
+			};
+			await writeFile(planPath, JSON.stringify(plan, null, 2));
+
+			// Set up old snapshot
+			await writeFile(snapshotPath, '## Old\n\nOld content.\n');
+
+			// Set up staleness
+			await writeFile(
+				specStalenessPath,
+				JSON.stringify({
+					planTitle: 'No Spec',
+					phase: 1,
+					specHash_plan: 'abc123',
+					specHash_current: null,
+					reason: 'spec deleted',
+					timestamp: new Date().toISOString(),
+				}),
+			);
+
+			// Should succeed even though snapshot can't be refreshed
+			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
+			expect(result).toContain('Spec drift acknowledged');
+
+			// Snapshot file should remain unchanged (refresh failed silently)
+			const unchangedSnapshot = await readFile(snapshotPath, 'utf-8');
+			expect(unchangedSnapshot).toBe('## Old\n\nOld content.\n');
+		});
+	});
 });

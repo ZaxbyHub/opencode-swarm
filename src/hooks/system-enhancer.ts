@@ -54,6 +54,7 @@ export function buildSpecDriftAdvisory(args: {
 	reason: string;
 	currentHash: string | null;
 	storedHash: string;
+	diff?: { diff: string; changedSections: string[] } | null;
 	midLoadRemovals?: { count: number; source: string };
 }): string {
 	const lines = [
@@ -74,12 +75,28 @@ export function buildSpecDriftAdvisory(args: {
 				'.swarm/plan-ledger.jsonl for IDs.',
 		);
 	}
+	if (args.diff) {
+		lines.push('');
+		lines.push('--- spec diff (recorded vs current) ---');
+		if (args.diff.changedSections.length > 0) {
+			lines.push(
+				'Changed sections: ' +
+					args.diff.changedSections.map((s) => `## ${s}`).join(', '),
+			);
+		}
+		lines.push('[Begin spec diff]', args.diff.diff, '[End spec diff]');
+	} else if (args.diff === null) {
+		lines.push('(no recorded snapshot to diff against)');
+	}
 	return lines.join('\n');
 }
 
-function readSpecStalenessSnapshot(
-	directory: string,
-): { specHash_plan: string; specHash_current: string | null } | null {
+function readSpecStalenessSnapshot(directory: string): {
+	specHash_plan: string;
+	specHash_current: string | null;
+	diff: string | null;
+	changedSections: string[];
+} | null {
 	try {
 		const p = path.join(directory, '.swarm', 'spec-staleness.json');
 		return readCachedParsedFileSync(
@@ -96,6 +113,10 @@ function readSpecStalenessSnapshot(
 					return {
 						specHash_plan: parsed.specHash_plan,
 						specHash_current: parsed.specHash_current,
+						diff: typeof parsed?.diff === 'string' ? parsed.diff : null,
+						changedSections: Array.isArray(parsed?.changedSections)
+							? parsed.changedSections
+							: [],
 					};
 				}
 				return null;
@@ -117,11 +138,22 @@ function maybeAppendSpecDriftAdvisory(
 	const storedHash =
 		snap?.specHash_plan ?? plan.specHash ?? '(unknown — plan missing specHash)';
 	const currentHash = snap?.specHash_current ?? null;
+
+	// Diff is precomputed by manager.ts at staleness-detection time and stored
+	// in spec-staleness.json. This avoids importing spec-hash (and transitively
+	// readEffectiveSpecSync) into the system-enhancer module graph, which would
+	// regress plugin init perf (repro-704 T1).
+	const diffInfo: { diff: string; changedSections: string[] } | null =
+		snap && snap.diff !== null
+			? { diff: snap.diff, changedSections: snap.changedSections }
+			: null;
+
 	output.system.push(
 		buildSpecDriftAdvisory({
 			reason: plan._specStaleReason ?? 'spec.md changed since plan was saved',
 			currentHash,
 			storedHash,
+			diff: diffInfo,
 			midLoadRemovals: plan._midLoadRemovals,
 		}),
 	);

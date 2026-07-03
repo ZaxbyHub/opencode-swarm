@@ -15,10 +15,12 @@ import { ensureAgentSession, swarmState } from '../../state';
 import type { WorktreeHandle } from '../../worktree';
 import {
 	attemptMergeBackFromDirty,
+	cleanupOrphanedBranches,
 	getMergeStrategy,
 	postMergeCleanup,
 	provisionWorktree,
 	removeWorktree,
+	startupOrphanRecovery,
 } from '../../worktree';
 import {
 	clearWorktreeMergeStatus,
@@ -193,6 +195,29 @@ export async function precreateStandardWorktreeSession(args: {
 		return;
 	}
 
+	// FR-004: Run startup orphan recovery before provisioning to clean up
+	// stale worktree metadata and orphaned branches from prior sessions.
+	// This gives the standard path the same cleanup the Lean Turbo runner has.
+	try {
+		await _internals.startupOrphanRecovery(args.directory, [
+			args.parentSessionID,
+		]);
+	} catch (recoveryError) {
+		console.warn(`[swarm] startup orphan recovery failed: ${recoveryError}`);
+	}
+
+	// SC-004.2: Also delete stale lane branches from inactive sessions so
+	// they cannot collide on resume/re-provisioning. The current session's
+	// branches are preserved by passing [args.parentSessionID] as the
+	// active-session allowlist. Failures are non-fatal — provisioning proceeds.
+	try {
+		await _internals.cleanupOrphanedBranches(args.directory, [
+			args.parentSessionID,
+		]);
+	} catch (cleanupError) {
+		console.warn(`[swarm] orphaned branch cleanup failed: ${cleanupError}`);
+	}
+
 	const provisionResult = await _internals.provisionWorktree(
 		args.directory,
 		args.taskId,
@@ -318,4 +343,6 @@ export const _internals = {
 	removeWorktree,
 	attemptMergeBackFromDirty,
 	postMergeCleanup,
+	startupOrphanRecovery,
+	cleanupOrphanedBranches,
 };

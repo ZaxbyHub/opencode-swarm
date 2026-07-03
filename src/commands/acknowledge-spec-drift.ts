@@ -1,6 +1,8 @@
 import { promises as fsPromises } from 'node:fs';
+import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import type { SpecDriftAcknowledgedEvent } from '../types/events';
 import { computeSpecHash } from '../utils/spec-hash';
 
@@ -76,6 +78,25 @@ Please re-run the relevant phase to detect current drift status.`;
 			// Convert null to undefined since plan.specHash is string | undefined
 			plan.specHash = currentHash ?? undefined;
 			await savePlan(directory, plan);
+			// Refresh spec snapshot to current content so future drift diffs
+			// start from the acknowledged baseline (FR-001).
+			try {
+				const currentSpec = readEffectiveSpecSync(directory);
+				if (currentSpec) {
+					const snapshotPath = path.join(
+						directory,
+						'.swarm',
+						'spec-snapshot.md',
+					);
+					await fsPromises.writeFile(
+						snapshotPath,
+						currentSpec.content,
+						'utf-8',
+					);
+				}
+			} catch {
+				// Non-fatal: snapshot refresh failure
+			}
 		}
 	} catch (planError) {
 		// Non-fatal: spec drift was acknowledged but plan update failed

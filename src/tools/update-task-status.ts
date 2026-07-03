@@ -51,6 +51,7 @@ export interface UpdateTaskStatusArgs {
 	task_id: string;
 	status: string;
 	working_directory?: string;
+	force?: boolean;
 }
 
 /**
@@ -906,23 +907,6 @@ export async function executeUpdateTaskStatus(
 		};
 	}
 
-	// Seed the task state machine: when transitioning to in_progress, advance idle → coder_delegated
-	// Also synchronize session task identity fields so later gate recording uses the correct task
-	if (args.status === 'in_progress') {
-		for (const [_sessionId, session] of swarmState.agentSessions) {
-			const currentState = getTaskState(session, args.task_id);
-			if (currentState === 'idle') {
-				try {
-					advanceTaskState(session, args.task_id, 'coder_delegated');
-				} catch {
-					// Non-fatal: session may not support state advancement
-				}
-			}
-			// Synchronize active task identity for durable gate recording
-			session.currentTaskId = args.task_id;
-		}
-	}
-
 	// Step 3: Validate working_directory if provided (must be before reviewer gate check)
 	// Uses resolveWorkingDirectory to consolidate: null-byte, device-path, traversal,
 	// existence, and subdirectory checks. (FR-006, DD-012)
@@ -1000,6 +984,51 @@ export async function executeUpdateTaskStatus(
 				'Plan state could not be reconciled with the authoritative ledger (.swarm/plan-ledger.jsonl). ' +
 				'Restore from a critic-approved snapshot or re-run plan recovery to rebuild plan.json from the ledger, then retry update_task_status.',
 		};
+	}
+
+	// FR-005: Guard against re-opening settled tasks to in_progress.
+	// A task is "settled" iff its status is neither 'pending' nor 'in_progress'.
+	// Reuse the already-loaded plan; do not add a second plan load.
+	if (args.status === 'in_progress' && args.force !== true) {
+		const currentTask = loadedPlan?.phases
+			.flatMap((p) => p.tasks)
+			.find((t) => t.id === args.task_id);
+		if (
+			currentTask &&
+			currentTask.status !== 'pending' &&
+			currentTask.status !== 'in_progress'
+		) {
+			return {
+				success: false,
+				message: `Task ${args.task_id} is settled (${currentTask.status}); cannot re-open to in_progress. Use force:true only for manual repair.`,
+				errors: [
+					`Task ${args.task_id} is settled (${currentTask.status}); cannot re-open to in_progress. Use force:true only for manual repair.`,
+				],
+			};
+		}
+	}
+
+	if (args.status === 'in_progress' && args.force === true) {
+		console.warn(
+			`[update-task-status] Force-override: re-opening settled task ${args.task_id} to in_progress`,
+		);
+	}
+
+	// Seed the task state machine: when transitioning to in_progress, advance idle → coder_delegated
+	// Also synchronize session task identity fields so later gate recording uses the correct task
+	if (args.status === 'in_progress') {
+		for (const [_sessionId, session] of swarmState.agentSessions) {
+			const currentState = getTaskState(session, args.task_id);
+			if (currentState === 'idle') {
+				try {
+					advanceTaskState(session, args.task_id, 'coder_delegated');
+				} catch {
+					// Non-fatal: session may not support state advancement
+				}
+			}
+			// Synchronize active task identity for durable gate recording
+			session.currentTaskId = args.task_id;
+		}
 	}
 
 	// Write minimal gate-tracking evidence to persist across session restarts.
@@ -1157,6 +1186,7 @@ export async function executeUpdateTaskStatus(
 			directory,
 			args.task_id,
 			args.status as TaskStatus,
+			{ force: args.force },
 		);
 
 		if (args.status === 'completed') {
@@ -1232,6 +1262,13 @@ export const update_task_status: ToolDefinition = createSwarmTool({
 			.string()
 			.optional()
 			.describe('Working directory where the plan is located'),
+		force: z
+			.boolean()
+			.optional()
+			.default(false)
+			.describe(
+				'Force override to permit re-opening a settled task (completed/blocked/failed) to in_progress. Use only for manual repair.',
+			),
 	},
 	execute: async (args: unknown, _directory: string, _ctx?: ToolContext) => {
 		return JSON.stringify(

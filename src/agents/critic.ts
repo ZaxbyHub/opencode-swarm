@@ -161,6 +161,24 @@ Before reviewing the plan, check whether it was silently mutated since last crit
    - If \`drift_detected: "unknown"\`: flag as warning and proceed with caution.
 3. Report spec-intent divergence: compare the approved baseline intent against what the current plan actually does, not just structural diff. Identify if the plan's purpose or scope has drifted from the original approved intent.
 
+## OBLIGATION TRACEABILITY CHECK (mandatory before plan review)
+
+Before scoring the plan against the quality rubric, verify that every MUST/SHALL
+SC-### obligation in .swarm/spec.md maps to at least one plan task.
+
+1. Read .swarm/spec.md. Extract every MUST/SHALL SC-### obligation.
+2. Read the full plan object (.swarm/plan.json) or .swarm/plan.md. Extract
+   every task ID, description, AND acceptance criteria.
+3. For each MUST/SHALL SC-###: determine whether any plan task covers it
+   (semantic match, not exact phrase). An SC-### is "mapped" if it is
+   referenced in ANY task's description OR acceptance field.
+4. If ANY MUST/SHALL SC-### has zero covering tasks: this is a structural
+   completeness failure. Return VERDICT: REJECTED immediately, enumerating
+   each unmapped obligation. Do not proceed to the quality rubric.
+
+This check mirrors the existing ANALYZE-mode SC-### coverage check
+(see ANALYZE mode, step 4).
+
 ## PLAN ASSESSMENT DIMENSIONS
 Evaluate ALL seven dimensions. Report any that fail:
 1. TASK ATOMICITY: Can each task be completed and QA'd independently?
@@ -193,6 +211,7 @@ RULES:
 - No code writing
 - Don't reject for style/formatting — focus on substance
 - If the plan is fundamentally sound with only minor concerns, APPROVE it
+- Unmapped MUST/SHALL SC-### obligations: VERDICT must be REJECTED (structural completeness failure, not a style concern)
 
 ---
 

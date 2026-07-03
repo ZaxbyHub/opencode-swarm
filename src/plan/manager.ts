@@ -77,7 +77,11 @@ import { readTaskScopes } from '../turbo/lean/conflicts.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { criticalWarn, warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
-import { isSpecStale } from '../utils/spec-hash';
+import {
+	computeSpecDiff,
+	isObligationPreserving,
+	isSpecStale,
+} from '../utils/spec-hash';
 import { readCachedParsedFile } from '../utils/swarm-artifact-cache';
 import {
 	appendLedgerEvent,
@@ -695,57 +699,66 @@ export async function loadPlan(
 							runtimePlan._specStale = true;
 							runtimePlan._specStaleReason = staleResult.reason;
 
-							// Write spec-staleness.json
-							try {
-								const specStalenessPath = path.join(
-									directory,
-									'.swarm',
-									'spec-staleness.json',
-								);
-								await fsPromises.writeFile(
-									specStalenessPath,
-									JSON.stringify(
-										{
-											type: 'spec_stale_detected',
-											timestamp: new Date().toISOString(),
-											phase: validated.current_phase ?? 1,
-											specHash_plan: validated.specHash,
-											specHash_current: staleResult.currentHash ?? null,
-											reason: staleResult.reason,
-											planTitle: validated.title,
-										},
-										null,
-										2,
-									),
-									'utf-8',
-								);
-							} catch {
-								// Non-fatal: spec-staleness.json write failure does not block plan loading
-							}
+							// Allowlist check: skip marker for obligation-preserving edits
+							const preserving = await isObligationPreserving(directory);
+							if (!preserving) {
+								// Write spec-staleness.json (includes precomputed diff so
+								// system-enhancer can render the advisory without importing
+								// spec-hash at module-load time — avoids repro-704 T1 regression).
+								try {
+									const diffInfo = computeSpecDiff(directory);
+									const specStalenessPath = path.join(
+										directory,
+										'.swarm',
+										'spec-staleness.json',
+									);
+									await fsPromises.writeFile(
+										specStalenessPath,
+										JSON.stringify(
+											{
+												type: 'spec_stale_detected',
+												timestamp: new Date().toISOString(),
+												phase: validated.current_phase ?? 1,
+												specHash_plan: validated.specHash,
+												specHash_current: staleResult.currentHash ?? null,
+												reason: staleResult.reason,
+												planTitle: validated.title,
+												diff: diffInfo?.diff ?? null,
+												changedSections: diffInfo?.changedSections ?? [],
+											},
+											null,
+											2,
+										),
+										'utf-8',
+									);
+								} catch {
+									// Non-fatal: spec-staleness.json write failure does not block plan loading
+								}
 
-							// Emit spec_stale_detected to events.jsonl
-							try {
-								const eventsPath = path.join(
-									directory,
-									'.swarm',
-									'events.jsonl',
-								);
-								const event: SpecStaleDetectedEvent = {
-									type: 'spec_stale_detected',
-									timestamp: new Date().toISOString(),
-									phase: validated.current_phase ?? 1,
-									specHash_plan: validated.specHash,
-									specHash_current: staleResult.currentHash ?? null,
-									reason: staleResult.reason ?? 'unknown',
-									planTitle: validated.title,
-								};
-								await fsPromises.appendFile(
-									eventsPath,
-									`${JSON.stringify(event)}\n`,
-									'utf-8',
-								);
-							} catch {
-								// Non-fatal: event write failure does not block plan loading
+								// Emit spec_stale_detected to events.jsonl
+								try {
+									const eventsPath = path.join(
+										directory,
+										'.swarm',
+										'events.jsonl',
+									);
+									const event: SpecStaleDetectedEvent = {
+										type: 'spec_stale_detected',
+										timestamp: new Date().toISOString(),
+										phase: validated.current_phase ?? 1,
+										specHash_plan: validated.specHash,
+										specHash_current: staleResult.currentHash ?? null,
+										reason: staleResult.reason ?? 'unknown',
+										planTitle: validated.title,
+									};
+									await fsPromises.appendFile(
+										eventsPath,
+										`${JSON.stringify(event)}\n`,
+										'utf-8',
+									);
+								} catch {
+									// Non-fatal: event write failure does not block plan loading
+								}
 							}
 						}
 					}
@@ -1798,6 +1811,35 @@ export async function closePlanTerminalState(
 }
 
 /**
+ * Check whether a task is in a settled state (not pending/in_progress).
+ *
+ * Settled = status is neither 'pending' nor 'in_progress' (i.e. 'completed',
+ * 'closed', or 'blocked'). Returns FALSE when the task is not found or the
+ * plan cannot be loaded, so callers only block on known-settled tasks and
+ * allow unknown/missing tasks through.
+ *
+ * Used by the advanceTaskStateAndPersist preflight to prevent re-dispatching
+ * a task that has already reached a terminal plan state.
+ */
+export async function isTaskSettled(
+	directory: string,
+	taskId: string,
+): Promise<boolean> {
+	const plan = await _internals.loadPlanJsonOnly(directory);
+	if (!plan) {
+		return false;
+	}
+
+	const task = plan.phases.flatMap((p) => p.tasks).find((t) => t.id === taskId);
+
+	if (!task) {
+		return false;
+	}
+
+	return task.status !== 'pending' && task.status !== 'in_progress';
+}
+
+/**
  * Load plan → find task by ID → update status → save → return updated plan.
  * Throw if plan not found or task not found.
  *
@@ -1813,6 +1855,7 @@ export async function updateTaskStatus(
 	directory: string,
 	taskId: string,
 	status: TaskStatus,
+	options?: { force?: boolean },
 ): Promise<Plan> {
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
 		if (
@@ -1832,6 +1875,34 @@ export async function updateTaskStatus(
 
 		return 'pending';
 	};
+
+	// FR-005 settled-task guard (centralized): refuse to re-open a settled task
+	// (completed / closed / blocked) to in_progress unless the caller explicitly
+	// opts in via options.force. This protects BOTH the user-facing tool path
+	// and the automated delegation-gate path (advanceTaskStateAndPersist), which
+	// previously bypassed the tool-only guard on session restart.
+	//
+	// "Settled" = status is neither 'pending' nor 'in_progress'.
+	// Legitimate retry-after-failure flows keep the task in 'in_progress' across
+	// retries, so re-persisting in_progress→in_progress is NOT blocked.
+	if (status === 'in_progress' && options?.force !== true) {
+		const currentPlan = await _internals.loadPlanJsonOnly(directory);
+		if (currentPlan) {
+			const currentTask = currentPlan.phases
+				.flatMap((p) => p.tasks)
+				.find((t) => t.id === taskId);
+			if (
+				currentTask &&
+				currentTask.status !== 'pending' &&
+				currentTask.status !== 'in_progress'
+			) {
+				warn(
+					`[updateTaskStatus] refusing to re-open settled task ${taskId} (${currentTask.status}) to in_progress without force`,
+				);
+				return currentPlan;
+			}
+		}
+	}
 
 	// Retry once on concurrent modification (#444 item 3).
 	// If another writer changed the plan between our load and save,
