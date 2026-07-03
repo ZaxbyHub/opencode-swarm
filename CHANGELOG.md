@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.107.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.0...v7.107.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **curator:** address pr-review findings F-001..F-014 ([f7ffe35](https://github.com/ZaxbyHub/opencode-swarm/commit/f7ffe35cf081c45317fc6451d0f9b1ca2bb1b019))
+* **curator:** execute postmortem action output ([0cf378a](https://github.com/ZaxbyHub/opencode-swarm/commit/0cf378a6157a99727e97dc69a5fc2b11fd44344a))
+
 ## [7.107.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.106.0...v7.107.0) (2026-07-03)
 
 
