@@ -65,6 +65,20 @@ int make_widget() { return hidden(); }
 		expect(overloads.every((item) => item.exported)).toBe(true);
 	});
 
+	test('cpp refs inside namespaces are not suppressed', async () => {
+		const source = `namespace api {
+int compute() { return helper(); }
+int helper() { return 42; }
+}
+`;
+		const facts = await extractFileSymbols('cpp', source);
+		expect(facts).not.toBeNull();
+		// The 'helper' call inside namespace api { ... } must NOT be filtered
+		// by isInsideImportStatement (regression: namespace_definition was
+		// wrongly in IMPORT_ANCESTOR_TYPES, suppressing all refs inside namespaces)
+		expect(facts!.refs.some((r) => r.identifier === 'helper')).toBe(true);
+	});
+
 	test('swift captures visibility modifiers, structs/enums/protocols, and extension members', async () => {
 		const source = `import Foundation
 

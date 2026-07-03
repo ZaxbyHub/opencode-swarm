@@ -2367,7 +2367,6 @@ const IMPORT_ANCESTOR_TYPES = new Set([
 	'using_directive',
 	'namespace_use_declaration',
 	'namespace_use_clause',
-	'namespace_definition',
 	'library_import', // dart
 	'library_export', // dart
 	'export_directive', // dart
