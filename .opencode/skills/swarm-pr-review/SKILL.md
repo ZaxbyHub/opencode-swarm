@@ -422,6 +422,54 @@ The context pack must include, when available:
 
 ---
 
+## Review Finding Persistence
+
+Do not rely on conversation context to preserve review findings. Create a run
+artifact under `.swarm/pr-review/<run_id>/findings.jsonl` when file writes are
+allowed, or under `.swarm/evidence/pr-review-<run_id>-findings.jsonl` when the
+review already uses the evidence tree.
+
+Each persisted finding record must include at least:
+
+```json
+{"finding_id":"F-001","status":"PENDING","file_line":"src/file.ts:123","evidence":"quote, command output, lane id, or reviewer rationale","next_action":"route_to_reviewer"}
+```
+
+Minimum field contract:
+
+- `finding_id`: stable ID from the candidate/reviewer/critic ledger.
+- `status`: one of `PENDING`, `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
+- `file_line`: exact `file:line` reference, or `N/A` with reason when the
+  finding is cross-file or artifact-only.
+- `evidence`: compact source-backed proof, including lane/reviewer/critic IDs or
+  command output references when available.
+- `next_action`: the next required action, such as `route_to_reviewer`,
+  `route_to_critic`, `report`, `suppress_with_reason`, or `handoff_to_feedback`.
+
+Persist after every major validation boundary:
+
+1. **Post-explorer:** after Phase 3/4 candidate parsing and before reviewer
+   dispatch, write all candidates as `PENDING` with their lane provenance.
+2. **Post-reviewer:** after Phase 6 reviewer validation, update each reviewed
+   record to `CONFIRMED`, `DISPROVED`, `PRE_EXISTING`, or keep `PENDING` with a
+   concrete `next_action` if more evidence is required.
+3. **Post-critic:** after Phase 8 critic challenge, update final status,
+   severity/action notes in `evidence`, and final reporting or handoff action.
+
+Resume/reload procedure:
+
+1. Before continuing any compacted or resumed review, read the latest
+   `findings.jsonl` artifact and reconstruct the candidate/reviewer/critic
+   ledger from disk before dispatching more lanes.
+2. If the artifact is missing but a review context says prior lanes ran, stop and
+   surface the missing artifact as a coverage gap instead of reclassifying from
+   memory.
+3. Append new records rather than overwriting history unless the artifact format
+   explicitly tracks revisions; latest record for a `finding_id` wins during
+   reload.
+
+---
+
 ## Phase 1: Intent Reconstruction / Obligation Extraction
 
 Reconstruct what the PR is obligated to deliver before looking for bugs.
@@ -550,6 +598,10 @@ rather than preview-text extraction:
    chunk.
 
 If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE from Phase 3: retry (max 2) with materially different parameters, then use blocking `dispatch_lanes` or the Task tool as verified-equivalent fallbacks when lane tools do not work. If the gap cannot be closed, stop and surface the lane failure to the user as BLOCKED. Do not mark affected candidates UNVERIFIED to proceed past the gap. Never infer candidate absence from a preview.
+
+After candidate parsing and before reviewer dispatch, persist the post-explorer
+candidate ledger using the Review Finding Persistence contract. This is the
+durable recovery point for context compaction before Phase 6.
 
 **Fallback convention:** If the parser is unavailable, the explorer MAY emit
 `[CANDIDATE]` rows in the lane output as a fallback convention (see the
@@ -728,6 +780,11 @@ Reviewer output format:
 
 `DISPROVED` findings must include the reason. `PRE_EXISTING` findings must include the base-branch evidence if available.
 
+After reviewer lanes settle, persist the post-reviewer finding ledger before
+critic routing or synthesis. The artifact must preserve `CONFIRMED`,
+`DISPROVED`, `PRE_EXISTING`, and still-`PENDING` records with reviewer IDs and
+next actions.
+
 ---
 
 ## Phase 7: Falsification Probe Requirement
@@ -781,6 +838,10 @@ The `[CRITIC]` row in the format above is **mandatory contract**, not advisory o
 **COVERAGE GATE alignment:** Critic lane failures follow the same COVERAGE GATE as explorer lanes: retry (max 2 attempts) with materially different parameters. If retries fail, deploy a verified equivalent alternative (same agent type, same prompt, same scope, same isolation), including Task-tool dispatch as the final fallback when lane tools do not work. If no equivalent can be verified, stop and surface the critic-lane failure to the user as BLOCKED — do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
 
 Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.
+
+After critic lanes settle, persist the post-critic finding ledger before final
+synthesis. This artifact is the source of truth for resumed reporting and for
+any later `swarm-pr-feedback` handoff.
 
 ---
 

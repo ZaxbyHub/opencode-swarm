@@ -141,8 +141,11 @@ tree:
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the
   `base_ref..head_ref` range for diff-scoped inspection.
- - If no PR reference was provided (a pasted-feedback session on the current branch),
-   confirm the current branch is the intended PR branch before editing.
+- Pass the `base_ref..head_ref` commit range in every read-only verification or
+  explorer/advisory-lane delegation so lane agents can inspect specific revisions
+  with `git show` when needed.
+- If no PR reference was provided (a pasted-feedback session on the current branch),
+  confirm the current branch is the intended PR branch before editing.
 
 When a verification lane result includes `output_ref`, treat `output` as a
 preview and call `retrieve_lane_output` before using it to classify, resolve,
