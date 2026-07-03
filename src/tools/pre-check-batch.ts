@@ -793,9 +793,27 @@ export async function runPreCheckBatch(
 	// Check secretscan (hard gate - MUST pass)
 	if (secretscanResult.ran && secretscanResult.result) {
 		const scanResult = secretscanResult.result as SecretscanResult;
-		if ('findings' in scanResult && scanResult.findings.length > 0) {
+		// F-003: an internal scan error returns SecretscanErrorResult (has `error`);
+		// fail closed instead of treating an errored scan as a clean pass.
+		if ('error' in scanResult && (scanResult as { error?: string }).error) {
+			gatesPassed = false;
+			warn(
+				`pre_check_batch: Secretscan error - GATE FAILED: ${(scanResult as { error?: string }).error}`,
+			);
+		} else if ('findings' in scanResult && scanResult.findings.length > 0) {
 			gatesPassed = false;
 			warn('pre_check_batch: Secretscan found secrets - GATE FAILED');
+		} else if (
+			// F-002: vacuous pass — scan ran but scanned zero files despite files being
+			// requested. Mirror SAST's zero-coverage-fail guard (sast-scan.ts:597).
+			files &&
+			files.length > 0 &&
+			(scanResult.files_scanned ?? 0) === 0
+		) {
+			gatesPassed = false;
+			warn(
+				'pre_check_batch: Secretscan scanned 0 files despite requested file scope - GATE FAILED (possible vacuous pass)',
+			);
 		}
 	} else if (secretscanResult.error) {
 		// Error in secretscan - fail closed

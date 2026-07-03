@@ -1,4 +1,6 @@
-### Fixed
+# Quality-gate language coverage (Go/Rust SAST, secretscan registry, PHP test/lint)
+
+## Fixed
 
 - Wired Go and Rust SAST into the native rule path so seeded Go/Rust vulnerabilities are detected without relying on optional Semgrep availability.
 - Reused the full `secretscan` detector registry for file-scoped `pre_check_batch` runs, restoring hard-gate coverage for AWS, Stripe, Slack, SendGrid, Twilio, and entropy-based secrets.

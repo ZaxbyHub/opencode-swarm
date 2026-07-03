@@ -1155,8 +1155,10 @@ export const _internals: {
 	secretscan: typeof secretscan;
 	runSecretscan: typeof runSecretscan;
 	runSecretscanOnFiles: typeof runSecretscanOnFiles;
+	SECRET_PATTERNS: typeof SECRET_PATTERNS;
 } = {
 	secretscan,
 	runSecretscan,
 	runSecretscanOnFiles,
+	SECRET_PATTERNS,
 } as const;

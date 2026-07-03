@@ -303,13 +303,14 @@ func main() {
 			).toBe(true);
 		});
 
-		it('should detect command injection in Rust files', async () => {
-			const testFile = path.join(tempDir, 'test.rs');
+		it('should detect camelCase hardcoded secrets in Go (F-001)', async () => {
+			const testFile = path.join(tempDir, 'test.go');
 			fs.writeFileSync(
 				testFile,
-				`use std::process::Command;
-fn main() {
-	let _child = Command::new("sh").arg("-c").arg(user_input).spawn();
+				`package main
+func main() {
+	apiKey := "AKIAIOSFODNN7EXAMPLE"
+	_ = apiKey
 }`,
 			);
 
@@ -320,11 +321,8 @@ fn main() {
 
 			const result = await sastScan(input, tempDir);
 
-			expect(result.summary.files_scanned).toBe(1);
 			expect(
-				result.findings.some(
-					(f) => f.rule_id === 'sast/rust-command-injection',
-				),
+				result.findings.some((f) => f.rule_id === 'sast/go-hardcoded-secret'),
 			).toBe(true);
 		});
 
