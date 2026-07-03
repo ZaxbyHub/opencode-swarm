@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.105.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.104.0...v7.105.0) (2026-07-03)
+
+
+### Features
+
+* **pr-monitor:** first-class pr subscriptions with pushed events and swarm-pr-subscribe skill ([e6315b0](https://github.com/ZaxbyHub/opencode-swarm/commit/e6315b00bc68722d44e1310f044f3e2c6f14b00f))
+
 ## [7.104.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.3...v7.104.0) (2026-07-03)
 
 
