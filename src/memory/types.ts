@@ -62,7 +62,6 @@ export interface MemoryRecord {
 	updatedAt: string;
 	lastAccessedAt?: string;
 	expiresAt?: string;
-	qValue?: number;
 	supersedes?: string[];
 	supersededBy?: string;
 	contentHash: string;
@@ -185,9 +184,6 @@ export interface RecallRequest {
 	maxItems: number;
 	tokenBudget: number;
 	minScore?: number;
-	qValueBoostWeight?: number;
-	suppressionThreshold?: number;
-	includeLowQ?: boolean;
 	requireQuerySignal?: boolean;
 	includeExpired?: boolean;
 	includePendingProposals?: boolean;
@@ -208,7 +204,6 @@ export interface RecallResultItem {
 		tagOverlap: number;
 		fileOverlap?: number;
 		symbolOverlap?: number;
-		qValue?: number;
 		kindMatch: boolean;
 		scopeMatch: boolean;
 	};

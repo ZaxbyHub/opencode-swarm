@@ -24,71 +24,46 @@ export interface MemoryRecallUsageEvent {
 	tokenEstimate: number;
 	agentRole?: string;
 	runId?: string;
-	qValue?: number;
-	lastReward?: number;
-	taskOutcome?: MemoryTaskOutcome;
+	/**
+	 * Task/phase unit-of-work identity (ADDITIVE — recorded alongside `runId`).
+	 * Undefined when unresolvable at recording time (graceful degrade to
+	 * session-scoped `runId`).
+	 */
+	unitId?: string;
 	timestamp: string;
 }
 
 export interface MemoryRecallUsageFilter {
 	limit?: number;
-}
-
-export type MemoryTaskOutcome =
-	| 'approved'
-	| 'rejected'
-	| 'concerns'
-	| 'unknown';
-
-export interface MemoryRecallRewardInput {
+	runId?: string;
 	/**
-	 * Candidate session/run identifiers whose recall-usage bundle(s) should
-	 * receive this reward. Every id is matched independently (exact match
-	 * only, no unscoped time-window fallback); all matched bundles are
-	 * rewarded together. Callers should include every session id known to
-	 * have actually recalled memory for this task (e.g. dispatched council
-	 * member sessions), not just the submitting session, so sub-agent
-	 * recalls are not silently skipped.
+	 * Restrict to rows whose `unit_id` matches. Combined with `runId` the two
+	 * predicates AND. Attribution prefers this filter and falls back to `runId`.
 	 */
-	runIds: string[];
-	outcome: MemoryTaskOutcome;
-	verdictPayload: unknown;
-	timestamp?: string;
+	unitId?: string;
+	/**
+	 * Restrict recall events to those with `timestamp >= since` (ISO 8601).
+	 * Used by buildRetrievalRecency to bound iteration over recent events only.
+	 */
+	since?: string;
 }
 
-export interface MemoryRecallRewardResult {
-	success: boolean;
-	/** First matched bundle id, for back-compat display. See `bundleIds` for the full set. */
-	bundleId?: string;
-	/** Every recall-usage bundle (across all matched runIds) that received this reward. */
-	bundleIds?: string[];
-	outcome: MemoryTaskOutcome;
-	memoryIds: string[];
-	updatedMemoryIds: string[];
-	propagatedMemoryIds: string[];
-	reward: number;
-	qValue?: number;
-	reason?: string;
-}
-
-export interface MemoryValueLogEntry {
+export interface MemoryRewardEvent {
+	id: string;
 	memoryId: string;
-	kind: MemoryRecord['kind'];
-	scopeKey: string;
-	textPreview: string;
-	qValue: number;
-	lastReward?: number;
-	taskOutcome?: MemoryTaskOutcome;
-	recallCount: number;
-	lastRecalledAt?: string;
-	promotionCandidate: boolean;
-	suppressionCandidate: boolean;
+	runId?: string;
+	unitId?: string;
+	verdict: string; // 'APPROVE' | 'CONCERNS' | 'REJECT' — string to keep provider leaf-level (no council import)
+	reward: number;
+	qBefore?: number;
+	qAfter?: number;
+	verdictSynthesisJson?: string;
+	timestamp: string; // ISO 8601, caller-supplied
 }
 
-export interface MemoryValueLogFilter {
+export interface MemoryRewardEventFilter {
+	memoryId?: string;
 	limit?: number;
-	includePromotionCandidatesOnly?: boolean;
-	includeSuppressionCandidatesOnly?: boolean;
 }
 
 export interface MemoryCompactOptions {
@@ -104,6 +79,12 @@ export interface MemoryCompactResult {
 	remaining: number;
 }
 
+/**
+ * Lightweight transaction marker. Concrete transaction semantics are
+ * backend-specific (SQLite serialised, local-jsonl no-op).
+ */
+export type MemoryTransaction = object;
+
 export interface MemoryProvider {
 	readonly name: string;
 	initialize?(): Promise<void>;
@@ -117,16 +98,24 @@ export interface MemoryProvider {
 	listRecallUsage?(
 		filter?: MemoryRecallUsageFilter,
 	): Promise<MemoryRecallUsageEvent[]>;
-	applyRecallReward?(
-		input: MemoryRecallRewardInput,
-	): Promise<MemoryRecallRewardResult>;
-	listMemoryValueLog?(
-		filter?: MemoryValueLogFilter,
-	): Promise<MemoryValueLogEntry[]>;
+	appendRewardEvent?(event: Omit<MemoryRewardEvent, 'id'>): Promise<void>;
+	listRewardEvents?(
+		filter?: MemoryRewardEventFilter,
+	): Promise<MemoryRewardEvent[]>;
 	compactMaintenance?(
 		options?: MemoryCompactOptions,
 	): Promise<MemoryCompactResult>;
 	list(filter: MemoryListFilter): Promise<MemoryRecord[]>;
+	/**
+	 * Run `fn` atomically within a transaction. When the provider does not
+	 * support transactions (e.g. local-jsonl), this is a no-op that calls
+	 * `fn` directly. The applyCouncilReward loop uses this to avoid a
+	 * read-then-update race between concurrent council verdicts on the same
+	 * memory id.
+	 */
+	withTransaction?<T>(
+		fn: (tx: MemoryTransaction) => Promise<T> | T,
+	): Promise<T>;
 }
 
 export interface MemoryProposalStore {

@@ -98,7 +98,7 @@ describe('FB-001 — migration renumber coverage', () => {
 				'SELECT version FROM schema_migrations ORDER BY version',
 			)
 			.all();
-		expect(applied.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 9, 10]);
+		expect(applied.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 	});
 
 	// ---------------------------------------------------------------------------
