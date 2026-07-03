@@ -47,6 +47,19 @@ const SYMBOL_EXTENSIONS = new Set([
 	'.kts',
 	'.cs',
 	'.csx',
+	'.c',
+	'.h',
+	'.cpp',
+	'.hpp',
+	'.cc',
+	'.cxx',
+	'.swift',
+	'.dart',
+	'.rb',
+	'.rake',
+	'.gemspec',
+	'.php',
+	'.phtml',
 ]);
 
 export const SUPPORTED_SYMBOL_EXTENSIONS = [...SYMBOL_EXTENSIONS].sort();
@@ -1023,6 +1036,326 @@ export function extractCSharpSymbols(
 	);
 }
 
+function declarationSignature(content: string, index: number): string {
+	return lineTextAt(content, index);
+}
+
+export function extractCppSymbols(filePath: string, cwd: string): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const anonymousRanges: Array<{ start: number; end: number }> = [];
+	for (const match of content.matchAll(/\bnamespace\s*\{/g)) {
+		const open = content.indexOf('{', match.index);
+		const close = open === -1 ? null : findMatchingBrace(content, open);
+		if (open !== -1 && close !== null) {
+			anonymousRanges.push({ start: open, end: close });
+		}
+	}
+	const isAnonymous = (index: number) =>
+		anonymousRanges.some((range) => index >= range.start && index <= range.end);
+
+	for (const match of content.matchAll(
+		/\b(class|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const kind: SymbolInfo['kind'] =
+			match[1] === 'enum' ? 'enum' : match[1] === 'class' ? 'class' : 'type';
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind,
+			exported: !isAnonymous(match.index),
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+
+	const fnRe =
+		/^\s*(static\s+)?(?:inline\s+|constexpr\s+|extern\s+|virtual\s+|friend\s+)*[A-Za-z_~][A-Za-z0-9_:<>~*&\s]*?\s+([A-Za-z_~][A-Za-z0-9_:~]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:[;{])/gm;
+	for (const match of content.matchAll(fnRe)) {
+		const name = match[2].split('::').pop() ?? match[2];
+		if (!name || ['if', 'for', 'while', 'switch', 'return'].includes(name)) {
+			continue;
+		}
+		addUniqueSymbol(symbols, seen, {
+			name,
+			kind: 'function',
+			exported: !match[1] && !isAnonymous(match.index),
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+function normalizeSwiftVisibility(
+	value: string | undefined,
+): 'public' | 'internal' | 'private' {
+	if (value === 'private' || value === 'fileprivate') return 'private';
+	if (value === 'open' || value === 'public') return 'public';
+	return 'internal';
+}
+
+export function extractSwiftSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const blocks: Array<{
+		name: string;
+		start: number;
+		end: number;
+		exported: boolean;
+		visibility: 'public' | 'internal' | 'private';
+	}> = [];
+	const typeRe =
+		/\b(?:(open|public|internal|fileprivate|private)\s+)?(class|struct|enum|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (const match of content.matchAll(typeRe)) {
+		const visibility = normalizeSwiftVisibility(match[1]);
+		const kind: SymbolInfo['kind'] =
+			match[2] === 'protocol'
+				? 'interface'
+				: match[2] === 'enum'
+					? 'enum'
+					: match[2] === 'class'
+						? 'class'
+						: 'type';
+		const open = content.indexOf('{', match.index);
+		const close = open === -1 ? null : findMatchingBrace(content, open);
+		const exported = visibility !== 'private';
+		if (open !== -1 && close !== null) {
+			blocks.push({
+				name: match[3],
+				start: open,
+				end: close,
+				exported,
+				visibility,
+			});
+		}
+		addUniqueSymbol(symbols, seen, {
+			name: match[3],
+			kind,
+			exported,
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+
+	const fnRe =
+		/\b(?:(open|public|internal|fileprivate|private)\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	for (const match of content.matchAll(fnRe)) {
+		const block = blocks.find(
+			(candidate) =>
+				match.index >= candidate.start && match.index <= candidate.end,
+		);
+		const visibility = match[1]
+			? normalizeSwiftVisibility(match[1])
+			: (block?.visibility ?? 'internal');
+		const exported = (block?.exported ?? true) && visibility !== 'private';
+		addUniqueSymbol(symbols, seen, {
+			name: block ? `${block.name}.${match[2]}` : match[2],
+			kind: block ? 'method' : 'function',
+			exported,
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractDartSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	for (const match of raw.matchAll(
+		/\b(class|mixin|enum|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const kind: SymbolInfo['kind'] =
+			match[1] === 'enum' ? 'enum' : match[1] === 'class' ? 'class' : 'type';
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind,
+			exported: !match[2].startsWith('_'),
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of raw.matchAll(
+		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+	)) {
+		// Skip control-flow keywords and expressions that look like declarations
+		// but aren't (e.g. "return foo()", "else if (", "throw Err(")
+		if (
+			[
+				'if',
+				'for',
+				'while',
+				'switch',
+				'return',
+				'else',
+				'throw',
+				'new',
+				'await',
+				'yield',
+				'case',
+				'catch',
+			].includes(match[1])
+		)
+			continue;
+		// Also skip if the "type" position is actually a non-type keyword
+		if (
+			[
+				'return',
+				'else',
+				'throw',
+				'new',
+				'await',
+				'yield',
+				'case',
+				'catch',
+				'final',
+				'const',
+			].includes(match[0].split(/\s+/)[0])
+		)
+			continue;
+		addUniqueSymbol(symbols, seen, {
+			name: match[1],
+			kind: 'function',
+			exported: !match[1].startsWith('_'),
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractRubySymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	let offset = 0;
+	let currentVisibility: 'public' | 'protected' | 'private' = 'public';
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (trimmed === 'private' || trimmed === 'protected') {
+			currentVisibility = trimmed;
+		}
+		const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+		const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+		if (moduleMatch || classMatch) {
+			currentVisibility = 'public';
+		}
+		const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+		const methodMatch = trimmed.match(
+			/^def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_?!]*)/,
+		);
+		const singleton = /^def\s+self\./.test(trimmed);
+		const lineIndex = offset + Math.max(0, line.indexOf(trimmed));
+		if (moduleMatch || classMatch || constMatch || methodMatch) {
+			const name =
+				moduleMatch?.[1] ??
+				classMatch?.[1] ??
+				constMatch?.[1] ??
+				methodMatch?.[1];
+			if (!name) continue;
+			addUniqueSymbol(symbols, seen, {
+				name,
+				kind: moduleMatch
+					? 'type'
+					: classMatch
+						? 'class'
+						: constMatch
+							? 'const'
+							: 'method',
+				exported: methodMatch
+					? singleton || currentVisibility === 'public'
+					: true,
+				signature: trimmed.substring(0, 100),
+				line: lineNumberAt(raw, lineIndex),
+			});
+		}
+		offset += line.length + 1;
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
+export function extractPhpSymbols(filePath: string, cwd: string): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripJvmDotnetComments(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	for (const match of content.matchAll(
+		/\bnamespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]/g,
+	)) {
+		addUniqueSymbol(symbols, seen, {
+			name: match[1],
+			kind: 'type',
+			exported: true,
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of content.matchAll(
+		/\b(final\s+|abstract\s+)?(class|interface|trait)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const bodyStart = content.indexOf('{', match.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(content, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addUniqueSymbol(symbols, seen, {
+			name: match[3],
+			kind: match[2] === 'class' ? 'class' : 'interface',
+			exported: true,
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of content.matchAll(
+		/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+	)) {
+		const insideType = typeRanges.some(
+			(range) => match.index >= range.start && match.index <= range.end,
+		);
+		const modifiers = match[0].slice(0, match[0].indexOf('function'));
+		const visibility = modifiers.match(/\b(public|protected|private)\b/)?.[1];
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind: insideType ? 'method' : 'function',
+			exported: visibility !== 'private' && !match[2].startsWith('_'),
+			signature: declarationSignature(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return symbols.sort((a, b) =>
+		a.line === b.line ? a.name.localeCompare(b.name) : a.line - b.line,
+	);
+}
+
 export function extractSymbolsForFile(
 	filePath: string,
 	cwd: string,
@@ -1051,7 +1384,27 @@ export function extractSymbolsForFile(
 		case '.cs':
 		case '.csx':
 			return extractCSharpSymbols(filePath, cwd);
+		case '.c':
+		case '.h':
+		case '.cpp':
+		case '.hpp':
+		case '.cc':
+		case '.cxx':
+			return _internals.extractCppSymbols(filePath, cwd);
+		case '.swift':
+			return _internals.extractSwiftSymbols(filePath, cwd);
+		case '.dart':
+			return _internals.extractDartSymbols(filePath, cwd);
+		case '.rb':
+		case '.rake':
+		case '.gemspec':
+			return _internals.extractRubySymbols(filePath, cwd);
+		case '.php':
+		case '.phtml':
+			return _internals.extractPhpSymbols(filePath, cwd);
 		default:
+			if (filePath.endsWith('.blade.php'))
+				return _internals.extractPhpSymbols(filePath, cwd);
 			return null;
 	}
 }
@@ -1339,3 +1692,16 @@ export const symbols: ToolDefinition = createSwarmTool({
 		);
 	},
 });
+
+/**
+ * DI seam for testability — tests substitute via `_internals.fn` rather than
+ * `mock.module`, which leaks across Bun's shared test-runner process.
+ * @see AGENTS.md invariant #7
+ */
+export const _internals = {
+	extractCppSymbols,
+	extractSwiftSymbols,
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
+};

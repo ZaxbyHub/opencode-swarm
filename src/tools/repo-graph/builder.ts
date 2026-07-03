@@ -480,6 +480,19 @@ export function resolveModuleSpecifier(
 								'.kts',
 								'.cs',
 								'.csx',
+								'.c',
+								'.h',
+								'.cpp',
+								'.hpp',
+								'.cc',
+								'.cxx',
+								'.swift',
+								'.dart',
+								'.rb',
+								'.rake',
+								'.gemspec',
+								'.php',
+								'.phtml',
 								'.ts',
 								'.tsx',
 								'.js',
@@ -504,6 +517,19 @@ export function resolveModuleSpecifier(
 								'.kts',
 								'.cs',
 								'.csx',
+								'.c',
+								'.h',
+								'.cpp',
+								'.hpp',
+								'.cc',
+								'.cxx',
+								'.swift',
+								'.dart',
+								'.rb',
+								'.rake',
+								'.gemspec',
+								'.php',
+								'.phtml',
 								'.json',
 							];
 				let found: string | null = null;
@@ -900,6 +926,25 @@ function parseFileImports(
 	if (ext === '.cs' || ext === '.csx') {
 		return parseCSharpFileImports(rawContent);
 	}
+	if (['.c', '.h', '.cpp', '.hpp', '.cc', '.cxx'].includes(ext)) {
+		return parseCppFileImports(rawContent);
+	}
+	if (ext === '.swift') {
+		return parseSwiftFileImports(rawContent);
+	}
+	if (ext === '.dart') {
+		return parseDartFileImports(rawContent);
+	}
+	if (['.rb', '.rake', '.gemspec'].includes(ext)) {
+		return parseRubyFileImports(rawContent);
+	}
+	if (
+		ext === '.php' ||
+		ext === '.phtml' ||
+		sourceFile?.endsWith('.blade.php')
+	) {
+		return parsePhpFileImports(rawContent);
+	}
 
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
@@ -1047,6 +1092,112 @@ function parseCSharpFileImports(rawContent: string): ParsedImport[] {
 				: isStatic
 					? [{ imported: '*', local: '*' }]
 					: [],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseCppFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = rawContent
+		.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+		.replace(/\/\/[^\n\r]*/g, (m) => ' '.repeat(m.length));
+	for (const line of content.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		const quotedInclude = trimmed.match(/^#\s*include\s+\\?"([^"\\]+)\\?"/);
+		if (quotedInclude) {
+			const specifier = quotedInclude[1].startsWith('.')
+				? quotedInclude[1]
+				: `./${quotedInclude[1]}`;
+			const parsed = makeParsedImport(specifier, 'default', []);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+		const angleInclude = trimmed.match(/^#\s*include\s+<([^>]+)>/);
+		if (angleInclude) {
+			const parsed = makeParsedImport(angleInclude[1], 'namespace', []);
+			if (parsed) imports.push(parsed);
+		}
+	}
+	for (const match of content.matchAll(
+		/^\s*using\s+(?:namespace\s+)?(.+?)\s*;?\s*$/gm,
+	)) {
+		const parsed = makeParsedImport(match[1].trim(), 'namespace', []);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseSwiftFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^\s*import\s+(?:class\s+)?([^;\s]+)/gm,
+	)) {
+		const parsed = makeParsedImport(match[1], 'namespace', []);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseDartFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^\s*(import|export)\s+['"]([^'"]+)['"]([^;]*)/gm,
+	)) {
+		const shown = match[3]
+			?.match(/\bshow\s+([^;]+)/)?.[1]
+			.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const alias = match[3]?.match(/\bas\s+(\w+)/)?.[1];
+		// F-006: hide clause is intentionally unhandled — the import is still
+		// recorded as a namespace import (all symbols minus hidden ones) and
+		// classified as 'namespace', which is correct for symbol-graph purposes.
+		const bindings =
+			shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [];
+		const parsed = makeParsedImport(
+			match[2],
+			bindings.length > 0 && !alias ? 'named' : 'namespace',
+			bindings,
+			match[1] === 'export',
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parseRubyFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^\s*(require_relative|require)\s+['"]([^'"]+)['"]/gm,
+	)) {
+		const relative = match[1] === 'require_relative';
+		const specifier =
+			relative && !match[2].startsWith('.') ? `./${match[2]}` : match[2];
+		const parsed = makeParsedImport(
+			specifier,
+			relative ? 'default' : 'namespace',
+			[],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+function parsePhpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^\s*use\s+(?:(?:function|const)\s+)?([^;\s]+)(?:\s+as\s+(\w+))?\s*;?\s*$/gim,
+	)) {
+		const imported = match[1].split('\\').pop() ?? match[1];
+		const bindings = match[2] ? [{ imported, local: match[2] }] : [];
+		const parsed = makeParsedImport(
+			match[1],
+			bindings.length > 0 ? 'named' : 'namespace',
+			bindings,
 		);
 		if (parsed) imports.push(parsed);
 	}
@@ -1935,7 +2086,10 @@ export async function scanFileAsync(
 		const count = rangeCounts.get(d.name) ?? 0;
 		const rangeKey = count === 0 ? d.name : `${d.name}#${count + 1}`;
 		rangeCounts.set(d.name, count + 1);
-		exportRanges[rangeKey] = { startLine: d.startLine, endLine: d.endLine };
+		exportRanges[rangeKey] = {
+			startLine: d.startLine,
+			endLine: Math.max(d.endLine, d.startLine),
+		};
 	}
 	const exportsSet = new Set(exports);
 	const isPythonPackageInit =

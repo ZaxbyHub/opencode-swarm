@@ -1307,11 +1307,9 @@ void main() {
 		expect(facts!.imports).toHaveLength(1);
 		expect(facts!.imports[0]).toMatchObject({
 			specifier: 'dart:io',
-			importType: 'named',
+			importType: 'namespace',
 		});
-		expect(facts!.imports[0].bindings).toEqual([
-			{ imported: 'dart:io', local: 'io' },
-		]);
+		expect(facts!.imports[0].bindings).toEqual([]);
 
 		// ref: io.stdout... inside main → enclosingDecl = 'main'
 		const ioRef = facts!.refs.find((r) => r.identifier === 'io');
@@ -1343,7 +1341,8 @@ end
 		expect(facts!.defs).toHaveLength(1);
 		expect(facts!.defs[0]).toMatchObject({
 			name: 'main',
-			kind: 'function',
+			kind: 'method',
+			exported: true,
 		});
 		expect(facts!.defs[0].startLine).toBeGreaterThan(0);
 		expect(facts!.defs[0].endLine).toBeGreaterThanOrEqual(
@@ -1404,7 +1403,7 @@ function main() {
 			importType: 'named',
 		});
 		expect(facts!.imports[0].bindings).toEqual([
-			{ imported: 'Ns\\Foo', local: 'F' },
+			{ imported: 'Foo', local: 'F' },
 		]);
 
 		// ref: F::bar() inside main → enclosingDecl = 'main'

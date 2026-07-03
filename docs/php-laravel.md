@@ -67,6 +67,13 @@ Audit:          composer audit --locked --format=json
 
 Note: `path.extname('view.blade.php')` returns `.php`, so Blade files are scanned via the `.php` extension in all tools, with `.blade.php` also explicitly registered for direct extension lookups.
 
+Repo-graph symbol extraction treats Blade templates as best-effort PHP syntax.
+Plain PHP functions, classes, traits, namespaces, and `use` declarations are
+represented when the regex-based extractor can recover them, but Blade directives, embedded
+HTML, template inheritance, and Laravel runtime binding are not resolved. Use
+`repo_map context_pack` output for Blade files as advisory context, not as proof
+that a template reference is complete.
+
 ## Laravel SAST rules
 
 Three Laravel-specific SAST rules are active (in addition to 10 generic PHP rules):
