@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.107.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.106.0...v7.107.0) (2026-07-03)
+
+
+### Features
+
+* **swarm:** harden spec-drift gate, obligation traceability, and session-reset resilience ([a0f15e9](https://github.com/ZaxbyHub/opencode-swarm/commit/a0f15e992c3c0370e0a2e36ca3252b23096c9a17))
+
 ## [7.106.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.105.0...v7.106.0) (2026-07-03)
 
 
