@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.104.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.3...v7.104.0) (2026-07-03)
+
+
+### Features
+
+* **memory:** add recall learning loop ([7b83634](https://github.com/ZaxbyHub/opencode-swarm/commit/7b83634bf59d2aabea283e4cebcc2cdd4fcbe602))
+* **symbol-graph:** harden python rust and go support ([53625cd](https://github.com/ZaxbyHub/opencode-swarm/commit/53625cd81912011bde3cf3cad35aa6b0eda2d313))
+
+
+### Bug Fixes
+
+* **memory:** close cross-scope propagation leak found by adversarial review ([23280b4](https://github.com/ZaxbyHub/opencode-swarm/commit/23280b49c5eb4ce8e13615568aca073735c4291a))
+* **memory:** close review-round-1 findings for memory learning loop ([d6af1ed](https://github.com/ZaxbyHub/opencode-swarm/commit/d6af1ed73fed6de5a1a9250d72675a444b79bc64))
+* **memory:** validate reward-targeting session ids and close remaining review findings ([9de6380](https://github.com/ZaxbyHub/opencode-swarm/commit/9de638035f48c911639ad035fda85f4d6b694906))
+* **symbol-graph:** close review-round-1 findings for symbol graph ([789a408](https://github.com/ZaxbyHub/opencode-swarm/commit/789a408e854420e228a6659b937b58275eb2a2e9))
+
 ## [7.103.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.2...v7.103.3) (2026-07-02)
 
 
