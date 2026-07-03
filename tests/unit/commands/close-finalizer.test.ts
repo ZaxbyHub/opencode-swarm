@@ -227,6 +227,8 @@ const { handleCloseCommand, _internals: closeInternals } = await import(
 const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
 const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
 const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
+const realResetSwarmStatePreservingSingletons =
+	closeInternals.resetSwarmStatePreservingSingletons;
 
 // ── DI Conversion Summary ────────────────────────────────────────────
 //
@@ -328,6 +330,18 @@ describe('handleCloseCommand — finalizer stages', () => {
 		closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
 		closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
+		// close.ts's call site (L1884) goes through
+		// _internals.resetSwarmStatePreservingSingletons(...), which is a plain
+		// object property snapshotted the FIRST time close.js is evaluated in the
+		// process. In a combined multi-file bun test run, an earlier test file
+		// (e.g. close-cleanup.test.ts) may cause that snapshot to permanently
+		// bind to ITS mock of state.js's resetSwarmStatePreservingSingletons —
+		// this file's own mock.module('.../state.js', ...) registration above has
+		// no effect on that already-captured reference. Overriding the property
+		// on _internals directly (not via mock.module) makes this file's tests
+		// immune to cross-file execution-order effects.
+		closeInternals.resetSwarmStatePreservingSingletons =
+			mockResetSwarmStatePreservingSingletons;
 		mockRunSkillImprover.mockClear();
 		mockResetSwarmStatePreservingSingletons.mockClear();
 		// Reset the mocked swarmState object (shared ref used by close.ts) so each
@@ -364,6 +378,11 @@ describe('handleCloseCommand — finalizer stages', () => {
 		closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
 		closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
+		// Restore the original reference so it doesn't leak into other test
+		// files (e.g. close-terminal-write.test.ts, close-retro-scope.test.ts)
+		// that may run after this file in a combined bun test invocation.
+		closeInternals.resetSwarmStatePreservingSingletons =
+			realResetSwarmStatePreservingSingletons;
 		// Restore all mock.module mocks to prevent cross-test pollution
 		mock.restore();
 	});
@@ -711,8 +730,12 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// Must complete without crash (the catches ensure this)
 			expect(closeOutput).toContain('Swarm finalized');
 			// Must surface warning about the file that failed to archive
+			// (drop the trailing period from the match: close.ts appends an
+			// errno-suffixed reason — e.g. ": EISDIR: ...." — after "archived"
+			// whenever a failure reason was recorded, which it always is here
+			// since handoff.md is a directory and fs.copyFile throws EISDIR).
 			expect(closeOutput).toContain(
-				'Preserved handoff.md because it was not successfully archived.',
+				'Preserved handoff.md because it was not successfully archived',
 			);
 			// Warnings section must be present when file-failure preservations exist
 			expect(closeOutput).toContain('**Warnings:**');
@@ -742,6 +765,25 @@ describe('handleCloseCommand — finalizer stages', () => {
 			);
 			// Create escalation-report.md as a directory so copyFile fails
 			mkdirSync(path.join(swarmDir(), 'escalation-report.md'), {
+				recursive: true,
+			});
+			// session-reflection.md is ALSO in both ARCHIVE_ARTIFACTS and
+			// ACTIVE_STATE_TO_CLEAN, and the finalize stage (runFinalizeStage,
+			// close.ts ~L780) unconditionally writes a real session-reflection.md
+			// via writeSessionReflection() BEFORE the archive stage runs — it is
+			// not gated by plan existence, and this file has no mock for it. If
+			// left untouched, that real write would succeed as a normal file,
+			// fs.copyFile would archive it successfully, and
+			// archivedActiveStateFiles would be non-empty — which would route the
+			// clean stage into the per-file "if" branch (only session-reflection.md
+			// deleted, the else/bulk-skip branch never reached) instead of the
+			// intended zero-archived else branch this test targets. Pre-create it
+			// as a directory too so writeSessionReflection's fs.writeFile fails
+			// (caught, becomes a warning) and the directory is left in place, then
+			// archive's fs.copyFile also fails on it (EISDIR) exactly like
+			// events.jsonl/escalation-report.md above — guaranteeing genuinely
+			// zero active-state files archive.
+			mkdirSync(path.join(swarmDir(), 'session-reflection.md'), {
 				recursive: true,
 			});
 

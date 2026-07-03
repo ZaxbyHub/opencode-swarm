@@ -4,15 +4,26 @@
  * Verifies the flat-file and directory archiving/deletion behavior:
  *   - 21 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
  *   - 17 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
- *   - 5 active-state directories (evidence/, session/, scopes/, locks/, spec-archive/)
- *     are recursively copied to the archive and then deleted
+ *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
+ *     are recursively copied to the archive and then deleted. (locks/ is
+ *     intentionally excluded — per-run locks are managed via proper-lockfile,
+ *     not archived/cleaned by close.)
  *   - Archive-first-guard: directories are only deleted if they were successfully archived
  *   - close-summary.md and spec.md are NOT in ACTIVE_STATE_TO_CLEAN — survive the clean stage
  *   - .swarm/archive/ itself survives the close
  *   - context.md is rewritten with "Session closed" content
  *   - Idempotent: running close twice produces no errors
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
+import * as childProcess from 'node:child_process';
 import {
 	existsSync,
 	mkdirSync,
@@ -24,6 +35,19 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+// Static import (hoisted, resolves to the real module) so the mock below can
+// spread the real exports and only override the ones this suite cares about.
+// This keeps the mock resilient to the live import graph (close.ts pulls in
+// evidence/manager.js re-exports transitively, e.g. via skill-improver.ts ->
+// trajectory-cluster.ts -> micro-reflector.ts -> sanitizeTaskId, and via
+// trajectory-cluster.ts -> listEvidenceTaskIds) without having to hand-stub
+// every export it happens to need.
+import * as actualEvidenceManager from '../../../src/evidence/manager.js';
+// Same rationale as actualEvidenceManager above: knowledge-curator.js is
+// imported transitively by other (unmocked) close.ts dependencies for
+// exports beyond curateAndStoreSwarm (e.g. enrichLessonToV3), so spread the
+// real module and only override the entry point this suite mocks.
+import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -45,10 +69,12 @@ mock.module('../../../src/tools/write-retro.js', () => ({
 }));
 
 mock.module('../../../src/hooks/knowledge-curator.js', () => ({
+	...actualKnowledgeCurator,
 	curateAndStoreSwarm: mockCurateAndStoreSwarm,
 }));
 
 mock.module('../../../src/evidence/manager.js', () => ({
+	...actualEvidenceManager,
 	archiveEvidence: mockArchiveEvidence,
 }));
 
@@ -70,6 +96,10 @@ mock.module('../../../src/state.js', () => ({
 	endAgentSession: () => {},
 	resetSwarmState: () => {},
 	resetSwarmStatePreservingSingletons: () => {},
+	// No sessions are ever populated in the mock swarmState above, so no
+	// session can have fullAutoMode enabled — false is the only consistent
+	// answer for this mock's shape.
+	hasActiveFullAuto: () => false,
 }));
 
 mock.module('../../../src/git/branch.js', () => ({
@@ -77,6 +107,7 @@ mock.module('../../../src/git/branch.js', () => ({
 	getCurrentBranch: () => 'main',
 	getDefaultBaseBranch: () => 'origin/main',
 	hasUncommittedChanges: () => false,
+	getGitRepositoryStatus: () => ({ isRepo: false }),
 	resetToRemoteBranch: () => ({
 		success: true,
 		targetBranch: 'main',
@@ -94,6 +125,29 @@ mock.module('../../../src/git/branch.js', () => ({
 		branchDeleted: false,
 		warnings: [],
 	}),
+	_internals: {
+		gitExec: () => '',
+		detectDefaultRemoteBranch: () => null,
+		getDefaultBaseBranch: () => 'origin/main',
+		getGitRepositoryStatus: () => ({ isRepo: false }),
+		resetToRemoteBranch: () => ({
+			success: true,
+			targetBranch: 'main',
+			localBranch: 'main',
+			message: 'Already aligned with remote',
+			alreadyAligned: true,
+			prunedBranches: [],
+			warnings: [],
+		}),
+		resetToMainAfterMerge: () => ({
+			success: true,
+			targetBranch: 'origin/main',
+			previousBranch: 'main',
+			message: 'Already on main',
+			branchDeleted: false,
+			warnings: [],
+		}),
+	},
 }));
 
 mock.module('../../../src/plan/checkpoint.js', () => ({
@@ -143,6 +197,21 @@ function getLatestArchivePath(): string {
 	return path.join(archiveBase, entries[entries.length - 1]);
 }
 
+// close.ts's copySqliteSafe() shells out to the `sqlite3` CLI to checkpoint
+// the WAL before archiving swarm.db. Whether that binary is actually on
+// PATH varies by host (confirmed absent on Windows dev machines, and not
+// guaranteed in every CI matrix cell either), which makes the happy-path
+// assertions below ("checkpoint succeeds -> swarm.db archived and removed")
+// non-deterministic if we let the real spawnSync run. Spy on just the
+// `spawnSync` named export (kept live via spyOn — NOT a full
+// mock.module('node:child_process', ...) replacement, since that risks
+// dropping other exports this test's reachable import graph needs; see
+// issue #1683) and make the sqlite3 invocation deterministically report a
+// completed checkpoint (busy=0). Non-sqlite3 invocations, if any ever occur
+// on this path, fall through to the real implementation.
+const realSpawnSync = childProcess.spawnSync;
+let spawnSyncSpy: ReturnType<typeof spyOn>;
+
 // ── Test suites ──────────────────────────────────────────────────────
 
 describe('handleCloseCommand — expanded artifact cleanup', () => {
@@ -153,6 +222,27 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		mockFlushPendingSnapshot.mockClear();
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-cleanup-test-'));
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
+
+		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation(
+			(...args: Parameters<typeof childProcess.spawnSync>) => {
+				const [command] = args;
+				if (command === 'sqlite3') {
+					// Simulates `PRAGMA wal_checkpoint(TRUNCATE)` reporting
+					// busy=0 (checkpoint completed) per close.ts's
+					// `busy|log|checkpointed` parsing at close.ts:958-968.
+					return {
+						status: 0,
+						stdout: '0|0|0\n',
+						stderr: '',
+						error: undefined,
+						pid: 0,
+						output: [],
+						signal: null,
+					} as ReturnType<typeof childProcess.spawnSync>;
+				}
+				return realSpawnSync(...args);
+			},
+		);
 	});
 
 	afterEach(() => {
@@ -161,6 +251,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		spawnSyncSpy.mockRestore();
 		mock.restore();
 	});
 
@@ -352,7 +443,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'swarm.db'))).toBe(false);
 		});
 
-		it('archives and removes swarm.db-shm', async () => {
+		it('preserves swarm.db-shm (not archived, not cleaned)', async () => {
 			writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'swarm.db-shm'),
@@ -361,12 +452,16 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			await handleCloseCommand(testDir, []);
 
+			// WAL sidecar files are transient SQLite internals: SQLite recreates
+			// them on next open, and deleting them risks losing uncheckpointed
+			// WAL pages. They are deliberately skipped during archiving and
+			// preserved (not cleaned) in the source .swarm/ dir.
 			const archivePath = getLatestArchivePath();
-			expect(existsSync(path.join(archivePath, 'swarm.db-shm'))).toBe(true);
-			expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(false);
+			expect(existsSync(path.join(archivePath, 'swarm.db-shm'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(true);
 		});
 
-		it('archives and removes swarm.db-wal', async () => {
+		it('preserves swarm.db-wal (not archived, not cleaned)', async () => {
 			writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'swarm.db-wal'),
@@ -375,12 +470,16 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			await handleCloseCommand(testDir, []);
 
+			// WAL sidecar files are transient SQLite internals: SQLite recreates
+			// them on next open, and deleting them risks losing uncheckpointed
+			// WAL pages. They are deliberately skipped during archiving and
+			// preserved (not cleaned) in the source .swarm/ dir.
 			const archivePath = getLatestArchivePath();
-			expect(existsSync(path.join(archivePath, 'swarm.db-wal'))).toBe(true);
-			expect(existsSync(path.join(swarmDir(), 'swarm.db-wal'))).toBe(false);
+			expect(existsSync(path.join(archivePath, 'swarm.db-wal'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'swarm.db-wal'))).toBe(true);
 		});
 
-		it('all three db files are present in archive with correct content', async () => {
+		it('swarm.db is archived with correct content; -shm/-wal sidecars are not archived', async () => {
 			writePlan();
 			writeFileSync(path.join(swarmDir(), 'swarm.db'), Buffer.from('db'));
 			writeFileSync(path.join(swarmDir(), 'swarm.db-shm'), Buffer.from('shm'));
@@ -390,11 +489,11 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			const archivePath = getLatestArchivePath();
 			const archivedDb = readFileSync(path.join(archivePath, 'swarm.db'));
-			const archivedShm = readFileSync(path.join(archivePath, 'swarm.db-shm'));
-			const archivedWal = readFileSync(path.join(archivePath, 'swarm.db-wal'));
 			expect(archivedDb.toString()).toBe('db');
-			expect(archivedShm.toString()).toBe('shm');
-			expect(archivedWal.toString()).toBe('wal');
+			// WAL sidecar files are transient SQLite internals and are
+			// deliberately excluded from archiving (see the two tests above).
+			expect(existsSync(path.join(archivePath, 'swarm.db-shm'))).toBe(false);
+			expect(existsSync(path.join(archivePath, 'swarm.db-wal'))).toBe(false);
 		});
 	});
 
@@ -469,8 +568,12 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'scopes'))).toBe(false);
 		});
 
-		it('archives and deletes locks/ directory with contents', async () => {
+		it('locks/ directory is NOT archived and NOT deleted (excluded from ACTIVE_STATE_DIRS_TO_CLEAN)', async () => {
 			writePlan();
+			// locks/ was intentionally dropped from ACTIVE_STATE_DIRS_TO_CLEAN —
+			// per-run locks are now managed via proper-lockfile, not archived
+			// or cleaned by close. It should be left untouched, matching the
+			// Archive-first-guard behavior for any directory not in the list.
 			mkdirSync(path.join(swarmDir(), 'locks'), { recursive: true });
 			writeFileSync(
 				path.join(swarmDir(), 'locks', 'tool-lock.json'),
@@ -480,10 +583,11 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			await handleCloseCommand(testDir, []);
 
 			const archivePath = getLatestArchivePath();
+			expect(existsSync(path.join(archivePath, 'locks'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'locks'))).toBe(true);
 			expect(
-				existsSync(path.join(archivePath, 'locks', 'tool-lock.json')),
-			).toBe(true);
-			expect(existsSync(path.join(swarmDir(), 'locks'))).toBe(false);
+				readFileSync(path.join(swarmDir(), 'locks', 'tool-lock.json'), 'utf-8'),
+			).toBe('{"locked":true}');
 		});
 
 		it('archives and deletes spec-archive/ directory with contents', async () => {
@@ -793,13 +897,13 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 	});
 
-	// ── Test 9: All 5 active-state directories archived and deleted ──
+	// ── Test 9: All 4 active-state directories archived and deleted ──
 
-	describe('All 5 active-state directories are archived and deleted', () => {
-		it('all five directories are archived and removed', async () => {
+	describe('All 4 active-state directories are archived and deleted', () => {
+		it('all four directories are archived and removed', async () => {
 			writePlan();
 
-			// Create all 5 directories with unique marker files
+			// Create all 4 directories with unique marker files
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), {
 				recursive: true,
 			});
@@ -822,12 +926,6 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 				'scopes-marker',
 			);
 
-			mkdirSync(path.join(swarmDir(), 'locks'));
-			writeFileSync(
-				path.join(swarmDir(), 'locks', 'marker.txt'),
-				'locks-marker',
-			);
-
 			mkdirSync(path.join(swarmDir(), 'spec-archive'));
 			writeFileSync(
 				path.join(swarmDir(), 'spec-archive', 'marker.txt'),
@@ -838,7 +936,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			const archivePath = getLatestArchivePath();
 
-			// All five directories should be in the archive
+			// All four directories should be in the archive
 			expect(existsSync(path.join(archivePath, 'evidence', 'marker.txt'))).toBe(
 				true,
 			);
@@ -848,18 +946,14 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(archivePath, 'scopes', 'marker.txt'))).toBe(
 				true,
 			);
-			expect(existsSync(path.join(archivePath, 'locks', 'marker.txt'))).toBe(
-				true,
-			);
 			expect(
 				existsSync(path.join(archivePath, 'spec-archive', 'marker.txt')),
 			).toBe(true);
 
-			// All five directories should be deleted from .swarm/
+			// All four directories should be deleted from .swarm/
 			expect(existsSync(path.join(swarmDir(), 'evidence'))).toBe(false);
 			expect(existsSync(path.join(swarmDir(), 'session'))).toBe(false);
 			expect(existsSync(path.join(swarmDir(), 'scopes'))).toBe(false);
-			expect(existsSync(path.join(swarmDir(), 'locks'))).toBe(false);
 			expect(existsSync(path.join(swarmDir(), 'spec-archive'))).toBe(false);
 		});
 	});

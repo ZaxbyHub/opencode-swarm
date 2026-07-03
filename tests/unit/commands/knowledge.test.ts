@@ -15,6 +15,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	transactKnowledge: async () => {},
 }));
 
 // Mock knowledge-validator module
@@ -24,13 +25,25 @@ const mockRestoreEntry = mock();
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
+	resolveUnactionablePath: (dir: string) =>
+		`${dir}/.swarm/knowledge-unactionable.jsonl`,
 }));
 
 // Mock knowledge-migrator module
 const mockMigrate = mock();
+// migrateHiveKnowledgeLegacy is called unconditionally alongside migrateContextToKnowledge
+// by handleKnowledgeMigrateCommand — default to a no-op result (no skippedReason, not
+// migrated) so it doesn't add a "Hive legacy migration" message to existing assertions.
+const mockMigrateHiveKnowledgeLegacy = mock().mockResolvedValue({
+	migrated: false,
+	entriesMigrated: 0,
+	entriesDropped: 0,
+	entriesTotal: 0,
+});
 
 mock.module('../../../src/hooks/knowledge-migrator.js', () => ({
 	migrateContextToKnowledge: mockMigrate,
+	migrateHiveKnowledgeLegacy: mockMigrateHiveKnowledgeLegacy,
 }));
 
 // Import AFTER mocking, with .js extension
@@ -234,6 +247,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 describe('handleKnowledgeRestoreCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	it('returns usage message when entryId is missing (empty args)', async () => {
@@ -306,6 +320,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 describe('handleKnowledgeListCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	it('returns no-entries message when knowledge store is empty', async () => {
@@ -363,6 +378,7 @@ describe('handleKnowledgeListCommand', () => {
 describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	it('knowledge quarantine <id> routes to quarantine handler', async () => {
@@ -402,9 +418,10 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 describe('handleKnowledgeMigrateCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 	});
 
-	it('successful migration returns string containing "Migration complete" with correct counts (entriesMigrated=3, entriesDropped=1, entriesTotal=4)', async () => {
+	it('successful migration returns string containing context migration summary with correct counts (entriesMigrated=3, entriesDropped=1)', async () => {
 		mockMigrate.mockResolvedValueOnce({
 			migrated: true,
 			entriesMigrated: 3,
@@ -412,10 +429,9 @@ describe('handleKnowledgeMigrateCommand', () => {
 			entriesTotal: 4,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(result).toContain('3 entries added');
 		expect(result).toContain('1 dropped');
-		expect(result).toContain('4 total processed');
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
@@ -461,24 +477,20 @@ describe('handleKnowledgeMigrateCommand', () => {
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
-	it('skippedReason unknown value returns string containing "unknown reason"', async () => {
-		mockMigrate.mockResolvedValueOnce({
-			migrated: false,
-			entriesMigrated: 0,
-			entriesDropped: 0,
-			entriesTotal: 0,
-			skippedReason: 'some-unknown-reason' as never,
-		});
-		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('unknown reason');
-		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
-	});
+	// Note: production's switch on skippedReason (src/commands/knowledge.ts) is exhaustive
+	// for the literal values migrateContextToKnowledge and migrateHiveKnowledgeLegacy
+	// actually emit ('sentinel-exists' | 'no-context-file' | 'empty-context' and
+	// 'sentinel-exists' | 'no-context-file' respectively — see src/hooks/knowledge-migrator.ts).
+	// There is no reachable "unknown skippedReason" state without violating the MigrationResult
+	// type contract, so a prior "unknown reason" fallback test (relying on an `as never` cast)
+	// was removed rather than kept passing against dead code.
 
-	it('error thrown by migrateContextToKnowledge returns string containing "failed"', async () => {
+	it('error thrown by migrateContextToKnowledge returns generic failure message without leaking error details', async () => {
 		mockMigrate.mockRejectedValueOnce(new Error('Database connection failed'));
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('failed');
-		expect(result).toContain('Check .swarm/context.md');
+		expect(result).toBe(
+			'❌ Migration failed. Check that knowledge source files are readable.',
+		);
 		expect(result).not.toContain('Database connection failed');
 	});
 
@@ -492,7 +504,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 		const result = await handleKnowledgeMigrateCommand('/test/dir', [
 			'/custom/target',
 		]);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(mockMigrate).toHaveBeenCalledWith(
 			'/custom/target',
 			expect.any(Object),
@@ -511,7 +523,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 			entriesTotal: 1,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 

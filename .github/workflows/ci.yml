@@ -179,10 +179,12 @@ jobs:
             # process was pure overhead on every cell.
             bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
             if [ $exit_code -ne 0 ]; then
-              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp"; then
-                echo "::error file=$f::FAILED: $f"
-                failed=1
-              fi
+              # Informational only — bun 1.3.x's failure markers don't reliably
+              # match this pattern, so it must not gate pass/fail. exit_code is
+              # the sole failure signal.
+              grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp" || true
+              echo "::error file=$f::FAILED: $f"
+              failed=1
             fi
             # Surface timing and timeout info to CI output (not just temp file)
             grep -E "^\[TIMING\]|^\[TIMEOUT\]" "$tmp" || true
@@ -253,7 +255,7 @@ jobs:
           echo "Running coverage measurement for gate enforcement..."
           # Run the full unit test suite with coverage (no --smol: that flag
           # crashes Bun with SIGILL when combined with --coverage on large suites).
-          bun test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || true
+          bun test --coverage tests/unit/ --timeout 60000 > coverage-output.txt 2>&1 || test_exit=$?
           # Extract line coverage from "All files" row using awk.
           # Bun's coverage table columns: File | % Funcs | % Lines | Uncovered Line #s
           awk -F'|' '/All files/ { gsub(/ /,"",$3); print substr($3, 1, 5); exit }' coverage-output.txt > coverage-value.txt
@@ -269,6 +271,10 @@ jobs:
             exit 1
           fi
           echo "Coverage gate passed: ${COVERAGE}% >= ${THRESHOLD}%"
+          if [ "${test_exit:-0}" -ne 0 ]; then
+            echo "::error::Coverage measurement run failed (exit ${test_exit}) even though coverage was above threshold"
+            exit 1
+          fi
       - name: Upload coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -315,10 +321,12 @@ jobs:
             exit_code=0
             bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
             if [ $exit_code -ne 0 ]; then
-              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
-                echo "::error file=$f::FAILED: $f"
-                failed=1
-              fi
+              # Informational only — bun 1.3.x's failure markers don't reliably
+              # match this pattern, so it must not gate pass/fail. exit_code is
+              # the sole failure signal.
+              grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp" || true
+              echo "::error file=$f::FAILED: $f"
+              failed=1
             fi
           done
           exit $failed

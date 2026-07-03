@@ -10,20 +10,21 @@ async function pathExists(p: string): Promise<boolean> {
 		.catch(() => false);
 }
 
-import type { CoChangeEntry } from '../../../src/tools/co-change-analyzer.js';
+import { handleSimulateCommand } from '../../../src/commands/simulate.js';
+import {
+	type CoChangeEntry,
+	_internals as coChangeAnalyzer,
+} from '../../../src/tools/co-change-analyzer.js';
 
-// Mock only co-change-analyzer (app-specific, no contamination risk)
+// Mock only co-change-analyzer's DI seam (app-specific, no contamination risk).
+// src/commands/simulate.ts calls coChangeAnalyzer.detectDarkMatter via the
+// `_internals` seam (not a direct named import), so the seam's method must be
+// monkey-patched rather than replacing the whole module with mock.module —
+// mock.module would drop every export the module has besides detectDarkMatter
+// and break the `_internals` import in simulate.ts.
+const originalDetectDarkMatter = coChangeAnalyzer.detectDarkMatter;
 const mockDetectDarkMatter = mock(
 	async (_dir: string, _options: any) => [] as CoChangeEntry[],
-);
-
-mock.module('../../../src/tools/co-change-analyzer.js', () => ({
-	detectDarkMatter: mockDetectDarkMatter,
-}));
-
-// Import AFTER mock setup
-const { handleSimulateCommand } = await import(
-	'../../../src/commands/simulate.js'
 );
 
 // Use a unique temp dir per test to avoid state leakage
@@ -34,6 +35,7 @@ describe('handleSimulateCommand', () => {
 
 	beforeEach(() => {
 		mockDetectDarkMatter.mockClear();
+		coChangeAnalyzer.detectDarkMatter = mockDetectDarkMatter;
 
 		// Create a unique temp directory for each test
 		testDir = require('node:fs').realpathSync(
@@ -68,6 +70,7 @@ describe('handleSimulateCommand', () => {
 	});
 
 	afterEach(() => {
+		coChangeAnalyzer.detectDarkMatter = originalDetectDarkMatter;
 		mock.restore();
 		try {
 			rmSync(testDir, { recursive: true, force: true });
