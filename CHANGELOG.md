@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.106.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.105.0...v7.106.0) (2026-07-03)
+
+
+### Features
+
+* **memory:** close the learning loop — council verdicts drive EMA confidence, suppression, promotion ([ba102c4](https://github.com/ZaxbyHub/opencode-swarm/commit/ba102c4b93dd83d5035e41af2a84f68178e98d82))
+
 ## [7.105.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.104.0...v7.105.0) (2026-07-03)
 
 
