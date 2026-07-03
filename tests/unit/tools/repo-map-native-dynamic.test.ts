@@ -174,6 +174,55 @@ public extension Model {
 		);
 	});
 
+	test('context_pack returns Ruby class and method spans from the tool path', async () => {
+		write(
+			'billing.rb',
+			`module Billing
+class Service
+  def self.build; end
+  private
+  def token; end
+end
+class Other
+  def visible; end
+end
+end
+`,
+		);
+
+		const build = await callRepoMap({ action: 'build' });
+		expect(build.success).toBe(true);
+
+		const context = await callRepoMap({
+			action: 'context_pack',
+			file: 'billing.rb',
+			symbol: 'Service',
+			top_n: 3,
+		});
+		expect(context.success).toBe(true);
+		expect(context.spans).toContainEqual(
+			expect.objectContaining({
+				file: 'billing.rb',
+				symbol: 'Service',
+				startLine: 2,
+			}),
+		);
+		const methodContext = await callRepoMap({
+			action: 'context_pack',
+			file: 'billing.rb',
+			symbol: 'self.build',
+			top_n: 3,
+		});
+		expect(methodContext.success).toBe(true);
+		expect(methodContext.spans).toContainEqual(
+			expect.objectContaining({
+				file: 'billing.rb',
+				symbol: 'self.build',
+				startLine: 3,
+			}),
+		);
+	});
+
 	test('build records Dart alias imports as namespace edges, not fake symbol imports', async () => {
 		write(
 			'helper.dart',

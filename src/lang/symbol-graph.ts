@@ -988,13 +988,29 @@ function declarationEnd(source: string, start: number): number {
 	return semi === -1 ? start : semi;
 }
 
+const cppAnonymousNamespaceRe = /\bnamespace\s*\{/g;
+const cppTypeRe = /\b(class|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const cppFunctionRe =
+	/(?:^|[;\n}])\s*(static\s+)?(?:[A-Za-z_~][A-Za-z0-9_:<>,~*&\s]*?\s+)([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(;|\{)/g;
+
+const swiftTypeRe =
+	/\b(?:(open|public|internal|fileprivate|private)\s+)?(class|struct|enum|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const swiftExtensionRe =
+	/\b(?:(open|public|internal|fileprivate|private)\s+)?extension\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const swiftFunctionRe =
+	/\b(?:(open|public|internal|fileprivate|private)\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+const dartTypeRe = /\b(class|mixin|enum|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const dartFunctionRe =
+	/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
 function augmentCppDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	const anonymousRanges: Array<{ start: number; end: number }> = [];
-	const anonymousNamespaceRe = /\bnamespace\s*\{/g;
+	cppAnonymousNamespaceRe.lastIndex = 0;
 	for (
-		let m = anonymousNamespaceRe.exec(source);
+		let m = cppAnonymousNamespaceRe.exec(source);
 		m !== null;
-		m = anonymousNamespaceRe.exec(source)
+		m = cppAnonymousNamespaceRe.exec(source)
 	) {
 		const open = source.indexOf('{', m.index);
 		const close = open === -1 ? null : findMatchingBrace(source, open);
@@ -1005,8 +1021,8 @@ function augmentCppDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	const isInAnonymousNamespace = (index: number): boolean =>
 		anonymousRanges.some((range) => index >= range.start && index <= range.end);
 
-	const typeRe = /\b(class|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
-	for (let m = typeRe.exec(source); m !== null; m = typeRe.exec(source)) {
+	cppTypeRe.lastIndex = 0;
+	for (let m = cppTypeRe.exec(source); m !== null; m = cppTypeRe.exec(source)) {
 		const exported = !isInAnonymousNamespace(m.index);
 		addRegexDef(
 			defs,
@@ -1021,13 +1037,12 @@ function augmentCppDefs(source: string, defs: FileSymbolFacts['defs']): void {
 		);
 	}
 
-	const functionRe =
-		/(?:^|[;\n}])\s*(static\s+)?(?:[A-Za-z_~][A-Za-z0-9_:<>,~*&\s]*?\s+)([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(;|\{)/g;
 	const skip = new Set(['if', 'for', 'while', 'switch', 'catch', 'return']);
+	cppFunctionRe.lastIndex = 0;
 	for (
-		let m = functionRe.exec(source);
+		let m = cppFunctionRe.exec(source);
 		m !== null;
-		m = functionRe.exec(source)
+		m = cppFunctionRe.exec(source)
 	) {
 		const name = m[2];
 		if (skip.has(name)) continue;
@@ -1076,8 +1091,7 @@ function augmentSwiftDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			blocks.push({ start: open, end: close, visibility, exported });
 		}
 	};
-	const swiftTypeRe =
-		/\b(?:(open|public|internal|fileprivate|private)\s+)?(class|struct|enum|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	swiftTypeRe.lastIndex = 0;
 	for (
 		let m = swiftTypeRe.exec(source);
 		m !== null;
@@ -1106,8 +1120,7 @@ function augmentSwiftDefs(source: string, defs: FileSymbolFacts['defs']): void {
 		);
 		addBlock(m.index, visibility, exported);
 	}
-	const swiftExtensionRe =
-		/\b(?:(open|public|internal|fileprivate|private)\s+)?extension\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	swiftExtensionRe.lastIndex = 0;
 	for (
 		let m = swiftExtensionRe.exec(source);
 		m !== null;
@@ -1116,8 +1129,7 @@ function augmentSwiftDefs(source: string, defs: FileSymbolFacts['defs']): void {
 		const visibility = normalizeVisibility(m[1]);
 		addBlock(m.index, visibility, visibility !== 'private');
 	}
-	const swiftFunctionRe =
-		/\b(?:(open|public|internal|fileprivate|private)\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	swiftFunctionRe.lastIndex = 0;
 	for (
 		let m = swiftFunctionRe.exec(source);
 		m !== null;
@@ -1145,8 +1157,7 @@ function augmentSwiftDefs(source: string, defs: FileSymbolFacts['defs']): void {
 }
 
 function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
-	const dartTypeRe =
-		/\b(class|mixin|enum|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+	dartTypeRe.lastIndex = 0;
 	for (
 		let m = dartTypeRe.exec(source);
 		m !== null;
@@ -1165,13 +1176,16 @@ function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			exported ? 'naming_convention' : 'unknown',
 		);
 	}
-	const dartFunctionRe =
-		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	dartFunctionRe.lastIndex = 0;
 	for (
 		let m = dartFunctionRe.exec(source);
 		m !== null;
 		m = dartFunctionRe.exec(source)
 	) {
+		// Exclude "new ClassName(" constructor calls — the "return type"
+		// position is occupied by the "new" keyword, not a real type name.
+		const beforeName = source.slice(Math.max(0, m.index - 4), m.index);
+		if (beforeName.endsWith('new ')) continue;
 		const exported = !m[1].startsWith('_');
 		addRegexDef(
 			defs,
@@ -1263,12 +1277,17 @@ function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	}
 }
 
+const phpNamespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
+const phpTypeRe = /\b(trait|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const phpFunctionRe =
+	/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
 function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
-	const namespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
+	phpNamespaceRe.lastIndex = 0;
 	for (
-		let m = namespaceRe.exec(source);
+		let m = phpNamespaceRe.exec(source);
 		m !== null;
-		m = namespaceRe.exec(source)
+		m = phpNamespaceRe.exec(source)
 	) {
 		addRegexDef(
 			defs,
@@ -1282,8 +1301,8 @@ function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			'namespace_public',
 		);
 	}
-	const phpTypeRe = /\b(trait|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
 	const typeRanges: Array<{ start: number; end: number }> = [];
+	phpTypeRe.lastIndex = 0;
 	for (let m = phpTypeRe.exec(source); m !== null; m = phpTypeRe.exec(source)) {
 		const bodyStart = source.indexOf('{', m.index);
 		const bodyEnd =
@@ -1303,8 +1322,7 @@ function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			'module_public',
 		);
 	}
-	const phpFunctionRe =
-		/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	phpFunctionRe.lastIndex = 0;
 	for (
 		let m = phpFunctionRe.exec(source);
 		m !== null;
@@ -2227,7 +2245,7 @@ function parsePhpUse(text: string): FileSymbolFacts['imports'][0] | null {
 		return {
 			specifier: m[1],
 			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			bindings: [{ imported: m[1].split('\\').pop() ?? m[1], local: m[2] }],
 		};
 	}
 	const simple = t.match(

@@ -69,7 +69,7 @@ Note: `path.extname('view.blade.php')` returns `.php`, so Blade files are scanne
 
 Repo-graph symbol extraction treats Blade templates as best-effort PHP syntax.
 Plain PHP functions, classes, traits, namespaces, and `use` declarations are
-represented when the PHP parser can recover them, but Blade directives, embedded
+represented when the regex-based extractor can recover them, but Blade directives, embedded
 HTML, template inheritance, and Laravel runtime binding are not resolved. Use
 `repo_map context_pack` output for Blade files as advisory context, not as proof
 that a template reference is complete.

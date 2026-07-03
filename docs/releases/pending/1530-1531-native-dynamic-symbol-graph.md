@@ -4,6 +4,8 @@
   with conservative visibility metadata, local include/import handling,
   re-export facts, and context-packable ranges for representative native and
   dynamic-language symbols.
+- Wired the same languages through the direct `symbols` tool extraction path
+  (`extractSymbolsForFile`) with a dependency-injection seam for testability.
 - Documented the remaining native and dynamic limitations, including build-system
   include paths, overload/template resolution, Swift/Xcode module metadata,
   Flutter widgets, Ruby metaprogramming, PHP dynamic calls, Composer boundaries,

@@ -1151,6 +1151,9 @@ function parseDartFileImports(rawContent: string): ParsedImport[] {
 			.map((part) => part.trim())
 			.filter(Boolean);
 		const alias = match[3]?.match(/\bas\s+(\w+)/)?.[1];
+		// F-006: hide clause is intentionally unhandled — the import is still
+		// recorded as a namespace import (all symbols minus hidden ones) and
+		// classified as 'namespace', which is correct for symbol-graph purposes.
 		const bindings =
 			shown && shown.length > 0
 				? shown.map((name) => ({ imported: name, local: name }))

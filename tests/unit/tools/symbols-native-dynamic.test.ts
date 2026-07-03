@@ -58,6 +58,32 @@ static int hidden();
 		);
 	});
 
+	test('extracts Dart class and method symbols while filtering private members', () => {
+		write(
+			'model.dart',
+			`class Foo {
+  void bar() {}
+  final int _privateField = 0;
+  static void staticBaz() {}
+}
+`,
+		);
+
+		const symbols = extractSymbolsForFile('model.dart', root);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'Foo', exported: true }),
+		);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'bar', exported: true }),
+		);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'staticBaz', exported: true }),
+		);
+		expect(symbols).not.toContainEqual(
+			expect.objectContaining({ name: '_privateField' }),
+		);
+	});
+
 	test('extracts Swift public types and methods while hiding private functions', () => {
 		write(
 			'Model.swift',

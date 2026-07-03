@@ -1403,7 +1403,7 @@ function main() {
 			importType: 'named',
 		});
 		expect(facts!.imports[0].bindings).toEqual([
-			{ imported: 'Ns\\Foo', local: 'F' },
+			{ imported: 'Foo', local: 'F' },
 		]);
 
 		// ref: F::bar() inside main → enclosingDecl = 'main'

@@ -1274,7 +1274,7 @@ export function extractPhpSymbols(filePath: string, cwd: string): SymbolInfo[] {
 	const seen = new Set<string>();
 	const typeRanges: Array<{ start: number; end: number }> = [];
 	for (const match of content.matchAll(
-		/\bnamespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*;/g,
+		/\bnamespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]/g,
 	)) {
 		addUniqueSymbol(symbols, seen, {
 			name: match[1],
@@ -1356,21 +1356,21 @@ export function extractSymbolsForFile(
 		case '.hpp':
 		case '.cc':
 		case '.cxx':
-			return extractCppSymbols(filePath, cwd);
+			return _internals.extractCppSymbols(filePath, cwd);
 		case '.swift':
-			return extractSwiftSymbols(filePath, cwd);
+			return _internals.extractSwiftSymbols(filePath, cwd);
 		case '.dart':
-			return extractDartSymbols(filePath, cwd);
+			return _internals.extractDartSymbols(filePath, cwd);
 		case '.rb':
 		case '.rake':
 		case '.gemspec':
-			return extractRubySymbols(filePath, cwd);
+			return _internals.extractRubySymbols(filePath, cwd);
 		case '.php':
 		case '.phtml':
-			return extractPhpSymbols(filePath, cwd);
+			return _internals.extractPhpSymbols(filePath, cwd);
 		default:
 			if (filePath.endsWith('.blade.php'))
-				return extractPhpSymbols(filePath, cwd);
+				return _internals.extractPhpSymbols(filePath, cwd);
 			return null;
 	}
 }
@@ -1658,3 +1658,16 @@ export const symbols: ToolDefinition = createSwarmTool({
 		);
 	},
 });
+
+/**
+ * DI seam for testability — tests substitute via `_internals.fn` rather than
+ * `mock.module`, which leaks across Bun's shared test-runner process.
+ * @see AGENTS.md invariant #7
+ */
+export const _internals = {
+	extractCppSymbols,
+	extractSwiftSymbols,
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
+};
