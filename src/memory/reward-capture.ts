@@ -75,6 +75,12 @@ const PROPAGATED_VERDICT_SUFFIX = '_PROPAGATED';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+// FB-005: bound buildRetrievalRecency to the last 30 days to avoid iterating
+// over ALL recall events across all sessions. (The PR body for issue #1467
+// documents a 30-day recency window; the LIMIT additionally caps result size.)
+const RECENCY_WINDOW_MS = 30 * MS_PER_DAY;
+const RECENCY_EVENT_LIMIT = 1000;
+
 export interface CouncilRewardOptions {
 	/** Session id — bundles are listed by this `runId`. */
 	runId: string;
@@ -161,30 +167,72 @@ export async function applyCouncilReward(
 		}
 	}
 
-	let memoriesRewarded = 0;
-	// Source records that actually received a DIRECT reward — reused as the
-	// propagation origins (their scope/kind/text drive candidate discovery).
-	const rewardedRecords: MemoryRecord[] = [];
-	for (const id of distinctIds) {
-		const rec = await provider.get(id);
-		if (!rec) continue;
-		const qBefore = getQValue(rec, opts.initialQValue);
-		const qAfter = applyEmaUpdate(qBefore, opts.reward, opts.eta);
-		await provider.upsert(setQValue(rec, qAfter));
-		await provider.appendRewardEvent?.({
-			memoryId: id,
-			runId: opts.runId,
-			unitId: opts.unitId,
-			verdict: opts.verdictLabel ?? 'APPROVE',
-			reward: opts.reward,
-			qBefore,
-			qAfter,
-			verdictSynthesisJson: opts.verdictSynthesisJson,
-			timestamp: opts.timestamp,
-		});
-		rewardedRecords.push(rec);
-		memoriesRewarded++;
-	}
+	// FB-004: wrap the read-then-update loop in a transaction to avoid a
+	// race between concurrent council verdicts on the same memory id.
+	const result = await (provider.withTransaction
+		? provider.withTransaction(async () => {
+				const updates: Map<
+					string,
+					{ rec: MemoryRecord; qBefore: number; qAfter: number }
+				> = new Map();
+				for (const id of distinctIds) {
+					const rec = await provider.get(id);
+					if (!rec) continue;
+					const qBefore = getQValue(rec, opts.initialQValue);
+					const qAfter = applyEmaUpdate(qBefore, opts.reward, opts.eta);
+					updates.set(id, { rec, qBefore, qAfter });
+				}
+				for (const [id, { rec, qBefore, qAfter }] of updates) {
+					await provider.upsert(setQValue(rec, qAfter));
+					await provider.appendRewardEvent?.({
+						memoryId: id,
+						runId: opts.runId,
+						unitId: opts.unitId,
+						verdict: opts.verdictLabel ?? 'APPROVE',
+						reward: opts.reward,
+						qBefore,
+						qAfter,
+						verdictSynthesisJson: opts.verdictSynthesisJson,
+						timestamp: opts.timestamp,
+					});
+				}
+				return updates;
+			})
+		: // Provider does not support transactions — degrade gracefully (non-atomic).
+			(async () => {
+				const updates: Map<
+					string,
+					{ rec: MemoryRecord; qBefore: number; qAfter: number }
+				> = new Map();
+				for (const id of distinctIds) {
+					const rec = await provider.get(id);
+					if (!rec) continue;
+					const qBefore = getQValue(rec, opts.initialQValue);
+					const qAfter = applyEmaUpdate(qBefore, opts.reward, opts.eta);
+					updates.set(id, { rec, qBefore, qAfter });
+				}
+				for (const [id, { rec, qBefore, qAfter }] of updates) {
+					await provider.upsert(setQValue(rec, qAfter));
+					await provider.appendRewardEvent?.({
+						memoryId: id,
+						runId: opts.runId,
+						unitId: opts.unitId,
+						verdict: opts.verdictLabel ?? 'APPROVE',
+						reward: opts.reward,
+						qBefore,
+						qAfter,
+						verdictSynthesisJson: opts.verdictSynthesisJson,
+						timestamp: opts.timestamp,
+					});
+				}
+				return updates;
+			})());
+
+	const memoriesRewarded = result.size;
+	// Source records for B.5 propagation — built from the committed updates.
+	const rewardedRecords: MemoryRecord[] = [...result.values()].map(
+		({ rec }) => rec,
+	);
 
 	// B.5 — soft Q-propagation. Runs AFTER the direct rewards above are
 	// persisted and counted, and is wrapped in its own best-effort guard so a
@@ -330,17 +378,48 @@ async function propagateReward(
 }
 
 /**
- * Build `memoryId → most-recent recall-usage timestamp (ms)` across ALL
- * sessions. Returns null when the provider cannot report recall usage (then
- * B.5 skips propagation entirely, since it has no trustworthy recency signal).
+ * FB-003 [MEDIUM]: Truncate a plain object so its JSON representation fits
+ * within a byte cap while always producing valid JSON. The source object is
+ * truncated before stringification so the output can never be a JSON fragment.
+ *
+ * Strategy:
+ *  1. If the full JSON already fits → return unchanged.
+ *  2. If adding a `__truncated__: true` marker still fits → return with marker.
+ *  3. Last resort: return a placeholder with metadata about the original size.
+ */
+export function truncateObjectForJson<T extends Record<string, unknown>>(
+	obj: T,
+	capBytes: number,
+): T & { __truncated__?: boolean } {
+	const asIs = JSON.stringify(obj);
+	if (asIs.length <= capBytes) return obj as T & { __truncated__?: boolean };
+	const withMarker = JSON.stringify({ ...obj, __truncated__: true });
+	if (withMarker.length <= capBytes) {
+		return { ...obj, __truncated__: true };
+	}
+	return {
+		__truncated__: true,
+		originalSize: asIs.length,
+		cap: capBytes,
+	} as unknown as T & { __truncated__?: boolean };
+}
+
+/**
+ * Build `memoryId → most-recent recall-usage timestamp (ms)` for memories
+ * recalled within the last 30 days. Returns null when the provider cannot report
+ * recall usage (then B.5 skips propagation entirely, since it has no trustworthy
+ * recency signal).
  */
 async function buildRetrievalRecency(
 	provider: MemoryProvider,
 ): Promise<Map<string, number> | null> {
 	if (typeof provider.listRecallUsage !== 'function') return null;
-	// Unfiltered: recency is a cross-session signal — a related memory may have
-	// been retrieved in an earlier session than the one being rewarded now.
-	const usage = (await provider.listRecallUsage()) ?? [];
+	// FB-005: bound iteration to recent recall events only — the `since` filter
+	// limits DB rows scanned, and the LIMIT prevents returning unbounded result sets.
+	const since = new Date(Date.now() - RECENCY_WINDOW_MS).toISOString();
+	const usage =
+		(await provider.listRecallUsage({ since, limit: RECENCY_EVENT_LIMIT })) ??
+		[];
 	const recency = new Map<string, number>();
 	for (const event of usage) {
 		const ts = Date.parse(event.timestamp);

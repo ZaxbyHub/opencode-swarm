@@ -49,7 +49,10 @@ export { resetStandardWorktreeIsolationState };
 
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
 import { createConfiguredMemoryProvider } from '../memory/gateway';
-import { applyCouncilReward } from '../memory/reward-capture';
+import {
+	applyCouncilReward,
+	truncateObjectForJson,
+} from '../memory/reward-capture';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
 	initDurableStatusPath,
@@ -1372,7 +1375,9 @@ export function createDelegationGateHook(
 													cap > 0 &&
 													verdictSynthesisJson.length > cap
 												) {
-													verdictSynthesisJson = `${verdictSynthesisJson.slice(0, cap)}…[truncated]`;
+													verdictSynthesisJson = JSON.stringify(
+														truncateObjectForJson(synthesis, cap),
+													);
 												}
 												await applyCouncilReward(provider, {
 													runId: input.sessionID,
