@@ -1001,8 +1001,6 @@ const swiftFunctionRe =
 	/\b(?:(open|public|internal|fileprivate|private)\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
 const dartTypeRe = /\b(class|mixin|enum|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
-const dartFunctionRe =
-	/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
 function augmentCppDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	const anonymousRanges: Array<{ start: number; end: number }> = [];
@@ -1176,29 +1174,9 @@ function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			exported ? 'naming_convention' : 'unknown',
 		);
 	}
-	dartFunctionRe.lastIndex = 0;
-	for (
-		let m = dartFunctionRe.exec(source);
-		m !== null;
-		m = dartFunctionRe.exec(source)
-	) {
-		// Exclude "new ClassName(" constructor calls — the "return type"
-		// position is occupied by the "new" keyword, not a real type name.
-		const beforeName = source.slice(Math.max(0, m.index - 4), m.index);
-		if (beforeName.endsWith('new ')) continue;
-		const exported = !m[1].startsWith('_');
-		addRegexDef(
-			defs,
-			source,
-			m[1],
-			'function',
-			m.index,
-			declarationEnd(source, m.index),
-			exported ? 'public' : 'private',
-			exported,
-			exported ? 'naming_convention' : 'unknown',
-		);
-	}
+	// Note: Dart function declarations are already captured by tree-sitter's
+	// (function_signature name: (identifier) @func.name) query, so no regex
+	// fallback is needed here.
 }
 
 function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {

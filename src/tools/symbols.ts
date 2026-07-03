@@ -1196,7 +1196,41 @@ export function extractDartSymbols(
 	for (const match of raw.matchAll(
 		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
 	)) {
-		if (['if', 'for', 'while', 'switch'].includes(match[1])) continue;
+		// Skip control-flow keywords and expressions that look like declarations
+		// but aren't (e.g. "return foo()", "else if (", "throw Err(")
+		if (
+			[
+				'if',
+				'for',
+				'while',
+				'switch',
+				'return',
+				'else',
+				'throw',
+				'new',
+				'await',
+				'yield',
+				'case',
+				'catch',
+			].includes(match[1])
+		)
+			continue;
+		// Also skip if the "type" position is actually a non-type keyword
+		if (
+			[
+				'return',
+				'else',
+				'throw',
+				'new',
+				'await',
+				'yield',
+				'case',
+				'catch',
+				'final',
+				'const',
+			].includes(match[0].split(/\s+/)[0])
+		)
+			continue;
 		addUniqueSymbol(symbols, seen, {
 			name: match[1],
 			kind: 'function',
