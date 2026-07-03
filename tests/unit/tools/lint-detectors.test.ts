@@ -5,7 +5,10 @@ afterEach(() => {
 });
 
 import * as realFs from 'node:fs';
-import { detectAdditionalLinter } from '../../../src/tools/lint';
+import {
+	detectAdditionalLinter,
+	getAdditionalLinterCommand,
+} from '../../../src/tools/lint';
 
 // Mock node:fs
 const mockExistsSync = mock();
@@ -52,7 +55,19 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
 		});
 
-		it('returns "ktlint" when build.gradle (Groovy DSL) exists + ktlint available', () => {
+		it('prefers ktlint over generic Gradle checkstyle for Kotlin projects', () => {
+			mockIsCommandAvailable.mockImplementation(
+				(cmd: string) => cmd === 'ktlint' || cmd === 'gradle',
+			);
+			mockExistsSync.mockImplementation(
+				(p: string) => typeof p === 'string' && p.endsWith('build.gradle.kts'),
+			);
+			mockReaddirSync.mockImplementation(() => []);
+
+			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
+		});
+
+		it('returns "ktlint" when build.gradle (Groovy DSL) has a Kotlin signal + ktlint available', () => {
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'ktlint',
 			);
@@ -63,9 +78,28 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					!p.endsWith('.kts')
 				);
 			});
+			mockReadFileSync.mockImplementation(
+				() => 'plugins { id("org.jetbrains.kotlin.jvm") version "2.0.0" }',
+			);
 			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
+		});
+
+		it('does not choose ktlint for generic Groovy Gradle projects with checkstyle', () => {
+			mockIsCommandAvailable.mockImplementation(
+				(cmd: string) => cmd === 'ktlint' || cmd === 'gradle',
+			);
+			mockExistsSync.mockImplementation((p: string) => {
+				return (
+					typeof p === 'string' &&
+					(p.endsWith('build.gradle') || p.endsWith('gradlew'))
+				);
+			});
+			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
+			mockReaddirSync.mockImplementation(() => []);
+
+			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
 
 		it('returns "ktlint" when root dir has .kt file + ktlint available', () => {
@@ -128,7 +162,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
 
-		it('returns "checkstyle" when build.gradle + gradlew exists (Gradle path)', () => {
+		it('returns "checkstyle" when build.gradle declares checkstyle + gradlew exists', () => {
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'other-tool',
 			);
@@ -138,18 +172,20 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					(p.endsWith('build.gradle') || p.endsWith('gradlew'))
 				);
 			});
+			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
 			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
 
-		it('returns "checkstyle" when build.gradle.kts + gradle available (Gradle path)', () => {
+		it('returns "checkstyle" when build.gradle.kts declares checkstyle + gradle available', () => {
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'gradle',
 			);
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('build.gradle.kts'),
 			);
+			mockReadFileSync.mockImplementation(() => 'plugins { checkstyle }');
 			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
@@ -406,6 +442,26 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
+		});
+	});
+
+	describe('detectPhpLinters (via detectAdditionalLinter returning PHP linters)', () => {
+		it('returns "phpstan" when phpstan.neon and local vendor binary exist', () => {
+			mockExistsSync.mockImplementation((p: string) => {
+				return (
+					typeof p === 'string' &&
+					(p.endsWith('phpstan.neon') ||
+						p.endsWith('vendor/bin/phpstan') ||
+						p.endsWith('vendor\\bin\\phpstan') ||
+						p.endsWith('vendor\\bin\\phpstan.bat'))
+				);
+			});
+
+			expect(detectAdditionalLinter(testCwd)).toBe('phpstan');
+			expect(getAdditionalLinterCommand('phpstan', 'check', testCwd)).toEqual([
+				expect.stringContaining('phpstan'),
+				'analyse',
+			]);
 		});
 	});
 

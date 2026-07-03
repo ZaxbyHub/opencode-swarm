@@ -24,7 +24,11 @@ export type AdditionalLinter =
 	| 'cppcheck'
 	| 'swiftlint'
 	| 'dart-analyze'
-	| 'rubocop';
+	| 'rubocop'
+	| 'phpstan'
+	| 'pint'
+	| 'php-cs-fixer'
+	| 'phpcs';
 
 // ============ Response Types ============
 export interface LintSuccessResult {
@@ -155,6 +159,18 @@ export function getAdditionalLinterCommand(
 			const base = useBundle ? ['bundle', 'exec', 'rubocop'] : ['rubocop'];
 			return mode === 'fix' ? [...base, '-A'] : base;
 		}
+		case 'phpstan':
+			return [phpVendorBin(cwd, 'phpstan'), 'analyse'];
+		case 'pint':
+			return mode === 'fix'
+				? [phpVendorBin(cwd, 'pint')]
+				: [phpVendorBin(cwd, 'pint'), '--test'];
+		case 'php-cs-fixer':
+			return mode === 'fix'
+				? [phpVendorBin(cwd, 'php-cs-fixer'), 'fix']
+				: [phpVendorBin(cwd, 'php-cs-fixer'), 'fix', '--dry-run', '--diff'];
+		case 'phpcs':
+			return [phpVendorBin(cwd, 'phpcs')];
 	}
 }
 
@@ -194,37 +210,98 @@ function detectGolangciLint(cwd: string): boolean {
 	);
 }
 
+function readTextFileSafe(filePath: string): string {
+	try {
+		return fs.readFileSync(filePath, 'utf-8');
+	} catch {
+		return '';
+	}
+}
+
+function phpVendorBin(_cwd: string, name: string): string {
+	const fileName = process.platform === 'win32' ? `${name}.bat` : name;
+	return path.join('vendor', 'bin', fileName);
+}
+
+function phpVendorBinExists(cwd: string, name: string): boolean {
+	const local = path.join(cwd, 'vendor', 'bin', name);
+	const localWin = path.join(cwd, 'vendor', 'bin', `${name}.bat`);
+	return fs.existsSync(local) || fs.existsSync(localWin);
+}
+
 /** Detect checkstyle (Java linter via mvn or checkstyle jar) */
 function detectCheckstyle(cwd: string): boolean {
-	// Maven: pom.xml + mvn binary; Gradle: build.gradle(.kts) + gradlew or gradle binary
+	// Maven: pom.xml + mvn binary; Gradle requires a Checkstyle-specific signal.
 	const hasMaven = fs.existsSync(path.join(cwd, 'pom.xml'));
-	const hasGradle =
-		fs.existsSync(path.join(cwd, 'build.gradle')) ||
-		fs.existsSync(path.join(cwd, 'build.gradle.kts'));
+	const gradleFiles = ['build.gradle', 'build.gradle.kts']
+		.map((file) => path.join(cwd, file))
+		.filter((file) => fs.existsSync(file));
+	const hasGradleCheckstyleSignal =
+		fs.existsSync(path.join(cwd, 'checkstyle.xml')) ||
+		fs.existsSync(path.join(cwd, 'config', 'checkstyle', 'checkstyle.xml')) ||
+		gradleFiles.some((file) => /\bcheckstyle\b/i.test(readTextFileSafe(file)));
 	const hasBinary =
 		(hasMaven && isCommandAvailable('mvn')) ||
-		(hasGradle &&
+		(hasGradleCheckstyleSignal &&
 			(fs.existsSync(path.join(cwd, 'gradlew')) ||
 				isCommandAvailable('gradle')));
-	return (hasMaven || hasGradle) && hasBinary;
+	return (hasMaven || hasGradleCheckstyleSignal) && hasBinary;
+}
+
+function hasRootKotlinFile(cwd: string): boolean {
+	try {
+		return fs
+			.readdirSync(cwd)
+			.some((f) => f.endsWith('.kt') || f.endsWith('.kts'));
+	} catch {
+		return false;
+	}
+}
+
+function buildGradleHasKotlinSignal(cwd: string): boolean {
+	const content = readTextFileSafe(path.join(cwd, 'build.gradle'));
+	return /\b(kotlin|org\.jetbrains\.kotlin|ktlint)\b/i.test(content);
 }
 
 /** Detect ktlint (Kotlin linter) */
 function detectKtlint(cwd: string): boolean {
-	// build.gradle.kts, build.gradle (Groovy DSL), or .kt/.kts files in root dir
+	// build.gradle.kts is Kotlin DSL. Groovy build.gradle needs a Kotlin signal.
 	const hasKotlin =
 		fs.existsSync(path.join(cwd, 'build.gradle.kts')) ||
-		fs.existsSync(path.join(cwd, 'build.gradle')) ||
-		(() => {
-			try {
-				return fs
-					.readdirSync(cwd)
-					.some((f) => f.endsWith('.kt') || f.endsWith('.kts'));
-			} catch {
-				return false;
-			}
-		})();
+		(fs.existsSync(path.join(cwd, 'build.gradle')) &&
+			buildGradleHasKotlinSignal(cwd)) ||
+		hasRootKotlinFile(cwd);
 	return hasKotlin && isCommandAvailable('ktlint');
+}
+
+/** Detect PHP linters from config + local Composer vendor binaries */
+function detectPhpLinter(cwd: string): AdditionalLinter | null {
+	if (
+		(fs.existsSync(path.join(cwd, 'phpstan.neon')) ||
+			fs.existsSync(path.join(cwd, 'phpstan.neon.dist'))) &&
+		phpVendorBinExists(cwd, 'phpstan')
+	) {
+		return 'phpstan';
+	}
+	if (
+		fs.existsSync(path.join(cwd, 'pint.json')) &&
+		phpVendorBinExists(cwd, 'pint')
+	) {
+		return 'pint';
+	}
+	if (
+		fs.existsSync(path.join(cwd, '.php-cs-fixer.php')) &&
+		phpVendorBinExists(cwd, 'php-cs-fixer')
+	) {
+		return 'php-cs-fixer';
+	}
+	if (
+		fs.existsSync(path.join(cwd, 'phpcs.xml')) &&
+		phpVendorBinExists(cwd, 'phpcs')
+	) {
+		return 'phpcs';
+	}
+	return null;
 }
 
 /** Detect dotnet-format (C#/.NET linter) */
@@ -311,12 +388,18 @@ export function detectAdditionalLinter(
 	| 'swiftlint'
 	| 'dart-analyze'
 	| 'rubocop'
+	| 'phpstan'
+	| 'pint'
+	| 'php-cs-fixer'
+	| 'phpcs'
 	| null {
 	if (detectRuff(cwd)) return 'ruff';
 	if (detectClippy(cwd)) return 'clippy';
 	if (detectGolangciLint(cwd)) return 'golangci-lint';
-	if (detectCheckstyle(cwd)) return 'checkstyle';
+	const phpLinter = detectPhpLinter(cwd);
+	if (phpLinter) return phpLinter;
 	if (detectKtlint(cwd)) return 'ktlint';
+	if (detectCheckstyle(cwd)) return 'checkstyle';
 	if (detectDotnetFormat(cwd)) return 'dotnet-format';
 	if (detectCppcheck(cwd)) return 'cppcheck';
 	if (detectSwiftlint(cwd)) return 'swiftlint';

@@ -18,7 +18,7 @@ export const goRules: SastRule[] = [
 		remediation:
 			'Move secrets to environment variables using os.Getenv() or a secrets manager.',
 		pattern:
-			/(?:api_key|password|secret|token|auth)[_-]?\w*\s*[:=]\s*["'][a-zA-Z0-9_-]{10,}["']/i,
+			/(?:api_key|password|secret|token|auth)[_-]?\w*\s*(?::=|=|:)\s*["'][a-zA-Z0-9_-]{10,}["']/i,
 	},
 	{
 		id: 'sast/go-weak-tls',

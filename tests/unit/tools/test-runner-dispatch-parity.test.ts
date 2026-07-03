@@ -156,7 +156,7 @@ describe('detectTestFramework legacy ↔ dispatch parity', () => {
 		expect(typeof viaDispatch).toBe('string');
 	});
 
-	test('PHP project: both return "none" (PHP framework names not in TestFramework union)', async () => {
+	test('PHP project: both return "phpunit"', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, 'composer.json'),
 			JSON.stringify({ name: 'x/y' }),
@@ -164,11 +164,8 @@ describe('detectTestFramework legacy ↔ dispatch parity', () => {
 		fs.writeFileSync(path.join(tempDir, 'phpunit.xml'), '<phpunit></phpunit>');
 		const legacy = await detectTestFramework(tempDir);
 		const viaDispatch = await detectTestFrameworkViaDispatch(tempDir);
-		// PHP frameworks aren't represented in the legacy TestFramework union,
-		// so legacy returns 'none'. The dispatch path collapses unmapped
-		// names to 'none' to preserve parity.
-		expect(legacy).toBe('none');
-		expect(viaDispatch).toBe('none');
+		expect(legacy).toBe('phpunit');
+		expect(viaDispatch).toBe('phpunit');
 	});
 });
 
@@ -176,7 +173,7 @@ describe('DD-C026: profile framework name ↔ dispatch map coverage', () => {
 	// Names whose test frameworks the legacy TestFramework union intentionally
 	// does not represent — `detectTestFrameworkViaDispatch` collapses them to
 	// 'none' on purpose (legacy could not detect them either).
-	const INTENTIONALLY_UNMAPPED = new Set(['unittest', 'Pest', 'PHPUnit']);
+	const INTENTIONALLY_UNMAPPED = new Set(['unittest']);
 
 	test('every profile test-framework name is either mapped or explicitly unmapped', () => {
 		const unmapped: string[] = [];
