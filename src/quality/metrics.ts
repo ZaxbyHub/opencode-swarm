@@ -381,9 +381,6 @@ function _tokenizeToNGrams(content: string, n: number): string[] {
 	return ngrams;
 }
 
-/**
- * Find duplicate n-grams in content
- */
 function findDuplicateLines(content: string, minLines: number): number {
 	const lines = content.split('\n').filter((line) => line.trim().length > 0);
 
@@ -391,23 +388,21 @@ function findDuplicateLines(content: string, minLines: number): number {
 		return 0;
 	}
 
-	// Group identical lines
-	const lineCounts = new Map<string, number>();
-	for (const line of lines) {
-		const normalized = line.trim();
-		lineCounts.set(normalized, (lineCounts.get(normalized) || 0) + 1);
+	const normalizedLines = lines.map((line) => line.trim());
+	const windowCounts = new Map<string, number>();
+	for (let i = 0; i <= normalizedLines.length - minLines; i++) {
+		const window = normalizedLines.slice(i, i + minLines).join('\n');
+		windowCounts.set(window, (windowCounts.get(window) || 0) + 1);
 	}
 
-	// Count duplicate line instances (total occurrences beyond the first)
 	let duplicateCount = 0;
-	for (const [_line, count] of lineCounts) {
+	for (const [_window, count] of windowCounts) {
 		if (count > 1) {
-			// Add all occurrences beyond the first one
-			duplicateCount += count - 1;
+			duplicateCount += (count - 1) * minLines;
 		}
 	}
 
-	return duplicateCount;
+	return Math.min(duplicateCount, lines.length);
 }
 
 /**

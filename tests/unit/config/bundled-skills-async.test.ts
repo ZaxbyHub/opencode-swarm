@@ -88,14 +88,14 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		).toBe(true);
 	});
 
-	test('does not overwrite an existing project skill', async () => {
+	test('updates an existing bundled project skill from the package source', async () => {
 		fs.mkdirSync(path.dirname(projectSkillPath()), { recursive: true });
-		fs.writeFileSync(projectSkillPath(), 'project override\n', 'utf-8');
+		fs.writeFileSync(projectSkillPath(), 'stale bundled skill\n', 'utf-8');
 
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
-			'project override\n',
+			'canonical skill\n',
 		);
 	});
 
@@ -233,12 +233,14 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		).toBe(true);
 	});
 
-	test('caches a successful sync for the current process', async () => {
+	test('reruns sync to repair a bundled skill deleted after a prior success', async () => {
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 		fs.rmSync(projectSkillPath(), { force: true });
 
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
-		expect(fs.existsSync(projectSkillPath())).toBe(false);
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
 	});
 });

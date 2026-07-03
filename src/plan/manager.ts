@@ -1442,12 +1442,18 @@ export async function savePlan(
 		}
 	}
 
+	// After the ledger event loop, replay the authoritative ledger before writing
+	// derived projections. Concurrent writers may have appended valid events since
+	// the caller built `validated`; plan.json and plan.md must reflect the ledger,
+	// not a stale caller snapshot.
+	const projectedPlan = (await replayFromLedger(directory)) ?? validated;
+
 	// After the ledger event loop, check if we should take a snapshot
 	const SNAPSHOT_INTERVAL = 50;
 	const latestSeq = await getLatestLedgerSeq(directory);
 	if (latestSeq > 0 && latestSeq % SNAPSHOT_INTERVAL === 0) {
-		await takeSnapshotWithRetry(directory, validated, {
-			planHashAfter: hashAfter,
+		await takeSnapshotWithRetry(directory, projectedPlan, {
+			planHashAfter: computePlanHash(projectedPlan),
 			source: 'savePlan_manager',
 		});
 	}
@@ -1461,7 +1467,7 @@ export async function savePlan(
 
 	// Write to temp and atomically rename
 	try {
-		await bunWrite(tempPath, JSON.stringify(validated, null, 2));
+		await bunWrite(tempPath, JSON.stringify(projectedPlan, null, 2));
 		renameSync(tempPath, planPath);
 	} finally {
 		try {
@@ -1479,8 +1485,11 @@ export async function savePlan(
 		const inProgressMarker = JSON.stringify({
 			source: 'plan_manager',
 			timestamp: new Date().toISOString(),
-			phases_count: validated.phases.length,
-			tasks_count: validated.phases.reduce((sum, p) => sum + p.tasks.length, 0),
+			phases_count: projectedPlan.phases.length,
+			tasks_count: projectedPlan.phases.reduce(
+				(sum, p) => sum + p.tasks.length,
+				0,
+			),
 			in_progress: true,
 		});
 		await bunWrite(markerPath, inProgressMarker);
@@ -1491,8 +1500,8 @@ export async function savePlan(
 	// Derive and write markdown atomically (with content hash for sync detection).
 	// plan.md is a derived/advisory projection — failure here should not fail savePlan (#444 item 2).
 	try {
-		const contentHash = computePlanContentHash(validated);
-		const markdown = derivePlanMarkdown(validated);
+		const contentHash = computePlanContentHash(projectedPlan);
+		const markdown = derivePlanMarkdown(projectedPlan);
 		const markdownWithHash = `<!-- PLAN_HASH: ${contentHash} -->\n${markdown}`;
 		const mdPath = path.join(swarmDir, 'plan.md');
 		const mdTempPath = path.join(
@@ -1531,14 +1540,14 @@ export async function savePlan(
 	// Advisory: write marker file for plan-manager write detection
 	try {
 		const markerPath = path.join(swarmDir, '.plan-write-marker');
-		const tasksCount = validated.phases.reduce(
+		const tasksCount = projectedPlan.phases.reduce(
 			(sum, phase) => sum + phase.tasks.length,
 			0,
 		);
 		const marker = JSON.stringify({
 			source: 'plan_manager',
 			timestamp: new Date().toISOString(),
-			phases_count: validated.phases.length,
+			phases_count: projectedPlan.phases.length,
 			tasks_count: tasksCount,
 			in_progress: false,
 		});

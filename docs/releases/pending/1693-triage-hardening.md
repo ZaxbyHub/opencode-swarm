@@ -1,0 +1,1 @@
+Fixes issue #1693 triage findings across Lean Turbo merge-back safety, checkpoint rollback, quality budget configuration, handoff/session resume isolation, snapshot state restoration, GitHub-content prompt-injection defense, bundled skill refresh, external skill fetch safety, and plan-ledger projection concurrency.

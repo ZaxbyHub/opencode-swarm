@@ -185,6 +185,54 @@ describe('dispatchPhaseReviewer', () => {
 		expect(pkg.testResults.failedLanes).toBe(0);
 	});
 
+	test('compileReviewPackage includes raw validation artifacts from phase evidence', async () => {
+		writeLaneEvidence(dir, 1, {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: ['src/a.ts'],
+			status: 'completed',
+			sessionId: 'test-session',
+		});
+		writePhaseEvidence(dir, 1, {
+			phase: 1,
+			planId: 'test-plan',
+			lanes: [],
+			degradedTasks: [],
+			startedAt: new Date().toISOString(),
+			status: 'completed',
+			validationArtifacts: {
+				build: {
+					status: 'passed',
+					command: 'bun run build',
+					stdoutTail: 'build ok',
+					stderrTail: '',
+				},
+				test: {
+					status: 'failed',
+					command: 'bun test',
+					stdoutTail: '1 fail',
+					stderrTail: 'expected true',
+				},
+				lint: {
+					status: 'passed',
+					command: 'bun run lint',
+					stdoutTail: 'lint ok',
+				},
+			},
+		});
+
+		const pkg = await _internals.compileReviewPackage(
+			dir,
+			1,
+			'test-session',
+			false,
+		);
+
+		expect(pkg.validationArtifacts?.build?.stdoutTail).toBe('build ok');
+		expect(pkg.validationArtifacts?.test?.stderrTail).toBe('expected true');
+		expect(pkg.validationArtifacts?.lint?.command).toBe('bun run lint');
+	});
+
 	// ─── Test 2: Reviewer dispatch uses correct agent name ───────────────────
 	test('dispatch uses configured reviewerAgent name', async () => {
 		let capturedAgentName: string | undefined;

@@ -393,71 +393,47 @@ describe('Path traversal attacks on promote/revoke tools', () => {
 // 3. SSRF Protection
 // ============================================================================
 //
-// NOTE: The real SSRF defense lives in isSubpathUrl / matchSourceConfig — private
-// functions in external-skill-discover.ts that validate the source URL BEFORE
-// fetchContent is ever called. Because isSubpathUrl is not exported, it cannot
-// be tested directly from this test file without modifying the source.
-//
-// fetchContent itself (the _internals entry) is a thin wrapper around fetch()
-// and performs no URL validation — the security boundary is the caller.
-// The tests below document the KNOWN GAP: if an attacker can reach fetchContent
-// with an internal URL (bypassing the caller's isSubpathUrl check), there is no
-// secondary URL filter inside fetchContent.
+// The production path has two SSRF boundaries:
+// 1. matchSourceConfig validates configured source allowlists before fetch.
+// 2. fetchContent rejects unsafe literal hosts before fetch and after redirects.
 //
 // ============================================================================
 
-describe('SSRF protection — KNOWN GAP: fetchContent has no secondary URL filter', () => {
-	it('KNOWN GAP: fetchContent does not validate URLs internally — defense is isSubpathUrl in caller', () => {
-		// fetchContent (via _internals) is a thin fetch() wrapper with timeout.
-		// It does NOT check whether the URL points to internal metadata endpoints
-		// (169.254.169.254), localhost, file:// protocol, or loopback addresses.
-		// The actual SSRF defense is isSubpathUrl, called by the discover tool
-		// BEFORE fetchContent. isSubpathUrl is private and cannot be tested here.
-		//
-		// If an attacker bypasses isSubpathUrl (e.g., via DNS rebinding or a
-		// misconfigured source), fetchContent will happily fetch from internal URLs.
-		//
-		// This test documents the architectural gap: fetchContent lacks a defense-
-		// in-depth URL filter. An improvement would add isInternalUrl() validation
-		// inside fetchContent itself, rejecting private/loopback/metadata IPs.
-		//
-		// We verify the function reference exists to prove the seam is wired:
-		expect(typeof discoverInternals.fetchContent).toBe('function');
+describe('SSRF protection in fetchContent', () => {
+	it('rejects metadata, loopback, and private literal hosts before fetch', async () => {
+		for (const url of [
+			'http://169.254.169.254/latest/meta-data/',
+			'http://127.0.0.1:8080/skill',
+			'http://localhost/skill',
+			'http://10.0.0.1/skill',
+			'http://172.16.0.1/skill',
+			'http://192.168.1.1/skill',
+			'http://[::1]/skill',
+		]) {
+			await expect(discoverInternals.fetchContent(url, 5000)).rejects.toThrow(
+				'Unsafe external skill fetch host',
+			);
+		}
 	});
 
-	it('KNOWN GAP: redirect to internal IP is returned without rejection by fetchContent', async () => {
-		// fetchContent returns the finalUrl from the HTTP response without checking
-		// whether the redirect target is an internal IP. The caller (discover tool)
-		// is responsible for checking the finalUrl via isSubpathUrl.
-		// Because fetch() cannot be easily mocked without mock.module (which leaks
-		// in Bun), we document this gap and verify the function signature.
-		const originalFetchContent = discoverInternals.fetchContent;
+	it('rejects redirect final URL to internal IP inside fetchContent', async () => {
+		const originalFetch = globalThis.fetch;
 		try {
-			// We must mock fetchContent because we cannot control the real network.
-			// This mock simulates the REAL behavior: fetchContent returns the
-			// finalUrl from the HTTP response without any SSRF filtering.
-			let capturedFinalUrl = '';
-			discoverInternals.fetchContent = async (
-				_url: string,
-				_timeoutMs: number,
-			): Promise<{ content: string; finalUrl: string }> => {
-				// Simulates: server redirects to internal metadata endpoint
-				return {
-					content: 'malicious redirect response',
-					finalUrl: 'http://169.254.169.254/latest/meta-data/',
-				};
-			};
-			const result = await discoverInternals.fetchContent(
-				'https://trusted.example.com/skill',
-				5000,
-			);
-			// KNOWN GAP: fetchContent happily returns the internal redirect URL.
-			// The caller's isSubpathUrl is the only check — if it fails, this
-			// internal URL reaches the skill body unfiltered.
-			capturedFinalUrl = result.finalUrl;
-			expect(capturedFinalUrl).toContain('169.254.169.254');
+			globalThis.fetch = (async () =>
+				({
+					ok: true,
+					url: 'http://169.254.169.254/latest/meta-data/',
+					text: async () => 'malicious redirect response',
+				}) as Response) as typeof fetch;
+
+			await expect(
+				discoverInternals.fetchContent(
+					'https://trusted.example.com/skill',
+					5000,
+				),
+			).rejects.toThrow('Unsafe external skill fetch host');
 		} finally {
-			discoverInternals.fetchContent = originalFetchContent;
+			globalThis.fetch = originalFetch;
 		}
 	});
 });

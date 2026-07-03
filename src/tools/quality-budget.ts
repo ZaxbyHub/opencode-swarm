@@ -191,6 +191,8 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 				max_public_api_delta: z.number().optional(),
 				max_duplication_ratio: z.number().optional(),
 				min_test_to_code_ratio: z.number().optional(),
+				enforce_on_globs: z.array(z.string()).optional(),
+				exclude_globs: z.array(z.string()).optional(),
 			})
 			.optional()
 			.describe('Quality budget thresholds'),
@@ -205,6 +207,8 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 					max_public_api_delta?: number;
 					max_duplication_ratio?: number;
 					min_test_to_code_ratio?: number;
+					enforce_on_globs?: string[];
+					exclude_globs?: string[];
 				};
 			},
 			directory,

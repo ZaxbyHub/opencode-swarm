@@ -30,16 +30,14 @@ export const _internals = {
 		_url: string,
 		_timeoutMs: number,
 	): Promise<{ content: string; finalUrl: string }> => {
-		const parsed = new URL(_url);
-		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-			throw new Error('Only http: and https: protocols are allowed');
-		}
+		assertSafeFetchUrl(_url);
 		const response = await fetch(_url, {
 			signal: AbortSignal.timeout(_timeoutMs),
 		});
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 		}
+		assertSafeFetchUrl(response.url);
 		const content = await response.text();
 		return { content, finalUrl: response.url };
 	},
@@ -59,6 +57,62 @@ const SOURCE_TRUST_LEVELS: Record<string, 'low' | 'medium' | 'high'> = {
 	collection: 'low',
 	manual_import: 'medium',
 };
+
+function normalizeHostname(hostname: string): string {
+	return hostname
+		.toLowerCase()
+		.replace(/^\[/, '')
+		.replace(/\]$/, '')
+		.replace(/\.$/, '');
+}
+
+function isUnsafeIpv4(hostname: string): boolean {
+	const parts = hostname.split('.');
+	if (parts.length !== 4) return false;
+	const octets = parts.map((part) => {
+		if (!/^\d+$/.test(part)) return Number.NaN;
+		const value = Number(part);
+		return value >= 0 && value <= 255 ? value : Number.NaN;
+	});
+	if (octets.some((value) => Number.isNaN(value))) return false;
+	const [a, b] = octets;
+	return (
+		a === 0 ||
+		a === 10 ||
+		a === 127 ||
+		(a === 100 && b >= 64 && b <= 127) ||
+		(a === 169 && b === 254) ||
+		(a === 172 && b >= 16 && b <= 31) ||
+		(a === 192 && b === 168)
+	);
+}
+
+function isUnsafeIpv6(hostname: string): boolean {
+	const host = normalizeHostname(hostname);
+	return (
+		host === '::' ||
+		host === '::1' ||
+		host.startsWith('fc') ||
+		host.startsWith('fd') ||
+		host.startsWith('fe80:')
+	);
+}
+
+function assertSafeFetchUrl(rawUrl: string): void {
+	const parsed = new URL(rawUrl);
+	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+		throw new Error('Only http: and https: protocols are allowed');
+	}
+	const hostname = normalizeHostname(parsed.hostname);
+	if (
+		hostname === 'localhost' ||
+		hostname.endsWith('.localhost') ||
+		isUnsafeIpv4(hostname) ||
+		isUnsafeIpv6(hostname)
+	) {
+		throw new Error(`Unsafe external skill fetch host: ${parsed.hostname}`);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Source matching (FR-011)
