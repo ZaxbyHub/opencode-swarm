@@ -26,6 +26,7 @@ describe('/swarm curate', () => {
 	let tempDir: string;
 	const realLoadCuratorDeps = _internals.loadCuratorDeps;
 	const realReadSwarmFileAsync = _internals.readSwarmFileAsync;
+	const realCheckHivePromotions = _internals.checkHivePromotions;
 
 	beforeEach(() => {
 		tempDir = createTempDir();
@@ -35,6 +36,7 @@ describe('/swarm curate', () => {
 	afterEach(() => {
 		_internals.loadCuratorDeps = realLoadCuratorDeps;
 		_internals.readSwarmFileAsync = realReadSwarmFileAsync;
+		_internals.checkHivePromotions = realCheckHivePromotions;
 		cleanupDir(tempDir);
 	});
 
@@ -122,23 +124,14 @@ describe('/swarm curate', () => {
 
 	describe('Error handling', () => {
 		it('should return clear user-facing error when error is thrown', async () => {
-			// The implementation catches errors and returns user-friendly messages
-			// Test that error handling path is in place by verifying the format function exists
-			// and that errors from checkHivePromotions would be caught
+			_internals.checkHivePromotions = async () => {
+				throw new Error('hive promoter exploded');
+			};
 
-			// The try-catch block in curate.ts will catch any errors from:
-			// - KnowledgeConfigSchema.parse()
-			// - resolveSwarmKnowledgePath()
-			// - readKnowledge()
-			// - checkHivePromotions()
-			// And format them as "❌ Curation failed: {message}"
+			const result = await handleCurateCommand(tempDir, []);
 
-			// Verify the error format is defined in the implementation
-			const hasErrorFormat = true; // Verified by reading curate.ts lines 53-58
-
-			expect(hasErrorFormat).toBe(true);
-			// Error message format is: "❌ Curation failed: {error.message}"
-			// This is checked via code inspection - see curate.ts:55-56
+			expect(result).toContain('❌ Curation failed:');
+			expect(result).toContain('hive promoter exploded');
 		});
 
 		it('should not expose stack traces in error output', async () => {

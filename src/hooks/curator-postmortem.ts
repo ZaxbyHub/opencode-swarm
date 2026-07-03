@@ -304,39 +304,65 @@ function parseLegacyPostMortemActions(
 	};
 	const curation = extractSection(llmOutput, 'CURATION_RECOMMENDATIONS');
 	if (curation) {
+		let recIndex = 0;
 		for (const line of curation.split('\n')) {
 			const trimmed = line.trim();
 			if (!trimmed.startsWith('-')) continue;
 			const body = trimmed.replace(/^-\s*/, '');
 			const [head, reasonPart = ''] = body.split(/\s+—\s+|\s+-\s+/, 2);
 			const [rawAction, rest = ''] = head.split(/:\s*/, 2);
+			const lowerRaw = rawAction.toLowerCase().trim();
 			const action = normalizeRecommendationAction(rawAction);
-			if (!action) continue;
+			if (!action) {
+				if (lowerRaw === 'merge') {
+					parsed.diagnostics.push(
+						"legacy curation_recommendations unsupported action 'merge' — dropped",
+					);
+				} else if (lowerRaw) {
+					parsed.diagnostics.push(
+						`legacy curation_recommendations unrecognized action '${lowerRaw}'`,
+					);
+				}
+				continue;
+			}
 			const idMatch = rest.match(
 				/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
 			);
 			const reason = (reasonPart || rest).trim();
-			if (!reason) continue;
+			if (!reason) {
+				parsed.diagnostics.push(
+					`legacy curation_recommendations[${recIndex}] missing reason`,
+				);
+				continue;
+			}
 			parsed.recommendations.push({
 				action,
 				entry_id: idMatch?.[0],
 				lesson: reason.slice(0, 280),
 				reason: reason.slice(0, 280),
 			});
+			recIndex++;
 		}
 	}
 	const queue = extractSection(llmOutput, 'QUEUE_TRIAGE');
 	if (queue) {
 		for (const line of queue.split('\n')) {
-			const match = line
-				.trim()
-				.match(/^-\s*([^:]+):\s*(APPLY|REJECT)\b\s*(?:—|-)?\s*(.*)$/i);
-			if (!match) continue;
-			parsed.queueTriage.push({
-				proposal_id: match[1].trim().slice(0, 120),
-				action: match[2].toLowerCase() as 'apply' | 'reject',
-				reason: match[3].trim().slice(0, 280),
-			});
+			const trimmed = line.trim();
+			if (!trimmed.startsWith('-')) continue;
+			if (trimmed.includes(':')) {
+				const match = trimmed.match(
+					/^-\s*([^:]+):\s*(APPLY|REJECT)\b\s*(?:—|-)?\s*(.*)$/i,
+				);
+				if (!match) {
+					parsed.diagnostics.push('legacy queue_triage malformed line');
+					continue;
+				}
+				parsed.queueTriage.push({
+					proposal_id: match[1].trim().slice(0, 120),
+					action: match[2].toLowerCase() as 'apply' | 'reject',
+					reason: match[3].trim().slice(0, 280),
+				});
+			}
 		}
 	}
 	return parsed;
@@ -355,7 +381,7 @@ function parsePostMortemActions(llmOutput: string): ParsedPostMortemActions {
 			structured.queueTriage.length > 0
 				? structured.queueTriage
 				: legacy.queueTriage,
-		diagnostics: structured.diagnostics,
+		diagnostics: [...structured.diagnostics, ...legacy.diagnostics],
 	};
 }
 
@@ -821,12 +847,13 @@ export async function runCuratorPostMortem(
 		warnings.push('Failed to load plan data.');
 	}
 
-	// Check for existing report (dedup protection)
-	// When planId is 'unknown' (plan.json absent/unreadable), use a distinct
-	// timestamped identifier so a stale post-mortem-unknown.md from a prior
-	// run cannot permanently block regeneration.
-	const effectivePlanId =
-		planId === 'unknown' ? `unknown-${Date.now()}` : planId;
+	// Check for existing report (idempotent dedup).
+	// For planless runs (planId === 'unknown') we keep the stable 'unknown'
+	// identifier so the isReportValid dedup check below works idempotently;
+	// isReportValid rejects empty/invalid/partial reports, and --force
+	// overrides for explicit regeneration. /swarm finalize archives and
+	// cleans post-mortem-*.md at project end.
+	const effectivePlanId = planId;
 	const reportFilename = `post-mortem-${effectivePlanId}.md`;
 	let reportPath: string;
 	try {

@@ -1051,7 +1051,7 @@ export async function executePhaseComplete(
 			);
 			try {
 				const { runDeterministicDriftCheck } = await import(
-					'../hooks/curator-drift'
+					'../hooks/curator-drift.js'
 				);
 				await runDeterministicDriftCheck(
 					dir,
@@ -1096,7 +1096,7 @@ export async function executePhaseComplete(
 				// Check for drift advisories from prior deterministic drift checks
 				try {
 					const { readPriorDriftReports } = await import(
-						'../hooks/curator-drift'
+						'../hooks/curator-drift.js'
 					);
 					const priorReports = await readPriorDriftReports(dir);
 					const phaseReport = priorReports
@@ -1139,7 +1139,7 @@ export async function executePhaseComplete(
 		if (config.design_docs?.enabled === true) {
 			const outDir = config.design_docs.out_dir ?? 'docs';
 			const { runDesignDocDriftCheck } = await import(
-				'../hooks/design-doc-drift'
+				'../hooks/design-doc-drift.js'
 			);
 			const docReport = await runDesignDocDriftCheck(dir, phase, outDir);
 			if (docReport?.verdict === 'DOC_STALE') {

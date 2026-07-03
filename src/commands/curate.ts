@@ -71,6 +71,7 @@ export async function handleCurateCommand(
 		);
 
 		if (options?.sessionID) {
+			let onDemandPhase = 1;
 			try {
 				const { CuratorConfigSchema, curator, createCuratorLLMDelegate } =
 					await _internals.loadCuratorDeps();
@@ -79,7 +80,6 @@ export async function handleCurateCommand(
 					directory,
 					'curator-summary.json',
 				);
-				let onDemandPhase = 1;
 				if (priorSummary) {
 					try {
 						const parsed = JSON.parse(priorSummary) as {
@@ -95,30 +95,80 @@ export async function handleCurateCommand(
 						// Corrupt summary should not block manual curation.
 					}
 				}
-				const delegate = createCuratorLLMDelegate(
-					directory,
-					'phase',
-					options.sessionID,
-				);
-				const curatorResult = await curator.runCuratorPhase(
-					directory,
-					onDemandPhase,
-					['curator'],
-					curatorConfig,
-					{},
-					delegate,
-				);
-				const applied = await curator.applyCuratorKnowledgeUpdates(
-					directory,
-					curatorResult.knowledge_recommendations,
-					config,
-				);
-				summary.knowledge_applied = applied.applied;
-				summary.knowledge_skipped = applied.skipped;
-				summary.curator_phase = onDemandPhase;
-			} catch {
+
+				// F-004: clamp onDemandPhase to the plan's phase count so we
+				// don't run a phantom digest for a non-existent phase.
+				let planPhaseCount = Infinity;
+				try {
+					const planRaw = await _internals.readSwarmFileAsync(
+						directory,
+						'plan.json',
+					);
+					if (planRaw) {
+						const plan = JSON.parse(planRaw) as { phases?: unknown[] };
+						if (Array.isArray(plan.phases)) planPhaseCount = plan.phases.length;
+					}
+				} catch {
+					// No plan or unreadable — leave unbounded.
+				}
+
+				if (planPhaseCount !== Infinity && onDemandPhase > planPhaseCount) {
+					// All plan phases already covered — skip the on-demand phase pass.
+					summary.knowledge_applied = 0;
+					summary.knowledge_skipped = 0;
+					summary.curator_phase = onDemandPhase;
+				} else {
+					const delegate = createCuratorLLMDelegate(
+						directory,
+						'phase',
+						options.sessionID,
+					);
+					const curatorResult = await curator.runCuratorPhase(
+						directory,
+						onDemandPhase,
+						['curator'],
+						curatorConfig,
+						{},
+						delegate,
+					);
+					const applied = await curator.applyCuratorKnowledgeUpdates(
+						directory,
+						curatorResult.knowledge_recommendations,
+						config,
+					);
+					summary.knowledge_applied = applied.applied;
+					summary.knowledge_skipped = applied.skipped;
+					summary.curator_phase = onDemandPhase;
+
+					// F-002: re-check hive promotion after knowledge updates so
+					// newly hive_eligible entries are considered in the same run
+					// (mirrors executePostMortemActions).
+					try {
+						const updatedEntries =
+							(await _internals.readKnowledge<SwarmKnowledgeEntry>(
+								swarmPath,
+							)) ?? [];
+						const postUpdateHive = await _internals.checkHivePromotions(
+							updatedEntries,
+							config,
+						);
+						summary.new_promotions += postUpdateHive.new_promotions;
+						summary.encounters_incremented +=
+							postUpdateHive.encounters_incremented;
+						summary.advancements += postUpdateHive.advancements;
+						summary.total_hive_entries = postUpdateHive.total_hive_entries;
+					} catch {
+						// Hive re-check is advisory; do not fail the curation.
+					}
+				}
+			} catch (err) {
+				// F-005: surface the error so the user can distinguish
+				// "nothing to curate" from "hard failure".
 				summary.knowledge_applied = 0;
 				summary.knowledge_skipped = 0;
+				summary.curator_phase = onDemandPhase;
+				const reason = err instanceof Error ? err.message : String(err);
+				return `${formatCurationSummary(summary)}\n\n⚠️ On-demand curator phase skipped: ${reason}`;
 			}
 		}
 

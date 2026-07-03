@@ -1666,6 +1666,24 @@ export async function applyCuratorKnowledgeUpdates(
 					if (newLesson.length < 15 || newLesson.length > 280) {
 						return entry;
 					}
+					// F-001: validate rewritten lesson text through the same
+					// content-safety gates as the new-entry path
+					// (INJECTION_PATTERNS, dangerous-command patterns,
+					// security-degrading patterns). Pass [] for existingLessons
+					// to skip dedup — cross-entry dedup is the new-entry path's job.
+					if (knowledgeConfig.validation_enabled !== false) {
+						const validation = validateLesson(newLesson, [], {
+							category: entry.category,
+							scope: entry.scope,
+							confidence: entry.confidence ?? 0.5,
+						});
+						if (!validation.valid) {
+							logger.warn(
+								`[curator] rewrite for entry '${entry.id}' rejected by content validation`,
+							);
+							return entry;
+						}
+					}
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
@@ -1702,8 +1720,11 @@ export async function applyCuratorKnowledgeUpdates(
 	// Only 'promote' actions are meaningful without an existing entry_id —
 	// 'archive' and 'flag_contradiction' require a real entry to operate on.
 	// These are appended after the transaction to avoid nested locking.
-	// Re-read lessons from the file for dedup purposes.
-	// This is a separate unlocked read; the append below is independently locked.
+
+	// Unlocked read for post-transaction dedup and validation.
+	// The append below is independently locked, so a race with a concurrent
+	// appendKnowledge is possible but benign (worst case: a duplicate lesson
+	// appears and is cleaned up on the next curator pass).
 	const currentEntries =
 		await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
 	const currentLessons: string[] = currentEntries.map((e) => e.lesson);
