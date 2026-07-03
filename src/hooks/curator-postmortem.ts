@@ -105,10 +105,7 @@ async function collectKnowledgeSummary(
 		resolveSwarmKnowledgePath(directory),
 		MAX_KNOWLEDGE_ENTRIES,
 	);
-	let events = await readKnowledgeEvents(
-		directory,
-		MAX_KNOWLEDGE_ENTRIES * 4,
-	);
+	let events = await readKnowledgeEvents(directory, MAX_KNOWLEDGE_ENTRIES * 4);
 	if (scope === 'session' && sessionID) {
 		events = events.filter(
 			(e) => (e as { session_id?: string }).session_id === sessionID,
@@ -163,7 +160,9 @@ function extractSection(text: string, sectionName: string): string | null {
 function normalizeRecommendationAction(
 	raw: unknown,
 ): KnowledgeRecommendation['action'] | null {
-	const value = String(raw ?? '').toLowerCase().trim();
+	const value = String(raw ?? '')
+		.toLowerCase()
+		.trim();
 	if (value === 'promote' || value === 'promote_to_hive') return 'promote';
 	if (value === 'archive' || value === 'flag_stale') return 'archive';
 	if (value === 'rewrite') return 'rewrite';
@@ -189,8 +188,7 @@ function parseStructuredPostMortemActions(
 		queueTriage: [],
 		diagnostics: [],
 	};
-	const fence =
-		/```(?:json|jsonc)?\s+postmortem_actions\s*\n([\s\S]*?)\n```/g;
+	const fence = /```(?:json|jsonc)?\s+postmortem_actions\s*\n([\s\S]*?)\n```/g;
 	for (const match of llmOutput.matchAll(fence)) {
 		let data: unknown;
 		try {
@@ -275,11 +273,10 @@ function parseStructuredPostMortemActions(
 					reason?: unknown;
 				};
 				const proposalId = String(triage.proposal_id ?? '').trim();
-				const action = String(triage.action ?? '').toLowerCase().trim();
-				if (
-					!proposalId ||
-					(action !== 'apply' && action !== 'reject')
-				) {
+				const action = String(triage.action ?? '')
+					.toLowerCase()
+					.trim();
+				if (!proposalId || (action !== 'apply' && action !== 'reject')) {
 					parsed.diagnostics.push(
 						`queue_triage[${index}] missing proposal_id/action`,
 					);
@@ -296,7 +293,9 @@ function parseStructuredPostMortemActions(
 	return parsed;
 }
 
-function parseLegacyPostMortemActions(llmOutput: string): ParsedPostMortemActions {
+function parseLegacyPostMortemActions(
+	llmOutput: string,
+): ParsedPostMortemActions {
 	const parsed: ParsedPostMortemActions = {
 		summary: extractSection(llmOutput, 'SUMMARY'),
 		recommendations: [],

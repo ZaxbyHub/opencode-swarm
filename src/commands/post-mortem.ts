@@ -25,7 +25,8 @@ function parsePostMortemArgs(args: string[]): {
 				return {
 					force: args.includes('--force'),
 					scope,
-					error: 'Invalid --scope value. Use --scope session or --scope project.',
+					error:
+						'Invalid --scope value. Use --scope session or --scope project.',
 				};
 			}
 			scope = value;
@@ -38,7 +39,8 @@ function parsePostMortemArgs(args: string[]): {
 				return {
 					force: args.includes('--force'),
 					scope,
-					error: 'Invalid --scope value. Use --scope=session or --scope=project.',
+					error:
+						'Invalid --scope value. Use --scope=session or --scope=project.',
 				};
 			}
 			scope = value;

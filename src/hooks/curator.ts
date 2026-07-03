@@ -537,7 +537,9 @@ function readLatestPostMortemDigest(directory: string): string | null {
 		const latest = candidates[0];
 		if (!latest) return null;
 		const content = fs.readFileSync(latest.filePath, 'utf-8');
-		const summary = content.match(/SUMMARY:\s*\n([\s\S]*?)(?:\n[A-Z_]+:|\n##|$)/);
+		const summary = content.match(
+			/SUMMARY:\s*\n([\s\S]*?)(?:\n[A-Z_]+:|\n##|$)/,
+		);
 		const body = (summary?.[1]?.trim() || content.slice(0, 1500)).slice(
 			0,
 			1500,
@@ -910,9 +912,8 @@ export async function runCuratorInit(
 			briefingParts.push(contextMd.slice(0, maxContextChars));
 		}
 
-		const latestPostMortemDigest = _internals.readLatestPostMortemDigest(
-			directory,
-		);
+		const latestPostMortemDigest =
+			_internals.readLatestPostMortemDigest(directory);
 		if (latestPostMortemDigest) {
 			briefingParts.push('\n## Latest Post-Mortem');
 			briefingParts.push(latestPostMortemDigest);

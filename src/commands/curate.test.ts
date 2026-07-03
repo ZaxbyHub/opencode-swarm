@@ -84,10 +84,7 @@ describe('/swarm curate', () => {
 					return async () => 'OBSERVATIONS:\n- new candidate: durable lesson';
 				},
 				curator: {
-					runCuratorPhase: async (
-						_directory: string,
-						phase: number,
-					) => {
+					runCuratorPhase: async (_directory: string, phase: number) => {
 						phaseSeen = phase;
 						return {
 							knowledge_recommendations: [
@@ -116,7 +113,9 @@ describe('/swarm curate', () => {
 			expect(delegateSession).toBe('session-1684');
 			expect(phaseSeen).toBe(5);
 			expect(appliedRecommendations).toBe(1);
-			expect(result).toContain('Knowledge recommendations: 1 applied, 0 skipped');
+			expect(result).toContain(
+				'Knowledge recommendations: 1 applied, 0 skipped',
+			);
 			expect(result).toContain('Curator digest phase: 5');
 		});
 	});
