@@ -576,6 +576,11 @@ class Service:
 		);
 	});
 
+	// -------------------------------------------------------------------------
+	// FB-002: Python methods on exported classes must be marked exported: true
+	// Restored from PR #1679 review — pythonParentClassExported regression tests
+	// (also addressed in PR #1637 Round 1 closure, commit 789a408e)
+	// -------------------------------------------------------------------------
 	test('FB-002: exported class methods are marked exported, private methods are not', async () => {
 		// Regression test: tree-sitter path should match regex extractor behavior
 		// for Python class method exported determination

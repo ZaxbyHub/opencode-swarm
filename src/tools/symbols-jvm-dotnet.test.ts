@@ -133,4 +133,29 @@ describe('symbols JVM/.NET extraction', () => {
 			'Runner.Start',
 		]);
 	});
+
+	// F-008 regression: same-line method overloads are dropped entirely.
+	// hasStatementBoundaryBefore requires a newline before each method; when two
+	// overloads share the same line the second has no preceding newline and both
+	// are filtered. Additionally addUniqueSymbol uses `${name}\0${kind}\0${line}`
+	// as its dedup key, so even if both passed the boundary check only one would
+	// survive. This is a documented design decision (regex-based extraction is
+	// pragmatic; distinguishing overloads by full signature would require a full
+	// parser). Future changes that teach extractJavaSymbols to distinguish
+	// overloads by signature should update both the implementation and this test.
+	test('same-line method overloads are dropped (documented limitation F-008)', async () => {
+		write(
+			'SameLine.java',
+			'public class SameLine { public int foo(){} public int foo(int x){} }',
+		);
+		const result = await callSymbols({
+			file: 'SameLine.java',
+			exported_only: false,
+		});
+		const fooSymbols = result.symbols.filter((s: any) => s.name === 'foo');
+		// Both same-line overloads are dropped: hasStatementBoundaryBefore
+		// rejects the second (no preceding newline), and even if it passed,
+		// addUniqueSymbol would dedup on the identical line-number key.
+		expect(fooSymbols).toHaveLength(0);
+	});
 });

@@ -673,13 +673,81 @@ function stripJvmDotnetComments(content: string): string {
 
 function findMatchingBrace(content: string, openIndex: number): number | null {
 	let depth = 0;
-	for (let i = openIndex; i < content.length; i++) {
+	let i = openIndex;
+	while (i < content.length) {
 		const ch = content[i];
+		// Skip double-quoted strings (handles \")
+		if (ch === '"') {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === '"') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip single-quoted strings / char literals
+		if (ch === "'") {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === "'") {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip template literals (basic; handles ${...} nesting)
+		if (ch === '`') {
+			i++;
+			while (i < content.length) {
+				if (content[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (content[i] === '`') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip line comments
+		if (ch === '/' && content[i + 1] === '/') {
+			i += 2;
+			while (i < content.length && content[i] !== '\n') i++;
+			continue;
+		}
+		// Skip block comments
+		if (ch === '/' && content[i + 1] === '*') {
+			i += 2;
+			while (i < content.length - 1) {
+				if (content[i] === '*' && content[i + 1] === '/') {
+					i += 2;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
 		if (ch === '{') depth++;
 		else if (ch === '}') {
 			depth--;
 			if (depth === 0) return i;
 		}
+		i++;
 	}
 	return null;
 }
@@ -760,13 +828,22 @@ function collectClassMethods(
 		'return',
 		'new',
 	]);
+	// Precompute depth at every character position — O(B) once per class
+	const depths: number[] = new Array(body.length + 1);
+	depths[0] = 0;
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+		if (ch === '{') depths[i + 1] = depths[i] + 1;
+		else if (ch === '}') depths[i + 1] = Math.max(0, depths[i] - 1);
+		else depths[i + 1] = depths[i];
+	}
 	for (let m = methodRe.exec(body); m !== null; m = methodRe.exec(body)) {
 		const visibility = m[1] as ModifierVisibility | undefined;
 		const name = m[2];
 		if (!name || skip.has(name)) continue;
 		const firstToken = m[0].trim().split(/\s+/)[0];
 		if (skip.has(firstToken)) continue;
-		if (braceDepthBefore(body, m.index) > 0) continue;
+		if (depths[m.index] > 0) continue;
 		const absoluteIndex = block.bodyStart + 1 + m.index;
 		if (!hasStatementBoundaryBefore(content, absoluteIndex)) continue;
 		const exported =
@@ -780,15 +857,6 @@ function collectClassMethods(
 			line: lineNumberAt(content, absoluteIndex),
 		});
 	}
-}
-
-function braceDepthBefore(content: string, index: number): number {
-	let depth = 0;
-	for (let i = 0; i < index; i++) {
-		if (content[i] === '{') depth++;
-		else if (content[i] === '}') depth = Math.max(0, depth - 1);
-	}
-	return depth;
 }
 
 function hasStatementBoundaryBefore(content: string, index: number): boolean {

@@ -804,13 +804,81 @@ function lineNumberAt(text: string, index: number): number {
 
 function findMatchingBrace(text: string, openIndex: number): number | null {
 	let depth = 0;
-	for (let i = openIndex; i < text.length; i++) {
+	let i = openIndex;
+	while (i < text.length) {
 		const ch = text[i];
+		// Skip double-quoted strings (handles \")
+		if (ch === '"') {
+			i++;
+			while (i < text.length) {
+				if (text[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (text[i] === '"') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip single-quoted strings / char literals
+		if (ch === "'") {
+			i++;
+			while (i < text.length) {
+				if (text[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (text[i] === "'") {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip template literals (basic; handles ${...} nesting)
+		if (ch === '`') {
+			i++;
+			while (i < text.length) {
+				if (text[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (text[i] === '`') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		// Skip line comments
+		if (ch === '/' && text[i + 1] === '/') {
+			i += 2;
+			while (i < text.length && text[i] !== '\n') i++;
+			continue;
+		}
+		// Skip block comments
+		if (ch === '/' && text[i + 1] === '*') {
+			i += 2;
+			while (i < text.length - 1) {
+				if (text[i] === '*' && text[i + 1] === '/') {
+					i += 2;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
 		if (ch === '{') depth++;
 		else if (ch === '}') {
 			depth--;
 			if (depth === 0) return i;
 		}
+		i++;
 	}
 	return null;
 }

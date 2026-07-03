@@ -169,6 +169,30 @@ internal class Service {
 		});
 	});
 
+	test('java does not truncate class body at brace inside string literal', async () => {
+		// Regression: findMatchingBrace was not string-aware; a field like
+		// String s = "x}y"; caused body truncation at the false terminator,
+		// silently dropping all methods defined after it.
+		const source = `
+public class Greeter {
+  private String s = "x}y";
+
+  public String greet() { return "hello"; }
+  public void farewell() { System.out.println("bye"); }
+}
+`;
+		const facts = await extractFileSymbols('java', source);
+		expect(facts).not.toBeNull();
+		const classDef = facts!.defs.find((d) => d.name === 'Greeter');
+		expect(classDef).toMatchObject({ kind: 'class', exported: true });
+		// Both methods must be present — not truncated at the false }
+		const methodNames = facts!.defs
+			.filter((d) => d.kind === 'method')
+			.map((d) => d.name);
+		expect(methodNames).toContain('greet');
+		expect(methodNames).toContain('farewell');
+	});
+
 	test('keeps repeated Java method names distinct across classes and overloads', async () => {
 		const acrossClasses = await extractFileSymbols(
 			'java',
@@ -198,5 +222,47 @@ public class App {
 		expect(overloadedRuns.map((d) => d.startLine)).toEqual([3, 4]);
 		expect(overloadedRuns.every((d) => d.kind === 'method')).toBe(true);
 		expect(overloadedRuns.every((d) => d.exported)).toBe(true);
+	});
+
+	test('java captures record declarations (Java 14+)', async () => {
+		const source = `public record Point(int x, int y) {}
+public record User(String name, int age) {}`;
+		const facts = await extractFileSymbols('java', source);
+		expect(facts).not.toBeNull();
+		const point = facts!.defs.find((d) => d.name === 'Point');
+		const user = facts!.defs.find((d) => d.name === 'User');
+		expect(point).toMatchObject({ kind: 'class', exported: true });
+		expect(user).toMatchObject({ kind: 'class', exported: true });
+	});
+
+	test('kotlin captures object, data class, and companion object', async () => {
+		const source = `object Singleton { fun foo() {} }
+data class Point(val x: Int, val y: Int)
+class Outer {
+    companion object {
+        fun bar() {}
+    }
+}`;
+		const facts = await extractFileSymbols('kotlin', source);
+		expect(facts).not.toBeNull();
+		const singleton = facts!.defs.find((d) => d.name === 'Singleton');
+		const point = facts!.defs.find((d) => d.name === 'Point');
+		const outer = facts!.defs.find((d) => d.name === 'Outer');
+		expect(singleton).toBeDefined();
+		expect(point).toBeDefined();
+		expect(outer).toBeDefined();
+	});
+
+	test('csharp captures struct and generic methods', async () => {
+		const source = `public struct PointStruct { public int X; }
+public class Container {
+    public T Identity<T>(T input) { return input; }
+}`;
+		const facts = await extractFileSymbols('csharp', source);
+		expect(facts).not.toBeNull();
+		const pointStruct = facts!.defs.find((d) => d.name === 'PointStruct');
+		const container = facts!.defs.find((d) => d.name === 'Container');
+		expect(pointStruct).toBeDefined();
+		expect(container).toBeDefined();
 	});
 });
