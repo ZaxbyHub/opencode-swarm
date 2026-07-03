@@ -653,7 +653,13 @@ Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson 
 
 ### `/swarm curate`
 
-Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse.
+Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse. When invoked from an active session, this also runs an on-demand `CURATOR_PHASE` pass, applies returned knowledge recommendations through the existing curator update gate, and reports applied/skipped counts.
+
+### `/swarm post-mortem [--force] [--scope session|project]`
+
+Run the curator post-mortem agent over recorded `.swarm/` evidence and write `.swarm/post-mortem-{planId}.md`. The report includes the improvement agenda, final curation pass, proposal queue triage, drift summary, and an architect-facing summary.
+
+By default the command is project-scoped. Use `--scope session` to limit knowledge event aggregation to the active session; use `--force` to regenerate an existing report for the same plan ID.
 
 ### `/swarm consolidate [--force] [--respect-interval] [--evaluate]`
 
@@ -712,6 +718,7 @@ Idempotent 4-stage project finalization:
 4. **Align** â€” aggressive alignment to the default remote branch via `git reset --hard` plus `git clean -fd`, discarding uncommitted changes and untracked files; falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed.
 
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
+Finalize also runs the curator post-mortem when curator postmortems are enabled; existing reports are reused unless regeneration is forced through `/swarm post-mortem --force`.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
 Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
 Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
@@ -721,8 +728,9 @@ cycles â€” cumulative project knowledge survives and is not deleted. Delete
 include `plan.json`, `plan.md`, `plan-ledger.jsonl`, `events.jsonl`, `handoff.*`,
 `escalation-report.md`, `knowledge-rejected.jsonl`, `repo-graph.json`,
 `doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db` (and
-shm/wal variants), and the `evidence/`, `session/`, `scopes/`, `locks/`,
-`spec-archive/` directories.
+shm/wal variants), generated `post-mortem-*.md` reports,
+`drift-report-phase-*.json`, and the `evidence/`, `session/`, `scopes/`,
+`locks/`, `spec-archive/` directories.
 
 **Hive promotion:** During finalize, lessons in `knowledge.jsonl` are evaluated
 against a three-route eligibility gate before promotion to hive:

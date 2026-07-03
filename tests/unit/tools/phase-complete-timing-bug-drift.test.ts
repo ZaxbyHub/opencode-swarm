@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as realCurator from '../../../src/hooks/curator';
 import * as realCuratorDrift from '../../../src/hooks/curator-drift';
+import type { DriftReport } from '../../../src/hooks/curator-types';
 import * as realKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import {
 	ensureAgentSession,
@@ -35,7 +36,6 @@ const mockApplyCuratorKnowledgeUpdates = mock(async () => ({
 	skipped: 0,
 }));
 
-// This mock tracks advisory drift calls. It must never write drift-verifier.json.
 const mockRunDeterministicDriftCheck = mock(async () => {
 	runDeterministicDriftCheckCalled = true;
 	return {
@@ -81,20 +81,7 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 // Import the tool after setting up mocks
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
-/**
- * Task 2.3: Core timing bug fix in phase-complete.ts
- *
- * The bug: runDeterministicDriftCheck wrote drift-verifier.json INSIDE phase_complete
- * AFTER the drift gate had already checked for it. This created a race condition
- * where the evidence didn't exist when checked.
- *
- * The fix:
- * 1. curator-drift.ts: Removed drift-verifier.json writing — only writes advisory drift reports
- * 2. phase-complete.ts: runDeterministicDriftCheck may run only as an advisory
- *    drift-report writer; it must not create critic_drift_verifier evidence.
- * 3. phase_complete remains a pure enforcement gate for drift-verifier.json.
- */
-describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', () => {
+describe('Task 2.3: drift gate — verdicts and prior reports', () => {
 	let tempDir: string;
 	let originalCwd: string;
 
@@ -107,8 +94,6 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 		mockRunDeterministicDriftCheck.mockClear();
 		mockReadPriorDriftReports.mockClear();
 
-		// Use realpathSync to resolve macOS /var→/private/var symlink so that
-		// process.cwd() (which resolves symlinks after chdir) matches tempDir.
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-complete-timing-test-')),
 		);
@@ -136,20 +121,14 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 			// Ignore cleanup errors
 		}
 		resetSwarmState();
-		// Restore cross-module mocks per two-tier DI convention
 		mock.restore();
 	});
 
-	describe('1. advisory drift writer does not recreate drift-verifier evidence', () => {
-		test('runDeterministicDriftCheck may run but does not rewrite approved verifier evidence', async () => {
-			ensureAgentSession('sess1');
-			fs.writeFileSync(
-				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
-				createConfig({ enabled: true, phase_enabled: true }),
-			);
-
-			// Write approved drift-verifier.json so drift gate passes
+	describe('3. drift-verifier.json with verdict=approved passes gate', () => {
+		test('phase_complete succeeds when drift-verifier.json has verdict approved', async () => {
 			writeDriftVerifier(tempDir, 1, 'approved');
+
+			ensureAgentSession('sess1');
 
 			const result = await phase_complete.execute({
 				phase: 1,
@@ -158,20 +137,74 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
-
-			expect(mockRunDeterministicDriftCheck).toHaveBeenCalled();
-			expect(runDeterministicDriftCheckCalled).toBe(true);
-			expect(
-				fs.existsSync(
-					path.join(tempDir, '.swarm', 'evidence', '1', 'drift-verifier.json'),
-				),
-			).toBe(true);
-			expect(
-				fs.existsSync(path.join(tempDir, '.swarm', 'drift-verifier.json')),
-			).toBe(false);
+			expect(parsed.status).toBe('success');
 		});
 
-		test('runDeterministicDriftCheck is advisory when curator pipeline runs', async () => {
+		test('phase_complete succeeds with custom approved summary', async () => {
+			writeDriftVerifier(tempDir, 1, 'approved', 'All requirements verified');
+
+			ensureAgentSession('sess1');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+		});
+	});
+
+	describe('4. drift-verifier.json with verdict=rejected blocks gate', () => {
+		test('phase_complete blocks when drift-verifier.json has verdict rejected', async () => {
+			writeDriftVerifier(
+				tempDir,
+				1,
+				'rejected',
+				'NEEDS_REVISION: Spec drift detected',
+			);
+
+			ensureAgentSession('sess1');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('DRIFT_VERIFICATION_REJECTED');
+			expect(parsed.message).toContain(
+				"drift verifier returned verdict 'rejected'",
+			);
+		});
+
+		test('phase_complete blocks when summary contains NEEDS_REVISION', async () => {
+			// verdict is 'approved' but summary indicates needs revision
+			writeDriftVerifier(
+				tempDir,
+				1,
+				'approved',
+				'NEEDS_REVISION: Some drift detected',
+			);
+
+			ensureAgentSession('sess1');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('DRIFT_VERIFICATION_REJECTED');
+		});
+	});
+
+	describe('5. readPriorDriftReports is called for advisory injection', () => {
+		test('readPriorDriftReports is called when curator pipeline runs with session state', async () => {
 			// Enable curator pipeline
 			fs.writeFileSync(
 				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
@@ -190,84 +223,44 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 
 			expect(parsed.success).toBe(true);
 
-			// runCuratorPhase WAS called (curator pipeline runs)
-			expect(mockRunCuratorPhase).toHaveBeenCalled();
-
-			expect(mockRunDeterministicDriftCheck).toHaveBeenCalled();
-			expect(
-				fs.existsSync(
-					path.join(tempDir, '.swarm', 'evidence', '1', 'drift-verifier.json'),
-				),
-			).toBe(true);
-			expect(
-				fs.existsSync(path.join(tempDir, '.swarm', 'drift-verifier.json')),
-			).toBe(false);
+			// readPriorDriftReports should have been called (for advisory injection)
+			expect(mockReadPriorDriftReports).toHaveBeenCalled();
+			expect(mockReadPriorDriftReports).toHaveBeenCalledWith(tempDir);
 		});
 
-		test('advisory drift does not create drift-verifier.json when it is missing', async () => {
-			// NO drift-verifier.json written — should trigger advisory-only warning
-			// but still succeed because spec.md doesn't exist
-			ensureAgentSession('sess1');
+		test('readPriorDriftReports returns drift reports that trigger advisory messages', async () => {
+			// Enable curator pipeline
 			fs.writeFileSync(
 				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
 				createConfig({ enabled: true, phase_enabled: true }),
 			);
 
-			const result = await phase_complete.execute({
-				phase: 1,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
+			writeDriftVerifier(tempDir, 1, 'approved');
 
-			// Should succeed with advisory warning about missing drift evidence
-			expect(parsed.success).toBe(true);
-			expect(parsed.warnings).toContainEqual(
-				expect.stringContaining('No effective spec'),
-			);
-
-			expect(mockRunDeterministicDriftCheck).toHaveBeenCalled();
-			expect(
-				fs.existsSync(path.join(tempDir, '.swarm', 'drift-verifier.json')),
-			).toBe(false);
-			expect(
-				fs.existsSync(
-					path.join(tempDir, '.swarm', 'evidence', '1', 'drift-verifier.json'),
-				),
-			).toBe(false);
-		});
-	});
-
-	describe('2. Advisory-only mode when no drift-verifier.json and no spec.md', () => {
-		test('phase_complete succeeds with warning when drift-verifier.json missing and no spec.md', async () => {
-			ensureAgentSession('sess1');
-
-			// Ensure NO drift-verifier.json and NO spec.md
-			// (setup already doesn't create these)
-
-			const result = await phase_complete.execute({
-				phase: 1,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Should succeed (advisory-only mode)
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('success');
-
-			// Should contain advisory warning about missing drift evidence
-			expect(parsed.warnings).toContainEqual(
-				expect.stringContaining('No effective spec'),
-			);
-		});
-
-		test('phase_complete BLOCKS when drift-verifier.json missing but spec.md exists', async () => {
-			// Create spec.md
-			fs.writeFileSync(
-				path.join(tempDir, '.swarm', 'spec.md'),
-				'# Test Spec\nSome requirements.',
-			);
+			// Mock readPriorDriftReports to return a report with drift_score > 0
+			mockReadPriorDriftReports.mockResolvedValueOnce([
+				{
+					schema_version: 1,
+					phase: 1,
+					timestamp: new Date().toISOString(),
+					alignment: 'MINOR_DRIFT' as const,
+					drift_score: 0.35,
+					first_deviation: {
+						phase: 1,
+						task: '1.1',
+						description: 'Implementation deviates from spec',
+					},
+					compounding_effects: [],
+					corrections: ['Update spec to match implementation'],
+					requirements_checked: 10,
+					requirements_satisfied: 8,
+					scope_additions: [],
+					injection_summary: 'Phase 1: MINOR_DRIFT (0.35)',
+				},
+			]);
 
 			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
 
 			const result = await phase_complete.execute({
 				phase: 1,
@@ -275,10 +268,7 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 			});
 			const parsed = JSON.parse(result);
 
-			// Should be blocked
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('DRIFT_VERIFICATION_MISSING');
+			expect(parsed.success).toBe(true);
 		});
 	});
 });

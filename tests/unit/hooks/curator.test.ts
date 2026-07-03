@@ -966,7 +966,18 @@ invalid json here
 					last_updated: '2026-01-01T00:00:00Z',
 					last_phase_covered: 1,
 					digest: 'Phase 1 initial digest',
-					phase_digests: [],
+					phase_digests: [
+						{
+							phase: 1,
+							timestamp: '2026-01-01T00:00:00Z',
+							summary: 'Phase 1 initial digest',
+							agents_used: ['reviewer'],
+							tasks_completed: 1,
+							tasks_total: 1,
+							key_decisions: [],
+							blockers_resolved: [],
+						},
+					],
 					compliance_observations: [],
 					knowledge_recommendations: [],
 				}),
@@ -984,8 +995,9 @@ invalid json here
 			const content = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'));
 
 			expect(content.last_phase_covered).toBe(2);
-			expect(content.phase_digests).toHaveLength(1);
-			expect(content.phase_digests[0].phase).toBe(2);
+			expect(content.phase_digests).toHaveLength(2);
+			expect(content.phase_digests[0].phase).toBe(1);
+			expect(content.phase_digests[1].phase).toBe(2);
 			expect(content.digest).toContain('Phase 1 initial digest');
 		});
 
@@ -3219,7 +3231,7 @@ describe('runCuratorPhase passes KNOWLEDGE_ENTRIES to LLM', () => {
 		let capturedUserInput = '';
 		const mockLlmDelegate = async (_system: string, user: string) => {
 			capturedUserInput = user;
-			return 'PHASE_DIGEST:\nphase: 1\nsummary: done\n\nKNOWLEDGE_UPDATES:\n- promote new: Good lesson\n\nEXTENDED_DIGEST:\nDone';
+			return 'PHASE_DIGEST:\nphase: 1\nsummary: done\n\nOBSERVATIONS:\n- entry new (new candidate): Good lesson with enough detail\n\nEXTENDED_DIGEST:\nDone';
 		};
 
 		// Create temp dir with knowledge entries

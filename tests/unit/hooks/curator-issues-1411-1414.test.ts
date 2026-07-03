@@ -97,18 +97,12 @@ describe('curator issue regressions', () => {
 				'OBSERVATIONS:',
 				`- entry ${knownId} (could be tighter): Keep this valid recommendation`,
 				'- malformed observation',
-				'',
-				'KNOWLEDGE_UPDATES:',
-				'- unknown-action new: bad action',
 			].join('\n'),
 		);
 
 		expect(parsed.recommendations).toHaveLength(1);
-		expect(parsed.diagnostics).toHaveLength(2);
-		expect(parsed.diagnostics.map((d) => d.section)).toEqual([
-			'OBSERVATIONS',
-			'KNOWLEDGE_UPDATES',
-		]);
+		expect(parsed.diagnostics).toHaveLength(1);
+		expect(parsed.diagnostics[0].section).toBe('OBSERVATIONS');
 	});
 
 	test('accumulates recommendations and filters unknown entry ids', async () => {

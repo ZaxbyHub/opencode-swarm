@@ -302,7 +302,7 @@ This prevents one noisy project from dominating hive promotions.
 | `/swarm knowledge restore <id>` | Un-quarantine an entry |
 | `/swarm promote <text>` | Write new hive entry |
 | `/swarm promote --from-swarm <id>` | Promote existing swarm entry |
-| `/swarm curate` | Run curator review and hive promotion pass |
+| `/swarm curate` | Run curator review, apply gated recommendations when session context exists, and review hive promotion candidates |
 
 See [Commands Reference](commands.md) for full flag details.
 

@@ -1049,6 +1049,26 @@ export async function executePhaseComplete(
 				curatorResult.knowledge_recommendations,
 				knowledgeConfig,
 			);
+			try {
+				const { runDeterministicDriftCheck } = await import(
+					'../hooks/curator-drift.js'
+				);
+				await runDeterministicDriftCheck(
+					dir,
+					phase,
+					curatorResult,
+					curatorConfig,
+					(message) => {
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (sessionState) {
+							sessionState.pendingAdvisoryMessages ??= [];
+							sessionState.pendingAdvisoryMessages.push(message);
+						}
+					},
+				);
+			} catch {
+				// Non-blocking: drift reports are advisory and must not gate phase completion.
+			}
 			// Advisory injection: push actionable curator message to architect session
 			const callerSessionState = swarmState.agentSessions.get(sessionID);
 			if (callerSessionState) {
@@ -1076,7 +1096,7 @@ export async function executePhaseComplete(
 				// Check for drift advisories from prior deterministic drift checks
 				try {
 					const { readPriorDriftReports } = await import(
-						'../hooks/curator-drift'
+						'../hooks/curator-drift.js'
 					);
 					const priorReports = await readPriorDriftReports(dir);
 					const phaseReport = priorReports
@@ -1119,7 +1139,7 @@ export async function executePhaseComplete(
 		if (config.design_docs?.enabled === true) {
 			const outDir = config.design_docs.out_dir ?? 'docs';
 			const { runDesignDocDriftCheck } = await import(
-				'../hooks/design-doc-drift'
+				'../hooks/design-doc-drift.js'
 			);
 			const docReport = await runDesignDocDriftCheck(dir, phase, outDir);
 			if (docReport?.verdict === 'DOC_STALE') {
@@ -1844,6 +1864,8 @@ export async function executePhaseComplete(
 					);
 					const pmResult = await runCuratorPostMortem(dir, {
 						llmDelegate: createCuratorLLMDelegate(dir, 'postmortem', sessionID),
+						scope: 'project',
+						sessionID,
 					});
 					if (pmResult.success && pmResult.summary) {
 						warnings.push(`[POST-MORTEM] ${pmResult.summary}`);

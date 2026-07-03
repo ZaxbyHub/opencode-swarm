@@ -215,67 +215,63 @@ describe('runCuratorPostMortem', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Regression: FR-004 / SC-007 — stale post-mortem-unknown.md must not block
-	// future regeneration. When plan.json is absent, effectivePlanId gets a
-	// timestamp suffix so every run uses a fresh filename.
+	// Regression: FR-004 / SC-007 — stale post-mortem-unknown.md handling.
+	// F-010: effectivePlanId is stable 'unknown'; idempotent dedup relies on
+	// isReportValid (rejects empty/invalid/partial reports) + --force for
+	// explicit regeneration. A stale VALID report correctly triggers the
+	// idempotent skip; stale INVALID junk is auto-regenerated.
 	// -------------------------------------------------------------------------
 
-	test('stale post-mortem-unknown.md does NOT block regeneration (FR-004 SC-007)', async () => {
+	test('stale INVALID post-mortem-unknown.md does not block regeneration', async () => {
 		// Arrange: .swarm dir exists but plan.json does NOT.
 		ensureSwarmDir(dir);
 
-		// Simulate a stale report from a prior run (pre-fix this would be
-		// post-mortem-unknown.md and would permanently block regeneration).
+		// Simulate stale INVALID junk (wrong header) — isReportValid must reject it.
 		const staleReportPath = join(dir, '.swarm', 'post-mortem-unknown.md');
-		writeFileSync(
-			staleReportPath,
-			`# Post-Mortem Report: unknown\nGenerated: ${new Date().toISOString()}\n\nStale content from prior run.`,
-		);
+		writeFileSync(staleReportPath, 'corrupt partial content - no valid header');
 
 		// Act: run without force.
 		const result = await runCuratorPostMortem(dir);
 
-		// Assert: it regenerates (does NOT skip as idempotent).
+		// Assert: it regenerates because isReportValid rejected the stale junk.
 		expect(result.success).toBe(true);
 		expect(result.summary!).not.toContain('already exists');
-		// A new report was written at a timestamped path (not the stale unknown.md).
-		expect(result.reportPath!).not.toBe(staleReportPath);
+		expect(result.reportPath).toBe(staleReportPath); // same stable path, overwritten
 		expect(existsSync(result.reportPath!)).toBe(true);
 		const content = readFileSync(result.reportPath!, 'utf-8');
 		expect(content).toContain('Post-Mortem Report');
-		// The stale file is untouched.
-		expect(readFileSync(staleReportPath, 'utf-8')).toContain('Stale content');
+		expect(content).not.toContain('corrupt partial content');
 	});
 
-	test('effectivePlanId includes timestamp when plan.json is absent', async () => {
+	test('effectivePlanId is stable unknown when plan.json is absent (idempotent dedup)', async () => {
 		ensureSwarmDir(dir);
 
 		const result = await runCuratorPostMortem(dir);
 
 		expect(result.success).toBe(true);
-		// effectivePlanId must carry a timestamp so subquent runs never reuse it.
-		expect(result.planId!).toMatch(/^unknown-\d+$/);
-		// Report filename also reflects the timestamped effectivePlanId.
-		expect(result.reportPath!).toContain(
-			`post-mortem-unknown-${result.planId!.split('-')[1]}`,
-		);
+		// F-010: effectivePlanId is stable 'unknown' (no timestamp) so the
+		// isReportValid dedup check works idempotently across runs.
+		expect(result.planId).toBe('unknown');
+		expect(result.reportPath!).toContain('post-mortem-unknown.md');
 	});
 
-	test('force:true regenerates even when stale post-mortem-unknown.md exists', async () => {
+	test('force:true regenerates even when a valid stale post-mortem-unknown.md exists', async () => {
 		ensureSwarmDir(dir);
 
-		// Pre-create stale report.
+		// Pre-create a VALID stale report (correct header) that would normally idempotent-skip.
 		const staleReportPath = join(dir, '.swarm', 'post-mortem-unknown.md');
-		writeFileSync(
-			staleReportPath,
-			`# Post-Mortem Report: unknown\nGenerated: ${new Date().toISOString()}\n\nStale content.`,
-		);
+		const staleContent = `# Post-Mortem Report: unknown\nGenerated: 2000-01-01T00:00:00.000Z\n\nStale content from prior run.`;
+		writeFileSync(staleReportPath, staleContent);
 
 		const result = await runCuratorPostMortem(dir, { force: true });
 
 		expect(result.success).toBe(true);
 		expect(result.summary!).not.toContain('already exists');
-		expect(result.reportPath!).not.toBe(staleReportPath);
+		// Same path (force overwrites in place), but content is regenerated.
+		expect(result.reportPath).toBe(staleReportPath);
+		const newContent = readFileSync(result.reportPath!, 'utf-8');
+		expect(newContent).not.toBe(staleContent);
+		expect(newContent).toContain('Post-Mortem Report');
 	});
 
 	test('falls back to data-only when LLM delegate fails', async () => {
@@ -306,9 +302,8 @@ describe('runCuratorPostMortem', () => {
 		const result = await runCuratorPostMortem(dir);
 
 		expect(result.success).toBe(true);
-		// planId is 'unknown' but effectivePlanId includes a timestamp suffix so
-		// every run generates a fresh report (no stale-unknown.md poisoning).
-		expect(result.planId).toMatch(/^unknown-\d+$/);
+		// F-010: effectivePlanId is stable 'unknown' for idempotent dedup.
+		expect(result.planId).toBe('unknown');
 		expect(result.warnings).toContainEqual(
 			expect.stringContaining('Plan not found'),
 		);
@@ -372,9 +367,18 @@ describe('runCuratorPostMortem', () => {
 		writeFileSync(
 			join(swarmDir, 'drift-report-phase-1.json'),
 			JSON.stringify({
+				schema_version: 1,
 				phase: 1,
+				timestamp: new Date().toISOString(),
 				alignment: 'ALIGNED',
 				drift_score: 0.0,
+				first_deviation: null,
+				compounding_effects: [],
+				corrections: [],
+				requirements_checked: 0,
+				requirements_satisfied: 0,
+				scope_additions: [],
+				injection_summary: '',
 			}),
 		);
 

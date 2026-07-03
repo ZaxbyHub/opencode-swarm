@@ -19,10 +19,16 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
 import type { CuratorLLMDelegate } from './curator.js';
+import type { KnowledgeRecommendation } from './curator-types.js';
 import { readKnowledgeEvents } from './knowledge-events.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import { readKnowledge, resolveSwarmKnowledgePath } from './knowledge-store.js';
-import type { KnowledgeEntryBase } from './knowledge-types.js';
+import type {
+	KnowledgeCategory,
+	KnowledgeConfig,
+	KnowledgeEntryBase,
+	SwarmKnowledgeEntry,
+} from './knowledge-types.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 const MAX_INPUT_TEXT_CHARS = 500;
@@ -42,11 +48,16 @@ export interface PostMortemResult {
 	reportPath: string | null;
 	summary: string | null;
 	warnings: string[];
+	actions?: PostMortemActionResult;
 }
 
 export interface PostMortemOptions {
 	llmDelegate?: CuratorLLMDelegate;
 	force?: boolean;
+	scope?: 'session' | 'project';
+	sessionID?: string;
+	knowledgeConfig?: KnowledgeConfig;
+	llmTimeoutMs?: number;
 }
 
 interface KnowledgeEventSummary {
@@ -59,21 +70,47 @@ interface KnowledgeEventSummary {
 	status: string;
 }
 
+interface ParsedPostMortemActions {
+	summary: string | null;
+	recommendations: KnowledgeRecommendation[];
+	queueTriage: Array<{
+		proposal_id: string;
+		action: 'apply' | 'reject';
+		reason: string;
+	}>;
+	diagnostics: string[];
+}
+
+export interface PostMortemActionResult {
+	knowledge_applied: number;
+	knowledge_skipped: number;
+	hive_promotions: number;
+	hive_encounters_incremented: number;
+	hive_advancements: number;
+	proposals_approved: number;
+	proposals_rejected: number;
+	proposals_skipped: number;
+}
+
 // ============================================================================
 // Data collection helpers
 // ============================================================================
 
 async function collectKnowledgeSummary(
 	directory: string,
+	scope: 'session' | 'project' = 'project',
+	sessionID?: string,
 ): Promise<KnowledgeEventSummary[]> {
 	const entries = await readKnowledge<KnowledgeEntryBase>(
 		resolveSwarmKnowledgePath(directory),
 		MAX_KNOWLEDGE_ENTRIES,
 	);
-	const events = await readKnowledgeEvents(
-		directory,
-		MAX_KNOWLEDGE_ENTRIES * 4,
-	);
+	let events = await readKnowledgeEvents(directory, MAX_KNOWLEDGE_ENTRIES * 4);
+	if (scope === 'session' && sessionID) {
+		events = events.filter(
+			(e) => (e as { session_id?: string }).session_id === sessionID,
+		);
+	}
 
 	const countsMap = new Map<
 		string,
@@ -109,6 +146,350 @@ async function collectKnowledgeSummary(
 			status: entry.status ?? 'active',
 		};
 	});
+}
+
+function extractSection(text: string, sectionName: string): string | null {
+	const pattern = new RegExp(
+		`^${sectionName}:\\s*\\n([\\s\\S]*?)(?=\\n[A-Z_]+:\\s*(?:\\n|$)|$)`,
+		'm',
+	);
+	const match = text.match(pattern);
+	return match?.[1]?.trim() || null;
+}
+
+function normalizeRecommendationAction(
+	raw: unknown,
+): KnowledgeRecommendation['action'] | null {
+	const value = String(raw ?? '')
+		.toLowerCase()
+		.trim();
+	if (value === 'promote' || value === 'promote_to_hive') return 'promote';
+	if (value === 'archive' || value === 'flag_stale') return 'archive';
+	if (value === 'rewrite') return 'rewrite';
+	if (value === 'flag_contradiction') return 'flag_contradiction';
+	if (value === 'merge') return null;
+	return null;
+}
+
+function normalizeProposalSlug(raw: string): string {
+	return raw
+		.trim()
+		.replace(/^proposals[\\/]/, '')
+		.replace(/\.md$/i, '')
+		.replace(/\.json$/i, '');
+}
+
+function parseStructuredPostMortemActions(
+	llmOutput: string,
+): ParsedPostMortemActions {
+	const parsed: ParsedPostMortemActions = {
+		summary: extractSection(llmOutput, 'SUMMARY'),
+		recommendations: [],
+		queueTriage: [],
+		diagnostics: [],
+	};
+	const fence = /```(?:json|jsonc)?\s+postmortem_actions\s*\n([\s\S]*?)\n```/g;
+	for (const match of llmOutput.matchAll(fence)) {
+		let data: unknown;
+		try {
+			data = JSON.parse(match[1]);
+		} catch (err) {
+			parsed.diagnostics.push(
+				`postmortem_actions malformed_json: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+			continue;
+		}
+		if (!data || typeof data !== 'object' || Array.isArray(data)) {
+			parsed.diagnostics.push('postmortem_actions expected object');
+			continue;
+		}
+		const obj = data as {
+			summary?: unknown;
+			curation_recommendations?: unknown;
+			queue_triage?: unknown;
+		};
+		if (typeof obj.summary === 'string' && obj.summary.trim()) {
+			parsed.summary = obj.summary.trim().slice(0, 1000);
+		}
+		if (Array.isArray(obj.curation_recommendations)) {
+			for (const [index, item] of obj.curation_recommendations.entries()) {
+				if (!item || typeof item !== 'object') {
+					parsed.diagnostics.push(
+						`curation_recommendations[${index}] invalid object`,
+					);
+					continue;
+				}
+				const rec = item as {
+					action?: unknown;
+					entry_id?: unknown;
+					lesson?: unknown;
+					reason?: unknown;
+					category?: unknown;
+					confidence?: unknown;
+				};
+				const action = normalizeRecommendationAction(rec.action);
+				const lesson = String(rec.lesson ?? rec.reason ?? '').trim();
+				const reason = String(rec.reason ?? lesson).trim();
+				if (!action || !reason) {
+					parsed.diagnostics.push(
+						`curation_recommendations[${index}] missing action/reason`,
+					);
+					continue;
+				}
+				if (action === 'rewrite' && lesson.length < 15) {
+					parsed.diagnostics.push(
+						`curation_recommendations[${index}] rewrite missing lesson`,
+					);
+					continue;
+				}
+				parsed.recommendations.push({
+					action,
+					entry_id:
+						typeof rec.entry_id === 'string' && rec.entry_id.trim()
+							? rec.entry_id.trim()
+							: undefined,
+					lesson: (lesson || reason).slice(0, 280),
+					reason: reason.slice(0, 280),
+					category:
+						typeof rec.category === 'string'
+							? (rec.category as KnowledgeCategory)
+							: undefined,
+					confidence:
+						typeof rec.confidence === 'number' ? rec.confidence : undefined,
+				});
+			}
+		}
+		if (Array.isArray(obj.queue_triage)) {
+			for (const [index, item] of obj.queue_triage.entries()) {
+				if (!item || typeof item !== 'object') {
+					parsed.diagnostics.push(`queue_triage[${index}] invalid object`);
+					continue;
+				}
+				const triage = item as {
+					proposal_id?: unknown;
+					action?: unknown;
+					reason?: unknown;
+				};
+				const proposalId = String(triage.proposal_id ?? '').trim();
+				const action = String(triage.action ?? '')
+					.toLowerCase()
+					.trim();
+				if (!proposalId || (action !== 'apply' && action !== 'reject')) {
+					parsed.diagnostics.push(
+						`queue_triage[${index}] missing proposal_id/action`,
+					);
+					continue;
+				}
+				parsed.queueTriage.push({
+					proposal_id: proposalId.slice(0, 120),
+					action,
+					reason: String(triage.reason ?? '').slice(0, 280),
+				});
+			}
+		}
+	}
+	return parsed;
+}
+
+function parseLegacyPostMortemActions(
+	llmOutput: string,
+): ParsedPostMortemActions {
+	const parsed: ParsedPostMortemActions = {
+		summary: extractSection(llmOutput, 'SUMMARY'),
+		recommendations: [],
+		queueTriage: [],
+		diagnostics: [],
+	};
+	const curation = extractSection(llmOutput, 'CURATION_RECOMMENDATIONS');
+	if (curation) {
+		let recIndex = 0;
+		for (const line of curation.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed.startsWith('-')) continue;
+			const body = trimmed.replace(/^-\s*/, '');
+			const [head, reasonPart = ''] = body.split(/\s+—\s+|\s+-\s+/, 2);
+			const [rawAction, rest = ''] = head.split(/:\s*/, 2);
+			const lowerRaw = rawAction.toLowerCase().trim();
+			const action = normalizeRecommendationAction(rawAction);
+			if (!action) {
+				if (lowerRaw === 'merge') {
+					parsed.diagnostics.push(
+						"legacy curation_recommendations unsupported action 'merge' — dropped",
+					);
+				} else if (lowerRaw) {
+					parsed.diagnostics.push(
+						`legacy curation_recommendations unrecognized action '${lowerRaw}'`,
+					);
+				}
+				continue;
+			}
+			const idMatch = rest.match(
+				/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+			);
+			const reason = (reasonPart || rest).trim();
+			if (!reason) {
+				parsed.diagnostics.push(
+					`legacy curation_recommendations[${recIndex}] missing reason`,
+				);
+				continue;
+			}
+			parsed.recommendations.push({
+				action,
+				entry_id: idMatch?.[0],
+				lesson: reason.slice(0, 280),
+				reason: reason.slice(0, 280),
+			});
+			recIndex++;
+		}
+	}
+	const queue = extractSection(llmOutput, 'QUEUE_TRIAGE');
+	if (queue) {
+		for (const line of queue.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed.startsWith('-')) continue;
+			if (trimmed.includes(':')) {
+				const match = trimmed.match(
+					/^-\s*([^:]+):\s*(APPLY|REJECT)\b\s*(?:—|-)?\s*(.*)$/i,
+				);
+				if (!match) {
+					parsed.diagnostics.push('legacy queue_triage malformed line');
+					continue;
+				}
+				parsed.queueTriage.push({
+					proposal_id: match[1].trim().slice(0, 120),
+					action: match[2].toLowerCase() as 'apply' | 'reject',
+					reason: match[3].trim().slice(0, 280),
+				});
+			}
+		}
+	}
+	return parsed;
+}
+
+function parsePostMortemActions(llmOutput: string): ParsedPostMortemActions {
+	const structured = parseStructuredPostMortemActions(llmOutput);
+	const legacy = parseLegacyPostMortemActions(llmOutput);
+	return {
+		summary: structured.summary ?? legacy.summary,
+		recommendations:
+			structured.recommendations.length > 0
+				? structured.recommendations
+				: legacy.recommendations,
+		queueTriage:
+			structured.queueTriage.length > 0
+				? structured.queueTriage
+				: legacy.queueTriage,
+		diagnostics: [...structured.diagnostics, ...legacy.diagnostics],
+	};
+}
+
+async function executePostMortemActions(
+	directory: string,
+	parsed: ParsedPostMortemActions,
+	options: PostMortemOptions,
+): Promise<{ result: PostMortemActionResult; warnings: string[] }> {
+	const warnings: string[] = [];
+	const result: PostMortemActionResult = {
+		knowledge_applied: 0,
+		knowledge_skipped: 0,
+		hive_promotions: 0,
+		hive_encounters_incremented: 0,
+		hive_advancements: 0,
+		proposals_approved: 0,
+		proposals_rejected: 0,
+		proposals_skipped: 0,
+	};
+	const knowledgeConfig =
+		options.knowledgeConfig ?? (await _internals.loadDefaultKnowledgeConfig());
+	if (parsed.recommendations.length > 0) {
+		try {
+			const knowledgeResult = await _internals.applyCuratorKnowledgeUpdates(
+				directory,
+				parsed.recommendations,
+				knowledgeConfig,
+			);
+			result.knowledge_applied = knowledgeResult.applied;
+			result.knowledge_skipped = knowledgeResult.skipped;
+		} catch (err) {
+			warnings.push(
+				`Post-mortem knowledge actions failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
+		try {
+			const entries = await _internals.readSwarmKnowledge(directory);
+			const hiveResult = await _internals.checkHivePromotions(
+				entries,
+				knowledgeConfig,
+			);
+			result.hive_promotions = hiveResult.new_promotions;
+			result.hive_encounters_incremented = hiveResult.encounters_incremented;
+			result.hive_advancements = hiveResult.advancements;
+		} catch (err) {
+			warnings.push(
+				`Post-mortem hive promotion check failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
+	}
+	if (parsed.queueTriage.length > 0) {
+		try {
+			const proposalResult = await _internals.applyProposalTriage(
+				directory,
+				parsed.queueTriage,
+			);
+			result.proposals_approved = proposalResult.approved.length;
+			result.proposals_rejected = proposalResult.rejected.length;
+			result.proposals_skipped = proposalResult.skipped.length;
+		} catch (err) {
+			warnings.push(
+				`Post-mortem proposal triage failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
+	}
+	return { result, warnings };
+}
+
+async function repairPostMortemActions(
+	llmOutput: string,
+	diagnostics: string[],
+	options: PostMortemOptions,
+): Promise<ParsedPostMortemActions | null> {
+	if (!options.llmDelegate || diagnostics.length === 0) return null;
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), 30_000);
+	try {
+		const repairPrompt = [
+			'Repair the supplied CURATOR_POSTMORTEM output into one valid fenced JSON block.',
+			'Return only this fence:',
+			'```json postmortem_actions',
+			'{"summary":"...","curation_recommendations":[],"queue_triage":[]}',
+			'```',
+			'Allowed curation action values: promote, archive, rewrite, flag_contradiction.',
+			'Allowed queue_triage action values: apply, reject.',
+			'Do not include unsupported actions such as merge.',
+			'Diagnostics:',
+			diagnostics.join('; '),
+			'Original output:',
+			llmOutput.slice(0, 8000),
+		].join('\n');
+		const repaired = await options.llmDelegate('', repairPrompt, ac.signal);
+		const parsed = _internals.parsePostMortemActions(repaired);
+		if (parsed.diagnostics.length === 0) {
+			return parsed;
+		}
+		return null;
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 function readJsonlFile(filePath: string, maxLines?: number): unknown[] {
@@ -156,25 +537,15 @@ function collectRetrospectives(directory: string): string[] {
 	return results;
 }
 
-function collectDriftReports(directory: string): string[] {
-	const results: string[] = [];
-	const swarmDir = path.join(directory, '.swarm');
+async function collectDriftReports(directory: string): Promise<string[]> {
 	try {
-		if (!existsSync(swarmDir)) return results;
-		const driftFiles = readdirSync(swarmDir)
-			.filter((e) => e.startsWith('drift-report-phase-') && e.endsWith('.json'))
-			.slice(0, MAX_DRIFT_REPORTS);
-		for (const entry of driftFiles) {
-			try {
-				results.push(readFileSync(path.join(swarmDir, entry), 'utf-8'));
-			} catch {
-				// skip
-			}
-		}
+		const reports = await _internals.readPriorDriftReports(directory);
+		return reports
+			.slice(-MAX_DRIFT_REPORTS)
+			.map((report) => JSON.stringify(report, null, 2));
 	} catch {
-		// fail-open
+		return [];
 	}
-	return results;
 }
 
 function collectPendingProposals(
@@ -380,6 +751,8 @@ function buildDataOnlyReport(
 
 function assembleLLMInput(
 	planId: string,
+	scope: 'session' | 'project',
+	sessionID: string | undefined,
 	planSummary: string,
 	knowledgeSummary: KnowledgeEventSummary[],
 	curatorDigest: string | null,
@@ -391,6 +764,7 @@ function assembleLLMInput(
 	const sections: string[] = [];
 
 	sections.push(`TASK: CURATOR_POSTMORTEM ${planId}`);
+	sections.push(`SCOPE: ${scope}${sessionID ? ` (${sessionID})` : ''}`);
 	sections.push(`PLAN_SUMMARY: ${planSummary}`);
 
 	sections.push(`CURATOR_DIGESTS: ${curatorDigest ?? 'none'}`);
@@ -452,6 +826,7 @@ export async function runCuratorPostMortem(
 	options: PostMortemOptions = {},
 ): Promise<PostMortemResult> {
 	const warnings: string[] = [];
+	const scope = options.scope ?? 'project';
 
 	// Load plan to derive the plan ID
 	let planId = 'unknown';
@@ -472,12 +847,13 @@ export async function runCuratorPostMortem(
 		warnings.push('Failed to load plan data.');
 	}
 
-	// Check for existing report (dedup protection)
-	// When planId is 'unknown' (plan.json absent/unreadable), use a distinct
-	// timestamped identifier so a stale post-mortem-unknown.md from a prior
-	// run cannot permanently block regeneration.
-	const effectivePlanId =
-		planId === 'unknown' ? `unknown-${Date.now()}` : planId;
+	// Check for existing report (idempotent dedup).
+	// For planless runs (planId === 'unknown') we keep the stable 'unknown'
+	// identifier so the isReportValid dedup check below works idempotently;
+	// isReportValid rejects empty/invalid/partial reports, and --force
+	// overrides for explicit regeneration. /swarm finalize archives and
+	// cleans post-mortem-*.md at project end.
+	const effectivePlanId = planId;
 	const reportFilename = `post-mortem-${effectivePlanId}.md`;
 	let reportPath: string;
 	try {
@@ -525,7 +901,11 @@ export async function runCuratorPostMortem(
 		// Collect evidence
 		let knowledgeSummary: KnowledgeEventSummary[] = [];
 		try {
-			knowledgeSummary = await collectKnowledgeSummary(directory);
+			knowledgeSummary = await collectKnowledgeSummary(
+				directory,
+				scope,
+				options.sessionID,
+			);
 		} catch {
 			warnings.push('Failed to collect knowledge summary.');
 		}
@@ -572,7 +952,7 @@ export async function runCuratorPostMortem(
 			);
 			retrospectives = retrospectives.slice(0, MAX_RETROSPECTIVES);
 		}
-		let driftReports = collectDriftReports(directory);
+		let driftReports = await collectDriftReports(directory);
 		if (driftReports.length > MAX_DRIFT_REPORTS) {
 			warnings.push(
 				`Drift reports capped at ${MAX_DRIFT_REPORTS} (had ${driftReports.length}); older entries truncated.`,
@@ -582,6 +962,8 @@ export async function runCuratorPostMortem(
 
 		// Generate report
 		let reportContent: string;
+		let llmSummary: string | null = null;
+		let actionResult: PostMortemActionResult | undefined;
 
 		if (options.llmDelegate) {
 			try {
@@ -590,6 +972,8 @@ export async function runCuratorPostMortem(
 				);
 				const userInput = assembleLLMInput(
 					effectivePlanId,
+					scope,
+					options.sessionID,
 					planSummary,
 					knowledgeSummary,
 					curatorDigest,
@@ -599,7 +983,10 @@ export async function runCuratorPostMortem(
 					driftReports,
 				);
 				const ac = new AbortController();
-				const timer = setTimeout(() => ac.abort(), 300_000);
+				const timer = setTimeout(
+					() => ac.abort(),
+					options.llmTimeoutMs ?? 300_000,
+				);
 				let llmOutput: string;
 				try {
 					// Hoist to attach no-op catch before race — prevents unhandled
@@ -621,7 +1008,36 @@ export async function runCuratorPostMortem(
 				} finally {
 					clearTimeout(timer);
 				}
-				reportContent = `# Post-Mortem Report: ${effectivePlanId}\nGenerated: ${new Date().toISOString()}\n\n${llmOutput}`;
+				let parsedActions = _internals.parsePostMortemActions(llmOutput);
+				if (parsedActions.diagnostics.length > 0) {
+					warnings.push(
+						`Post-mortem structured action parse diagnostics: ${parsedActions.diagnostics.join('; ')}`,
+					);
+					const repaired = await _internals.repairPostMortemActions(
+						llmOutput,
+						parsedActions.diagnostics,
+						options,
+					);
+					if (repaired) {
+						parsedActions = repaired;
+						warnings.push('Post-mortem structured actions repaired by LLM.');
+					}
+				}
+				llmSummary = parsedActions.summary;
+				const executed = await _internals.executePostMortemActions(
+					directory,
+					parsedActions,
+					options,
+				);
+				actionResult = executed.result;
+				warnings.push(...executed.warnings);
+				const actionSummary = [
+					'## Executed Post-Mortem Actions',
+					`- Knowledge actions: ${actionResult.knowledge_applied} applied, ${actionResult.knowledge_skipped} skipped`,
+					`- Hive actions: ${actionResult.hive_promotions} new promotions, ${actionResult.hive_encounters_incremented} encounters incremented, ${actionResult.hive_advancements} advancements`,
+					`- Proposal actions: ${actionResult.proposals_approved} approved, ${actionResult.proposals_rejected} rejected, ${actionResult.proposals_skipped} skipped`,
+				].join('\n');
+				reportContent = `# Post-Mortem Report: ${effectivePlanId}\nGenerated: ${new Date().toISOString()}\nScope: ${scope}\n\n${llmOutput}\n\n${actionSummary}`;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				warnings.push(
@@ -676,11 +1092,12 @@ export async function runCuratorPostMortem(
 			(s, e) => s + e.violated,
 			0,
 		);
-		const summary = [
+		const mechanicalSummary = [
 			`Post-mortem for plan "${effectivePlanId}": ${totalEntries} knowledge entries reviewed.`,
 			`${neverAppliedCount} never-applied entries flagged; ${totalViolations} total violations recorded.`,
 			`${proposals.length} pending proposals, ${unactionable.length} quarantined entries.`,
 		].join(' ');
+		const summary = llmSummary ?? mechanicalSummary;
 
 		return {
 			success: true,
@@ -688,6 +1105,7 @@ export async function runCuratorPostMortem(
 			reportPath,
 			summary,
 			warnings,
+			actions: actionResult,
 		};
 	} finally {
 		if (lock.release) {
@@ -714,4 +1132,85 @@ export const _internals = {
 	buildDataOnlyReport,
 	assembleLLMInput,
 	isReportValid,
+	parsePostMortemActions,
+	executePostMortemActions,
+	repairPostMortemActions,
+	loadDefaultKnowledgeConfig: async (): Promise<KnowledgeConfig> => {
+		const { KnowledgeConfigSchema } = await import('../config/schema.js');
+		return KnowledgeConfigSchema.parse({});
+	},
+	applyCuratorKnowledgeUpdates: async (
+		directory: string,
+		recommendations: KnowledgeRecommendation[],
+		knowledgeConfig: KnowledgeConfig,
+	) => {
+		const { applyCuratorKnowledgeUpdates } = await import('./curator.js');
+		return applyCuratorKnowledgeUpdates(
+			directory,
+			recommendations,
+			knowledgeConfig,
+		);
+	},
+	checkHivePromotions: async (
+		entries: SwarmKnowledgeEntry[],
+		knowledgeConfig: KnowledgeConfig,
+	) => {
+		const { checkHivePromotions } = await import('./hive-promoter.js');
+		return checkHivePromotions(entries, knowledgeConfig);
+	},
+	applyProposalTriage: async (
+		directory: string,
+		triage: ParsedPostMortemActions['queueTriage'],
+	) => {
+		const {
+			_internals: skillInternals,
+			activateProposal,
+			listSkills,
+			sanitizeSlug,
+		} = await import('../services/skill-generator.js');
+		const result = {
+			approved: [] as string[],
+			rejected: [] as string[],
+			skipped: [] as string[],
+		};
+		const skills = await listSkills(directory);
+		const proposalSlugs = new Set(skills.proposals.map((p) => p.slug));
+		for (const item of triage) {
+			const slug = sanitizeSlug(normalizeProposalSlug(item.proposal_id));
+			if (!slug || !proposalSlugs.has(slug)) {
+				result.skipped.push(slug || item.proposal_id);
+				continue;
+			}
+			if (item.action === 'apply') {
+				const activation = await activateProposal(directory, slug, false, {
+					evaluate: true,
+					operation: 'post_mortem_queue_triage',
+				});
+				if (activation.activated) {
+					result.approved.push(slug);
+				} else {
+					result.skipped.push(slug);
+				}
+				continue;
+			}
+			const proposal = skills.proposals.find((p) => p.slug === slug);
+			if (!proposal) {
+				result.skipped.push(slug);
+				continue;
+			}
+			try {
+				skillInternals.unlinkSync(proposal.path);
+				result.rejected.push(slug);
+			} catch {
+				result.skipped.push(slug);
+			}
+		}
+		return result;
+	},
+	readPriorDriftReports: async (directory: string) => {
+		const { readPriorDriftReports } = await import('./curator-drift.js');
+		return readPriorDriftReports(directory);
+	},
+	readSwarmKnowledge: (directory: string) =>
+		readKnowledge<SwarmKnowledgeEntry>(resolveSwarmKnowledgePath(directory)),
 };

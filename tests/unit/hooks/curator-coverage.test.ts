@@ -712,8 +712,8 @@ describe('runCuratorInit uncovered paths', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseKnowledgeRecommendations additional coverage', () => {
-	it('returns empty array when KNOWLEDGE_UPDATES section is empty', () => {
-		const output = `KNOWLEDGE_UPDATES:
+	it('returns empty array when OBSERVATIONS section is empty', () => {
+		const output = `OBSERVATIONS:
 -
 
 NEXT_SECTION:
@@ -722,8 +722,8 @@ something`;
 		expect(recs).toEqual([]);
 	});
 
-	it('returns empty array when KNOWLEDGE_UPDATES section has only whitespace', () => {
-		const output = `KNOWLEDGE_UPDATES:
+	it('returns empty array when OBSERVATIONS section has only whitespace', () => {
+		const output = `OBSERVATIONS:
    
 NEXT_SECTION:
 `;
@@ -732,10 +732,8 @@ NEXT_SECTION:
 	});
 
 	it('parses flag_contradiction action correctly with valid UUID', () => {
-		// entry-123 is NOT a valid UUID, so it gets treated as undefined (hallucination safe)
-		// Use a real UUID for this test
-		const output = `KNOWLEDGE_UPDATES:
-- flag_contradiction 550e8400-e29b-41d4-a716-446655440000: Reason for contradiction
+		const output = `OBSERVATIONS:
+- entry 550e8400-e29b-41d4-a716-446655440000 (contradicts project state): Reason for contradiction
 `;
 		const recs = parseKnowledgeRecommendations(output);
 		expect(recs).toHaveLength(1);
@@ -746,8 +744,8 @@ NEXT_SECTION:
 
 	it('flag_contradiction with non-UUID entry_id is treated as new (undefined)', () => {
 		// This is the anti-hallucination behavior: non-UUID slugs become undefined
-		const output = `KNOWLEDGE_UPDATES:
-- flag_contradiction entry-123: Reason for contradiction
+		const output = `OBSERVATIONS:
+- entry entry-123 (contradicts project state): Reason for contradiction
 `;
 		const recs = parseKnowledgeRecommendations(output);
 		expect(recs).toHaveLength(1);
@@ -758,8 +756,8 @@ NEXT_SECTION:
 
 	it('non-UUID entry_id is treated as undefined (hallucination safe)', () => {
 		// This is the key anti-hallucination behavior
-		const output = `KNOWLEDGE_UPDATES:
-- promote tool-name-normalization: Lesson text here
+		const output = `OBSERVATIONS:
+- entry tool-name-normalization (new candidate): Lesson text here
 `;
 		const recs = parseKnowledgeRecommendations(output);
 		expect(recs).toHaveLength(1);
