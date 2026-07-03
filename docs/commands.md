@@ -784,8 +784,8 @@ When you type a two-word command like `/swarm config doctor`, Swarm tries the co
 |---------|-------|-------|
 | `/swarm config doctor` | `/swarm config-doctor` | |
 | `/swarm evidence summary` | `/swarm evidence-summary` | |
-| `/swarm pr subscribe` | `/swarm pr-subscribe` | TUI shim (deprecated) |
-| `/swarm pr unsubscribe` | `/swarm pr-unsubscribe` | TUI shim (deprecated) |
+| `/swarm pr subscribe` | `/swarm pr-subscribe` | TUI shim (deprecated). Agent-callable via `swarm_command`: subscriptions are idempotent and capped by `pr_monitor.max_subscriptions`, so the agent may subscribe itself (e.g. right after creating a PR). |
+| `/swarm pr unsubscribe` | `/swarm pr-unsubscribe` | TUI shim (deprecated). Agent-callable via `swarm_command`. |
 | `/swarm pr status` | `/swarm pr-status` | TUI shim (deprecated). In a session (TUI/chat) it is session-scoped; the `bunx opencode-swarm run pr status` CLI has no session context and lists all sessions. |
 | `/swarm sdd status` | `/swarm sdd-status` | TUI shim (deprecated) |
 | `/swarm sdd validate` | `/swarm sdd-validate` | TUI shim (deprecated) |

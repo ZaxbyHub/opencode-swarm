@@ -23,6 +23,13 @@ Carry forward the original review finding IDs, classifications, reviewer/critic
 provenance, and any operational blockers instead of renumbering them as new
 discoveries.
 
+Feedback closure is not the end of the PR lifecycle: when PR monitoring is
+enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
+`../swarm-pr-subscribe/SKILL.md` until it is merged or closed. Events that
+arrive after closure (a new bot round, a CI change, fresh review activity) are
+triaged through that skill and route back into this discipline when they need
+fixes.
+
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
 The repository's bot reviewer (`hermes-pr-review` / Qwen3.6 + Gemma-4 dual-model)

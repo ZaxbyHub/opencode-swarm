@@ -159,6 +159,16 @@ export const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
 		expectedCanonicalRef:
 			'../../../.opencode/skills/swarm-pr-feedback/SKILL.md',
 	},
+	{
+		slug: 'swarm-pr-subscribe',
+		canonicalPath: '.opencode/skills/swarm-pr-subscribe/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-pr-subscribe/SKILL.md',
+			'.agents/skills/swarm-pr-subscribe/SKILL.md',
+		],
+		expectedCanonicalRef:
+			'../../../.opencode/skills/swarm-pr-subscribe/SKILL.md',
+	},
 ];
 
 /**

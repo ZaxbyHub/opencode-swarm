@@ -881,16 +881,16 @@ export const COMMAND_REGISTRY = {
 			'Subscribe the current session to PR state-change notifications',
 		args: '<pr-url|owner/repo#N|N>',
 		details:
-			'Subscribes the current session to receive advisory notifications for the specified PR. When pr_monitor.enabled is true, the background polling worker will detect CI failures, new comments, merge conflicts, review state changes, and merge/close events. Notifications are delivered as session-scoped advisories with dedup tokens. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin). Requires pr_monitor.enabled: true in config.',
+			'Subscribes the current session to PR state-change events for the specified PR. When pr_monitor.enabled is true, the background polling worker detects CI failures, new comments, review state changes (changes requested / approved), merge conflicts and conflict resolutions, and merge/close events — each gated by its pr_monitor notify_* config flag (notify_ci_success defaults to false). Delivery follows pr_monitor.event_delivery: "prompt" (default) wakes the subscribed session with a structured <pr-activity> message; "advisory" queues session-scoped advisories with dedup tokens for the next turn. Subscriptions are idempotent, capped by pr_monitor.max_subscriptions, and agent-callable. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin). Requires pr_monitor.enabled: true in config.',
 		category: 'agent',
-		toolPolicy: 'human-only',
+		toolPolicy: 'agent',
 	},
 	// Alias for the TUI shortcut 'swarm-pr-subscribe', which normalizes to the
 	// single dash token 'pr-subscribe'. Without this alias
 	// resolveCommand(['pr-subscribe']) returns null and the TUI reports
 	// "command not found" instead of running the command. Mirrors the
 	// 'config-doctor'/'doctor-tools' alias pattern. The alias inherits the
-	// canonical human-only tool policy via canonicalCommandKey (aliasOf).
+	// canonical agent tool policy via canonicalCommandKey (aliasOf).
 	'pr-subscribe': {
 		handler: (ctx) =>
 			handlePrSubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
@@ -906,9 +906,9 @@ export const COMMAND_REGISTRY = {
 			'Unsubscribe the current session from PR state-change notifications',
 		args: '<pr-url|owner/repo#N|N>',
 		details:
-			'Unsubscribes the current session from receiving advisory notifications for the specified PR. Removes the active subscription record. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+			'Unsubscribes the current session from PR state-change events for the specified PR. Removes the active subscription record (idempotent; agent-callable). Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
-		toolPolicy: 'human-only',
+		toolPolicy: 'agent',
 	},
 	// Alias for the TUI shortcut 'swarm-pr-unsubscribe' (normalizes to
 	// 'pr-unsubscribe'). See the 'pr-subscribe' alias note above.

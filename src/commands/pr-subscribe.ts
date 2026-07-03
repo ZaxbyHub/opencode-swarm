@@ -3,9 +3,11 @@
  *
  * Subscribes the current session to PR state-change notifications. When
  * `pr_monitor.enabled` is true, the background polling worker will detect CI
- * failures, new comments, merge conflicts, review state changes, and
- * merge/close events. Notifications are delivered as session-scoped advisories
- * with dedup tokens.
+ * failures, new comments, merge conflicts (and resolutions), review state
+ * changes, and merge/close events — each gated by its `notify_*` config flag.
+ * Events are delivered per `pr_monitor.event_delivery`: 'prompt' (default)
+ * wakes the subscribed session with a structured <pr-activity> message;
+ * 'advisory' queues session-scoped advisories with dedup tokens.
  *
  * Input contract (PR reference is required):
  *   /swarm pr subscribe 155                         → subscribe via bare number
@@ -41,7 +43,7 @@ export async function handlePrSubscribeCommand(
 		return [
 			'Usage: /swarm pr subscribe <pr-url|owner/repo#N|N>',
 			'',
-			'Subscribes the current session to receive advisory notifications',
+			'Subscribes the current session to PR state-change events',
 			'for the specified PR. Requires pr_monitor.enabled: true in config.',
 			'',
 			'  /swarm pr subscribe https://github.com/owner/repo/pull/42',
@@ -110,15 +112,24 @@ export async function handlePrSubscribeCommand(
 			maxSubscriptions: prMonitorConfig?.max_subscriptions,
 		});
 
+		const deliveryMode =
+			prMonitorConfig?.event_delivery === 'advisory' ? 'advisory' : 'prompt';
+		const deliveryLine =
+			deliveryMode === 'prompt'
+				? 'Delivery mode: prompt — events wake this session with a <pr-activity> message.'
+				: 'Delivery mode: advisory — events queue as session advisories for the next turn.';
+
 		return [
 			`Subscribed to ${prUrl}`,
 			`Session: ${sessionID}`,
 			`PR: ${repoFullName}#${prInfo.number}`,
 			'',
-			'The background PR monitor will now check this PR for',
-			'CI failures, new comments, review state changes, and',
-			'merge/close events. Notifications appear as session-scoped',
-			'advisories with dedup tokens.',
+			'The background PR monitor will now watch this PR and deliver',
+			'the events enabled by your pr_monitor config: CI failures, new',
+			'comments, review activity (changes requested / approved), merge',
+			'conflicts and resolutions, merge/close, and (off by default)',
+			'CI success. Each event type is gated by its notify_* flag.',
+			deliveryLine,
 		].join('\n');
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);

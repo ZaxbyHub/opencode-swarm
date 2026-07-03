@@ -1814,10 +1814,35 @@ export const PrMonitorConfigSchema = z
 		notify_ci_failure: z.boolean().default(true),
 		/** Emit notification on new comments. */
 		notify_new_comments: z.boolean().default(true),
-		/** Emit notification on merge conflict detection. */
+		/** Emit notification on merge conflict detection (and conflict resolution). */
 		notify_merge_conflict: z.boolean().default(true),
+		/**
+		 * Emit notification on review state changes
+		 * (`pr.review.changes_requested` and `pr.review.approved`).
+		 */
+		notify_review_activity: z.boolean().default(true),
+		/** Emit notification when the PR is merged (terminal event). */
+		notify_merged: z.boolean().default(true),
+		/** Emit notification when the PR is closed without merge (terminal event). */
+		notify_closed: z.boolean().default(true),
+		/** Emit notification when CI recovers / all checks pass. Quiet by default. */
+		notify_ci_success: z.boolean().default(false),
 		/** Automatically trigger PR_FEEDBACK mode on CI failure or merge conflict. */
 		auto_pr_feedback: z.boolean().default(false),
+		/**
+		 * Event delivery mode for subscribed sessions.
+		 * 'prompt' (default) wakes the subscribed session with a structured
+		 * <pr-activity> message via the SDK session prompt so idle sessions
+		 * act on events immediately. 'advisory' is the legacy passive channel:
+		 * events are queued as session advisories and surface on the next
+		 * model turn. Only effective when `enabled` is true.
+		 */
+		event_delivery: z.enum(['advisory', 'prompt']).default('prompt'),
+		/**
+		 * Automatically subscribe the current session to a PR created via
+		 * `gh pr create` in a bash tool call. Only effective when `enabled`.
+		 */
+		auto_subscribe_on_pr_create: z.boolean().default(true),
 	})
 	.strict();
 

@@ -138,6 +138,42 @@ describe('handlePrSubscribeCommand', () => {
 			);
 			expect(result).toContain('Session: session-abc');
 			expect(result).toContain('PR: owner/repo#42');
+			// Success text is accurate about config-gated events + delivery mode
+			expect(result).toContain('events enabled by your pr_monitor config');
+			expect(result).toContain('gated by its notify_* flag');
+		});
+
+		test('success text reports prompt delivery mode by default', async () => {
+			mockSubscribe.mockImplementation(() => Promise.resolve({}));
+
+			const result = await handlePrSubscribeCommand(
+				tempDir,
+				['owner/repo#12'],
+				'session-mode-default',
+			);
+
+			expect(result).toContain('Delivery mode: prompt');
+			expect(result).toContain('<pr-activity>');
+		});
+
+		test('success text reports advisory delivery mode when configured', async () => {
+			mockSubscribe.mockImplementation(() => Promise.resolve({}));
+			prSubscribeInternals.loadPluginConfig = (() => ({
+				pr_monitor: {
+					enabled: true,
+					max_subscriptions: 20,
+					event_delivery: 'advisory',
+				},
+			})) as typeof prSubscribeInternals.loadPluginConfig;
+
+			const result = await handlePrSubscribeCommand(
+				tempDir,
+				['owner/repo#13'],
+				'session-mode-advisory',
+			);
+
+			expect(result).toContain('Delivery mode: advisory');
+			expect(result).toContain('session advisories');
 		});
 
 		test('owner/repo#N shorthand subscribes successfully', async () => {

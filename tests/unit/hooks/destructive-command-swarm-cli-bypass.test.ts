@@ -712,11 +712,14 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 		test('sdd-project (dash) is blocked', async () => {
 			await expectBlocked('bunx opencode-swarm run sdd-project');
 		});
-		test('pr-subscribe (dash) is blocked', async () => {
-			await expectBlocked('bunx opencode-swarm run pr-subscribe 123');
+		// `pr subscribe` / `pr unsubscribe` moved to agent toolPolicy
+		// (first-class swarm-pr-subscribe), so their dash aliases no longer
+		// inherit a human-only target and must be allowed.
+		test('pr-subscribe (dash) is allowed (agent-policy alias)', async () => {
+			await expectAllowed('bunx opencode-swarm run pr-subscribe 123');
 		});
-		test('pr-unsubscribe (dash) is blocked', async () => {
-			await expectBlocked('bunx opencode-swarm run pr-unsubscribe 123');
+		test('pr-unsubscribe (dash) is allowed (agent-policy alias)', async () => {
+			await expectAllowed('bunx opencode-swarm run pr-unsubscribe 123');
 		});
 		test('clear (alias of restricted reset-session) is blocked', async () => {
 			await expectBlocked('bunx opencode-swarm run clear');
