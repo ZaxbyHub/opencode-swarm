@@ -12,7 +12,6 @@ import {
 	type MemoryRecallUsageByMemory,
 	type MemoryRecallUsageByRole,
 	type MemoryRecord,
-	type MemoryValueLogEntry,
 	readMigrationReport,
 	resolveMemoryConfig,
 	resolveMemoryStorageDir,
@@ -20,13 +19,15 @@ import {
 	SQLiteMemoryProvider,
 	writeJsonlExport,
 } from '../memory';
-import type { MemoryConfig } from '../memory/config';
+import type { MemoryConfig, QLearningConfig } from '../memory/config';
 import { readConsolidationLog } from '../memory/consolidation-log';
 import type {
 	MemoryCompactResult,
 	MemoryProposalStore,
 	MemoryProvider,
+	MemoryRewardEvent,
 } from '../memory/provider';
+import { getQValue } from '../memory/q-learning';
 
 type ExportableProvider = MemoryProvider & Partial<MemoryProposalStore>;
 
@@ -44,7 +45,7 @@ export async function handleMemoryCommand(
 		'- `/swarm memory status` - show provider, SQLite path, JSONL files, and last migration report',
 		'- `/swarm memory pending` - show pending proposals and recent rejection reasons',
 		'- `/swarm memory recall-log` - summarize recall usage by agent role and memory ID',
-		'- `/swarm memory value-log` - show recent Q-value, reward, suppression, and promotion signals',
+		'- `/swarm memory value-log` - show per-memory learned-utility (q-value) history, recent rewards, and suppression/promotion candidacy',
 		'- `/swarm memory stale` - list expired scratch, superseded, deleted, and low-utility memories',
 		'- `/swarm memory compact` - dry-run compaction; pass `--confirm` to remove deleted, superseded, and expired scratch records',
 		'- `/swarm memory export` - export current memory and proposals to `.swarm/memory/export/*.jsonl`',
@@ -173,9 +174,9 @@ export async function handleMemoryPendingCommand(
 			'Rejected proposal reasons',
 			report.rejectedProposalReasons,
 		);
-		appendValueLogLines(
+		appendMemoryLines(
 			lines,
-			'Promotion candidates',
+			'Promotion candidates (high learned utility, frequently recalled)',
 			report.promotionCandidates,
 		);
 		return lines.join('\n');
@@ -231,28 +232,64 @@ export async function handleMemoryValueLogCommand(
 	if ('error' in parsed) return parsed.error;
 	const config = resolveCommandMemoryConfig(directory);
 	const provider = createMaintenanceProvider(directory, config);
+	const q = config.qLearning;
 	try {
 		await provider.initialize?.();
-		if (!provider.listMemoryValueLog) {
-			return 'Memory provider does not support value-log reporting.';
+		const lines = ['## Swarm Memory Value Log', ''];
+		if (!provider.listRewardEvents) {
+			lines.push(
+				'- Reward-event history is not available for this memory provider.',
+			);
+			return lines.join('\n');
 		}
-		const valueLog = await provider.listMemoryValueLog({ limit: parsed.limit });
-		const promotionCandidates = valueLog.filter(
-			(entry) => entry.promotionCandidate,
-		);
-		const suppressionCandidates = valueLog.filter(
-			(entry) => entry.suppressionCandidate,
-		);
-		const lines = [
-			'## Swarm Memory Value Log',
+		// Pull a generous window of recent reward events (already sorted
+		// most-recent-first), then group by memory so each memory's learned-utility
+		// evolution is shown together.
+		const events = await provider.listRewardEvents({
+			limit: parsed.limit * 20,
+		});
+		const byMemory = new Map<string, MemoryRewardEvent[]>();
+		for (const event of events) {
+			const bucket = byMemory.get(event.memoryId) ?? [];
+			bucket.push(event);
+			byMemory.set(event.memoryId, bucket);
+		}
+		lines.push(
+			`- Reward events scanned: \`${events.length}\``,
+			`- Memories with reward history shown: \`${Math.min(byMemory.size, parsed.limit)}\``,
 			'',
-			`- Entries shown: \`${valueLog.length}\``,
-			`- Promotion candidates shown: \`${promotionCandidates.length}\``,
-			`- Suppression candidates shown: \`${suppressionCandidates.length}\``,
-		];
-		appendValueLogLines(lines, 'Recent Q-value updates', valueLog);
-		appendValueLogLines(lines, 'Promotion candidates', promotionCandidates);
-		appendValueLogLines(lines, 'Suppression candidates', suppressionCandidates);
+		);
+		let shown = 0;
+		for (const [memoryId, memoryEvents] of byMemory) {
+			if (shown >= parsed.limit) break;
+			shown++;
+			const record = await provider.get(memoryId);
+			const currentQ = record
+				? getQValue(record, q.initialQValue)
+				: (memoryEvents[0]?.qAfter ?? q.initialQValue);
+			const candidacy =
+				currentQ < q.suppressionThreshold
+					? 'suppressed (low learned-utility)'
+					: currentQ > q.promotionThreshold
+						? 'promotion candidate'
+						: 'neutral';
+			const snippet = record ? truncate(record.text, 80) : '(memory not found)';
+			lines.push(
+				`- \`${memoryId}\` q=${currentQ.toFixed(3)} [${candidacy}] rewards=${memoryEvents.length} - ${snippet}`,
+			);
+			for (const event of memoryEvents.slice(0, 5)) {
+				const qBefore =
+					typeof event.qBefore === 'number' ? event.qBefore.toFixed(2) : '?';
+				const qAfter =
+					typeof event.qAfter === 'number' ? event.qAfter.toFixed(2) : '?';
+				lines.push(
+					`    - ${event.timestamp} ${event.verdict} reward=${event.reward.toFixed(2)} (q ${qBefore}→${qAfter})`,
+				);
+			}
+		}
+		if (shown === 0) {
+			lines.push('- No reward history recorded yet.');
+		}
 		return lines.join('\n');
 	} finally {
 		await provider.close?.();
@@ -283,7 +320,7 @@ export async function handleMemoryStaleCommand(
 			`- Deleted tombstones shown: \`${report.deletedMemories.length}\``,
 			`- Superseded memories shown: \`${report.supersededMemories.length}\``,
 			`- Low-utility memories shown: \`${report.lowUtilityMemories.length}\``,
-			`- Low-Q memories shown: \`${report.lowQValueMemories.length}\``,
+			`- Low-learned-utility (low-Q) memories shown: \`${report.lowQValueMemories.length}\``,
 		];
 		appendMemoryLines(
 			lines,
@@ -293,7 +330,11 @@ export async function handleMemoryStaleCommand(
 		appendMemoryLines(lines, 'Deleted tombstones', report.deletedMemories);
 		appendSupersededChains(lines, report);
 		appendMemoryLines(lines, 'Low-utility memories', report.lowUtilityMemories);
-		appendValueLogLines(lines, 'Low-Q memories', report.lowQValueMemories);
+		appendMemoryLines(
+			lines,
+			'Low-learned-utility memories (suppressed by q-value)',
+			report.lowQValueMemories,
+		);
 		return lines.join('\n');
 	} finally {
 		await provider.close?.();
@@ -429,12 +470,14 @@ function maintenanceReportOptions(
 		n: number;
 	};
 	importanceThreshold: number;
+	qLearning: QLearningConfig;
 } {
 	const { threshold, ...weights } = config.maintenance.importance;
 	return {
 		limit,
 		importanceWeights: weights,
 		importanceThreshold: threshold,
+		qLearning: config.qLearning,
 	};
 }
 
@@ -673,29 +716,6 @@ function appendRecallMemoryLines(
 	for (const memory of memories) {
 		lines.push(
 			`- \`${memory.memoryId}\`: ${memory.count} hit(s), last=${memory.lastRecalledAt}, avgScore=${memory.averageScore.toFixed(3)}`,
-		);
-	}
-}
-
-function appendValueLogLines(
-	lines: string[],
-	title: string,
-	entries: MemoryValueLogEntry[],
-): void {
-	lines.push('', `### ${title}`);
-	if (entries.length === 0) {
-		lines.push('- none');
-		return;
-	}
-	for (const entry of entries) {
-		const outcome = entry.taskOutcome ? ` outcome=${entry.taskOutcome}` : '';
-		const reward =
-			typeof entry.lastReward === 'number'
-				? ` reward=${entry.lastReward.toFixed(2)}`
-				: '';
-		const last = entry.lastRecalledAt ? ` last=${entry.lastRecalledAt}` : '';
-		lines.push(
-			`- \`${entry.memoryId}\` ${entry.kind} q=${entry.qValue.toFixed(3)} recalls=${entry.recallCount}${reward}${outcome}${last} - ${entry.textPreview}`,
 		);
 	}
 }

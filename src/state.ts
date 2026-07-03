@@ -33,10 +33,6 @@ import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
-import {
-	clearRealtimeLearningNudgeSession,
-	resetRealtimeLearningNudgeState,
-} from './hooks/realtime-learning-nudge.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
@@ -231,6 +227,13 @@ export interface AgentSessionState {
 			 * quorumSize: 1 — conservative; forces a fresh council run.
 			 */
 			quorumSize: number;
+			/**
+			 * A.4 dedup guard: set true once the positive council reward
+			 * (EMA step on session-recalled memories) has fired for this task.
+			 * Ensures the reward is applied at most once per task even if the
+			 * APPROVE→complete path is re-entered.
+			 */
+			rewarded?: boolean;
 		}
 	>;
 	/**
@@ -469,9 +472,9 @@ export const swarmState = {
 		{ ids: string[]; taskId?: string; phase?: string; generatedAt: number }
 	>(),
 
-	/** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}`.
+	/** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}|${dayKey}`.
 	 *  Prevents the chat.messages.transform path AND a knowledge_ack tool call
-	 *  from double-counting the same ack within a session. FIFO-capped —
+	 *  from double-counting the same ack within a session-day. FIFO-capped —
 	 *  see addKnowledgeAckDedup. */
 	knowledgeAckDedup: new Set<string>(),
 
@@ -528,7 +531,6 @@ export function resetSwarmState(): void {
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
-	resetRealtimeLearningNudgeState();
 	swarmState.generatedAgentNames = [];
 	_rehydrationCache = null;
 	// Full Auto Mode (Phase 4)
@@ -846,7 +848,6 @@ export function startAgentSession(
  */
 export function endAgentSession(sessionId: string): void {
 	swarmState.agentSessions.delete(sessionId);
-	clearRealtimeLearningNudgeSession(sessionId);
 }
 
 /**

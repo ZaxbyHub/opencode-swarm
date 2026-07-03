@@ -514,6 +514,285 @@ describe('MemoryProvider contract parity', () => {
 	}
 });
 
+describe('MemoryProvider reward-event contract parity', () => {
+	for (const providerCase of providerCases) {
+		describe(providerCase.name, () => {
+			test('appends a reward event and round-trips it with a generated id', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-basic`);
+				const provider = track(providerCase.create(root));
+				const timestamp = '2026-05-24T12:00:00.000Z';
+
+				await provider.appendRewardEvent?.({
+					memoryId: 'm1',
+					runId: 'r1',
+					unitId: 't1',
+					verdict: 'APPROVE',
+					reward: 1,
+					timestamp,
+				});
+
+				const events = await provider.listRewardEvents?.({ memoryId: 'm1' });
+				expect(events).toHaveLength(1);
+				const event = events?.[0];
+				// A no-op / broken appendRewardEvent (e.g. one that never persists,
+				// or fails to generate an id) would either return [] here or leave
+				// id empty/undefined — this assertion is falsifiable against both.
+				expect(typeof event?.id).toBe('string');
+				expect(event?.id.length).toBeGreaterThan(0);
+				expect(event).toMatchObject({
+					memoryId: 'm1',
+					runId: 'r1',
+					unitId: 't1',
+					verdict: 'APPROVE',
+					reward: 1,
+					timestamp,
+				});
+				// qBefore/qAfter were not supplied — must round-trip as absent, not 0.
+				expect(event?.qBefore).toBeUndefined();
+				expect(event?.qAfter).toBeUndefined();
+			});
+
+			test('round-trips optional qBefore/qAfter/verdictSynthesisJson fields', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-optional`);
+				const provider = track(providerCase.create(root));
+
+				await provider.appendRewardEvent?.({
+					memoryId: 'm-optional',
+					verdict: 'CONCERNS',
+					reward: 0.5,
+					qBefore: 0.6,
+					qAfter: 0.55,
+					verdictSynthesisJson: '{"summary":"partial pass"}',
+					timestamp: '2026-05-24T12:00:00.000Z',
+				});
+
+				const events = await provider.listRewardEvents?.({
+					memoryId: 'm-optional',
+				});
+				expect(events?.[0]).toMatchObject({
+					qBefore: 0.6,
+					qAfter: 0.55,
+					verdictSynthesisJson: '{"summary":"partial pass"}',
+				});
+			});
+
+			test('filters listRewardEvents by memoryId', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-filter`);
+				const provider = track(providerCase.create(root));
+
+				await provider.appendRewardEvent?.({
+					memoryId: 'm1',
+					verdict: 'APPROVE',
+					reward: 1,
+					timestamp: '2026-05-24T12:00:00.000Z',
+				});
+				await provider.appendRewardEvent?.({
+					memoryId: 'm2',
+					verdict: 'REJECT',
+					reward: 0,
+					timestamp: '2026-05-24T12:00:01.000Z',
+				});
+
+				const eventsForM1 = await provider.listRewardEvents?.({
+					memoryId: 'm1',
+				});
+				expect(eventsForM1).toHaveLength(1);
+				expect(eventsForM1?.[0].memoryId).toBe('m1');
+				// m2's event must never leak into an m1-scoped query.
+				expect(eventsForM1?.some((event) => event.memoryId === 'm2')).toBe(
+					false,
+				);
+			});
+
+			test('orders reward events by timestamp DESC', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-order`);
+				const provider = track(providerCase.create(root));
+
+				await provider.appendRewardEvent?.({
+					memoryId: 'm-order',
+					verdict: 'APPROVE',
+					reward: 1,
+					timestamp: '2026-05-24T12:00:00.000Z',
+				});
+				await provider.appendRewardEvent?.({
+					memoryId: 'm-order',
+					verdict: 'REJECT',
+					reward: 0,
+					timestamp: '2026-05-24T12:00:02.000Z',
+				});
+				await provider.appendRewardEvent?.({
+					memoryId: 'm-order',
+					verdict: 'CONCERNS',
+					reward: 0.5,
+					timestamp: '2026-05-24T12:00:01.000Z',
+				});
+
+				const events = await provider.listRewardEvents?.({
+					memoryId: 'm-order',
+				});
+				expect(events?.map((event) => event.timestamp)).toEqual([
+					'2026-05-24T12:00:02.000Z',
+					'2026-05-24T12:00:01.000Z',
+					'2026-05-24T12:00:00.000Z',
+				]);
+			});
+
+			test('honors limit on listRewardEvents', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-limit`);
+				const provider = track(providerCase.create(root));
+
+				for (let i = 0; i < 5; i++) {
+					await provider.appendRewardEvent?.({
+						memoryId: 'm-limit',
+						verdict: 'APPROVE',
+						reward: 1,
+						timestamp: `2026-05-24T12:00:0${i}.000Z`,
+					});
+				}
+
+				const limited = await provider.listRewardEvents?.({
+					memoryId: 'm-limit',
+					limit: 2,
+				});
+				expect(limited).toHaveLength(2);
+				// Limit must apply to the most-recent-first ordering, not an
+				// arbitrary subset.
+				expect(limited?.map((event) => event.timestamp)).toEqual([
+					'2026-05-24T12:00:04.000Z',
+					'2026-05-24T12:00:03.000Z',
+				]);
+			});
+
+			test('listRewardEvents returns [] (no throw) when no history exists', async () => {
+				const root = await providerRoot(`${providerCase.name}-reward-empty`);
+				const provider = track(providerCase.create(root));
+
+				const events = await provider.listRewardEvents?.({});
+				expect(events).toEqual([]);
+			});
+		});
+	}
+});
+
+describe('LocalJsonlMemoryProvider reward-events sidecar', () => {
+	test('skips a malformed line in reward-events.jsonl without failing the whole read', async () => {
+		const root = await providerRoot('jsonl-reward-malformed');
+		const provider = track(
+			new LocalJsonlMemoryProvider(root, { enabled: true }),
+		);
+		await provider.appendRewardEvent?.({
+			memoryId: 'm-valid',
+			verdict: 'APPROVE',
+			reward: 1,
+			timestamp: '2026-05-24T12:00:00.000Z',
+		});
+
+		const rewardPath = path.join(
+			root,
+			'.swarm',
+			'memory',
+			'reward-events.jsonl',
+		);
+		await fs.appendFile(rewardPath, 'not-valid-json\n', 'utf-8');
+		await fs.appendFile(rewardPath, '{"missing":"required fields"}\n', 'utf-8');
+
+		const events = await provider.listRewardEvents?.({});
+		expect(events).toHaveLength(1);
+		expect(events?.[0].memoryId).toBe('m-valid');
+	});
+});
+
+describe('LocalJsonlMemoryProvider recall-usage runId parity (A.4 cross-session fix)', () => {
+	function makeUsageEvent(
+		overrides: Partial<
+			Parameters<LocalJsonlMemoryProvider['recordRecallUsage']>[0]
+		>,
+	): Parameters<LocalJsonlMemoryProvider['recordRecallUsage']>[0] {
+		return {
+			bundleId: `bundle_${overrides.runId ?? 'default'}`,
+			query: 'test query',
+			scopes: [{ type: 'repository', repoId: 'repo-a' }],
+			memoryIds: ['m1'],
+			scores: [0.9],
+			tokenEstimate: 10,
+			timestamp: '2026-05-24T12:00:00.000Z',
+			...overrides,
+		};
+	}
+
+	test('listRecallUsage({ runId }) returns only events for that run', async () => {
+		const root = await providerRoot('jsonl-recall-run-parity');
+		const provider = track(
+			new LocalJsonlMemoryProvider(root, { enabled: true }),
+		);
+
+		await provider.recordRecallUsage?.(
+			makeUsageEvent({ runId: 'run-A', timestamp: '2026-05-24T12:00:00.000Z' }),
+		);
+		await provider.recordRecallUsage?.(
+			makeUsageEvent({ runId: 'run-B', timestamp: '2026-05-24T12:00:01.000Z' }),
+		);
+
+		const runAEvents = await provider.listRecallUsage?.({ runId: 'run-A' });
+		expect(runAEvents).toHaveLength(1);
+		expect(runAEvents?.[0].runId).toBe('run-A');
+		// The A.4 bug: filter.runId was ignored on jsonl, so run-B's event would
+		// leak into a run-A-scoped query. This assertion fails against that bug.
+		expect(runAEvents?.some((event) => event.runId === 'run-B')).toBe(false);
+	});
+
+	test('listRecallUsage({ runId, limit }) applies limit to the filtered set', async () => {
+		const root = await providerRoot('jsonl-recall-run-parity-limit');
+		const provider = track(
+			new LocalJsonlMemoryProvider(root, { enabled: true }),
+		);
+
+		for (let i = 0; i < 3; i++) {
+			await provider.recordRecallUsage?.(
+				makeUsageEvent({
+					runId: 'run-A',
+					timestamp: `2026-05-24T12:00:0${i}.000Z`,
+				}),
+			);
+		}
+		await provider.recordRecallUsage?.(
+			makeUsageEvent({ runId: 'run-B', timestamp: '2026-05-24T12:00:09.000Z' }),
+		);
+
+		const limited = await provider.listRecallUsage?.({
+			runId: 'run-A',
+			limit: 2,
+		});
+		expect(limited).toHaveLength(2);
+		expect(limited?.every((event) => event.runId === 'run-A')).toBe(true);
+		// Most-recent-first within the run-A-filtered set.
+		expect(limited?.map((event) => event.timestamp)).toEqual([
+			'2026-05-24T12:00:02.000Z',
+			'2026-05-24T12:00:01.000Z',
+		]);
+	});
+
+	test('listRecallUsage() with no filter returns events from both runs', async () => {
+		const root = await providerRoot('jsonl-recall-run-parity-unfiltered');
+		const provider = track(
+			new LocalJsonlMemoryProvider(root, { enabled: true }),
+		);
+
+		await provider.recordRecallUsage?.(
+			makeUsageEvent({ runId: 'run-A', timestamp: '2026-05-24T12:00:00.000Z' }),
+		);
+		await provider.recordRecallUsage?.(
+			makeUsageEvent({ runId: 'run-B', timestamp: '2026-05-24T12:00:01.000Z' }),
+		);
+
+		const allEvents = await provider.listRecallUsage?.();
+		expect(allEvents).toHaveLength(2);
+		expect(new Set(allEvents?.map((event) => event.runId))).toEqual(
+			new Set(['run-A', 'run-B']),
+		);
+	});
+});
+
 describe('LocalJsonlMemoryProvider', () => {
 	test('event-logs curator decisions with the structured provider payload', async () => {
 		const root = await providerRoot('local-jsonl-events');

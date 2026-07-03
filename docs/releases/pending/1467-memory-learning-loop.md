@@ -1,50 +1,22 @@
-## What changed
+# `feat(memory)`: close the learning loop — council verdicts drive EMA confidence, suppression, and promotion
 
-Issue #1467 ships memory recall learning from council verdicts:
+## Summary
 
-### Reward from council verdicts
+- **Attribution (Phase A):** each memory recall bundle now carries a `unit_id` (the plan-task id), letting a phase/final council verdict or task completion reward the exact memories that were actually used for that unit of work — not merely "whatever the session touched." A task's approval (`APPROVE` → advance to `complete`) applies an upward EMA q-value update (`q ← (1-η)·q + η·reward`, η=0.10) to its recalled memories via the shared reward mechanism (A.3/A.4).
+- **Precise & all-scope attribution + propagation (Phase B):** `submit_phase_council_verdicts` and `write_final_council_evidence` now reward session-recalled memories on their real overall verdict (`APPROVE`=1.0 / `CONCERNS`=0.5 / `REJECT`=0.0), trust-gated on a verified `ctx.sessionID` (never the model-suppliable `provenanceSessionId`). Soft Q-propagation (B.5) nudges *related* memories by a configurable fraction (`propagationRelatednessThreshold`, default 0.7) of the direct reward, so learning generalizes beyond the exact recalled record. A deterministic negative-terminal sweep (B.6) runs at `/swarm finalize` — tasks left non-complete (`close_reason='session_terminated'`) apply a `0.0` reward to their recalled memories, making suppression (q < 0.15) functionally reachable rather than positive-only.
+- **Active exploration (Phase C):** default recall occasionally (`explorationRate`, default 0.05) resurfaces an otherwise-suppressed low-q memory, flagged `explored: true`, so it can earn its way back via the same reward path. Inclusion is strictly additive at the recall-slice layer (`sliceRecallItemsWithExploration`) — it never evicts a legitimately ranked hit; normal (non-exploring) recalls are unaffected.
+- New diagnostics: `/swarm memory value-log` shows per-memory q-value evolution, recent rewards, and suppression/promotion candidacy.
 
-Council and phase-council submissions update the Q-value of memories recalled for the reviewed task, using an exponential moving average over `APPROVE`, `REJECT`, and `CONCERNS` outcomes. Recall scoring boosts high-Q memories and suppresses low-Q memories by default. Auto-promotion moves session memories whose Q-value and recall count cross configured thresholds to durable storage.
+## User-facing changes
 
-### Reward targeting: validated multi-session matching, not an unscoped fallback
+- Memory usefulness now genuinely adapts to outcomes: memories that get used in approved work rise toward promotion (q > 0.85); memories tied to abandoned or rejected work drift toward suppression (q < 0.15) and stop being injected by default.
+- No configuration changes required to benefit — the loop runs on the existing `memory.qLearning` defaults. New optional tunables: `qLearning.propagationRelatednessThreshold` (0–1, default 0.7) and `qLearning.explorationRate` (0–1, default 0.05).
 
-The reward is applied to every recall bundle whose session id is either host-derived (the submitting session's own id, trusted without further checks) or caller-supplied and validated against the tracked session registry before being trusted: each dispatched council member's own `sessionId` reported on their verdict, and an optional `provenanceSessionId`. An unrecognized or made-up caller-supplied id is dropped rather than matched. A submission with no matching recall bundle returns `no_recall_usage_for_run` — there is no "grab whatever was recalled recently" fallback, since that could reward an unrelated task's recall bundle. Repeated submissions for the same swarm/task/round are idempotent.
+## Migration notes
 
-Known limitations:
-- Matching is still per-session, not per-task/round — a session that recalls memory across more than one task/round only has its single most recent bundle considered unless distinct member session ids are reported per verdict.
-- Validating a caller-supplied session id against the tracked session registry proves the id belongs to *some* currently-active session, not that it belongs to *this specific* review — there is no session→task ownership registry today. A hallucinated or copied session id matching an unrelated, concurrently-running session would still be accepted; the risk is bounded to Q-value corruption of that other session's recalled memories, not privilege escalation.
+None required. All schema additions are additive with safe defaults (a new nullable `unit_id` column, backfilled; absent `metadata.qValue` defaults to 0.5), so existing memory stores and the jsonl provider behave unchanged until they start earning rewards.
 
-### Atomicity via `db.transaction`
+## Known limitations
 
-All Q-value update operations (including FTS shadow-index maintenance) are wrapped in `db.transaction()` to ensure atomicity. If any step fails, the entire update rolls back.
-
-### Bounded soft propagation: token overlap OR embedding cosine similarity
-
-Propagation to recently-recalled, same-scope memories qualifies via either lexical token overlap (same `kind` required) or, when `embeddings.enabled` and a provider is available, embedding cosine similarity (not restricted to the same `kind`, since embeddings capture cross-kind semantic relationships). Embeddings are disabled by default, in which case propagation is lexical-only with no added cost. Both paths are capped by `memory.learning.propagationFanout` and `memory.learning.propagationLookbackDays`.
-
-### `/swarm memory value-log` command
-
-New `swarm_memory_value_log` tool and `/swarm memory value-log` CLI command show recent Q-values, reward outcomes, suppression candidates, and promotion candidates. `/swarm memory stale` now also lists low-Q suppression candidates, and `/swarm memory pending` now also lists promotion candidates.
-
-### New `memory.learning` config block
-
-`learningRate`, `propagationFactor`, `qValueBoostWeight`, `suppressionThreshold`, `promotionThreshold`, `propagationTokenOverlapThreshold`, `propagationEmbeddingCosineThreshold`, `propagationFanout`, and `propagationLookbackDays` are all configurable under `memory.learning` — see `docs/memory.md` for defaults and an example.
-
-## Deferred in this phase
-
-- **`listMemoryValueLog` O(N) iteration:** iterates over the in-memory `memories` Map before applying filters/limit. Acceptable for typical swarm session sizes (10–100 memories); CLI-only path. SQL-level pushdown (filter+limit at the SQLite layer) is deferred to a follow-up.
-
-- **`writeMemory` per-update SQL statement count:** performs `INSERT OR REPLACE` + FTS `DELETE` + FTS `INSERT` per Q-value update. The FTS rebuild is wasted work when only the Q-value changed. A targeted `UPDATE` path that avoids FTS churn is deferred to a follow-up.
-
-- **Per-task/round reward scoping:** rewarding a session's exact recall bundle for the specific task/round under review (rather than that session's single most recent bundle) would require threading a task/round identifier through the recall-time call chain, which does not currently exist. Reporting each council member's own session id on their verdict (supported now) is the interim mitigation.
-
-## Migration version note
-
-The schema migration for this feature is `add_recall_learning_columns` at **version 7** — not v5 as issue #1467 originally specified:
-
-- **v2** is reserved by `LEGACY_JSONL_MIGRATION_VERSION` (`src/memory/jsonl-migration.ts:9`)
-- **v5** was occupied by the `create_recall_usage_timestamp_index` migration
-- **v6** was occupied by the `create_embedding_config_table` migration
-- **v7** is the first available slot for this change
-
-A follow-up migration (**version 8**, `add_recall_reward_idempotency_key`) adds a `reward_key` column used to make repeated council-verdict submissions for the same round idempotent. Both migrations tolerate a "duplicate column name" error from a losing concurrent-process race (no cross-process migration lock exists) rather than crashing `initialize()`.
+- **Injection-path attribution is coarser than the direct-recall path.** `unit_id` is populated for the orchestrator-session recall path; recalls injected into a subagent's own session currently fall back to session-scoped (`run_id`) attribution rather than per-task attribution, pending a follow-up prompt-parse enhancement.
+- **Active exploration (Phase C) does not always reach the final injected prompt** in two pre-existing configurations: (1) under the opt-in embeddings/RRF fusion path with default `minScore`, a resurfaced item can normalize below the fusion re-gate and be dropped; (2) the injection token-budget packer fills in rank order and can drop the (necessarily lowest-ranked) explored item under budget pressure. Both are documented, deliberate trade-offs — reserving injection budget for exploration would mean evicting a legitimate higher-q memory from the model-facing prompt, which is a product decision deferred to the same follow-up as the attribution enhancement above. The default (non-embeddings) recall path and direct `swarm_memory_recall` tool calls are unaffected.

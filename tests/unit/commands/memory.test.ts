@@ -280,6 +280,63 @@ describe('/swarm memory commands', () => {
 		expect(output).toContain('Rejected before many newer proposals.');
 	});
 
+	test('pending lists promotion candidates that satisfy BOTH q-value and retrieval-count thresholds (A.7)', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		// High q-value (>0.85) AND recalled more than 5 times: a true candidate.
+		const candidate = makeRecord('Frequently recalled high-utility memory.', {
+			metadata: { qValue: 0.9 },
+		});
+		// High q-value but NOT recalled enough (3 <= 5): must NOT appear.
+		const notEnoughRecalls = makeRecord(
+			'High-utility memory recalled too rarely.',
+			{ metadata: { qValue: 0.9 } },
+		);
+		// Recalled plenty but q-value NOT above threshold (0.6 <= 0.85): must NOT appear.
+		const notHighEnoughQ = makeRecord(
+			'Frequently recalled but only moderately useful memory.',
+			{ metadata: { qValue: 0.6 } },
+		);
+		try {
+			await provider.upsert(candidate);
+			await provider.upsert(notEnoughRecalls);
+			await provider.upsert(notHighEnoughQ);
+			for (const [record, count] of [
+				[candidate, 6],
+				[notEnoughRecalls, 3],
+				[notHighEnoughQ, 10],
+			] as const) {
+				for (let i = 0; i < count; i++) {
+					await provider.recordRecallUsage({
+						bundleId: `bundle_${record.id}_${i}`,
+						query: 'promotion candidate test',
+						scopes: [record.scope],
+						memoryIds: [record.id],
+						scores: [0.8],
+						tokenEstimate: 50,
+						agentRole: 'coder',
+						runId: `run-${i}`,
+						timestamp: new Date(Date.UTC(2026, 4, 25, 12, i)).toISOString(),
+					});
+				}
+			}
+		} finally {
+			provider.close();
+		}
+
+		const output = await handleMemoryPendingCommand(tmpDir, []);
+
+		expect(output).toContain('- Promotion candidates shown: `1`');
+		expect(output).toContain(
+			'### Promotion candidates (high learned utility, frequently recalled)',
+		);
+		expect(output).toContain(candidate.id);
+		expect(output).not.toContain(notEnoughRecalls.id);
+		expect(output).not.toContain(notHighEnoughQ.id);
+	});
+
 	test('recall-log summarizes usage by agent role and memory ID', async () => {
 		const provider = new SQLiteMemoryProvider(tmpDir, {
 			enabled: true,
@@ -407,6 +464,71 @@ describe('/swarm memory commands', () => {
 		expect(output).toContain('Replacement is more precise.');
 	});
 
+	test('stale renders a distinct low-learned-utility (q-value) section from the low-utility (importance) section (A.7)', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		const nowIso = new Date().toISOString();
+		// High confidence + fresh => high importance (NOT low-utility), but a
+		// suppressed q-value (<0.15) => IS low-learned-utility.
+		const lowQHighImportance = makeRecord(
+			'High-importance memory with suppressed learned utility.',
+			{
+				confidence: 0.95,
+				createdAt: nowIso,
+				updatedAt: nowIso,
+				metadata: { qValue: 0.05 },
+			},
+		);
+		// Low confidence + very stale + never recalled => IS low-utility, but a
+		// neutral (default) q-value => NOT low-learned-utility.
+		const lowUtilityHighQ = makeRecord(
+			'Stale low-confidence memory with neutral learned utility.',
+			{
+				confidence: 0.05,
+				createdAt: '2020-01-01T00:00:00.000Z',
+				updatedAt: '2020-01-01T00:00:00.000Z',
+			},
+		);
+		try {
+			await provider.upsert(lowQHighImportance);
+			await provider.upsert(lowUtilityHighQ);
+		} finally {
+			provider.close();
+		}
+
+		const output = await handleMemoryStaleCommand(tmpDir, []);
+
+		function extractSection(header: string): string | undefined {
+			const marker = `### ${header}`;
+			const idx = output.indexOf(marker);
+			if (idx === -1) return undefined;
+			const rest = output.slice(idx + marker.length);
+			const nextIdx = rest.indexOf('\n### ');
+			return nextIdx === -1 ? rest : rest.slice(0, nextIdx);
+		}
+
+		const lowUtilitySection = extractSection('Low-utility memories');
+		const lowQSection = extractSection(
+			'Low-learned-utility memories (suppressed by q-value)',
+		);
+
+		expect(output).toContain('- Low-utility memories shown: `1`');
+		expect(output).toContain(
+			'- Low-learned-utility (low-Q) memories shown: `1`',
+		);
+		expect(lowUtilitySection).toBeDefined();
+		expect(lowQSection).toBeDefined();
+		expect(lowUtilitySection).not.toBe(lowQSection);
+
+		expect(lowQSection).toContain(lowQHighImportance.id);
+		expect(lowUtilitySection).not.toContain(lowQHighImportance.id);
+
+		expect(lowUtilitySection).toContain(lowUtilityHighQ.id);
+		expect(lowQSection).not.toContain(lowUtilityHighQ.id);
+	});
+
 	test('compact is dry-run by default and requires --confirm to remove records', async () => {
 		const provider = new SQLiteMemoryProvider(tmpDir, {
 			enabled: true,
@@ -457,7 +579,10 @@ describe('/swarm memory commands', () => {
 	});
 });
 
-function makeRecord(text: string): MemoryRecord {
+function makeRecord(
+	text: string,
+	overrides: Partial<MemoryRecord> = {},
+): MemoryRecord {
 	const base = {
 		scope: {
 			type: 'repository' as const,
@@ -478,6 +603,7 @@ function makeRecord(text: string): MemoryRecord {
 		updatedAt: '2026-05-25T12:00:00.000Z',
 		contentHash: computeMemoryContentHash(base),
 		metadata: {},
+		...overrides,
 	};
 }
 

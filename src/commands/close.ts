@@ -27,6 +27,7 @@ import {
 } from '../hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
+import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
@@ -1724,6 +1725,24 @@ export async function handleCloseCommand(
 		};
 
 		await runFinalizeStage(ctx);
+
+		// ─── B.6: NEGATIVE-TERMINAL REWARD SWEEP (design decision C-6) ───
+		// Tasks left non-complete were just stamped close_reason='session_terminated'
+		// by guaranteeAllPlansComplete (populating ctx.guaranteeResult.closedTaskIds).
+		// Memories recalled into those tasks earn a 0.0 terminal reward so their
+		// q-value drifts down toward suppression (FR-001 negative / FR-006). This is
+		// the deterministic negative counterpart to A.4's positive (APPROVE→1.0)
+		// reward. Placed AFTER closedTaskIds is fully populated and BEFORE
+		// runAlignStage's destructive git ops, so the reward writes to .swarm/memory/
+		// (gitignored, outside finalize's clean allowlists) persist past finalize.
+		// Non-blocking: runFinalizeRewardSweep never throws and never alters
+		// finalize's task/archive/align behavior — it only records rewards.
+		await _internals.runFinalizeRewardSweep({
+			directory,
+			closedTaskIds: ctx.guaranteeResult.closedTaskIds,
+			memoryConfig: loadedConfig.memory,
+		});
+
 		await runArchiveStage(ctx);
 		const cleanResult = await runCleanStage(ctx);
 		const { gitAlignResult, prunedBranches } = await runAlignStage(ctx);
@@ -1964,6 +1983,7 @@ export const _internals = {
 	createCuratorLLMDelegate,
 	resetSwarmStatePreservingSingletons,
 	runFinalizeStage,
+	runFinalizeRewardSweep,
 	acquireFinalizeLock,
 	runArchiveStage,
 	runArchiveEvidenceRetention,

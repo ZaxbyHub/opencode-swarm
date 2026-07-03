@@ -1,8 +1,6 @@
-import type {
-	MemoryProposalStore,
-	MemoryProvider,
-	MemoryValueLogEntry,
-} from './provider';
+import { DEFAULT_QLEARNING_CONFIG, type QLearningConfig } from './config';
+import type { MemoryProposalStore, MemoryProvider } from './provider';
+import { getQValue } from './q-learning';
 import { isExpired } from './schema';
 import { type ImportanceWeights, importanceScore } from './scoring';
 import type { MemoryProposal, MemoryRecord } from './types';
@@ -60,8 +58,18 @@ export interface MemoryMaintenanceReport {
 	supersededMemories: MemoryRecord[];
 	supersededChains: MemorySupersededChain[];
 	lowUtilityMemories: MemoryRecord[];
-	lowQValueMemories: MemoryValueLogEntry[];
-	promotionCandidates: MemoryValueLogEntry[];
+	/**
+	 * Memories suppressed for low LEARNED utility (q-value < suppression
+	 * threshold). Distinct from `lowUtilityMemories`, which is the orthogonal
+	 * importance-based (recency/frequency/confidence) axis — see FR-006/A-1.
+	 */
+	lowQValueMemories: MemoryRecord[];
+	/**
+	 * Memories whose learned utility is above the promotion threshold AND that
+	 * have been recalled more than the configured minimum — surfaced as
+	 * candidates for promotion (not auto-promoted). FR-007.
+	 */
+	promotionCandidates: MemoryRecord[];
 	neverRecalledMemories: MemoryRecord[];
 	mostRecalledMemories: MemoryRecallUsageByMemory[];
 	recallByAgentRole: MemoryRecallUsageByRole[];
@@ -79,12 +87,13 @@ export interface MemoryMaintenanceReportOptions {
 	importanceWeights?: ImportanceWeights;
 	/** A memory is low-utility when importance < threshold. Defaults to DEFAULT_IMPORTANCE_THRESHOLD. */
 	importanceThreshold?: number;
+	/** Learned-utility (q-value) thresholds for the low-Q / promotion surfaces. Defaults to DEFAULT_QLEARNING_CONFIG. */
+	qLearning?: QLearningConfig;
 }
 
 type ObservableProvider = MemoryProvider &
 	Partial<MemoryProposalStore> & {
 		listRecallUsage?: MemoryProvider['listRecallUsage'];
-		listMemoryValueLog?: MemoryProvider['listMemoryValueLog'];
 	};
 
 export async function buildMemoryMaintenanceReport(
@@ -100,23 +109,6 @@ export async function buildMemoryMaintenanceReport(
 	const proposals = await loadMaintenanceProposals(provider, limit);
 	const recallUsage = provider.listRecallUsage
 		? await provider.listRecallUsage()
-		: [];
-	// Use the dedicated filter flags rather than fetching a single capped,
-	// unfiltered page and filtering client-side: with more memories than the
-	// fetch cap, a client-side filter over a "top-N by recency" page can
-	// silently miss real suppression/promotion candidates that fall outside
-	// that window, even though the provider can filter-then-slice correctly.
-	const suppressionValueLog = provider.listMemoryValueLog
-		? await provider.listMemoryValueLog({
-				includeSuppressionCandidatesOnly: true,
-				limit,
-			})
-		: [];
-	const promotionValueLog = provider.listMemoryValueLog
-		? await provider.listMemoryValueLog({
-				includePromotionCandidatesOnly: true,
-				limit,
-			})
 		: [];
 	const usageByMemory = summarizeRecallByMemory(recallUsage);
 	const usageByRole = summarizeRecallByRole(recallUsage);
@@ -143,6 +135,23 @@ export async function buildMemoryMaintenanceReport(
 	const neverRecalledMemories = activeMemories
 		.filter((memory) => !usageByMemory.has(memory.id))
 		.sort(memorySort);
+	const qLearning = options.qLearning ?? DEFAULT_QLEARNING_CONFIG;
+	const lowQValueMemories = activeMemories
+		.filter(
+			(memory) =>
+				getQValue(memory, qLearning.initialQValue) <
+				qLearning.suppressionThreshold,
+		)
+		.sort(memorySort);
+	const promotionCandidates = activeMemories
+		.filter(
+			(memory) =>
+				getQValue(memory, qLearning.initialQValue) >
+					qLearning.promotionThreshold &&
+				(usageByMemory.get(memory.id)?.count ?? 0) >
+					qLearning.promotionMinRetrievals,
+		)
+		.sort(memorySort);
 	const rejectedProposalReasons = proposals
 		.filter((proposal) => proposal.status === 'rejected')
 		.sort(proposalSort);
@@ -159,8 +168,8 @@ export async function buildMemoryMaintenanceReport(
 		supersededMemories: supersededMemories.slice(0, limit),
 		supersededChains: buildSupersededChains(memories).slice(0, limit),
 		lowUtilityMemories: lowUtilityMemories.slice(0, limit),
-		lowQValueMemories: suppressionValueLog.slice(0, limit),
-		promotionCandidates: promotionValueLog.slice(0, limit),
+		lowQValueMemories: lowQValueMemories.slice(0, limit),
+		promotionCandidates: promotionCandidates.slice(0, limit),
 		neverRecalledMemories: neverRecalledMemories.slice(0, limit),
 		mostRecalledMemories: Array.from(usageByMemory.values())
 			.sort(
