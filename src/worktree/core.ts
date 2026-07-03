@@ -346,7 +346,95 @@ export async function provisionWorktree(
 		directory,
 	);
 	if (checkResult.exitCode === 0) {
-		return { error: `Branch already exists: ${branchName}` };
+		// Branch exists — reconcile stale vs active worktree (FR-004)
+		//
+		// Always inspect ALL registered worktrees (not just the expected path).
+		// A branch checked out in a different registered worktree (different
+		// worktree_dir, shortened temp path, or previous concurrent session)
+		// must be treated as an active collision even when the expected path
+		// is missing on disk. Without this check, `git worktree add -f` would
+		// silently create a second checkout of an active branch.
+		const listResult = await runGit(
+			['worktree', 'list', '--porcelain'],
+			directory,
+		);
+
+		const normalizeGitPath = (p: string) =>
+			p.replace(/\\/g, '/').replace(/\/+$/, '');
+		const expectedPath = normalizeGitPath(worktreePath);
+
+		// Parse all worktree entries from porcelain output.
+		// Each entry has a "worktree <path>" line and optionally a
+		// "branch refs/heads/<name>" line.
+		interface ParsedWorktree {
+			path: string;
+			branch: string | undefined;
+		}
+		const entries: ParsedWorktree[] = [];
+		let current: ParsedWorktree = { path: '', branch: undefined };
+
+		if (listResult.exitCode !== 0) {
+			const raw = listResult.stderr.trim() || listResult.stdout.trim();
+			const bounded =
+				raw.length > 500 ? `${raw.slice(0, 500)}... (truncated)` : raw;
+			return {
+				error: `worktree enumeration failed: ${bounded}`,
+			};
+		}
+
+		for (const rawLine of listResult.stdout.split('\n')) {
+			const line = rawLine.trim();
+			if (line.startsWith('worktree ')) {
+				if (current.path) entries.push(current);
+				current = {
+					path: normalizeGitPath(line.slice('worktree '.length)),
+					branch: undefined,
+				};
+			} else if (line.startsWith('branch ')) {
+				current.branch = line.slice('branch '.length);
+			}
+		}
+		if (current.path) entries.push(current);
+
+		// Case (b) active collision: branch is checked out in ANY registered
+		// worktree, OR the expected path is itself registered (regardless of
+		// on-disk presence).
+		const branchIsActiveSomewhere = entries.some(
+			(e) => e.branch === `refs/heads/${branchName}`,
+		);
+		const expectedPathIsRegistered = entries.some(
+			(e) => e.path === expectedPath,
+		);
+
+		if (branchIsActiveSomewhere || expectedPathIsRegistered) {
+			return {
+				error: `Branch already exists and worktree is active: ${branchName} (owned by another session)`,
+			};
+		}
+
+		// Case (a): branch exists but is NOT registered in any active worktree — adopt it
+		console.warn(
+			`[swarm] adopting existing branch ${branchName} (stale worktree)`,
+		);
+
+		// Adopt: check out the existing branch into the worktree path
+		const adoptResult = await runGit(
+			['worktree', 'add', '-f', worktreePath, branchName],
+			directory,
+		);
+		if (adoptResult.exitCode !== 0) {
+			return {
+				error: `Failed to adopt existing worktree: ${adoptResult.stderr.trim() || adoptResult.stdout.trim()}`,
+			};
+		}
+
+		return {
+			worktreePath,
+			branchName,
+			purpose: options.purpose,
+			id,
+			sessionId,
+		};
 	}
 
 	// Create the worktree: git worktree add -b <branch> <path> HEAD

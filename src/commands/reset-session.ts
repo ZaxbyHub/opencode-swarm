@@ -4,6 +4,25 @@ import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
 import { swarmState } from '../state';
+import {
+	cleanupOrphanedBranches,
+	type OrphanCleanupResult,
+} from '../worktree/merge';
+
+/**
+ * _internals DI seam for testing reset-session without spawning real git processes.
+ * Production code calls `_internals.cleanupOrphanedBranches(...)` so tests can
+ * replace the function on this object without touching the real worktree/merge
+ * module. Mutations are file-scoped and trivially restorable via afterEach.
+ */
+export const _internals: {
+	cleanupOrphanedBranches: (
+		directory: string,
+		activeSessionIds: string[],
+	) => Promise<OrphanCleanupResult>;
+} = {
+	cleanupOrphanedBranches,
+};
 
 function errorMessage(err: unknown): string {
 	if (err instanceof Error) return err.message;
@@ -78,6 +97,39 @@ export async function handleResetSessionCommand(
 	const chainCount = swarmState.delegationChains.size;
 	swarmState.delegationChains.clear();
 	results.push(`✅ Cleared ${chainCount} delegation chain(s)`);
+
+	// Best-effort: clean stale worktree directories and orphan branches
+	const worktreesDir = path.resolve(
+		path.dirname(directory),
+		'.swarm-worktrees',
+	);
+	try {
+		if (fs.existsSync(worktreesDir)) {
+			fs.rmSync(worktreesDir, { recursive: true, force: true });
+			results.push('✅ Removed .swarm-worktrees/ directory');
+		}
+	} catch (err) {
+		results.push(`⚠️ Failed to remove .swarm-worktrees/: ${errorMessage(err)}`);
+	}
+
+	try {
+		const branchResult = await _internals.cleanupOrphanedBranches(
+			directory,
+			[],
+		);
+		if (branchResult.removed.length > 0) {
+			results.push(
+				`✅ Removed ${branchResult.removed.length} orphan swarm-lane branch(es)`,
+			);
+		}
+		if (branchResult.errors.length > 0) {
+			results.push(
+				`⚠️ Failed to remove ${branchResult.errors.length} branch(es): ${branchResult.errors.map((e) => e.error).join('; ')}`,
+			);
+		}
+	} catch (err) {
+		results.push(`⚠️ Failed to cleanup orphan branches: ${errorMessage(err)}`);
+	}
 
 	return [
 		'## Session State Reset',

@@ -52,8 +52,22 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
   (status: pending, in_progress, blocked) MUST NOT be removed without explicit
   user confirmation — surface the list to the user and ask before populating
   removed_task_ids.
-- While .swarm/spec-staleness.json exists, the runtime STRUCTURALLY BLOCKS the
-  following tools (SPEC_DRIFT_BLOCKED_TOOLS): save_plan, update_task_status,
-  phase_complete, lean_turbo_run_phase, lean_turbo_acquire_locks. If a call
-  returns SPEC_DRIFT_BLOCK, do NOT retry; surface the drift to the user and
-  WAIT for them to run /swarm clarify or /swarm acknowledge-spec-drift.
+ - While .swarm/spec-staleness.json exists, the runtime STRUCTURALLY BLOCKS the
+   following tools (SPEC_DRIFT_BLOCKED_TOOLS): save_plan, update_task_status,
+   phase_complete, lean_turbo_run_phase, lean_turbo_acquire_locks. If a call
+   returns SPEC_DRIFT_BLOCK, do NOT retry; surface the drift to the user and
+   WAIT for them to run /swarm clarify or /swarm acknowledge-spec-drift.
+
+6l. OBLIGATION TRACEABILITY CHECK (FR-003):
+- Before the critic's substantive rubric, the critic MUST cross-reference every
+  MUST/SHALL SC-### obligation in .swarm/spec.md against the plan tasks.
+- If ANY MUST/SHALL SC-### has zero corresponding plan tasks, the critic MUST
+  return VERDICT: REJECTED enumerating each unmapped obligation.
+- The critic MUST evaluate coverage against the FULL plan — each task's
+  description AND acceptance criteria. An SC-### is "mapped" if referenced
+  in ANY task's description OR acceptance field. Read plan.json (the structured
+  plan object) rather than relying solely on plan.md, which omits acceptance
+  criteria.
+- This is a structural-completeness failure, not a style concern.
+- The detection logic mirrors the existing ANALYZE-mode SC-### coverage check
+  (see src/agents/critic.ts ANALYZE mode, step 4).

@@ -306,9 +306,24 @@ PHASE COUNT GUIDANCE:
 Also create .swarm/context.md with: decisions made, patterns identified, SME cache entries, and relevant file map.
 
 TRACEABILITY CHECK (run after plan is written, when spec.md exists):
-- Every FR-### in spec.md MUST map to at least one task → unmapped FRs = coverage gap, flag to user
-- Every task MUST reference its source FR-### in the description or acceptance field → tasks with no FR = potential gold-plating, flag to critic
-- Report: "TRACEABILITY: <N> FRs mapped, <M> unmapped FRs (gap), <K> tasks with no FR mapping (gold-plating risk)"
+
+OBLIGATION TRACEABILITY — STRUCTURAL COMPLETENESS PRECONDITION
+The obligation-traceability mapping is a STRUCTURAL COMPLETENESS precondition. It MUST be evaluated BEFORE the critic begins its substantive 5-axis/7-dimension rubric. An unmapped MUST/SHALL obligation makes the plan structurally incomplete — it is not an afterthought.
+
+1. FR-### MAPPING (existing requirement):
+   - Every FR-### in spec.md MUST map to at least one task → unmapped FRs = coverage gap, flag to user
+   - Every task MUST reference its source FR-### in the description or acceptance field → tasks with no FR = potential gold-plating, flag to critic
+
+2. SC-### MAPPING (MUST/SHALL obligations):
+   - Parse spec.md for every SC-### line whose obligation text contains MUST or SHALL/SHALL NOT
+   - Each such MUST/SHALL SC-### MUST be referenced by ≥1 task's description or acceptance field
+   - Unmapped MUST/SHALL SC-### are structural coverage gaps that must be resolved — surface them prominently, not buried
+   - A plan where every MUST/SHALL SC-### is referenced by ≥1 task passes this check and is not blocked by it
+   - This skill section surfaces gaps for the critic-gate to enforce. The actual REJECT-enforcement at the critic-gate is a separate step.
+
+REPORT FORMAT:
+"TRACEABILITY: <N> FRs mapped, <M> unmapped FRs (gap), <K> tasks with no FR mapping (gold-plating risk), <P> MUST/SHALL SCs mapped, <Q> unmapped MUST/SHALL SCs (structural gap)"
+
 - If no spec.md: skip this check silently.
 
 ### Transition to CRITIC-GATE

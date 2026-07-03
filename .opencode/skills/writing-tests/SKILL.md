@@ -277,6 +277,37 @@ afterEach(() => mock.restore());
 | Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
 | File-scoped mock (applies to all tests in file) | `mock.module` at top level + `mockReset()` in `beforeEach` | Preflight tests with `mockLoadPlan.mockReset()` |
 
+## Mock Coverage Documentation
+
+When a test fixture mocks fewer than 100% of a target function's branches, the test MUST document, in a comment, which paths/branches are untested and the rationale for not covering them. Partial-coverage mock decisions must be explicit and reviewable instead of silent.
+
+### Why this matters
+
+A narrow mock can produce hollow coverage: the test passes because the mocked path returns a favorable result, but downstream branches that the real code would exercise remain untested. When the unmocked branches later fail, the failure is misdiagnosed as an unrelated regression because the test appeared to cover the caller.
+
+**Motivating case:** `tests/unit/turbo/lean/runtime-conformance.test.ts:457` mocks only `readCriticEvidence` → `APPROVED`, leaving downstream gates (retrospective evidence, drift-verifier, completion-verify) unmocked. The assertion `expect(parsed.status).not.toBe('blocked')` passed, but coverage was hollow. A later failure was initially misdiagnosed as an unrelated minification regression because the test gave false confidence that the caller's gate sequence was exercised.
+
+### Required comment format
+
+For any mock that does not cover all branches of the target function, add a comment near the mock declaration listing:
+1. Which branches/paths are untested.
+2. Why they are not covered in this test (e.g., "covered by `runtime-conformance.complete.test.ts`", "requires live critic evidence store", "tested at integration level in `tests/integration/...`").
+
+```typescript
+// Example — partial mock with documented coverage gap
+mock.module('../../../src/turbo/lean/runtime-conformance', () => ({
+  ...realModule,
+  // readCriticEvidence mocked to APPROVED only.
+  // Untested branches: RETRY, REJECT, and the downstream gates
+  // (retrospective evidence, drift-verifier, completion-verify) that
+  // depend on non-APPROVED critic verdicts. Rationale: those paths
+  // are covered by tests/unit/turbo/lean/runtime-conformance.complete.test.ts.
+  readCriticEvidence: mock(() => 'APPROVED'),
+}));
+```
+
+This requirement applies to all three mock tiers (`_test_exports`, `_internals`, `mock.module`) whenever the mock narrows the exercised branch set.
+
 ## mock.module() Export Completeness
 
 When using `mock.module()` (or `vi.mock()`) with Bun's test runner, the mock factory **MUST provide stubs for ALL named exports** of the target module — not just the ones your test calls. Bun validates the export set at dynamic-import time and throws `SyntaxError: Export named 'X' not found` if any export is missing.
