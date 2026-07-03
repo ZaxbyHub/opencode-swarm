@@ -19,14 +19,14 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
 import type { CuratorLLMDelegate } from './curator.js';
+import type { KnowledgeRecommendation } from './curator-types.js';
 import { readKnowledgeEvents } from './knowledge-events.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import { readKnowledge, resolveSwarmKnowledgePath } from './knowledge-store.js';
-import type { KnowledgeRecommendation } from './curator-types.js';
 import type {
+	KnowledgeCategory,
 	KnowledgeConfig,
 	KnowledgeEntryBase,
-	KnowledgeCategory,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
