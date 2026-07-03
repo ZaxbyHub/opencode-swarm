@@ -610,7 +610,10 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	curate: {
-		handler: (ctx) => handleCurateCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleCurateCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
 		description: 'Run knowledge curation and hive promotion review',
 		args: '',
 		category: 'utility',
@@ -691,8 +694,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Run the post-mortem agent: project-end synthesis, queue triage, and final curation pass',
 		details:
-			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed.',
-		args: '--force',
+			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed. Use --scope session to limit knowledge event aggregation to the current session; project scope is the default.',
+		args: '--force, --scope session|project',
 		category: 'core',
 		toolPolicy: 'agent',
 	},

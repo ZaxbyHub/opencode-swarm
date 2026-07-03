@@ -862,6 +862,8 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 					'postmortem',
 					ctx.options.sessionID,
 				),
+				scope: 'project',
+				sessionID: ctx.options.sessionID,
 			});
 			if (pmResult.success && pmResult.summary) {
 				ctx.postMortemSummary = pmResult.summary;
@@ -1104,6 +1106,35 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			}
 		}
 
+		const dynamicArchiveArtifacts = (
+			await fs.readdir(ctx.swarmDir).catch(() => [] as string[])
+		).filter(
+			(name) =>
+				/^post-mortem-[^/\\]+\.md$/.test(name) ||
+				/^drift-report-phase-\d+\.json$/.test(name),
+		);
+		for (const artifact of dynamicArchiveArtifacts) {
+			const srcPath = path.join(ctx.swarmDir, artifact);
+			const destPath = path.join(ctx.archiveDir, artifact);
+			try {
+				await fs.copyFile(srcPath, destPath);
+				ctx.archivedFileCount++;
+				ctx.archivedActiveStateFiles.add(artifact);
+			} catch (err: unknown) {
+				const errno = (err as NodeJS.ErrnoException)?.code;
+				if (errno !== 'ENOENT') {
+					const reason = err instanceof Error ? err.message : String(err);
+					ctx.archiveFailureReasons.set(
+						artifact,
+						`${errno ?? 'unknown'}: ${reason}`,
+					);
+					ctx.warnings.push(
+						`Failed to archive ${artifact} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
+					);
+				}
+			}
+		}
+
 		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
 		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
 			const srcDir = path.join(ctx.swarmDir, dirName);
@@ -1271,6 +1302,27 @@ export async function runCleanStage(
 		ctx.warnings.push(
 			'Skipped active-state cleanup because no active-state files were archived. Files preserved to prevent data loss.',
 		);
+	}
+
+	for (const artifact of ctx.archivedActiveStateFiles) {
+		if (
+			!/^post-mortem-[^/\\]+\.md$/.test(artifact) &&
+			!/^drift-report-phase-\d+\.json$/.test(artifact)
+		) {
+			continue;
+		}
+		try {
+			await fs.unlink(path.join(ctx.swarmDir, artifact));
+			cleanedFiles.push(artifact);
+		} catch (err) {
+			const errno = (err as NodeJS.ErrnoException)?.code;
+			if (errno !== 'ENOENT') {
+				const reason = err instanceof Error ? err.message : String(err);
+				ctx.warnings.push(
+					`Failed to clean active-state file ${artifact} [${errno ?? 'unknown'}]: ${reason}`,
+				);
+			}
+		}
 	}
 
 	// Delete directories that were successfully archived

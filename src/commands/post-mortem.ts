@@ -11,6 +11,42 @@ export const _internals = {
 	runCuratorPostMortem,
 };
 
+function parsePostMortemArgs(args: string[]): {
+	force: boolean;
+	scope: 'session' | 'project';
+	error?: string;
+} {
+	let scope: 'session' | 'project' = 'project';
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === '--scope') {
+			const value = args[i + 1];
+			if (value !== 'session' && value !== 'project') {
+				return {
+					force: args.includes('--force'),
+					scope,
+					error: 'Invalid --scope value. Use --scope session or --scope project.',
+				};
+			}
+			scope = value;
+			i++;
+			continue;
+		}
+		if (arg.startsWith('--scope=')) {
+			const value = arg.slice('--scope='.length);
+			if (value !== 'session' && value !== 'project') {
+				return {
+					force: args.includes('--force'),
+					scope,
+					error: 'Invalid --scope value. Use --scope=session or --scope=project.',
+				};
+			}
+			scope = value;
+		}
+	}
+	return { force: args.includes('--force'), scope };
+}
+
 // ── Command handler ───────────────────────────────────────────────────
 
 export async function handlePostMortemCommand(
@@ -19,10 +55,15 @@ export async function handlePostMortemCommand(
 	options?: { sessionID?: string },
 ): Promise<string> {
 	try {
-		const force = args.includes('--force');
+		const parsedArgs = parsePostMortemArgs(args);
+		if (parsedArgs.error) {
+			return parsedArgs.error;
+		}
 
 		const pmOptions: PostMortemOptions = {
-			force,
+			force: parsedArgs.force,
+			scope: parsedArgs.scope,
+			sessionID: options?.sessionID,
 		};
 
 		if (options?.sessionID) {

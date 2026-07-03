@@ -372,9 +372,18 @@ describe('runCuratorPostMortem', () => {
 		writeFileSync(
 			join(swarmDir, 'drift-report-phase-1.json'),
 			JSON.stringify({
+				schema_version: 1,
 				phase: 1,
+				timestamp: new Date().toISOString(),
 				alignment: 'ALIGNED',
 				drift_score: 0.0,
+				first_deviation: null,
+				compounding_effects: [],
+				corrections: [],
+				requirements_checked: 0,
+				requirements_satisfied: 0,
+				scope_additions: [],
+				injection_summary: '',
 			}),
 		);
 

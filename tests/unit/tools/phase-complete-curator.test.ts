@@ -345,8 +345,12 @@ describe('phase_complete - curator pipeline', () => {
 			// applyCuratorKnowledgeUpdates should be called after runCuratorPhase
 			expect(mockApplyCuratorKnowledgeUpdates).toHaveBeenCalled();
 
-			// runDeterministicDriftCheck is no longer called from phase_complete
-			expect(mockRunDeterministicDriftCheck).not.toHaveBeenCalled();
+			// Advisory drift runs after curator updates, but it must not recreate
+			// the old critic_drift_verifier evidence gate.
+			expect(mockRunDeterministicDriftCheck).toHaveBeenCalled();
+			expect(
+				fs.existsSync(path.join(tempDir, '.swarm', 'drift-verifier.json')),
+			).toBe(false);
 		});
 	});
 

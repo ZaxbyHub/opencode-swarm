@@ -1049,6 +1049,26 @@ export async function executePhaseComplete(
 				curatorResult.knowledge_recommendations,
 				knowledgeConfig,
 			);
+			try {
+				const { runDeterministicDriftCheck } = await import(
+					'../hooks/curator-drift'
+				);
+				await runDeterministicDriftCheck(
+					dir,
+					phase,
+					curatorResult,
+					curatorConfig,
+					(message) => {
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (sessionState) {
+							sessionState.pendingAdvisoryMessages ??= [];
+							sessionState.pendingAdvisoryMessages.push(message);
+						}
+					},
+				);
+			} catch {
+				// Non-blocking: drift reports are advisory and must not gate phase completion.
+			}
 			// Advisory injection: push actionable curator message to architect session
 			const callerSessionState = swarmState.agentSessions.get(sessionID);
 			if (callerSessionState) {
@@ -1844,6 +1864,8 @@ export async function executePhaseComplete(
 					);
 					const pmResult = await runCuratorPostMortem(dir, {
 						llmDelegate: createCuratorLLMDelegate(dir, 'postmortem', sessionID),
+						scope: 'project',
+						sessionID,
 					});
 					if (pmResult.success && pmResult.summary) {
 						warnings.push(`[POST-MORTEM] ${pmResult.summary}`);

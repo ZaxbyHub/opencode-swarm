@@ -128,10 +128,12 @@ export const _internals = {
 	readKnowledge,
 	reviseSkill,
 	getSkillVersion,
+	readLatestPostMortemDigest: (directory: string) =>
+		readLatestPostMortemDigest(directory),
 };
 
 export interface RecommendationParseDiagnostic {
-	section: 'OBSERVATIONS' | 'KNOWLEDGE_UPDATES';
+	section: 'OBSERVATIONS';
 	line: string;
 	reason: string;
 }
@@ -316,56 +318,6 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 
 			recommendations.push({
 				action,
-				entry_id: entryId,
-				lesson: text,
-				reason: text,
-			});
-		}
-	}
-
-	// Parse KNOWLEDGE_UPDATES: section (direct format: "- <action> <id>: <text>")
-	const updatesSection = llmOutput.match(
-		/KNOWLEDGE_UPDATES:\s*\n([\s\S]*?)(?:\n\n|\n[A-Z_]+:|$)/,
-	);
-	if (updatesSection) {
-		const validActions = new Set([
-			'promote',
-			'archive',
-			'rewrite',
-			'flag_contradiction',
-		]);
-		const lines = updatesSection[1].split('\n');
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed.startsWith('-')) continue;
-
-			// Match "- <action> <id>: <text>"
-			const match = trimmed.match(/^-\s+(\S+)\s+(\S+):\s+(.+)$/);
-			if (!match) {
-				diagnostics.push({
-					section: 'KNOWLEDGE_UPDATES',
-					line: trimmed,
-					reason: 'expected "- <action> <id>: <text>"',
-				});
-				continue;
-			}
-
-			const action = match[1].toLowerCase();
-			if (!validActions.has(action)) {
-				diagnostics.push({
-					section: 'KNOWLEDGE_UPDATES',
-					line: trimmed,
-					reason: `unknown action "${action}"`,
-				});
-				continue;
-			}
-
-			const id = match[2];
-			const text = match[3].trim();
-			const entryId = UUID_V4.test(id) ? id : undefined;
-
-			recommendations.push({
-				action: action as KnowledgeRecommendation['action'],
 				entry_id: entryId,
 				lesson: text,
 				reason: text,
@@ -568,6 +520,32 @@ function arrayOfStrings(v: unknown): string[] {
 		.filter((x) => typeof x === 'string')
 		.map((x) => (x as string).slice(0, 200))
 		.slice(0, 20);
+}
+
+function readLatestPostMortemDigest(directory: string): string | null {
+	try {
+		const swarmDir = path.join(directory, '.swarm');
+		if (!fs.existsSync(swarmDir)) return null;
+		const candidates = fs
+			.readdirSync(swarmDir)
+			.filter((name) => /^post-mortem-[^/\\]+\.md$/.test(name))
+			.map((name) => {
+				const filePath = path.join(swarmDir, name);
+				return { name, filePath, mtimeMs: fs.statSync(filePath).mtimeMs };
+			})
+			.sort((a, b) => b.mtimeMs - a.mtimeMs);
+		const latest = candidates[0];
+		if (!latest) return null;
+		const content = fs.readFileSync(latest.filePath, 'utf-8');
+		const summary = content.match(/SUMMARY:\s*\n([\s\S]*?)(?:\n[A-Z_]+:|\n##|$)/);
+		const body = (summary?.[1]?.trim() || content.slice(0, 1500)).slice(
+			0,
+			1500,
+		);
+		return `${latest.name}\n${body}`;
+	} catch {
+		return null;
+	}
 }
 
 function clampConf(v: unknown): number {
@@ -932,6 +910,14 @@ export async function runCuratorInit(
 			briefingParts.push(contextMd.slice(0, maxContextChars));
 		}
 
+		const latestPostMortemDigest = _internals.readLatestPostMortemDigest(
+			directory,
+		);
+		if (latestPostMortemDigest) {
+			briefingParts.push('\n## Latest Post-Mortem');
+			briefingParts.push(latestPostMortemDigest);
+		}
+
 		// 5. Find contradictions in knowledge entries (entries with 'contradiction' in tags)
 		const contradictions = allEntries
 			.filter(
@@ -968,6 +954,7 @@ export async function runCuratorInit(
 					`PRIOR_SUMMARY: ${priorSummary ? JSON.stringify(priorSummary) : 'none'}`,
 					`KNOWLEDGE_ENTRIES: ${JSON.stringify(allEntriesForCurator)}`,
 					`PROJECT_CONTEXT: ${contextMd?.slice(0, config.max_summary_tokens * 2) ?? 'none'}`,
+					`POST_MORTEM_DIGEST: ${latestPostMortemDigest ?? 'none'}`,
 				].join('\n');
 
 				const systemPrompt = CURATOR_INIT_PROMPT;

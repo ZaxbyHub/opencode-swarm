@@ -38,7 +38,7 @@ describe('curator LLM delegation', () => {
 		const delegate: CuratorLLMDelegate = vi
 			.fn()
 			.mockResolvedValue(
-				'KNOWLEDGE_UPDATES:\n- promote entry_1: good lesson\n',
+				'OBSERVATIONS:\n- new candidate: good lesson with enough durable detail\n',
 			);
 		const result = await runCuratorPhase(
 			'/tmp/test',
@@ -85,7 +85,7 @@ describe('curator LLM delegation', () => {
 
 	test('parseKnowledgeRecommendations parses promote actions', () => {
 		const output =
-			'KNOWLEDGE_UPDATES:\n- promote entry_1: good lesson\n- archive entry_2: outdated\n';
+			'OBSERVATIONS:\n- new candidate: good lesson with enough durable detail\n- entry 550e8400-e29b-41d4-a716-446655440000 appears stale: outdated\n';
 		const recs = parseKnowledgeRecommendations(output);
 		expect(recs).toHaveLength(2);
 		expect(recs[0].action).toBe('promote');

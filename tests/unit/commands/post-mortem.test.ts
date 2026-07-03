@@ -113,6 +113,43 @@ describe('handlePostMortemCommand (FR-002)', () => {
 
 			expect(capturedForce).toBe(false);
 		});
+
+		it('passes session scope and session ID to runCuratorPostMortem', async () => {
+			let capturedScope: string | undefined;
+			let capturedSessionID: string | undefined;
+			pmInternals.runCuratorPostMortem = mock(
+				async (
+					_dir: string,
+					options: { scope?: string; sessionID?: string },
+				) => {
+					capturedScope = options.scope;
+					capturedSessionID = options.sessionID;
+					return {
+						success: true,
+						planId: 'test',
+						reportPath: null,
+						summary: null,
+						warnings: [],
+					};
+				},
+			);
+
+			await handlePostMortemCommand(testDir, ['--scope', 'session'], {
+				sessionID: 'session-1684',
+			});
+
+			expect(capturedScope).toBe('session');
+			expect(capturedSessionID).toBe('session-1684');
+		});
+
+		it('rejects invalid scope values before running post-mortem', async () => {
+			const result = await handlePostMortemCommand(testDir, [
+				'--scope=workspace',
+			]);
+
+			expect(result).toContain('Invalid --scope value');
+			expect(pmInternals.runCuratorPostMortem).not.toHaveBeenCalled();
+		});
 	});
 
 	// ── Test 2: LLM delegate creation failure → data-only fallback ────
