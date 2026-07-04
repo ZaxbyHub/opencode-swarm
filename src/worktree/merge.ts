@@ -170,6 +170,7 @@ export interface DirtyMergePartial {
 	autoCommitted: boolean;
 	cleaned: boolean;
 	message: string;
+	conflictFiles?: string[];
 }
 
 export interface DirtyMergeFailure {
@@ -477,6 +478,7 @@ export async function attemptMergeBackFromDirty(
 			autoCommitted,
 			cleaned,
 			message: mergeResult.message,
+			conflictFiles: mergeResult.files,
 		};
 	}
 

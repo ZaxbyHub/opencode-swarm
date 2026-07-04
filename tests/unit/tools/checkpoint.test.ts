@@ -174,7 +174,7 @@ describe('checkpoint tool', () => {
 			expect(parsed.success).toBe(true);
 			expect(parsed.label).toBe('restore-me');
 			expect(parsed.sha).toBe(checkpointSha);
-			expect(parsed.message).toContain('soft reset');
+			expect(parsed.message).toContain('hard reset');
 		});
 
 		test('returns error for non-existent checkpoint', async () => {

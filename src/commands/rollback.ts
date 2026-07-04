@@ -1,9 +1,113 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ToolContext } from '@opencode-ai/plugin';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { validateSwarmPath } from '../hooks/utils';
 import { appendLedgerEvent, computePlanHash, initLedger } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
+import { checkpoint as checkpointTool } from '../tools/checkpoint.js';
+import type { ToolResult } from '../tools/create-tool';
+
+type LegacyCheckpoint = { phase: number; label?: string; timestamp: string };
+type GitCheckpoint = { label: string; sha: string; timestamp: string };
+
+function safeParseToolJson(result: ToolResult): unknown {
+	try {
+		const jsonStr = typeof result === 'string' ? result : result.output;
+		return JSON.parse(jsonStr);
+	} catch {
+		return null;
+	}
+}
+
+async function listGitCheckpoints(
+	directory: string,
+): Promise<GitCheckpoint[] | null> {
+	try {
+		const result = await checkpointTool.execute({ action: 'list' }, {
+			directory,
+		} as ToolContext);
+		const parsed = safeParseToolJson(result) as {
+			success?: boolean;
+			checkpoints?: GitCheckpoint[];
+		};
+		if (!parsed) return null;
+		if (parsed.success !== true || !Array.isArray(parsed.checkpoints)) {
+			return null;
+		}
+		return parsed.checkpoints;
+	} catch {
+		return null;
+	}
+}
+
+function formatGitCheckpointList(checkpoints: GitCheckpoint[]): string {
+	if (checkpoints.length === 0) {
+		return 'No checkpoints found. Create one with `/swarm checkpoint save <label>`';
+	}
+
+	return [
+		'## Available Checkpoints',
+		'',
+		...checkpoints.map(
+			(c, index) =>
+				`- ${index + 1}. "${c.label}" - ${new Date(c.timestamp).toLocaleString()} (${c.sha.slice(0, 12)})`,
+		),
+		'',
+		'Run `/swarm rollback <label-or-number>` to restore to a checkpoint.',
+	].join('\n');
+}
+
+function resolveGitCheckpoint(
+	checkpoints: GitCheckpoint[],
+	selector: string,
+): GitCheckpoint | null {
+	const index = Number.parseInt(selector, 10);
+	if (/^\d+$/.test(selector) && index >= 1 && index <= checkpoints.length) {
+		return checkpoints[index - 1] ?? null;
+	}
+	return checkpoints.find((c) => c.label === selector) ?? null;
+}
+
+async function restoreGitCheckpoint(
+	directory: string,
+	selected: GitCheckpoint,
+): Promise<string> {
+	const result = await checkpointTool.execute(
+		{ action: 'restore', label: selected.label },
+		{ directory } as ToolContext,
+	);
+	const parsed = safeParseToolJson(result) as {
+		success?: boolean;
+		error?: string;
+	};
+	if (!parsed) {
+		return `Error: Failed to parse checkpoint response for "${selected.label}"`;
+	}
+	if (parsed.success !== true) {
+		return `Error: ${parsed.error || `Failed to restore checkpoint "${selected.label}"`}`;
+	}
+
+	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+	const rollbackEvent = {
+		type: 'rollback',
+		label: selected.label,
+		sha: selected.sha,
+		timestamp: new Date().toISOString(),
+		source: 'checkpoints.json',
+	};
+
+	try {
+		fs.appendFileSync(eventsPath, `${JSON.stringify(rollbackEvent)}\n`);
+	} catch (error) {
+		console.error(
+			'Failed to write rollback event:',
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+
+	return `Rolled back to checkpoint "${selected.label}" (${selected.sha.slice(0, 12)})`;
+}
 
 /**
  * Handle /swarm rollback command
@@ -23,12 +127,14 @@ export async function handleRollbackCommand(
 			'checkpoints/manifest.json',
 		);
 		if (!fs.existsSync(manifestPath)) {
-			return 'No checkpoints found. Use `/swarm checkpoint` to create checkpoints.';
+			const gitCheckpoints = await listGitCheckpoints(directory);
+			if (gitCheckpoints) {
+				return formatGitCheckpointList(gitCheckpoints);
+			}
+			return 'No checkpoints found. Use `/swarm checkpoint save <label>` to create checkpoints.';
 		}
 
-		let manifest: {
-			checkpoints?: Array<{ phase: number; label?: string; timestamp: string }>;
-		};
+		let manifest: { checkpoints?: LegacyCheckpoint[] };
 		try {
 			manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
 		} catch {
@@ -58,7 +164,15 @@ export async function handleRollbackCommand(
 
 	const targetPhase = parseInt(phaseArg, 10);
 	if (Number.isNaN(targetPhase) || targetPhase < 1) {
-		return 'Error: Phase number must be a positive integer.';
+		const gitCheckpoints = await listGitCheckpoints(directory);
+		if (!gitCheckpoints) {
+			return 'Error: Phase number must be a positive integer.';
+		}
+		const selected = resolveGitCheckpoint(gitCheckpoints, phaseArg);
+		if (!selected) {
+			return `Error: Checkpoint "${phaseArg}" not found. Available checkpoints: ${gitCheckpoints.map((c) => `"${c.label}"`).join(', ') || 'none'}`;
+		}
+		return restoreGitCheckpoint(directory, selected);
 	}
 
 	// Validate checkpoint exists
@@ -67,12 +181,18 @@ export async function handleRollbackCommand(
 		'checkpoints/manifest.json',
 	);
 	if (!fs.existsSync(manifestPath)) {
-		return `Error: No checkpoints found. Cannot rollback to phase ${targetPhase}.`;
+		const gitCheckpoints = await listGitCheckpoints(directory);
+		if (!gitCheckpoints) {
+			return `Error: No checkpoints found. Cannot rollback to phase ${targetPhase}.`;
+		}
+		const selected = resolveGitCheckpoint(gitCheckpoints, phaseArg);
+		if (!selected) {
+			return `Error: Checkpoint ${phaseArg} not found. Available checkpoints: ${gitCheckpoints.map((c, index) => `${index + 1}="${c.label}"`).join(', ') || 'none'}`;
+		}
+		return restoreGitCheckpoint(directory, selected);
 	}
 
-	let manifest: {
-		checkpoints?: Array<{ phase: number; label?: string; timestamp: string }>;
-	};
+	let manifest: { checkpoints?: LegacyCheckpoint[] };
 	try {
 		manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
 	} catch {

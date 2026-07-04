@@ -22,8 +22,8 @@ import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
-import type { LaneEvidence } from './evidence';
-import { writeLaneEvidence } from './evidence';
+import type { LaneEvidence, PhaseEvidence } from './evidence';
+import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
 	attemptMergeBackFromDirty,
 	getMergeStrategy,
@@ -92,6 +92,12 @@ export interface LaneDispatchResult {
 export interface MergeBackFailureInfo {
 	/** Lane identifier */
 	laneId: string;
+	/** Lane branch preserved for recovery */
+	branchName?: string;
+	/** Lane worktree preserved for recovery */
+	worktreePath: string;
+	/** Merge-back failure class */
+	status: 'failed' | 'partial' | 'conflict';
 	/** Human-readable reason for the merge-back failure */
 	reason: string;
 	/** Conflict files if the failure was a merge conflict */
@@ -278,6 +284,7 @@ export class LeanTurboRunner {
 		hasActiveFullAuto: typeof hasActiveFullAuto;
 		loadFullAutoRunState: typeof loadFullAutoRunState;
 		writeLaneEvidence: typeof writeLaneEvidence;
+		writePhaseEvidence: typeof writePhaseEvidence;
 		/** Timeout for lane dispatch (session.create + session.prompt) in ms. Undefined = no timeout. */
 		laneDispatchTimeoutMs: number | undefined;
 		provisionWorktree: typeof provisionWorktree;
@@ -301,6 +308,7 @@ export class LeanTurboRunner {
 		hasActiveFullAuto,
 		loadFullAutoRunState,
 		writeLaneEvidence,
+		writePhaseEvidence,
 		laneDispatchTimeoutMs: undefined,
 		provisionWorktree,
 		removeWorktree,
@@ -457,6 +465,7 @@ export class LeanTurboRunner {
 
 		// Get lean config (use stored config or defaults if not set)
 		const leanConfig = this._getLeanConfig(this._leanConfig);
+		const phaseStartedAt = new Date().toISOString();
 
 		// Startup orphan recovery (FR-002) — only when worktree isolation is enabled
 		if (leanConfig.worktree_isolation) {
@@ -541,6 +550,15 @@ export class LeanTurboRunner {
 		// persist state so phase-ready can verify them
 		if (lanePlan.lanes.length === 0) {
 			await this._withStateLock(() => this._updateDurableState(lanePlan));
+			await this._writePhaseEvidenceSafely({
+				phaseNumber,
+				plan,
+				lanePlan,
+				laneResults: [],
+				leanConfig,
+				status: 'completed',
+				startedAt: phaseStartedAt,
+			});
 			return {
 				ok: true,
 				lanes: [],
@@ -575,14 +593,30 @@ export class LeanTurboRunner {
 			leanConfig,
 		);
 
-		return {
-			ok: true,
+		const phaseResult: LeanTurboPhaseResult = {
+			ok: mergeBackFailures.length === 0,
+			reason:
+				mergeBackFailures.length > 0
+					? `Lean Turbo merge-back failed for ${mergeBackFailures.length} lane(s); preserved affected worktrees for manual recovery.`
+					: undefined,
 			lanes: laneResults,
 			degradedTasks,
 			serializedTasks: lanePlan.serializedTasks,
 			mergeBackFailures:
 				mergeBackFailures.length > 0 ? mergeBackFailures : undefined,
 		};
+		await this._writePhaseEvidenceSafely({
+			phaseNumber,
+			plan,
+			lanePlan,
+			laneResults,
+			leanConfig,
+			status: phaseResult.ok ? 'completed' : 'failed',
+			startedAt: phaseStartedAt,
+			mergeBackFailures,
+		});
+
+		return phaseResult;
 	}
 
 	/**
@@ -1237,17 +1271,20 @@ export class LeanTurboRunner {
 			let needsPostMergeCleanup = false;
 
 			if (lr.status === 'completed') {
-				// Success path: merge the lane branch back into HEAD
+				// Success path: commit dirty lane work, clean untracked files, then
+				// merge the lane branch back into HEAD.
 				if (!laneInState.branchName) continue;
 
 				try {
 					const strategy =
 						LeanTurboRunner._internals.getMergeStrategy(leanConfig);
-					const mergeResult = await LeanTurboRunner._internals.mergeLaneBranch(
-						this._directory,
-						laneInState.branchName,
-						strategy,
-					);
+					const mergeResult =
+						await LeanTurboRunner._internals.attemptMergeBackFromDirty(
+							laneInState.worktreePath,
+							laneInState.branchName,
+							this._directory,
+							strategy,
+						);
 					if ('merged' in mergeResult && mergeResult.merged) {
 						// Mark for post-merge cleanup AFTER worktree removal (branch delete
 						// fails while the branch is still checked out in an active worktree).
@@ -1264,27 +1301,77 @@ export class LeanTurboRunner {
 						} catch {
 							/* non-fatal */
 						}
-					} else if ('conflict' in mergeResult && mergeResult.conflict) {
-						// Merge conflict: log warning, do NOT remove worktree, record failure
+					} else if (
+						('conflict' in mergeResult && mergeResult.conflict) ||
+						('partial' in mergeResult && mergeResult.partial)
+					) {
+						// Merge conflict or partial failure: log warning, do NOT remove worktree, record failure
 						const failureInfo: MergeBackFailureInfo = {
 							laneId: lr.laneId,
-							reason: mergeResult.message || 'merge conflict',
-							conflictFiles: mergeResult.files,
+							branchName: laneInState.branchName,
+							worktreePath: laneInState.worktreePath,
+							status:
+								mergeResult.conflictFiles &&
+								mergeResult.conflictFiles.length > 0
+									? 'conflict'
+									: 'partial',
+							reason: mergeResult.message || 'merge-back partially failed',
+							conflictFiles: mergeResult.conflictFiles,
 						};
 						mergeBackFailures.push(failureInfo);
+						lr.status = 'failed';
+						lr.error = failureInfo.reason;
 						lr.mergeBackFailure = failureInfo;
+						laneInState.status = 'failed';
+						laneInState.error = failureInfo.reason;
+						await this._updateDurableStateLaneStatus(lr.laneId, 'failed');
+						await this._writeLaneEvidenceSafely(
+							{
+								laneId: lr.laneId,
+								taskIds: lr.taskIds,
+								files: [],
+								status: 'failed',
+							},
+							'failed',
+							{
+								status: 'failed',
+								error: failureInfo.reason,
+								mergeBackFailure: failureInfo,
+							},
+						);
 						console.warn(
-							`[lean-turbo] merge-back CONFLICT for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
+							`[lean-turbo] merge-back PARTIAL for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
 						continue; // Skip removeWorktree — keep worktree for manual recovery
-					} else if ('error' in mergeResult && mergeResult.error) {
-						// Merge error: log warning, do NOT remove worktree, record failure
+					} else if ('failed' in mergeResult && mergeResult.failed) {
 						const failureInfo: MergeBackFailureInfo = {
 							laneId: lr.laneId,
-							reason: mergeResult.error,
+							branchName: laneInState.branchName,
+							worktreePath: laneInState.worktreePath,
+							status: 'failed',
+							reason: mergeResult.message,
 						};
 						mergeBackFailures.push(failureInfo);
+						lr.status = 'failed';
+						lr.error = failureInfo.reason;
 						lr.mergeBackFailure = failureInfo;
+						laneInState.status = 'failed';
+						laneInState.error = failureInfo.reason;
+						await this._updateDurableStateLaneStatus(lr.laneId, 'failed');
+						await this._writeLaneEvidenceSafely(
+							{
+								laneId: lr.laneId,
+								taskIds: lr.taskIds,
+								files: [],
+								status: 'failed',
+							},
+							'failed',
+							{
+								status: 'failed',
+								error: failureInfo.reason,
+								mergeBackFailure: failureInfo,
+							},
+						);
 						console.warn(
 							`[lean-turbo] merge-back ERROR for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
@@ -1295,33 +1382,57 @@ export class LeanTurboRunner {
 					const errMsg = err instanceof Error ? err.message : String(err);
 					const failureInfo: MergeBackFailureInfo = {
 						laneId: lr.laneId,
+						branchName: laneInState.branchName,
+						worktreePath: laneInState.worktreePath,
+						status: 'failed',
 						reason: errMsg,
 					};
 					mergeBackFailures.push(failureInfo);
+					lr.status = 'failed';
+					lr.error = failureInfo.reason;
 					lr.mergeBackFailure = failureInfo;
+					laneInState.status = 'failed';
+					laneInState.error = failureInfo.reason;
+					await this._updateDurableStateLaneStatus(lr.laneId, 'failed');
+					await this._writeLaneEvidenceSafely(
+						{
+							laneId: lr.laneId,
+							taskIds: lr.taskIds,
+							files: [],
+							status: 'failed',
+						},
+						'failed',
+						{
+							status: 'failed',
+							error: failureInfo.reason,
+							mergeBackFailure: failureInfo,
+						},
+					);
 					console.warn(
 						`[lean-turbo] merge-back EXCEPTION for lane ${lr.laneId}: ${errMsg} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 					);
 					continue; // Skip removeWorktree — keep worktree for manual recovery
 				}
 			} else if (lr.status === 'failed' && laneInState._failureCleanupPending) {
-				// Failure path: attempt dirty merge-back before removing worktree
-				try {
-					const strategy =
-						LeanTurboRunner._internals.getMergeStrategy(leanConfig);
-					await LeanTurboRunner._internals.attemptMergeBackFromDirty(
-						laneInState.worktreePath,
-						laneInState.branchName ??
-							`swarm-lane/${this._sessionID}/${lr.laneId}`,
-						this._directory,
-						strategy,
-					);
-				} catch {
-					// Best-effort merge-back — worktree still needs removal
-				}
+				const failureInfo: MergeBackFailureInfo = {
+					laneId: lr.laneId,
+					branchName: laneInState.branchName,
+					worktreePath: laneInState.worktreePath,
+					status: 'failed',
+					reason:
+						lr.error ||
+						'Lane failed before completion; worktree preserved without merge-back',
+				};
+				mergeBackFailures.push(failureInfo);
+				lr.mergeBackFailure = failureInfo;
+				console.warn(
+					`[lean-turbo] failed lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath}; not merging partial work`,
+				);
+				continue; // Keep failed lane worktree for manual inspection.
 			}
 
-			// Both success-with-merge-ok and failure paths remove the worktree
+			// Only lanes that are safe to clean up remove their worktree. Failed
+			// merge-back and failed dispatch lanes are preserved for manual recovery.
 			try {
 				await LeanTurboRunner._internals.removeWorktree(
 					laneInState.worktreePath,
@@ -1347,6 +1458,142 @@ export class LeanTurboRunner {
 		}
 
 		return mergeBackFailures;
+	}
+
+	private _buildIntegratedDiffSummary(
+		lanePlan: LeanTurboLanePlan,
+		laneResults: LaneResult[],
+		mergeBackFailures: MergeBackFailureInfo[] = [],
+	): string {
+		const resultByLane = new Map(
+			laneResults.map((lane) => [lane.laneId, lane]),
+		);
+		const files = new Set<string>();
+		for (const lane of lanePlan.lanes) {
+			for (const file of lane.files) files.add(file);
+		}
+
+		const completed = laneResults.filter(
+			(lane) => lane.status === 'completed',
+		).length;
+		const failed = laneResults.filter(
+			(lane) => lane.status === 'failed',
+		).length;
+		const blocked = laneResults.filter(
+			(lane) => lane.status === 'blocked',
+		).length;
+		const fileList = [...files].sort();
+		const displayedFiles = fileList.slice(0, 50);
+		const hiddenFileCount = Math.max(
+			0,
+			fileList.length - displayedFiles.length,
+		);
+		const lines = [
+			`Lean Turbo phase ${lanePlan.phase}: ${completed}/${lanePlan.lanes.length} lanes completed, ${failed} failed, ${blocked} blocked.`,
+			`Files declared changed (${fileList.length}): ${
+				displayedFiles.length > 0 ? displayedFiles.join(', ') : 'none'
+			}${hiddenFileCount > 0 ? `, ... +${hiddenFileCount} more` : ''}.`,
+		];
+
+		if (lanePlan.serializedTasks.length > 0) {
+			lines.push(
+				`Serialized tasks pending standard execution: ${lanePlan.serializedTasks.join(', ')}.`,
+			);
+		}
+		if (lanePlan.degradedTasks.length > 0) {
+			lines.push(
+				`Degraded tasks: ${lanePlan.degradedTasks.map((task) => `${task.taskId} (${task.reason})`).join(', ')}.`,
+			);
+		}
+		if (mergeBackFailures.length > 0) {
+			lines.push(
+				`Merge-back failures: ${mergeBackFailures.map((failure) => `${failure.laneId}: ${failure.reason}`).join('; ')}.`,
+			);
+		}
+		for (const lane of lanePlan.lanes) {
+			const result = resultByLane.get(lane.laneId);
+			if (result?.error) {
+				lines.push(`${lane.laneId} error: ${result.error}.`);
+			}
+		}
+
+		return lines.join('\n');
+	}
+
+	private async _writePhaseEvidenceSafely(args: {
+		phaseNumber: number;
+		plan: { swarm?: string; title?: string };
+		lanePlan: LeanTurboLanePlan;
+		laneResults: LaneResult[];
+		leanConfig: LeanTurboConfig;
+		status: PhaseEvidence['status'];
+		startedAt: string;
+		mergeBackFailures?: MergeBackFailureInfo[];
+	}): Promise<void> {
+		const completedAt = new Date().toISOString();
+		const resultByLane = new Map(
+			args.laneResults.map((lane) => [lane.laneId, lane]),
+		);
+		const lanes: LaneEvidence[] = args.lanePlan.lanes.map((lane) => {
+			const result = resultByLane.get(lane.laneId);
+			const evidenceLane: LaneEvidence = {
+				laneId: lane.laneId,
+				taskIds: lane.taskIds,
+				files: lane.files,
+				status: result?.status ?? lane.status,
+				startedAt: lane.startedAt,
+				completedAt:
+					result?.status === 'completed' || result?.status === 'failed'
+						? (lane.completedAt ?? completedAt)
+						: lane.completedAt,
+				error: result?.error ?? lane.error,
+				agent: result?.agent ?? lane.agent,
+				sessionId: result?.sessionId ?? lane.sessionId,
+			};
+			if (result?.mergeBackFailure) {
+				evidenceLane.mergeBackFailure = result.mergeBackFailure;
+			}
+			return evidenceLane;
+		});
+		const planId =
+			args.lanePlan.planId ||
+			derivePlanId({
+				swarm: args.plan.swarm ?? 'default',
+				title: args.plan.title ?? 'Untitled Plan',
+			});
+		const evidence: PhaseEvidence = {
+			phase: args.phaseNumber,
+			planId,
+			lanes,
+			degradedTasks: args.lanePlan.degradedTasks.map((task) => ({
+				taskId: task.taskId,
+				reason: task.reason,
+			})),
+			startedAt: args.startedAt,
+			completedAt,
+			status: args.status,
+			evidencePaths: lanes.map(
+				(lane) =>
+					`.swarm/evidence/${args.phaseNumber}/lean-turbo/${lane.laneId}.json`,
+			),
+			integratedDiffSummary: this._buildIntegratedDiffSummary(
+				args.lanePlan,
+				args.laneResults,
+				args.mergeBackFailures ?? [],
+			),
+			configSnapshot: args.leanConfig,
+			timestamp: completedAt,
+		};
+
+		try {
+			await LeanTurboRunner._internals.writePhaseEvidence(
+				this._directory,
+				evidence,
+			);
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			console.warn(`[lean-turbo] phase evidence write failed: ${msg}`);
+		}
 	}
 
 	/**

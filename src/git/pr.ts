@@ -9,6 +9,7 @@ import {
 	MAX_TRANSIENT_RETRIES,
 	transientBackoff,
 } from '../utils/transient-retry.js';
+import { neutralizeUntrustedMarkdown } from '../utils/untrusted-markdown.js';
 import {
 	commitChanges,
 	getChangedFiles,
@@ -641,7 +642,10 @@ export async function getPRComments(
 	const mapIssueComment = (c: Record<string, unknown>): PRCommentResult => ({
 		id: String(c.id ?? ''),
 		author: String((c.user as Record<string, unknown>)?.login ?? ''),
-		body: String(c.body ?? ''),
+		body: neutralizeUntrustedMarkdown(
+			String(c.body ?? ''),
+			'GitHub issue comment',
+		),
 		createdAt: String(c.created_at ?? ''),
 		isReviewComment: false,
 	});
@@ -649,7 +653,10 @@ export async function getPRComments(
 	const mapReviewComment = (c: Record<string, unknown>): PRCommentResult => ({
 		id: String(c.id ?? ''),
 		author: String((c.user as Record<string, unknown>)?.login ?? ''),
-		body: String(c.body ?? ''),
+		body: neutralizeUntrustedMarkdown(
+			String(c.body ?? ''),
+			'GitHub review comment',
+		),
 		createdAt: String(c.created_at ?? ''),
 		isReviewComment: true,
 	});

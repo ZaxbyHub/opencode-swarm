@@ -214,6 +214,43 @@ describe('dispatchPhaseCritic', () => {
 		expect(pkg.testResults.failedLanes).toBe(0);
 	});
 
+	test('compileCriticPackage includes raw validation artifacts from phase evidence', async () => {
+		writeLaneEvidence(dir, 1, {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: ['src/a.ts'],
+			status: 'completed',
+			sessionId: 'test-session',
+		});
+		writePhaseEvidence(dir, 1, {
+			phase: 1,
+			planId: 'test-plan',
+			lanes: [],
+			degradedTasks: [],
+			startedAt: new Date().toISOString(),
+			status: 'completed',
+			validationArtifacts: {
+				build: {
+					status: 'failed',
+					command: 'bun run build',
+					stdoutTail: 'build failed',
+					stderrTail: 'ts error',
+				},
+				test: {
+					status: 'passed',
+					command: 'bun test',
+					stdoutTail: 'all pass',
+				},
+			},
+		});
+		writeReviewerEvidence(dir, 1, 'APPROVED', 'review ok');
+
+		const pkg = await _internals.compileCriticPackage(dir, 1, 'test-session');
+
+		expect(pkg.validationArtifacts?.build?.stderrTail).toBe('ts error');
+		expect(pkg.validationArtifacts?.test?.stdoutTail).toBe('all pass');
+	});
+
 	test('compileCriticPackage notes missing reviewer evidence as safety concern', async () => {
 		// Set up lane evidence files
 		writeLaneEvidence(dir, 1, {

@@ -1,4 +1,4 @@
-import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -43,15 +43,6 @@ interface BundledSkillFile {
 	relativePath: string;
 }
 
-const syncedProjectSkillTargets = new Set<string>();
-
-function getSyncCacheKey(
-	projectDirectory: string,
-	packageRoot: string,
-): string {
-	return `${path.resolve(projectDirectory)}\0${path.resolve(packageRoot)}`;
-}
-
 function warnBundledSkillSyncFailure(err: unknown): void {
 	const message = err instanceof Error ? err.message : String(err);
 	console.warn(
@@ -67,11 +58,9 @@ function warnBundledSkillSyncFailure(err: unknown): void {
 // NOT bounded. This implementation uses `fs/promises` with real await points
 // between files so the timeout is enforceable at file boundaries.
 //
-// Guarantees: missing-only, never-overwrite (COPYFILE_EXCL + existence check),
-// symlink refusal, MAX_SKILL_FILES/MAX_SKILL_BYTES bounds, rollback-on-error,
-// and the sawBundledSource-gated cache add (so a trimmed package never poisons
-// the cache and disables the command-path backstop). Custom project skills are
-// never overwritten, and any filesystem error leaves command execution fail-open.
+// Guarantees: update known bundled slugs in place, symlink refusal,
+// MAX_SKILL_FILES/MAX_SKILL_BYTES bounds, and rollback-on-error. Any filesystem
+// error leaves command execution fail-open.
 // ---------------------------------------------------------------------------
 
 async function isSymbolicLinkAsync(p: string): Promise<boolean> {
@@ -146,6 +135,7 @@ async function collectBundledSkillFilesBoundedAsync(
 async function rollbackCopiedFilesAsync(
 	copiedFiles: string[],
 	destDir: string,
+	overwrittenFiles: Array<{ path: string; contents: Buffer }> = [],
 ): Promise<void> {
 	const safeDestDir = path.resolve(destDir);
 	const dirs = new Set<string>();
@@ -162,6 +152,17 @@ async function rollbackCopiedFilesAsync(
 		dirs.add(path.dirname(resolvedFile));
 	}
 
+	for (const overwritten of overwrittenFiles.reverse()) {
+		const resolvedFile = path.resolve(overwritten.path);
+		const relative = path.relative(safeDestDir, resolvedFile);
+		if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+		try {
+			await fsp.writeFile(resolvedFile, overwritten.contents);
+		} catch {
+			// Best effort restore only; the original copy error remains primary.
+		}
+	}
+
 	for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
 		const relative = path.relative(safeDestDir, path.resolve(dir));
 		if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
@@ -170,6 +171,27 @@ async function rollbackCopiedFilesAsync(
 		} catch {
 			// Directory may contain user files or previously installed skill files.
 		}
+	}
+}
+
+async function copyFileAtomicAsync(
+	sourcePath: string,
+	destPath: string,
+): Promise<void> {
+	const tempPath = path.join(
+		path.dirname(destPath),
+		`.${path.basename(destPath)}.tmp.${randomUUID()}`,
+	);
+	try {
+		await fsp.copyFile(sourcePath, tempPath);
+		await fsp.rename(tempPath, destPath);
+	} catch (err) {
+		try {
+			await fsp.rm(tempPath, { force: true });
+		} catch {
+			// Best effort cleanup of a temp file from this copy attempt.
+		}
+		throw err;
 	}
 }
 
@@ -182,6 +204,7 @@ async function copyBundledDirectoryBoundedAsync(
 		bytes: 0,
 	});
 	const copiedFiles: string[] = [];
+	const overwrittenFiles: Array<{ path: string; contents: Buffer }> = [];
 
 	try {
 		for (const file of files) {
@@ -189,15 +212,26 @@ async function copyBundledDirectoryBoundedAsync(
 			const destPath = path.join(destDir, file.relativePath);
 
 			await fsp.mkdir(path.dirname(destPath), { recursive: true });
-			try {
-				await fsp.copyFile(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
+			if (await pathExistsAsync(destPath)) {
+				if (await isSymbolicLinkAsync(destPath)) {
+					throw new Error('refusing to overwrite symlinked bundled skill file');
+				}
+				const [sourceContents, destContents] = await Promise.all([
+					fsp.readFile(sourcePath),
+					fsp.readFile(destPath),
+				]);
+				if (sourceContents.equals(destContents)) {
+					continue;
+				}
+				overwrittenFiles.push({ path: destPath, contents: destContents });
+				await copyFileAtomicAsync(sourcePath, destPath);
+			} else {
+				await copyFileAtomicAsync(sourcePath, destPath);
 				copiedFiles.push(destPath);
-			} catch (err) {
-				if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
 			}
 		}
 	} catch (err) {
-		await rollbackCopiedFilesAsync(copiedFiles, destDir);
+		await rollbackCopiedFilesAsync(copiedFiles, destDir, overwrittenFiles);
 		throw err;
 	}
 }
@@ -213,8 +247,8 @@ async function copyBundledDirectoryBoundedAsync(
  * load its SKILL.md without a manual `/swarm` command or session restart; the
  * command path calls it again as a backstop for pre-existing projects.
  *
- * This is intentionally missing-only and fail-open: custom project skills are
- * never overwritten, and any filesystem error leaves command execution fail-open.
+ * This is intentionally fail-open: bundled slugs are refreshed from the package
+ * source, and any filesystem error leaves command execution fail-open.
  */
 export async function syncBundledProjectSkillsIfMissingAsync(
 	projectDirectory: string,
@@ -222,13 +256,9 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 	quiet = false,
 ): Promise<void> {
 	try {
-		const cacheKey = getSyncCacheKey(projectDirectory, packageRoot);
-		if (syncedProjectSkillTargets.has(cacheKey)) return;
-
 		const sourceRoot = path.join(packageRoot, '.opencode', 'skills');
 		const opencodeDir = path.join(projectDirectory, '.opencode');
 		const skillsDir = path.join(opencodeDir, 'skills');
-		let sawBundledSource = false;
 
 		if (!(await ensureNotSymlinkedDirectoryAsync(opencodeDir))) return;
 		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
@@ -237,21 +267,17 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 			const sourceDir = path.join(sourceRoot, slug);
 			const sourceSkill = path.join(sourceDir, 'SKILL.md');
 			const destDir = path.join(skillsDir, slug);
-			const destSkill = path.join(destDir, 'SKILL.md');
 
 			if (!(await pathExistsAsync(sourceSkill))) continue;
-			sawBundledSource = true;
-			if (await pathExistsAsync(destSkill)) continue;
 			if (!(await ensureNotSymlinkedDirectoryAsync(destDir))) continue;
 
 			await copyBundledDirectoryBoundedAsync(sourceDir, destDir);
 			if (!quiet) {
 				console.warn(
-					`[opencode-swarm] Installed bundled skill .opencode/skills/${slug}/SKILL.md for first-class /swarm command support`,
+					`[opencode-swarm] Synchronized bundled skill .opencode/skills/${slug}/SKILL.md for first-class /swarm command support`,
 				);
 			}
 		}
-		if (sawBundledSource) syncedProjectSkillTargets.add(cacheKey);
 	} catch (err) {
 		// Non-fatal: plugin init and command registration must remain fail-open.
 		if (!quiet) warnBundledSkillSyncFailure(err);
@@ -260,6 +286,7 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 
 export const _test_exports = {
 	collectBundledSkillFilesBoundedAsync,
-	getSyncCacheKey,
-	resetBundledProjectSkillSyncCache: () => syncedProjectSkillTargets.clear(),
+	// No-op: the cache was removed in favor of content-equality checks on every
+	// call. This stub is retained for backward compatibility with existing tests.
+	resetBundledProjectSkillSyncCache: () => undefined,
 };
