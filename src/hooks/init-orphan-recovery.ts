@@ -35,7 +35,7 @@ const INIT_ORPHAN_RECOVERY_TIMEOUT_MS = 10_000;
  * Lock file path for the init orphan recovery advisory lock.
  * advisory-only — signals that another process may be actively using the repo.
  */
-const ORPHAN_RECOVERY_LOCK_FILE = '.swarm/locks/init-orphan-recovery.lock';
+export const ORPHAN_RECOVERY_LOCK_FILE = '.swarm/locks/init-orphan-recovery.lock';
 
 /**
  * DI seam for orphaned worktree removal operations and cross-process lock checking.

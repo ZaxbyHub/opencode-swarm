@@ -58,6 +58,10 @@ server.on('error', (err) => {
   const msg = 'Failed to bind to port ' + port + ': ' + err.message;
   console.error(msg);
   ${stderrFile ? `fs.appendFileSync(${JSON.stringify(stderrFile)}, msg + '\\n', 'utf-8');` : ''}
+  // Write result on error too so callers can distinguish bind outcomes via file content.
+  if (resultFile) {
+    fs.writeFileSync(resultFile, 'ERROR:' + err.code, 'utf-8');
+  }
   process.exit(2);
 });
 
@@ -301,6 +305,62 @@ describe('SC-122: concurrent port binding across lanes', () => {
 		expect(boundPort1).toBe(8001);
 		expect(child0.exitCode).toBeNull();
 		expect(child1.exitCode).toBeNull();
+	});
+});
+
+// ─── SC-122: same-port collision (negative path) ──────────────────────────────
+
+describe('SC-122: same-port collision — lane profiles with shared port_base', () => {
+	test('two lanes forced to same PORT: first binds, second fails with EADDRINUSE', async () => {
+		// This simulates the scenario where port_base is shared and stride is 0
+		// (or two lanes are forced to the same override), producing a real
+		// EADDRINUSE collision. The lane runtime profiles must handle this
+		// gracefully: one lane gets the port, the other receives the bind error.
+		//
+		// Prior code: both lanes would attempt bind; the second either hung or
+		// crashed without a clean error signal.
+		const port = 9200;
+
+		// NOTE: resultFile is derived from port alone (port-<port>.result), so both
+		// lanes would write the same file. Override with unique names to prevent
+		// the second lane's error handler from overwriting the first lane's success
+		// result before the test reads it.
+		const { child: child0, resultFile: resultFile0 } = spawnPortBinder(
+			port,
+			tmpDir,
+		);
+		spawnedChildren.push(child0);
+		const boundPort0 = await waitForChildReady(child0, resultFile0);
+		expect(boundPort0).toBe(port);
+		expect(child0.exitCode).toBeNull(); // lane 0 still alive
+
+		// Second lane is forced to the same port — should fail immediately
+		const scriptPath1 = writePortBindingScript(tmpDir);
+		const resultFile1 = path.join(tmpDir, `port-${port}-lane1.result`);
+		const child1 = spawn(process.execPath, [scriptPath1, resultFile1], {
+			cwd: tmpDir,
+			env: { ...process.env, PORT: String(port) },
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+		spawnedChildren.push(child1);
+
+		const exitCode1 = await waitForChildExit(child1, 8000);
+		// Exit code 2 = bind error (EADDRINUSE or similar)
+		expect(exitCode1).toBe(2);
+		expect(child1.exitCode).not.toBeNull();
+
+		// Lane 0 is undisturbed — still bound to its port
+		expect(child0.exitCode).toBeNull();
+		expect(fs.readFileSync(resultFile0, 'utf-8').trim()).toBe(String(port));
+
+		// Lane 1 wrote an ERROR marker instead of a port number (EADDRINUSE before listening)
+		let result1Content = '';
+		try {
+			result1Content = fs.readFileSync(resultFile1, 'utf-8').trim();
+		} catch {
+			result1Content = '';
+		}
+		expect(result1Content).toMatch(/^ERROR:/);
 	});
 });
 
