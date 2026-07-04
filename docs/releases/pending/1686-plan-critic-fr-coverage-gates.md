@@ -1,0 +1,1 @@
+Fix issue #1686 by making plan-critic approval and FR traceability mechanical. Coder execution now requires a current critic-approved plan snapshot, and `save_plan` reports structured requirement coverage while blocking unmapped MUST/SHALL FRs unless explicitly overridden.

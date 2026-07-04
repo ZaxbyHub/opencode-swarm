@@ -519,7 +519,12 @@ describe('save-plan tool verification tests', () => {
 					{
 						id: 1,
 						name: 'Implementation',
-						tasks: [{ id: '1.1', description: 'Implement checkout flow' }],
+						tasks: [
+							{
+								id: '1.1',
+								description: 'Implement FR-001 checkout flow',
+							},
+						],
 					},
 				],
 				working_directory: tmpDir,

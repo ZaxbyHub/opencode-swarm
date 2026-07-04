@@ -16,7 +16,13 @@ import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import {
+	computePlanHash,
+	loadLastApprovedPlan,
+	takeSnapshotEvent,
+} from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
@@ -434,6 +440,122 @@ function extractPlanTaskId(text: string): string | null {
 	}
 
 	return null;
+}
+
+function outputText(output: unknown): string {
+	if (typeof output === 'string') return output;
+	if (typeof output === 'number' || typeof output === 'boolean') {
+		return String(output);
+	}
+	if (Array.isArray(output)) {
+		return output.map(outputText).filter(Boolean).join('\n');
+	}
+	if (output && typeof output === 'object') {
+		const record = output as Record<string, unknown>;
+		const preferred = ['output', 'text', 'content', 'message', 'result'];
+		const parts: string[] = [];
+		for (const key of preferred) {
+			if (key in record) parts.push(outputText(record[key]));
+		}
+		if (parts.length > 0) return parts.filter(Boolean).join('\n');
+		try {
+			return JSON.stringify(output);
+		} catch {
+			return '';
+		}
+	}
+	return '';
+}
+
+function extractPlanCriticVerdict(
+	output: unknown,
+): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
+	const match = /^\s*VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+		outputText(output),
+	);
+	if (!match) return null;
+	return match[1].toUpperCase() as 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED';
+}
+
+function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
+	const text = [
+		args.prompt,
+		args.task,
+		args.description,
+		args.message,
+		args.input,
+	]
+		.filter((value): value is string => typeof value === 'string')
+		.join('\n')
+		.toLowerCase();
+	if (!text) return false;
+	return (
+		text.includes('mode: critic-gate') ||
+		(text.includes('review plan') && text.includes('execute')) ||
+		(text.includes('plan critic') && text.includes('plan'))
+	);
+}
+
+async function assertPlanCriticApprovedForExecution(
+	directory: string,
+	plan: Plan | null,
+): Promise<void> {
+	if (!plan) return;
+
+	const planId = derivePlanId(plan);
+	const approved = await loadLastApprovedPlan(directory, planId);
+	if (!approved) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
+				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE.',
+		);
+	}
+
+	if (
+		approved.approval?.verdict !== 'APPROVED' ||
+		approved.approval?.source !== 'plan_critic_gate'
+	) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Latest approved-plan snapshot does not contain plan critic VERDICT: APPROVED evidence. ' +
+				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution.',
+		);
+	}
+
+	if (approved.payloadHash !== computePlanHash(plan)) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
+				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
+		);
+	}
+}
+
+async function recordPlanCriticApprovalSnapshotIfApplicable(
+	directory: string,
+	input: { sessionID: string; callID: string },
+	args: Record<string, unknown>,
+	output: unknown,
+): Promise<void> {
+	const targetAgent =
+		typeof args.subagent_type === 'string'
+			? stripKnownSwarmPrefix(args.subagent_type)
+			: null;
+	if (targetAgent !== 'critic') return;
+	if (!taskLooksLikePlanCritic(args)) return;
+	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) return;
+
+	await takeSnapshotEvent(directory, plan, {
+		source: 'critic_approved',
+		approvalMetadata: {
+			verdict: 'APPROVED',
+			source: 'plan_critic_gate',
+			session_id: input.sessionID,
+			call_id: input.callID,
+			approved_at: new Date().toISOString(),
+		},
+	});
 }
 
 /**
@@ -1084,6 +1206,8 @@ export function createDelegationGateHook(
 			: new Set<string>();
 		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
 
+		await assertPlanCriticApprovedForExecution(directory, plan);
+
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
 		// review. In parallel mode (parallelization_enabled), dispatching a coder
 		// for a DIFFERENT dependency-ready task is legitimate, so a coder_delegated
@@ -1528,6 +1652,22 @@ export function createDelegationGateHook(
 				}
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				return;
+			}
+
+			if (typeof subagentType === 'string') {
+				try {
+					const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+					await recordPlanCriticApprovalSnapshotIfApplicable(
+						directory,
+						input,
+						mergedArgs,
+						_output,
+					);
+				} catch (err) {
+					logger.warn(
+						`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
 			}
 
 			if (standardDispatch) {

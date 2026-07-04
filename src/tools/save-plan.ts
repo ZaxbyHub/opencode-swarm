@@ -32,6 +32,7 @@ import { derivePlanId } from '../plan/utils.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
+import { extractRequirements } from './req-coverage';
 
 /** Test seam for the snapshot retry helper (FR-004). */
 export const _test_exports = { takeSnapshotWithRetry };
@@ -93,6 +94,12 @@ export interface SavePlanArgs {
 	 */
 	confirm_identity_change?: boolean;
 	/**
+	 * When true, allows saving a plan even when required FR-### MUST/SHALL
+	 * requirements from the effective spec are not explicitly mapped in task
+	 * descriptions or acceptance criteria.
+	 */
+	confirm_requirement_coverage_gaps?: boolean;
+	/**
 	 * Architect-facing concurrency controls for this plan.
 	 * When execution_profile.locked is true the profile is immutable — subsequent
 	 * save_plan calls that try to change it will be rejected (fail-closed).
@@ -119,6 +126,7 @@ export interface SavePlanResult {
 	errors?: string[];
 	warnings?: string[];
 	recovery_guidance?: string;
+	requirement_coverage?: RequirementCoverageResult;
 	/** The resolved execution_profile that was persisted, if any. */
 	execution_profile?: {
 		parallelization_enabled: boolean;
@@ -127,6 +135,24 @@ export interface SavePlanResult {
 		locked: boolean;
 		auto_proceed?: boolean;
 	};
+}
+
+interface RequirementCoverageEntry {
+	id: string;
+	obligation: 'MUST' | 'SHOULD' | 'SHALL' | null;
+	text: string;
+	mapped_task_ids: string[];
+}
+
+interface RequirementCoverageResult {
+	status: 'passed' | 'failed' | 'override';
+	total_requirements: number;
+	covered_count: number;
+	missing_count: number;
+	blocking_missing_count: number;
+	covered: RequirementCoverageEntry[];
+	missing: RequirementCoverageEntry[];
+	blocking_missing: RequirementCoverageEntry[];
 }
 
 function executionProfilesEqual(
@@ -140,6 +166,64 @@ function executionProfilesEqual(
 		a.locked === b.locked &&
 		a.auto_proceed === b.auto_proceed
 	);
+}
+
+function evaluateRequirementCoverage(
+	specContent: string | undefined,
+	args: SavePlanArgs,
+): RequirementCoverageResult | null {
+	if (!specContent) return null;
+
+	const requirements = extractRequirements(specContent);
+	if (requirements.length === 0) return null;
+
+	const covered: RequirementCoverageEntry[] = [];
+	const missing: RequirementCoverageEntry[] = [];
+
+	for (const requirement of requirements) {
+		const mappedTaskIds: string[] = [];
+		for (const phase of args.phases) {
+			for (const task of phase.tasks) {
+				const taskText = `${task.description}\n${task.acceptance ?? ''}`;
+				const idPattern = new RegExp(`\\b${requirement.id}\\b`, 'i');
+				if (idPattern.test(taskText)) {
+					mappedTaskIds.push(task.id);
+				}
+			}
+		}
+
+		const entry: RequirementCoverageEntry = {
+			id: requirement.id,
+			obligation: requirement.obligation,
+			text: requirement.text,
+			mapped_task_ids: mappedTaskIds,
+		};
+		if (mappedTaskIds.length > 0) {
+			covered.push(entry);
+		} else {
+			missing.push(entry);
+		}
+	}
+
+	const blockingMissing = missing.filter(
+		(entry) => entry.obligation === 'MUST' || entry.obligation === 'SHALL',
+	);
+
+	return {
+		status:
+			blockingMissing.length > 0
+				? args.confirm_requirement_coverage_gaps === true
+					? 'override'
+					: 'failed'
+				: 'passed',
+		total_requirements: requirements.length,
+		covered_count: covered.length,
+		missing_count: missing.length,
+		blocking_missing_count: blockingMissing.length,
+		covered,
+		missing,
+		blocking_missing: blockingMissing,
+	};
 }
 
 /**
@@ -334,6 +418,7 @@ export async function executeSavePlan(
 	// projection may satisfy the same canonical plan gate.
 	let specMtime: string | undefined;
 	let specHash: string | undefined;
+	let specContent: string | undefined;
 	if (process.env.SWARM_SKIP_SPEC_GATE !== '1') {
 		const spec = readEffectiveSpecSync(targetWorkspace as string);
 		if (!spec) {
@@ -350,6 +435,7 @@ export async function executeSavePlan(
 		}
 		specMtime = spec.mtime ?? undefined;
 		specHash = spec.hash;
+		specContent = spec.content;
 		// Persist spec content snapshot for future drift diffing (FR-001).
 		// Uses a separate snapshot file to avoid bloating plan.json/plan-ledger.
 		// Best-effort: failure does not affect plan save.
@@ -422,6 +508,26 @@ export async function executeSavePlan(
 				};
 			}
 		}
+	}
+
+	const requirementCoverage = evaluateRequirementCoverage(specContent, args);
+	if (
+		requirementCoverage?.status === 'failed' &&
+		args.confirm_requirement_coverage_gaps !== true
+	) {
+		return {
+			success: false,
+			message:
+				'REQUIREMENT_COVERAGE_GAPS: save_plan rejected because required FR-### MUST/SHALL requirements are not mapped to any task.',
+			errors: requirementCoverage.blocking_missing.map(
+				(requirement) =>
+					`${requirement.id} (${requirement.obligation}): ${requirement.text}`,
+			),
+			recovery_guidance:
+				'Add each required FR-### id to a task description or acceptance criterion, ' +
+				'or retry with confirm_requirement_coverage_gaps: true only after surfacing the gaps to the user.',
+			requirement_coverage: requirementCoverage,
+		};
 	}
 
 	// Step 2.5: Read current plan for status preservation (merge mode) and
@@ -836,6 +942,14 @@ export async function executeSavePlan(
 					'No critic review detected before plan save. Consider delegating to critic for plan validation.',
 				);
 			}
+			if (requirementCoverage?.status === 'override') {
+				const missingIds = requirementCoverage.blocking_missing
+					.map((requirement) => requirement.id)
+					.join(', ');
+				warnings.push(
+					`Requirement coverage override used. Missing required FR mappings: ${missingIds}`,
+				);
+			}
 
 			return {
 				success: true,
@@ -843,6 +957,9 @@ export async function executeSavePlan(
 				plan_path: path.join(dir, '.swarm', 'plan.json'),
 				phases_count: plan.phases.length,
 				tasks_count: tasksCount,
+				...(requirementCoverage
+					? { requirement_coverage: requirementCoverage }
+					: {}),
 				...(resolvedProfile !== undefined
 					? { execution_profile: resolvedProfile }
 					: {}),
@@ -996,6 +1113,15 @@ export const save_plan: ToolDefinition = createSwarmTool({
 				'When true, allows overwriting an existing plan that has a different ' +
 					'identity (swarm_id + title). Without this flag, save_plan rejects ' +
 					'with PLAN_IDENTITY_MISMATCH if the identity differs.',
+			),
+		confirm_requirement_coverage_gaps: z
+			.boolean()
+			.optional()
+			.describe(
+				'When true, allows saving a plan even when required FR-### MUST/SHALL ' +
+					'requirements from the effective spec are not explicitly mapped in ' +
+					'task descriptions or acceptance criteria. Use only after surfacing ' +
+					'the structured requirement_coverage gaps to the user.',
 			),
 		execution_profile: z
 			.object({
