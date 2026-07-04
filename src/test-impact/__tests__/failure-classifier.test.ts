@@ -272,6 +272,15 @@ describe('classifyFailure', () => {
 			'Segmentation fault (core dumped)',
 			'SIGABRT',
 			'SIGBUS',
+			// SC-136: EADDRINUSE patterns
+			'EADDRINUSE',
+			'Error: listen EADDRINUSE: address already in use 0.0.0.0:3000',
+			'bind: address already in use',
+			// SC-137: lock-timeout patterns
+			'File lock timeout',
+			'Resource lock timeout',
+			'Lock acquisition timeout',
+			'failed to acquire lock',
 		];
 
 		for (const [index, errorMessage] of patterns.entries()) {
@@ -374,6 +383,112 @@ describe('classifyFailure', () => {
 
 		const result = classifyFailure(current, []);
 		expect(result.classification).toBe('infrastructure_failure');
+	});
+
+	// SC-136: EADDRINUSE bare errno classified as infrastructure_failure
+	test('EADDRINUSE in failure output classifies as infrastructure_failure', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'eaddrinuse test',
+			result: 'fail',
+			errorMessage:
+				'Error: listen EADDRINUSE: address already in use 0.0.0.0:3000',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(
+			current,
+			makeRecentPassHistory('src/foo.test.ts', 'eaddrinuse test'),
+		);
+		expect(result.classification).toBe('infrastructure_failure');
+	});
+
+	test('EADDRINUSE in failure output with context classifies as infrastructure_failure', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'eaddrinuse context test',
+			result: 'fail',
+			errorMessage: 'bind: address already in use',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(
+			current,
+			makeRecentPassHistory('src/foo.test.ts', 'eaddrinuse context test'),
+		);
+		expect(result.classification).toBe('infrastructure_failure');
+	});
+
+	// SC-137: lock-timeout patterns classified as infrastructure_failure
+	test('lock timeout classifies as infrastructure_failure', () => {
+		const lockTimeoutMessages = [
+			'File lock timeout',
+			'Resource lock timeout',
+			'Lock acquisition timeout',
+			'failed to acquire lock',
+		];
+
+		for (const [index, errorMessage] of lockTimeoutMessages.entries()) {
+			const testName = `lock-timeout ${index}`;
+			const current = makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName,
+				result: 'fail',
+				errorMessage,
+				changedFiles: ['src/foo.test.ts'],
+			});
+
+			const result = classifyFailure(
+				current,
+				makeRecentPassHistory('src/foo.test.ts', testName),
+			);
+			expect(result.classification).toBe('infrastructure_failure');
+		}
+	});
+
+	// SC-138: determinism — same input produces same classification
+	test('classifyFailure is deterministic — same input produces same classification', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'determinism test',
+			result: 'fail',
+			errorMessage:
+				'Error: listen EADDRINUSE: address already in use 0.0.0.0:3000',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const history = makeRecentPassHistory(
+			'src/foo.test.ts',
+			'determinism test',
+		);
+
+		const result1 = classifyFailure(current, history);
+		const result2 = classifyFailure(current, history);
+
+		expect(result1.classification).toBe(result2.classification);
+		expect(result1.confidence).toBe(result2.confidence);
+		expect(result1.errorMessage).toBe(result2.errorMessage);
+	});
+
+	test('classifyFailure determinism with lock timeout — same input produces same classification', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'lock determinism test',
+			result: 'fail',
+			errorMessage: 'File lock timeout',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const history = makeRecentPassHistory(
+			'src/foo.test.ts',
+			'lock determinism test',
+		);
+
+		const result1 = classifyFailure(current, history);
+		const result2 = classifyFailure(current, history);
+
+		expect(result1.classification).toBe(result2.classification);
+		expect(result1.confidence).toBe(result2.confidence);
 	});
 
 	test('regression: assertion text containing killed preserves regression classification', () => {

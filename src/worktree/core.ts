@@ -9,10 +9,15 @@
  * @module worktree
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { bunSpawn } from '../utils/bun-compat';
+// Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
+// to allow DI for tests without mock.module leakage. The top-level import is intentionally
+// omitted; the seam default performs a dynamic import on first use.
 import type {
+	DependencyPreparationStrategy,
 	WorktreeHandle,
 	WorktreeOptions,
 	WorktreeProvisionResult,
@@ -44,6 +49,40 @@ export const _internals: {
 	 * Production implementation runs `git config core.longpaths` via runGit.
 	 */
 	getCoreLongPaths: (directory: string) => Promise<string | undefined>;
+	/** Test seam for filesystem ops used by deps_strategy copy/link (DI to avoid mock.module leaks). */
+	fs: {
+		existsSync: typeof fs.existsSync;
+		cpSync: typeof fs.cpSync;
+		symlinkSync: typeof fs.symlinkSync;
+	};
+	/**
+	 * Test seam for scope materialization into worktree lanes (FR-102).
+	 * Allows tests to inject a spy without mock.module on node:fs or scope-persistence.
+	 */
+	writeScopeToDisk: (
+		directory: string,
+		taskId: string,
+		files: string[],
+	) => Promise<void>;
+	/**
+	 * Test seam for lane runtime profile materialization into worktree lanes (FR-201).
+	 * Allows tests to inject a spy without mock.module on node:fs.
+	 */
+	writeLaneProfileToDisk: (
+		worktreePath: string,
+		laneIndex: number,
+		envOverrides: Record<string, string>,
+	) => Promise<void>;
+	/**
+	 * Test seam for lane profile removal at teardown (FR-205 SC-134).
+	 * Allows tests to inject a spy without mock.module on node:fs.
+	 */
+	removeLaneProfileFromDisk: (
+		worktreePath: string,
+		laneIndex: number,
+	) => Promise<void>;
+	/** Test seam for removeWorktree — allows tests to intercept worktree removal calls. */
+	removeWorktree: typeof removeWorktree;
 } = {
 	bunSpawn,
 	platform: process.platform,
@@ -58,11 +97,120 @@ export const _internals: {
 		const value = result.stdout.trim().toLowerCase();
 		return value === '' ? undefined : value;
 	},
+	fs: {
+		existsSync: fs.existsSync,
+		cpSync: fs.cpSync,
+		symlinkSync: fs.symlinkSync,
+	},
+	writeScopeToDisk: async (
+		directory: string,
+		taskId: string,
+		files: string[],
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		const { writeScopeToDisk: realWrite } = await import(
+			'../scope/scope-persistence'
+		);
+		return realWrite(directory, taskId, files);
+	},
+	writeLaneProfileToDisk: async (
+		_worktreePath: string,
+		_laneIndex: number,
+		_envOverrides: Record<string, string>,
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		return writeLaneProfileToDiskReal(_worktreePath, _laneIndex, _envOverrides);
+	},
+	removeLaneProfileFromDisk: async (
+		_worktreePath: string,
+		_laneIndex: number,
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		return removeLaneProfileFromDiskReal(_worktreePath, _laneIndex);
+	},
+	removeWorktree,
 };
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * FR-201 SC-124: Writes the lane runtime profile as `.swarm/lanes/{laneIndex}.env`.
+ *
+ * The file is written in KEY=VAL format (one entry per line) so it can be
+ * sourced by shell scripts or parsed by Node.js.
+ *
+ * Defense-in-depth: failures are non-fatal. The lane can still function without
+ * the env file if the write fails (e.g. permissions), as long as the child
+ * processes get the env vars through other means.
+ *
+ * @param worktreePath - Absolute path to the lane worktree root.
+ * @param laneIndex    - 0-based lane index used for filename derivation.
+ * @param envOverrides - Map of env var names to values (set) or null (unset).
+ */
+export async function writeLaneProfileToDiskReal(
+	worktreePath: string,
+	laneIndex: number,
+	envOverrides: Record<string, string>,
+): Promise<void> {
+	// Build KEY=VAL lines; skip null values (unset)
+	const lines: string[] = [];
+	for (const [key, value] of Object.entries(envOverrides)) {
+		if (value === null) continue;
+		// Basic safety: skip keys that would be shell-injection vectors
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+		lines.push(`${key}=${value}`);
+	}
+
+	if (lines.length === 0) return;
+
+	// Create .swarm/lanes/ directory
+	const lanesDir = path.join(worktreePath, '.swarm', 'lanes');
+	await fs.promises.mkdir(lanesDir, { recursive: true });
+
+	// Write {laneIndex}.env
+	const envPath = path.join(lanesDir, `${laneIndex}.env`);
+	await fs.promises.writeFile(envPath, `${lines.join('\n')}\n`, 'utf-8');
+}
+
+/**
+ * FR-205 SC-134: Removes the lane runtime profile `.swarm/lanes/{laneIndex}.env`.
+ *
+ * Called at lane teardown to clean up the materialization created by
+ * `writeLaneProfileToDiskReal`. Removing this file prevents stale lane data
+ * from accumulating in `.swarm/lanes/` across phases.
+ *
+ * Defense-in-depth: failures are non-fatal. The lane teardown can still
+ * complete even if the env file removal fails (e.g. permissions).
+ *
+ * @param worktreePath - Absolute path to the lane worktree root.
+ * @param laneIndex   - 0-based lane index used for filename derivation.
+ */
+export async function removeLaneProfileFromDiskReal(
+	worktreePath: string,
+	laneIndex: number,
+): Promise<void> {
+	const envPath = path.join(
+		worktreePath,
+		'.swarm',
+		'lanes',
+		`${laneIndex}.env`,
+	);
+	try {
+		await fs.promises.unlink(envPath);
+	} catch (err) {
+		// ENOENT means the file was already absent — this is fine.
+		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+			console.warn(
+				`[worktree] Failed to remove lane profile ${envPath}: ${(err as Error).message}`,
+			);
+		}
+	}
+}
 
 interface GitResult {
 	exitCode: number;
@@ -358,6 +506,83 @@ export async function provisionWorktree(
 		return {
 			error: `Failed to create worktree: ${addResult.stderr.trim() || addResult.stdout.trim()}`,
 		};
+	}
+
+	// Dependency preparation per depsStrategy (FR-101 / SC-101..SC-103)
+	// 'skip' (default): no preparation — caller may emit advisory if task gates include test/build.
+	// 'copy': recursive copy of host node_modules into lane (real files, not symlink).
+	// 'link': platform-appropriate symlink/junction so lane resolves host's dependency entries at same paths.
+	const strategy: DependencyPreparationStrategy =
+		options.depsStrategy ?? 'skip';
+	if (strategy !== 'skip') {
+		const hostDepDir = path.join(directory, 'node_modules');
+		const laneDepDir = path.join(worktreePath, 'node_modules');
+		if (_internals.fs.existsSync(hostDepDir)) {
+			try {
+				if (strategy === 'copy') {
+					_internals.fs.cpSync(hostDepDir, laneDepDir, {
+						recursive: true,
+						force: true,
+					});
+				} else if (strategy === 'link') {
+					const isWindows = _internals.platform === 'win32';
+					// 'junction' on Windows for directory symlinks (no admin required for local targets);
+					// 'dir' on POSIX.
+					_internals.fs.symlinkSync(
+						hostDepDir,
+						laneDepDir,
+						isWindows ? 'junction' : 'dir',
+					);
+				}
+			} catch (e) {
+				// Non-fatal: the lane may still function for tasks that do not require the deps,
+				// or the subsequent commands will surface the real missing-dep error.
+				console.warn(
+					`[swarm] deps_strategy '${strategy}' preparation failed for ${id}: ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
+		} else {
+			// SC-103: no silent no-op for copy/link when host node_modules is absent.
+			// Return error so callers can fail-fast or surface loudly instead of provisioning a lane
+			// that will immediately fail on any test/build command.
+			return {
+				error: `WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING: deps_strategy ${strategy} requires node_modules at ${hostDepDir} but it does not exist`,
+			};
+		}
+	}
+
+	// FR-102 / SC-105: Materialize declared scope into the lane's .swarm/scopes/
+	// so that resolveScopeWithFallbacks({ directory: worktreePath, ... }) recovers
+	// the narrow scope after a plugin restart (in-memory state is lost).
+	// This makes the lane self-sufficient; the scope file is written under the
+	// worktree root which inherits the primary .gitignore (excludes .swarm/).
+	// Write is best-effort (defense-in-depth); failure is non-fatal.
+	if (options.scope?.taskId && Array.isArray(options.scope.files)) {
+		try {
+			await _internals.writeScopeToDisk(
+				worktreePath,
+				options.scope.taskId,
+				options.scope.files,
+			);
+		} catch {
+			/* non-fatal — scope persistence is defense-in-depth */
+		}
+	}
+
+	// FR-201 SC-124: Materialize lane runtime profile as `.swarm/lanes/{laneIndex}.env`.
+	// This file allows child processes spawned inside the lane to source lane-specific
+	// env vars (PORT, TMPDIR, cache redirects, etc.) by reading this file.
+	// Write is best-effort (defense-in-depth); failure is non-fatal.
+	if (options.laneProfile) {
+		try {
+			await _internals.writeLaneProfileToDisk(
+				worktreePath,
+				options.laneProfile.laneIndex,
+				options.laneProfile.envOverrides,
+			);
+		} catch {
+			/* non-fatal — profile materialization is defense-in-depth */
+		}
 	}
 
 	return {

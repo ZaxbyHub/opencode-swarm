@@ -43,6 +43,7 @@ import {
 	handleKnowledgeRetryHardeningCommand,
 	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
+import { handleLanesCommand } from './lanes.js';
 import { handleLearningCommand } from './learning.js';
 import { handleLinkCommand } from './link.js';
 import { handleLoopCommand } from './loop.js';
@@ -473,6 +474,14 @@ export const COMMAND_REGISTRY = {
 	preflight: {
 		handler: (ctx) => handlePreflightCommand(ctx.directory, ctx.args),
 		description: 'Run preflight automation checks',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	lanes: {
+		handler: (ctx) =>
+			Promise.resolve(handleLanesCommand(ctx.directory, ctx.args)),
+		description: 'List active, awaiting-merge, and conflicted worktree lanes',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 		toolNoArgs: true,

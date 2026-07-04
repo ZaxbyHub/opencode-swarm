@@ -352,8 +352,8 @@ describe('AC-1: config acceptance — worktree_isolation triggers worktree mode'
 		expect(mocks.provisionCalls.length).toBe(0);
 	});
 
-	test('DEFAULT_LEAN_TURBO_CONFIG has worktree_isolation false', () => {
-		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(false);
+	test('DEFAULT_LEAN_TURBO_CONFIG has worktree_isolation true', () => {
+		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(true);
 	});
 
 	test('config schema accepts worktree_isolation boolean', () => {

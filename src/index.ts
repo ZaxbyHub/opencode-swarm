@@ -87,6 +87,8 @@ import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
 import { deleteStoredInputArgs } from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
+import { runInitOrphanRecovery } from './hooks/init-orphan-recovery.js';
+import { createInitOrphanRecoveryAdvisoryHook } from './hooks/init-orphan-recovery-advisory';
 import {
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
@@ -117,6 +119,7 @@ import { buildDelegationCostFields } from './services/cost-accounting.js';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
+
 import { ensureAgentSession, getActiveWindow, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
@@ -489,6 +492,25 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		});
 	});
 
+	// FR-103: Startup orphan recovery — reclaim orphaned worktrees and branches
+	// from crashed sessions. At plugin init no sessions are active yet, so
+	// runInitOrphanRecovery with an empty activeSessionIds array will remove
+	// ALL swarm-lane branches (orphans). git worktree prune cleans up stale
+	// worktree metadata. Results are written to .swarm/advisories/ so the
+	// architect sees any state-unreadable conditions on their NEXT TURN.
+	//
+	// DEFERRED via queueMicrotask (NOT awaited on the server()-resolution path)
+	// per Invariant 1 / Issue #704 — see the repoGraphHook precedent above.
+	// Fails open so plugin init is never blocked. The companion hook
+	// createInitOrphanRecoveryAdvisoryHook surfaces results to the architect
+	// on their first turn after plugin init.
+	queueMicrotask(() => {
+		void runInitOrphanRecovery(ctx.directory).catch((err: unknown) => {
+			const msg = err instanceof Error ? err.message : String(err);
+			log('initOrphanRecovery failed (non-fatal)', { error: msg });
+		});
+	});
+
 	// Side tasks are small and scoped to `<ctx.directory>/.swarm/`
 	// or `<ctx.directory>/.opencode/`, so none risks a home-tree scan.
 	writeSwarmConfigExampleIfNew(ctx.directory);
@@ -772,6 +794,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		{ enabled: watchdogConfig.delegation_ledger },
 		ctx.directory,
 		advisoryInjector,
+	);
+
+	// Init orphan recovery advisory: surfaces plugin-init orphan reclamation results
+	// to the architect on their next turn via pendingAdvisoryMessages.
+	const initOrphanRecoveryAdvisoryHook = createInitOrphanRecoveryAdvisoryHook(
+		ctx.directory,
 	);
 
 	// Self-review advisory hook
@@ -1709,6 +1737,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				},
 				pipelineHook['experimental.chat.messages.transform'],
 				contextBudgetHandler,
+				initOrphanRecoveryAdvisoryHook.messagesTransform,
 				guardrailsHooks.messagesTransform,
 				fullAutoInterceptHook?.messagesTransform,
 				ccCommandInterceptHook?.messagesTransform,

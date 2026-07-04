@@ -244,6 +244,15 @@ export function bunHash(input: string | ArrayBufferView | ArrayBuffer): bigint {
 export interface BunCompatSpawnOptions {
 	cwd?: string;
 	env?: Record<string, string | undefined>;
+	/**
+	 * Per-call env overlay merged into the child env at spawn time.
+	 * - string value: sets KEY=value on the child env
+	 * - null value:    deletes KEY from the child env (use to scrub inherited vars)
+	 * Absent keys are inherited from the parent process.env.
+	 * Used by FR-201/202 lane runtime profile to inject per-lane PORT,
+	 * TMPDIR, etc., without copying process.env.
+	 */
+	envOverrides?: Record<string, string | null>;
 	stdin?: 'inherit' | 'ignore' | 'pipe';
 	stdout?: 'inherit' | 'ignore' | 'pipe';
 	stderr?: 'inherit' | 'ignore' | 'pipe';
@@ -475,6 +484,59 @@ function streamFromBun(stream: unknown): BunCompatStream {
 	return { text, bytes, getReader };
 }
 
+/**
+ * Merges `envOverrides` into the base env (or `process.env` if no base env
+ * is given) and returns the resulting record.
+ *
+ * - `value === null`  → delete the key from the result
+ * - `value !== null`  → set `key = value` in the result
+ * - absent keys       → inherited from base env
+ *
+ * Always returns a copy of the env — never mutates the caller's env.
+ *
+ * The distinction between "no base env provided" and "explicitly provided
+ * an empty base env" is preserved:
+ *   - `baseEnv === undefined` (caller did NOT provide env):
+ *       fallback to process.env, apply overrides, return `undefined` if the
+ *       merged result is empty so the child inherits naturally from process.env.
+ *   - `baseEnv !== undefined` (caller provided env, even if `{}`):
+ *       start from a copy of baseEnv, apply overrides, return `{}` if the
+ *       merged result is empty (explicit empty environment — do NOT collapse
+ *       to `undefined` and re-expose the parent's env to the child).
+ */
+export function mergeEnvForChild(
+	baseEnv: Record<string, string | undefined> | undefined,
+	envOverrides: Record<string, string | null> | undefined,
+): Record<string, string> | undefined {
+	// Track whether the caller explicitly provided a base env (possibly `{}`).
+	// This flag determines what to return when the merged result is empty:
+	//   - true  → return `{}`  (caller asked for empty env, honor it)
+	//   - false → return `undefined` (let the child inherit process.env)
+	const hasExplicitBaseEnv = baseEnv !== undefined;
+
+	// Start from a copy of the base so we never mutate the caller's env.
+	const baseSource = baseEnv ?? process.env;
+	const merged: Record<string, string> = {};
+	for (const [key, value] of Object.entries(baseSource)) {
+		if (typeof value === 'string') merged[key] = value;
+	}
+
+	if (envOverrides) {
+		for (const [key, value] of Object.entries(envOverrides)) {
+			if (value === null) {
+				delete merged[key];
+			} else {
+				merged[key] = value;
+			}
+		}
+	}
+
+	if (Object.keys(merged).length === 0) {
+		return hasExplicitBaseEnv ? {} : undefined;
+	}
+	return merged;
+}
+
 export function bunSpawn(
 	cmd: string[],
 	options?: BunCompatSpawnOptions,
@@ -486,7 +548,10 @@ export function bunSpawn(
 		// Adapt Bun's subprocess to the `BunCompatSubprocess` shape so
 		// callers do not have to know which runtime they're on. Bun exposes
 		// `stdout`/`stderr` as `ReadableStream`; we wrap them.
-		const proc = bun.spawn(cmd, options) as {
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		const spawnOpts =
+			mergedEnv !== undefined ? { ...options, env: mergedEnv } : options;
+		const proc = bun.spawn(cmd, spawnOpts) as {
 			stdout?: unknown;
 			stderr?: unknown;
 			exited: Promise<number>;
@@ -515,9 +580,10 @@ export function bunSpawn(
 	}
 	const [file, ...args] = cmd;
 	const detached = options?.killProcessTree === true;
+	const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
 	const proc = nodeSpawn(file, args, {
 		cwd: options?.cwd,
-		env: options?.env as NodeJS.ProcessEnv | undefined,
+		env: mergedEnv,
 		detached,
 		windowsHide: true,
 		stdio: [
@@ -608,7 +674,10 @@ export function bunSpawnSync(
 		  }
 		| undefined;
 	if (bun?.spawnSync) {
-		const result = bun.spawnSync(cmd, options);
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		const spawnOpts =
+			mergedEnv !== undefined ? { ...options, env: mergedEnv } : options;
+		const result = bun.spawnSync(cmd, spawnOpts);
 		return result;
 	}
 	let argv: string[];
@@ -630,9 +699,10 @@ export function bunSpawnSync(
 		}
 	}
 	const [file, ...args] = argv;
+	const mergedEnv = mergeEnvForChild(mergedOptions.env, options?.envOverrides);
 	const result = nodeSpawnSync(file, args, {
 		cwd: mergedOptions.cwd,
-		env: mergedOptions.env as NodeJS.ProcessEnv | undefined,
+		env: mergedEnv,
 		input:
 			(mergedOptions as { stdin?: string | Uint8Array }).stdin instanceof
 				Uint8Array ||

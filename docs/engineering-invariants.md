@@ -419,6 +419,9 @@ mock.module('node:fs', () => ({
 | **`src/hooks/delegate-ack-collector.ts`** | **delegate ack internals** | **FR-011 delegate-ack-collector hook tests** |
 | **`src/hooks/delegate-directive-injection.ts`** | **delegate directive injection internals** | **FR-011 delegate-directive-injection hook tests** |
 | **`src/hooks/knowledge-reinforcement.ts`** | **knowledge-reinforcement internals** | **FR-011 knowledge-reinforcement hook tests** |
+| **`src/utils/bun-compat.ts`** | **`mergeEnvForChild`** | **FR-202 spawn env-override helper** |
+| **`src/sandbox/executor.ts`** | **`isValidEnvKey`** | **FR-203 sandbox key validation** |
+| **`src/worktree/core.ts`** | **`removeLaneProfileFromDisk`, `writeLaneProfileToDisk`** | **FR-201 + FR-205 lane profile materialization + teardown** |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

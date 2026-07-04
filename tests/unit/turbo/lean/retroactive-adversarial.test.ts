@@ -684,7 +684,7 @@ describe('ATTACK VECTOR 4 — worktree_isolation coercion from non-boolean value
 		}
 	});
 
-	test('schema: undefined worktree_isolation uses default (false)', () => {
+	test('schema: undefined worktree_isolation uses default (true after FR-107 alignment)', () => {
 		const result = LeanTurboConfigSchema.safeParse({
 			max_parallel_coders: 4,
 			// worktree_isolation not specified
@@ -692,7 +692,7 @@ describe('ATTACK VECTOR 4 — worktree_isolation coercion from non-boolean value
 
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.data.worktree_isolation).toBe(false); // default
+			expect(result.data.worktree_isolation).toBe(true); // FR-107: aligned with general surface policy 'auto'
 		}
 	});
 

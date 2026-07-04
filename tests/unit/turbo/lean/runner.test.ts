@@ -15,6 +15,13 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DEFAULT_LEAN_TURBO_CONFIG } from '../../../../src/config/constants';
+import type { AgentSessionState } from '../../../../src/state';
+import {
+	resetSwarmState,
+	startAgentSession,
+	swarmState,
+} from '../../../../src/state';
 import { LeanTurboRunner } from '../../../../src/turbo/lean/runner';
 import type {
 	LeanTurboLane,
@@ -37,11 +44,20 @@ let origAssertCleanWorkingTree: typeof LeanTurboRunner._internals.assertCleanWor
 function makeRunner(options?: {
 	opencodeClient?: null;
 	generatedAgentNames?: string[];
-	leanConfig?: { max_parallel_coders: number };
+	leanConfig?: { max_parallel_coders: number; worktree_isolation?: boolean };
 }) {
+	// Default worktree_isolation to false so tests that don't initialize a git repo
+	// continue to work. Tests that explicitly test isolation pass
+	// leanConfig: { worktree_isolation: true } and the spread below preserves that.
+	const leanConfig = {
+		...DEFAULT_LEAN_TURBO_CONFIG,
+		worktree_isolation: false,
+		...options?.leanConfig,
+	};
 	return new LeanTurboRunner({
 		directory: tmpDir,
 		sessionID: SESSION_ID,
+		leanConfig,
 		...options,
 	});
 }
@@ -133,6 +149,8 @@ function mockSuccessfulSessionOps() {
 }
 
 beforeEach(() => {
+	resetSwarmState();
+	startAgentSession(SESSION_ID, 'architect');
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'runner-test-')),
 	);
@@ -1438,6 +1456,78 @@ describe('leanConfig propagation', () => {
 		expect(
 			(capturedConfig as { max_parallel_coders: number }).max_parallel_coders,
 		).toBe(4);
+	});
+
+	test('FR-107: runner without leanConfig uses production default worktree_isolation=true (provisionWorktree IS called)', async () => {
+		// This test locks down the FR-107 default-flip: when leanConfig is NOT
+		// provided to the LeanTurboRunner constructor, it falls back to
+		// DEFAULT_LEAN_TURBO_CONFIG which now has worktree_isolation=true.
+		// This test constructs a runner directly (bypassing makeRunner) to
+		// exercise the real production code path.
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		// Construct WITHOUT makeRunner to use real production constructor defaults
+		const runner = new LeanTurboRunner({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+			generatedAgentNames: ['mega_coder'],
+			// leanConfig intentionally omitted → runner uses DEFAULT_LEAN_TURBO_CONFIG
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock startupOrphanRecovery to avoid git commands in non-git tmpDir
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Track provisionWorktree calls — with production default (true), it MUST be called
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath: path.join(
+						tmpDir,
+						'.swarm-worktrees',
+						SESSION_ID,
+						'lane-1',
+					),
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+		// Mock merge + cleanup so lanes complete fully
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		// With FR-107 default (worktree_isolation=true), provisionWorktree MUST be called
+		expect(result.ok).toBe(true);
+		expect(provisionCalls.length).toBeGreaterThan(0);
 	});
 });
 
@@ -3581,6 +3671,377 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 		} finally {
 			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
 			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FR-106: dirty-tree downgrade advisory — pendingAdvisoryMessages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('FR-106: dirty-tree downgrade advisory', () => {
+	/**
+	 * Helper: start a fresh agent session for the test.
+	 * Called inside each test so each test gets a clean session.
+	 */
+	function startTestSession() {
+		resetSwarmState();
+		startAgentSession(SESSION_ID, 'architect');
+	}
+
+	test('SC-118: dirty tree triggers advisory with LEAN_TURBO_DIRTY_TREE_DOWNGRADE reason', async () => {
+		startTestSession();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to return dirty
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.resolve({
+				clean: false,
+				error: 'uncommitted changes in src/',
+			}),
+		);
+
+		// Mock provisionWorktree to avoid being called (degraded)
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		try {
+			await runner.runPhase(1);
+
+			// Verify pendingAdvisoryMessages contains the downgrade advisory
+			const session = swarmState.agentSessions.get(SESSION_ID);
+			expect(session).toBeDefined();
+			const advisories = session!.pendingAdvisoryMessages ?? [];
+			const dirtyAdvisory = advisories.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(dirtyAdvisory).toBeDefined();
+			expect(dirtyAdvisory).toContain('uncommitted changes in src/');
+			expect(dirtyAdvisory).toContain(
+				'Worktree isolation is OFF for this phase',
+			);
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+		}
+	});
+
+	test('SC-118: assertCleanWorkingTree exception triggers advisory with error message', async () => {
+		startTestSession();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to throw
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.reject(new Error('not a git repository')),
+		);
+
+		// Mock provisionWorktree to avoid being called (degraded)
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		try {
+			await runner.runPhase(1);
+
+			// Verify pendingAdvisoryMessages contains the downgrade advisory
+			const session = swarmState.agentSessions.get(SESSION_ID);
+			expect(session).toBeDefined();
+			const advisories = session!.pendingAdvisoryMessages ?? [];
+			const dirtyAdvisory = advisories.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(dirtyAdvisory).toBeDefined();
+			expect(dirtyAdvisory).toContain('not a git repository');
+			expect(dirtyAdvisory).toContain(
+				'Worktree isolation is OFF for this phase',
+			);
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+		}
+	});
+
+	test('SC-120: advisory names the affected lanes by lane ID', async () => {
+		startTestSession();
+		// Write a plan with two tasks that produce two lanes
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'], '1.2': ['src/b.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to return dirty
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.resolve({
+				clean: false,
+				error: 'uncommitted changes in src/',
+			}),
+		);
+
+		// Mock provisionWorktree to avoid being called (degraded)
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		try {
+			await runner.runPhase(1);
+
+			// Verify pendingAdvisoryMessages names the lanes
+			const session = swarmState.agentSessions.get(SESSION_ID);
+			expect(session).toBeDefined();
+			const advisories = session!.pendingAdvisoryMessages ?? [];
+			const dirtyAdvisory = advisories.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(dirtyAdvisory).toBeDefined();
+			// The advisory should name the lanes that were planned (e.g. "lane-1, lane-2")
+			expect(dirtyAdvisory).toContain('affected lanes:');
+			// Verify actual lane IDs are present in the affected lanes section
+			const affectedMatch = dirtyAdvisory!.match(/affected lanes: ([^.]+)\./);
+			expect(affectedMatch).not.toBeNull();
+			// Lane IDs contain "lane-" prefix
+			expect(affectedMatch![1]).toMatch(/lane-/);
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+		}
+	});
+
+	test('SC-119: _pendingDowngrade is reset after runPhase so a subsequent clean run does NOT re-emit advisory', async () => {
+		startTestSession();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree: FIRST call dirty, SECOND call clean
+		let callCount = 0;
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() => {
+			callCount++;
+			if (callCount === 1) {
+				return Promise.resolve({
+					clean: false,
+					error: 'uncommitted changes in src/',
+				});
+			}
+			return Promise.resolve({ clean: true });
+		});
+
+		// Mock provisionWorktree (needed for clean second run)
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Mock merge + cleanup
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		try {
+			// First run: dirty tree — advisory should be emitted
+			await runner.runPhase(1);
+
+			const session1 = swarmState.agentSessions.get(SESSION_ID)!;
+			const advisories1 = session1.pendingAdvisoryMessages ?? [];
+			const dirtyAdvisory1 = advisories1.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(dirtyAdvisory1).toBeDefined();
+			expect(dirtyAdvisory1).toContain('uncommitted changes in src/');
+
+			// Clear the advisory queue to isolate the second call
+			session1.pendingAdvisoryMessages = [];
+
+			// Second run: clean tree — advisory must NOT be re-emitted
+			await runner.runPhase(1);
+
+			const session2 = swarmState.agentSessions.get(SESSION_ID)!;
+			const advisories2 = session2.pendingAdvisoryMessages ?? [];
+			const staleAdvisory = advisories2.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(staleAdvisory).toBeUndefined();
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	});
+
+	test('worktree_isolation=false skips assertCleanWorkingTree and does NOT emit advisory', async () => {
+		startTestSession();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: false },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to track calls
+		const assertCleanCalls: unknown[] = [];
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(
+			(...args: Parameters<typeof origAssertClean>) => {
+				assertCleanCalls.push(args);
+				return Promise.resolve({ clean: true });
+			},
+		);
+
+		try {
+			await runner.runPhase(1);
+
+			// assertCleanWorkingTree must NOT have been called
+			expect(assertCleanCalls.length).toBe(0);
+
+			// No dirty-tree advisory should be emitted
+			const session = swarmState.agentSessions.get(SESSION_ID);
+			expect(session).toBeDefined();
+			const advisories = session!.pendingAdvisoryMessages ?? [];
+			const dirtyAdvisory = advisories.find((m) =>
+				m.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE'),
+			);
+			expect(dirtyAdvisory).toBeUndefined();
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+		}
+	});
+
+	// Regression test: dirty-tree downgrade must NOT mutate DEFAULT_LEAN_TURBO_CONFIG
+	test('calling runPhase with dirty tree twice does not mutate DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation', async () => {
+		startTestSession();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Snapshot the original default
+		const originalWorktreeIsolation =
+			DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation;
+
+		// Mock assertCleanWorkingTree to return dirty on first call, clean on second
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		let callCount = 0;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() => {
+			callCount++;
+			return Promise.resolve({ clean: callCount > 1 });
+		});
+
+		// Also mock provisionWorktree to avoid actual file system work
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({ success: true, laneId: 'lane-1', worktreeDir: '' }),
+		);
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		try {
+			// First run: dirty tree — downgrade path triggered
+			await runner.runPhase(1);
+
+			// Second run: clean tree — no downgrade
+			await runner.runPhase(1);
+
+			// CRITICAL: DEFAULT_LEAN_TURBO_CONFIG must not have been mutated
+			expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(
+				originalWorktreeIsolation,
+			);
+			// Specifically, worktree_isolation should still be true (the production default)
+			expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(true);
+		} finally {
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
 			LeanTurboRunner._internals.provisionWorktree = origProvision;
 			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
 			LeanTurboRunner._internals.postMergeCleanup = origCleanup;

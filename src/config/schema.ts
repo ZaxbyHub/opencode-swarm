@@ -1813,6 +1813,53 @@ export const WorktreeIsolationConfigSchema = z.object({
 	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
 	worktree_dir: z.string().optional(),
 	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+	/**
+	 * FR-104 SC-111: Release a serialized session after this many successful
+	 * dispatches have completed and merged back from that session.
+	 */
+	serialization_release_after_dispatches: z
+		.number()
+		.int()
+		.positive()
+		.default(5),
+	/**
+	 * FR-104 SC-112: Release a serialized session after this many milliseconds
+	 * have elapsed since the session was first serialized (even if zero
+	 * dispatches have succeeded).
+	 */
+	serialization_release_after_ms: z.number().int().positive().default(60_000),
+	/**
+	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
+	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride,
+	 * plus any custom env_overrides and cache_redirects merged in.
+	 * Disabled by default — zero behavior change when off.
+	 */
+	runtime_isolation: z
+		.object({
+			/** Master gate — must be true for any profile injection to occur. */
+			enabled: z.boolean().default(false),
+			/**
+			 * Base port for lane 0. Lanes get PORT = port_base + laneIndex * port_stride.
+			 * If omitted, no PORT variable is set.
+			 */
+			port_base: z.number().int().nonnegative().optional(),
+			/** Stride between lane ports. Default 1. */
+			port_stride: z.number().int().positive().default(1),
+			/**
+			 * Custom env var overrides applied to every lane.
+			 * Values are set verbatim; null values unset the variable.
+			 * Merged after the PORT assignment so lanes can override it.
+			 */
+			env_overrides: z.record(z.string(), z.string()).optional(),
+			/**
+			 * Cache directory redirections: map of base path → lane-suffixed path.
+			 * For each entry, the lane gets the redirected path as an env var
+			 * named after the key (e.g. `{ "XDG_CACHE_HOME": "/path/to/base" }` →
+			 * lane gets `XDG_CACHE_HOME=/lane/cache/path`).
+			 */
+			cache_redirects: z.record(z.string(), z.string()).optional(),
+		})
+		.optional(),
 });
 
 export type WorktreeIsolationConfig = z.infer<
@@ -1838,7 +1885,7 @@ export const LeanTurboConfigSchema = z.object({
 	/** Allow docs-only phases when reviewer is not available. */
 	allow_docs_only_without_reviewer: z.boolean().default(false),
 	/** Use worktree isolation for parallel coders. When true, each lane gets its own worktree. */
-	worktree_isolation: z.boolean().default(false),
+	worktree_isolation: z.boolean().default(true),
 	/** Branch merge strategy after lane worktree completion. */
 	merge_strategy: z
 		.enum(['merge', 'rebase', 'cherry-pick'])
@@ -1846,6 +1893,23 @@ export const LeanTurboConfigSchema = z.object({
 		.optional(),
 	/** Optional user-specified worktree directory override. */
 	worktree_dir: z.string().optional(),
+	/** Dependency preparation strategy for lanes when worktree_isolation is enabled. */
+	deps_strategy: z.enum(['skip', 'copy', 'link']).optional(),
+	/**
+	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
+	 * Mirrors WorktreeIsolationConfigSchema.runtime_isolation for Lean Turbo lanes.
+	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride.
+	 * Disabled by default — zero behavior change when off.
+	 */
+	runtime_isolation: z
+		.object({
+			enabled: z.boolean().default(false),
+			port_base: z.number().int().nonnegative().optional(),
+			port_stride: z.number().int().positive().default(1),
+			env_overrides: z.record(z.string(), z.string()).optional(),
+			cache_redirects: z.record(z.string(), z.string()).optional(),
+		})
+		.optional(),
 });
 
 export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;

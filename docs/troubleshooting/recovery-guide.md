@@ -164,7 +164,39 @@ lane result is `output_degraded`, `transcript_incomplete`, truncated without a
 usable ref, stale, cancelled, or failed, treat it as missing advisory evidence and
 re-dispatch a narrower lane or mark the affected coverage UNVERIFIED.
 
-## 9. Recovering from Background Stage B Gate Batches
+## 9. Orphaned Worktree Recovery
+
+**Symptom:** Stale `.swarm-worktrees/<sessionId>/` directories remain after a session crashes or is terminated uncleanly. These orphaned worktrees accumulate over time and consume disk space.
+
+**What happens:** On session start, the plugin runs an orphan recovery scan that:
+1. Reads active sessions from the swarm state ledger
+2. Identifies `.swarm-worktrees/<sessionId>/` directories whose sessions are no longer active
+3. Removes the orphaned worktree directory and its associated git branch (`sw-lane-<sessionId>/*`)
+4. Writes an advisory to `.swarm/advisories/init-orphan-recovery.json` describing what was cleaned up
+
+The orphan recovery runs via `queueMicrotask` during plugin initialization, so it does not block the plugin from loading.
+
+**Files cleaned up:**
+- `.swarm-worktrees/<sessionId>/` directory
+- Git branch `sw-lane-<sessionId>/*` for each lane under that session
+
+**Advisory file:** `.swarm/advisories/init-orphan-recovery.json` contains the recovery report. The session-start hook consumes this file and pushes its contents to `pendingAdvisoryMessages`, then deletes the file after consumption. To inspect what was cleaned up after a session restart, check the advisory content before it is consumed.
+
+**Manual cleanup:** If you need to clean up orphaned worktrees manually:
+```bash
+# List all worktrees
+git worktree list
+
+# Remove a specific orphaned worktree
+git worktree remove .swarm-worktrees/<sessionId>/<laneId>
+
+# Also remove the branch
+git branch -D sw-lane-<sessionId>-<laneId>
+```
+
+---
+
+## 10. Recovering from Background Stage B Gate Batches
 
 When `hooks.background_subagents: true` is enabled, native background `Task`
 dispatches to gate-bearing agents are tracked in `.swarm/background-delegations.jsonl`.

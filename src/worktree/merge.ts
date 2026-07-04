@@ -32,11 +32,17 @@ export const _internals: {
 	platform: string;
 	/** Test seam for sleep — allows tests to skip real delays. */
 	sleep: (ms: number) => Promise<void>;
+	/** Test seam for cleanupOrphanedBranches — allows tests to intercept the cleanup call. */
+	cleanupOrphanedBranches: typeof cleanupOrphanedBranches;
+	/** Test seam for startupOrphanRecovery — allows tests to intercept the recovery call. */
+	startupOrphanRecovery: typeof startupOrphanRecovery;
 } = {
 	bunSpawn,
 	platform: process.platform,
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
+	cleanupOrphanedBranches,
+	startupOrphanRecovery,
 };
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,14 @@ export interface WorktreeMergeFailure {
 	stage: string;
 	/** Human-readable detail surfaced in the Rule 2 skip warning. */
 	message: string;
+	/** Worktree path where the lane is preserved after a failed/partial merge. */
+	worktreePath?: string;
+	/** Branch name of the lane. */
+	branch?: string;
+	/** Timestamp (Date.now()) when the lane entered merge-back. */
+	queuedAt?: number;
+	/** Timestamp (Date.now()) when merge-back completed (success or failure). */
+	completedAt?: number;
 }
 
 const failuresByTask = new Map<string, WorktreeMergeFailure>();
@@ -170,6 +178,21 @@ export function getWorktreeMergeFailure(
 		loadDurableStatus(durableStatusPath);
 	}
 	return failuresByTask.get(taskId);
+}
+
+/**
+ * Iterate all worktree merge failures. Used by /swarm lanes to surface
+ * conflicted lanes that are NOT in awaitingMergeByCallID (i.e., merge
+ * has completed with partial/failed outcome).
+ */
+export function getAllWorktreeMergeFailures(): IterableIterator<
+	[string, WorktreeMergeFailure]
+> {
+	// One-shot lazy load as a safety net if init was skipped.
+	if (!hasLoaded && durableStatusPath) {
+		loadDurableStatus(durableStatusPath);
+	}
+	return failuresByTask.entries();
 }
 
 /**

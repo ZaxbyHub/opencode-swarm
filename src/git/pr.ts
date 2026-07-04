@@ -2,6 +2,7 @@ import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { mergeEnvForChild } from '../utils/bun-compat';
 import { warn } from '../utils/logger.js';
 import {
 	isTransientSpawnError,
@@ -13,6 +14,7 @@ import {
 	getChangedFiles,
 	getCurrentBranch,
 	getCurrentSha,
+	readLaneEnvFileFromDiskSync,
 	stageAll,
 } from './branch.js';
 
@@ -111,7 +113,39 @@ export function ghExec(args: string[], cwd: string): string {
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024; // 5MB cap per stream
 
 /**
+ * File-scoped indirection seam for spawnSync.
+ * Supports envOverrides so lane runtime profiles can inject env.
+ */
+const __spawnSyncSeam = {
+	spawnSync: (
+		cmd: string,
+		args: string[],
+		options?: {
+			cwd?: string;
+			encoding?: BufferEncoding;
+			timeout?: number;
+			maxBuffer?: number;
+			windowsHide?: boolean;
+			stdio?:
+				| 'pipe'
+				| 'ignore'
+				| 'inherit'
+				| Array<'pipe' | 'ignore' | 'inherit'>;
+			env?: Record<string, string | undefined>;
+			envOverrides?: Record<string, string | null>;
+		},
+	) => {
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		return child_process.spawnSync(cmd, args, {
+			...options,
+			env: mergedEnv as NodeJS.ProcessEnv | undefined,
+		});
+	},
+};
+
+/**
  * Shared spawnSync wrapper with bounded ETIMEDOUT-only transient retry.
+ * Applies envOverrides to options.env before calling spawnSync.
  *
  * Mirrors the retry shape from ghExec (invariant 9):
  * - Up to MAX_TRANSIENT_RETRIES attempts with exponential backoff on ETIMEDOUT
@@ -121,10 +155,23 @@ const MAX_OUTPUT_BYTES = 5 * 1024 * 1024; // 5MB cap per stream
 function spawnSyncWithTransientRetry(
 	command: string,
 	args: string[],
-	options: child_process.SpawnSyncOptions,
+	options?: {
+		cwd?: string;
+		encoding?: BufferEncoding;
+		timeout?: number;
+		maxBuffer?: number;
+		windowsHide?: boolean;
+		stdio?:
+			| 'pipe'
+			| 'ignore'
+			| 'inherit'
+			| Array<'pipe' | 'ignore' | 'inherit'>;
+		env?: Record<string, string | undefined>;
+		envOverrides?: Record<string, string | null>;
+	},
 ): child_process.SpawnSyncReturns<string> {
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-		const result = child_process.spawnSync(command, args, options);
+		const result = __spawnSyncSeam.spawnSync(command, args, options);
 
 		if (result.error) {
 			if (
@@ -259,7 +306,15 @@ export const _internals: {
 	ghExec: typeof ghExec;
 	ghExecAsync: typeof ghExecAsync;
 	spawnSyncWithTransientRetry: typeof spawnSyncWithTransientRetry;
-} = { ghExec, ghExecAsync, spawnSyncWithTransientRetry };
+	spawnSync: typeof __spawnSyncSeam.spawnSync;
+	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
+} = {
+	ghExec,
+	ghExecAsync,
+	spawnSyncWithTransientRetry,
+	spawnSync: __spawnSyncSeam.spawnSync,
+	readLaneEnvFileFromDiskSync,
+};
 
 /**
  * Check if gh CLI is available
@@ -336,12 +391,12 @@ export async function createPullRequest(
 	body?: string,
 	baseBranch: string = 'main',
 ): Promise<{ url: string; number: number }> {
-	const branch = getCurrentBranch(cwd);
+	const branch = await getCurrentBranch(cwd);
 	const baseBranchResolved = baseBranch || 'main';
 
 	// Generate body from evidence.md if not provided
 	// Note: sanitizeInput removed — spawnSync with array args is already safe from injection
-	const prBody = body || generateEvidenceMd(cwd);
+	const prBody = body || (await generateEvidenceMd(cwd));
 
 	// Create PR using gh CLI (array-based spawnSync is shell-injection safe)
 	const output = ghExec(
@@ -374,10 +429,26 @@ export async function createPullRequest(
 
 /**
  * Commit and push current changes
+ * @param cwd - Working directory
+ * @param message - Commit message
+ * @param laneEnv - Optional lane env overrides for git spawns
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function commitAndPush(cwd: string, message: string): void {
+export async function commitAndPush(
+	cwd: string,
+	message: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): Promise<void> {
+	// FR-201: fall back to sync disk read if laneEnv not provided but laneIndex is.
+	const resolvedLaneEnv =
+		laneEnv ??
+		(laneIndex !== undefined
+			? _internals.readLaneEnvFileFromDiskSync(cwd, laneIndex)
+			: undefined);
+
 	// Stage all changes
-	stageAll(cwd);
+	stageAll(cwd, laneEnv, laneIndex);
 
 	// Check if there are changes to commit
 	const statusResult = spawnSyncWithTransientRetry(
@@ -390,6 +461,7 @@ export function commitAndPush(cwd: string, message: string): void {
 			windowsHide: true,
 			maxBuffer: MAX_OUTPUT_BYTES,
 			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: resolvedLaneEnv,
 		},
 	);
 	const status = statusResult.stdout;
@@ -399,10 +471,10 @@ export function commitAndPush(cwd: string, message: string): void {
 	}
 
 	// Commit
-	commitChanges(cwd, message);
+	await commitChanges(cwd, message, laneEnv, laneIndex);
 
 	// Push
-	const branch = getCurrentBranch(cwd);
+	const branch = await getCurrentBranch(cwd, laneEnv, laneIndex);
 	const _pushResult = spawnSyncWithTransientRetry(
 		'git',
 		['push', '-u', 'origin', branch],
@@ -413,6 +485,7 @@ export function commitAndPush(cwd: string, message: string): void {
 			windowsHide: true,
 			maxBuffer: MAX_OUTPUT_BYTES,
 			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: resolvedLaneEnv,
 		},
 	);
 	// spawnSyncWithTransientRetry throws on non-zero exit, so no status check needed here
