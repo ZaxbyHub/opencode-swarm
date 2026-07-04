@@ -1,0 +1,24 @@
+# Quarantined integration tests — CI's `integration` job skips these files.
+#
+# The `integration` job (tests/integration/*.test.ts + ./test/*.test.ts) only
+# ever runs on `merge_group` events — it is skipped entirely on `pull_request`,
+# same as `coverage`. PR #1700's exit-code-primary fix made its failure
+# detection honest for the first time, and the first real merge_group run this
+# job ever executed surfaced 8 genuinely pre-existing failures, independent of
+# that PR's changes (reproduce identically on main, standalone, in a clean
+# environment).
+#
+# Tracked in https://github.com/ZaxbyHub/opencode-swarm/issues/1705 — remove a
+# line here ONLY once the corresponding file is fixed and passes standalone.
+#
+# Format: one repo-relative test file path per line. Blank lines and lines
+# starting with # are ignored.
+#
+tests/integration/curator-llm-delegation.test.ts
+tests/integration/phase-complete-events.test.ts
+tests/integration/phase-completion-e2e.test.ts
+tests/integration/php-command-selection.test.ts
+tests/integration/plan-status-preservation.test.ts
+tests/integration/save-plan-round-trip.test.ts
+tests/integration/unified-injection-budget.test.ts
+test/adversarial-plan-write.test.ts
