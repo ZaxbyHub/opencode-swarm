@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.107.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.1...v7.107.2) (2026-07-04)
+
+
+### Bug Fixes
+
+* **issue-tracer:** harden issue 1693 findings ([0a875ec](https://github.com/ZaxbyHub/opencode-swarm/commit/0a875ec5c08cc72614937da841584657f6503486))
+* **ssrf:** close IPv4-mapped/compatible/translated IPv6 bypasses + resolve review findings ([b831c5f](https://github.com/ZaxbyHub/opencode-swarm/commit/b831c5fcca73bad59750059292e19e0b842a3afa))
+
 ## [7.107.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.0...v7.107.1) (2026-07-03)
 
 
