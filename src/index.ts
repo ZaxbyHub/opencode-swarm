@@ -80,6 +80,7 @@ import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.j
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { collectDelegateAcksAfter } from './hooks/delegate-ack-collector.js';
 import { injectDelegateDirectivesBefore } from './hooks/delegate-directive-injection.js';
+import { resolveWorktreeIsolationConfig } from './hooks/delegation-gate/worktree-isolation.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
@@ -737,11 +738,17 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		guardrailsConfig.enabled,
 	);
 	const authorityConfig = AuthorityConfigSchema.parse(config.authority ?? {});
+	const worktreeDirOverride =
+		resolveWorktreeIsolationConfig(config).worktree_dir;
+	const worktreeBaseDirOverrides = worktreeDirOverride
+		? [worktreeDirOverride]
+		: [];
 	const guardrailsHooks = createGuardrailsHooks(
 		ctx.directory,
 		undefined,
 		guardrailsConfig,
 		authorityConfig,
+		worktreeBaseDirOverrides,
 	);
 
 	// Full-auto intercept: autonomous oversight when full-auto mode is active

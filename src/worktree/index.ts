@@ -17,9 +17,11 @@ export {
 	checkPathBudget,
 	cleanUntrackedFiles,
 	isCleanWorktree,
+	isPathUnderSwarmWorktreeBase,
 	makeWorktreeBranchName,
 	provisionWorktree,
 	removeWorktree,
+	resolveWorktreeBaseDir,
 	shortenWorktreePath,
 } from './core';
 export type {

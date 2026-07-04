@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
@@ -569,7 +569,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 
 	// ============================================================
 	// Section 22: Git clean -fd and worktree remove --force
-	// (Already covered by existing tests; just verify no regression)
+	// (issue #1708: worktree remove --force is now scope-exempt)
 	// ============================================================
 	describe('Section 22: Git clean -fd and worktree remove (regression)', () => {
 		test('git clean -fd → BLOCKED', async () => {
@@ -582,17 +582,293 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('git worktree remove --force → BLOCKED', async () => {
+		// --- issue #1708: other git destructive patterns stay hard-blocked ---
+		test('git reset --hard → BLOCKED (unchanged)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-			const input = makeBashInput(
-				'test-session',
-				'git worktree remove --force',
+			const input = makeBashInput('test-session', 'git reset --hard');
+			const output = makeBashOutput('git reset --hard HEAD~1');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git reset --hard.*detected/,
 			);
-			const output = makeBashOutput('git worktree remove --force');
+		});
+
+		test('git reset --mixed <target> → BLOCKED (unchanged)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput('test-session', 'git reset --mixed HEAD~1');
+			const output = makeBashOutput('git reset --mixed HEAD~1');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git reset --mixed.*not allowed/,
+			);
+		});
+
+		test('git push --force → BLOCKED (unchanged)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput('test-session', 'git push --force');
+			const output = makeBashOutput('git push --force origin main');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/Force push detected/,
+			);
+		});
+	});
+
+	// ============================================================
+	// Section 22b: git worktree remove --force scope-exemption (#1708)
+	// ============================================================
+	describe('Section 22b: git worktree remove --force scope-exemption (#1708)', () => {
+		/** Creates a fresh worktree base dir + an in-base worktree that exists on disk. */
+		function makeWorktreeFixture(): { base: string; worktreePath: string } {
+			const base = realpathSync(mkdtempSync(join(tmpdir(), 'wt-base-')));
+			const worktreePath = join(base, 'sess', 'lane-1');
+			mkdirSync(worktreePath, { recursive: true });
+			return { base, worktreePath };
+		}
+
+		test('--force before path, target under configured worktree base → ALLOWED', async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove --force ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('--force after path, target under configured worktree base → ALLOWED', async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove ${worktreePath} --force`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('-f short flag, target under configured worktree base → ALLOWED', async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove -f ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('--force on path OUTSIDE the worktree base (e.g. src/) → BLOCKED', async () => {
+			const { base } = makeWorktreeFixture();
+			const outside = join(TEST_DIR, 'src');
+			mkdirSync(outside, { recursive: true });
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove --force ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
 				/git worktree remove --force.*detected/,
 			);
+		});
+
+		test('--force on an in-base symlink/junction that resolves OUTSIDE → BLOCKED (fail closed)', async () => {
+			const { base } = makeWorktreeFixture();
+			const outsideReal = realpathSync(
+				mkdtempSync(join(tmpdir(), 'wt-escape-')),
+			);
+			const link = join(base, 'sess', 'escape-link');
+			mkdirSync(dirname(link), { recursive: true });
+			// 'junction' type is creatable by non-admin users on Windows and is
+			// ignored (dir symlink) on POSIX.
+			symlinkSync(outsideReal, link, 'junction');
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove --force ${link}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('--force with NO target → BLOCKED (unparseable, fail closed)', async () => {
+			const { base } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = 'git worktree remove --force';
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('--force with TWO positional targets → BLOCKED (ambiguous, fail closed)', async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove --force ${worktreePath} ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('non-force git worktree remove <path> → ALLOWED (never blocked by this guard)', async () => {
+			const outside = join(TEST_DIR, 'some-worktree');
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const cmd = `git worktree remove ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		// --------------------------------------------------------------
+		// Regression: quoted / abbreviated force flags must not bypass the
+		// containment check. A real shell strips surrounding quotes and git
+		// honors force-flag abbreviations, so `"--force"`, `'--force'`,
+		// `--forc`, and `-ff` all execute as force. If the guard only matched
+		// the exact tokens `--force`/`-f`, these forms slipped past hasForce
+		// and the entire scope check was skipped — allowing a force-remove of
+		// a path OUTSIDE the swarm worktree base with zero scrutiny.
+		// --------------------------------------------------------------
+		test('double-quoted "--force" on path OUTSIDE base → BLOCKED (regression)', async () => {
+			const { base } = makeWorktreeFixture();
+			const outside = join(TEST_DIR, 'src');
+			mkdirSync(outside, { recursive: true });
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove "--force" ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test("single-quoted '--force' on path OUTSIDE base → BLOCKED (regression)", async () => {
+			const { base } = makeWorktreeFixture();
+			const outside = join(TEST_DIR, 'src');
+			mkdirSync(outside, { recursive: true });
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove '--force' ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('abbreviated --forc on path OUTSIDE base → BLOCKED (regression)', async () => {
+			const { base } = makeWorktreeFixture();
+			const outside = join(TEST_DIR, 'src');
+			mkdirSync(outside, { recursive: true });
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove --forc ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('stacked short form -ff on path OUTSIDE base → BLOCKED (regression)', async () => {
+			const { base } = makeWorktreeFixture();
+			const outside = join(TEST_DIR, 'src');
+			mkdirSync(outside, { recursive: true });
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove -ff ${outside}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/git worktree remove --force.*detected/,
+			);
+		});
+
+		test('double-quoted "--force" on path INSIDE base → ALLOWED (not blocked unconditionally)', async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove "--force" ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 	});
 

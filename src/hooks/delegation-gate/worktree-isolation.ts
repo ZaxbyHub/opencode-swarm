@@ -155,6 +155,8 @@ export interface StandardWorktreeDispatch {
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	/** FR-201: 0-based lane index for runtime profile derivation. */
 	laneIndex: number;
+	/** Configured worktree-dir override, so cleanup trusts the same base. */
+	worktree_dir?: string;
 }
 
 export interface AwaitingMergeRecord {
@@ -564,7 +566,10 @@ export async function precreateStandardWorktreeSession(args: {
 	});
 	if (!createResult.data?.id) {
 		await _internals
-			.removeWorktree(provisionResult.worktreePath, args.directory)
+			.removeWorktree(provisionResult.worktreePath, args.directory, {
+				force: true,
+				worktreeDir: worktreeConfig.worktree_dir,
+			})
 			.catch(() => {});
 		const createError = (createResult as { error?: unknown }).error;
 		const detail =
@@ -589,6 +594,7 @@ export async function precreateStandardWorktreeSession(args: {
 		handle: provisionResult,
 		mergeStrategy: worktreeConfig.merge_strategy,
 		laneIndex,
+		worktree_dir: worktreeConfig.worktree_dir,
 	});
 }
 
@@ -642,7 +648,10 @@ export async function finishStandardWorktreeDispatch(
 			}
 
 			await _internals
-				.removeWorktree(dispatch.handle.worktreePath, directory)
+				.removeWorktree(dispatch.handle.worktreePath, directory, {
+					force: true,
+					worktreeDir: dispatch.worktree_dir,
+				})
 				.catch(() => {});
 			await _internals
 				.postMergeCleanup(directory, dispatch.handle.branchName)
