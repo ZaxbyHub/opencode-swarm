@@ -19,6 +19,7 @@
  */
 
 import { renameSync, unlinkSync } from 'node:fs';
+import { open as openAsync } from 'node:fs/promises';
 import * as path from 'node:path';
 import { bunWrite } from '../utils/bun-compat';
 import { withEvidenceLock } from './lock.js';
@@ -51,6 +52,12 @@ export const _internals = {
  * Atomic write: write to a unique temp file, then rename over the target.
  * The rename is atomic on POSIX and Windows, so readers never observe a torn
  * file. The temp file is cleaned up in `finally` (no-op once renamed away).
+ *
+ * After the rename, fsyncs the parent directory. A plain rename can complete
+ * before the directory entry update is flushed (documented on macOS/APFS;
+ * the same delayed-visibility gap has been observed on Linux CI runners), so
+ * without this a reader that opens `targetPath` immediately after this
+ * function returns can transiently see stale contents or ENOENT.
  */
 export async function atomicWriteFile(
 	targetPath: string,
@@ -60,6 +67,16 @@ export async function atomicWriteFile(
 	try {
 		await bunWrite(tempPath, content);
 		_internals.renameSync(tempPath, targetPath);
+		try {
+			const dirFd = await openAsync(path.dirname(targetPath), 'r');
+			try {
+				await dirFd.sync();
+			} finally {
+				await dirFd.close();
+			}
+		} catch {
+			// fsync is best-effort; some filesystems/OSes don't support directory fsync.
+		}
 	} finally {
 		try {
 			_internals.unlinkSync(tempPath);

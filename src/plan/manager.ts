@@ -76,7 +76,7 @@ import { commitTaskCompletion } from '../turbo/epic/task-commit.js';
 import { readTaskScopes } from '../turbo/lean/conflicts.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { criticalWarn, warn } from '../utils';
-import { bunHash, bunWrite } from '../utils/bun-compat';
+import { atomicRename, bunHash, bunWrite } from '../utils/bun-compat';
 import {
 	computeSpecDiff,
 	isObligationPreserving,
@@ -504,7 +504,7 @@ export async function regeneratePlanMarkdown(
 	);
 	try {
 		await bunWrite(mdTempPath, markdownWithHash);
-		renameSync(mdTempPath, mdPath);
+		await atomicRename(mdTempPath, mdPath);
 	} finally {
 		try {
 			unlinkSync(mdTempPath);
@@ -1462,7 +1462,7 @@ export async function savePlan(
 	// Write to temp and atomically rename
 	try {
 		await bunWrite(tempPath, JSON.stringify(validated, null, 2));
-		renameSync(tempPath, planPath);
+		await atomicRename(tempPath, planPath);
 	} finally {
 		try {
 			unlinkSync(tempPath);
@@ -1501,7 +1501,7 @@ export async function savePlan(
 		);
 		try {
 			await bunWrite(mdTempPath, markdownWithHash);
-			renameSync(mdTempPath, mdPath);
+			await atomicRename(mdTempPath, mdPath);
 		} finally {
 			try {
 				unlinkSync(mdTempPath);
@@ -1575,7 +1575,7 @@ export async function rebuildPlan(
 		`plan.json.rebuild.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
 	await bunWrite(tempPlanPath, JSON.stringify(targetPlan, null, 2));
-	renameSync(tempPlanPath, planPath);
+	await atomicRename(tempPlanPath, planPath);
 
 	// Write in-progress marker right after plan.json rename.
 	try {
@@ -1607,7 +1607,7 @@ export async function rebuildPlan(
 			`plan.md.rebuild.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 		);
 		await bunWrite(tempMdPath, markdownWithHash);
-		renameSync(tempMdPath, mdPath);
+		await atomicRename(tempMdPath, mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.
@@ -1753,7 +1753,7 @@ export async function closePlanTerminalState(
 		`plan.json.close.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
 	await bunWrite(tempPlanPath, JSON.stringify(validated, null, 2));
-	renameSync(tempPlanPath, planPath);
+	await atomicRename(tempPlanPath, planPath);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1786,7 +1786,7 @@ export async function closePlanTerminalState(
 			`plan.md.close.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 		);
 		await bunWrite(mdTempPath, markdownWithHash);
-		renameSync(mdTempPath, mdPath);
+		await atomicRename(mdTempPath, mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.

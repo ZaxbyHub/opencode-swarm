@@ -3,7 +3,7 @@
  * Serializes swarmState to .swarm/session/state.json using atomic write (temp-file + rename).
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync } from 'node:fs';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import type {
@@ -13,7 +13,7 @@ import type {
 } from '../state';
 import { swarmState } from '../state';
 import { log } from '../utils';
-import { bunWrite } from '../utils/bun-compat';
+import { atomicRename, bunWrite } from '../utils/bun-compat';
 
 /**
  * v6.35.4: In-flight write guard.
@@ -284,7 +284,7 @@ export async function writeSnapshot(
 			// fsync is best-effort; OSes / filesystems that don't support it
 			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
 		}
-		renameSync(tempPath, resolvedPath);
+		await atomicRename(tempPath, resolvedPath);
 	} catch (error) {
 		log('[snapshot-writer] write failed', {
 			error: error instanceof Error ? error.message : String(error),

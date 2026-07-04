@@ -3,7 +3,6 @@
  * Generates a handoff brief, writes to .swarm/handoff.md, triggers snapshot, and returns markdown.
  */
 import crypto from 'node:crypto';
-import { renameSync, unlinkSync } from 'node:fs';
 import { validateSwarmPath } from '../hooks/utils';
 import {
 	formatContinuationPrompt,
@@ -15,7 +14,7 @@ import {
 	writeSnapshot,
 } from '../session/snapshot-writer';
 import { swarmState } from '../state';
-import { bunWrite } from '../utils/bun-compat';
+import { atomicRename, bunWrite } from '../utils/bun-compat';
 
 export async function handleHandoffCommand(
 	directory: string,
@@ -32,19 +31,7 @@ export async function handleHandoffCommand(
 		const resolvedPath = validateSwarmPath(directory, 'handoff.md');
 		const tempPath = `${resolvedPath}.tmp.${crypto.randomUUID()}`;
 		await bunWrite(tempPath, markdown);
-		try {
-			renameSync(tempPath, resolvedPath);
-		} catch (renameErr) {
-			try {
-				unlinkSync(tempPath);
-			} catch {
-				/* Justification: best-effort cleanup of a temp file that was just
-				 * successfully written. Failure here means the OS or an external
-				 * process already removed it — nothing actionable to report, and
-				 * the renameErr (rethrown below) is the real signal. */
-			}
-			throw renameErr;
-		}
+		await atomicRename(tempPath, resolvedPath);
 
 		// Build continuation prompt from structured data
 		const continuationPrompt = formatContinuationPrompt(handoffData);
@@ -53,19 +40,7 @@ export async function handleHandoffCommand(
 		const promptPath = validateSwarmPath(directory, 'handoff-prompt.md');
 		const promptTempPath = `${promptPath}.tmp.${crypto.randomUUID()}`;
 		await bunWrite(promptTempPath, continuationPrompt);
-		try {
-			renameSync(promptTempPath, promptPath);
-		} catch (renameErr) {
-			try {
-				unlinkSync(promptTempPath);
-			} catch {
-				/* Justification: best-effort cleanup of a temp file that was just
-				 * successfully written. Failure here means the OS or an external
-				 * process already removed it — nothing actionable to report, and
-				 * the renameErr (rethrown below) is the real signal. */
-			}
-			throw renameErr;
-		}
+		await atomicRename(promptTempPath, promptPath);
 
 		// Trigger snapshot write
 		await writeSnapshot(directory, swarmState);

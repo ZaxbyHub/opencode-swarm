@@ -1,8 +1,8 @@
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
-import { bunWrite } from '../utils/bun-compat';
+import { atomicRename, bunWrite } from '../utils/bun-compat';
 
 /**
  * Summary ID validation regex: S followed by one or more digits
@@ -122,7 +122,7 @@ export async function storeSummary(
 	);
 	try {
 		await bunWrite(tempPath, entryJson);
-		renameSync(tempPath, summaryPath);
+		await atomicRename(tempPath, summaryPath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {
