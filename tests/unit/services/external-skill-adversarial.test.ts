@@ -21,7 +21,10 @@ import {
 	type ValidationGateResult,
 	_internals as validatorInternals,
 } from '../../../src/services/external-skill-validator';
-import { _internals as discoverInternals } from '../../../src/tools/external-skill-discover';
+import {
+	_test_exports,
+	_internals as discoverInternals,
+} from '../../../src/tools/external-skill-discover';
 import { _internals as promoteInternals } from '../../../src/tools/external-skill-promote';
 import { _internals as revokeInternals } from '../../../src/tools/external-skill-revoke';
 
@@ -393,72 +396,234 @@ describe('Path traversal attacks on promote/revoke tools', () => {
 // 3. SSRF Protection
 // ============================================================================
 //
-// NOTE: The real SSRF defense lives in isSubpathUrl / matchSourceConfig — private
-// functions in external-skill-discover.ts that validate the source URL BEFORE
-// fetchContent is ever called. Because isSubpathUrl is not exported, it cannot
-// be tested directly from this test file without modifying the source.
-//
-// fetchContent itself (the _internals entry) is a thin wrapper around fetch()
-// and performs no URL validation — the security boundary is the caller.
-// The tests below document the KNOWN GAP: if an attacker can reach fetchContent
-// with an internal URL (bypassing the caller's isSubpathUrl check), there is no
-// secondary URL filter inside fetchContent.
+// The production path has two SSRF boundaries:
+// 1. matchSourceConfig validates configured source allowlists before fetch.
+// 2. fetchContent rejects unsafe literal hosts before fetch and after redirects.
 //
 // ============================================================================
 
-describe('SSRF protection — KNOWN GAP: fetchContent has no secondary URL filter', () => {
-	it('KNOWN GAP: fetchContent does not validate URLs internally — defense is isSubpathUrl in caller', () => {
-		// fetchContent (via _internals) is a thin fetch() wrapper with timeout.
-		// It does NOT check whether the URL points to internal metadata endpoints
-		// (169.254.169.254), localhost, file:// protocol, or loopback addresses.
-		// The actual SSRF defense is isSubpathUrl, called by the discover tool
-		// BEFORE fetchContent. isSubpathUrl is private and cannot be tested here.
-		//
-		// If an attacker bypasses isSubpathUrl (e.g., via DNS rebinding or a
-		// misconfigured source), fetchContent will happily fetch from internal URLs.
-		//
-		// This test documents the architectural gap: fetchContent lacks a defense-
-		// in-depth URL filter. An improvement would add isInternalUrl() validation
-		// inside fetchContent itself, rejecting private/loopback/metadata IPs.
-		//
-		// We verify the function reference exists to prove the seam is wired:
-		expect(typeof discoverInternals.fetchContent).toBe('function');
+describe('SSRF protection in fetchContent', () => {
+	it('rejects metadata, loopback, and private literal hosts before fetch', async () => {
+		for (const url of [
+			'http://169.254.169.254/latest/meta-data/',
+			'http://127.0.0.1:8080/skill',
+			'http://localhost/skill',
+			'http://10.0.0.1/skill',
+			'http://172.16.0.1/skill',
+			'http://192.168.1.1/skill',
+			'http://[::1]/skill',
+		]) {
+			await expect(discoverInternals.fetchContent(url, 5000)).rejects.toThrow(
+				'Unsafe external skill fetch host',
+			);
+		}
 	});
 
-	it('KNOWN GAP: redirect to internal IP is returned without rejection by fetchContent', async () => {
-		// fetchContent returns the finalUrl from the HTTP response without checking
-		// whether the redirect target is an internal IP. The caller (discover tool)
-		// is responsible for checking the finalUrl via isSubpathUrl.
-		// Because fetch() cannot be easily mocked without mock.module (which leaks
-		// in Bun), we document this gap and verify the function signature.
-		const originalFetchContent = discoverInternals.fetchContent;
+	it('rejects redirect final URL to internal IP inside fetchContent', async () => {
+		const originalFetch = globalThis.fetch;
 		try {
-			// We must mock fetchContent because we cannot control the real network.
-			// This mock simulates the REAL behavior: fetchContent returns the
-			// finalUrl from the HTTP response without any SSRF filtering.
-			let capturedFinalUrl = '';
-			discoverInternals.fetchContent = async (
-				_url: string,
-				_timeoutMs: number,
-			): Promise<{ content: string; finalUrl: string }> => {
-				// Simulates: server redirects to internal metadata endpoint
-				return {
-					content: 'malicious redirect response',
-					finalUrl: 'http://169.254.169.254/latest/meta-data/',
-				};
-			};
+			globalThis.fetch = (async () =>
+				({
+					ok: true,
+					url: 'http://169.254.169.254/latest/meta-data/',
+					text: async () => 'malicious redirect response',
+				}) as Response) as typeof fetch;
+
+			await expect(
+				discoverInternals.fetchContent(
+					'https://trusted.example.com/skill',
+					5000,
+				),
+			).rejects.toThrow('Unsafe external skill fetch host');
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+});
+
+describe('SSRF: IPv4-mapped IPv6 bypass prevention', () => {
+	// These URLs use IPv4-mapped IPv6 notation to bypass the IPv6 guard
+	it('rejects ::ffff:192.168.1.1 (IPv4-mapped IPv6 private IP)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:192.168.1.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:169.254.169.254 (IPv4-mapped IPv6 metadata endpoint)', async () => {
+		await expect(
+			discoverInternals.fetchContent(
+				'http://[::ffff:169.254.169.254]/skill',
+				5000,
+			),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:127.0.0.1 (IPv4-mapped IPv6 loopback)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:127.0.0.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:10.0.0.1 (IPv4-mapped IPv6 RFC1918)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:10.0.0.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:172.16.0.1 (IPv4-mapped IPv6 RFC1918)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:172.16.0.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:c0a8:101 (IPv4-mapped IPv6 hex form)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:c0a8:101]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+});
+
+describe('SSRF: comprehensive guard coverage', () => {
+	// Additional direct tests for edge cases not covered by integration tests
+	it('rejects 0.0.0.0', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://0.0.0.0/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects 100.64.0.0 (CGN range)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://100.64.0.0/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects IPv6 ULA fc00::', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[fc00::1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects IPv6 ULA fd00::', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[fd00::1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects IPv6 link-local fe80::', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[fe80::1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects IPv6 unspecified ::', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('allows safe public host', async () => {
+		// Use a mock to avoid real network
+		const originalFetch = globalThis.fetch;
+		try {
+			globalThis.fetch = (async () =>
+				({
+					ok: true,
+					url: 'https://example.com/skill',
+					text: async () => 'content',
+				}) as Response) as typeof fetch;
 			const result = await discoverInternals.fetchContent(
-				'https://trusted.example.com/skill',
+				'https://example.com/skill',
 				5000,
 			);
-			// KNOWN GAP: fetchContent happily returns the internal redirect URL.
-			// The caller's isSubpathUrl is the only check — if it fails, this
-			// internal URL reaches the skill body unfiltered.
-			capturedFinalUrl = result.finalUrl;
-			expect(capturedFinalUrl).toContain('169.254.169.254');
+			expect(result.content).toBe('content');
 		} finally {
-			discoverInternals.fetchContent = originalFetchContent;
+			globalThis.fetch = originalFetch;
 		}
+	});
+});
+
+describe('SSRF: IPv4-compatible and IPv4-translated bypass prevention', () => {
+	it('rejects ::192.168.1.1 (IPv4-compatible private IP)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::192.168.1.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::127.0.0.1 (IPv4-compatible loopback)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::127.0.0.1]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::169.254.169.254 (IPv4-compatible metadata)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::169.254.169.254]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:0:192.168.1.1 (IPv4-translated private IP)', async () => {
+		await expect(
+			discoverInternals.fetchContent(
+				'http://[::ffff:0:192.168.1.1]/skill',
+				5000,
+			),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:0:c0a8:101 (IPv4-translated hex form)', async () => {
+		await expect(
+			discoverInternals.fetchContent('http://[::ffff:0:c0a8:101]/skill', 5000),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+	it('rejects ::ffff:0:0:c0a8:101 (standard IPv4-translated 4-group hex)', async () => {
+		await expect(
+			discoverInternals.fetchContent(
+				'http://[::ffff:0:0:c0a8:101]/skill',
+				5000,
+			),
+		).rejects.toThrow('Unsafe external skill fetch host');
+	});
+});
+
+describe('SSRF guard direct unit tests', () => {
+	// isUnsafeIpv4
+	it('isUnsafeIpv4: rejects 10.x, 172.16-31.x, 192.168.x, 127.x, 0.x, 169.254.x, 100.64-127.x', () => {
+		expect(_test_exports.isUnsafeIpv4('10.0.0.1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('172.16.0.1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('192.168.1.1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('127.0.0.1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('0.0.0.0')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('169.254.169.254')).toBe(true);
+		expect(_test_exports.isUnsafeIpv4('100.64.0.1')).toBe(true);
+	});
+	it('isUnsafeIpv4: allows public IPs', () => {
+		expect(_test_exports.isUnsafeIpv4('8.8.8.8')).toBe(false);
+		expect(_test_exports.isUnsafeIpv4('1.1.1.1')).toBe(false);
+	});
+	// isUnsafeIpv6
+	it('isUnsafeIpv6: rejects ::, ::1, fc*, fd*, fe80:*', () => {
+		expect(_test_exports.isUnsafeIpv6('::')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('::1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('fc00::1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('fd00::1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('fe80::1')).toBe(true);
+	});
+	it('isUnsafeIpv6: rejects IPv4-mapped ::ffff:a.b.c.d', () => {
+		expect(_test_exports.isUnsafeIpv6('::ffff:192.168.1.1')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('::ffff:c0a8:101')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('::ffff:127.0.0.1')).toBe(true);
+	});
+	it('isUnsafeIpv6: rejects IPv4-translated ::ffff:0:hex:hex', () => {
+		expect(_test_exports.isUnsafeIpv6('::ffff:0:c0a8:101')).toBe(true);
+		expect(_test_exports.isUnsafeIpv6('::ffff:0:0:c0a8:101')).toBe(true);
+	});
+	it('isUnsafeIpv6: rejects IPv4-compatible ::hex:hex', () => {
+		expect(_test_exports.isUnsafeIpv6('::c0a8:101')).toBe(true);
+	});
+	it('isUnsafeIpv6: allows safe IPv6', () => {
+		expect(_test_exports.isUnsafeIpv6('2001:db8::1')).toBe(false);
+	});
+	// assertSafeFetchUrl
+	it('assertSafeFetchUrl: rejects unsafe hosts', () => {
+		expect(() =>
+			_test_exports.assertSafeFetchUrl('http://192.168.1.1/'),
+		).toThrow();
+		expect(() =>
+			_test_exports.assertSafeFetchUrl('http://[::ffff:192.168.1.1]/'),
+		).toThrow();
+		expect(() =>
+			_test_exports.assertSafeFetchUrl('http://[::c0a8:101]/'),
+		).toThrow();
+	});
+	it('assertSafeFetchUrl: allows safe hosts', () => {
+		expect(() =>
+			_test_exports.assertSafeFetchUrl('https://example.com/'),
+		).not.toThrow();
 	});
 });
 

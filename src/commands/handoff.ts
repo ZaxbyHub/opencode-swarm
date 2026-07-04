@@ -17,9 +17,23 @@ import {
 import { swarmState } from '../state';
 import { bunWrite } from '../utils/bun-compat';
 
+const HANDOFF_SOURCE_SESSION_PREFIX =
+	'<!-- opencode-swarm-handoff-source-session:';
+
+export function formatSessionScopedHandoffMarkdown(
+	markdown: string,
+	sessionID?: string,
+): string {
+	if (!sessionID) {
+		return markdown;
+	}
+	return `${HANDOFF_SOURCE_SESSION_PREFIX} ${encodeURIComponent(sessionID)} -->\n${markdown}`;
+}
+
 export async function handleHandoffCommand(
 	directory: string,
 	_args: string[],
+	sessionID?: string,
 ): Promise<string> {
 	// Get handoff data from service
 	const handoffData = await getHandoffData(directory);
@@ -31,7 +45,10 @@ export async function handleHandoffCommand(
 	try {
 		const resolvedPath = validateSwarmPath(directory, 'handoff.md');
 		const tempPath = `${resolvedPath}.tmp.${crypto.randomUUID()}`;
-		await bunWrite(tempPath, markdown);
+		await bunWrite(
+			tempPath,
+			formatSessionScopedHandoffMarkdown(markdown, sessionID),
+		);
 		try {
 			renameSync(tempPath, resolvedPath);
 		} catch (renameErr) {

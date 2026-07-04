@@ -39,6 +39,10 @@ export interface SerializedAgentSession {
 	lastCoderDelegationTaskId: string | null;
 	currentTaskId: string | null;
 	turboMode: boolean;
+	turboStrategy?: 'standard' | 'lean';
+	leanTurboActive?: boolean;
+	leanTurboCurrentPhase?: number;
+	epicModeActive?: boolean;
 	gateLog: Record<string, string[]>;
 	reviewerCallCount: Record<string, number>;
 	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
@@ -194,6 +198,12 @@ export function serializeAgentSession(
 		lastCoderDelegationTaskId: s.lastCoderDelegationTaskId ?? null,
 		currentTaskId: s.currentTaskId ?? null,
 		turboMode: s.turboMode ?? false,
+		...(s.turboStrategy !== undefined && { turboStrategy: s.turboStrategy }),
+		leanTurboActive: s.leanTurboActive ?? false,
+		...(s.leanTurboCurrentPhase !== undefined && {
+			leanTurboCurrentPhase: s.leanTurboCurrentPhase,
+		}),
+		epicModeActive: s.epicModeActive ?? false,
 		gateLog,
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,

@@ -152,6 +152,16 @@ export function deserializeAgentSession(
 		lastCoderDelegationTaskId: s.lastCoderDelegationTaskId ?? null,
 		currentTaskId: s.currentTaskId ?? null,
 		turboMode: s.turboMode ?? false,
+		turboStrategy:
+			s.turboStrategy === 'lean' || s.turboStrategy === 'standard'
+				? s.turboStrategy
+				: undefined,
+		leanTurboActive: s.leanTurboActive ?? false,
+		leanTurboCurrentPhase:
+			typeof s.leanTurboCurrentPhase === 'number'
+				? s.leanTurboCurrentPhase
+				: undefined,
+		epicModeActive: s.epicModeActive ?? false,
 		gateLog,
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,
