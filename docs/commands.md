@@ -698,16 +698,16 @@ Clear only session state (`.swarm/session/state.json` and related files). Preser
 
 ### `/swarm checkpoint <save|restore|delete|list> <label>`
 
-Named snapshots of `.swarm/` state.
+Named git checkpoints for project files.
 
-- `save <label>`: create snapshot.
-- `restore <label>`: soft-reset to checkpoint.
+- `save <label>`: create checkpoint.
+- `restore <label>`: hard-reset tracked project files to checkpoint.
 - `delete <label>`: remove checkpoint.
 - `list`: show all checkpoints.
 
-### `/swarm rollback <phase>`
+### `/swarm rollback <phase|label|number>`
 
-Restore `.swarm/` to a phase checkpoint (`checkpoints/phase-<N>`). Writes a rollback event to `events.jsonl`. Without a phase argument, lists available checkpoints.
+Restore legacy `.swarm/` phase checkpoints (`checkpoints/phase-<N>`) when present. Otherwise restore named git checkpoints from `.swarm/checkpoints.json` by label or list number. Writes a rollback event to `events.jsonl`. Without an argument, lists available checkpoints.
 
 ### `/swarm finalize [--prune-branches] [--skill-review]`
 

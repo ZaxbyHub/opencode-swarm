@@ -34,6 +34,12 @@ const MAX_COMBINED_BYTES = 500_000; // 500KB
 const MAX_CONCURRENT = 4;
 const MAX_FILES = 100;
 
+export const _internals: {
+	qualityBudget: typeof qualityBudget;
+} = {
+	qualityBudget,
+};
+
 // ============ Input/Output Types ============
 export interface PreCheckBatchInput {
 	/** List of specific files to check (optional) */
@@ -665,13 +671,19 @@ async function runSastScanWrapped(
 async function runQualityBudgetWrapped(
 	changedFiles: string[],
 	directory: string,
-	_config?: PluginConfig,
+	config?: PluginConfig,
 ): Promise<ToolResult<QualityBudgetResult>> {
 	const start = process.hrtime.bigint();
 
 	try {
 		const result = await runWithTimeout(
-			qualityBudget({ changed_files: changedFiles }, directory),
+			_internals.qualityBudget(
+				{
+					changed_files: changedFiles,
+					config: config?.gates?.quality_budget,
+				},
+				directory,
+			),
 			TOOL_TIMEOUT_MS,
 		);
 

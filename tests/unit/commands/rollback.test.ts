@@ -86,7 +86,7 @@ describe('handleRollbackCommand', () => {
 			const result = await handleRollbackCommand(testDir, []);
 
 			expect(result).toBe(
-				'No checkpoints found. Use `/swarm checkpoint` to create checkpoints.',
+				'No checkpoints found. Use `/swarm checkpoint save <label>` to create checkpoints.',
 			);
 		});
 

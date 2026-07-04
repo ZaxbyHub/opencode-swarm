@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { readPhaseEvidence } from '../../../../src/turbo/lean/evidence';
 import { LeanTurboRunner } from '../../../../src/turbo/lean/runner';
 import type {
 	LeanTurboLane,
@@ -33,6 +34,7 @@ interface MockSessionOps {
 let tmpDir: string;
 let mockSessionOps: MockSessionOps;
 let origAssertCleanWorkingTree: typeof LeanTurboRunner._internals.assertCleanWorkingTree;
+let origAttemptMergeBackFromDirty: typeof LeanTurboRunner._internals.attemptMergeBackFromDirty;
 
 function makeRunner(options?: {
 	opencodeClient?: null;
@@ -148,12 +150,24 @@ beforeEach(() => {
 	LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
 		Promise.resolve({ clean: true }),
 	);
+	origAttemptMergeBackFromDirty =
+		LeanTurboRunner._internals.attemptMergeBackFromDirty;
+	LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() =>
+		Promise.resolve({
+			merged: true,
+			strategy: 'merge',
+			autoCommitted: true,
+			cleaned: true,
+		}),
+	);
 });
 
 afterEach(() => {
 	// Restore assertCleanWorkingTree before cleaning up tmpDir
 	LeanTurboRunner._internals.assertCleanWorkingTree =
 		origAssertCleanWorkingTree;
+	LeanTurboRunner._internals.attemptMergeBackFromDirty =
+		origAttemptMergeBackFromDirty;
 
 	leanState.repairStateUnreadable(tmpDir);
 	try {
@@ -234,6 +248,51 @@ describe('lane planning and lock acquisition', () => {
 
 		expect(result.ok).toBe(false);
 		expect(result.reason).toBe('NO_PLAN');
+	});
+
+	test('runPhase writes phase evidence with integrated diff summary', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const result = await runner.runPhase(1);
+		const evidence = await readPhaseEvidence(tmpDir, 1);
+
+		expect(result.ok).toBe(true);
+		expect(evidence).not.toBeNull();
+		expect(evidence!.status).toBe('completed');
+		expect(evidence!.integratedDiffSummary).toContain('src/a.ts');
+		expect(evidence!.lanes).toHaveLength(1);
+		expect(evidence!.lanes[0].files[0]).toContain('src/a.ts');
+		expect(evidence!.configSnapshot).toBeDefined();
+	});
+
+	test('_writePhaseEvidenceSafely writes phase evidence with correct structure', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const result = await runner.runPhase(1);
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBeGreaterThan(0);
+
+		// Verify phase evidence file structure via readPhaseEvidence
+		const phaseEvidence = await readPhaseEvidence(tmpDir, 1);
+		expect(phaseEvidence).not.toBeNull();
+		expect(phaseEvidence!.status).toBeDefined();
+		expect(phaseEvidence!.lanes).toHaveLength(result.lanes.length);
+
+		// Verify lane-level fields within the phase evidence
+		const lane = phaseEvidence!.lanes[0];
+		expect(lane.laneId).toBeDefined();
+		expect(lane.taskIds).toEqual(expect.arrayContaining(['1.1']));
+		expect(lane.files).toBeDefined();
+		expect(lane.status).toBeDefined();
+		// startedAt and completedAt are optional in LeanTurboLane and depend on lane processing timing
 	});
 });
 
@@ -1630,11 +1689,16 @@ describe('worktree isolation integration', () => {
 
 		// Track merge and cleanup calls
 		const mergeCalls: unknown[] = [];
-		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
-		LeanTurboRunner._internals.mergeLaneBranch = mock(
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
 			(...args: Parameters<typeof origMerge>) => {
 				mergeCalls.push(args);
-				return Promise.resolve({ merged: true, strategy: 'merge' });
+				return Promise.resolve({
+					merged: true,
+					strategy: 'merge',
+					autoCommitted: true,
+					cleaned: true,
+				});
 			},
 		);
 
@@ -1660,7 +1724,7 @@ describe('worktree isolation integration', () => {
 
 		// Restore
 		LeanTurboRunner._internals.provisionWorktree = origProvision;
-		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = origMerge;
 		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
 		LeanTurboRunner._internals.removeWorktree = origRemove;
 
@@ -1670,7 +1734,7 @@ describe('worktree isolation integration', () => {
 		expect(removeCalls.length).toBeGreaterThan(0);
 	});
 
-	test('calls attemptMergeBackFromDirty + removeWorktree sequentially for failed lane', async () => {
+	test('preserves failed lane worktree without merging partial work', async () => {
 		writeMinimalPlan(1);
 		writeScopeFiles({ '1.1': ['src/a.ts'] });
 
@@ -1738,14 +1802,15 @@ describe('worktree isolation integration', () => {
 		LeanTurboRunner._internals.attemptMergeBackFromDirty = origAttemptMerge;
 		LeanTurboRunner._internals.removeWorktree = origRemove;
 
-		expect(result.ok).toBe(true);
+		expect(result.ok).toBe(false);
 		// Lane should have failed
 		const failedLanes = result.lanes.filter((l) => l.status === 'failed');
 		expect(failedLanes.length).toBeGreaterThan(0);
-		// attemptMergeBackFromDirty should have been called
-		expect(attemptMergeCalls.length).toBeGreaterThan(0);
-		// removeWorktree should have been called
-		expect(removeCalls.length).toBeGreaterThan(0);
+		// Failed lanes must not auto-commit/merge partial work.
+		expect(attemptMergeCalls.length).toBe(0);
+		// Worktree is preserved for manual inspection instead of being removed.
+		expect(removeCalls.length).toBe(0);
+		expect(result.mergeBackFailures).toHaveLength(1);
 	});
 
 	test('calls startupOrphanRecovery at runPhase start when worktree_isolation is enabled', async () => {
@@ -2015,11 +2080,11 @@ describe('sequential merge-back after concurrent lanes (race condition fix)', ()
 			});
 		});
 
-		// Track the order of mergeLaneBranch calls to verify sequential execution
+		// Track the order of dirty merge-back calls to verify sequential execution
 		const mergeCallOrder: number[] = [];
 		let mergeRunning = false;
-		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
-		LeanTurboRunner._internals.mergeLaneBranch = mock(
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
 			async (...args: Parameters<typeof origMerge>) => {
 				const callNum = mergeCallOrder.length;
 				mergeCallOrder.push(callNum);
@@ -2031,7 +2096,12 @@ describe('sequential merge-back after concurrent lanes (race condition fix)', ()
 				mergeRunning = true;
 				await Bun.sleep(10);
 				mergeRunning = false;
-				return { merged: true, strategy: 'merge' as const };
+				return {
+					merged: true,
+					strategy: 'merge' as const,
+					autoCommitted: true,
+					cleaned: true,
+				};
 			},
 		);
 
@@ -2063,7 +2133,7 @@ describe('sequential merge-back after concurrent lanes (race condition fix)', ()
 			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
 			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
 			LeanTurboRunner._internals.provisionWorktree = origProvision;
-			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.attemptMergeBackFromDirty = origMerge;
 			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
 			LeanTurboRunner._internals.removeWorktree = origRemove;
 		}
@@ -2148,23 +2218,14 @@ describe('sequential merge-back after concurrent lanes (race condition fix)', ()
 			});
 		});
 
-		// Track the order of attemptMergeBackFromDirty calls to verify sequential execution
+		// Failed worktree lanes are preserved for recovery and are not merged.
 		const attemptMergeCallOrder: number[] = [];
-		let attemptMergeRunning = false;
 		const origAttemptMerge =
 			LeanTurboRunner._internals.attemptMergeBackFromDirty;
 		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
 			async (...args: Parameters<typeof origAttemptMerge>) => {
 				const callNum = attemptMergeCallOrder.length;
 				attemptMergeCallOrder.push(callNum);
-				// Simulate non-zero duration to expose concurrent execution
-				if (attemptMergeRunning) {
-					// If another merge is already running, this proves they are concurrent
-					attemptMergeCallOrder.push(-1); // sentinel for concurrent execution
-				}
-				attemptMergeRunning = true;
-				await Bun.sleep(10);
-				attemptMergeRunning = false;
 				return {
 					merged: true,
 					strategy: 'merge',
@@ -2187,17 +2248,18 @@ describe('sequential merge-back after concurrent lanes (race condition fix)', ()
 		try {
 			result = await runner.runPhase(1);
 
-			expect(result.ok).toBe(true);
+			expect(result.ok).toBe(false);
 			expect(result.lanes.length).toBe(2);
 			// Both lanes should have failed
 			const failedLanes = result.lanes.filter((l) => l.status === 'failed');
 			expect(failedLanes.length).toBe(2);
 			// attemptMergeBackFromDirty should have been called twice (once per failed worktree lane)
-			expect(attemptMergeCallOrder.filter((n) => n >= 0).length).toBe(2);
+			expect(attemptMergeCallOrder.filter((n) => n >= 0).length).toBe(0);
 			// No concurrent sentinel (-1) should appear — cleanup ran sequentially
 			expect(attemptMergeCallOrder).not.toContain(-1);
-			// removeWorktree should have been called for both failed worktree lanes
-			expect(removeCalls.length).toBe(2);
+			// Failed worktrees are preserved for manual inspection.
+			expect(removeCalls.length).toBe(0);
+			expect(result.mergeBackFailures).toHaveLength(2);
 		} finally {
 			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
 			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
@@ -3113,9 +3175,21 @@ describe('transient worktree provision retry', () => {
 describe('merge-back failure handling', () => {
 	function setupWorktreeRunnerAndMocks(opts?: {
 		mergeResult?:
-			| { merged: true; strategy: string }
-			| { conflict: true; files: string[]; message: string }
-			| { error: string };
+			| {
+					merged: true;
+					strategy: string;
+					autoCommitted?: boolean;
+					cleaned?: boolean;
+			  }
+			| {
+					partial: true;
+					stage: string;
+					autoCommitted: boolean;
+					cleaned: boolean;
+					message: string;
+					conflictFiles?: string[];
+			  }
+			| { failed: true; stage: string; message: string };
 		sessionFail?: boolean;
 	}) {
 		writeMinimalPlan(1);
@@ -3192,14 +3266,16 @@ describe('merge-back failure handling', () => {
 			}),
 		);
 
-		// Track merge calls
+		// Track dirty merge calls
 		const mergeCalls: unknown[] = [];
-		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
 		const defaultMergeResult = opts?.mergeResult ?? {
 			merged: true,
 			strategy: 'merge' as const,
+			autoCommitted: true,
+			cleaned: true,
 		};
-		LeanTurboRunner._internals.mergeLaneBranch = mock(
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
 			(...args: Parameters<typeof origMerge>) => {
 				mergeCalls.push(args);
 				return Promise.resolve(defaultMergeResult);
@@ -3246,7 +3322,7 @@ describe('merge-back failure handling', () => {
 		LeanTurboRunner._internals.planLeanTurboLanes = mocks.origPlan;
 		LeanTurboRunner._internals.startupOrphanRecovery = mocks.origOrphanRecovery;
 		LeanTurboRunner._internals.provisionWorktree = mocks.origProvision;
-		LeanTurboRunner._internals.mergeLaneBranch = mocks.origMerge;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mocks.origMerge;
 		LeanTurboRunner._internals.postMergeCleanup = mocks.origCleanup;
 		LeanTurboRunner._internals.removeWorktree = mocks.origRemove;
 	}
@@ -3254,21 +3330,23 @@ describe('merge-back failure handling', () => {
 	test('merge conflict: worktree NOT removed, lane result indicates merge-back failure', async () => {
 		const mocks = setupWorktreeRunnerAndMocks({
 			mergeResult: {
-				conflict: true,
-				files: ['src/a.ts', 'src/b.ts'],
+				partial: true,
+				stage: 'merge',
+				autoCommitted: true,
+				cleaned: true,
 				message: 'CONFLICT (content): Merge conflict in src/a.ts',
+				conflictFiles: ['src/a.ts', 'src/b.ts'],
 			},
 		});
 
 		const result = await mocks.runner.runPhase(1);
 		restoreMocks(mocks);
 
-		// Phase should still report ok (coder completed)
-		expect(result.ok).toBe(true);
+		expect(result.ok).toBe(false);
 
-		// Lane should still be completed (coder finished work)
+		// Lane should fail because integration back to primary failed
 		expect(result.lanes.length).toBe(1);
-		expect(result.lanes[0].status).toBe('completed');
+		expect(result.lanes[0].status).toBe('failed');
 
 		// Lane result should include merge-back failure info
 		expect(result.lanes[0].mergeBackFailure).toBeDefined();
@@ -3294,16 +3372,18 @@ describe('merge-back failure handling', () => {
 	test('merge error: worktree NOT removed, lane result indicates merge-back failure', async () => {
 		const mocks = setupWorktreeRunnerAndMocks({
 			mergeResult: {
-				error: 'fatal: not something we can merge',
+				failed: true,
+				stage: 'merge',
+				message: 'fatal: not something we can merge',
 			},
 		});
 
 		const result = await mocks.runner.runPhase(1);
 		restoreMocks(mocks);
 
-		expect(result.ok).toBe(true);
+		expect(result.ok).toBe(false);
 		expect(result.lanes.length).toBe(1);
-		expect(result.lanes[0].status).toBe('completed');
+		expect(result.lanes[0].status).toBe('failed');
 
 		// Lane result should include merge-back failure info
 		expect(result.lanes[0].mergeBackFailure).toBeDefined();
@@ -3323,7 +3403,12 @@ describe('merge-back failure handling', () => {
 
 	test('merge success: worktree IS removed, lane result shows success (no mergeBackFailure)', async () => {
 		const mocks = setupWorktreeRunnerAndMocks({
-			mergeResult: { merged: true, strategy: 'merge' },
+			mergeResult: {
+				merged: true,
+				strategy: 'merge',
+				autoCommitted: true,
+				cleaned: true,
+			},
 		});
 
 		const result = await mocks.runner.runPhase(1);
@@ -3349,9 +3434,12 @@ describe('merge-back failure handling', () => {
 	test('phase result includes merge-back failure information in summary', async () => {
 		const mocks = setupWorktreeRunnerAndMocks({
 			mergeResult: {
-				conflict: true,
-				files: ['src/a.ts'],
+				partial: true,
+				stage: 'merge',
+				autoCommitted: true,
+				cleaned: true,
 				message: 'CONFLICT: Merge conflict in src/a.ts',
+				conflictFiles: ['src/a.ts'],
 			},
 		});
 
@@ -3437,10 +3525,15 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 		// Track call order using a shared array
 		const callOrder: string[] = [];
 
-		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
-			callOrder.push('mergeLaneBranch');
-			return Promise.resolve({ merged: true, strategy: 'merge' });
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() => {
+			callOrder.push('attemptMergeBackFromDirty');
+			return Promise.resolve({
+				merged: true,
+				strategy: 'merge',
+				autoCommitted: true,
+				cleaned: true,
+			});
 		});
 		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
 		LeanTurboRunner._internals.postMergeCleanup = mock(() => {
@@ -3460,7 +3553,7 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 			expect(result.ok).toBe(true);
 
 			// All three operations should have been called
-			expect(callOrder).toContain('mergeLaneBranch');
+			expect(callOrder).toContain('attemptMergeBackFromDirty');
 			expect(callOrder).toContain('removeWorktree');
 			expect(callOrder).toContain('postMergeCleanup');
 
@@ -3471,13 +3564,13 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 			expect(cleanupIdx).toBeGreaterThan(-1);
 			expect(removeIdx).toBeLessThan(cleanupIdx);
 
-			// mergeLaneBranch must be first
-			expect(callOrder[0]).toBe('mergeLaneBranch');
+			// attemptMergeBackFromDirty must be first
+			expect(callOrder[0]).toBe('attemptMergeBackFromDirty');
 		} finally {
 			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
 			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
 			LeanTurboRunner._internals.provisionWorktree = origProvision;
-			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.attemptMergeBackFromDirty = origMerge;
 			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
 			LeanTurboRunner._internals.removeWorktree = origRemove;
 		}
@@ -3548,12 +3641,15 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 
 		const callOrder: string[] = [];
 
-		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
-			callOrder.push('mergeLaneBranch');
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() => {
+			callOrder.push('attemptMergeBackFromDirty');
 			return Promise.resolve({
-				conflict: true,
-				files: ['src/a.ts'],
+				partial: true,
+				stage: 'merge',
+				autoCommitted: true,
+				cleaned: true,
+				conflictFiles: ['src/a.ts'],
 				message: 'CONFLICT: Merge conflict in src/a.ts',
 			});
 		});
@@ -3572,17 +3668,17 @@ describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)',
 		try {
 			result = await runner.runPhase(1);
 
-			expect(result.ok).toBe(true);
+			expect(result.ok).toBe(false);
 
-			// On conflict: mergeLaneBranch called, but neither removeWorktree nor postMergeCleanup
-			expect(callOrder).toContain('mergeLaneBranch');
+			// On conflict: dirty merge-back called, but neither removeWorktree nor postMergeCleanup
+			expect(callOrder).toContain('attemptMergeBackFromDirty');
 			expect(callOrder).not.toContain('removeWorktree');
 			expect(callOrder).not.toContain('postMergeCleanup');
 		} finally {
 			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
 			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
 			LeanTurboRunner._internals.provisionWorktree = origProvision;
-			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.attemptMergeBackFromDirty = origMerge;
 			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
 			LeanTurboRunner._internals.removeWorktree = origRemove;
 		}

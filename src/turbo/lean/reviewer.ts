@@ -18,6 +18,7 @@ import {
 	type LaneEvidence,
 	listLaneEvidence,
 	readPhaseEvidence,
+	type ValidationArtifact,
 } from './evidence';
 import type { LeanTurboRunState } from './state';
 import { readPersisted } from './state';
@@ -127,6 +128,11 @@ interface ReviewPackage {
 		failedLanes: number;
 	};
 	buildStatus: 'unknown' | 'passed' | 'failed';
+	validationArtifacts?: {
+		build?: ValidationArtifact;
+		test?: ValidationArtifact;
+		lint?: ValidationArtifact;
+	};
 	degradationSummary: {
 		totalDegraded: number;
 		resolvedDegraded: number;
@@ -249,6 +255,10 @@ async function compileReviewPackage(
 			pendingDegraded,
 		},
 	};
+
+	if (phaseEvidence?.validationArtifacts) {
+		pkg.validationArtifacts = phaseEvidence.validationArtifacts;
+	}
 
 	if (requireDiffSummary) {
 		if (!phaseEvidence?.integratedDiffSummary) {
