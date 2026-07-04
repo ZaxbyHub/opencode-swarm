@@ -339,6 +339,29 @@ describe('computeLaneRuntimeProfile', () => {
 		const profile = computeLaneRuntimeProfile(config, 0, worktreePath);
 		expect(profile?.envOverrides).toEqual({ PORT: '5000' });
 	});
+
+	// FB-003: PORT must be clamped to 65535 — valid TCP port range max.
+	// Without the clamp, port_base=65530, port_stride=10, laneIndex=10 → 70000
+	// would cause EADDRINUSE / "port out of range" bind failures.
+	it('FB-003: PORT is clamped to 65535 when derived value exceeds the TCP port range max', () => {
+		const config: WorktreeIsolationConfig['runtime_isolation'] = {
+			enabled: true,
+			port_base: 65530,
+			port_stride: 10,
+		};
+
+		// laneIndex=10 → 65530 + 10*10 = 65630 → clamped to 65535
+		const overflow = computeLaneRuntimeProfile(config, 10, worktreePath);
+		expect(overflow?.envOverrides['PORT']).toBe('65535');
+
+		// laneIndex=5 → 65530 + 5*10 = 65580 → clamped to 65535
+		const overflow2 = computeLaneRuntimeProfile(config, 5, worktreePath);
+		expect(overflow2?.envOverrides['PORT']).toBe('65535');
+
+		// laneIndex=0 → 65530 + 0*10 = 65530 → within range, unchanged
+		const inRange = computeLaneRuntimeProfile(config, 0, worktreePath);
+		expect(inRange?.envOverrides['PORT']).toBe('65530');
+	});
 });
 
 describe('lane profile materialization', () => {

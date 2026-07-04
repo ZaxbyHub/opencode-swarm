@@ -479,7 +479,7 @@ Lean Turbo is configured via `turbo` and `turbo.lean` in `.opencode/opencode-swa
 | `allow_docs_only_without_reviewer` | `false` | Allow docs-only phases when reviewer is not available |
 | `worktree_isolation` | `true` | Use worktree isolation for parallel coders |
 
-> ⚠️ **Behavior change (FR-301 / SC-140):** `worktree_isolation` now defaults to `true`. Lean Turbo phases provision per-lane worktrees by default. To retain the previous behavior, set `turbo.lean.worktree_isolation: false` explicitly.
+> ⚠️ **Behavior change (FR-107 / SC-121):** `worktree_isolation` now defaults to `true`. Lean Turbo phases provision per-lane worktrees by default. To retain the previous behavior, set `turbo.lean.worktree_isolation: false` explicitly.
 
 ### Tests
 

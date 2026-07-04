@@ -96,7 +96,10 @@ export function computeLaneRuntimeProfile(
 	// Schema comment: "If omitted, no PORT variable is set."
 	if (runtime.port_base !== undefined) {
 		const portBase = runtime.port_base;
-		const port = portBase + laneIndex * portStride;
+		// Clamp to 65535 — valid TCP port range max. Without this, port_base +
+		// laneIndex * port_stride can exceed 65535 and cause EADDRINUSE or
+		// "port out of range" bind failures that the failure-classifier misclassifies.
+		const port = Math.min(portBase + laneIndex * portStride, 65535);
 		envOverrides.PORT = String(port);
 	}
 
