@@ -11,8 +11,7 @@ description: >
 
 # Swarm PR Review
 
-Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the
-canonical workflow.
+Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
 
 ## Codex Execution Notes
 
@@ -43,8 +42,7 @@ canonical workflow.
   full text, then `parse_lane_candidates` to extract structured candidates
   for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
 - If actionable findings remain, write the handoff artifact described by the
-  canonical skill and ask the user whether to continue with
-  `swarm-pr-feedback`.
+  canonical skill and ask the user whether to continue with `swarm-pr-feedback`.
 
 Do not improvise a fix path from review mode. If the user approves follow-up
 work, switch to `swarm-pr-feedback` and carry validated findings forward with

@@ -20,6 +20,7 @@ export interface MemoryConfig {
 			tokenBudget: number;
 		};
 	};
+	learning: MemoryLearningConfig;
 	writes: {
 		mode: 'propose';
 	};
@@ -58,6 +59,8 @@ export interface MemoryConfig {
 		};
 		latencyBudgetMs: number;
 	};
+	/** Q-learning-style utility tracking for memory recall/promotion/suppression. */
+	qLearning: QLearningConfig;
 }
 
 export interface ImportanceConfig {
@@ -70,6 +73,46 @@ export interface ImportanceConfig {
 	n: number;
 	/** A memory is low-utility when importance < threshold. */
 	threshold: number;
+}
+
+export interface QLearningConfig {
+	/** EMA learning rate η for q ← (1-η)·q + η·reward. */
+	learningRate: number;
+	/** Weight of the q-value term added to recall scoring. */
+	qValueBoostWeight: number;
+	/** Memories with qValue below this are suppressed from default recall. */
+	suppressionThreshold: number;
+	/** Memories with qValue above this (and enough retrievals) are promotion candidates. */
+	promotionThreshold: number;
+	/** Minimum retrieval count before a high-q memory is a promotion candidate. */
+	promotionMinRetrievals: number;
+	/** Fraction of a reward propagated to closely-related memories. */
+	propagationFraction: number;
+	/** Max related memories a single reward may propagate to. */
+	propagationFanoutCap: number;
+	/** Only propagate to memories retrieved within this window (days). */
+	propagationWindowDays: number;
+	/**
+	 * Jaccard token-overlap bar for treating two same-scope+kind memories as
+	 * "related" for reward propagation (B.5). Deliberately HIGH — propagation
+	 * mutates OTHER memories' learned utility, so wrong bounds = blast radius;
+	 * it must reach only near-duplicate memories. Strictly higher than
+	 * consolidation's clustering bar (`DEFAULT_CONSOLIDATION_CONFIG.jaccardThreshold`
+	 * = 0.30, a more aggressive MERGE operation): incidental template-word
+	 * overlap between distinct sibling-task memories (e.g. "Recalled by task
+	 * A." vs "...task B." ≈ 0.6 Jaccard) must NOT count as related, so
+	 * propagation never cross-pollinates distinct tasks' memories — which
+	 * coheres with the B.2 unitId attribution the reward path already
+	 * enforces. Documented judgment call (task B.5 report): deviates upward
+	 * from the spec's "e.g. 0.5" example toward blast-radius safety.
+	 */
+	propagationRelatednessThreshold: number;
+	/** Bounded rate at which suppressed memories are surfaced for exploration. */
+	explorationRate: number;
+	/** Max bytes of the retained council-synthesis payload (truncated with a marker beyond this). */
+	verdictPayloadCapBytes: number;
+	/** Neutral starting utility for a new memory. */
+	initialQValue: number;
 }
 
 export interface ConsolidationConfig {
@@ -86,6 +129,25 @@ export interface ConsolidationConfig {
 	 * (the issue's "365+ days, no decay unless superseded" durable kinds).
 	 */
 	decayHalfLifeDays: Record<MemoryKind, number>;
+}
+
+export interface MemoryLearningConfig {
+	learningRate: number;
+	propagationFactor: number;
+	qValueBoostWeight: number;
+	suppressionThreshold: number;
+	promotionThreshold: number;
+	propagationTokenOverlapThreshold: number;
+	/**
+	 * Minimum cosine similarity (embedding space) for a candidate memory to
+	 * qualify for soft propagation via the embedding path, independent of the
+	 * token-overlap path. Only evaluated when `embeddings.enabled` is true and
+	 * the configured embedding provider is available; otherwise propagation
+	 * falls back to token-overlap only (issue #1467 acceptance criteria).
+	 */
+	propagationEmbeddingCosineThreshold: number;
+	propagationFanout: number;
+	propagationLookbackDays: number;
 }
 
 export const DEFAULT_DECAY_HALF_LIFE_DAYS: Record<MemoryKind, number> = {
@@ -114,6 +176,28 @@ export const DEFAULT_IMPORTANCE_CONFIG: ImportanceConfig = {
 	threshold: 0.2,
 };
 
+export const DEFAULT_QLEARNING_CONFIG: QLearningConfig = {
+	learningRate: 0.1,
+	qValueBoostWeight: 0.1,
+	suppressionThreshold: 0.15,
+	promotionThreshold: 0.85,
+	promotionMinRetrievals: 5,
+	propagationFraction: 0.3,
+	propagationFanoutCap: 20,
+	propagationWindowDays: 30,
+	propagationRelatednessThreshold: 0.7,
+	explorationRate: 0.05,
+	verdictPayloadCapBytes: 8192,
+	initialQValue: 0.5,
+};
+
+/** Council verdict → EMA reward on the [0,1] utility scale (coherence fix; see spec FR-001). */
+export const COUNCIL_VERDICT_REWARDS = {
+	APPROVE: 1.0,
+	CONCERNS: 0.5,
+	REJECT: 0.0,
+} as const;
+
 export const DEFAULT_CONSOLIDATION_CONFIG: ConsolidationConfig = {
 	// Explicit opt-in (lockstep with MemoryConfigSchema in src/config/schema.ts):
 	// consolidation makes LLM calls and auto-applies records, so a user enabling
@@ -123,6 +207,18 @@ export const DEFAULT_CONSOLIDATION_CONFIG: ConsolidationConfig = {
 	jaccardThreshold: 0.3,
 	autoApplyMinConfidence: 0.6,
 	decayHalfLifeDays: { ...DEFAULT_DECAY_HALF_LIFE_DAYS },
+};
+
+export const DEFAULT_MEMORY_LEARNING_CONFIG: MemoryLearningConfig = {
+	learningRate: 0.1,
+	propagationFactor: 0.3,
+	qValueBoostWeight: 0.1,
+	suppressionThreshold: 0.15,
+	promotionThreshold: 0.85,
+	propagationTokenOverlapThreshold: 0.4,
+	propagationEmbeddingCosineThreshold: 0.7,
+	propagationFanout: 20,
+	propagationLookbackDays: 30,
 };
 
 export const DEFAULT_EMBEDDINGS_CONFIG = {
@@ -165,6 +261,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 			tokenBudget: 1000,
 		},
 	},
+	learning: { ...DEFAULT_MEMORY_LEARNING_CONFIG },
 	writes: {
 		mode: 'propose',
 	},
@@ -183,6 +280,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	},
 	embeddings: { ...DEFAULT_EMBEDDINGS_CONFIG },
 	retrieval: { ...DEFAULT_RETRIEVAL_CONFIG },
+	qLearning: { ...DEFAULT_QLEARNING_CONFIG },
 	hardDelete: false,
 };
 
@@ -220,6 +318,10 @@ export function resolveMemoryConfig(
 				...DEFAULT_MEMORY_CONFIG.recall.injection,
 				...(input?.recall?.injection ?? {}),
 			},
+		},
+		learning: {
+			...DEFAULT_MEMORY_CONFIG.learning,
+			...(input?.learning ?? {}),
 		},
 		writes: {
 			...DEFAULT_MEMORY_CONFIG.writes,
@@ -260,6 +362,10 @@ export function resolveMemoryConfig(
 				...DEFAULT_MEMORY_CONFIG.retrieval.rerank,
 				...(input?.retrieval?.rerank ?? {}),
 			},
+		},
+		qLearning: {
+			...DEFAULT_MEMORY_CONFIG.qLearning,
+			...(input?.qLearning ?? {}),
 		},
 	};
 }

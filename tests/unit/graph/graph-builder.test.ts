@@ -41,6 +41,44 @@ beforeAll(() => {
 	fs.writeFileSync(path.join(tmp, '.git/config'), '[core]\nbare = false\n');
 });
 
+describe('buildRepoGraph - Python, Rust, and Go exports', () => {
+	it('extracts conservative exports for .pyw, .rs, and .go files', async () => {
+		const mixedTmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'graph-builder-mixed-'),
+		);
+		try {
+			fs.writeFileSync(
+				path.join(mixedTmp, 'service.pyw'),
+				"__all__ = ['_private_api']\n\ndef _private_api():\n    pass\n\ndef hidden():\n    pass\n",
+			);
+			fs.writeFileSync(
+				path.join(mixedTmp, 'lib.rs'),
+				'pub fn public_api() {}\npub(crate) struct InternalThing;\nfn hidden() {}\n',
+			);
+			fs.writeFileSync(
+				path.join(mixedTmp, 'main.go'),
+				'package main\n\nfunc PublicFunc() {}\nfunc privateFunc() {}\nconst MaxRetries = 3\n',
+			);
+
+			const graph = await buildRepoGraph(mixedTmp);
+
+			expect(graph.files['service.pyw'].exports.map((s) => s.name)).toEqual([
+				'_private_api',
+			]);
+			expect(graph.files['lib.rs'].exports.map((s) => s.name)).toEqual([
+				'public_api',
+				'InternalThing',
+			]);
+			expect(graph.files['main.go'].exports.map((s) => s.name)).toEqual([
+				'PublicFunc',
+				'MaxRetries',
+			]);
+		} finally {
+			fs.rmSync(mixedTmp, { recursive: true, force: true });
+		}
+	});
+});
+
 afterAll(() => {
 	fs.rmSync(tmp, { recursive: true, force: true });
 });

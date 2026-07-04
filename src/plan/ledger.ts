@@ -14,6 +14,7 @@ import {
 	PlanSchema,
 	TaskStatusSchema,
 } from '../config/plan-schema';
+import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
 import { derivePlanId } from './utils';
 
@@ -106,6 +107,13 @@ export interface SnapshotEventPayload {
  * Ledger file name
  */
 const LEDGER_FILENAME = 'plan-ledger.jsonl';
+
+/**
+ * Relative path used as the project-scoped lock key for ledger append writes.
+ * Must match the real runtime ledger path so every append caller coordinates
+ * on the same proper-lockfile sentinel.
+ */
+const LEDGER_LOCK_PATH = path.join('.swarm', LEDGER_FILENAME);
 
 /**
  * Plan JSON file name
@@ -390,66 +398,78 @@ export async function appendLedgerEvent(
 		planHashAfter?: string;
 	},
 ): Promise<LedgerEvent> {
-	const ledgerPath = getLedgerPath(directory);
+	return withEvidenceLock(
+		directory,
+		LEDGER_LOCK_PATH,
+		'plan-ledger',
+		'append-ledger-event',
+		async () => {
+			const ledgerPath = getLedgerPath(directory);
 
-	// Get current state
-	const latestSeq = await getLatestLedgerSeq(directory);
-	const nextSeq = latestSeq + 1;
+			// Get current state while holding the ledger write lock so concurrent
+			// writers cannot observe the same seq and both rewrite the canonical file.
+			const latestSeq = await getLatestLedgerSeq(directory);
+			const nextSeq = latestSeq + 1;
 
-	// Compute plan_hash_before from current plan.json
-	const planHashBefore = computeCurrentPlanHash(directory);
+			// Compute plan_hash_before from current plan.json
+			const planHashBefore = computeCurrentPlanHash(directory);
 
-	// Validate concurrency constraints if provided
-	if (options?.expectedSeq !== undefined && options.expectedSeq !== latestSeq) {
-		throw new LedgerStaleWriterError(
-			`Stale writer: expected seq ${options.expectedSeq} but found ${latestSeq}`,
-		);
-	}
+			// Validate concurrency constraints if provided
+			if (
+				options?.expectedSeq !== undefined &&
+				options.expectedSeq !== latestSeq
+			) {
+				throw new LedgerStaleWriterError(
+					`Stale writer: expected seq ${options.expectedSeq} but found ${latestSeq}`,
+				);
+			}
 
-	if (
-		options?.expectedHash !== undefined &&
-		options.expectedHash !== planHashBefore
-	) {
-		throw new LedgerStaleWriterError(
-			`Stale writer: expected hash ${options.expectedHash} but found ${planHashBefore}`,
-		);
-	}
+			if (
+				options?.expectedHash !== undefined &&
+				options.expectedHash !== planHashBefore
+			) {
+				throw new LedgerStaleWriterError(
+					`Stale writer: expected hash ${options.expectedHash} but found ${planHashBefore}`,
+				);
+			}
 
-	// Use provided planHashAfter if available (allows caller to compute hash from
-	// in-memory mutated plan before writing to disk), otherwise fall back to
-	// computing from current plan.json (backward-compatible)
-	const planHashAfter = options?.planHashAfter ?? planHashBefore;
+			// Use provided planHashAfter if available (allows caller to compute hash from
+			// in-memory mutated plan before writing to disk), otherwise fall back to
+			// computing from current plan.json (backward-compatible)
+			const planHashAfter = options?.planHashAfter ?? planHashBefore;
 
-	const event: LedgerEvent = {
-		...eventInput,
-		seq: nextSeq,
-		timestamp: new Date().toISOString(),
-		plan_hash_before: planHashBefore,
-		plan_hash_after: planHashAfter,
-		schema_version: LEDGER_SCHEMA_VERSION,
-	};
+			const event: LedgerEvent = {
+				...eventInput,
+				seq: nextSeq,
+				timestamp: new Date().toISOString(),
+				plan_hash_before: planHashBefore,
+				plan_hash_after: planHashAfter,
+				schema_version: LEDGER_SCHEMA_VERSION,
+			};
 
-	// Ensure .swarm/ directory exists
-	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
+			// Ensure .swarm/ directory exists
+			fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 
-	// Write to temp file then rename for atomicity.
-	// Random suffix prevents concurrent writers across processes from clobbering
-	// each other's temp file (each process writes its own uniquely-named temp).
-	const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	const line = `${JSON.stringify(event)}\n`;
+			// Write to temp file then rename for atomicity.
+			// Random suffix prevents concurrent writers across processes from clobbering
+			// each other's temp file (each process writes its own uniquely-named temp).
+			const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
+			const line = `${JSON.stringify(event)}\n`;
 
-	// If ledger exists, append to it via temp file
-	if (fs.existsSync(ledgerPath)) {
-		const existingContent = fs.readFileSync(ledgerPath, 'utf8');
-		fs.writeFileSync(tempPath, existingContent + line, 'utf8');
-	} else {
-		// Ledger not initialized - cannot append without plan_created event
-		throw new Error('Ledger not initialized. Call initLedger() first.');
-	}
+			// If ledger exists, append to it via temp file
+			if (fs.existsSync(ledgerPath)) {
+				const existingContent = fs.readFileSync(ledgerPath, 'utf8');
+				fs.writeFileSync(tempPath, existingContent + line, 'utf8');
+			} else {
+				// Ledger not initialized - cannot append without plan_created event
+				throw new Error('Ledger not initialized. Call initLedger() first.');
+			}
 
-	fs.renameSync(tempPath, ledgerPath);
+			fs.renameSync(tempPath, ledgerPath);
 
-	return event;
+			return event;
+		},
+	);
 }
 
 /**

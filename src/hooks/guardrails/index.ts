@@ -26,6 +26,7 @@ import { advanceTaskState, getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import * as logger from '../../utils/logger';
+import { computeSpecDiff } from '../../utils/spec-hash';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -65,7 +66,9 @@ export const SPEC_DRIFT_BLOCKED_TOOLS = new Set<string>([
 
 /**
  * Throw SPEC_DRIFT_BLOCK if the tool is on the block-list and the
- * spec-staleness marker file exists.
+ * spec-staleness marker file exists. The error message includes a unified
+ * diff of the recorded vs current spec content so the user can see what
+ * changed (FR-001).
  */
 export function enforceSpecDriftGate(
 	directory: string | undefined,
@@ -75,10 +78,33 @@ export function enforceSpecDriftGate(
 	if (!SPEC_DRIFT_BLOCKED_TOOLS.has(toolName)) return;
 	const stalePath = path.join(directory, '.swarm', 'spec-staleness.json');
 	if (fsSync.existsSync(stalePath)) {
-		throw new Error(
+		let diffInfo: { diff: string; changedSections: string[] } | null = null;
+		try {
+			diffInfo = computeSpecDiff(directory);
+		} catch {
+			// Non-fatal: diff computation failure falls back to bare block message
+		}
+
+		let message =
 			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
-				'Run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to dismiss, then retry.',
-		);
+			'Run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to dismiss, then retry.';
+
+		if (diffInfo) {
+			const sectionSummary =
+				diffInfo.changedSections.length > 0
+					? `\nChanged sections: ${diffInfo.changedSections.map((s) => `## ${s}`).join(', ')}`
+					: '';
+			message +=
+				'\n\n--- spec diff (recorded vs current) ---' +
+				sectionSummary +
+				'\n[Begin spec diff]\n' +
+				diffInfo.diff +
+				'\n[End spec diff]';
+		} else {
+			message += '\n\n(no recorded snapshot to diff against)';
+		}
+
+		throw new Error(message);
 	}
 }
 

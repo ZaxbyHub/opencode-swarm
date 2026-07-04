@@ -68,7 +68,10 @@ If the task is unclear, ask a small number of targeted questions or create a sho
 
 ### Phase 0a — Parallel work check
 
-**Reference the [parallel-work-check skill](../../../.opencode/skills/generated/parallel-work-check/SKILL.md) for the full protocol.**
+If this project has the OpenCode-generated
+[parallel-work-check skill](../../../.opencode/skills/generated/parallel-work-check/SKILL.md),
+follow its full protocol. Otherwise (most repos), the inline steps below are
+the protocol.
 
 Before starting implementation on an existing branch, check for parallel work:
 
@@ -77,7 +80,7 @@ Before starting implementation on an existing branch, check for parallel work:
    - Read the new commits with `git log origin/<branch> --not HEAD`.
    - Evaluate whether to **integrate**, **supersede**, or **proceed** with your planned work.
    - Default stance: prefer the parallel swarm's work unless you can clearly articulate why your approach is better.
-3. Document the decision before proceeding to Phase 1 using the PARALLEL WORK CHECK template from the parallel-work-check skill.
+3. Document the decision before proceeding to Phase 1 — use the PARALLEL WORK CHECK template if the parallel-work-check skill is present, otherwise a short written note stating what was fetched, what was found, and the integrate/supersede/proceed choice with its reason.
 
 **This check prevents wasted effort on stale branches and ensures you build on the latest remote state.**
 
@@ -197,6 +200,11 @@ Before declaring completion, run a no-unwired/no-deferred gate:
   explicit user instruction.
 
 ## Suggested subagent prompts
+
+For agent-type, model, and effort tiering, fan-out limits, and the full
+subagent prompt contract, load the `orchestrating-subagents` skill. For
+persisting plans, evidence, and reviewer/critic verdicts across long sessions
+and compaction, load the `durable-session-state` skill.
 
 ### Explorer-style
 Use for broad discovery:

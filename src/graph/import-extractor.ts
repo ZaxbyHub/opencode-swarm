@@ -43,6 +43,7 @@ export const SOURCE_EXTENSIONS = [
 	'.mjs',
 	'.cjs',
 	'.py',
+	'.pyw',
 	'.go',
 	'.rs',
 ] as const;
@@ -70,15 +71,15 @@ const RESOLVE_INDEX_CANDIDATES = [
 	'index.mjs',
 ];
 
-const PY_EXTENSION_CANDIDATES = ['.py'];
-const PY_INDEX_CANDIDATES = ['__init__.py'];
+const PY_EXTENSION_CANDIDATES = ['.py', '.pyw'];
+const PY_INDEX_CANDIDATES = ['__init__.py', '__init__.pyw'];
 
 export function getLanguageFromExtension(ext: string): string | null {
 	const lower = ext.toLowerCase();
 	if (TS_JS_EXTENSIONS.includes(lower)) {
 		return lower === '.ts' || lower === '.tsx' ? 'typescript' : 'javascript';
 	}
-	if (lower === '.py') return 'python';
+	if (lower === '.py' || lower === '.pyw') return 'python';
 	if (lower === '.go') return 'go';
 	if (lower === '.rs') return 'rust';
 	return null;
@@ -162,7 +163,10 @@ function tryResolvePython(
 		}
 		return null;
 	};
-	for (const ext of PY_EXTENSION_CANDIDATES) {
+	const sourceExt = path.extname(sourceFileAbs).toLowerCase();
+	const extensionCandidates =
+		sourceExt === '.pyw' ? ['.pyw', '.py'] : [...PY_EXTENSION_CANDIDATES];
+	for (const ext of extensionCandidates) {
 		const hit = accept(baseAbs + ext);
 		if (hit) return hit;
 	}
@@ -589,9 +593,9 @@ function parsePythonImports(content: string): ParsedImport[] {
 	return out;
 }
 
-const GO_SINGLE_IMPORT_RE = /^\s*import\s+(?:[\w.]+\s+)?["`]([^"`]+)["`]/gm;
+const GO_SINGLE_IMPORT_RE = /^\s*import\s+(?:(\.|_|\w+)\s+)?["`]([^"`]+)["`]/gm;
 const GO_BLOCK_IMPORT_RE = /^\s*import\s*\(([\s\S]*?)\)/gm;
-const GO_BLOCK_LINE_RE = /(?:[\w.]+\s+)?["`]([^"`]+)["`]/g;
+const GO_BLOCK_LINE_RE = /(?:(\.|_|\w+)\s+)?["`]([^"`]+)["`]/g;
 
 function parseGoImports(content: string): ParsedImport[] {
 	const out: ParsedImport[] = [];
@@ -601,9 +605,9 @@ function parseGoImports(content: string): ParsedImport[] {
 		m = GO_SINGLE_IMPORT_RE.exec(content)
 	) {
 		out.push({
-			rawModule: m[1],
+			rawModule: m[2],
 			importedSymbols: [],
-			importType: 'namespace',
+			importType: m[1] === '_' ? 'sideeffect' : 'namespace',
 			line: lineNumberFor(content, m.index),
 		});
 	}
@@ -620,9 +624,9 @@ function parseGoImports(content: string): ParsedImport[] {
 			inner = GO_BLOCK_LINE_RE.exec(block)
 		) {
 			out.push({
-				rawModule: inner[1],
+				rawModule: inner[2],
 				importedSymbols: [],
-				importType: 'namespace',
+				importType: inner[1] === '_' ? 'sideeffect' : 'namespace',
 				line: lineNumberFor(content, blockStart + inner.index),
 			});
 		}
@@ -631,7 +635,7 @@ function parseGoImports(content: string): ParsedImport[] {
 	return out;
 }
 
-const RUST_USE_RE = /^\s*use\s+([\w:]+(?:\s*::\s*\{[^}]*\})?)\s*;/gm;
+const RUST_USE_RE = /^\s*use\s+(.+?)\s*;/gm;
 
 function parseRustUses(content: string): ParsedImport[] {
 	const out: ParsedImport[] = [];
@@ -640,10 +644,32 @@ function parseRustUses(content: string): ParsedImport[] {
 		m !== null;
 		m = RUST_USE_RE.exec(content)
 	) {
+		const raw = m[1].trim();
+		const grouped = raw.match(/^(.+?)::\{(.+)\}$/);
+		if (grouped) {
+			const importedSymbols = grouped[2]
+				.split(',')
+				.map((part) => part.trim())
+				.map((part) => {
+					const [_full, _path_prefix, symbol, alias] =
+						part.match(/^(?:(.+?)::)?(\w+)(?:\s+as\s+(\w+))?$/) ?? [];
+					// If there's an alias, use it; otherwise use the symbol (last path segment)
+					return alias ?? symbol;
+				})
+				.filter((part): part is string => Boolean(part));
+			out.push({
+				rawModule: grouped[1].trim(),
+				importedSymbols,
+				importType: 'named',
+				line: lineNumberFor(content, m.index),
+			});
+			continue;
+		}
+		const alias = raw.match(/^(.+?)\s+as\s+\w+$/);
 		out.push({
-			rawModule: m[1].trim(),
+			rawModule: alias ? alias[1].trim() : raw,
 			importedSymbols: [],
-			importType: 'namespace',
+			importType: alias ? 'named' : 'namespace',
 			line: lineNumberFor(content, m.index),
 		});
 	}

@@ -17,6 +17,16 @@
 
 > **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/plan-export/` instead of the project root. The `/swarm close` and `/swarm reset --confirm` commands clean up all three locations (`.swarm/plan-export/`, flat `.swarm/`, and project root) during the transition window.
 
+### Ledger append concurrency
+
+`appendLedgerEvent()` serializes its read -> validate -> rewrite sequence under
+a project-scoped lock keyed to `.swarm/plan-ledger.jsonl`. The lock is acquired
+before reading the latest ledger sequence and released only after the canonical
+ledger file has been replaced. This preserves monotonic sequence assignment and
+keeps `expectedSeq` / `expectedHash` stale-writer checks tied to the latest
+committed ledger state even when two OpenCode processes or background workers
+try to append at the same time.
+
 ### Ledger Event Types
 
 ```json

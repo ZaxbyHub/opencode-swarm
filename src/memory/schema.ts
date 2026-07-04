@@ -86,6 +86,7 @@ export const MemoryRecordSchema = z
 		updatedAt: z.string().datetime(),
 		lastAccessedAt: z.string().datetime().optional(),
 		expiresAt: z.string().datetime().optional(),
+		qValue: z.number().min(0).max(1).optional(),
 		supersedes: z.array(z.string()).optional(),
 		supersededBy: z.string().optional(),
 		contentHash: z.string().regex(/^[a-f0-9]{64}$/),

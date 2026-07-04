@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
 import type { KnowledgeEventInput } from '../../../src/hooks/knowledge-events';
@@ -9,6 +9,7 @@ import {
 } from '../../../src/hooks/knowledge-injector';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
+import { swarmState } from '../../../src/state';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -49,6 +50,7 @@ beforeEach(() => {
 	mkdirSync('.tmp-tests', { recursive: true });
 	tempDir = mkdtempSync(path.join('.tmp-tests', 'swarm-kinj-'));
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+	swarmState.currentCriticalShownIds.clear();
 	originalSearch = _internals.searchKnowledge;
 	originalRecordEvent = _internals.recordKnowledgeEvent;
 	originalRecordShown = _internals.recordKnowledgeShown;
@@ -58,11 +60,31 @@ afterEach(() => {
 	_internals.searchKnowledge = originalSearch;
 	_internals.recordKnowledgeEvent = originalRecordEvent;
 	_internals.recordKnowledgeShown = originalRecordShown;
+	swarmState.currentCriticalShownIds.clear();
 	rmSync(tempDir, { recursive: true, force: true });
 	rmSync('.tmp-tests', { recursive: true, force: true });
 });
 
 describe('knowledge injector retrieved events', () => {
+	function outputForUser(text: string): { messages?: MessageWithParts[] } {
+		return {
+			messages: [
+				{
+					info: {
+						role: 'system',
+						agent: 'architect',
+						sessionID: 'session-1',
+					},
+					parts: [{ type: 'text', text: 'system' }],
+				},
+				{
+					info: { role: 'user' },
+					parts: [{ type: 'text', text }],
+				},
+			],
+		};
+	}
+
 	test('emits retrieved telemetry for the final displayed IDs (no confidence pre-filter, Task 6.1)', async () => {
 		let searchParams: Record<string, unknown> | undefined;
 		let emittedEvent: KnowledgeEventInput | undefined;
@@ -190,5 +212,145 @@ describe('knowledge injector retrieved events', () => {
 
 		expect(searchCalled).toBe(false);
 		expect(output.messages).toHaveLength(3);
+	});
+
+	test('regression INJ-001: changed user message invalidates cached injection', async () => {
+		const calls: string[] = [];
+		_internals.searchKnowledge = async (params) => {
+			calls.push(params.context.lastUserMessage ?? '');
+			return {
+				trace_id: `trace-${calls.length}`,
+				results: [
+					rankedEntry(`shown-${calls.length}`, {
+						lesson: `lesson for ${params.context.lastUserMessage}`,
+					}),
+				],
+			};
+		};
+		_internals.recordKnowledgeEvent = async () => null;
+		_internals.recordKnowledgeShown = async () => {};
+
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+			inject_char_budget: 1200,
+		});
+
+		const first = outputForUser('first request');
+		await hook({}, first);
+		const second = outputForUser('second request');
+		await hook({}, second);
+
+		expect(calls).toEqual(['first request', 'second request']);
+		const injectedText = second.messages
+			?.flatMap((m) => m.parts ?? [])
+			.map((p) => p.text ?? '')
+			.join('\n');
+		expect(injectedText).toContain('lesson for second request');
+		expect(injectedText).not.toContain('lesson for first request');
+	});
+
+	test('regression INJ-002: critical gate IDs come only from rendered directive records', async () => {
+		let shownIds: string[] | undefined;
+		_internals.searchKnowledge = async () => ({
+			trace_id: 'trace-trimmed',
+			results: [
+				rankedEntry('crit-visible', {
+					directive_priority: 'critical',
+					triggers: ['save'],
+					required_actions: ['ack visible'],
+				}),
+				rankedEntry('crit-trimmed', {
+					directive_priority: 'critical',
+					triggers: ['save'],
+					required_actions: ['ack trimmed'],
+				}),
+			],
+		});
+		_internals.recordKnowledgeEvent = async () => null;
+		_internals.recordKnowledgeShown = async (_directory, ids) => {
+			shownIds = ids;
+		};
+
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+			inject_char_budget: 500,
+			max_lesson_display_chars: 40,
+		});
+		const output = outputForUser('please save');
+
+		await hook({}, output);
+
+		const injectedText = output.messages
+			?.flatMap((m) => m.parts ?? [])
+			.map((p) => p.text ?? '')
+			.join('\n');
+		expect(injectedText).toContain('- id: crit-visible');
+		expect(injectedText).not.toContain('- id: crit-trimmed');
+		expect(shownIds).toContain('crit-visible');
+		const criticalState = swarmState.currentCriticalShownIds.get('session-1');
+		expect(criticalState?.ids).toEqual(['crit-visible']);
+	});
+
+	test('regression INJ-002b: truncated lesson-block entries still count as shown', async () => {
+		let shownIds: string[] | undefined;
+		_internals.searchKnowledge = async () => ({
+			trace_id: 'trace-truncated-lesson',
+			results: [
+				rankedEntry('long-lesson', {
+					lesson: 'abcdefghij1234567890 extra lesson detail',
+				}),
+			],
+		});
+		_internals.recordKnowledgeEvent = async () => null;
+		_internals.recordKnowledgeShown = async (_directory, ids) => {
+			shownIds = ids;
+		};
+
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+			inject_char_budget: 1200,
+			max_lesson_display_chars: 10,
+		});
+		const output = outputForUser('surface lesson');
+
+		await hook({}, output);
+
+		const injectedText = output.messages
+			?.flatMap((m) => m.parts ?? [])
+			.map((p) => p.text ?? '')
+			.join('\n');
+		expect(injectedText).toContain('[S] abcdefghij');
+		expect(shownIds).toEqual(['long-lesson']);
+	});
+
+	test('regression INJ-003: preamble-only injection clears stale critical gate IDs', async () => {
+		swarmState.currentCriticalShownIds.set('session-1', {
+			ids: ['stale-critical'],
+			generatedAt: Date.now(),
+		});
+		_internals.searchKnowledge = async () => ({
+			trace_id: 'trace-empty',
+			results: [],
+		});
+		_internals.recordKnowledgeEvent = async () => null;
+		_internals.recordKnowledgeShown = async () => {};
+		writeFileSync(
+			path.join(tempDir, '.swarm', 'curator-briefing.md'),
+			'briefing only',
+			'utf-8',
+		);
+
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+			inject_char_budget: 1200,
+		});
+
+		await hook({}, outputForUser('empty retrieval'));
+
+		expect(swarmState.currentCriticalShownIds.has('session-1')).toBe(false);
 	});
 });

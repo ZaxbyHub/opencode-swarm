@@ -95,7 +95,13 @@ function isBinaryFile(filePath: string, buffer: Buffer): boolean {
 interface ImportMatch {
 	line: number;
 	imports: string;
-	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+	importType:
+		| 'default'
+		| 'named'
+		| 'namespace'
+		| 'require'
+		| 'sideeffect'
+		| 'type';
 	raw: string;
 }
 
@@ -289,7 +295,13 @@ interface ConsumerFile {
 	file: string;
 	line: number;
 	imports: string;
-	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+	importType:
+		| 'default'
+		| 'named'
+		| 'namespace'
+		| 'require'
+		| 'sideeffect'
+		| 'type';
 	raw: string;
 }
 

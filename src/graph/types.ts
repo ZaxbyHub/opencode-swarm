@@ -13,7 +13,8 @@ export type ImportType =
 	| 'default'
 	| 'namespace'
 	| 'sideeffect'
-	| 'require';
+	| 'require'
+	| 'type';
 
 export interface ImportEdge {
 	/** Importing file (relative, forward-slash). */

@@ -80,6 +80,7 @@ export {
 	handleMemoryImportCommand,
 	handleMemoryMigrateCommand,
 	handleMemoryStatusCommand,
+	handleMemoryValueLogCommand,
 } from './memory';
 export { handlePlanCommand } from './plan';
 export { handlePreflightCommand } from './preflight';

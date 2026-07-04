@@ -96,7 +96,10 @@ describe('Migration v6: create_embedding_config table', () => {
 					'SELECT MAX(version) as version FROM schema_migrations',
 				)
 				.get();
-			expect(maxRow?.version).toBe(6);
+			// Pre-existing note: this asserts v6 was applied, not that it's the
+			// latest migration — later migrations (v7, v8, ...) legitimately
+			// advance MAX(version) further, so `>=` rather than exact equality.
+			expect(maxRow?.version).toBeGreaterThanOrEqual(6);
 		} finally {
 			db.close();
 		}

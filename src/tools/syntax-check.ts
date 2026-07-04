@@ -5,7 +5,7 @@ import pLimit from 'p-limit';
 import { z } from 'zod';
 import type { PluginConfig } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
-import { saveEvidence } from '../evidence/manager';
+import { _internals as evidenceInternals } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { getLanguageForExtension, getParserForFile } from '../lang/registry';
 import type { Parser } from '../lang/runtime';
@@ -302,7 +302,7 @@ export async function syntaxCheck(
 			: `All ${filesChecked} files passed syntax check`;
 
 	// Save evidence
-	await saveEvidence(directory, 'syntax_check', {
+	await evidenceInternals.saveEvidence(directory, 'syntax_check', {
 		task_id: 'syntax_check',
 		type: 'syntax',
 		timestamp: new Date().toISOString(),

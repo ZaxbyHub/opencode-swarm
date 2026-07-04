@@ -1,5 +1,10 @@
 import * as path from 'node:path';
-import { extractPythonSymbols, extractTSSymbols } from '../tools/symbols';
+import {
+	extractGoSymbols,
+	extractPythonSymbols,
+	extractRustSymbols,
+	extractTSSymbols,
+} from '../tools/symbols';
 import { getLanguageFromExtension } from './import-extractor';
 import type { ExportedSymbol, SymbolKind } from './types';
 
@@ -33,6 +38,14 @@ export function extractExportedSymbols(
 	}
 	if (language === 'python') {
 		const raw = extractPythonSymbols(relativeFilePath, workspaceRoot);
+		return raw.filter((s) => s.exported).map(toExported);
+	}
+	if (language === 'rust') {
+		const raw = extractRustSymbols(relativeFilePath, workspaceRoot);
+		return raw.filter((s) => s.exported).map(toExported);
+	}
+	if (language === 'go') {
+		const raw = extractGoSymbols(relativeFilePath, workspaceRoot);
 		return raw.filter((s) => s.exported).map(toExported);
 	}
 	return [];

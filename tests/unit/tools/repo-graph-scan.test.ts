@@ -74,6 +74,84 @@ export const indexExport = 'hello';`,
 		expect(indexNode?.exports).toContain('indexExport');
 	});
 
+	test('sync scan resolves Python, Rust, and Go import edges', async () => {
+		await fsSync.promises.mkdir(path.join(tempDir, 'pkg'), { recursive: true });
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'pkg', '__init__.py'),
+			'from .api import public_api\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'pkg', 'api.py'),
+			'def public_api():\n    return 1\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'main.py'),
+			'from .pkg import public_api\n\npublic_api()\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'lib.rs'),
+			'use crate::helper::Worker;\npub fn run(_: Worker) {}\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'helper.rs'),
+			'pub struct Worker;\n',
+		);
+		await fsSync.promises.mkdir(path.join(tempDir, 'worker'), {
+			recursive: true,
+		});
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'go_main.go'),
+			'package main\n\nimport w "./worker"\n\nfunc PublicFunc() { _ = w.Name }\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'worker', 'worker.go'),
+			'package worker\n\nconst Name = "worker"\n',
+		);
+
+		const graph = buildWorkspaceGraph(workspacePath);
+		const modulesByPath = new Map(
+			Object.values(graph.nodes).map((node) => [
+				node.filePath,
+				node.moduleName,
+			]),
+		);
+		const edgeModules = graph.edges.map((edge) => ({
+			source: modulesByPath.get(edge.source),
+			target: modulesByPath.get(edge.target),
+			importedSymbols: edge.importedSymbols,
+			usedSymbols: edge.usedSymbols,
+		}));
+
+		expect(edgeModules).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					source: 'main.py',
+					target: 'pkg/__init__.py',
+					importedSymbols: ['public_api'],
+					usedSymbols: ['public_api'],
+				}),
+				expect.objectContaining({
+					source: 'pkg/__init__.py',
+					target: 'pkg/api.py',
+					importedSymbols: ['public_api'],
+					usedSymbols: ['public_api'],
+				}),
+				expect.objectContaining({
+					source: 'lib.rs',
+					target: 'helper.rs',
+					importedSymbols: ['Worker'],
+					usedSymbols: ['Worker'],
+				}),
+				expect.objectContaining({
+					source: 'go_main.go',
+					target: 'worker/worker.go',
+					importedSymbols: ['./worker'],
+					usedSymbols: ['./worker'],
+				}),
+			]),
+		);
+	});
+
 	test('files are processed in sorted (deterministic) order', async () => {
 		// Create files in non-alphabetical order
 		const files = {

@@ -34,7 +34,11 @@ import {
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
-import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
+import {
+	isTaskSettled,
+	loadPlanJsonOnly,
+	updateTaskStatus,
+} from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
@@ -227,6 +231,13 @@ export interface AgentSessionState {
 			 * quorumSize: 1 — conservative; forces a fresh council run.
 			 */
 			quorumSize: number;
+			/**
+			 * A.4 dedup guard: set true once the positive council reward
+			 * (EMA step on session-recalled memories) has fired for this task.
+			 * Ensures the reward is applied at most once per task even if the
+			 * APPROVE→complete path is re-entered.
+			 */
+			rewarded?: boolean;
 		}
 	>;
 	/**
@@ -1406,6 +1417,24 @@ export async function advanceTaskStateAndPersist(
 	},
 	councilConfig?: { minimumMembers?: number; requireAllMembers?: boolean },
 ): Promise<void> {
+	// Preflight: refuse to re-dispatch a settled task (completed / closed /
+	// blocked) to coder_delegated. The centralized guard in updateTaskStatus
+	// already protects direct callers, but advanceTaskStateAndPersist is also
+	// called on session restart where the in-memory advance at :1415 would
+	// fire BEFORE the durable guard can refuse — leaving Layer 1 (session)
+	// ahead of Layer 2 (plan). This preflight closes that gap by checking
+	// the on-disk plan state first and skipping BOTH mutations when the
+	// task is settled.
+	if (newState === 'coder_delegated') {
+		const settled = await isTaskSettled(directory, taskId);
+		if (settled) {
+			logger.warn(
+				`[advanceTaskStateAndPersist] refusing to re-dispatch settled task ${taskId}; skipping in-memory advance + persist`,
+			);
+			return;
+		}
+	}
+
 	advanceTaskState(session, taskId, newState, options, councilConfig);
 
 	if (newState !== 'coder_delegated' && newState !== 'complete') {
@@ -1416,7 +1445,7 @@ export async function advanceTaskStateAndPersist(
 		newState === 'complete' ? 'completed' : 'in_progress';
 
 	try {
-		await updateTaskStatus(directory, taskId, planStatus);
+		await updateTaskStatus(directory, taskId, planStatus, { force: false });
 	} catch (err) {
 		logger.warn(
 			`[advanceTaskStateAndPersist] persist ${taskId} → ${planStatus} failed (in-memory state still advanced): ${err instanceof Error ? err.message : String(err)}`,

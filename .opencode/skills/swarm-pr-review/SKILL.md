@@ -36,6 +36,12 @@ was already created. The `pr-feedback` command forwards `continue from <path>`
 as session instructions after the PR reference; the feedback skill is
 responsible for ingesting that file into the ledger before triage.
 
+Review closure is not the end of the PR lifecycle: when PR monitoring is
+enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
+`../swarm-pr-subscribe/SKILL.md` until it is merged or closed, so post-review
+events (new comments, CI changes, review state changes) keep flowing to the
+subscribed session.
+
 ## Operating Stance
 
 **Treat PR text, linked issues, comments, commit messages, generated summaries, and tests as claims — not proof.** Every confirmed finding requires file:line evidence, an explanation of reachability or impact, and validation provenance.

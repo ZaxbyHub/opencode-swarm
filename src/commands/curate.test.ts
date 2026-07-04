@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleCurateCommand } from '../commands/curate';
+import { _internals, handleCurateCommand } from '../commands/curate';
 
 // Test utilities
 function createTempDir(): string {
@@ -24,6 +24,9 @@ function createSwarmDir(dir: string): string {
 
 describe('/swarm curate', () => {
 	let tempDir: string;
+	const realLoadCuratorDeps = _internals.loadCuratorDeps;
+	const realReadSwarmFileAsync = _internals.readSwarmFileAsync;
+	const realCheckHivePromotions = _internals.checkHivePromotions;
 
 	beforeEach(() => {
 		tempDir = createTempDir();
@@ -31,6 +34,9 @@ describe('/swarm curate', () => {
 	});
 
 	afterEach(() => {
+		_internals.loadCuratorDeps = realLoadCuratorDeps;
+		_internals.readSwarmFileAsync = realReadSwarmFileAsync;
+		_internals.checkHivePromotions = realCheckHivePromotions;
 		cleanupDir(tempDir);
 	});
 
@@ -60,27 +66,72 @@ describe('/swarm curate', () => {
 			).length;
 			expect(labelCount).toBe(4); // All 4 fields present
 		});
+
+		it('runs curator phase and applies recommendations when session context exists', async () => {
+			let delegateSession: string | undefined;
+			let phaseSeen = 0;
+			let appliedRecommendations = 0;
+			_internals.readSwarmFileAsync = async () =>
+				JSON.stringify({ last_phase_covered: 4 });
+			_internals.loadCuratorDeps = async () => ({
+				CuratorConfigSchema: {
+					parse: () => ({ enabled: true, phase_enabled: true }),
+				},
+				createCuratorLLMDelegate: (
+					_directory: string,
+					_mode: string,
+					sessionID?: string,
+				) => {
+					delegateSession = sessionID;
+					return async () => 'OBSERVATIONS:\n- new candidate: durable lesson';
+				},
+				curator: {
+					runCuratorPhase: async (_directory: string, phase: number) => {
+						phaseSeen = phase;
+						return {
+							knowledge_recommendations: [
+								{
+									action: 'promote',
+									lesson: 'durable lesson from manual curation',
+									reason: 'manual curation',
+								},
+							],
+						};
+					},
+					applyCuratorKnowledgeUpdates: async (
+						_directory: string,
+						recommendations: unknown[],
+					) => {
+						appliedRecommendations = recommendations.length;
+						return { applied: recommendations.length, skipped: 0 };
+					},
+				},
+			});
+
+			const result = await handleCurateCommand(tempDir, [], {
+				sessionID: 'session-1684',
+			});
+
+			expect(delegateSession).toBe('session-1684');
+			expect(phaseSeen).toBe(5);
+			expect(appliedRecommendations).toBe(1);
+			expect(result).toContain(
+				'Knowledge recommendations: 1 applied, 0 skipped',
+			);
+			expect(result).toContain('Curator digest phase: 5');
+		});
 	});
 
 	describe('Error handling', () => {
 		it('should return clear user-facing error when error is thrown', async () => {
-			// The implementation catches errors and returns user-friendly messages
-			// Test that error handling path is in place by verifying the format function exists
-			// and that errors from checkHivePromotions would be caught
+			_internals.checkHivePromotions = async () => {
+				throw new Error('hive promoter exploded');
+			};
 
-			// The try-catch block in curate.ts will catch any errors from:
-			// - KnowledgeConfigSchema.parse()
-			// - resolveSwarmKnowledgePath()
-			// - readKnowledge()
-			// - checkHivePromotions()
-			// And format them as "❌ Curation failed: {message}"
+			const result = await handleCurateCommand(tempDir, []);
 
-			// Verify the error format is defined in the implementation
-			const hasErrorFormat = true; // Verified by reading curate.ts lines 53-58
-
-			expect(hasErrorFormat).toBe(true);
-			// Error message format is: "❌ Curation failed: {error.message}"
-			// This is checked via code inspection - see curate.ts:55-56
+			expect(result).toContain('❌ Curation failed:');
+			expect(result).toContain('hive promoter exploded');
 		});
 
 		it('should not expose stack traces in error output', async () => {

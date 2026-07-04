@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -8,7 +8,10 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleResetSessionCommand } from '../../../src/commands/reset-session';
+import {
+	_internals,
+	handleResetSessionCommand,
+} from '../../../src/commands/reset-session';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -98,7 +101,9 @@ describe('handleResetSessionCommand', () => {
 		// Other session files should also be deleted
 		expect(existsSync(cacheFile)).toBe(false);
 		expect(existsSync(tempFile)).toBe(false);
-		expect(result).toContain('Cleaned 2 additional session file(s)');
+		// Current implementation uses per-file deletion messages
+		expect(result).toContain('✓ Deleted delegation-cache.json');
+		expect(result).toContain('✓ Deleted temp-session.tmp');
 	});
 
 	it('reports zero additional files when session dir is empty or only has state.json', async () => {
@@ -109,6 +114,98 @@ describe('handleResetSessionCommand', () => {
 		const result = await handleResetSessionCommand(testDir, []);
 
 		expect(existsSync(stateFile)).toBe(false);
-		expect(result).toContain('Cleaned 0 additional session file(s)');
+		// No per-file deletion messages when there are no extra files
+		expect(result).not.toContain('✓ Deleted');
+	});
+
+	// ─────────────────────────────────────────────────────────────────────
+	// FR-004 stale worktree/branch reconciliation (task 3.2)
+	// ─────────────────────────────────────────────────────────────────────
+
+	it('FR-004: invokes cleanupOrphanedBranches with empty active list', async () => {
+		const mockFn = mock(() =>
+			Promise.resolve({ removed: [], skipped: [], errors: [] }),
+		);
+		const original = _internals.cleanupOrphanedBranches;
+		_internals.cleanupOrphanedBranches = mockFn;
+
+		try {
+			await handleResetSessionCommand(testDir, []);
+
+			expect(mockFn).toHaveBeenCalledTimes(1);
+			expect(mockFn).toHaveBeenCalledWith(testDir, []);
+		} finally {
+			_internals.cleanupOrphanedBranches = original;
+		}
+	});
+
+	it('FR-004: cleanup failure does NOT abort session-file reset — best-effort', async () => {
+		const mockFn = mock(() => Promise.reject(new Error('git failed')));
+		const original = _internals.cleanupOrphanedBranches;
+		_internals.cleanupOrphanedBranches = mockFn;
+
+		try {
+			// Pre-populate session files
+			const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
+			writeFileSync(stateFile, JSON.stringify({ test: 'data' }));
+			const cacheFile = path.join(
+				testDir,
+				'.swarm',
+				'session',
+				'delegation-cache.json',
+			);
+			writeFileSync(cacheFile, JSON.stringify({ chains: [] }));
+
+			const result = await handleResetSessionCommand(testDir, []);
+
+			// Session files must still be deleted despite cleanup failure
+			expect(existsSync(stateFile)).toBe(false);
+			expect(existsSync(cacheFile)).toBe(false);
+			// Best-effort warning must appear in output
+			expect(result).toContain('⚠️ Failed to cleanup orphan branches');
+		} finally {
+			_internals.cleanupOrphanedBranches = original;
+		}
+	});
+
+	it('FR-004: successful orphan branch removal reported in output', async () => {
+		const mockFn = mock(() =>
+			Promise.resolve({
+				removed: ['swarm-lane/sess-123/lane-1'],
+				skipped: [],
+				errors: [],
+			}),
+		);
+		const original = _internals.cleanupOrphanedBranches;
+		_internals.cleanupOrphanedBranches = mockFn;
+
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+
+			expect(result).toContain('Removed 1 orphan swarm-lane branch(es)');
+		} finally {
+			_internals.cleanupOrphanedBranches = original;
+		}
+	});
+
+	it('FR-004: in-memory agentSessions and delegationChains cleared even when cleanupOrphanedBranches throws', async () => {
+		const mockFn = mock(() => Promise.reject(new Error('git exploded')));
+		const original = _internals.cleanupOrphanedBranches;
+		_internals.cleanupOrphanedBranches = mockFn;
+
+		try {
+			startAgentSession('sess-1', 'coder');
+			startAgentSession('sess-2', 'reviewer');
+			expect(swarmState.agentSessions.size).toBe(2);
+
+			const result = await handleResetSessionCommand(testDir, []);
+
+			// In-memory state cleared regardless of cleanup failure
+			expect(swarmState.agentSessions.size).toBe(0);
+			expect(result).toContain('Cleared 2 in-memory agent session(s)');
+			expect(result).toContain('Cleared 0 delegation chain(s)');
+		} finally {
+			_internals.cleanupOrphanedBranches = original;
+		}
 	});
 });

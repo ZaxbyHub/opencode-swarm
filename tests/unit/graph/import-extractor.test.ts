@@ -31,6 +31,7 @@ describe('getLanguageFromExtension', () => {
 		expect(getLanguageFromExtension('.tsx')).toBe('typescript');
 		expect(getLanguageFromExtension('.js')).toBe('javascript');
 		expect(getLanguageFromExtension('.py')).toBe('python');
+		expect(getLanguageFromExtension('.pyw')).toBe('python');
 		expect(getLanguageFromExtension('.go')).toBe('go');
 		expect(getLanguageFromExtension('.rs')).toBe('rust');
 	});
@@ -41,6 +42,7 @@ describe('getLanguageFromExtension', () => {
 	it('exports the source extensions array', () => {
 		expect(SOURCE_EXTENSIONS).toContain('.ts');
 		expect(SOURCE_EXTENSIONS).toContain('.py');
+		expect(SOURCE_EXTENSIONS).toContain('.pyw');
 	});
 });
 
@@ -155,6 +157,47 @@ describe('extractImports — Python', () => {
 		expect(edges.length).toBeGreaterThanOrEqual(1);
 		const target = edges[0].target;
 		expect(target.endsWith('util.py')).toBe(true);
+	});
+
+	it('recognizes .pyw as Python', () => {
+		write('pkg/util.pyw', 'def foo(): pass\n');
+		const a = write('pkg/main.pyw', 'from .util import foo\n');
+		const edges = extractImports({ absoluteFilePath: a, workspaceRoot: tmp });
+		expect(edges[0].target.endsWith('util.pyw')).toBe(true);
+	});
+});
+
+describe('extractImports - Go and Rust', () => {
+	it('marks Go blank imports as side effects', () => {
+		const a = write('main.go', 'package main\n\nimport _ "embed"\n');
+		const edges = extractImports({ absoluteFilePath: a, workspaceRoot: tmp });
+		expect(edges[0]).toMatchObject({
+			rawModule: 'embed',
+			importType: 'sideeffect',
+		});
+	});
+
+	it('decomposes Rust grouped uses into named imported symbols', () => {
+		const a = write('lib.rs', 'use crate::models::{User, Account as Acct};\n');
+		const edges = extractImports({ absoluteFilePath: a, workspaceRoot: tmp });
+		expect(edges[0]).toMatchObject({
+			rawModule: 'crate::models',
+			importType: 'named',
+			importedSymbols: ['User', 'Acct'],
+		});
+	});
+
+	it('extracts symbols with :: paths inside grouped braces (FB-003)', () => {
+		const a = write(
+			'lib.rs',
+			'use crate::{Item, submodule::Item2, alias_name::Item3 as Renamed};\n',
+		);
+		const edges = extractImports({ absoluteFilePath: a, workspaceRoot: tmp });
+		expect(edges[0]).toMatchObject({
+			rawModule: 'crate',
+			importType: 'named',
+			importedSymbols: ['Item', 'Item2', 'Renamed'],
+		});
 	});
 });
 

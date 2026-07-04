@@ -1,5 +1,103 @@
 # Changelog
 
+## [7.107.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.0...v7.107.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **curator:** address pr-review findings F-001..F-014 ([f7ffe35](https://github.com/ZaxbyHub/opencode-swarm/commit/f7ffe35cf081c45317fc6451d0f9b1ca2bb1b019))
+* **curator:** execute postmortem action output ([0cf378a](https://github.com/ZaxbyHub/opencode-swarm/commit/0cf378a6157a99727e97dc69a5fc2b11fd44344a))
+
+## [7.107.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.106.0...v7.107.0) (2026-07-03)
+
+
+### Features
+
+* **swarm:** harden spec-drift gate, obligation traceability, and session-reset resilience ([a0f15e9](https://github.com/ZaxbyHub/opencode-swarm/commit/a0f15e992c3c0370e0a2e36ca3252b23096c9a17))
+
+## [7.106.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.105.0...v7.106.0) (2026-07-03)
+
+
+### Features
+
+* **memory:** close the learning loop — council verdicts drive EMA confidence, suppression, promotion ([ba102c4](https://github.com/ZaxbyHub/opencode-swarm/commit/ba102c4b93dd83d5035e41af2a84f68178e98d82))
+
+## [7.105.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.104.0...v7.105.0) (2026-07-03)
+
+
+### Features
+
+* **pr-monitor:** first-class pr subscriptions with pushed events and swarm-pr-subscribe skill ([e6315b0](https://github.com/ZaxbyHub/opencode-swarm/commit/e6315b00bc68722d44e1310f044f3e2c6f14b00f))
+
+## [7.104.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.3...v7.104.0) (2026-07-03)
+
+
+### Features
+
+* **memory:** add recall learning loop ([7b83634](https://github.com/ZaxbyHub/opencode-swarm/commit/7b83634bf59d2aabea283e4cebcc2cdd4fcbe602))
+* **symbol-graph:** harden python rust and go support ([53625cd](https://github.com/ZaxbyHub/opencode-swarm/commit/53625cd81912011bde3cf3cad35aa6b0eda2d313))
+
+
+### Bug Fixes
+
+* **memory:** close cross-scope propagation leak found by adversarial review ([23280b4](https://github.com/ZaxbyHub/opencode-swarm/commit/23280b49c5eb4ce8e13615568aca073735c4291a))
+* **memory:** close review-round-1 findings for memory learning loop ([d6af1ed](https://github.com/ZaxbyHub/opencode-swarm/commit/d6af1ed73fed6de5a1a9250d72675a444b79bc64))
+* **memory:** validate reward-targeting session ids and close remaining review findings ([9de6380](https://github.com/ZaxbyHub/opencode-swarm/commit/9de638035f48c911639ad035fda85f4d6b694906))
+* **symbol-graph:** close review-round-1 findings for symbol graph ([789a408](https://github.com/ZaxbyHub/opencode-swarm/commit/789a408e854420e228a6659b937b58275eb2a2e9))
+
+## [7.103.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.2...v7.103.3) (2026-07-02)
+
+
+### Bug Fixes
+
+* **knowledge:** apply swarm-pr-feedback review for PR [#1632](https://github.com/ZaxbyHub/opencode-swarm/issues/1632) ([5480cd6](https://github.com/ZaxbyHub/opencode-swarm/commit/5480cd62f977d7766d614db7b980b0f024a539a0))
+* **knowledge:** preserve linked injection after optional read failures ([2954523](https://github.com/ZaxbyHub/opencode-swarm/commit/29545230a1a31fd0d72f574c5fe59edb6eba5f3b))
+* **knowledge:** repair knowledge feedback-loop state tracking ([4a1817d](https://github.com/ZaxbyHub/opencode-swarm/commit/4a1817d2e58be1c8474d59ab30bc537f7516138b))
+
+## [7.103.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.1...v7.103.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* **skills:** apply swarm-pr-review feedback for PR [#1631](https://github.com/ZaxbyHub/opencode-swarm/issues/1631) ([6c1d0a5](https://github.com/ZaxbyHub/opencode-swarm/commit/6c1d0a56d9f7487f70a73edae00c3cdbb501c65e))
+
+## [7.103.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.103.0...v7.103.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **repo-graph:** add type to IMPORT_TYPE_VALUES union (was unstaged) ([fcebb05](https://github.com/ZaxbyHub/opencode-swarm/commit/fcebb05df97aa2ef9134d54b7e74c84a8d26d045))
+* **repo-graph:** address review findings for ts js symbol graph ([f5d12ea](https://github.com/ZaxbyHub/opencode-swarm/commit/f5d12ea35b89f506f621b1c6d5334df2341acd06))
+* **repo-graph:** harden ts js symbol graph ([b654aa6](https://github.com/ZaxbyHub/opencode-swarm/commit/b654aa6b01d6f6bdf012713517f6c7e8b9a5f7ad))
+
+## [7.103.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.102.0...v7.103.0) (2026-07-02)
+
+
+### Features
+
+* **knowledge:** add realtime learning nudge ([3be0811](https://github.com/ZaxbyHub/opencode-swarm/commit/3be0811d69d1e51f1b3993229e04438aefe0a829))
+
+
+### Bug Fixes
+
+* **ledger:** serialize plan ledger appends ([0406f52](https://github.com/ZaxbyHub/opencode-swarm/commit/0406f5244616cea7099ef5af127596ea4219617f))
+* **ledger:** serialize plan ledger appends ([6df5b92](https://github.com/ZaxbyHub/opencode-swarm/commit/6df5b92fa257a44dbe9c7c0cbb959ed00804fee3))
+* **sast,tools,docs:** close remaining PR [#1194](https://github.com/ZaxbyHub/opencode-swarm/issues/1194) follow-up gaps (issue [#1248](https://github.com/ZaxbyHub/opencode-swarm/issues/1248) items 3, 6, 16) ([a8a4c2f](https://github.com/ZaxbyHub/opencode-swarm/commit/a8a4c2f049bdb4f7361c3e74dcd14d3fb33c5207))
+
+## [7.102.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.101.0...v7.102.0) (2026-07-01)
+
+
+### Features
+
+* **repo-graph:** add symbol visibility semantics ([f2c895f](https://github.com/ZaxbyHub/opencode-swarm/commit/f2c895f80e5e0b015c3840565dec33c3ab8fa6f9))
+
+## [7.101.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.1...v7.101.0) (2026-07-01)
+
+
+### Features
+
+* **sdd:** GitHub Spec-Kit interop for /swarm sdd (v1) ([075e535](https://github.com/ZaxbyHub/opencode-swarm/commit/075e535a502b75fe4118186a6a4d3a6fd2673bfe))
+
 ## [7.100.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.100.0...v7.100.1) (2026-07-01)
 
 

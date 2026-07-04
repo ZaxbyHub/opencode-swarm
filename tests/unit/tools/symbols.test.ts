@@ -243,9 +243,12 @@ class UserService:
 			const parsed = parseResult(result);
 
 			expect(parsed.error).toBeUndefined();
-			expect(parsed.symbolCount).toBe(1);
-			expect(parsed.symbols[0].name).toBe('UserService');
+			expect(parsed.symbols.map((s: any) => s.name)).toEqual([
+				'UserService',
+				'UserService.get_user',
+			]);
 			expect(parsed.symbols[0].kind).toBe('class');
+			expect(parsed.symbols[1].kind).toBe('method');
 		});
 
 		it('should extract Python constants', async () => {
@@ -285,6 +288,85 @@ class PublicClass:
 			expect(parsed.symbolCount).toBeGreaterThanOrEqual(1);
 			const names = parsed.symbols.map((s: any) => s.name);
 			expect(names).toContain('public_function');
+		});
+
+		it('should allow __all__ to export private names and constrain constants', async () => {
+			const content = `
+__all__ = ['_private_function']
+
+def _private_function():
+    pass
+
+PUBLIC_CONSTANT = 1
+`;
+			createTestFile(tempDir, 'test.pyw', content);
+			const result = await symbols.execute({ file: 'test.pyw' }, {} as any);
+			const parsed = parseResult(result);
+
+			expect(parsed.error).toBeUndefined();
+			expect(parsed.symbols.map((s: any) => s.name)).toEqual([
+				'_private_function',
+			]);
+		});
+
+		it('should extract __init__.pyw package re-exports', async () => {
+			const content = `
+from ..api import public_api as exposed_api
+`;
+			createTestFile(tempDir, 'pkg/sub/__init__.pyw', content);
+			const result = await symbols.execute(
+				{ file: 'pkg/sub/__init__.pyw' },
+				{} as any,
+			);
+			const parsed = parseResult(result);
+
+			expect(parsed.error).toBeUndefined();
+			expect(parsed.symbols.map((s: any) => s.name)).toEqual(['exposed_api']);
+		});
+	});
+
+	describe('happy path - Rust and Go', () => {
+		it('should extract Rust exported items', async () => {
+			const content = `pub fn public_api() {}
+pub(crate) struct InternalThing;
+impl InternalThing {
+    pub fn run(&self) {}
+    fn hidden_method(&self) {}
+}
+fn hidden() {}
+`;
+			createTestFile(tempDir, 'lib.rs', content);
+			const result = await symbols.execute({ file: 'lib.rs' }, {} as any);
+			const parsed = parseResult(result);
+
+			expect(parsed.error).toBeUndefined();
+			expect(parsed.symbols.map((s: any) => s.name)).toEqual([
+				'public_api',
+				'InternalThing',
+				'run',
+			]);
+		});
+
+		it('should extract Go exported declarations', async () => {
+			const content = `package main
+
+type Service struct{}
+var Version = "1"
+const MaxRetries = 3
+func PublicFunc() {}
+func privateFunc() {}
+`;
+			createTestFile(tempDir, 'main.go', content);
+			const result = await symbols.execute({ file: 'main.go' }, {} as any);
+			const parsed = parseResult(result);
+
+			expect(parsed.error).toBeUndefined();
+			expect(parsed.symbols.map((s: any) => s.name)).toEqual([
+				'Service',
+				'Version',
+				'MaxRetries',
+				'PublicFunc',
+			]);
 		});
 	});
 

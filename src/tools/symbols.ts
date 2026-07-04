@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { collectPythonAllNames } from '../lang/symbol-visibility';
 import { createSwarmTool } from './create-tool';
 
 interface SymbolInfo {
@@ -38,6 +39,9 @@ const SYMBOL_EXTENSIONS = new Set([
 	'.mjs',
 	'.cjs',
 	'.py',
+	'.pyw',
+	'.rs',
+	'.go',
 ]);
 
 // Directories to skip during workspace scanning
@@ -130,6 +134,19 @@ function isPathInWorkspace(filePath: string, workspace: string): boolean {
  */
 function validatePathForRead(filePath: string, workspace: string): boolean {
 	return isPathInWorkspace(filePath, workspace);
+}
+
+function readValidatedSourceFile(filePath: string, cwd: string): string | null {
+	const fullPath = path.join(cwd, filePath);
+	if (!validatePathForRead(fullPath, cwd)) return null;
+
+	try {
+		const stats = fs.statSync(fullPath);
+		if (stats.size > MAX_FILE_SIZE_BYTES) return null;
+		return fs.readFileSync(fullPath, 'utf-8');
+	} catch {
+		return null;
+	}
 }
 
 // ============ TypeScript/JavaScript Extraction ============
@@ -362,47 +379,59 @@ export function extractPythonSymbols(
 	filePath: string,
 	cwd: string,
 ): SymbolInfo[] {
-	const fullPath = path.join(cwd, filePath);
-
-	// Re-validate path right before file read to catch any TOCTOU issues
-	if (!validatePathForRead(fullPath, cwd)) {
-		return [];
-	}
-
-	// Reduce TOCTOU: use single try-catch for exists+stat+read instead of separate checks
-	let content: string;
-	try {
-		const stats = fs.statSync(fullPath);
-		if (stats.size > MAX_FILE_SIZE_BYTES) {
-			throw new Error(
-				`File too large: ${stats.size} bytes (max: ${MAX_FILE_SIZE_BYTES})`,
-			);
-		}
-		content = fs.readFileSync(fullPath, 'utf-8');
-	} catch {
-		return [];
-	}
+	const content = readValidatedSourceFile(filePath, cwd);
+	if (content === null) return [];
 
 	const lines = content.split('\n');
 	const symbols: SymbolInfo[] = [];
 
-	// Check __all__ for explicit exports
-	const allMatch = content.match(/__all__\s*=\s*\[([^\]]+)\]/);
-	const explicitExports = allMatch
-		? allMatch[1].split(',').map((s) => s.trim().replace(/['"]/g, ''))
-		: null;
+	const explicitExports = collectPythonAllNames(content);
+	const isExplicitlyExported = (name: string): boolean =>
+		explicitExports ? explicitExports.has(name) : !name.startsWith('_');
+	const isPackageInit = ['__init__.py', '__init__.pyw'].includes(
+		path.basename(filePath),
+	);
+	const seenNames = new Set<string>();
+	let currentClass: { name: string; exported: boolean; indent: number } | null =
+		null;
+	const addSymbol = (symbol: SymbolInfo) => {
+		if (seenNames.has(symbol.name)) return;
+		seenNames.add(symbol.name);
+		symbols.push(symbol);
+	};
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		if (line.startsWith(' ') || line.startsWith('\t')) continue; // Skip nested definitions
+		const indent = line.match(/^\s*/)?.[0].length ?? 0;
+		if (indent === 0) currentClass = null;
+		if (currentClass && indent > currentClass.indent) {
+			const methodMatch = line
+				.trim()
+				.match(/^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*(.+?))?:/);
+			if (methodMatch) {
+				const name = `${currentClass.name}.${methodMatch[1]}`;
+				addSymbol({
+					name,
+					kind: 'method',
+					exported:
+						currentClass.exported &&
+						!methodMatch[1].startsWith('_') &&
+						methodMatch[1] !== '__init__',
+					signature: `def ${methodMatch[1]}(${methodMatch[2].trim()})${methodMatch[3] ? ` -> ${methodMatch[3].trim()}` : ''}`,
+					line: i + 1,
+				});
+				continue;
+			}
+		}
+		if (line.startsWith(' ') || line.startsWith('\t')) continue; // Skip other nested definitions
 
 		// Functions
 		const fnMatch = line.match(
 			/^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*(.+?))?:/,
 		);
-		if (fnMatch && !fnMatch[1].startsWith('_')) {
-			const exported = !explicitExports || explicitExports.includes(fnMatch[1]);
-			symbols.push({
+		if (fnMatch) {
+			const exported = isExplicitlyExported(fnMatch[1]);
+			addSymbol({
 				name: fnMatch[1],
 				kind: 'function',
 				exported,
@@ -413,10 +442,10 @@ export function extractPythonSymbols(
 
 		// Classes
 		const classMatch = line.match(/^class\s+(\w+)(?:\(([^)]*)\))?:/);
-		if (classMatch && !classMatch[1].startsWith('_')) {
-			const exported =
-				!explicitExports || explicitExports.includes(classMatch[1]);
-			symbols.push({
+		if (classMatch) {
+			const exported = isExplicitlyExported(classMatch[1]);
+			currentClass = { name: classMatch[1], exported, indent };
+			addSymbol({
 				name: classMatch[1],
 				kind: 'class',
 				exported,
@@ -428,17 +457,173 @@ export function extractPythonSymbols(
 		// Module-level constants (UPPER_CASE)
 		const constMatch = line.match(/^([A-Z][A-Z0-9_]+)\s*[:=]/);
 		if (constMatch) {
-			symbols.push({
+			addSymbol({
 				name: constMatch[1],
 				kind: 'const',
-				exported: true,
+				exported: isExplicitlyExported(constMatch[1]),
+				signature: line.trim().substring(0, 100),
+				line: i + 1,
+			});
+		}
+
+		const importMatch = line.match(
+			/^from\s+[\w.]+\s+import\s+(.+?)(?:\s*#.*)?$/,
+		);
+		if (importMatch && (isPackageInit || explicitExports)) {
+			for (const rawPart of importMatch[1].split(',')) {
+				const part = rawPart.trim();
+				if (!part || part === '*') continue;
+				const alias = part.match(/^(\w+)\s+as\s+(\w+)$/);
+				const importedName = alias ? alias[1] : part;
+				const localName = alias ? alias[2] : part;
+				if (!/^\w+$/.test(importedName) || !/^\w+$/.test(localName)) continue;
+				const exported = isExplicitlyExported(localName);
+				if (!exported && explicitExports) continue;
+				addSymbol({
+					name: localName,
+					kind: 'variable',
+					exported,
+					signature: line.trim().substring(0, 100),
+					line: i + 1,
+				});
+			}
+		}
+	}
+
+	// Sort by line number for deterministic ordering, with tie-breaker on symbol name
+	return symbols.sort((a, b) => {
+		if (a.line !== b.line) return a.line - b.line;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+export function extractRustSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const content = readValidatedSourceFile(filePath, cwd);
+	if (content === null) return [];
+
+	const symbols: SymbolInfo[] = [];
+	const lines = content.split('\n');
+	let implDepth = 0;
+	const braceDelta = (text: string): number =>
+		(text.match(/{/g)?.length ?? 0) - (text.match(/}/g)?.length ?? 0);
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+		const inImpl = implDepth > 0;
+
+		if (!inImpl && /^impl\b/.test(trimmed)) {
+			implDepth = Math.max(0, implDepth + braceDelta(trimmed));
+			continue;
+		}
+
+		if (inImpl) {
+			const method = trimmed.match(
+				/^(pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/,
+			);
+			if (method) {
+				const modifier = method[1] ?? '';
+				symbols.push({
+					name: method[2],
+					kind: 'method',
+					exported: modifier.trim().startsWith('pub'),
+					signature: trimmed.substring(0, 100),
+					line: i + 1,
+				});
+			}
+			implDepth = Math.max(0, implDepth + braceDelta(trimmed));
+			continue;
+		}
+
+		if (/^\s/.test(line)) continue;
+		const item = trimmed.match(
+			/^(pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|mod)\s+([A-Za-z_][A-Za-z0-9_]*)/,
+		);
+		if (!item) continue;
+		const modifier = item[1] ?? '';
+		const exported = modifier.trim().startsWith('pub');
+		const kindMap: Record<string, SymbolInfo['kind']> = {
+			fn: 'function',
+			struct: 'type',
+			enum: 'enum',
+			trait: 'interface',
+			mod: 'type',
+		};
+		symbols.push({
+			name: item[3],
+			kind: kindMap[item[2]] ?? 'type',
+			exported,
+			signature: trimmed.substring(0, 100),
+			line: i + 1,
+		});
+	}
+
+	return symbols.sort((a, b) => {
+		if (a.line !== b.line) return a.line - b.line;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+export function extractGoSymbols(filePath: string, cwd: string): SymbolInfo[] {
+	const content = readValidatedSourceFile(filePath, cwd);
+	if (content === null) return [];
+
+	const symbols: SymbolInfo[] = [];
+	const lines = content.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const method = line.match(
+			/^func\s+\([^)]*\)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/,
+		);
+		if (method) {
+			symbols.push({
+				name: method[1],
+				kind: 'method',
+				exported: /^[A-Z]/.test(method[1]),
+				signature: line.trim().substring(0, 100),
+				line: i + 1,
+			});
+			continue;
+		}
+
+		const fn = line.match(/^func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+		if (fn) {
+			symbols.push({
+				name: fn[1],
+				kind: 'function',
+				exported: /^[A-Z]/.test(fn[1]),
+				signature: line.trim().substring(0, 100),
+				line: i + 1,
+			});
+			continue;
+		}
+
+		const typeDecl = line.match(/^type\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+		if (typeDecl) {
+			symbols.push({
+				name: typeDecl[1],
+				kind: 'type',
+				exported: /^[A-Z]/.test(typeDecl[1]),
+				signature: line.trim().substring(0, 100),
+				line: i + 1,
+			});
+			continue;
+		}
+
+		const valueDecl = line.match(/^(var|const)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+		if (valueDecl) {
+			symbols.push({
+				name: valueDecl[2],
+				kind: valueDecl[1] === 'const' ? 'const' : 'variable',
+				exported: /^[A-Z]/.test(valueDecl[2]),
 				signature: line.trim().substring(0, 100),
 				line: i + 1,
 			});
 		}
 	}
 
-	// Sort by line number for deterministic ordering, with tie-breaker on symbol name
 	return symbols.sort((a, b) => {
 		if (a.line !== b.line) return a.line - b.line;
 		return a.name.localeCompare(b.name);
@@ -528,7 +713,14 @@ function searchWorkspaceSymbols(
 				syms = extractTSSymbols(relFile, cwd);
 				break;
 			case '.py':
+			case '.pyw':
 				syms = extractPythonSymbols(relFile, cwd);
+				break;
+			case '.rs':
+				syms = extractRustSymbols(relFile, cwd);
+				break;
+			case '.go':
+				syms = extractGoSymbols(relFile, cwd);
 				break;
 			default:
 				continue;
@@ -582,7 +774,7 @@ export const symbols: ToolDefinition = createSwarmTool({
 	description:
 		'Extract all exported symbols from a source file: functions with signatures, ' +
 		'classes with public members, interfaces, types, enums, constants. ' +
-		'Supports TypeScript/JavaScript and Python. Use for architect planning, ' +
+		'Supports TypeScript/JavaScript, Python, Rust, and Go. Use for architect planning, ' +
 		'designer scaffolding, and understanding module public API surface.',
 	args: {
 		file: z
@@ -620,7 +812,7 @@ export const symbols: ToolDefinition = createSwarmTool({
 			const obj = args as Record<string, unknown>;
 			file =
 				obj.file != null && typeof obj.file === 'string' ? obj.file : undefined;
-			exportedOnly = obj.exported_only === true;
+			exportedOnly = obj.exported_only !== false;
 			workspace = obj.workspace === true;
 			name =
 				obj.name != null && typeof obj.name === 'string' ? obj.name : undefined;
@@ -724,13 +916,20 @@ export const symbols: ToolDefinition = createSwarmTool({
 				syms = extractTSSymbols(file, cwd);
 				break;
 			case '.py':
+			case '.pyw':
 				syms = extractPythonSymbols(file, cwd);
+				break;
+			case '.rs':
+				syms = extractRustSymbols(file, cwd);
+				break;
+			case '.go':
+				syms = extractGoSymbols(file, cwd);
 				break;
 			default:
 				return JSON.stringify(
 					{
 						file,
-						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py`,
+						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
 						symbols: [],
 					},
 					null,

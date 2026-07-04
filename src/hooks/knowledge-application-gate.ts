@@ -115,12 +115,11 @@ export async function knowledgeApplicationGateBefore(
 	const cached = swarmState.currentCriticalShownIds.get(sessionID);
 	if (!cached || cached.ids.length === 0) return;
 
-	// Has an architect ack landed in this session for any of the critical ids?
-	const dayKey = new Date().toISOString().slice(0, 10);
+	// Has an architect terminal ack landed in this session for any critical id?
 	const ackedIds = new Set<string>();
 	for (const id of cached.ids) {
-		// Either explicit-applied OR explicit-ignored counts as "acknowledged"
-		// for the purpose of the gate (the architect chose; we audit elsewhere).
+		// Applied, ignored, and violated all count as "acknowledged" for the
+		// purpose of the gate (the architect chose; we audit elsewhere).
 		for (const result of ['applied', 'ignored', 'violated'] as const) {
 			const key = buildAckDedupKey(sessionID, id, result);
 			if (swarmState.knowledgeAckDedup.has(key)) {
@@ -139,7 +138,7 @@ export async function knowledgeApplicationGateBefore(
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
 		const ids = unacked.join(', ');
 		throw new Error(
-			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id> or KNOWLEDGE_IGNORED:<id> reason=... before this action.`,
+			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,
 		);
 	}
 
@@ -150,7 +149,6 @@ export async function knowledgeApplicationGateBefore(
 		tool: toolName,
 		agent: agentRaw,
 		sessionID,
-		dayKey,
 		unacknowledged_critical_ids: unacked,
 	}).catch(() => {
 		/* never block tool path */

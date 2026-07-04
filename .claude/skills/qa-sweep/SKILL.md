@@ -12,6 +12,36 @@ effort: high
 
 Follow this protocol on every implementation, fix, debugging, or review task.
 
+### Proportionality
+Scale the **depth** of each phase to risk — never skip a gate for changed work,
+but match its weight to the task:
+- Read-only or answer-only work (explaining code, reading logs, answering a
+  question) with no worktree edit: Phases 2–3 are not required; verify claims
+  against the actual source before answering.
+- Any worktree edit (code, tests, docs, package metadata, release notes, skill
+  files): Phases 2 and 3 are mandatory. For a small, low-risk edit, one fresh
+  review agent covering both the adversarial and completeness checklists is
+  acceptable; for high-risk or cross-file work, keep them separate.
+- High-risk work (security, auth, isolation, IPC contracts, payments,
+  migrations, concurrency): full protocol, no consolidation.
+
+This proportionality applies only to qa-sweep's own Phase 2/3 passes. When
+swarm mode is enabled, the swarm-mode contract's separate independent
+implementation reviewer and final critic gates apply unreduced to any
+changed work — consolidation here never merges or replaces those gates.
+
+For agent-type, model, and effort selection when spawning these sub-agents,
+load the `orchestrating-subagents` skill: economize on explorers, never on
+reviewers.
+
+### If no subagent tool is available
+If this protocol executes in a context without a subagent tool (`Agent` or
+`Task`) — check your actual tool list rather than assuming — perform the
+Phase 2/3 checklists yourself as a clearly labeled **fallback self-review**
+and disclose in your report that independent review was unavailable, so the
+orchestrator can re-run the gate with a real fresh agent. Never present
+self-review as independent review.
+
 ### Phase 1 — Parallel Implementation
 - Use parallel sub-agents to speed up independent units of work wherever possible.
 - Each sub-agent must read relevant source code end-to-end before making changes.

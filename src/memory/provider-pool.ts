@@ -292,6 +292,15 @@ function resolvePoolKey(directory: string): string {
 /**
  * Evict and close every cached provider. Intended for test teardown only —
  * production code should rely on LRU eviction.
+ *
+ * DANGER for production code paths: this force-closes EVERY pooled entry
+ * process-wide, bypassing the refCount contract that `releaseProvider()` /
+ * `evictLru()` honor — including entries for OTHER directories with active
+ * callers (this plugin's module-level pool is shared by every in-process
+ * memory operation, per AGENTS.md invariant 8). A production command that
+ * needs to force-close its OWN throwaway provider (e.g. before deleting a
+ * temp directory) must use `evictAndClose(directory)` instead, which is
+ * scoped to a single pool key and leaves every other entry untouched.
  */
 export function clearPool(): void {
 	let entry = head;
@@ -307,4 +316,33 @@ export function clearPool(): void {
 	entriesByKey.clear();
 	head = null;
 	tail = null;
+}
+
+/**
+ * Force-close and evict the SINGLE pool entry for `directory` (matched via
+ * the same canonical key as `getOrCreateProvider`), regardless of refCount.
+ * Every other pooled entry is left completely untouched — safe to call from
+ * a scoped, single-directory teardown (e.g. a throwaway eval temp root about
+ * to be deleted) without disrupting other in-process callers sharing the
+ * pool. No-op if no entry exists for that directory.
+ *
+ * Bypassing refCount here is intentional and safe ONLY when the caller
+ * already knows the directory is being torn down and will never be accessed
+ * again (e.g. immediately followed by `fs.rm` on the same path) — it is not
+ * a general-purpose substitute for `releaseProvider()`.
+ */
+export function evictAndClose(directory: string): void {
+	const key = resolvePoolKey(directory);
+	const active = entriesByKey.get(key);
+	if (active) {
+		entriesByKey.delete(key);
+		unlinkEntry(active);
+		callRealClose(active.provider);
+	}
+	for (const deferred of [...deferredEntries]) {
+		if (deferred.key === key) {
+			deferredEntries.delete(deferred);
+			callRealClose(deferred.provider);
+		}
+	}
 }

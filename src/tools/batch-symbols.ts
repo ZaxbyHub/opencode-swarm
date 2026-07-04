@@ -3,7 +3,12 @@ import * as path from 'node:path';
 import { tool } from '@opencode-ai/plugin';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { createSwarmTool } from './create-tool';
-import { extractPythonSymbols, extractTSSymbols } from './symbols';
+import {
+	extractGoSymbols,
+	extractPythonSymbols,
+	extractRustSymbols,
+	extractTSSymbols,
+} from './symbols';
 
 // Re-export SymbolInfo for use in batch results
 export interface SymbolInfo {
@@ -179,13 +184,20 @@ function processFile(
 			syms = extractTSSymbols(file, cwd);
 			break;
 		case '.py':
+		case '.pyw':
 			syms = extractPythonSymbols(file, cwd);
+			break;
+		case '.rs':
+			syms = extractRustSymbols(file, cwd);
+			break;
+		case '.go':
+			syms = extractGoSymbols(file, cwd);
 			break;
 		default:
 			return {
 				file,
 				success: false,
-				error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py`,
+				error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
 				errorType: 'unsupported-language',
 			};
 	}
@@ -276,7 +288,7 @@ export const batch_symbols: ToolDefinition = createSwarmTool({
 				);
 			}
 			files = obj.files.map((f) => String(f));
-			exportedOnly = obj.exported_only === true;
+			exportedOnly = obj.exported_only !== false;
 		} catch {
 			return JSON.stringify(
 				{

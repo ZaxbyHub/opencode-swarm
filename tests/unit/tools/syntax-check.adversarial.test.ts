@@ -30,22 +30,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { _internals as evidenceInternals } from '../../../src/evidence/manager';
 // Import the module under test
 import {
 	type SyntaxCheckInput,
 	syntaxCheck,
 } from '../../../src/tools/syntax-check';
 
-// Mock the saveEvidence function
-vi.mock('../../../src/evidence/manager', () => ({
-	saveEvidence: vi.fn().mockResolvedValue(undefined),
-}));
-
-const { saveEvidence } = await import('../../../src/evidence/manager');
-
 describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 	let tmpDir: string;
 	let originalCwd: string;
+	let originalSaveEvidence: typeof evidenceInternals.saveEvidence;
 
 	beforeEach(() => {
 		originalCwd = process.cwd();
@@ -53,7 +48,11 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'adv-syntax-')),
 		);
 		process.chdir(tmpDir);
-		vi.clearAllMocks();
+		// _internals DI seam (not vi.mock — AGENTS.md invariant 7: mock.module
+		// leaks across files in Bun's shared test-runner process; a plain
+		// property assignment is trivially and reliably restorable).
+		originalSaveEvidence = evidenceInternals.saveEvidence;
+		evidenceInternals.saveEvidence = vi.fn().mockResolvedValue(undefined);
 	});
 
 	afterEach(() => {
@@ -61,7 +60,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 		if (tmpDir && fs.existsSync(tmpDir)) {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
-		vi.clearAllMocks();
+		evidenceInternals.saveEvidence = originalSaveEvidence;
 	});
 
 	// ============ Attack Vector 1: Empty/null/undefined Inputs ============
@@ -78,7 +77,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			expect(result.verdict).toBe('pass');
 			expect(result.files).toHaveLength(0);
 			expect(result.summary).toBe('All 0 files passed syntax check');
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('handles undefined mode (defaults to changed)', async () => {
@@ -94,7 +93,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 
 			// Default mode is 'changed', should filter by additions > 0
 			expect(result.files).toHaveLength(1);
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('handles undefined languages (no filter applied)', async () => {
@@ -111,7 +110,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0]?.ok).toBe(true);
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('handles empty string file paths gracefully', async () => {
@@ -126,7 +125,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			// This is correct behavior with pre-filter removed
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0]?.skipped_reason).toBe('unsupported_language');
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('handles file with 0 additions in changed mode', async () => {
@@ -142,7 +141,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 
 			// Should be filtered out by additions > 0 check
 			expect(result.files).toHaveLength(0);
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('handles negative additions (edge case)', async () => {
@@ -176,7 +175,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			expect(result.files[0]?.path).toBe('../../etc/passwd.js');
 			// Should get file_read_error since the file doesn't exist
 			expect(result.files[0]?.skipped_reason).toBe('file_read_error');
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('rejects deep path traversal', async () => {
@@ -496,7 +495,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			// With pre-filter removed, should get unsupported_language skipped_reason
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0]?.skipped_reason).toBe('unsupported_language');
-			expect(saveEvidence).toHaveBeenCalled();
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 
 		test('unsupported files still count in summary', async () => {

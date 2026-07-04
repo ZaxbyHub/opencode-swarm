@@ -180,3 +180,29 @@ describe('TEST C — symbol-graph.ts satisfies the backend-purity bar (invariant
 		expect(stripped).not.toMatch(/\bspawn(?:Sync)?\s*\(/);
 	});
 });
+
+describe('TEST D — symbol-visibility.ts stays pure and init-safe', () => {
+	test('no bun, spawn, runtime, or web-tree-sitter value imports', () => {
+		const visibilityPath = path.join(
+			REPO_ROOT,
+			'src',
+			'lang',
+			'symbol-visibility.ts',
+		);
+		const src = fs.readFileSync(visibilityPath, 'utf-8');
+		const stripped = src
+			.replace(/\/\/[^\n]*/g, '')
+			.replace(/\/\*[\s\S]*?\*\//g, '');
+
+		expect(stripped).not.toMatch(/from\s+['"]bun:[^'"]+['"]/);
+		expect(stripped).not.toMatch(/import\s*\(\s*['"]bun:/);
+		expect(stripped).not.toMatch(/\bBun\.[a-zA-Z]/);
+		expect(stripped).not.toMatch(/\bbunSpawn(?:Sync)?\s*\(/);
+		expect(stripped).not.toMatch(/\bspawn(?:Sync)?\s*\(/);
+		expect(stripped).not.toMatch(
+			/import\s+(?!type\s*\{).*from\s+['"]web-tree-sitter['"]/,
+		);
+		expect(stripped).not.toMatch(/from\s+['"]\.\/runtime(?:\.js)?['"]/);
+		expect(stripped).not.toMatch(/from\s+['"]\.\/index(?:\.js)?['"]/);
+	});
+});

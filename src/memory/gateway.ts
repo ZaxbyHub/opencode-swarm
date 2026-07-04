@@ -198,6 +198,10 @@ export class MemoryGateway {
 			tokenEstimate: bundle.tokenEstimate,
 			agentRole: this.context.agentRole,
 			runId: this.context.runId ?? this.context.sessionID,
+			// ADDITIVE join key. Intentionally NOT defaulted to sessionID: an
+			// unresolvable unit id must persist as NULL so attribution degrades to
+			// session-scoped `runId` rather than re-deriving the session value.
+			unitId: this.context.unitId,
 			timestamp: generatedAt,
 		});
 		return bundle;
@@ -611,8 +615,14 @@ function resolveInjectionSkipReason(
 ): RecallInjectionSkipReason | undefined {
 	if (diagnostics.returnedCount > 0) return undefined;
 	if (diagnostics.candidateCount === 0) return 'no_results';
+	// Subtract suppressed-low-Q records: A.6 excludes them BEFORE the signal
+	// check (they never reach `noSignalCount`) yet they remain in
+	// `candidateCount`. Without this, `signalEligibleCount` is inflated and the
+	// `no_signal` reason is under-reported for mixed suppressed+no-signal recalls.
 	const signalEligibleCount =
-		diagnostics.candidateCount - diagnostics.preScoredFilteredCount;
+		diagnostics.candidateCount -
+		diagnostics.preScoredFilteredCount -
+		diagnostics.suppressedLowQCount;
 	if (
 		signalEligibleCount > 0 &&
 		diagnostics.noSignalCount > 0 &&

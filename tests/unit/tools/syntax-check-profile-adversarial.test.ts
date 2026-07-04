@@ -37,6 +37,9 @@ mock.module('../../../src/lang/runtime', () => ({
 
 mock.module('../../../src/evidence/manager', () => ({
 	saveEvidence: (...args: unknown[]) => mockSaveEvidence(...args),
+	_internals: {
+		saveEvidence: (...args: unknown[]) => mockSaveEvidence(...args),
+	},
 }));
 
 mock.module('node:fs', () => ({

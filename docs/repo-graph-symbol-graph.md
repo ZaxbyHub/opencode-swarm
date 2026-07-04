@@ -14,7 +14,7 @@ module: per-edge `usedSymbols` (which exported names an importer actually
 references) and per-node `exportLines` (exported symbol → definition line), plus
 the `repo_map` actions `callers` and `dead_exports`. That work deliberately used
 the module's existing **conservative regex scanner** and covered only TS/JS/Python
-(`SUPPORTED_EXTENSIONS` at `src/tools/repo-graph/builder.ts:106`).
+(`SUPPORTED_EXTENSIONS` at `src/tools/repo-graph/builder.ts:113`).
 
 Two ceilings remain, and they are exactly what an external "codebase memory" MCP
 server claims to break through:
@@ -80,7 +80,7 @@ src/lang/runtime.ts  loadGrammar(grammarId) → Parser   (lazy, cached; already 
         │
         ▼
 src/lang/symbol-graph.ts  (NEW)  per-grammar .scm queries → per-file facts:
-        │     defs[]    { name, kind, exported, startLine, endLine }
+        │     defs[]    { name, kind, exported, visibilityInfo?, startLine, endLine }
         │     imports[] { specifier, importType, bindings:[{imported,local}] }
         │     refs[]    { identifier, line, enclosingDecl }
         ▼
@@ -101,7 +101,14 @@ A single language-agnostic entry point, modeled on `ast-diff.ts`'s `QUERIES` map
 
 ```ts
 export interface FileSymbolFacts {
-  defs: Array<{ name: string; kind: 'function' | 'class' | 'const' | 'type' | 'interface' | 'enum' | 'method'; exported: boolean; startLine: number; endLine: number }>;
+  defs: Array<{
+    name: string;
+    kind: 'function' | 'class' | 'const' | 'type' | 'interface' | 'enum' | 'method';
+    exported: boolean;
+    visibilityInfo?: SymbolVisibilityInfo;
+    startLine: number;
+    endLine: number;
+  }>;
   imports: Array<{ specifier: string; importType: ImportType; bindings: Array<{ imported: string; local: string }> }>;
   refs: Array<{ identifier: string; line: number; enclosingDecl: string | null }>;
 }
@@ -114,6 +121,25 @@ export async function extractFileSymbols(grammarId: string, source: string): Pro
   keyed by language id — mirror the `QUERIES` shape in `src/diff/ast-diff.ts:36`.
   Definitions reuse the existing `@func.def`/`@class.def`/`@type.def` capture
   conventions and add `endLine` from `node.endPosition.row + 1`.
+- `src/lang/symbol-visibility.ts` is the shared visibility/export semantics API.
+  It exports `SymbolVisibilityInfo`, metadata value sets, `collectCommonJsExports`,
+  and `getSymbolVisibilityInfo`. Import it directly from that module; do not use
+  the `src/lang/index.ts` barrel for init-sensitive code.
+- `defs[].exported` is the backward-compatible graph-consumer boolean: true for
+  file-level symbols addressable outside the local file/module according to the
+  language (explicit ESM/CommonJS exports, Python top-level public names or
+  literal `__all__`, Rust `pub*`, Go capitalized top-level identifiers,
+  visibility-modifier/module-public types/functions, C/C++ non-static top-level
+  declarations, Ruby public-by-default declarations, and Dart non-underscore
+  top-level names). `defs[].visibilityInfo` explains the decision with
+  `visibility`, `exportedReason`, and `apiSurfaceKind`.
+- Method/member definitions are not promoted into file-level graph exports by
+  convention-only visibility. They may carry `visibilityInfo`, but `exported`
+  stays false unless an explicit export construct already made them exported.
+  This avoids simple-name collisions in `exportLines` / `exportRanges`.
+- `visibilityInfo` is extraction-time metadata only. It is not persisted in
+  `RepoGraph` schema 1.2.0; persisted graph fields remain `exports`,
+  `exportLines`, and `exportRanges`.
 - `enclosingDecl` (the nearest top-level declaration containing a reference) is
   computed by walking ancestors of the captured identifier node; this is what
   turns file→file edges into symbol→symbol edges.

@@ -284,6 +284,17 @@ Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "
 EXTENDED_DIGEST:
 [the full running digest with this phase appended]
 
+OPTIONAL_STRUCTURED_BLOCKS:
+When you have evidence for knowledge application outcomes, append this exact fenced JSON block:
+\`\`\`json knowledge_application_findings
+[{"knowledge_id":"<uuid>","expected_behavior":"...","observed_behavior":"...","verdict":"applied|ignored|violated|not_applicable","evidence_refs":[".swarm/evidence/..."]}]
+\`\`\`
+When you find skill candidates, append this exact fenced JSON block:
+\`\`\`json skill_candidates
+[{"slug":"short-kebab-slug","title":"...","source_knowledge_ids":["<uuid>"],"trigger":"...","required_procedure":["..."],"forbidden_shortcuts":["..."],"target_agents":["architect"],"reviewer_checks":["..."],"confidence":0.8,"reason":"..."}]
+\`\`\`
+Omit a block when you have no valid entries for it. Malformed or differently named blocks are ignored.
+
 ## ACTIONABILITY ENRICHMENT (V3 compatibility label; overrides the format above when triggered)
 When the input asks you to "Convert this prose lesson into an actionable knowledge directive", ignore the PHASE_DIGEST output format entirely and output ONLY a single JSON object — no fences, no commentary, no digest.
 MANDATORY fields (the directive is rejected without them):
@@ -334,19 +345,34 @@ IMPROVEMENT_AGENDA:
 2. ...
 
 CURATION_RECOMMENDATIONS:
-- merge: [entry_a UUID] + [entry_b UUID] — [reason]
-- promote_to_hive: [entry UUID] — [evidence of cross-phase confirmation]
-- flag_stale: [entry UUID] — [never applied in N phases]
-- rewrite: [entry UUID] — [what's verbose/outdated]
+- promote: [entry UUID] - [evidence of cross-phase confirmation]
+- archive: [entry UUID] - [never applied in N phases]
+- rewrite: [entry UUID] - [replacement lesson text, max 280 chars]
+- flag_contradiction: [entry UUID] - [observable conflict]
+- promote: new - [new concise lesson text]
 
 QUEUE_TRIAGE:
-- [proposal_id]: APPLY|REJECT — [one-line reasoning]
+- [proposal_id]: APPLY|REJECT - [one-line reasoning]
 
 LEARNING_METRICS:
 [3-line summary of trends if data available, or "metrics data not provided"]
 
 SUMMARY:
 [3-line executive summary for architect briefing]
+
+REQUIRED_ACTION_BLOCK:
+Append exactly one fenced JSON block after SUMMARY. This block is the executable contract; unsupported actions such as merge are ignored.
+\`\`\`json postmortem_actions
+{
+  "summary": "3-line executive summary for architect briefing",
+  "curation_recommendations": [
+    {"action": "promote", "entry_id": "<uuid or omit for new>", "lesson": "concise lesson text", "reason": "evidence-backed reason", "category": "process", "confidence": 0.8}
+  ],
+  "queue_triage": [
+    {"proposal_id": "proposal-slug", "action": "apply", "reason": "one-line reason"}
+  ]
+}
+\`\`\`
 `;
 
 export const CURATOR_CONSOLIDATION_PROMPT = `## IDENTITY

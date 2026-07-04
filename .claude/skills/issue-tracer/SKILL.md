@@ -249,7 +249,7 @@ Use `references/critic-gate.md`.
    - rollout/risk/rollback
    - explicit "unwired functionality" checklist
 5. Send the plan to an independent critic:
-   - If running in the main session and the `Agent` tool is available, launch a separate critic subagent with `references/critic-gate.md` and the trace artifacts as context.
+   - If running in the main session and the subagent tool is available (named `Agent` or `Task` depending on Claude Code version), launch a separate critic subagent with `references/critic-gate.md` and the trace artifacts as context.
    - If running as a subagent through `.claude/agents/issue-tracer.md`, do not attempt nested subagent invocation. Claude Code subagents cannot spawn other subagents. Run the full fallback self-critic pass from `references/critic-gate.md` and disclose this to the user.
    - If no independent subagent is available in the current environment, run the fallback adversarial critic pass and clearly label it "Fallback self-critic: independent critic unavailable."
 6. The critic must return one of:
@@ -263,6 +263,14 @@ Use `references/critic-gate.md`.
 #### High-risk: candidate-patch sampling
 
 For high-risk or close-call fixes, do not commit to a single patch shape prematurely. Draft 2-3 concrete candidate patches for the selected root cause, and choose between them by which one makes the reproduction test pass while keeping the regression suite green and the diff minimal. On a genuine tie, prefer the smallest, most contract-preserving patch and record why the alternatives were rejected. This mirrors validate-then-select repair: a patch is chosen on evidence (tests + minimality), not on first-draft intuition.
+
+#### Diagnosis correctness does not imply fix correctness
+
+A pasted second opinion, an external agent's finding, or your own recollection of CLI/shell flag semantics can localize the root cause correctly while proposing a fix that does not actually work. Treat the diagnosis and the proposed fix as two separate claims requiring separate verification — do not adopt a suggested patch just because the file:line diagnosis it came with checked out. This risk is sharpest for fixes that hinge on subtle CLI/subprocess flag semantics (e.g. `git clean -e/-x/-X` interactions, gitignore pattern anchoring, `chmod`/`sed`/`awk` flag combinations): these read as plausible in prose but are easy to get wrong. Before finalizing such a fix, empirically run the *exact* candidate invocation in an isolated throwaway environment (a scratch git repo, a temp directory) and observe the actual result — do not rely on documented or remembered semantics alone.
+
+#### Verify the fix against the real blast radius, not a minimal repro
+
+A minimal two-file reproduction can validate that a fix's *mechanism* works while hiding that its *scope* is wrong. Before finalizing a fix for a destructive or broad-acting operation (recursive deletes, blanket cleans, glob-based rewrites), also run a dry-run/no-op form of the fixed operation against the actual target environment (e.g. `git clean -fdXn` in the real repo, not a synthetic one) to see everything it would still touch. A fix that passes its toy reproduction can still leave real, higher-value paths unprotected or under/over-scoped.
 
 ### Phase 3 Gate
 

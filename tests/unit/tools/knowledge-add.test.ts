@@ -3,11 +3,20 @@
  * Covers valid lesson creation, validation errors, near-duplicate detection, and auto_generated flag
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	invalidateKnowledgeStoreDirCache,
+	resolveLinkDir,
+	writeLinkPointer,
+} from '../../../src/hooks/knowledge-link';
+import {
+	readKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
 import { knowledge_add } from '../../../src/tools/knowledge-add';
 
 describe('knowledge_add tool verification tests', () => {
@@ -59,6 +68,59 @@ describe('knowledge_add tool verification tests', () => {
 		applies_to_agents: ['coder'],
 		required_actions: ['apply this lesson when relevant'],
 	};
+
+	describe('Linked store persistence', () => {
+		it('writes new lessons to the shared linked store', async () => {
+			const platformSpy = spyOn(process, 'platform', 'get').mockReturnValue(
+				'linux',
+			);
+			const prevXdg = process.env.XDG_DATA_HOME;
+			const dataDir = await fs.realpath(
+				await fs.mkdtemp(path.join(os.tmpdir(), 'knowledge-add-link-data-')),
+			);
+			process.env.XDG_DATA_HOME = dataDir;
+			invalidateKnowledgeStoreDirCache();
+
+			try {
+				await writeLinkPointer(tmpDir, {
+					version: 1,
+					linkId: 'linked-add',
+					createdAt: '2026-01-01T00:00:00.000Z',
+					source: 'manual',
+				});
+
+				const lessonText =
+					'Linked worktrees must persist new lessons into the shared store';
+				const result = await knowledge_add.execute(
+					{
+						lesson: lessonText,
+						category: 'process',
+						...V3_FIELDS,
+					},
+					tmpDir,
+				);
+
+				const parsed = JSON.parse(result);
+				expect(parsed.success).toBe(true);
+				expect(path.dirname(resolveSwarmKnowledgePath(tmpDir))).toBe(
+					resolveLinkDir('linked-add'),
+				);
+
+				const linkedEntries = await readKnowledge<Record<string, unknown>>(
+					resolveSwarmKnowledgePath(tmpDir),
+				);
+				expect(linkedEntries).toHaveLength(1);
+				expect(linkedEntries[0].lesson).toBe(lessonText);
+				expect(readKnowledgeEntries()).toHaveLength(0);
+			} finally {
+				if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+				else process.env.XDG_DATA_HOME = prevXdg;
+				invalidateKnowledgeStoreDirCache();
+				platformSpy.mockRestore();
+				await fs.rm(dataDir, { recursive: true, force: true });
+			}
+		});
+	});
 
 	// ========== Test 1: Valid lesson is created ==========
 	describe('Valid lesson is created', () => {

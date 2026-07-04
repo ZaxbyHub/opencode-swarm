@@ -42,6 +42,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory status',
 		'memory pending',
 		'memory recall-log',
+		'memory value-log',
 		'memory stale',
 		'memory export',
 		'memory evaluate',
@@ -56,6 +57,10 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'pr status',
 		'learning',
 		'post-mortem',
+		// agent-callable PR subscription lifecycle (idempotent + capped;
+		// moved from human-only for swarm-pr-subscribe parity)
+		'pr subscribe',
+		'pr unsubscribe',
 		// guardrail diagnostics (pre-existing 'agent' commands not previously
 		// enumerated here — registry is the source of truth, both carry
 		// toolPolicy: 'agent')
@@ -68,9 +73,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory import',
 		'memory migrate',
 		'sdd project',
-		// gap commands
-		'pr subscribe',
-		'pr unsubscribe',
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([
@@ -131,14 +133,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 6 commands", () => {
+	test("'human-only' bucket contains exactly the expected 4 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(6);
+		expect(actual.size).toBe(4);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -278,12 +280,9 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 				}
 			}
 		}
-		// pr subscribe, pr unsubscribe are the 2 new gap human-only commands
-		const expected = new Set([
-			...HUMAN_ONLY_SWARM_COMMANDS,
-			'pr subscribe',
-			'pr unsubscribe',
-		]);
+		// pr subscribe / pr unsubscribe are now agent-callable, so the derived
+		// set matches HUMAN_ONLY_SWARM_COMMANDS exactly.
+		const expected = new Set([...HUMAN_ONLY_SWARM_COMMANDS]);
 		expect(derived.size).toBe(expected.size);
 		for (const name of expected) {
 			expect(derived.has(name)).toBe(true);
@@ -301,7 +300,7 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 				derived.add(name);
 			}
 		}
-		// All 5 gap commands: pr status (agent), pr subscribe (human-only), pr unsubscribe (human-only), learning (agent), post-mortem (agent)
+		// All 5 gap commands: pr status (agent), pr subscribe (agent), pr unsubscribe (agent), learning (agent), post-mortem (agent)
 		const expected = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			const e = entry as CommandEntry;
@@ -365,12 +364,12 @@ describe('gap command classification', () => {
 		expect(cmd('pr status').toolNoArgs).toBe(true);
 	});
 
-	test('pr subscribe: toolPolicy === "human-only"', () => {
-		expect(cmd('pr subscribe').toolPolicy).toBe('human-only');
+	test('pr subscribe: toolPolicy === "agent" (idempotent + capped, agent-callable)', () => {
+		expect(cmd('pr subscribe').toolPolicy).toBe('agent');
 	});
 
-	test('pr unsubscribe: toolPolicy === "human-only"', () => {
-		expect(cmd('pr unsubscribe').toolPolicy).toBe('human-only');
+	test('pr unsubscribe: toolPolicy === "agent" (idempotent, agent-callable)', () => {
+		expect(cmd('pr unsubscribe').toolPolicy).toBe('agent');
 	});
 
 	test('learning: toolPolicy === "agent"', () => {

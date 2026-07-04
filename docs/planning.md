@@ -212,7 +212,7 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 | `/swarm specify [description]` | You have a feature idea but no spec yet | Generates `.swarm/spec.md` with FR-### requirements, SC-### success criteria, and user scenarios |
 | `/swarm clarify [topic]` | Your spec has `[NEEDS CLARIFICATION]` markers or vague language | Asks targeted questions one at a time, updates spec.md after each accepted answer |
 | `/swarm analyze` | You have both a spec and a plan and want a coverage check | Maps FR-### requirements to plan tasks, flags gaps (untasked requirements) and gold-plating (untasked work) |
-| `/swarm sdd status|validate|project` | You keep requirements in OpenSpec-compatible files | Inspects `openspec/`, validates the projected effective spec, or materializes `.swarm/spec.md` |
+| `/swarm sdd status|validate|project` | You keep requirements in OpenSpec or Spec-Kit format | Inspects SDD source artifacts, validates or projects the effective spec; `--source <openspec|speckit>` disambiguates when both layouts are present |
 
 ### The Workflow
 
@@ -228,11 +228,69 @@ If you already have a plan (e.g. from a prior tool or another session), you can 
 **Using OpenSpec-compatible artifacts:**
 Keep current requirements in `openspec/specs/**/spec.md` and pending deltas in `openspec/changes/*/specs/**/spec.md`. When `.swarm/spec.md` is absent, planning, spec hashing, drift checks, linting, and requirement coverage use an effective Swarm spec projected from those artifacts. Run `/swarm sdd validate` before planning and `/swarm sdd project` when you want to materialize the projection into `.swarm/spec.md`.
 
+**Using Spec-Kit artifacts:**
+When your repository has a `.specify/` marker directory and `specs/<feature-dir>/spec.md` files, `/swarm sdd project` auto-detects the Spec-Kit layout and projects the feature into `.swarm/spec.md`. Use `--feature <id>` when multiple feature directories exist; see _Spec-Kit SDD support_ below for detection rules, feature selection, source precedence, and validation details.
+
 **Without a spec:**
 Planning works fine without a spec. When you enter PLAN mode without a spec.md, the architect offers to create one first or skip straight to planning. If you skip, planning behavior is identical to prior versions — no behavioral change.
 
 **Using General Council before planning:**
 When `council.general.enabled` is true and a Tavily or Brave search API key is configured, MODE: PLAN asks whether to use the three-agent General Council before `save_plan`. If accepted, the architect gathers current external context, records the council consensus/disagreements in `.swarm/context.md`, and uses that input before writing the plan and before critic pre-plan review.
+
+### Spec-Kit SDD support
+
+Starting with issue [#1228](https://github.com/ZaxbyHub/opencode-swarm/issues/1228), `/swarm sdd` detects and projects [GitHub Spec-Kit](https://github.com/github/spec-kit) artifacts alongside OpenSpec, so teams already using Spec-Kit can enforce their existing specs with the Swarm drift gate without rewriting anything.
+
+#### Detection
+
+A Spec-Kit layout is identified by two conditions being true simultaneously:
+
+- A `.specify/` marker directory at the repository root, **and**
+- One or more `specs/<feature-dir>/spec.md` files. Any non-symlink directory directly under `specs/` that contains a `spec.md` is detected as a feature; the `NNN-` numbering prefix (e.g. `001-my-feature`) is Spec-Kit convention, not an enforced rule.
+
+A repository that has a `specs/` directory but no `.specify/` marker is **not** treated as Spec-Kit. `/swarm sdd status` reports the Spec-Kit source in a dedicated section, separate from the OpenSpec output.
+
+#### Projection
+
+`/swarm sdd project` projects a single Spec-Kit feature into `.swarm/spec.md`:
+
+```
+/swarm sdd project                                             # auto-detect; single feature only
+/swarm sdd project --feature 001-my-feature                   # required when multiple features exist
+/swarm sdd project --source speckit --feature 001-my-feature  # explicit when both layouts are present
+```
+
+`--feature <id>` takes the full feature directory name (e.g. `001-my-feature`). It is required when more than one `specs/<dir>` exists and produces an error when used with `--source openspec` or `--source swarm`.
+
+Original `FR-###` identifiers in the feature's `spec.md` are preserved unchanged. When a requirement carries no explicit identifier, a stable one is synthesized — re-running the same source produces an identical projection. The resulting `.swarm/spec.md` is treated identically to an OpenSpec projection by all downstream tools: drift verification, lint, and requirement coverage apply with no source-specific handling.
+
+#### Source precedence
+
+When resolving which source feeds planning and drift enforcement:
+
+1. **Native `.swarm/spec.md` present** — always used, regardless of `--source`.
+2. **`--source <openspec|speckit>`** — explicit selection (applied after the native-spec check).
+3. **Auto-detect (no `--source`):**
+   - Only Spec-Kit detected → Spec-Kit projection used.
+   - Only OpenSpec detected → OpenSpec projection used (unchanged behavior).
+   - **Both detected, no `--source`** — the two paths differ by layer. For library consumers (planning/drift), `readEffectiveSpecSync` returns no effective spec and logs a single ambiguity warning, so drift enforcement degrades to advisory rather than guessing. The `/swarm sdd` commands (`status`, `validate`, `project`) treat the same situation as a **hard error**, naming both sources and requiring `--source` to disambiguate.
+
+`--source swarm` is accepted by `status` and `validate` but is rejected by `project` — the native `.swarm/spec.md` does not require projection.
+
+#### Validation (read-only)
+
+`/swarm sdd validate` inspects Spec-Kit artifacts and reports structural problems without modifying any file:
+
+- **Required sections** — `## Functional Requirements` and `## Success Criteria` must be present in `spec.md`.
+- **Task references** — Each checkbox task line that carries a `T###` id (e.g. `- [ ] T001 …`) must also carry a `[US#]` user-story tag or an `FR-###` requirement id; such task lines with neither are flagged. Lines without a `T###` id are not task lines and are not checked.
+- **Zero functional requirements** — A feature whose `spec.md` yields no parsable functional requirements is surfaced as a structural problem. Requirements include both explicit `FR-###` lines and id-less obligation bullets under `## Functional Requirements` (which are assigned synthesized ids); the problem fires only when neither form is present.
+
+`--source speckit` and `--feature <id>` apply to `validate` by the same rules as `project`.
+
+#### v1 boundaries
+
+- **Single-feature only.** When multiple `specs/<dir>` directories exist, exactly one must be selected with `--feature`; omitting it produces a hard error naming the detected features.
+- **Multi-feature aggregation** (projecting all features into one effective spec) and **round-trip `tasks.md` check-off** (writing completed tasks back to the source file) are deferred to issue [#1577](https://github.com/ZaxbyHub/opencode-swarm/issues/1577).
 
 ### Spec Format
 

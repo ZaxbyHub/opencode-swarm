@@ -18,6 +18,20 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed).toEqual({
 			enabled: false,
 			provider: 'sqlite',
+			qLearning: {
+				learningRate: 0.1,
+				qValueBoostWeight: 0.1,
+				suppressionThreshold: 0.15,
+				promotionThreshold: 0.85,
+				promotionMinRetrievals: 5,
+				propagationFraction: 0.3,
+				propagationFanoutCap: 20,
+				propagationWindowDays: 30,
+				propagationRelatednessThreshold: 0.7,
+				explorationRate: 0.05,
+				verdictPayloadCapBytes: 8192,
+				initialQValue: 0.5,
+			},
 			storageDir: '.swarm/memory',
 			sqlite: {
 				path: '.swarm/memory/memory.db',
@@ -34,6 +48,17 @@ describe('MemoryConfigSchema', () => {
 					maxItems: 6,
 					tokenBudget: 1000,
 				},
+			},
+			learning: {
+				learningRate: 0.1,
+				propagationFactor: 0.3,
+				qValueBoostWeight: 0.1,
+				suppressionThreshold: 0.15,
+				promotionThreshold: 0.85,
+				propagationTokenOverlapThreshold: 0.4,
+				propagationEmbeddingCosineThreshold: 0.7,
+				propagationFanout: 20,
+				propagationLookbackDays: 30,
 			},
 			writes: { mode: 'propose' },
 			redaction: { rejectDurableSecrets: true },
@@ -103,6 +128,106 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed.recall.defaultMaxItems).toBe(3);
 		expect(parsed.recall.defaultTokenBudget).toBe(500);
 		expect(parsed.recall.minScore).toBe(0.2);
+	});
+
+	test('accepts bounded learning overrides', () => {
+		const parsed = MemoryConfigSchema.parse({
+			learning: {
+				learningRate: 0.2,
+				qValueBoostWeight: 0.25,
+				suppressionThreshold: 0.1,
+				promotionThreshold: 0.9,
+				propagationFanout: 4,
+			},
+		});
+
+		expect(parsed.learning.learningRate).toBe(0.2);
+		expect(parsed.learning.qValueBoostWeight).toBe(0.25);
+		expect(parsed.learning.suppressionThreshold).toBe(0.1);
+		expect(parsed.learning.promotionThreshold).toBe(0.9);
+		expect(parsed.learning.propagationFanout).toBe(4);
+		expect(parsed.learning.propagationFactor).toBe(0.3);
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { learningRate: 2 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFanout: -1 } }),
+		).toThrow();
+	});
+
+	test('accepts the propagationEmbeddingCosineThreshold override', () => {
+		const parsed = MemoryConfigSchema.parse({
+			learning: { propagationEmbeddingCosineThreshold: 0.8 },
+		});
+		expect(parsed.learning.propagationEmbeddingCosineThreshold).toBe(0.8);
+	});
+
+	test('rejects a negative learningRate (previously untested lower bound)', () => {
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { learningRate: -0.1 } }),
+		).toThrow();
+	});
+
+	test('rejects out-of-bounds values for every remaining learning.* field', () => {
+		// Each of these fields is bounded [0,1] in the schema; the "accepts
+		// bounded learning overrides" test above only exercised learningRate's
+		// upper bound and propagationFanout's lower bound — every other field
+		// had zero bounds-rejection coverage.
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFactor: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFactor: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { qValueBoostWeight: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { qValueBoostWeight: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { suppressionThreshold: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { suppressionThreshold: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { promotionThreshold: 1.5 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { promotionThreshold: -0.1 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationTokenOverlapThreshold: 1.5 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationTokenOverlapThreshold: -0.1 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationEmbeddingCosineThreshold: 1.5 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationEmbeddingCosineThreshold: -0.1 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationFanout: 1001 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({ learning: { propagationLookbackDays: 0 } }),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				learning: { propagationLookbackDays: 3651 },
+			}),
+		).toThrow();
 	});
 
 	test('accepts bounded injection overrides while preserving tool recall defaults', () => {

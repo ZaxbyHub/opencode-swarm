@@ -8,6 +8,7 @@ import {
 	computePlanHash,
 	getLatestLedgerSeq,
 	initLedger,
+	LEDGER_SCHEMA_VERSION,
 	type LedgerEvent,
 	LedgerStaleWriterError,
 	ledgerExists,
@@ -180,7 +181,7 @@ describe('ledger', () => {
 			expect(events[0].plan_id).toBe('test-plan-id');
 			expect(events[0].seq).toBe(1);
 			expect(events[0].source).toBe('initLedger');
-			expect(events[0].schema_version).toBe('1.0.0');
+			expect(events[0].schema_version).toBe(LEDGER_SCHEMA_VERSION);
 		});
 
 		test('creates ledger file', async () => {
@@ -274,7 +275,7 @@ describe('ledger', () => {
 			expect(event.source).toBe('updateTaskStatus');
 			expect(event.plan_hash_before).toHaveLength(64);
 			expect(event.plan_hash_after).toHaveLength(64);
-			expect(event.schema_version).toBe('1.0.0');
+			expect(event.schema_version).toBe(LEDGER_SCHEMA_VERSION);
 		});
 
 		test('multiple events have incrementing seq', async () => {

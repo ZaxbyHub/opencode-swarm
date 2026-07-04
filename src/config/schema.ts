@@ -1099,6 +1099,21 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
+	realtime_learning_nudge: z
+		.object({
+			/** Enable/disable the real-time learning nudge. */
+			enabled: z.boolean().default(true),
+			/** First total session tool-call count at which to nudge the architect. */
+			first_after_tool_calls: z.number().int().min(1).max(1000).default(10),
+			/** Minimum additional tool calls before repeating the nudge. */
+			repeat_after_tool_calls: z.number().int().min(1).max(1000).default(25),
+		})
+		.default({
+			enabled: true,
+			first_after_tool_calls: 10,
+			repeat_after_tool_calls: 25,
+		}),
 	/** Change 5: retrieval-upgrade tuning (MMR diversity, cold-start, synonyms). */
 	retrieval: z
 		.object({
@@ -1173,6 +1188,33 @@ export const MemoryConfigSchema = z.object({
 				tokenBudget: 1000,
 			},
 		}),
+	learning: z
+		.object({
+			learningRate: z.number().min(0).max(1).default(0.1),
+			propagationFactor: z.number().min(0).max(1).default(0.3),
+			qValueBoostWeight: z.number().min(0).max(1).default(0.1),
+			suppressionThreshold: z.number().min(0).max(1).default(0.15),
+			promotionThreshold: z.number().min(0).max(1).default(0.85),
+			propagationTokenOverlapThreshold: z.number().min(0).max(1).default(0.4),
+			propagationEmbeddingCosineThreshold: z
+				.number()
+				.min(0)
+				.max(1)
+				.default(0.7),
+			propagationFanout: z.number().int().min(0).max(1000).default(20),
+			propagationLookbackDays: z.number().int().min(1).max(3650).default(30),
+		})
+		.default({
+			learningRate: 0.1,
+			propagationFactor: 0.3,
+			qValueBoostWeight: 0.1,
+			suppressionThreshold: 0.15,
+			promotionThreshold: 0.85,
+			propagationTokenOverlapThreshold: 0.4,
+			propagationEmbeddingCosineThreshold: 0.7,
+			propagationFanout: 20,
+			propagationLookbackDays: 30,
+		}),
 	writes: z
 		.object({
 			/** Normal agents can only create proposals in PR 1. */
@@ -1226,6 +1268,58 @@ export const MemoryConfigSchema = z.object({
 				n: 50,
 				threshold: 0.2,
 			},
+		}),
+	/** Q-learning-style utility tracking for memory recall/promotion/suppression. */
+	qLearning: z
+		.object({
+			/** EMA learning rate η for q ← (1-η)·q + η·reward. */
+			learningRate: z.number().min(0).max(1).default(0.1),
+			/** Weight of the q-value term added to recall scoring. */
+			qValueBoostWeight: z.number().min(0).max(1).default(0.1),
+			/** Memories with qValue below this are suppressed from default recall. */
+			suppressionThreshold: z.number().min(0).max(1).default(0.15),
+			/** Memories with qValue above this (and enough retrievals) are promotion candidates. */
+			promotionThreshold: z.number().min(0).max(1).default(0.85),
+			/** Minimum retrieval count before a high-q memory is a promotion candidate. */
+			promotionMinRetrievals: z.number().int().min(0).max(100000).default(5),
+			/** Fraction of a reward propagated to closely-related memories. */
+			propagationFraction: z.number().min(0).max(1).default(0.3),
+			/** Max related memories a single reward may propagate to. */
+			propagationFanoutCap: z.number().int().min(0).max(10000).default(20),
+			/** Only propagate to memories retrieved within this window (days). */
+			propagationWindowDays: z.number().int().min(0).max(3650).default(30),
+			/**
+			 * Jaccard token-overlap bar for treating two same-scope+kind memories
+			 * as "related" for reward propagation (B.5). Deliberately HIGH — see
+			 * `QLearningConfig.propagationRelatednessThreshold` in
+			 * `src/memory/config.ts` for the full blast-radius rationale.
+			 */
+			propagationRelatednessThreshold: z.number().min(0).max(1).default(0.7),
+			/** Bounded rate at which suppressed memories are surfaced for exploration. */
+			explorationRate: z.number().min(0).max(1).default(0.05),
+			/** Max bytes of the retained council-synthesis payload (truncated with a marker beyond this). */
+			verdictPayloadCapBytes: z
+				.number()
+				.int()
+				.min(0)
+				.max(1048576)
+				.default(8192),
+			/** Neutral starting utility for a new memory. */
+			initialQValue: z.number().min(0).max(1).default(0.5),
+		})
+		.default({
+			learningRate: 0.1,
+			qValueBoostWeight: 0.1,
+			suppressionThreshold: 0.15,
+			promotionThreshold: 0.85,
+			promotionMinRetrievals: 5,
+			propagationFraction: 0.3,
+			propagationFanoutCap: 20,
+			propagationWindowDays: 30,
+			propagationRelatednessThreshold: 0.7,
+			explorationRate: 0.05,
+			verdictPayloadCapBytes: 8192,
+			initialQValue: 0.5,
 		}),
 	/** Reflection / consolidation pass (issue #1464, Phase 3). */
 	consolidation: z
@@ -1772,10 +1866,35 @@ export const PrMonitorConfigSchema = z
 		notify_ci_failure: z.boolean().default(true),
 		/** Emit notification on new comments. */
 		notify_new_comments: z.boolean().default(true),
-		/** Emit notification on merge conflict detection. */
+		/** Emit notification on merge conflict detection (and conflict resolution). */
 		notify_merge_conflict: z.boolean().default(true),
+		/**
+		 * Emit notification on review state changes
+		 * (`pr.review.changes_requested` and `pr.review.approved`).
+		 */
+		notify_review_activity: z.boolean().default(true),
+		/** Emit notification when the PR is merged (terminal event). */
+		notify_merged: z.boolean().default(true),
+		/** Emit notification when the PR is closed without merge (terminal event). */
+		notify_closed: z.boolean().default(true),
+		/** Emit notification when CI recovers / all checks pass. Quiet by default. */
+		notify_ci_success: z.boolean().default(false),
 		/** Automatically trigger PR_FEEDBACK mode on CI failure or merge conflict. */
 		auto_pr_feedback: z.boolean().default(false),
+		/**
+		 * Event delivery mode for subscribed sessions.
+		 * 'prompt' (default) wakes the subscribed session with a structured
+		 * <pr-activity> message via the SDK session prompt so idle sessions
+		 * act on events immediately. 'advisory' is the legacy passive channel:
+		 * events are queued as session advisories and surface on the next
+		 * model turn. Only effective when `enabled` is true.
+		 */
+		event_delivery: z.enum(['advisory', 'prompt']).default('prompt'),
+		/**
+		 * Automatically subscribe the current session to a PR created via
+		 * `gh pr create` in a bash tool call. Only effective when `enabled`.
+		 */
+		auto_subscribe_on_pr_create: z.boolean().default(true),
 	})
 	.strict();
 

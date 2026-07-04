@@ -171,9 +171,9 @@ export const LANGUAGE_REGISTRY = new LanguageRegistry();
 
 LANGUAGE_REGISTRY.register({
 	id: 'typescript',
-	displayName: 'TypeScript / JavaScript',
+	displayName: 'TypeScript',
 	tier: 1,
-	extensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
+	extensions: ['.ts', '.tsx'],
 	treeSitter: {
 		grammarId: 'typescript',
 		wasmFile: 'tree-sitter-typescript.wasm',
@@ -223,6 +223,115 @@ LANGUAGE_REGISTRY.register({
 				// project — the dispatch path requires this to avoid the
 				// false-positive where any plain Node project's package.json
 				// triggers bun:test detection. (PR #825 review finding P1 #2.)
+				name: 'bun:test',
+				detect: 'bun.lock',
+				cmd: 'bun test',
+				priority: 8,
+			},
+			{
+				name: 'mocha',
+				detect: '.mocharc.json',
+				cmd: 'npx mocha',
+				priority: 7,
+			},
+		],
+	},
+	lint: {
+		detectFiles: [
+			'biome.json',
+			'biome.jsonc',
+			'.eslintrc.js',
+			'.eslintrc.json',
+		],
+		linters: [
+			{
+				name: 'biome',
+				detect: 'biome.json',
+				cmd: 'biome check --write .',
+				priority: 10,
+			},
+			{
+				name: 'eslint',
+				detect: '.eslintrc.js',
+				cmd: 'npx eslint --fix .',
+				priority: 9,
+			},
+		],
+	},
+	audit: {
+		detectFiles: ['package.json'],
+		command: 'npm audit --json',
+		outputFormat: 'json',
+	},
+	sast: { nativeRuleSet: 'javascript', semgrepSupport: 'ga' },
+	prompts: {
+		coderConstraints: [
+			'Use strict TypeScript; no implicit any or type assertions without justification',
+			'Prefer async/await over raw Promises; always handle rejections',
+			'Use const/let, never var; prefer immutable data structures',
+			'Follow existing import style (ESM); no require() in .ts files',
+			'Add JSDoc for all exported functions and types',
+		],
+		reviewerChecklist: [
+			'Verify no implicit any or unsafe type casts',
+			'Check async error handling — unhandled Promises are bugs',
+			'Confirm ESM import consistency (no mixed require/import)',
+			'Validate exported API surface matches declared types',
+			'Check for missing null/undefined guards on optional fields',
+		],
+	},
+});
+
+LANGUAGE_REGISTRY.register({
+	id: 'javascript',
+	displayName: 'JavaScript',
+	tier: 1,
+	extensions: ['.js', '.jsx', '.mjs', '.cjs'],
+	treeSitter: {
+		grammarId: 'javascript',
+		wasmFile: 'tree-sitter-javascript.wasm',
+		commentNodes: ['comment', 'line_comment', 'block_comment'],
+	},
+	build: {
+		detectFiles: ['package.json'],
+		commands: [
+			{
+				name: 'bun build',
+				cmd: 'bun run build',
+				detectFile: 'package.json',
+				priority: 10,
+			},
+			{
+				name: 'tsc',
+				cmd: 'npx tsc --noEmit',
+				detectFile: 'tsconfig.json',
+				priority: 9,
+			},
+			{
+				name: 'vite build',
+				cmd: 'npx vite build',
+				detectFile: 'vite.config.ts',
+				priority: 8,
+			},
+		],
+	},
+	test: {
+		detectFiles: [
+			'package.json',
+			'vitest.config.ts',
+			'jest.config.js',
+			'.mocharc.js',
+			'.mocharc.json',
+		],
+		frameworks: [
+			{
+				name: 'vitest',
+				detect: 'vitest.config.ts',
+				cmd: 'bun test',
+				priority: 10,
+			},
+			{ name: 'jest', detect: 'jest.config.js', cmd: 'npx jest', priority: 9 },
+			{
 				name: 'bun:test',
 				detect: 'bun.lock',
 				cmd: 'bun test',

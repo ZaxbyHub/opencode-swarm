@@ -11,6 +11,7 @@ import type { PluginConfig } from '../config/schema';
 import { swarmState } from '../state';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
+import { recordRealtimeLearningToolCall } from './realtime-learning-nudge';
 import { readSwarmFileAsync } from './utils';
 
 /**
@@ -98,6 +99,7 @@ export function createAgentActivityHooks(
 			existing.totalDuration += duration;
 
 			swarmState.toolAggregates.set(key, existing);
+			recordRealtimeLearningToolCall(entry.sessionID);
 
 			// Increment pending events counter
 			swarmState.pendingEvents++;

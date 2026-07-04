@@ -97,6 +97,7 @@ import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
+import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
@@ -688,6 +689,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		config: config.memory,
 		getActiveAgentName: (sessionID) =>
 			sessionID ? swarmState.activeAgent.get(sessionID) : undefined,
+		// B.1 — resolve the unit-of-work (task) id from the SAME session's
+		// currentTaskId. `?? undefined` normalizes the null sentinel so an absent
+		// id persists as NULL and recall degrades to session-scoped runId.
+		getActiveTaskId: (sessionID) =>
+			sessionID
+				? (swarmState.agentSessions.get(sessionID)?.currentTaskId ?? undefined)
+				: undefined,
 	});
 	// Fail-secure: honor explicit guardrails.enabled === false (preserving the full
 	// guardrails block), otherwise let Zod schema defaults fill in enabled: true.
@@ -1090,8 +1098,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ensurePrMonitorWorkerRunning(directory);
 	});
 
-	// Register PR event subscribers for advisory delivery to active sessions
+	// Register PR event subscribers for event delivery to active sessions
 	let prEventCleanup: (() => void) | null = null;
+	// Wake-delivery module handle (prompt mode). Populated only when
+	// pr_monitor is enabled with event_delivery === 'prompt' — same
+	// enabled-gated dynamic-import pattern as the subscribers (invariant 1:
+	// zero added init work when the feature is disabled).
+	let prEventDelivery: {
+		noteSessionIdle: (sessionID: string) => void;
+		unregisterPrEventDelivery: () => void;
+	} | null = null;
 	if (prMonitorConfig.enabled) {
 		try {
 			const { registerPrEventSubscribers } = await import(
@@ -1106,7 +1122,33 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
+		if (prMonitorConfig.event_delivery === 'prompt') {
+			try {
+				const deliveryModule = await import('./background/pr-event-delivery');
+				deliveryModule.registerPrEventDelivery({
+					client: ctx.client,
+					directory: ctx.directory,
+					config: prMonitorConfig,
+				});
+				prEventDelivery = {
+					noteSessionIdle: deliveryModule.noteSessionIdle,
+					unregisterPrEventDelivery: deliveryModule.unregisterPrEventDelivery,
+				};
+			} catch (err) {
+				log('[pr-monitor] Failed to register wake delivery (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
 	}
+
+	// Auto-subscribe on `gh pr create` (tool.execute.after observer).
+	// Cheap to construct; all gating (enabled + auto_subscribe_on_pr_create)
+	// happens inside the hook.
+	const prAutoSubscribeHook = createPrAutoSubscribeHook(
+		ctx.directory,
+		prMonitorConfig,
+	);
 
 	// Startup scan: resume worker for existing subscriptions after plugin restart.
 	// Deferred via queueMicrotask so setup() returns promptly (fail-open).
@@ -1131,6 +1173,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		automationManager?.stop();
 		prMonitorWorker?.stop();
 		prEventCleanup?.();
+		prEventDelivery?.unregisterPrEventDelivery();
 	};
 	process.on('exit', cleanupAutomation);
 
@@ -1236,6 +1279,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		event: async (input: { event: unknown }): Promise<void> => {
 			try {
 				rememberAssistantUsageEvent(input);
+				// PR wake delivery: session.idle flushes that session's queued PR
+				// events. No-op unless prompt-mode delivery is registered.
+				if (prEventDelivery) {
+					const evt = input.event as
+						| { type?: string; properties?: { sessionID?: string } }
+						| undefined;
+					if (
+						evt?.type === 'session.idle' &&
+						typeof evt.properties?.sessionID === 'string'
+					) {
+						prEventDelivery.noteSessionIdle(evt.properties.sessionID);
+					}
+				}
 				await backgroundCompletionObserver.event(input);
 			} catch (err) {
 				warn(
@@ -2211,6 +2267,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// Both are non-throwing observers (errors swallowed by safeHook).
 				await safeHook(fullAutoInputProbeHook.toolAfter)(input, output);
 				await safeHook(fullAutoDelegationHook.toolAfter)(input, output);
+
+				// PR auto-subscribe: observe `gh pr create` bash output and
+				// subscribe the session to the created PR (fail-open observer;
+				// internally gated by pr_monitor.enabled + auto_subscribe_on_pr_create).
+				await safeHook(prAutoSubscribeHook.toolAfter)(input, output);
 
 				// Adversarial semantic pattern detection on agent output
 				if (isTaskTool && typeof output.output === 'string') {

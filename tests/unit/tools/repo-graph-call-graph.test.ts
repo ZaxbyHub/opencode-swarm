@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fsSync from 'node:fs';
+import os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -56,7 +57,7 @@ describe('builder: usedSymbols + exportLines', () => {
 	let workspacePath: string;
 
 	beforeEach(() => {
-		tempDir = fsSync.mkdtempSync(path.join(process.cwd(), 'repo-graph-cg-'));
+		tempDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-cg-'));
 		workspacePath = path.relative(process.cwd(), tempDir);
 	});
 
@@ -214,7 +215,7 @@ describe('async builder usedSymbols (buildWorkspaceGraphAsync)', () => {
 
 	beforeEach(() => {
 		tempDir = fsSync.mkdtempSync(
-			path.join(process.cwd(), 'repo-graph-cg-async-'),
+			path.join(os.tmpdir(), 'repo-graph-cg-async-'),
 		);
 		workspacePath = path.relative(process.cwd(), tempDir);
 	});
@@ -267,20 +268,19 @@ describe('async builder usedSymbols (buildWorkspaceGraphAsync)', () => {
 		expect(edge?.usedSymbols).toBeUndefined();
 	});
 
-	test('named re-exports: async tree-sitter path does not produce re-export edges (documented divergence)', async () => {
+	test('named re-exports treat re-exported symbols as used in the async tree-sitter path', async () => {
 		write('lib.ts', `export const a = 1;\nexport const b = 2;\n`);
 		write('barrel.ts', `export { a, b } from './lib';\n`);
 
 		const graph = await buildWorkspaceGraphAsync(workspacePath);
-		// The async tree-sitter builder does not emit edges for re-export statements
-		// (`export { a, b } from './lib'`). This is a documented divergence from the
-		// sync regex-based builder which does produce an edge with usedSymbols=['a','b'].
-		// Re-export resolution requires resolving the re-exported symbols through the
-		// source module, which tree-sitter facts do not surface at the edge-construction layer.
 		const reExportEdge = graph.edges.find(
 			(e) => e.source.endsWith('barrel.ts') && e.target.endsWith('lib.ts'),
 		);
-		expect(reExportEdge).toBeUndefined();
+		expect(reExportEdge).toMatchObject({
+			importType: 'named',
+			importedSymbols: ['a', 'b'],
+			usedSymbols: ['a', 'b'],
+		});
 	});
 
 	test('named default exports: edge uses "default" sentinel; async node exports normalize to "default"', async () => {

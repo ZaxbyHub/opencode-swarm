@@ -54,6 +54,7 @@ export function buildSpecDriftAdvisory(args: {
 	reason: string;
 	currentHash: string | null;
 	storedHash: string;
+	diff?: { diff: string; changedSections: string[] } | null;
 	midLoadRemovals?: { count: number; source: string };
 }): string {
 	const lines = [
@@ -74,12 +75,28 @@ export function buildSpecDriftAdvisory(args: {
 				'.swarm/plan-ledger.jsonl for IDs.',
 		);
 	}
+	if (args.diff) {
+		lines.push('');
+		lines.push('--- spec diff (recorded vs current) ---');
+		if (args.diff.changedSections.length > 0) {
+			lines.push(
+				'Changed sections: ' +
+					args.diff.changedSections.map((s) => `## ${s}`).join(', '),
+			);
+		}
+		lines.push('[Begin spec diff]', args.diff.diff, '[End spec diff]');
+	} else if (args.diff === null) {
+		lines.push('(no recorded snapshot to diff against)');
+	}
 	return lines.join('\n');
 }
 
-function readSpecStalenessSnapshot(
-	directory: string,
-): { specHash_plan: string; specHash_current: string | null } | null {
+function readSpecStalenessSnapshot(directory: string): {
+	specHash_plan: string;
+	specHash_current: string | null;
+	diff: string | null;
+	changedSections: string[];
+} | null {
 	try {
 		const p = path.join(directory, '.swarm', 'spec-staleness.json');
 		return readCachedParsedFileSync(
@@ -96,6 +113,10 @@ function readSpecStalenessSnapshot(
 					return {
 						specHash_plan: parsed.specHash_plan,
 						specHash_current: parsed.specHash_current,
+						diff: typeof parsed?.diff === 'string' ? parsed.diff : null,
+						changedSections: Array.isArray(parsed?.changedSections)
+							? parsed.changedSections
+							: [],
 					};
 				}
 				return null;
@@ -117,11 +138,22 @@ function maybeAppendSpecDriftAdvisory(
 	const storedHash =
 		snap?.specHash_plan ?? plan.specHash ?? '(unknown — plan missing specHash)';
 	const currentHash = snap?.specHash_current ?? null;
+
+	// Diff is precomputed by manager.ts at staleness-detection time and stored
+	// in spec-staleness.json. This avoids importing spec-hash (and transitively
+	// readEffectiveSpecSync) into the system-enhancer module graph, which would
+	// regress plugin init perf (repro-704 T1).
+	const diffInfo: { diff: string; changedSections: string[] } | null =
+		snap && snap.diff !== null
+			? { diff: snap.diff, changedSections: snap.changedSections }
+			: null;
+
 	output.system.push(
 		buildSpecDriftAdvisory({
 			reason: plan._specStaleReason ?? 'spec.md changed since plan was saved',
 			currentHash,
 			storedHash,
+			diff: diffInfo,
 			midLoadRemovals: plan._midLoadRemovals,
 		}),
 	);
@@ -163,6 +195,13 @@ import { _internals as knowledgeStoreInternals } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
 import { validateActionability } from './knowledge-validator.js';
 import {
+	buildRealtimeLearningNudge,
+	getRealtimeLearningToolCallCount,
+	REALTIME_LEARNING_NUDGE_ID_PREFIX,
+	recordRealtimeLearningNudge,
+	shouldInjectRealtimeLearningNudge,
+} from './realtime-learning-nudge';
+import {
 	buildCoderLocalizationBlock,
 	buildReviewerBlastRadiusBlock,
 } from './repo-graph-injection';
@@ -183,6 +222,13 @@ function extractAgentPrefix(fullAgentName: string | null | undefined): string {
 	const baseName = stripKnownSwarmPrefix(fullAgentName);
 	if (baseName.length >= fullAgentName.length) return '';
 	return fullAgentName.substring(0, fullAgentName.length - baseName.length);
+}
+
+function getTotalAggregateToolCallCount(): number {
+	return Array.from(swarmState.toolAggregates.values()).reduce(
+		(sum, agg) => sum + agg.count,
+		0,
+	);
 }
 
 /**
@@ -610,7 +656,7 @@ export function createSystemEnhancerHook(
 						seAllocation = maxInjectionTokens;
 					}
 
-					function tryInject(text: string): void {
+					function tryInject(text: string): boolean {
 						const tokens = estimateTokens(text);
 						actualDemand += tokens;
 						const effectiveMax = seAllocation;
@@ -618,10 +664,11 @@ export function createSystemEnhancerHook(
 							warn(
 								`system-enhancer: injection budget exceeded (${injectedTokens + tokens} > ${effectiveMax} tokens) — truncating system prompt content`,
 							);
-							return;
+							return false;
 						}
 						output.system.push(text);
 						injectedTokens += tokens;
+						return true;
 					}
 
 					const contextContent = await readSwarmFileAsync(
@@ -1348,15 +1395,37 @@ ${handoffContent}`;
 								// Silently skip if evidence dir missing or unreadable
 							}
 
+							// Real-time learning nudge: architect-only, cadence-bounded.
+							if (
+								mode !== 'DISCOVER' &&
+								config.knowledge?.enabled !== false &&
+								sessionId_retro
+							) {
+								const sessionToolCalls =
+									getRealtimeLearningToolCallCount(sessionId_retro);
+								if (
+									shouldInjectRealtimeLearningNudge({
+										sessionID: sessionId_retro,
+										config: config.knowledge?.realtime_learning_nudge,
+									})
+								) {
+									const learningNudge = buildRealtimeLearningNudge({
+										currentPhase: plan?.current_phase ?? 1,
+										toolCallCount: sessionToolCalls,
+									});
+									if (tryInject(learningNudge)) {
+										recordRealtimeLearningNudge(sessionId_retro);
+									}
+								}
+							}
+
 							// v6.2: Soft compaction advisory
 							if (mode !== 'DISCOVER') {
 								const compactionConfig = config.compaction_advisory;
 								if (compactionConfig?.enabled !== false && sessionId_retro) {
 									const session = swarmState.agentSessions.get(sessionId_retro);
 									if (session) {
-										const totalToolCalls = Array.from(
-											swarmState.toolAggregates.values(),
-										).reduce((sum, agg) => sum + agg.count, 0);
+										const totalToolCalls = getTotalAggregateToolCallCount();
 
 										const thresholds = compactionConfig?.thresholds ?? [
 											50, 75, 100, 125, 150,
@@ -1967,6 +2036,34 @@ ${handoffContent}`;
 							// Silently skip if evidence dir missing or unreadable
 						}
 
+						if (
+							mode_b !== 'DISCOVER' &&
+							config.knowledge?.enabled !== false &&
+							sessionId_retro_b
+						) {
+							const sessionToolCalls_b =
+								getRealtimeLearningToolCallCount(sessionId_retro_b);
+							if (
+								shouldInjectRealtimeLearningNudge({
+									sessionID: sessionId_retro_b,
+									config: config.knowledge?.realtime_learning_nudge,
+								})
+							) {
+								const learningNudge_b = buildRealtimeLearningNudge({
+									currentPhase: plan?.current_phase ?? 1,
+									toolCallCount: sessionToolCalls_b,
+								});
+								candidates.push({
+									id: `${REALTIME_LEARNING_NUDGE_ID_PREFIX}-${idCounter++}`,
+									kind: 'phase' as ContextCandidate['kind'],
+									text: learningNudge_b,
+									tokens: estimateTokens(learningNudge_b),
+									priority: 1,
+									metadata: { contentType: 'prose' as ContentType },
+								});
+							}
+						}
+
 						// v6.2: Soft compaction advisory
 						if (mode_b !== 'DISCOVER') {
 							const compactionConfig_b = config.compaction_advisory;
@@ -1974,9 +2071,7 @@ ${handoffContent}`;
 								const session_b =
 									swarmState.agentSessions.get(sessionId_retro_b);
 								if (session_b) {
-									const totalToolCalls_b = Array.from(
-										swarmState.toolAggregates.values(),
-									).reduce((sum, agg) => sum + agg.count, 0);
+									const totalToolCalls_b = getTotalAggregateToolCallCount();
 
 									const thresholds_b = compactionConfig_b?.thresholds ?? [
 										50, 75, 100, 125, 150,
@@ -2249,6 +2344,12 @@ ${handoffContent}`;
 						}
 						output.system.push(candidate.text);
 						injectedTokens += candidate.tokens;
+						if (
+							candidate.id.startsWith(REALTIME_LEARNING_NUDGE_ID_PREFIX) &&
+							_input.sessionID
+						) {
+							recordRealtimeLearningNudge(_input.sessionID);
+						}
 					}
 
 					// Context budget check - run after all other assembly, architect-only

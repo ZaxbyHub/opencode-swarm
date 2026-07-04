@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 6.5 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 4.6 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,17 +38,18 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 6.5MB)', () => {
+	test('dist/index.js file size is reasonable (< 4.6MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
-		// History: 5MiB → 5.5MiB (#1302 Wave 2 eval-gated skill machinery +
-		// #1263 config-doctor validation) → 6.5MiB here. The 5.5MiB cap became a
-		// merge-queue flake: the unminified bundle sat ~1KB from the limit, and
-		// builds vary ~2KB across platforms/toolchains (Windows ~5,766,141 under;
-		// Linux CI ~5,768,289 over), so the gate flipped pass/fail by runner and
-		// intermittently blocked unrelated PRs. 6.5MiB restores ~1MiB headroom,
-		// far above that variance, while staying tight enough to keep growth
-		// visible in smoke CI. The structural alternative (minify the bundle,
-		// ~43% smaller) is tracked in #1582.
+		// The main bundle is built with identifier-preserving minification
+		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
+		// 4.6 × 1024 × 1024 = 4,823,449.6 bytes (cap); measured 4,481,025 bytes;
+		// headroom ≈ 342 KB (≈ 167× the ~2 KB cross-platform build variance, well
+		// above the ≥4× requirement). ≥10% growth = 4,481,025 × 1.1 = 4,929,127.5
+		// bytes, which EXCEEDS the 4,823,449.6 cap, so the gate fires on ≥10%
+		// growth (keeps growth visible). Decision: identifier-preserving minify
+		// adopted; full identifier mangling + source maps rejected (General
+		// Council, #1582). Debuggability preserved (identifier names intact; no
+		// source maps needed). #1582 is resolved.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

@@ -22,7 +22,7 @@ export interface LanguageDefinition {
 export const languageDefinitions: LanguageDefinition[] = [
 	{
 		id: 'javascript',
-		extensions: ['.js', '.jsx'],
+		extensions: ['.js', '.jsx', '.mjs', '.cjs'],
 		commentNodes: ['comment', 'line_comment', 'block_comment'],
 	},
 	{

@@ -426,6 +426,34 @@ export class MyClass {
 			expect(typeof fileResult.errorType).toBe('string');
 		});
 
+		test('omitting exported_only defaults to exported-only behavior', async () => {
+			createTestFile(
+				'mixed.ts',
+				`
+export function exportedFunc() {}
+function privateFunc() {}
+export const exportedConst = 42;
+const privateConst = 100;
+`,
+			);
+
+			// Omit exported_only entirely — should default to true (only exported symbols)
+			const result = await executeBatchSymbols(
+				{ files: ['mixed.ts'] },
+				tempDir,
+			);
+
+			const parsed = JSON.parse(result);
+			const symbols = parsed.results[0].symbols;
+
+			// Should only contain the two exported symbols
+			const symbolNames = symbols.map((s: any) => s.name);
+			expect(symbolNames).toContain('exportedFunc');
+			expect(symbolNames).toContain('exportedConst');
+			expect(symbolNames).not.toContain('privateFunc');
+			expect(symbolNames).not.toContain('privateConst');
+		});
+
 		test('exported_only filter affects symbol count', async () => {
 			createTestFile(
 				'exported.ts',

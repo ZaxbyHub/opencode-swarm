@@ -254,7 +254,7 @@ export async function recordKnowledgeShown(
 }
 
 /** Record an explicit acknowledgment outcome (applied / ignored / violated).
- *  Per-(sessionId, knowledgeId, result, dayKey) dedup is enforced by the
+ *  Per-(sessionId, knowledgeId, result) dedup is enforced by the
  *  caller via swarmState.knowledgeAckDedup; this fn always records when
  *  invoked, so test code can trigger duplicates if needed. The runtime
  *  integration in src/index.ts uses recordAcknowledgmentDeduped instead. */
@@ -303,20 +303,15 @@ export async function recordAcknowledgment(
 	}
 }
 
-/** Day key in UTC; matches the default skill_improver quota window. */
-function utcDayKey(d: Date = new Date()): string {
-	return d.toISOString().slice(0, 10);
-}
-
 /** Build the dedup key. Exported so test code and the runtime integration
  *  share the exact format. */
 export function buildAckDedupKey(
 	sessionId: string,
 	id: string,
 	result: KnowledgeApplicationResult | 'n_a',
-	now: Date = new Date(),
+	_now: Date = new Date(),
 ): string {
-	return `${sessionId}|${id}|${result}|${utcDayKey(now)}`;
+	return `${sessionId}|${id}|${result}`;
 }
 
 /** Acknowledgment recording with dedup. Returns whether a record was actually
@@ -459,7 +454,7 @@ export function gateKnowledgeApplication(args: {
 	const warnings: GateResult['warnings'] = [];
 	for (const id of criticalShownIds) {
 		if (!ackIds.has(id)) {
-			const reason = `critical directive ${id} requires KNOWLEDGE_APPLIED/IGNORED ack`;
+			const reason = `critical directive ${id} requires KNOWLEDGE_APPLIED/IGNORED/VIOLATED ack`;
 			if (config.mode === 'enforce' && config.critical_requires_ack) {
 				violations.push({ id, reason });
 			} else {

@@ -105,6 +105,8 @@ The critic must answer:
 8. Does the patch preserve public API and backward compatibility?
 9. Does the plan avoid broad refactors and unrelated cleanup?
 10. Is rollback straightforward?
+11. If the fix's exact invocation depends on subtle CLI/subprocess/flag semantics (git flags, gitignore anchoring, shell globs), was the exact candidate invocation empirically verified in an isolated environment — not just asserted as correct by the tracer or an external source?
+12. If the fix scopes or restricts a destructive/broad-acting operation, was it checked against the real target's full blast radius (e.g. a dry-run against the actual repo/environment), not only a minimal reproduction?
 
 ## Verdict Semantics
 
@@ -147,6 +149,8 @@ Find, with concrete evidence:
 - any changed path that is not wired into the real runtime path
 - any regressed public API, CLI, UI, config, persistence, or concurrency contract
 - any "passed"/"validated" claim in 08-test-results.md not backed by a shown command + output
+- if the fix depends on CLI/subprocess/flag semantics, independently re-run the exact invocation yourself (don't just re-read the implementer's transcript) and confirm the observed behavior matches the claim
+- if the fix scopes a destructive/broad-acting operation, independently re-check it against the real target's full blast radius (not just the implementer's toy reproduction)
 
 Return exactly:
 

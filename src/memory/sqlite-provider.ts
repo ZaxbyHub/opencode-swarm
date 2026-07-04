@@ -49,6 +49,9 @@ import type {
 	MemoryProvider,
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
+	MemoryRewardEvent,
+	MemoryRewardEventFilter,
+	MemoryTransaction,
 } from './provider';
 import {
 	normalizeMemoryText,
@@ -57,7 +60,10 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
-import { scoreMemoryRecordsWithDiagnostics } from './scoring';
+import {
+	scoreMemoryRecordsWithDiagnostics,
+	sliceRecallItemsWithExploration,
+} from './scoring';
 import type {
 	AppliedMemoryChange,
 	MemoryListFilter,
@@ -240,6 +246,70 @@ export const MIGRATIONS: Migration[] = [
 			);
 		`,
 	},
+	{
+		version: 7,
+		name: 'add_recall_learning_columns',
+		// Migration version 7 (not v5 as issue #1467 spec stated):
+		//   v2 is reserved by LEGACY_JSONL_MIGRATION_VERSION (src/memory/jsonl-migration.ts:9).
+		//   v5 was occupied by the recall_usage timestamp index migration.
+		//   v6 was occupied by the embedding_config migration.
+		//   v7 is the first available slot for this change.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN q_value REAL DEFAULT 0.5;
+			ALTER TABLE memory_recall_usage ADD COLUMN last_reward REAL;
+			ALTER TABLE memory_recall_usage ADD COLUMN task_outcome TEXT;
+			ALTER TABLE memory_recall_usage ADD COLUMN council_verdict_json TEXT;
+		`,
+	},
+	{
+		version: 8,
+		name: 'add_recall_reward_idempotency_key',
+		// Stores a stable "swarmId:taskOrPhase:roundNumber" key (see
+		// deriveRewardKey below) on the recall-usage row a reward was last
+		// applied against, so a duplicate council-verdict submission for the
+		// SAME round does not re-apply the EMA update indefinitely.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN reward_key TEXT;
+		`,
+	},
+	{
+		version: 9,
+		name: 'add_reward_events_and_recall_run_id',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_reward_events (
+				id TEXT PRIMARY KEY,
+				memory_id TEXT NOT NULL,
+				run_id TEXT,
+				unit_id TEXT,
+				verdict TEXT NOT NULL,
+				reward REAL NOT NULL,
+				q_before REAL,
+				q_after REAL,
+				verdict_synthesis_json TEXT,
+				timestamp TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_reward_events_memory
+				ON memory_reward_events(memory_id);
+			ALTER TABLE memory_recall_usage ADD COLUMN run_id TEXT;
+			CREATE INDEX IF NOT EXISTS idx_memory_recall_usage_run_id
+				ON memory_recall_usage(run_id);
+		`,
+	},
+	{
+		version: 10,
+		name: 'add_recall_usage_unit_id',
+		// B.1 — ADDITIVE task/phase identity on recall-usage rows. Mirrors the v7
+		// run_id column exactly. Idempotency comes from the runMigrations version
+		// guard + the per-migration transaction, NOT from `IF NOT EXISTS` on ALTER
+		// (SQLite does not support that clause on ADD COLUMN). Brand-new column —
+		// no historical usage_json backfill (unlike run_id): existing rows keep
+		// unit_id NULL, which is the intended graceful-degrade default.
+		sql: `
+			ALTER TABLE memory_recall_usage ADD COLUMN unit_id TEXT;
+			CREATE INDEX IF NOT EXISTS idx_memory_recall_usage_unit_id
+				ON memory_recall_usage(unit_id);
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -259,6 +329,19 @@ interface ProposalRow {
 
 interface RecallUsageRow {
 	usage_json: string;
+}
+
+interface RewardEventRow {
+	id: string;
+	memory_id: string;
+	run_id: string | null;
+	unit_id: string | null;
+	verdict: string;
+	reward: number;
+	q_before: number | null;
+	q_after: number | null;
+	verdict_synthesis_json: string | null;
+	timestamp: string;
 }
 
 interface DecisionTransactionResult {
@@ -363,6 +446,7 @@ export class SQLiteMemoryProvider
 		this.db.run('PRAGMA foreign_keys = ON;');
 		this.runMigrations();
 		this.backfillScopeKeys();
+		this.backfillRecallRunIds();
 		this.ftsAvailable = this.initializeFtsIndex();
 		this.initializeVecExtension();
 		if (this.config.embeddings.enabled && !this.embeddingProvider) {
@@ -449,6 +533,13 @@ export class SQLiteMemoryProvider
 		return this.memories.get(id) ?? null;
 	}
 
+	async withTransaction<T>(
+		fn: (tx: MemoryTransaction) => Promise<T> | T,
+	): Promise<T> {
+		const db = this.requireDb();
+		return db.transaction(() => fn({}))();
+	}
+
 	async delete(id: string, reason?: string): Promise<void> {
 		await this.initialize();
 		const existing = this.memories.get(id);
@@ -498,15 +589,29 @@ export class SQLiteMemoryProvider
 			const result = scoreMemoryRecordsWithDiagnostics(
 				candidates.records,
 				request,
+				this.config.qLearning,
 			);
 			const reranked = candidates.ftsOrder
 				? rerankWithFts(result.items, candidates.ftsOrder)
 				: result.items;
+			// Fix 1 (C.1 reviewer fix): cap normal hits at maxItems, then append
+			// the single explored item (if any) beyond the cap so exploration can
+			// never evict a legitimate ranked hit.
+			const disabledPathSliced = sliceRecallItemsWithExploration(
+				reranked,
+				request.maxItems,
+			);
 			return {
-				items: reranked.slice(0, request.maxItems),
+				items: disabledPathSliced,
 				diagnostics: {
 					...result.diagnostics,
-					returnedCount: Math.min(reranked.length, request.maxItems),
+					// Fix 3: derive exploredCount from what actually survived
+					// slicing so the count always matches an item present in the
+					// returned bundle.
+					exploredCount: disabledPathSliced.some((item) => item.explored)
+						? 1
+						: 0,
+					returnedCount: disabledPathSliced.length,
 				},
 			};
 		}
@@ -528,6 +633,7 @@ export class SQLiteMemoryProvider
 		const lexicalResult = scoreMemoryRecordsWithDiagnostics(
 			lexicalCandidates.records,
 			request,
+			this.config.qLearning,
 		);
 		const lexicalReranked = lexicalCandidates.ftsOrder
 			? rerankWithFts(lexicalResult.items, lexicalCandidates.ftsOrder)
@@ -570,11 +676,21 @@ export class SQLiteMemoryProvider
 				});
 			}
 			// True lexical-only fallback — identical shape to the disabled path.
+			// Fix 1 (C.1 reviewer fix): additive maxItems slice (see above).
+			const denseFailedSliced = sliceRecallItemsWithExploration(
+				lexicalReranked,
+				request.maxItems,
+			);
 			return {
-				items: lexicalReranked.slice(0, request.maxItems),
+				items: denseFailedSliced,
 				diagnostics: {
 					...lexicalResult.diagnostics,
-					returnedCount: Math.min(lexicalReranked.length, request.maxItems),
+					// Fix 3: derive exploredCount from what actually survived
+					// slicing.
+					exploredCount: denseFailedSliced.some((item) => item.explored)
+						? 1
+						: 0,
+					returnedCount: denseFailedSliced.length,
 				},
 			};
 		}
@@ -601,6 +717,13 @@ export class SQLiteMemoryProvider
 		const minScore = request.minScore ?? this.config.recall.minScore;
 		const fusedItems: RecallResultItem[] = [];
 		for (const candidate of fused) {
+			// C.1 additivity caveat (known limitation G-1/G-3): a C.1 `explored`
+			// item entered `fuseRankings` above as an ordinary lexical candidate,
+			// so (a) it is subject to THIS `minScore` re-gate like any hit — under
+			// default embeddings it can normalise below the gate and be dropped
+			// (G-1), and (b) its presence can nudge a boundary-scored normal hit
+			// below the gate (G-3). The additive `sliceRecallItemsWithExploration`
+			// guarantee holds at the final slice, not through this RRF re-gate.
 			if (candidate.fusedScore < minScore) continue;
 			const lexicalItem = lexicalItemMap.get(candidate.id);
 			if (lexicalItem) {
@@ -609,6 +732,11 @@ export class SQLiteMemoryProvider
 					score: candidate.fusedScore,
 					reason: `${lexicalItem.reason}, rrf_fused=${candidate.fusedScore.toFixed(4)}`,
 					signals: lexicalItem.signals,
+					// Fix 2 (C.1 reviewer fix): carry the C.1 explored flag from
+					// the source lexical item — this reconstruction otherwise
+					// drops it, silently un-flagging an explored item that
+					// survives fusion.
+					...(lexicalItem.explored ? { explored: true } : {}),
 				});
 			} else {
 				// Dense-only hit: look up the record directly.
@@ -681,11 +809,25 @@ export class SQLiteMemoryProvider
 			}
 		}
 
+		// Fix 1 (C.1 reviewer fix): cap normal hits at maxItems, then append the
+		// single explored item (if any — and if it survived the fusion minScore
+		// gate above, see Stage 5) beyond the cap.
+		const fusionSliced = sliceRecallItemsWithExploration(
+			rerankedItems,
+			request.maxItems,
+		);
 		return {
-			items: rerankedItems.slice(0, request.maxItems),
+			items: fusionSliced,
 			diagnostics: {
 				...lexicalResult.diagnostics,
-				returnedCount: Math.min(rerankedItems.length, request.maxItems),
+				// Fix 3: derive exploredCount from what actually survived fusion
+				// AND slicing, not the pre-fusion lexical diagnostics — the
+				// fusion minScore re-gate (Stage 5) can independently drop the
+				// explored item on its own normalised-score scale, so
+				// `lexicalResult.diagnostics.exploredCount` alone is not a
+				// reliable signal of what is actually present here.
+				exploredCount: fusionSliced.some((item) => item.explored) ? 1 : 0,
+				returnedCount: fusionSliced.length,
 				fusionActive: true,
 			},
 		};
@@ -698,9 +840,18 @@ export class SQLiteMemoryProvider
 				id,
 				bundle_id,
 				timestamp,
-				usage_json
-			) VALUES (?, ?, ?, ?)`,
-			[randomUUID(), event.bundleId, event.timestamp, JSON.stringify(event)],
+				usage_json,
+				run_id,
+				unit_id
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+			[
+				randomUUID(),
+				event.bundleId,
+				event.timestamp,
+				JSON.stringify(event),
+				event.runId ?? null,
+				event.unitId ?? null,
+			],
 		);
 		this.recallCountSinceLastCompaction++;
 		const threshold = this.config.maintenance?.autoCompactEveryNRecalls ?? 50;
@@ -752,24 +903,33 @@ export class SQLiteMemoryProvider
 		filter: MemoryRecallUsageFilter = {},
 	): Promise<MemoryRecallUsageEvent[]> {
 		await this.initialize();
-		const rows =
-			typeof filter.limit === 'number'
-				? this.requireDb()
-						.query<RecallUsageRow, [number]>(
-							`SELECT usage_json
-				FROM memory_recall_usage
-				ORDER BY timestamp DESC
-				LIMIT ?`,
-						)
-						.all(Math.max(1, Math.trunc(filter.limit)))
-				: this.requireDb()
-						.query<RecallUsageRow, []>(
-							`SELECT usage_json
-				FROM memory_recall_usage
-				ORDER BY timestamp DESC
-				`,
-						)
-						.all();
+
+		const conditions: string[] = [];
+		const params: SQLQueryBindings[] = [];
+		if (typeof filter.runId === 'string' && filter.runId.length > 0) {
+			conditions.push('run_id = ?');
+			params.push(filter.runId);
+		}
+		if (typeof filter.unitId === 'string' && filter.unitId.length > 0) {
+			conditions.push('unit_id = ?');
+			params.push(filter.unitId);
+		}
+		if (typeof filter.since === 'string' && filter.since.length > 0) {
+			conditions.push('timestamp >= ?');
+			params.push(filter.since);
+		}
+		const whereClause =
+			conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+
+		let sql = `SELECT usage_json FROM memory_recall_usage${whereClause} ORDER BY timestamp DESC`;
+		if (typeof filter.limit === 'number') {
+			sql += ' LIMIT ?';
+			params.push(Math.max(1, Math.trunc(filter.limit)));
+		}
+
+		const rows = this.requireDb()
+			.query<RecallUsageRow, SQLQueryBindings[]>(sql)
+			.all(...params);
 		const events: MemoryRecallUsageEvent[] = [];
 		for (const row of rows) {
 			try {
@@ -785,6 +945,84 @@ export class SQLiteMemoryProvider
 			}
 		}
 		return events;
+	}
+
+	async appendRewardEvent(event: Omit<MemoryRewardEvent, 'id'>): Promise<void> {
+		await this.initialize();
+		this.requireDb().run(
+			`INSERT INTO memory_reward_events (
+				id,
+				memory_id,
+				run_id,
+				unit_id,
+				verdict,
+				reward,
+				q_before,
+				q_after,
+				verdict_synthesis_json,
+				timestamp
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				randomUUID(),
+				event.memoryId,
+				event.runId ?? null,
+				event.unitId ?? null,
+				event.verdict,
+				event.reward,
+				event.qBefore ?? null,
+				event.qAfter ?? null,
+				event.verdictSynthesisJson ?? null,
+				event.timestamp,
+			],
+		);
+	}
+
+	async listRewardEvents(
+		filter: MemoryRewardEventFilter = {},
+	): Promise<MemoryRewardEvent[]> {
+		await this.initialize();
+
+		const conditions: string[] = [];
+		const params: SQLQueryBindings[] = [];
+		if (typeof filter.memoryId === 'string' && filter.memoryId.length > 0) {
+			conditions.push('memory_id = ?');
+			params.push(filter.memoryId);
+		}
+		const whereClause =
+			conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+
+		let sql = `SELECT
+			id,
+			memory_id,
+			run_id,
+			unit_id,
+			verdict,
+			reward,
+			q_before,
+			q_after,
+			verdict_synthesis_json,
+			timestamp
+		FROM memory_reward_events${whereClause} ORDER BY timestamp DESC`;
+		if (typeof filter.limit === 'number') {
+			sql += ' LIMIT ?';
+			params.push(Math.max(1, Math.trunc(filter.limit)));
+		}
+
+		const rows = this.requireDb()
+			.query<RewardEventRow, SQLQueryBindings[]>(sql)
+			.all(...params);
+		return rows.map((row) => ({
+			id: row.id,
+			memoryId: row.memory_id,
+			runId: row.run_id ?? undefined,
+			unitId: row.unit_id ?? undefined,
+			verdict: row.verdict,
+			reward: row.reward,
+			qBefore: row.q_before ?? undefined,
+			qAfter: row.q_after ?? undefined,
+			verdictSynthesisJson: row.verdict_synthesis_json ?? undefined,
+			timestamp: row.timestamp,
+		}));
 	}
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
@@ -1311,6 +1549,51 @@ export class SQLiteMemoryProvider
 		// Stamp completion so this full-table scan runs only once.
 		db.run(
 			"INSERT OR REPLACE INTO _meta (key, value) VALUES ('scope_key_backfilled', '1')",
+		);
+	}
+
+	private backfillRecallRunIds(): void {
+		const db = this.requireDb();
+
+		// One-time guard: skip if backfill was already completed in a prior init.
+		const metaRow = db
+			.query<{ value: string }, [string]>(
+				"SELECT value FROM _meta WHERE key = 'recall_run_id_backfilled'",
+			)
+			.get('recall_run_id_backfilled');
+		if (metaRow?.value === '1') return;
+
+		const rows = db
+			.query<{ id: string; usage_json: string }, []>(
+				'SELECT id, usage_json FROM memory_recall_usage WHERE run_id IS NULL',
+			)
+			.all();
+		let backfillCount = 0;
+		for (const row of rows) {
+			try {
+				const parsed = JSON.parse(row.usage_json) as { runId?: string };
+				if (typeof parsed.runId === 'string' && parsed.runId.length > 0) {
+					db.run('UPDATE memory_recall_usage SET run_id = ? WHERE id = ?', [
+						parsed.runId,
+						row.id,
+					]);
+					backfillCount++;
+				}
+			} catch {
+				// Skip unparseable rows — they'll remain with run_id = NULL
+			}
+		}
+		if (backfillCount > 0) {
+			this.insertEvent(
+				'migration',
+				'backfill_recall_run_ids',
+				`${backfillCount} memory_recall_usage row(s) run_id backfilled from usage_json`,
+			);
+		}
+
+		// Stamp completion so this full-table scan runs only once.
+		db.run(
+			"INSERT OR REPLACE INTO _meta (key, value) VALUES ('recall_run_id_backfilled', '1')",
 		);
 	}
 

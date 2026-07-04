@@ -8,15 +8,19 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
 import type { CouncilAgent, CouncilMemberVerdict } from '../council/types';
 import { validateSwarmPath } from '../hooks/utils';
+import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
+import { createConfiguredMemoryProvider } from '../memory/gateway';
+import { applyCouncilReward } from '../memory/reward-capture';
 import { computePlanHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
+import * as logger from '../utils/logger';
 import { createSwarmTool } from './create-tool';
 
 const FINAL_COUNCIL_MEMBERS = [
@@ -86,6 +90,7 @@ function normalizeFinalVerdict(
 export async function executeWriteFinalCouncilEvidence(
 	args: unknown,
 	directory: string,
+	ctx?: ToolContext,
 ): Promise<string> {
 	const parsed = ArgsSchema.safeParse(args);
 	if (!parsed.success) {
@@ -239,6 +244,62 @@ export async function executeWriteFinalCouncilEvidence(
 		);
 		await fs.promises.rename(tempPath, validatedPath);
 
+		// B.4 — reward the memories recalled during this run via the SAME shared
+		// mechanism A.4/B.3 use (applyCouncilReward), keyed on the VERIFIED
+		// `ctx.sessionID` supplied by the tool-call runtime — this tool has no
+		// model-suppliable session id field at all, so there is no analogous
+		// trust-gate bypass to guard against; the gate below exists purely to
+		// skip when the session is unlinkable or memory is disabled.
+		//
+		// unitId is intentionally omitted: a final verdict spans the ENTIRE
+		// project run, so there is no single task unitId to narrow by. Passing
+		// `undefined` engages B.2's run_id fallback, rewarding every DISTINCT
+		// memory recalled in this session — the correct semantics for a
+		// project-scoped final verdict.
+		//
+		// Graded reward: the full COUNCIL_VERDICT_REWARDS mapping applies
+		// (APPROVE 1.0 / CONCERNS 0.5 / REJECT 0.0), matching B.3's phase-level
+		// signal rather than a hardcoded APPROVE-only reward.
+		//
+		// No re-submission dedup guard: a final verdict is typically submitted
+		// once per run, and each EMA step is self-correcting/bounded — a
+		// duplicate resolution nudges q-values slightly rather than corrupting
+		// them. B.6 owns the authoritative negative-terminal finalize sweep;
+		// this is the verdict-time graded signal only.
+		//
+		// Non-blocking (SC-013 trust gate + isolation): any failure here
+		// (memory disabled, no sessionID, provider error) must NEVER change
+		// this tool's returned output or evidence — caught and logged, never
+		// rethrown, and never allowed to flip a successful write into a
+		// success:false response.
+		try {
+			const memoryConfig = config.memory;
+			if (memoryConfig?.enabled === true && ctx?.sessionID) {
+				const provider = createConfiguredMemoryProvider(
+					directory,
+					memoryConfig,
+				);
+				try {
+					await applyCouncilReward(provider, {
+						runId: ctx.sessionID,
+						unitId: undefined,
+						reward: COUNCIL_VERDICT_REWARDS[synthesis.overallVerdict],
+						eta: memoryConfig.qLearning.learningRate,
+						initialQValue: memoryConfig.qLearning.initialQValue,
+						qLearning: memoryConfig.qLearning,
+						timestamp: new Date().toISOString(),
+						verdictLabel: synthesis.overallVerdict,
+					});
+				} finally {
+					await provider.close?.();
+				}
+			}
+		} catch (rewardErr) {
+			logger.warn(
+				`[write-final-council-evidence] final council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
+			);
+		}
+
 		return JSON.stringify(
 			{
 				success: true,
@@ -309,7 +370,7 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 				'Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer.',
 			),
 	},
-	execute: async (args, directory) => {
+	execute: async (args, directory, ctx) => {
 		const parsed = ArgsSchema.safeParse(args);
 		if (!parsed.success) {
 			return JSON.stringify(
@@ -328,6 +389,7 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 		return await executeWriteFinalCouncilEvidence(
 			parsed.data as WriteFinalCouncilEvidenceArgs,
 			directory,
+			ctx,
 		);
 	},
 });

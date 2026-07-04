@@ -7,11 +7,18 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import type { tool } from '@opencode-ai/plugin';
+import type { ToolContext, tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { synthesizePhaseCouncilAdvisory } from '../council/council-service';
 import type { CouncilFinding, CouncilMemberVerdict } from '../council/types';
+import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
+import { createConfiguredMemoryProvider } from '../memory/gateway';
+import {
+	applyCouncilReward,
+	truncateObjectForJson,
+} from '../memory/reward-capture';
+import * as logger from '../utils/logger';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -125,7 +132,11 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					'Session ID of the agent that produced this evidence (optional provenance)',
 				),
 		},
-		async execute(args: unknown, directory: string): Promise<string> {
+		async execute(
+			args: unknown,
+			directory: string,
+			ctx?: ToolContext,
+		): Promise<string> {
 			const parsed = ArgsSchema.safeParse(args);
 			if (!parsed.success) {
 				return JSON.stringify(
@@ -283,6 +294,84 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					: undefined;
 
 			writePhaseCouncilEvidence(workingDir, synthesis, provenance);
+
+			// B.3 — reward the memories recalled during this phase's work via the
+			// SAME shared mechanism A.4 uses (applyCouncilReward), keyed on the
+			// VERIFIED `ctx.sessionID` supplied by the tool-call runtime — never
+			// the free-form, model-suppliable `provenanceSessionId` above, which
+			// is preserved in evidence for provenance only and must never be used
+			// as a reward join key (FR-012/SC-013 trust gate).
+			//
+			// unitId is intentionally omitted: a phase spans multiple tasks, so
+			// there is no single task unitId to narrow by. Passing it as
+			// `undefined` engages B.2's run_id fallback, which rewards every
+			// DISTINCT memory recalled in this session — the correct semantics
+			// for a phase-level verdict (task-tagged bundles from B.1 would not
+			// match a phase id even if one existed).
+			//
+			// Graded reward: unlike A.4 (positive-only, task-completion terminal
+			// reward), a phase verdict can resolve APPROVE, CONCERNS, or REJECT,
+			// so the full COUNCIL_VERDICT_REWARDS mapping applies here (1.0 / 0.5
+			// / 0.0) rather than a hardcoded APPROVE-only reward.
+			//
+			// No re-submission dedup guard: this tool is stateless (no in-memory
+			// session store like A.4's `session.taskCouncilApproved`), and each
+			// EMA step is self-correcting/bounded — a duplicate resolution for
+			// the same round nudges q-values slightly rather than corrupting
+			// them. B.6 owns the authoritative negative-terminal sweep at
+			// finalize; this is the verdict-time graded signal only.
+			//
+			// Non-blocking: any failure here (memory disabled, provider error,
+			// unlinkable session) must NEVER change this tool's returned output
+			// or evidence — caught and logged, never rethrown.
+			try {
+				const memoryConfig = config.memory;
+				if (memoryConfig?.enabled === true && ctx?.sessionID) {
+					const provider = createConfiguredMemoryProvider(
+						workingDir,
+						memoryConfig,
+					);
+					try {
+						const rewardSynthesis = {
+							scope: 'phase',
+							phaseNumber: synthesis.phaseNumber,
+							overallVerdict: synthesis.overallVerdict,
+							allCriteriaMet: synthesis.allCriteriaMet,
+							requiredFixesCount: synthesis.requiredFixes?.length ?? 0,
+							roundNumber: synthesis.roundNumber,
+							quorumSize: membersVoted.length,
+						};
+						let verdictSynthesisJson = JSON.stringify(rewardSynthesis);
+						const cap = memoryConfig.qLearning.verdictPayloadCapBytes;
+						if (
+							typeof cap === 'number' &&
+							cap > 0 &&
+							verdictSynthesisJson.length > cap
+						) {
+							verdictSynthesisJson = JSON.stringify(
+								truncateObjectForJson(rewardSynthesis, cap),
+							);
+						}
+						await applyCouncilReward(provider, {
+							runId: ctx.sessionID,
+							unitId: undefined,
+							reward: COUNCIL_VERDICT_REWARDS[synthesis.overallVerdict],
+							eta: memoryConfig.qLearning.learningRate,
+							initialQValue: memoryConfig.qLearning.initialQValue,
+							qLearning: memoryConfig.qLearning,
+							verdictSynthesisJson,
+							timestamp: new Date().toISOString(),
+							verdictLabel: synthesis.overallVerdict,
+						});
+					} finally {
+						await provider.close?.();
+					}
+				}
+			} catch (rewardErr) {
+				logger.warn(
+					`[submit-phase-council-verdicts] phase council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
+				);
+			}
 
 			return JSON.stringify(
 				{

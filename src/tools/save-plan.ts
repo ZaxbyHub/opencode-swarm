@@ -350,6 +350,19 @@ export async function executeSavePlan(
 		}
 		specMtime = spec.mtime ?? undefined;
 		specHash = spec.hash;
+		// Persist spec content snapshot for future drift diffing (FR-001).
+		// Uses a separate snapshot file to avoid bloating plan.json/plan-ledger.
+		// Best-effort: failure does not affect plan save.
+		try {
+			const snapshotPath = path.join(
+				targetWorkspace as string,
+				'.swarm',
+				'spec-snapshot.md',
+			);
+			await fs.promises.writeFile(snapshotPath, spec.content, 'utf-8');
+		} catch {
+			// Non-fatal: snapshot write failure does not affect plan save
+		}
 	}
 
 	// Step 2.y: QA GATE SELECTION CHECK

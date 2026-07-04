@@ -52,10 +52,23 @@ Enable local memory in `.opencode/opencode-swarm.json`:
         "model": "Xenova/ms-marco-MiniLM-L-6-v2"
       },
       "latencyBudgetMs": 250
+    },
+    "learning": {
+      "learningRate": 0.1,
+      "propagationFactor": 0.3,
+      "qValueBoostWeight": 0.1,
+      "suppressionThreshold": 0.15,
+      "promotionThreshold": 0.85,
+      "propagationTokenOverlapThreshold": 0.4,
+      "propagationEmbeddingCosineThreshold": 0.7,
+      "propagationFanout": 20,
+      "propagationLookbackDays": 30
     }
   }
 }
 ```
+
+All `learning.*` fields shown above are the defaults — override only the ones you want to tune; see [Recall Learning](#recall-learning) for what each controls.
 
 `sqlite` is the default provider. `local-jsonl` remains available for legacy/debug mode:
 
@@ -142,6 +155,8 @@ SQLite stores the default durable state in `memory.db`. `memories.jsonl` and `pr
 
 When `provider` is `sqlite`, the database defaults to `.swarm/memory/memory.db` and stores the provider tables `memory_items`, `memory_proposals`, `memory_events`, `memory_recall_usage`, `embedding_config` (migration v6 — stores the dense embedding model version), and `schema_migrations`.
 
+Migration v7 adds recall-learning columns to `memory_recall_usage` (`q_value`, `last_reward`, `task_outcome`, and `council_verdict_json`) so council verdicts can update recalled memories without rewriting historical event JSON by hand.
+
 ## JSONL Migration And Export
 
 When SQLite initializes for a project, it checks for legacy `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` files. Valid records are imported into SQLite, the original JSONL files are copied to `.swarm/memory/backups/*.pre-sqlite-migration`, and the migration is marked complete in `schema_migrations` as `legacy_jsonl_import_complete`. The marker prevents automatic re-import on later runs.
@@ -157,6 +172,7 @@ Memory commands:
 /swarm memory migrate
 /swarm memory evaluate --json
 /swarm memory evaluate --json --fixtures tests/fixtures/memory-recall
+/swarm memory value-log
 ```
 
 `/swarm memory export` writes the current provider contents to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`. `/swarm memory import` explicitly imports the current legacy JSONL files into SQLite; use it for manual recovery or debug workflows after reviewing the source files.
@@ -255,10 +271,29 @@ kind profile            6%
 role boost              5%
 confidence              8%
                        ----
-sum                   1.13
+lexical sum           1.13
+Q-value boost   +/- 5% default (qValue in [0,1], boost weight 0.10), centered at 0.5
 ```
 
-(Weights are an unnormalised weighted sum and may exceed 1.0; `minScore` thresholds are empirical tuning parameters, not probabilities. Default thresholds in `DEFAULT_MEMORY_CONFIG` are calibrated against these actual weights.)
+(Weights are an unnormalised weighted sum and may exceed 1.0; `minScore` thresholds are empirical tuning parameters, not probabilities. Default thresholds in `DEFAULT_MEMORY_CONFIG` are calibrated against these actual weights. The Q-value boost is configured separately through `memory.learning.qValueBoostWeight`; the default is `0.10`.)
+
+### Recall Learning
+
+SQLite memories carry an optional `qValue` in `[0, 1]`; missing values default to `0.5`. Recall suppresses memories below `memory.learning.suppressionThreshold` (`0.15` by default) unless the caller explicitly sets `includeLowQ`. Recall scoring adds `(qValue - 0.5) * memory.learning.qValueBoostWeight`, so neutral memories preserve golden recall behavior while high-value memories with otherwise similar lexical signals rank higher.
+
+`submit_council_verdicts` and `submit_phase_council_verdicts` close the learning loop after a successful evidence write, applying an exponential moving average update with `memory.learning.learningRate` (`0.1` by default):
+
+- `APPROVE` -> reward `+1`
+- `REJECT` -> reward `-1`
+- `CONCERNS` -> reward `0`
+
+**Reward targeting.** The reward is applied to every recall bundle whose session id is either host-derived (the submitting session's own id — cannot be spoofed by tool-call arguments) or caller-supplied and resolved against the tracked session registry: each dispatched council member's own `sessionId` on their verdict, and an optional `provenanceSessionId`. An unrecognized/made-up caller-supplied id is dropped rather than matched, and a submission with no matching recall bundle at all returns `no_recall_usage_for_run` rather than falling back to an unrelated bundle. Repeated submissions for the same `swarmId`+task/phase+round are idempotent — the EMA update is not re-applied.
+
+Known limitations:
+- Matching is still per-session, not per-task/round. A session that has recalled memory for more than one task/round only has its single most recent recall bundle considered when a reward is applied — this can misattribute reward if the same long-lived session reviews multiple tasks without reporting distinct member session ids.
+- Resolving a caller-supplied session id against the tracked session registry proves the id belongs to *some* currently-active session process-wide, not that it belongs to *this* review — there is no session→task ownership registry today. A hallucinated or copied session id matching an unrelated, concurrently-running session would still be accepted; the resulting risk is bounded to Q-value corruption of that other session's recalled memories, not privilege escalation.
+
+The SQLite provider also applies bounded soft propagation to recently recalled, same-scope memories that qualify via EITHER of two independent paths: lexical token overlap (Jaccard similarity, gated additionally on matching `kind`) above `memory.learning.propagationTokenOverlapThreshold` (`0.4` default), OR — when `embeddings.enabled` and a provider is available — embedding cosine similarity above `memory.learning.propagationEmbeddingCosineThreshold` (`0.7` default), which is not restricted to the same `kind` since embeddings capture cross-kind semantic relationships. When embeddings are disabled (the default), propagation is lexical-only with no added cost. Propagation is capped by `memory.learning.propagationFanout` and uses `memory.learning.propagationLookbackDays` to avoid unbounded history scans.
 
 ### Write-Time Embedding
 
@@ -382,9 +417,10 @@ In SQLite, decision application is transactional: Swarm loads the pending propos
 Memory cleanup is explicit. Swarm does not automatically remove deleted, superseded, or expired scratch records. The command surface is safe by default:
 
 - `/swarm memory status` reports storage, migration, and cleanup mode.
-- `/swarm memory pending` lists pending proposals and recent rejected proposal reasons.
+- `/swarm memory pending` lists pending proposals, recent rejected proposal reasons, and promotion candidates (session memories whose learned Q-value has crossed `promotionThreshold` and been recalled more than 5 times — see [Recall Learning](#recall-learning) below).
 - `/swarm memory recall-log` summarizes recall usage by agent role and memory ID, including most-recalled and never-recalled memories.
-- `/swarm memory stale` lists expired scratch memories, deleted tombstones, superseded chains, and low-utility memories.
+- `/swarm memory stale` lists expired scratch memories, deleted tombstones, superseded chains, low-utility memories, and low-Q-value memories (whose learned Q-value has fallen below `suppressionThreshold` and are filtered from default recall).
+- `/swarm memory value-log` shows per-memory Q-value history, recent rewards, and promotion/suppression candidates from the recall learning loop.
 - `/swarm memory compact` is a dry run unless `--confirm` is passed. Confirmed compaction removes only deleted tombstones, superseded records, and expired scratch memories.
 
 Expired scratch memory is hidden from recall and normal list results by default. Superseded chains remain inspectable through `/swarm memory stale` before compaction.

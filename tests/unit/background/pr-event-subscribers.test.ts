@@ -62,6 +62,7 @@ interface MockState {
 	getAgentSession: ReturnType<typeof mock>;
 	log: ReturnType<typeof mock>;
 	getGlobalEventBus: ReturnType<typeof mock>;
+	scheduleClearUnaddressed: ReturnType<typeof mock>;
 	busInstance: {
 		subscribe: ReturnType<typeof mock>;
 	};
@@ -78,6 +79,7 @@ function setupMocks(): void {
 		getAgentSession: mock(() => undefined),
 		log: mock(() => {}),
 		getGlobalEventBus: mock(() => mockState.busInstance),
+		scheduleClearUnaddressed: mock(() => {}),
 		busInstance: {
 			subscribe: mock(() => () => {}),
 		},
@@ -89,6 +91,10 @@ function setupMocks(): void {
 	_internals.log = mockState.log as typeof _internals.log;
 	_internals.getGlobalEventBus =
 		mockState.getGlobalEventBus as typeof _internals.getGlobalEventBus;
+	// No-op the deferred hasUnaddressedEvents clear so these tests never
+	// schedule real timers / store writes.
+	_internals.scheduleClearUnaddressed =
+		mockState.scheduleClearUnaddressed as typeof _internals.scheduleClearUnaddressed;
 }
 
 function restoreInternals(): void {
@@ -97,6 +103,8 @@ function restoreInternals(): void {
 		_internals.getAgentSession = savedInternals.getAgentSession;
 		_internals.log = savedInternals.log;
 		_internals.getGlobalEventBus = savedInternals.getGlobalEventBus;
+		_internals.scheduleClearUnaddressed =
+			savedInternals.scheduleClearUnaddressed;
 	}
 }
 
@@ -143,8 +151,10 @@ describe('registerPrEventSubscribers', () => {
 			config: makeConfig() as PrEventSubscriberOptions['config'],
 		});
 
-		// Should have called subscribe for all 3 event types
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
+		// The legacy 3 flags gate 4 event types: notify_merge_conflict also
+		// gates pr.merge.conflict_resolved. The other flags (review/merged/
+		// closed/ci_success) are unset in makeConfig → skipped.
+		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(4);
 		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
 			'pr.ci.failed',
 			expect.any(Function),
@@ -155,6 +165,10 @@ describe('registerPrEventSubscribers', () => {
 		);
 		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
 			'pr.merge.conflict',
+			expect.any(Function),
+		);
+		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
+			'pr.merge.conflict_resolved',
 			expect.any(Function),
 		);
 
@@ -169,8 +183,8 @@ describe('registerPrEventSubscribers', () => {
 			}) as PrEventSubscriberOptions['config'],
 		});
 
-		// Only 2 event types subscribed (new_comment + merge_conflict)
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(2);
+		// 3 event types subscribed (new_comment + merge_conflict + conflict_resolved)
+		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
 
 		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
 			(c: unknown[]) => c[0],
@@ -178,6 +192,7 @@ describe('registerPrEventSubscribers', () => {
 		expect(subscribedTypes).not.toContain('pr.ci.failed');
 		expect(subscribedTypes).toContain('pr.new.comment');
 		expect(subscribedTypes).toContain('pr.merge.conflict');
+		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
 	});
 
 	test('skips subscriber when notify_new_comments config flag is false', () => {
@@ -188,13 +203,14 @@ describe('registerPrEventSubscribers', () => {
 			}) as PrEventSubscriberOptions['config'],
 		});
 
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(2);
+		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
 		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
 			(c: unknown[]) => c[0],
 		);
 		expect(subscribedTypes).toContain('pr.ci.failed');
 		expect(subscribedTypes).not.toContain('pr.new.comment');
 		expect(subscribedTypes).toContain('pr.merge.conflict');
+		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
 	});
 
 	test('skips subscriber when notify_merge_conflict config flag is false', () => {
@@ -212,6 +228,7 @@ describe('registerPrEventSubscribers', () => {
 		expect(subscribedTypes).toContain('pr.ci.failed');
 		expect(subscribedTypes).toContain('pr.new.comment');
 		expect(subscribedTypes).not.toContain('pr.merge.conflict');
+		expect(subscribedTypes).not.toContain('pr.merge.conflict_resolved');
 	});
 
 	test('skips all subscribers when all config flags are false', () => {

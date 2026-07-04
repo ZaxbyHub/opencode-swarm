@@ -306,7 +306,7 @@ if (!resolved) return { success: false, error: 'working_directory must resolve t
 
 - `grep -rn "process.cwd()" src/tools src/hooks` — every remaining match has a comment justifying it as a documented direct-CLI/test fallback.
 
-### 5. Plan durability
+**Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The resume skill explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
 
 **Anti-pattern:**
 
@@ -327,7 +327,9 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 - `tests/unit/plan/*.test.ts` — replay round-trip + projection tests.
 - `docs/plan-durability.md` is updated when the schema changes.
 
-### 6. test_runner safety (test execution scope)
+**Settled-task re-open guard (FR-005):** `update_task_status` (and the automated delegation path via `advanceTaskStateAndPersist`) must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. `src/plan/manager.ts` implements a three-layer guard: the tool layer (`src/tools/update-task-status.ts`), the manager layer (`updateTaskStatus`), and the automated path all check the current task state before allowing `in_progress` transitions. An explicit `force: true` option permits manual repair. This prevents a session restart from silently overwriting completed work with a fresh `in_progress` state.
+
+### 6. test_runner safety
 
 **Anti-pattern:**
 

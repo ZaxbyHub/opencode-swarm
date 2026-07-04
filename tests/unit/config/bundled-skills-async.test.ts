@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -33,7 +33,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 	let cleanupProject: () => void;
 	let cleanupPackage: () => void;
 	let warnOutput: string[];
-	let origWarn: typeof console.warn;
+	let warnSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
 		_test_exports.resetBundledProjectSkillSyncCache();
@@ -46,14 +46,15 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		writePackageSkill(packageRoot);
 		writePackageSkill(packageRoot, 'design-docs', 'design docs skill\n');
 		warnOutput = [];
-		origWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnOutput.push(args.map(String).join(' '));
-		};
+		warnSpy = spyOn(console, 'warn').mockImplementation(
+			(...args: unknown[]) => {
+				warnOutput.push(args.map(String).join(' '));
+			},
+		);
 	});
 
 	afterEach(() => {
-		console.warn = origWarn;
+		warnSpy.mockRestore();
 		cleanupProject();
 		cleanupPackage();
 	});

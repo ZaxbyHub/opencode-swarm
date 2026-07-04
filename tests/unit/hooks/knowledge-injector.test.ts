@@ -1089,6 +1089,25 @@ describe('Rejected pattern warnings', () => {
 		// Should NOT contain old ones
 		expect(text).not.toContain('Old rejected 1');
 	});
+
+	it('Test 11b: rejected-pattern read failures do not suppress the knowledge block', async () => {
+		readRejectedLessons.mockRejectedValue(
+			new Error('rejected store unreadable'),
+		);
+
+		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		const output = makeOutput('architect');
+
+		await hook({}, output);
+		await hook({}, output);
+
+		const knowledgeMsg = output.messages.find((m) =>
+			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
+		);
+		const text = knowledgeMsg?.parts[0].text ?? '';
+		expect(text).toContain('Some lesson');
+		expect(text).not.toContain('REJECTED PATTERN');
+	});
 });
 
 // ============================================================================

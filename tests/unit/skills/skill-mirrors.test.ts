@@ -134,6 +134,14 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 	it('keeps mirrored skill list in sync with architect mode stubs', () => {
 		// Previous coverage used only this hardcoded list, so a new architect
 		// stub could reference a skill that was never checked for mirror parity.
+		//
+		// swarm-pr-subscribe is event-driven: the PR-monitor wake prompt /
+		// [pr-monitor:...] advisory instructs the subscribed session to load the
+		// skill directly, so no architect.ts MODE stub references it. It still
+		// belongs in ADAPTER_ARCHITECT_MODE_SKILLS so its .claude/.agents shims
+		// are held to the adapter contract. If a /swarm command ever gains a
+		// MODE stub for it, remove this exemption.
+		const eventDrivenAdapterSkills = new Set(['swarm-pr-subscribe']);
 		const stubSlugs = [
 			...architectSource.matchAll(
 				/file:\.opencode\/skills\/([^/\s`]+)\/SKILL\.md/g,
@@ -142,7 +150,9 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		const mirroredSlugs = [
 			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
-			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug).filter(
+				(slug) => !eventDrivenAdapterSkills.has(slug),
+			),
 			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 		];
 

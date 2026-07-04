@@ -5,12 +5,32 @@ import { validateSpecContent } from '../config/spec-schema';
 
 const SWARM_SPEC_REL = path.join('.swarm', 'spec.md');
 const OPENSPEC_ROOT = 'openspec';
+const SPECKIT_MARKER = '.specify';
+const SPECKIT_SPECS_DIR = 'specs';
 const MAX_SPEC_BYTES = 256 * 1024;
 const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_SPEC_FILES = 100;
 const MAX_WALK_DEPTH = 10;
 
-export type EffectiveSpecSource = 'swarm' | 'openspec_projection';
+/**
+ * Required top-level section headers for a Spec-Kit feature spec.md (FR-007).
+ *
+ * Justification for the minimal list:
+ * - `## Functional Requirements` — the content basis for all drift / coverage / projection
+ *   work; absent means nothing can be enforced (FR-007, FR-013).
+ * - `## Success Criteria` — the only Spec-Kit-required acceptance gate; the malformed
+ *   fixture deliberately drops it to exercise the validator.
+ * Keeping the list small and justified avoids over-specifying the Spec-Kit template.
+ */
+const SPECKIT_REQUIRED_SECTIONS = [
+	'## Functional Requirements',
+	'## Success Criteria',
+] as const;
+
+export type EffectiveSpecSource =
+	| 'swarm'
+	| 'openspec_projection'
+	| 'speckit_projection';
 
 export interface OpenSpecArtifact {
 	relPath: string;
@@ -46,6 +66,53 @@ export interface SddStatus {
 	warnings: string[];
 }
 
+/** A single Spec-Kit feature directory containing a spec.md. */
+export interface SpeckitFeatureEntry {
+	/** Full directory name, e.g. `001-feature-name`. */
+	featureId: string;
+	/** Posix-normalized path relative to the repo root, e.g. `specs/001-feature-name/spec.md`. */
+	specRelPath: string;
+}
+
+/** Result returned by {@link detectSpeckit}. */
+export interface SpeckitDetection {
+	/** Whether the `.specify/` marker directory is present at the repo root (A-001). */
+	markerPresent: boolean;
+	/**
+	 * Detected feature directories, sorted lexicographically by {@link SpeckitFeatureEntry.featureId}.
+	 * Empty when no `specs/<feature>/spec.md` files are found (or when markerPresent is false).
+	 */
+	features: SpeckitFeatureEntry[];
+}
+
+/**
+ * Discriminated union returned by {@link resolveSpeckitProjection} (task 1.4).
+ *
+ * Each kind carries exactly the information the command layer (task 2.2) needs to
+ * produce the correct error message per FR-008, FR-012, FR-013 without re-detecting.
+ *
+ * - `not_speckit`      — no `.specify/` marker at the repo root (A-001).
+ * - `empty`            — marker present but no `specs/NNN/spec.md` feature dirs (FR-012).
+ * - `ambiguous`        — more than one feature and no `options.feature` given (FR-008);
+ *                        `features` = sorted feature ids for naming in the error message.
+ * - `unknown_feature`  — `options.feature` was given but matches no detected feature.
+ * - `zero_requirements`— the selected feature's spec.md yielded zero parsable functional
+ *                        requirements (covers unreadable/oversized *input* files too) (FR-013).
+ * - `too_large`        — requirements parsed, but the projected *output* exceeds the byte
+ *                        cap and is refused; `bytes` is the projected size. Distinct from
+ *                        zero_requirements so the command layer reports the real reason.
+ * - `ok`               — a valid projection was built; `spec` is ready for use, `feature`
+ *                        identifies the projected feature dir name.
+ */
+export type SpeckitResolution =
+	| { kind: 'not_speckit' }
+	| { kind: 'empty' }
+	| { kind: 'ambiguous'; features: string[] }
+	| { kind: 'unknown_feature'; feature: string; available: string[] }
+	| { kind: 'zero_requirements'; feature: string }
+	| { kind: 'too_large'; feature: string; bytes: number }
+	| { kind: 'ok'; spec: EffectiveSpec; feature: string };
+
 type DeltaKind = 'ADDED' | 'MODIFIED' | 'REMOVED' | 'CURRENT';
 
 interface ParsedRequirement {
@@ -65,11 +132,25 @@ function hash(content: string): string {
 }
 
 function readTextBounded(absPath: string): string | null {
-	const stat = fs.lstatSync(absPath);
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(absPath);
+	} catch {
+		// File vanished between detection and read (narrow TOCTOU) or is unreadable.
+		// Return null so callers (resolveSpeckitProjection, validateSpeckit) fold this
+		// into their existing null-handling instead of crashing. Mirrors fileArtifact.
+		return null;
+	}
 	if (!stat.isFile() || stat.size > MAX_SOURCE_BYTES) {
 		return null;
 	}
-	return fs.readFileSync(absPath, 'utf-8');
+	try {
+		return fs.readFileSync(absPath, 'utf-8');
+	} catch {
+		// File vanished or became unreadable between the lstatSync check and the read.
+		// Same null-folding contract as the lstatSync guard above.
+		return null;
+	}
 }
 
 function fileArtifact(root: string, absPath: string): OpenSpecArtifact | null {
@@ -221,10 +302,24 @@ function parseRequirements(
 	return requirements;
 }
 
-function nextFrId(used: Set<string>, warnings: string[]): string {
+/**
+ * Allocate the next free synthesized FR id.
+ *
+ * `reserved` (optional) holds ids that explicit requirements own but have not yet
+ * been emitted (e.g. an explicit `FR-001` that appears AFTER an id-less bullet in
+ * document order). Synthesis must skip those so it never steals an explicit id and
+ * forces a spurious renumber (FR-003, Bug 1). When `reserved` is undefined the
+ * behavior is byte-identical to the pre-fix allocator — the OpenSpec path relies on
+ * this, so its projection output is unchanged.
+ */
+function nextFrId(
+	used: Set<string>,
+	warnings: string[],
+	reserved?: Set<string>,
+): string {
 	for (let n = 1; n <= 999; n++) {
 		const id = `FR-${String(n).padStart(3, '0')}`;
-		if (!used.has(id)) {
+		if (!used.has(id) && !reserved?.has(id)) {
 			used.add(id);
 			return id;
 		}
@@ -237,8 +332,10 @@ function renderRequirement(
 	req: ParsedRequirement,
 	used: Set<string>,
 	warnings: string[],
+	reserved?: Set<string>,
 ): string {
-	const id = req.id && !used.has(req.id) ? req.id : nextFrId(used, warnings);
+	const id =
+		req.id && !used.has(req.id) ? req.id : nextFrId(used, warnings, reserved);
 	if (req.id && req.id !== id) {
 		warnings.push(
 			`Duplicate requirement id ${req.id} in ${req.sourceRel}; generated ${id}.`,
@@ -253,7 +350,320 @@ function renderRequirement(
 	return `- ${text} _(source: ${req.sourceRel})_`;
 }
 
-export function loadSddStatusSync(directory: string): SddStatus {
+/**
+ * Detect whether `directory` is a GitHub Spec-Kit project (FR-001, A-001).
+ *
+ * Detection key: the `.specify/` marker directory at the repo root.
+ * A repo with `specs/` but no `.specify/` is NOT a Spec-Kit repo (A-001).
+ *
+ * When the marker is present, enumerates all direct children of `specs/` that
+ * contain a `spec.md` file.  The enumeration is:
+ * - One level deep (depth is bounded by construction — stronger than MAX_WALK_DEPTH).
+ * - Bounded by MAX_SPEC_FILES.
+ * - Symlink-safe: directories and spec.md files that are symlinks are skipped.
+ * - Size-bounded: spec.md files exceeding MAX_SOURCE_BYTES are skipped.
+ * - Error-swallowing: unreadable directories are skipped silently.
+ * - Deterministic: feature entries are sorted lexicographically by featureId.
+ *
+ * Does NOT read or parse spec.md content — detection only (FR-001).
+ */
+export function detectSpeckit(directory: string): SpeckitDetection {
+	const root = path.resolve(directory);
+
+	// A-001: detection is keyed on the .specify/ marker DIRECTORY at the repo root.
+	// statSync (not lstatSync) so a symlinked marker dir is followed; a regular file
+	// named .specify is correctly rejected as non-conformant with the Spec-Kit layout.
+	const markerPath = path.join(root, SPECKIT_MARKER);
+	const markerPresent =
+		fs.statSync(markerPath, { throwIfNoEntry: false })?.isDirectory() ?? false;
+
+	if (!markerPresent) {
+		return { markerPresent: false, features: [] };
+	}
+
+	const specsRoot = path.join(root, SPECKIT_SPECS_DIR);
+	if (!fs.existsSync(specsRoot)) {
+		return { markerPresent: true, features: [] };
+	}
+
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(specsRoot, { withFileTypes: true });
+	} catch {
+		return { markerPresent: true, features: [] };
+	}
+
+	// Feature dirs are direct children of specs/ that are not symlinks.
+	const featureDirs = entries
+		.filter(
+			(entry): entry is fs.Dirent =>
+				typeof entry?.name === 'string' &&
+				!entry.isSymbolicLink() &&
+				entry.isDirectory(),
+		)
+		.sort((a, b) => a.name.localeCompare(b.name));
+
+	const features: SpeckitFeatureEntry[] = [];
+	for (const entry of featureDirs) {
+		if (features.length >= MAX_SPEC_FILES) break;
+
+		const specAbs = path.join(specsRoot, entry.name, 'spec.md');
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(specAbs);
+		} catch {
+			// spec.md missing or unreadable — not a feature dir
+			continue;
+		}
+		// isFile() returns false for symlinks under lstatSync, so no separate
+		// isSymbolicLink() check is needed here.
+		if (!stat.isFile() || stat.size > MAX_SOURCE_BYTES) continue;
+
+		features.push({
+			featureId: entry.name,
+			specRelPath: toPosix(path.relative(root, specAbs)),
+		});
+	}
+
+	return { markerPresent: true, features };
+}
+
+/**
+ * Parse Spec-Kit functional requirements from a feature's spec.md content.
+ *
+ * Separate from parseRequirements (the OpenSpec parser) which MUST remain
+ * byte-untouched for OpenSpec compatibility (FR-011, critic Finding 1).
+ *
+ * Handles two cases within the `## Functional Requirements` section:
+ * (a) Explicit FR-### id (e.g. `- **FR-001**: System MUST …`) — preserve id unchanged (FR-003).
+ * (b) Id-less obligation bullet (e.g. `- System MUST …`) — id: null so nextFrId synthesises
+ *     a stable id at render time (FR-004).  This is the primary synthesis path: the shared
+ *     parseRequirements drops these lines silently because they match neither the explicit-FR
+ *     branch nor the `### Requirement:` header branch.
+ *
+ * Traversal is deterministic (top-to-bottom within the section) so synthesised ids are
+ * stable across repeated calls on the same content (FR-004, SC-003).
+ */
+function parseSpeckitRequirements(
+	content: string,
+	sourceRel: string,
+): ParsedRequirement[] {
+	const requirements: ParsedRequirement[] = [];
+	const lines = content.replace(/\r\n/g, '\n').split('\n');
+	let inFrSection = false;
+
+	for (const line of lines) {
+		// Track ## section boundaries (## only — ### or #### do not reset inFrSection).
+		if (/^##\s+/.test(line)) {
+			inFrSection = /^##\s+Functional Requirements\s*$/i.test(line);
+			continue;
+		}
+
+		if (!inFrSection) continue;
+
+		// Only process list bullets (- or *).
+		if (!/^\s*[-*]\s+/.test(line)) continue;
+
+		// Must carry an obligation keyword.
+		if (!/\b(MUST|SHALL|SHOULD|MAY)\b/i.test(line)) continue;
+
+		const text = line.trim().replace(/^\s*[-*]\s+/, '');
+
+		// Case (a): explicit FR-### id — preserve it unchanged (FR-003).
+		const explicit = line.match(/\b(FR-(?!000)\d{3})\b/);
+		if (explicit) {
+			requirements.push({
+				id: explicit[1].toUpperCase(),
+				kind: 'CURRENT',
+				title: explicit[1].toUpperCase(),
+				text,
+				sourceRel,
+			});
+			continue;
+		}
+
+		// Case (b): id-less obligation bullet — id: null for nextFrId synthesis (FR-004).
+		requirements.push({
+			id: null,
+			kind: 'CURRENT',
+			title: text,
+			text,
+			sourceRel,
+		});
+	}
+
+	return requirements;
+}
+
+/**
+ * Resolve a Spec-Kit feature projection with a discriminated result (FR-008, FR-012, FR-013).
+ *
+ * Returns one of six kinds so the command layer can produce the right error message without
+ * re-running detection:
+ * - `not_speckit`       — no `.specify/` marker (A-001).
+ * - `empty`             — marker present but no feature dirs (FR-012).
+ * - `ambiguous`         — multiple features, no `options.feature` (FR-008).
+ * - `unknown_feature`   — `options.feature` not among detected features.
+ * - `zero_requirements` — feature found but yields zero parsable FRs, or spec.md unreadable
+ *                         (FR-013; covers oversized files too).
+ * - `ok`                — valid EffectiveSpec built (FR-002, FR-003, FR-004, FR-005).
+ *
+ * This function is the single source of truth for feature selection logic.
+ * {@link buildSpeckitProjectionSync} delegates here and maps `ok → spec | null`.
+ */
+export function resolveSpeckitProjection(
+	directory: string,
+	options: { feature?: string } = {},
+): SpeckitResolution {
+	const root = path.resolve(directory);
+	const detection = detectSpeckit(root);
+
+	if (!detection.markerPresent) {
+		return { kind: 'not_speckit' };
+	}
+
+	if (detection.features.length === 0) {
+		return { kind: 'empty' };
+	}
+
+	// Feature selection.
+	let selectedFeature: SpeckitFeatureEntry;
+	if (options.feature) {
+		const found = detection.features.find(
+			(f) => f.featureId === options.feature,
+		);
+		if (!found) {
+			return {
+				kind: 'unknown_feature',
+				feature: options.feature,
+				// detectSpeckit already sorts features lexicographically.
+				available: detection.features.map((f) => f.featureId),
+			};
+		}
+		selectedFeature = found;
+	} else if (detection.features.length === 1) {
+		// Single-feature auto-select (FR-008).
+		selectedFeature = detection.features[0]!;
+	} else {
+		// Multiple features, no explicit selection — caller must name one (FR-008).
+		return {
+			kind: 'ambiguous',
+			// detectSpeckit already sorts lexicographically.
+			features: detection.features.map((f) => f.featureId),
+		};
+	}
+
+	const specAbs = path.join(root, selectedFeature.specRelPath);
+	const content = readTextBounded(specAbs);
+	// Unreadable/oversized spec.md — fold into zero_requirements (nothing to project).
+	if (content === null) {
+		return { kind: 'zero_requirements', feature: selectedFeature.featureId };
+	}
+
+	const warnings: string[] = [];
+	const usedIds = new Set<string>();
+
+	const requirements = parseSpeckitRequirements(
+		content,
+		selectedFeature.specRelPath,
+	);
+
+	// Mirror buildOpenSpecProjectionSync's zero-FR handling — zero FRs → advisory (FR-013).
+	if (requirements.length === 0) {
+		return { kind: 'zero_requirements', feature: selectedFeature.featureId };
+	}
+
+	// FR-003 (Bug 1): pre-scan and reserve every explicit id BEFORE the render loop so
+	// synthesis (nextFrId) never steals an explicit FR-### that appears later in document
+	// order. Without this, an id-less bullet before an explicit `FR-001` would allocate
+	// FR-001 for itself and force the real explicit `FR-001` to renumber (FR-002) with a
+	// "Duplicate requirement id" warning. Reserving (rather than seeding usedIds) keeps each
+	// explicit requirement rendering with its OWN id and preserves the genuine
+	// duplicate-explicit-id warning (two explicit reqs truly sharing an id).
+	const reservedIds = new Set<string>();
+	for (const req of requirements) {
+		if (req.id) reservedIds.add(req.id);
+	}
+
+	let mtimeMs = 0;
+	try {
+		mtimeMs = fs.lstatSync(specAbs).mtimeMs;
+	} catch {
+		// mtime unavailable — leave 0; caller sees mtime: null in the returned spec.
+	}
+
+	const lines: string[] = [
+		'# Specification: Effective SDD Projection',
+		'',
+		'Generated from Spec-Kit feature artifacts. Update the source artifacts, then run `/swarm sdd project` to refresh this projection.',
+		'',
+		'## Source Artifacts',
+		`- ${selectedFeature.specRelPath}`,
+		'',
+		'## Functional Requirements',
+	];
+
+	for (const req of requirements) {
+		lines.push(renderRequirement(req, usedIds, warnings, reservedIds));
+	}
+
+	const projected = `${lines.join('\n')}\n`;
+
+	if (projected.length > MAX_SPEC_BYTES) {
+		// Requirements parsed successfully but the projected output is too large to use.
+		// This is a distinct reason from zero_requirements — surface it accurately so the
+		// command layer (FR-013 messaging) does not falsely report "no requirements".
+		return {
+			kind: 'too_large',
+			feature: selectedFeature.featureId,
+			bytes: projected.length,
+		};
+	}
+
+	const validation = validateSpecContent(projected);
+	if (!validation.valid) {
+		warnings.push(
+			...validation.issues.map(
+				(issue) => `Projection line ${issue.line}: ${issue.message}`,
+			),
+		);
+	}
+
+	const spec: EffectiveSpec = {
+		source: 'speckit_projection',
+		content: projected,
+		hash: hash(projected),
+		mtime: mtimeMs > 0 ? new Date(mtimeMs).toISOString() : null,
+		sourcePaths: [selectedFeature.specRelPath],
+		warnings,
+	};
+
+	return { kind: 'ok', spec, feature: selectedFeature.featureId };
+}
+
+/**
+ * Project a single Spec-Kit feature into an EffectiveSpec (FR-002, FR-003, FR-004, FR-005).
+ *
+ * Delegates all selection and build logic to {@link resolveSpeckitProjection} — that function
+ * is the single source of truth for feature selection.  This wrapper preserves the existing
+ * `EffectiveSpec | null` contract so all call sites (task 2.2, tests) are unchanged.
+ *
+ * Returns null when resolution is anything other than `ok` (not_speckit, empty, ambiguous,
+ * unknown_feature, zero_requirements).  Callers that need the failure reason should call
+ * {@link resolveSpeckitProjection} directly.
+ */
+export function buildSpeckitProjectionSync(
+	directory: string,
+	options: { feature?: string } = {},
+): EffectiveSpec | null {
+	const resolution = resolveSpeckitProjection(directory, options);
+	return resolution.kind === 'ok' ? resolution.spec : null;
+}
+
+export function loadSddStatusSync(
+	directory: string,
+	opts?: ReadEffectiveSpecOpts,
+): SddStatus {
 	const root = path.resolve(directory);
 	const swSpecPath = path.join(root, SWARM_SPEC_REL);
 	const openSpecPath = path.join(root, OPENSPEC_ROOT);
@@ -263,7 +673,9 @@ export function loadSddStatusSync(directory: string): SddStatus {
 	const openSpecExists = fs.existsSync(openSpecPath);
 	const currentSpecs = walkSpecFiles(root, path.join(OPENSPEC_ROOT, 'specs'));
 	const changes = listOpenSpecChanges(root);
-	const effectiveSpec = readEffectiveSpecSync(root);
+	// Forward opts so an explicit --source selection is honored (FR-009); with no
+	// opts this is byte-identical to the prior auto-detect behavior.
+	const effectiveSpec = readEffectiveSpecSync(root, opts);
 
 	if (openSpecExists && currentSpecs.length === 0 && changes.length === 0) {
 		errors.push('openspec/ exists but contains no specs or active changes.');
@@ -418,9 +830,74 @@ export function buildOpenSpecProjectionSync(
 	};
 }
 
-export function readEffectiveSpecSync(directory: string): EffectiveSpec | null {
+/**
+ * Resolver options for {@link readEffectiveSpecSync} (task 2.1, FR-009).
+ *
+ * Both fields are optional so that all 13 existing single-argument call sites
+ * continue to work unchanged.
+ */
+export interface ReadEffectiveSpecOpts {
+	/**
+	 * Explicit provider selection (FR-009 step b).
+	 * When given, the specified provider is used directly after the native swarm
+	 * spec check.  A `'swarm'` selection with no `.swarm/spec.md` returns null.
+	 */
+	source?: 'swarm' | 'openspec' | 'speckit';
+	/**
+	 * Feature selector forwarded to {@link buildSpeckitProjectionSync} when the
+	 * effective provider is Spec-Kit.  Ignored for `source: 'openspec'` or
+	 * `source: 'swarm'` (feature-vs-non-speckit source validation is enforced at
+	 * the command layer in task 2.2, not here).
+	 */
+	feature?: string;
+}
+
+/**
+ * Read (or build) the effective spec for a directory, applying deterministic
+ * source precedence (FR-009, FR-010, FR-011).
+ *
+ * **Precedence:**
+ * a. `.swarm/spec.md` present → return the native swarm spec.  This branch is
+ *    IDENTICAL to the pre-task-2.1 code and wins even over an explicit
+ *    `opts.source` — native swarm spec always wins (FR-009).
+ * b. `opts.source` given → use that provider: `'openspec'` calls
+ *    {@link buildOpenSpecProjectionSync}; `'speckit'` calls
+ *    {@link buildSpeckitProjectionSync}; `'swarm'` with no `.swarm/spec.md`
+ *    returns null.
+ * c. Auto-detect:
+ *    - **No `.specify/` marker** → byte-identical to pre-task-2.1 behavior:
+ *      call {@link buildOpenSpecProjectionSync} and return its result (FR-011).
+ *    - **`.specify/` present but no feature dirs** (empty marker) → Spec-Kit is
+ *      NOT counted as a competing source; behaves like the no-marker case.
+ *    - **`.specify/` with ≥1 feature dir and no openspec projection** → return
+ *      the Spec-Kit projection.
+ *    - **`.specify/` with ≥1 feature dir AND openspec yields a projection** →
+ *      AMBIGUOUS (FR-010): emit a concrete diagnostic via `console.warn` (the
+ *      anti-silent-suppression requirement; critic Finding 2) and return null.
+ *      The diagnostic is independent of the return value so it fires even when
+ *      no consumer inspects the null return (e.g. the drift gate, which only
+ *      checks for null to decide advisory-vs-blocking mode).
+ *
+ * **Backward-compat (FR-011):** when `.detectSpeckit(directory).markerPresent`
+ * is false, the function is byte-identical to pre-task-2.1.  The additional
+ * `detectSpeckit` call (a single `fs.existsSync`) is the only overhead.
+ *
+ * **Deviation from task-2.1 literal text:** the task body says "Spec-Kit
+ * present (`detectSpeckit(dir).markerPresent`)" but plan.md task 3.1 and the
+ * test note both state that an empty `.specify/` "would never reach the
+ * ambiguity branch."  `markerPresent` is true for empty-specify, so it cannot
+ * be the discriminator.  We use `features.length > 0` instead, which is
+ * symmetric with "OpenSpec present (yields a projection)" and makes empty
+ * `.specify/` a non-competing source, matching both citations.
+ */
+export function readEffectiveSpecSync(
+	directory: string,
+	opts?: ReadEffectiveSpecOpts,
+): EffectiveSpec | null {
 	const root = path.resolve(directory);
 	const swSpecPath = path.join(root, SWARM_SPEC_REL);
+
+	// a. Native swarm spec always wins — EXACTLY today's behavior, unchanged.
 	try {
 		const stat = fs.lstatSync(swSpecPath);
 		if (stat.isFile() && stat.size <= MAX_SPEC_BYTES) {
@@ -439,12 +916,73 @@ export function readEffectiveSpecSync(directory: string): EffectiveSpec | null {
 			throw error;
 		}
 	}
-	return buildOpenSpecProjectionSync(root);
+
+	// b. Explicit source selection — use the named provider directly.
+	if (opts?.source) {
+		switch (opts.source) {
+			case 'openspec':
+				return buildOpenSpecProjectionSync(root);
+			case 'speckit':
+				return buildSpeckitProjectionSync(root, { feature: opts.feature });
+			case 'swarm':
+				// No .swarm/spec.md present (already checked above) → null.
+				return null;
+		}
+	}
+
+	// c. Auto-detect: determine which projection sources are present.
+
+	// BACKWARD-COMPAT (FR-011): when no .specify/ marker, behavior is
+	// byte-identical to today — swarm spec (handled above) else openspec.
+	const speckitDetection = detectSpeckit(root);
+	if (!speckitDetection.markerPresent) {
+		return buildOpenSpecProjectionSync(root);
+	}
+
+	// "Spec-Kit present" = marker present AND at least one valid feature dir.
+	// An empty .specify/ (features.length === 0) is NOT a competing source —
+	// fall through to openspec as if the marker were absent (plan.md task 3.1;
+	// test note: "NOT empty, or it won't register as a competing source").
+	const speckitPresent = speckitDetection.features.length > 0;
+
+	if (!speckitPresent) {
+		// .specify/ exists but is empty — not a competing source.
+		return buildOpenSpecProjectionSync(root);
+	}
+
+	// Spec-Kit present: check whether OpenSpec is also present.
+	// "OpenSpec present" = openspec/ layout yields a non-null projection.
+	const openspecProjection = buildOpenSpecProjectionSync(root);
+	const openspecPresent = openspecProjection !== null;
+
+	if (openspecPresent) {
+		// FR-010 / critic Finding 2: BOTH sources present, no --source given.
+		// Emit a concrete resolver-side diagnostic BEFORE returning null.
+		// This is INDEPENDENT of the null return value: the drift gate (and all
+		// other consumers) see only the null; this warn fires regardless of
+		// whether any consumer checks the return or its contents.
+		console.warn(
+			'[opencode-swarm] Multiple SDD sources detected (openspec and speckit). ' +
+				'Enforcement/projection is suppressed until you disambiguate. ' +
+				'Pass --source openspec or --source speckit to select a provider.',
+		);
+		return null;
+	}
+
+	// Only Spec-Kit present — return the Spec-Kit projection.
+	return buildSpeckitProjectionSync(root, { feature: opts?.feature });
 }
 
 export function writeProjectedSpecSync(
 	directory: string,
-	options: { changeId?: string; dryRun?: boolean } = {},
+	options: {
+		changeId?: string;
+		dryRun?: boolean;
+		/** When `'speckit'`, builds a Spec-Kit projection instead of OpenSpec (task 2.2). */
+		source?: 'openspec' | 'speckit';
+		/** Feature selector forwarded to buildSpeckitProjectionSync when source is speckit. */
+		feature?: string;
+	} = {},
 ): {
 	written: boolean;
 	projection: EffectiveSpec | null;
@@ -452,9 +990,10 @@ export function writeProjectedSpecSync(
 	path: string;
 } {
 	const root = path.resolve(directory);
-	const projection = buildOpenSpecProjectionSync(root, {
-		changeId: options.changeId,
-	});
+	const projection =
+		options.source === 'speckit'
+			? buildSpeckitProjectionSync(root, { feature: options.feature })
+			: buildOpenSpecProjectionSync(root, { changeId: options.changeId });
 	const target = path.join(root, SWARM_SPEC_REL);
 	if (!projection || options.dryRun) {
 		return { written: false, projection, path: target };
@@ -477,4 +1016,111 @@ export function writeProjectedSpecSync(
 	fs.writeFileSync(tmp, projection.content, 'utf-8');
 	fs.renameSync(tmp, target);
 	return { written: true, projection, archivePath, path: target };
+}
+
+/**
+ * Validate Spec-Kit artifacts READ-ONLY (FR-007, task 2.3).
+ *
+ * MUST NOT write or modify any Spec-Kit artifact — it only reads spec.md and
+ * tasks.md to report structural problems.
+ *
+ * Returns the {@link SpeckitResolution} from {@link resolveSpeckitProjection}
+ * alongside a flat `problems` array.  Returning both avoids a second
+ * `resolveSpeckitProjection` call in the command layer (which would need the
+ * projection's hash / sourcePaths from `resolution.spec`).
+ *
+ * **Problems reported** (only when `resolution.kind` is `'ok'` or
+ * `'zero_requirements'` — i.e. when we have a feature to inspect):
+ * - Zero parsable functional requirements (`zero_requirements` kind, FR-013).
+ * - Missing required spec.md sections (`SPECKIT_REQUIRED_SECTIONS`).
+ * - `tasks.md` task lines that carry no `[US#]` user-story reference (FR-007).
+ *
+ * For other resolution kinds (`not_speckit`, `empty`, `ambiguous`,
+ * `unknown_feature`, `too_large`) the command layer uses
+ * {@link formatSpeckitError} on the returned resolution — same messaging path
+ * as task 2.2 (plan.md task 2.3 requirement: no second messaging scheme).
+ */
+export function validateSpeckit(
+	directory: string,
+	options: { feature?: string } = {},
+): { resolution: SpeckitResolution; problems: string[] } {
+	const root = path.resolve(directory);
+	const resolution = resolveSpeckitProjection(root, options);
+	const problems: string[] = [];
+
+	// Structural validation only applies when we resolved to a specific feature.
+	if (resolution.kind !== 'ok' && resolution.kind !== 'zero_requirements') {
+		return { resolution, problems };
+	}
+
+	// FR-013: surface zero parsable requirements as a problem.
+	if (resolution.kind === 'zero_requirements') {
+		problems.push(
+			`Feature '${resolution.feature}' contains no parsable functional requirements.`,
+		);
+	}
+
+	// Locate the feature entry to derive spec.md / tasks.md absolute paths.
+	// detectSpeckit is read-only (no side effects) and deterministic.
+	const detection = detectSpeckit(root);
+	const featureEntry = detection.features.find(
+		(f) => f.featureId === resolution.feature,
+	);
+	if (!featureEntry) {
+		// Race condition: feature disappeared between the two reads. Be defensive.
+		return { resolution, problems };
+	}
+
+	const specAbs = path.join(root, featureEntry.specRelPath);
+
+	// --- spec.md structural check (READ-ONLY) ---
+	let specContent: string | null = null;
+	try {
+		specContent = readTextBounded(specAbs);
+	} catch {
+		// File missing or unreadable — skip section checks.
+	}
+
+	if (specContent !== null) {
+		const specLines = specContent.replace(/\r\n/g, '\n').split('\n');
+		for (const requiredHeader of SPECKIT_REQUIRED_SECTIONS) {
+			// Exact line match after stripping trailing whitespace.  This correctly
+			// rejects `### Functional Requirements` (wrong level) and ignores
+			// `## Functional Requirements Details` (extra text on the same line).
+			if (!specLines.some((line) => line.trimEnd() === requiredHeader)) {
+				problems.push(`Missing required spec.md section: ${requiredHeader}`);
+			}
+		}
+	}
+
+	// --- tasks.md structural check (READ-ONLY) ---
+	// tasks.md sits alongside spec.md in the same feature directory.
+	const tasksAbs = path.join(path.dirname(specAbs), 'tasks.md');
+	let tasksContent: string | null = null;
+	try {
+		tasksContent = readTextBounded(tasksAbs);
+	} catch {
+		// tasks.md absent or unreadable — skip; it is optional.
+	}
+
+	if (tasksContent !== null) {
+		const tasksLines = tasksContent.replace(/\r\n/g, '\n').split('\n');
+		for (const line of tasksLines) {
+			// Match a task checkbox line and capture the task id (T### pattern).
+			const taskMatch = line.match(/^\s*-\s+\[[ xX]\]\s+(T\d+)/);
+			if (!taskMatch) continue;
+			const taskId = taskMatch[1]!;
+			// FR-007: a task must carry a spec/requirement reference. Accept EITHER a
+			// `[US#]` user-story tag OR an `FR-###` requirement id — flag only when the
+			// task has neither (a task that explicitly references FR-001, or a setup task
+			// tagged to a story, is a legitimate reference and must not be flagged).
+			const hasStoryRef = /\[US\d+\]/i.test(line);
+			const hasReqRef = /\bFR-(?!000)\d{3}\b/i.test(line);
+			if (!hasStoryRef && !hasReqRef) {
+				problems.push(`Task ${taskId} has no spec/requirement reference.`);
+			}
+		}
+	}
+
+	return { resolution, problems };
 }

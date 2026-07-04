@@ -1,4 +1,7 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
 	MemoryLifecycleHookOptions,
 	RecallBundle,
@@ -67,37 +70,58 @@ function makeBundle(record: MemoryRecord): RecallBundle {
 	};
 }
 
+interface GatewayContext {
+	directory: string;
+	sessionID?: string;
+	agentRole?: string;
+	agentId?: string;
+	runId?: string;
+	unitId?: string;
+}
+
 interface HooksAndRecorder {
 	hooks: ReturnType<typeof createMemoryLifecycleHooks>;
 	recalls: RecallMemoryInput[];
 	logs: unknown[];
+	contexts: GatewayContext[];
 }
 
-function makeHooks(bundle: RecallBundle): HooksAndRecorder {
+function makeHooks(
+	bundle: RecallBundle,
+	extraOptions: Partial<
+		Pick<MemoryLifecycleHookOptions, 'getActiveTaskId'>
+	> = {},
+): HooksAndRecorder {
 	const recalls: RecallMemoryInput[] = [];
 	const logs: unknown[] = [];
-	const createGateway: MemoryLifecycleHookOptions['createGateway'] = () => ({
-		isEnabled: () => true,
-		deriveAllowedScopes: () => allowedScopes,
-		recall: async (input) => {
-			recalls.push(input);
-			return bundle;
-		},
-		propose: async () => {
-			const proposal: MemoryProposal = {
-				id: 'prop_1111111111111111',
-				operation: 'add',
-				proposedBy: { agentRole: 'coder', runId: 'session-a' },
-				rationale: 'test',
-				evidenceRefs: [],
-				status: 'pending',
-				createdAt: '2026-05-24T00:00:00.000Z',
-				metadata: {},
-			};
-			return proposal;
-		},
-		dispose: async () => {},
-	});
+	const contexts: GatewayContext[] = [];
+	const createGateway: MemoryLifecycleHookOptions['createGateway'] = (
+		context,
+	) => {
+		contexts.push(context);
+		return {
+			isEnabled: () => true,
+			deriveAllowedScopes: () => allowedScopes,
+			recall: async (input) => {
+				recalls.push(input);
+				return bundle;
+			},
+			propose: async () => {
+				const proposal: MemoryProposal = {
+					id: 'prop_1111111111111111',
+					operation: 'add',
+					proposedBy: { agentRole: 'coder', runId: 'session-a' },
+					rationale: 'test',
+					evidenceRefs: [],
+					status: 'pending',
+					createdAt: '2026-05-24T00:00:00.000Z',
+					metadata: {},
+				};
+				return proposal;
+			},
+			dispose: async () => {},
+		};
+	};
 	const hooks = createMemoryLifecycleHooks({
 		directory: 'C:/repo-a',
 		config: { enabled: true },
@@ -106,8 +130,9 @@ function makeHooks(bundle: RecallBundle): HooksAndRecorder {
 		appendRunLog: async (_directory, _runId, event) => {
 			logs.push(event);
 		},
+		...extraOptions,
 	});
-	return { hooks, recalls, logs };
+	return { hooks, recalls, logs, contexts };
 }
 
 describe('agentTask propagation — SC-017 and SC-018', () => {
@@ -522,5 +547,283 @@ describe('agentTask propagation — SC-017 and SC-018', () => {
 			// Non-string prompt should trigger fallback
 			expect(recalls[0].task).toBe(userGoal);
 		});
+	});
+});
+
+describe('unitId propagation — injection path (B.1)', () => {
+	// Coverage gap flagged by an independent reviewer: the manual swarm_memory_recall
+	// tool's unitId resolver is tested (tests/unit/tools/swarm-memory-recall-unit-id.test.ts),
+	// but the INJECTION path — getActiveTaskId wired in src/index.ts, threaded through
+	// injectIntoMessages/recallForAgent in src/memory/injector.ts — was inspection-verified
+	// only. This block closes that gap by capturing the context passed into createGateway
+	// (unitId lives there, NOT in the recall() input — see recallForAgent in injector.ts).
+	const standardOutput = (sessionID: string) => ({
+		messages: [
+			{
+				info: { role: 'system', sessionID },
+				parts: [{ type: 'text', text: 'You are Test Engineer.' }],
+			},
+			{
+				info: { role: 'user', sessionID },
+				parts: [{ type: 'text', text: 'TASK: implement the memory join key' }],
+			},
+		],
+	});
+
+	test('positive: getActiveTaskId resolving a task id threads unitId onto the gateway context', async () => {
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const { hooks, contexts } = makeHooks(bundle, {
+			getActiveTaskId: (sessionID) =>
+				sessionID === 'session-a' ? '1.2' : undefined,
+		});
+
+		await hooks.messagesTransform(
+			{ sessionID: 'session-a' },
+			standardOutput('session-a'),
+		);
+
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]?.unitId).toBe('1.2');
+	});
+
+	test('degrade: getActiveTaskId returning undefined leaves unitId undefined (no sessionID fallback, no empty string)', async () => {
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const { hooks, contexts } = makeHooks(bundle, {
+			// Dominant subagent-session case: no task id is resolvable for this session.
+			getActiveTaskId: () => undefined,
+		});
+
+		await hooks.messagesTransform(
+			{ sessionID: 'session-a' },
+			standardOutput('session-a'),
+		);
+
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]?.unitId).toBeUndefined();
+		// Regression guards: a `?? sessionID` or `?? ''` fallback would surface here.
+		expect(contexts[0]?.unitId).not.toBe('session-a');
+		expect(contexts[0]?.unitId).not.toBe('');
+	});
+
+	test("same-session property: getActiveTaskId is invoked with the recall's own sessionID, exactly once", async () => {
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const receivedSessionIDs: (string | undefined)[] = [];
+		const { hooks, contexts } = makeHooks(bundle, {
+			getActiveTaskId: (sessionID) => {
+				receivedSessionIDs.push(sessionID);
+				return '3.4';
+			},
+		});
+
+		await hooks.messagesTransform(
+			{ sessionID: 'session-a' },
+			standardOutput('session-a'),
+		);
+
+		// Called exactly once, with the recall's own session — never a different one.
+		expect(receivedSessionIDs).toHaveLength(1);
+		const resolvedFor = receivedSessionIDs[0];
+		expect(resolvedFor).toBe('session-a');
+		// The context the recall was recorded under must match the SAME sessionID
+		// the resolver was called with (bind, don't just compare against a literal twice).
+		expect(contexts[0]?.sessionID).toBe(resolvedFor);
+		expect(contexts[0]?.runId).toBe(resolvedFor);
+		expect(contexts[0]?.unitId).toBe('3.4');
+	});
+});
+
+describe('unitid-probe — issue #1467 diagnostic (env-gated, inert by default)', () => {
+	// Verifies the OPENCODE_SWARM_MEMORY_UNITID_PROBE=1 diagnostic added to
+	// injector.ts: a temporary empirical probe that records, per injected
+	// recall, whether the subagent's dispatch prompt carries a parseable
+	// plan-task-id even when session-state resolution (getActiveTaskId)
+	// finds nothing for that session.
+	const originalFlag = process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE;
+	let probeDir: string;
+
+	beforeEach(() => {
+		probeDir = mkdtempSync(path.join(os.tmpdir(), 'injector-unitid-probe-'));
+	});
+
+	afterEach(() => {
+		if (originalFlag === undefined) {
+			delete process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE;
+		} else {
+			process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE = originalFlag;
+		}
+		try {
+			rmSync(probeDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
+	function probeFilePath(dir: string): string {
+		return path.join(dir, '.swarm', 'memory', 'unitid-probe.jsonl');
+	}
+
+	function makeHooksWithDirectory(
+		bundle: RecallBundle,
+		directory: string,
+		extraOptions: Partial<
+			Pick<MemoryLifecycleHookOptions, 'getActiveTaskId'>
+		> = {},
+	): ReturnType<typeof createMemoryLifecycleHooks> {
+		const createGateway: MemoryLifecycleHookOptions['createGateway'] = () => ({
+			isEnabled: () => true,
+			deriveAllowedScopes: () => allowedScopes,
+			recall: async () => bundle,
+			propose: async () => {
+				throw new Error('propose is not exercised by this test');
+			},
+			dispose: async () => {},
+		});
+		return createMemoryLifecycleHooks({
+			directory,
+			config: { enabled: true },
+			getActiveAgentName: () => 'mega_test_engineer',
+			createGateway,
+			appendRunLog: async () => {},
+			...extraOptions,
+		});
+	}
+
+	function textOutput(sessionID: string, userText: string) {
+		return {
+			messages: [
+				{
+					info: { role: 'system', sessionID },
+					parts: [{ type: 'text', text: 'You are Test Engineer.' }],
+				},
+				{
+					info: { role: 'user', sessionID },
+					parts: [{ type: 'text', text: userText }],
+				},
+			],
+		};
+	}
+
+	test('flag OFF (default): behavior unchanged and no probe file is written', async () => {
+		delete process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE;
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const hooks = makeHooksWithDirectory(bundle, probeDir);
+		const output = textOutput('session-a', 'TASK: 1.2 implement X');
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		// Behavior is unaffected: the recall message is still injected.
+		const injected = output.messages.some((message) =>
+			(message.parts as Array<{ text?: string }>).some(
+				(part) =>
+					typeof part.text === 'string' &&
+					part.text.includes('Retrieved Swarm Memory'),
+			),
+		);
+		expect(injected).toBe(true);
+		// No probe side effect when the flag is unset.
+		expect(existsSync(probeFilePath(probeDir))).toBe(false);
+	});
+
+	test('flag ON: subagent case — resolvedUnitId null, promptTaskIdCandidate parsed from TASK: marker', async () => {
+		process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE = '1';
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const hooks = makeHooksWithDirectory(bundle, probeDir, {
+			// Dominant subagent-session case: session-state resolution finds nothing.
+			getActiveTaskId: () => undefined,
+		});
+		const taskPrompt = 'TASK: 1.2 implement X';
+		const output = textOutput('session-a', taskPrompt);
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		const filePath = probeFilePath(probeDir);
+		expect(existsSync(filePath)).toBe(true);
+		const lines = readFileSync(filePath, 'utf-8').trim().split('\n');
+		expect(lines).toHaveLength(1);
+		const record = JSON.parse(lines[0]);
+		expect(record.promptTaskIdCandidate).toBe('1.2');
+		expect(record.resolvedUnitId).toBeNull();
+		expect(record.sessionID).toBe('session-a');
+		expect(record.agentRole).toBe('test_engineer');
+		expect(record.bundleId).toBe(bundle.id);
+		expect(record.agentTaskSnippet).toBe(taskPrompt.slice(0, 160));
+		expect(typeof record.timestamp).toBe('string');
+		expect(Number.isNaN(Date.parse(record.timestamp))).toBe(false);
+	});
+
+	test('flag ON, no marker: agentTask without TASK: marker → promptTaskIdCandidate is null', async () => {
+		process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE = '1';
+		const bundle = makeBundle(
+			makeRecord('test_pattern', 'Run focused tests with bun --smol test.'),
+		);
+		const hooks = makeHooksWithDirectory(bundle, probeDir, {
+			getActiveTaskId: () => undefined,
+		});
+		const output = textOutput(
+			'session-a',
+			'Please review the memory injector implementation',
+		);
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		const filePath = probeFilePath(probeDir);
+		expect(existsSync(filePath)).toBe(true);
+		const record = JSON.parse(
+			readFileSync(filePath, 'utf-8').trim().split('\n')[0],
+		);
+		expect(record.promptTaskIdCandidate).toBeNull();
+		expect(record.resolvedUnitId).toBeNull();
+	});
+
+	test('flag ON, zero-item bundle: probe still fires (no-injection case is deliberately observed, not blinded)', async () => {
+		process.env.OPENCODE_SWARM_MEMORY_UNITID_PROBE = '1';
+		// A produced bundle with zero items — nothing is actually injected into
+		// the message stream, but this is the dominant cold-memory subagent case
+		// the probe exists to observe, so it must still be recorded.
+		const emptyBundle: RecallBundle = {
+			id: 'bundle_20260601_empty',
+			query: 'query',
+			generatedAt: '2026-06-01T00:00:00.000Z',
+			items: [],
+			tokenEstimate: 0,
+			promptBlock: '',
+		};
+		const hooks = makeHooksWithDirectory(emptyBundle, probeDir, {
+			getActiveTaskId: () => undefined,
+		});
+		const taskPrompt = 'TASK: 2.4 add coverage';
+		const output = textOutput('session-a', taskPrompt);
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		// No recall message was injected (zero items).
+		const injected = output.messages.some((message) =>
+			(message.parts as Array<{ text?: string }>).some(
+				(part) =>
+					typeof part.text === 'string' &&
+					part.text.includes('Retrieved Swarm Memory'),
+			),
+		);
+		expect(injected).toBe(false);
+
+		// But the probe row was still written for this no-injection recall.
+		const filePath = probeFilePath(probeDir);
+		expect(existsSync(filePath)).toBe(true);
+		const record = JSON.parse(
+			readFileSync(filePath, 'utf-8').trim().split('\n')[0],
+		);
+		expect(record.promptTaskIdCandidate).toBe('2.4');
+		expect(record.resolvedUnitId).toBeNull();
+		expect(record.bundleId).toBe(emptyBundle.id);
 	});
 });
