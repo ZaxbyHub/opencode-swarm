@@ -381,6 +381,15 @@ function _tokenizeToNGrams(content: string, n: number): string[] {
 	return ngrams;
 }
 
+/**
+ * Find duplicate lines using a sliding-window approach.
+ *
+ * NOTE: Sliding windows overlap by design — a file with N repetitions of the
+ * same minLines-sized block will count (N - 1) * minLines duplicate lines per
+ * unique window, which may overcount relative to the true amount of non-original
+ * content. This is acceptable for a heuristic metric; the ratio is capped at
+ * lines.length to prevent impossible values.
+ */
 function findDuplicateLines(content: string, minLines: number): number {
 	const lines = content.split('\n').filter((line) => line.trim().length > 0);
 

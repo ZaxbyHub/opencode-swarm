@@ -99,6 +99,41 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		);
 	});
 
+	test('skips overwrite when destination content is identical to source', async () => {
+		// First sync to install the skill
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+		const mtimeBefore = fs.statSync(projectSkillPath()).mtimeMs;
+
+		// Small delay to ensure mtime would differ if rewritten
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		// Second sync — content is identical, should NOT rewrite
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		const mtimeAfter = fs.statSync(projectSkillPath()).mtimeMs;
+		expect(mtimeAfter).toBe(mtimeBefore);
+	});
+
+	test('atomically overwrites stale content leaving no temp files', async () => {
+		fs.mkdirSync(path.dirname(projectSkillPath()), { recursive: true });
+		fs.writeFileSync(projectSkillPath(), 'stale content\n', 'utf-8');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		// Content is updated
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+
+		// No temp files left behind
+		const skillDir = path.dirname(projectSkillPath());
+		const files = fs.readdirSync(skillDir);
+		const tempFiles = files.filter(
+			(f) => f.includes('.tmp') || f.includes('.swarm'),
+		);
+		expect(tempFiles).toEqual([]);
+	});
+
 	test('suppresses install warning when quiet is true', async () => {
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot, true);
 

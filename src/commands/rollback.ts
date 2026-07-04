@@ -12,8 +12,12 @@ type LegacyCheckpoint = { phase: number; label?: string; timestamp: string };
 type GitCheckpoint = { label: string; sha: string; timestamp: string };
 
 function safeParseToolJson(result: ToolResult): unknown {
-	const jsonStr = typeof result === 'string' ? result : result.output;
-	return JSON.parse(jsonStr);
+	try {
+		const jsonStr = typeof result === 'string' ? result : result.output;
+		return JSON.parse(jsonStr);
+	} catch {
+		return null;
+	}
 }
 
 async function listGitCheckpoints(
@@ -27,6 +31,7 @@ async function listGitCheckpoints(
 			success?: boolean;
 			checkpoints?: GitCheckpoint[];
 		};
+		if (!parsed) return null;
 		if (parsed.success !== true || !Array.isArray(parsed.checkpoints)) {
 			return null;
 		}
@@ -76,6 +81,9 @@ async function restoreGitCheckpoint(
 		success?: boolean;
 		error?: string;
 	};
+	if (!parsed) {
+		return `Error: Failed to parse checkpoint response for "${selected.label}"`;
+	}
 	if (parsed.success !== true) {
 		return `Error: ${parsed.error || `Failed to restore checkpoint "${selected.label}"`}`;
 	}

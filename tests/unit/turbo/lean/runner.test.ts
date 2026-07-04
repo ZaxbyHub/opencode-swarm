@@ -268,6 +268,32 @@ describe('lane planning and lock acquisition', () => {
 		expect(evidence!.lanes[0].files[0]).toContain('src/a.ts');
 		expect(evidence!.configSnapshot).toBeDefined();
 	});
+
+	test('_writePhaseEvidenceSafely writes phase evidence with correct structure', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const result = await runner.runPhase(1);
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBeGreaterThan(0);
+
+		// Verify phase evidence file structure via readPhaseEvidence
+		const phaseEvidence = await readPhaseEvidence(tmpDir, 1);
+		expect(phaseEvidence).not.toBeNull();
+		expect(phaseEvidence!.status).toBeDefined();
+		expect(phaseEvidence!.lanes).toHaveLength(result.lanes.length);
+
+		// Verify lane-level fields within the phase evidence
+		const lane = phaseEvidence!.lanes[0];
+		expect(lane.laneId).toBeDefined();
+		expect(lane.taskIds).toEqual(expect.arrayContaining(['1.1']));
+		expect(lane.files).toBeDefined();
+		expect(lane.status).toBeDefined();
+		// startedAt and completedAt are optional in LeanTurboLane and depend on lane processing timing
+	});
 });
 
 // ─── Test: NO_LANES regression ─────────────────────────────────────────────────

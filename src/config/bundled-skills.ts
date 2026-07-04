@@ -286,5 +286,7 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 
 export const _test_exports = {
 	collectBundledSkillFilesBoundedAsync,
+	// No-op: the cache was removed in favor of content-equality checks on every
+	// call. This stub is retained for backward compatibility with existing tests.
 	resetBundledProjectSkillSyncCache: () => undefined,
 };
