@@ -166,7 +166,12 @@ jobs:
             echo "::error::No test files found for shard ${SHARD}"
             exit 1
           fi
-          echo "Shard ${SHARD}/${num_shards} ($(wc -l < "$tmpdir/quarantined.txt") file(s) quarantined repo-wide, issue #1705)"
+          # Avoid dollar-paren command substitution here: this workflow's own
+          # security scan (tests/security/ci-workflow-security.test.ts) flags
+          # that syntax inside a run: step as a command-injection risk pattern.
+          wc -l < "$tmpdir/quarantined.txt" > "$tmpdir/quarantined-count.txt"
+          read -r quarantined_count < "$tmpdir/quarantined-count.txt"
+          echo "Shard ${SHARD}/${num_shards} (${quarantined_count} file(s) quarantined repo-wide, issue #1705)"
       - name: Run unit tests
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
@@ -263,11 +268,17 @@ jobs:
           find tests/unit -name '*.test.ts' -type f | sort > all-tests.txt
           grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt | sort > quarantined.txt
           comm -23 all-tests.txt quarantined.txt > gated-tests.txt
-          echo "$(wc -l < quarantined.txt) file(s) quarantined repo-wide, issue #1705"
+          # Avoid dollar-paren command substitution here: this workflow's own
+          # security scan (tests/security/ci-workflow-security.test.ts) flags
+          # that syntax inside a run: step as a command-injection risk pattern.
+          wc -l < quarantined.txt > quarantined-count.txt
+          read -r quarantined_count < quarantined-count.txt
+          echo "${quarantined_count} file(s) quarantined repo-wide, issue #1705"
           # Run the full (non-quarantined) unit test suite with coverage (no
           # --smol: that flag crashes Bun with SIGILL when combined with
-          # --coverage on large suites).
-          bun test --coverage --timeout 60000 $(cat gated-tests.txt) > coverage-output.txt 2>&1 || test_exit=$?
+          # --coverage on large suites). xargs -a appends gated-tests.txt's
+          # lines as arguments without needing command substitution.
+          xargs -a gated-tests.txt bun test --coverage --timeout 60000 > coverage-output.txt 2>&1 || test_exit=$?
           # Extract line coverage from "All files" row using awk.
           # Bun's coverage table columns: File | % Funcs | % Lines | Uncovered Line #s
           awk -F'|' '/All files/ { gsub(/ /,"",$3); print substr($3, 1, 5); exit }' coverage-output.txt > coverage-value.txt
