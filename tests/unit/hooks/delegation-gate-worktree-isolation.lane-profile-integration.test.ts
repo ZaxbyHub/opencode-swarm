@@ -21,11 +21,11 @@
  * moved to delegation-gate-worktree-isolation.lane-profile-integration.supplemental.test.ts
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as realFs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import type { WorktreeIsolationConfig } from '../../../src/config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../../src/config/constants';
 import {

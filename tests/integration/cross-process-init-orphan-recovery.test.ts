@@ -13,19 +13,16 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	realpathSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'path';
-
-import {
-	tryAcquireLock,
-} from '../../src/parallel/file-locks';
 import { runInitOrphanRecovery } from '../../src/hooks/init-orphan-recovery';
 import type { InitOrphanAdvisory } from '../../src/hooks/init-orphan-recovery-advisory';
+import { tryAcquireLock } from '../../src/parallel/file-locks';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -79,7 +76,12 @@ async function runGit(
  */
 async function initGitRepo(repoDir: string): Promise<void> {
 	mkdirSync(repoDir, { recursive: true });
-	await runGit(repoDir, ['config', '--global', 'user.email', 'test@test.local']);
+	await runGit(repoDir, [
+		'config',
+		'--global',
+		'user.email',
+		'test@test.local',
+	]);
 	await runGit(repoDir, ['config', '--global', 'user.name', 'Test User']);
 	const result2 = await runGit(repoDir, ['init']);
 	if (result2.exitCode !== 0) {
@@ -146,7 +148,10 @@ describe('SC-105: cross-process lock held → orphaned worktrees preserved', () 
 				'lane-1',
 			);
 			mkdirSync(orphanedWtPath, { recursive: true });
-			writeFileSync(path.join(orphanedWtPath, 'orphan.txt'), 'orphan content\n');
+			writeFileSync(
+				path.join(orphanedWtPath, 'orphan.txt'),
+				'orphan content\n',
+			);
 
 			expect(existsSync(orphanedWtPath)).toBe(true);
 
@@ -239,101 +244,95 @@ describe('SC-105: cross-process lock held → orphaned worktrees preserved', () 
 // ─── SC-106: lock released → cleanup proceeds ─────────────────────────────────
 
 describe('SC-106: lock released → cleanup proceeds', () => {
-	test(
-		'runInitOrphanRecovery reclaims orphaned worktrees after lock is released',
-		async () => {
-			// Create orphaned worktree directories
-			const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
-			const orphanedWtPath = path.join(
-				worktreeRoot,
-				'session-after-release',
-				'lane-1',
-			);
-			mkdirSync(orphanedWtPath, { recursive: true });
-			writeFileSync(path.join(orphanedWtPath, 'orphan.txt'), 'orphan content\n');
+	test('runInitOrphanRecovery reclaims orphaned worktrees after lock is released', async () => {
+		// Create orphaned worktree directories
+		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+		const orphanedWtPath = path.join(
+			worktreeRoot,
+			'session-after-release',
+			'lane-1',
+		);
+		mkdirSync(orphanedWtPath, { recursive: true });
+		writeFileSync(path.join(orphanedWtPath, 'orphan.txt'), 'orphan content\n');
 
-			expect(existsSync(orphanedWtPath)).toBe(true);
+		expect(existsSync(orphanedWtPath)).toBe(true);
 
-			// Acquire the lock first
-			const lockResult = await tryAcquireLock(
-				gitRepoDir,
-				'.swarm/locks/init-orphan-recovery.lock',
-				'test-agent',
-				'FB-007',
-			);
-			expect(lockResult.acquired).toBe(true);
-			const lock = lockResult.lock;
+		// Acquire the lock first
+		const lockResult = await tryAcquireLock(
+			gitRepoDir,
+			'.swarm/locks/init-orphan-recovery.lock',
+			'test-agent',
+			'FB-007',
+		);
+		expect(lockResult.acquired).toBe(true);
+		const lock = lockResult.lock;
 
-			// Verify cleanup is skipped while lock is held
-			const resultWhileLocked = await runInitOrphanRecovery(gitRepoDir);
-			expect(resultWhileLocked.crossProcessLockHeld).toBe(true);
-			expect(existsSync(orphanedWtPath)).toBe(true); // still preserved
+		// Verify cleanup is skipped while lock is held
+		const resultWhileLocked = await runInitOrphanRecovery(gitRepoDir);
+		expect(resultWhileLocked.crossProcessLockHeld).toBe(true);
+		expect(existsSync(orphanedWtPath)).toBe(true); // still preserved
 
-			// Release the lock (simulating process death)
-			await lock._release!();
+		// Release the lock (simulating process death)
+		await lock._release!();
 
-			// Run init orphan recovery again — now cleanup should proceed
-			const resultAfterRelease = await runInitOrphanRecovery(gitRepoDir);
+		// Run init orphan recovery again — now cleanup should proceed
+		const resultAfterRelease = await runInitOrphanRecovery(gitRepoDir);
 
-			// crossProcessLockHeld should be false
-			expect(resultAfterRelease.crossProcessLockHeld).toBe(false);
-			expect(resultAfterRelease.attempted).toBe(true);
+		// crossProcessLockHeld should be false
+		expect(resultAfterRelease.crossProcessLockHeld).toBe(false);
+		expect(resultAfterRelease.attempted).toBe(true);
 
-			// The orphaned worktree directory must be GONE (reclaimed)
-			expect(existsSync(orphanedWtPath)).toBe(false);
-		},
-	);
+		// The orphaned worktree directory must be GONE (reclaimed)
+		expect(existsSync(orphanedWtPath)).toBe(false);
+	});
 
-	test(
-		'SC-106: multiple orphaned worktrees are all reclaimed after lock release',
-		async () => {
-			const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+	test('SC-106: multiple orphaned worktrees are all reclaimed after lock release', async () => {
+		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
 
-			// Create three orphaned worktree directories
-			const sessions = [
-				'session-multi-release-1',
-				'session-multi-release-2',
-				'session-multi-release-3',
-			];
-			for (const sess of sessions) {
-				const wtPath = path.join(worktreeRoot, sess, 'lane-1');
-				mkdirSync(wtPath, { recursive: true });
-				writeFileSync(path.join(wtPath, 'filler.txt'), 'content\n');
-			}
+		// Create three orphaned worktree directories
+		const sessions = [
+			'session-multi-release-1',
+			'session-multi-release-2',
+			'session-multi-release-3',
+		];
+		for (const sess of sessions) {
+			const wtPath = path.join(worktreeRoot, sess, 'lane-1');
+			mkdirSync(wtPath, { recursive: true });
+			writeFileSync(path.join(wtPath, 'filler.txt'), 'content\n');
+		}
 
-			// Acquire the lock
-			const lockResult = await tryAcquireLock(
-				gitRepoDir,
-				'.swarm/locks/init-orphan-recovery.lock',
-				'test-agent',
-				'FB-007',
-			);
-			expect(lockResult.acquired).toBe(true);
-			const lock = lockResult.lock;
+		// Acquire the lock
+		const lockResult = await tryAcquireLock(
+			gitRepoDir,
+			'.swarm/locks/init-orphan-recovery.lock',
+			'test-agent',
+			'FB-007',
+		);
+		expect(lockResult.acquired).toBe(true);
+		const lock = lockResult.lock;
 
-			// Verify all preserved while lock is held
-			const resultWhileLocked = await runInitOrphanRecovery(gitRepoDir);
-			expect(resultWhileLocked.crossProcessLockHeld).toBe(true);
-			for (const sess of sessions) {
-				const wtPath = path.join(worktreeRoot, sess, 'lane-1');
-				expect(existsSync(wtPath)).toBe(true);
-			}
+		// Verify all preserved while lock is held
+		const resultWhileLocked = await runInitOrphanRecovery(gitRepoDir);
+		expect(resultWhileLocked.crossProcessLockHeld).toBe(true);
+		for (const sess of sessions) {
+			const wtPath = path.join(worktreeRoot, sess, 'lane-1');
+			expect(existsSync(wtPath)).toBe(true);
+		}
 
-			// Release the lock
-			await lock._release!();
+		// Release the lock
+		await lock._release!();
 
-			// Run cleanup
-			const resultAfterRelease = await runInitOrphanRecovery(gitRepoDir);
+		// Run cleanup
+		const resultAfterRelease = await runInitOrphanRecovery(gitRepoDir);
 
-			// All dirs must be gone
-			for (const sess of sessions) {
-				const wtPath = path.join(worktreeRoot, sess, 'lane-1');
-				expect(existsSync(wtPath)).toBe(false);
-			}
+		// All dirs must be gone
+		for (const sess of sessions) {
+			const wtPath = path.join(worktreeRoot, sess, 'lane-1');
+			expect(existsSync(wtPath)).toBe(false);
+		}
 
-			expect(resultAfterRelease.crossProcessLockHeld).toBe(false);
-		},
-	);
+		expect(resultAfterRelease.crossProcessLockHeld).toBe(false);
+	});
 });
 
 // ─── Cross-process simulation (real child process) ─────────────────────────────────
@@ -348,8 +347,7 @@ describe('SC-106: lock released → cleanup proceeds', () => {
  */
 function writeLockHolderScript(tmpDir: string): string {
 	const scriptPath = path.join(tmpDir, 'lock-holder.mjs');
-	const fileLocksUrl =
-		'file://' + path.resolve('src/parallel/file-locks.js');
+	const fileLocksUrl = 'file://' + path.resolve('src/parallel/file-locks.js');
 	const script = `
 import { tryAcquireLock } from ${JSON.stringify(fileLocksUrl)};
 
@@ -422,35 +420,32 @@ function waitForLockReady(
 }
 
 describe('cross-process simulation (real child process holding lock)', () => {
-	test(
-		'SC-105: real child process lock → worktrees preserved, crossProcessLockHeld=true',
-		async () => {
-			const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
-			const orphanedWtPath = path.join(
-				worktreeRoot,
-				'session-child-real',
-				'lane-1',
-			);
-			mkdirSync(orphanedWtPath, { recursive: true });
-			writeFileSync(path.join(orphanedWtPath, 'orphan.txt'), 'orphan\n');
+	test('SC-105: real child process lock → worktrees preserved, crossProcessLockHeld=true', async () => {
+		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+		const orphanedWtPath = path.join(
+			worktreeRoot,
+			'session-child-real',
+			'lane-1',
+		);
+		mkdirSync(orphanedWtPath, { recursive: true });
+		writeFileSync(path.join(orphanedWtPath, 'orphan.txt'), 'orphan\n');
 
+		expect(existsSync(orphanedWtPath)).toBe(true);
+
+		const child = spawnLockHolder(tmpDir, gitRepoDir);
+		spawnedChildren.push(child);
+		await waitForLockReady(child, 8000);
+		expect(child.exitCode).toBeNull();
+
+		try {
+			const result = await runInitOrphanRecovery(gitRepoDir);
+			expect(result.crossProcessLockHeld).toBe(true);
+			expect(result.removedWorktrees).toEqual([]);
 			expect(existsSync(orphanedWtPath)).toBe(true);
-
-			const child = spawnLockHolder(tmpDir, gitRepoDir);
-			spawnedChildren.push(child);
-			await waitForLockReady(child, 8000);
-			expect(child.exitCode).toBeNull();
-
-			try {
-				const result = await runInitOrphanRecovery(gitRepoDir);
-				expect(result.crossProcessLockHeld).toBe(true);
-				expect(result.removedWorktrees).toEqual([]);
-				expect(existsSync(orphanedWtPath)).toBe(true);
-			} finally {
-				await killChild(child, 'SIGTERM');
-			}
-		},
-	);
+		} finally {
+			await killChild(child, 'SIGTERM');
+		}
+	});
 });
 
 // NOTE: Subprocess spawn-pattern correctness (array-form, explicit cwd,

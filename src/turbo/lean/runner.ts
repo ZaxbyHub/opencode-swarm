@@ -21,8 +21,8 @@ import type { LeanTurboConfig } from '../../config/schema';
 import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
-import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
 import { derivePlanId } from '../../plan/utils';
+import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
@@ -1311,12 +1311,15 @@ export class LeanTurboRunner {
 							'conflict' in mergeResult && mergeResult.conflict === true;
 						const conflictFiles =
 							'conflictFiles' in mergeResult &&
-							Array.isArray((mergeResult as { conflictFiles?: unknown }).conflictFiles)
+							Array.isArray(
+								(mergeResult as { conflictFiles?: unknown }).conflictFiles,
+							)
 								? (mergeResult as { conflictFiles: string[] }).conflictFiles
 								: [];
 						const reason =
 							('message' in mergeResult &&
-								typeof (mergeResult as { message?: unknown }).message === 'string' &&
+								typeof (mergeResult as { message?: unknown }).message ===
+									'string' &&
 								((mergeResult as { message: string }).message || '')) ||
 							'merge-back partially failed';
 						const failureInfo: MergeBackFailureInfo = {
