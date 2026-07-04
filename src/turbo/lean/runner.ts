@@ -22,6 +22,7 @@ import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
+import { derivePlanId } from '../../plan/utils';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
@@ -1306,17 +1307,25 @@ export class LeanTurboRunner {
 						('partial' in mergeResult && mergeResult.partial)
 					) {
 						// Merge conflict or partial failure: log warning, do NOT remove worktree, record failure
+						const isConflict =
+							'conflict' in mergeResult && mergeResult.conflict === true;
+						const conflictFiles =
+							'conflictFiles' in mergeResult &&
+							Array.isArray((mergeResult as { conflictFiles?: unknown }).conflictFiles)
+								? (mergeResult as { conflictFiles: string[] }).conflictFiles
+								: [];
+						const reason =
+							('message' in mergeResult &&
+								typeof (mergeResult as { message?: unknown }).message === 'string' &&
+								((mergeResult as { message: string }).message || '')) ||
+							'merge-back partially failed';
 						const failureInfo: MergeBackFailureInfo = {
 							laneId: lr.laneId,
 							branchName: laneInState.branchName,
 							worktreePath: laneInState.worktreePath,
-							status:
-								mergeResult.conflictFiles &&
-								mergeResult.conflictFiles.length > 0
-									? 'conflict'
-									: 'partial',
-							reason: mergeResult.message || 'merge-back partially failed',
-							conflictFiles: mergeResult.conflictFiles,
+							status: isConflict ? 'conflict' : 'partial',
+							reason,
+							conflictFiles,
 						};
 						mergeBackFailures.push(failureInfo);
 						lr.status = 'failed';
