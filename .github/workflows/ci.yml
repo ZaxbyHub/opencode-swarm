@@ -210,6 +210,14 @@ jobs:
               # match this pattern, so it must not gate pass/fail. exit_code is
               # the sole failure signal.
               grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp" || true
+              # Print the captured output so the actual assertion failure is
+              # visible in the log — the grep above only computes a match and
+              # never printed it, and the temp file is deleted at step end
+              # (trap below), so previously every failure showed only a bare
+              # "FAILED: <path>" with no diagnostic content at all.
+              echo "::group::Output for $f"
+              cat "$tmp"
+              echo "::endgroup::"
               echo "::error file=$f::FAILED: $f"
               failed=1
             fi
