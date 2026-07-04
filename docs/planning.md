@@ -30,7 +30,7 @@ Paste the [opencode-swarm README](https://github.com/zaxbysauce/opencode-swarm) 
 
 Each model needs to know:
 - The Architect delegates all coding to the Coder — it never writes code itself
-- Each task runs through a full 12-step QA gate
+- Each task runs through a full 15-step QA gate
 - Tasks must be atomic: one file, one concern, one logical change
 - Tasks need `FILE`, `TASK`, `CONSTRAINT`, and `ACCEPTANCE CRITERIA` fields
 - The Critic reviews the plan before implementation starts

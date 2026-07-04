@@ -18,6 +18,7 @@
  *   3. tool             — reuse of scripts/check-tool-registration.ts.
  *   4. command          — COMMAND_REGISTRY structural integrity.
  *   5. agent            — ALL_AGENT_NAMES vs AGENT_TOOL_MAP and the opt-in maps.
+ *   6. docs-claim       — numeric documentation claims vs importable source.
  *
  * Output:
  *   - GitHub Actions annotations (`::warning file=...::message`) on stdout.
@@ -33,6 +34,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
+import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
 import { ALL_AGENT_NAMES } from '../src/config/agent-names';
 import {
@@ -53,6 +55,7 @@ import {
 	NON_SKILL_OPENCODE_DIRS,
 	OPENCODE_ONLY_ARCHITECT_MODE_SKILLS,
 } from '../src/config/skill-mirrors';
+export { detectDocsClaimDrift };
 
 export type DriftSeverity = 'error' | 'warning' | 'notice';
 
@@ -495,6 +498,7 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['tool', detectToolRegistrationDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
+	['docs-claim', detectDocsClaimDrift],
 ];
 
 export function runAllDetectors(): DriftFinding[] {
@@ -526,7 +530,9 @@ export function annotation(finding: DriftFinding): string {
 export function buildReport(findings: DriftFinding[]): string {
 	const lines: string[] = ['# Drift check report', ''];
 	if (findings.length === 0) {
-		lines.push('✅ No drift detected across skills, tools, commands, and agents.');
+		lines.push(
+			'✅ No drift detected across skills, tools, commands, agents, and docs claims.',
+		);
 		lines.push('');
 		return lines.join('\n');
 	}
