@@ -158,7 +158,17 @@ jobs:
           # Drop known-red pre-existing failures (issue #1705) so the gate reflects
           # new regressions, not the debt backlog CI's old broken detection had been
           # silently hiding. See scripts/ci/quarantined-tests.txt for the tracked list.
-          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt | sort > "$tmpdir/quarantined.txt"
+          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt > "$tmpdir/quarantined-raw.txt"
+          # RUNNER_OS is a GitHub Actions default env var (Linux/Windows/macOS).
+          # merge_group runs the full 3-OS matrix; some pre-existing failures
+          # only reproduce on one non-Linux OS (see scripts/ci/quarantined-tests-{macos,windows}.txt).
+          if [ "$RUNNER_OS" = "macOS" ] && [ -f scripts/ci/quarantined-tests-macos.txt ]; then
+            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-macos.txt >> "$tmpdir/quarantined-raw.txt"
+          fi
+          if [ "$RUNNER_OS" = "Windows" ] && [ -f scripts/ci/quarantined-tests-windows.txt ]; then
+            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-windows.txt >> "$tmpdir/quarantined-raw.txt"
+          fi
+          sort -u "$tmpdir/quarantined-raw.txt" > "$tmpdir/quarantined.txt"
           comm -23 "$tmpdir/all-tests.txt" "$tmpdir/quarantined.txt" > "$tmpdir/gated-tests.txt"
           num_shards=4
           awk -v s="$SHARD" -v n="$num_shards" '(NR - 1) % n == (s - 1)' "$tmpdir/gated-tests.txt" > "$tmpdir/shard-tests.txt"
