@@ -388,13 +388,15 @@ describe('lane profile materialization', () => {
 	});
 
 	it('writeLaneProfileToDisk receives correct laneIndex from computeLaneRuntimeProfile', async () => {
+		// Use a real temp directory so we can read back the written file
+		const tempDir = makeTempProject('lane-profile-');
 		const config: WorktreeIsolationConfig['runtime_isolation'] = {
 			enabled: true,
 			port_base: 8000,
 			port_stride: 3,
 		};
 
-		const profile = computeLaneRuntimeProfile(config, 4, '/tmp/lane-worktree');
+		const profile = computeLaneRuntimeProfile(config, 4, tempDir);
 		expect(profile?.laneIndex).toBe(4);
 		expect(profile?.envOverrides['PORT']).toBe('8012'); // 8000 + 4*3
 
@@ -404,5 +406,12 @@ describe('lane profile materialization', () => {
 			profile!.laneIndex,
 			profile!.envOverrides,
 		);
+
+		// FB-004: Assert file was written with correct contents (readLaneProfileToDisk seam)
+		const envPath = path.join(tempDir, '.swarm', 'lanes', '4.env');
+		const content = fs.readFileSync(envPath, 'utf-8');
+		// Format is KEY=VAL\nKEY=VAL\n... (LF line endings)
+		const lines = content.split('\n').filter((l) => l.length > 0);
+		expect(lines).toContain('PORT=8012');
 	});
 });

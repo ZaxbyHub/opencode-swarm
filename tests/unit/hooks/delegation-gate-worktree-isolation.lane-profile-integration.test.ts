@@ -25,11 +25,13 @@ import * as fs from 'node:fs';
 import * as realFs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import type { WorktreeIsolationConfig } from '../../../src/config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../../src/config/constants';
 import {
 	computeLaneRuntimeProfile,
 	parseLeanLaneIndex,
+	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
 import { resetSwarmState } from '../../../src/state';
@@ -69,6 +71,29 @@ async function laneEnvExists(
 		.access(envPath)
 		.then(() => true)
 		.catch(() => false);
+}
+
+function initGitRepo(repoPath: string): void {
+	fs.mkdirSync(repoPath, { recursive: true });
+	const result = spawnSync('git', ['init', '-q'], {
+		cwd: repoPath,
+		env: { ...process.env, LC_ALL: 'C' },
+	});
+	if (result.status !== 0) {
+		throw new Error(`git init failed: ${result.stderr?.toString()}`);
+	}
+	spawnSync('git', ['config', 'user.email', 'test@opencode.swarm'], {
+		cwd: repoPath,
+		env: { ...process.env, LC_ALL: 'C' },
+	});
+	spawnSync('git', ['config', 'user.name', 'Swarm Test'], {
+		cwd: repoPath,
+		env: { ...process.env, LC_ALL: 'C' },
+	});
+	spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'initial'], {
+		cwd: repoPath,
+		env: { ...process.env, LC_ALL: 'C' },
+	});
 }
 
 // ─── SC-123 — Port determinism across 5 lanes ───────────────────────────────
@@ -378,23 +403,76 @@ describe('SC-124: provisionWorktree with laneProfile writes env file', () => {
 	});
 
 	it('when laneProfile is undefined, no seam call is made (null guard)', async () => {
-		let called = false;
-		worktreeCoreInternals.writeLaneProfileToDisk = async () => {
-			called = true;
+		// Set up a real git repo and mock the opencodeClient so precreateStandardWorktreeSession
+		// can reach the profile materialization path
+		const gitDir = path.join(os.tmpdir(), `null-guard-lane-${Date.now()}`);
+		initGitRepo(gitDir);
+
+		const calls: Array<{
+			worktreePath: string;
+			laneIndex: number;
+			envOverrides: Record<string, string>;
+		}> = [];
+		const orig = worktreeCoreInternals.writeLaneProfileToDisk;
+		worktreeCoreInternals.writeLaneProfileToDisk = async (
+			worktreePath: string,
+			laneIndex: number,
+			envOverrides: Record<string, string>,
+		) => {
+			calls.push({ worktreePath, laneIndex, envOverrides });
 		};
 
-		// Simulate the null check: when laneProfile is undefined, the
-		// provisionWorktree code skips the seam call entirely
-		const laneProfile = undefined;
-		if (laneProfile) {
-			await worktreeCoreInternals.writeLaneProfileToDisk(
-				tempDir,
-				0,
-				laneProfile.envOverrides,
-			);
-		}
+		// Override provisionWorktree to avoid real git worktree creation
+		const { _internals: isolationInternals } = await import(
+			'../../../src/hooks/delegation-gate/worktree-isolation'
+		);
+		const origProvision = isolationInternals.provisionWorktree;
+		isolationInternals.provisionWorktree = async () => ({
+			worktreePath: path.join(gitDir, '.swarm-worktrees', 'lane-null'),
+			branchName: 'swarm/lane/lane-null',
+			purpose: 'lane',
+			id: 'lane-null',
+			sessionId: 'null-guard',
+		});
 
-		expect(called).toBe(false);
+		const { swarmState } = await import('../../../src/state');
+		swarmState.opencodeClient = {
+			session: { create: async () => ({ data: { id: 'sess-null' } }) },
+		} as any;
+
+		try {
+			// Call precreateStandardWorktreeSession with runtime_isolation undefined,
+			// which makes computeLaneRuntimeProfile return undefined → null guard skips seam
+			await precreateStandardWorktreeSession({
+				config: {
+					worktree: { policy: 'auto', merge_strategy: 'merge' },
+				} as any,
+				directory: gitDir,
+				parentSessionID: 'null-guard-session',
+				callID: 'call-null-guard',
+				taskId: 'task-null-guard',
+				outputArgs: {},
+			});
+
+			// Assert: writeLaneProfileToDisk seam must NOT have been called
+			expect(calls).toHaveLength(0);
+
+			// Assert: no .swarm/lanes/*.env file must have been created
+			const lanesDir = path.join(gitDir, '.swarm', 'lanes');
+			const files = await realFs.readdir(lanesDir).catch(() => []);
+			expect(files.filter((f) => f.endsWith('.env'))).toHaveLength(0);
+		} finally {
+			worktreeCoreInternals.writeLaneProfileToDisk = orig;
+			isolationInternals.provisionWorktree = origProvision;
+			swarmState.opencodeClient = undefined as any;
+			try {
+				await realFs.rm(gitDir, { recursive: true, force: true });
+			} catch {
+				/* best-effort */
+			}
+			resetStandardWorktreeIsolationState();
+			resetSwarmState();
+		}
 	});
 });
 
