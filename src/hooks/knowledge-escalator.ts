@@ -14,6 +14,7 @@
 
 import { existsSync } from 'node:fs';
 import {
+	countEntryContradictionsInWindow,
 	countEntryViolationsInWindow,
 	readKnowledgeEvents,
 	recordKnowledgeEvent,
@@ -275,4 +276,77 @@ export async function escalateViolatedEntries(
 		out.push(await maybeEscalateOnViolation(directory, id, now));
 	}
 	return out;
+}
+
+// ============================================================================
+// G3 (#1715): repeat-contradiction quarantine
+// ============================================================================
+
+export interface ContradictionQuarantineResult {
+	quarantined: boolean;
+	entryId: string;
+	contradictionsInWindow?: number;
+	/** True when the entry was already quarantined/archived (no-op, idempotent). */
+	alreadyInactive?: boolean;
+}
+
+/**
+ * G3 (#1715): if an entry's `contradicted` count within `windowDays` crosses
+ * `threshold`, auto-quarantine it. Mirrors {@link maybeEscalateOnViolation}
+ * (counts from the RAW event log via {@link countEntryContradictionsInWindow}
+ * — NOT the rollup cache, which is mtime-keyed and can be stale immediately
+ * after an append). Idempotent: already-quarantined/archived entries are
+ * skipped. Never throws.
+ */
+export async function maybeQuarantineOnContradiction(
+	directory: string,
+	entryId: string,
+	threshold: number,
+	windowDays: number,
+	now: Date = new Date(),
+): Promise<ContradictionQuarantineResult> {
+	try {
+		const count = await countEntryContradictionsInWindow(
+			directory,
+			entryId,
+			windowDays,
+			now,
+		);
+		if (count < threshold) {
+			return { quarantined: false, entryId, contradictionsInWindow: count };
+		}
+
+		// Idempotency: skip if already inactive. Read fresh under no lock (the
+		// quarantine call below does its own locking; this is just a guard).
+		const entries = await readKnowledge<KnowledgeEntryBase>(
+			resolveSwarmKnowledgePath(directory),
+		);
+		const entry = entries.find((e) => e.id === entryId);
+		if (!entry) {
+			return { quarantined: false, entryId, contradictionsInWindow: count };
+		}
+		if (
+			entry.status === 'quarantined' ||
+			entry.status === 'quarantined_unactionable' ||
+			entry.status === 'archived'
+		) {
+			return {
+				quarantined: false,
+				entryId,
+				contradictionsInWindow: count,
+				alreadyInactive: true,
+			};
+		}
+
+		const { quarantineEntry } = await import('./knowledge-validator.js');
+		await quarantineEntry(
+			directory,
+			entryId,
+			`repeat_contradiction: ${count} contradicted events in ${windowDays}d`,
+			'auto',
+		);
+		return { quarantined: true, entryId, contradictionsInWindow: count };
+	} catch {
+		return { quarantined: false, entryId };
+	}
 }

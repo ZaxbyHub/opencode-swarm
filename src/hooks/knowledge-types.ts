@@ -149,6 +149,11 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	auto_generated?: boolean; // true if created without human review
 	phases_alive?: number; // monotonic phase counter, incremented at phase-wrap (excluding promoted & archived)
 	max_phases?: number; // per-entry TTL in phases, falls back to KnowledgeConfig.default_max_phases
+	/** G2 (#1715): set when the confidence-floor action fired (demote).
+	 * Suppresses `statusBoost` in retrieval so a floor-clamped entry sinks to
+	 * the bottom of ranking without introducing a new retrieval-leaking status.
+	 * Cleared if confidence recovers above the floor. */
+	confidence_floor_demoted?: boolean;
 }
 
 /** v2 schema marker. v1 entries are still parseable and normalized in-memory by knowledge-store.normalizeEntry. */
@@ -235,6 +240,19 @@ export interface KnowledgeConfig {
 	todo_max_phases: number;
 	/** Enable age-based sweep of knowledge entries. Default: true */
 	sweep_enabled: boolean;
+	/** G2 (#1715): action when an entry sits at the confidence floor with a
+	 * net-negative outcome signal. Default: 'demote'. */
+	confidence_floor_action: 'none' | 'demote' | 'quarantine';
+	/** G2: minimum total outcome-evidence count required before acting. Default: 3. */
+	confidence_floor_min_outcomes: number;
+	/** G2: outcome-signal threshold below which a floor entry is acted on. Default: 0. */
+	confidence_floor_signal_threshold: number;
+	/** G3 (#1715): action when contradicted count crosses the threshold. Default: 'quarantine'. */
+	contradiction_threshold_action: 'tag_only' | 'quarantine';
+	/** G3: contradicted-event count in window to trigger the action. Default: 3. */
+	contradiction_quarantine_threshold: number;
+	/** G3: window in days for counting contradicted events. Default: 30. */
+	contradiction_quarantine_window_days: number;
 	/** Change 5: retrieval-upgrade tuning (MMR / cold-start / synonyms). */
 	retrieval?: {
 		mmr_lambda?: number;

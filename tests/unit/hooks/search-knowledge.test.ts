@@ -611,4 +611,46 @@ describe('searchKnowledge (unified retrieval)', () => {
 		// The valid entry must survive the malformed neighbor.
 		expect(results.map((r) => r.id)).toContain('valid');
 	});
+
+	it('G2 (#1715): a confidence-floor-demoted entry ranks below an equal healthy entry', async () => {
+		// Two DISTINCT lessons that both match the query (identical text would
+		// be deduped by the Jaccard≥0.6 rule). The only score-relevant
+		// difference: one carries the confidence_floor_demoted flag.
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'healthy',
+				lesson: 'Always validate user input before processing http requests',
+			}),
+		);
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'demoted',
+				lesson: 'Validate user input thoroughly before processing form submissions',
+				confidence_floor_demoted: true,
+			}),
+		);
+
+		const { results } = await searchKnowledge({
+			directory: dir,
+			config,
+			query: 'validate user input',
+			mode: 'manual',
+			agent: 'architect',
+			sessionId: 's1',
+			tier: 'swarm',
+			applyScopeFilter: false,
+			emitEvent: false,
+		});
+
+		// Both surface (demote suppresses the statusBoost, not retrieval entirely).
+		expect(results.map((r) => r.id)).toContain('healthy');
+		expect(results.map((r) => r.id)).toContain('demoted');
+		// The healthy entry must rank above the demoted one — the demoted entry
+		// loses its `established` statusBoost (0.1) so its score is strictly lower.
+		const healthyIdx = results.findIndex((r) => r.id === 'healthy');
+		const demotedIdx = results.findIndex((r) => r.id === 'demoted');
+		expect(healthyIdx).toBeLessThan(demotedIdx);
+	});
 });

@@ -72,6 +72,7 @@ import {
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from './knowledge-store.js';
+import { recordKnowledgeEvent } from './knowledge-events.js';
 import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
@@ -1612,6 +1613,11 @@ export async function applyCuratorKnowledgeUpdates(
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
 	const foundIds = new Set<string>();
+	// G3 (#1715): collect (id, reason) for flag_contradiction actions so we can
+	// emit `contradicted` events post-transaction. Emitting inline inside the
+	// transactKnowledge callback would risk a directory-lock deadlock (the
+	// events file lives in the same `.swarm/` dir the transaction locks).
+	const contradictedEntries: Array<{ id: string; reason: string }> = [];
 
 	// Atomically read, mutate, and rewrite existing entries under a directory lock
 	// (CF-2 TOCTOU fix: concurrent appendKnowledge calls between an unlocked read
@@ -1620,6 +1626,7 @@ export async function applyCuratorKnowledgeUpdates(
 		// Reset closure state on each call (in case of future retry semantics).
 		appliedIds.clear();
 		foundIds.clear();
+		contradictedEntries.length = 0;
 		let txApplied = 0;
 		let modified = false;
 
@@ -1653,6 +1660,11 @@ export async function applyCuratorKnowledgeUpdates(
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
+					// G3 (#1715): capture for post-transaction event emission.
+					contradictedEntries.push({
+						id: entry.id,
+						reason: (rec.reason ?? '').slice(0, 200),
+					});
 					return {
 						...entry,
 						tags: [
@@ -1702,6 +1714,53 @@ export async function applyCuratorKnowledgeUpdates(
 		applied += txApplied;
 		return modified ? updatedEntries : null;
 	});
+
+	// G3 (#1715): emit `contradicted` events for flag_contradiction actions,
+	// AFTER the transaction commits. This unifies the two previously-disconnected
+	// contradiction signals: `contradicted_count` (incremented only via
+	// knowledge_receipt) and the curator's tag-only `flag_contradiction`. Now
+	// both paths feed the same event-sourced counter. The curator-attributed
+	// context (agent: 'curator') makes these events distinguishable from
+	// delegate/reviewer ones for audit.
+	for (const { id, reason } of contradictedEntries) {
+		try {
+			await recordKnowledgeEvent(directory, {
+				type: 'contradicted' as const,
+				knowledge_id: id,
+				trace_id: `curator-${randomUUID()}`,
+				session_id: 'curator',
+				agent: 'curator',
+				reason: `flag_contradiction: ${reason}`,
+				evidence: { summary: reason },
+			});
+		} catch {
+			// best-effort — never fail the curator on event emission
+		}
+	}
+
+	// G3: after emitting, check the threshold and quarantine if configured +
+	// crossed. `tag_only` preserves legacy behavior; `quarantine` (default)
+	// auto-quarantines entries whose in-window contradicted count crossed.
+	if (
+		contradictedEntries.length > 0 &&
+		knowledgeConfig.contradiction_threshold_action === 'quarantine'
+	) {
+		const { maybeQuarantineOnContradiction } = await import(
+			'./knowledge-escalator.js'
+		);
+		for (const { id } of contradictedEntries) {
+			try {
+				await maybeQuarantineOnContradiction(
+					directory,
+					id,
+					knowledgeConfig.contradiction_quarantine_threshold,
+					knowledgeConfig.contradiction_quarantine_window_days,
+				);
+			} catch {
+				// best-effort
+			}
+		}
+	}
 
 	// Count skipped: recommendations that were not applied to existing entries
 	for (const rec of validRecommendations) {

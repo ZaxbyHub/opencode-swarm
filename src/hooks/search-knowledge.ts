@@ -484,7 +484,12 @@ export async function searchKnowledge(
 						coldStartBonus +
 						synonymBoost +
 						triggerRecallBoost +
-						(hasQuery ? statusBoost(entry.status) : 0),
+						// G2 (#1715): a floor-demoted entry loses its status boost
+						// so it sinks to the bottom of ranking without introducing
+						// a new retrieval-leaking status.
+						(hasQuery && !entry.confidence_floor_demoted
+							? statusBoost(entry.status)
+							: 0),
 				),
 			);
 

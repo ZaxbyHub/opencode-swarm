@@ -40,6 +40,13 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				// G2/G3 (#1715) feedback-loop closure fields
+				confidence_floor_action: 'demote',
+				confidence_floor_min_outcomes: 3,
+				confidence_floor_signal_threshold: 0,
+				contradiction_threshold_action: 'quarantine',
+				contradiction_quarantine_threshold: 3,
+				contradiction_quarantine_window_days: 30,
 				realtime_learning_nudge: {
 					enabled: true,
 					first_after_tool_calls: 10,
@@ -99,6 +106,13 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				// G2/G3 (#1715) feedback-loop closure fields
+				confidence_floor_action: 'quarantine',
+				confidence_floor_min_outcomes: 5,
+				confidence_floor_signal_threshold: -0.1,
+				contradiction_threshold_action: 'tag_only',
+				contradiction_quarantine_threshold: 5,
+				contradiction_quarantine_window_days: 14,
 				realtime_learning_nudge: {
 					enabled: false,
 					first_after_tool_calls: 5,
@@ -224,6 +238,13 @@ describe('KnowledgeConfigSchema', () => {
 					default_max_phases: 10,
 					todo_max_phases: 3,
 					sweep_enabled: true,
+					// G2/G3 (#1715) feedback-loop closure fields
+					confidence_floor_action: 'quarantine',
+					confidence_floor_min_outcomes: 5,
+					confidence_floor_signal_threshold: -0.1,
+					contradiction_threshold_action: 'tag_only',
+					contradiction_quarantine_threshold: 5,
+					contradiction_quarantine_window_days: 14,
 					realtime_learning_nudge: {
 						enabled: false,
 						first_after_tool_calls: 5,

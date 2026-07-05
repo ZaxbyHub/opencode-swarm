@@ -9,6 +9,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { bumpKnowledgeConfidenceBatch } from './knowledge-store.js';
+import type { ConfidenceFloorOptions } from './knowledge-store.js';
 import { validateSwarmPath } from './utils.js';
 
 // ============================================================================
@@ -757,7 +758,11 @@ const VIOLATION_DECAY = 0.1;
  */
 export async function applySkillUsageFeedback(
 	directory: string,
-	options?: { sinceTimestamp?: string },
+	options?: {
+		sinceTimestamp?: string;
+		/** G2: forwarded to bumpKnowledgeConfidenceBatch. */
+		floorOptions?: ConfidenceFloorOptions;
+	},
 ): Promise<{ processed: number; bumps: number }> {
 	let processed = 0;
 	let bumps = 0;
@@ -843,7 +848,7 @@ export async function applySkillUsageFeedback(
 
 		// Batch-apply clamped deltas in a single call
 		if (clampedDeltas.length > 0) {
-			await bumpKnowledgeConfidenceBatch(directory, clampedDeltas);
+			await bumpKnowledgeConfidenceBatch(directory, clampedDeltas, options?.floorOptions);
 			appendFeedbackAppliedMarker(directory, processedEntryIds);
 		}
 	} catch (err) {

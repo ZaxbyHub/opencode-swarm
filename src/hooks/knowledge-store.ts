@@ -859,23 +859,45 @@ const CONFIDENCE_CEILING = 1.0;
 export async function bumpKnowledgeConfidenceBatch(
 	directory: string,
 	deltas: Array<{ id: string; delta: number }>,
+	options?: ConfidenceFloorOptions,
 ): Promise<void> {
 	if (deltas.length === 0) return;
 
 	const swarmPath = resolveSwarmKnowledgePath(directory);
 	const hivePath = resolveHiveKnowledgePath();
 
+	const touchedSwarm: KnowledgeEntryBase[] = [];
+	const touchedHive: KnowledgeEntryBase[] = [];
+
 	try {
 		// --- Swarm pass ---
-		await applyConfidenceDeltas(swarmPath, deltas);
+		touchedSwarm.push(
+			...(await applyConfidenceDeltas(swarmPath, deltas)),
+		);
 
 		// --- Hive pass (only for IDs not found in swarm) ---
-		const swarmEntries = await readKnowledge<KnowledgeEntryBase>(swarmPath);
-		const swarmIds = new Set(swarmEntries.map((e) => e.id));
+		const swarmIds = new Set(touchedSwarm.map((e) => e.id));
+		// If a delta id was NOT touched in swarm it may live in hive; re-check
+		// against the full swarm file too (some entries may not have received
+		// a delta but the id set we care about is the deltas we tried to apply).
 		const hiveOnly = deltas.filter((d) => !swarmIds.has(d.id));
 		if (hiveOnly.length > 0) {
-			await applyConfidenceDeltas(hivePath, hiveOnly);
+			touchedHive.push(...(await applyConfidenceDeltas(hivePath, hiveOnly)));
 		}
+
+		// --- G2: confidence-floor action (post-bump sweep) ---
+		// Confidence used to dead-end at the floor with no consequence. Now an
+		// entry clamped to the floor with a net-negative outcome signal is
+		// demoted (default) or quarantined per config, closing the loop.
+		await applyConfidenceFloorAction(directory, [
+			...touchedSwarm,
+			...touchedHive,
+		], options).catch((err) => {
+			console.warn(
+				'[knowledge-store] confidence-floor action sweep failed (best-effort):',
+				err instanceof Error ? err.message : String(err),
+			);
+		});
 	} catch (err) {
 		console.warn(
 			'[knowledge-store] bumpKnowledgeConfidenceBatch failed (fail-open):',
@@ -885,19 +907,184 @@ export async function bumpKnowledgeConfidenceBatch(
 }
 
 /**
+ * G2 (#1715): for each just-bumped entry at the confidence floor with a
+ * net-negative outcome signal, fire the configured action (`demote` strips
+ * retrieval `statusBoost` via the `confidence_floor_demoted` flag; `quarantine`
+ * routes through `quarantineEntry`). Entries that recovered above the floor
+ * have a stale `confidence_floor_demoted` flag cleared.
+ *
+ * Best-effort: any failure is caught by the caller; never throws.
+ */
+async function applyConfidenceFloorAction(
+	directory: string,
+	touched: KnowledgeEntryBase[],
+	options?: ConfidenceFloorOptions,
+): Promise<void> {
+	const action = options?.floorAction ?? 'demote';
+	if (action === 'none' || touched.length === 0) return;
+
+	const minOutcomes = options?.floorMinOutcomes ?? 3;
+	const signalThreshold = options?.floorSignalThreshold ?? 0; // net-negative
+
+	// Floor-band epsilon: treat confidence within this distance of the floor as
+	// "at the floor" (float compare safety).
+	const FLOOR_EPSILON = 1e-9;
+	const atFloor = touched.filter(
+		(e) => e.confidence <= CONFIDENCE_FLOOR + FLOOR_EPSILON,
+	);
+	const recovered = touched.filter(
+		(e) => e.confidence > CONFIDENCE_FLOOR + FLOOR_EPSILON && e.confidence_floor_demoted,
+	);
+
+	if (atFloor.length === 0 && recovered.length === 0) return;
+
+	// Read the events rollup ONCE (the expensive re-read) — keyed by entry id.
+	// Dynamic import avoids a static store↔events cycle (events already
+	// dynamic-imports store for the bump itself; this mirrors that precedent).
+	const { readKnowledgeCounterRollups, effectiveRetrievalOutcomes } = await import(
+		'./knowledge-events.js'
+	);
+	const rollups = await readKnowledgeCounterRollups(directory);
+
+	// Helper: persist the confidence_floor_demoted flag flip on a single entry
+	// via a tiny locked transaction. Re-uses transactKnowledge for safety.
+	const flagIds = new Set<string>();
+	for (const e of atFloor) {
+		const outcomes = effectiveRetrievalOutcomes(e.retrieval_outcomes, rollups?.get(e.id));
+		const signal = computeOutcomeSignal(outcomes);
+		const totalEvidence =
+			(outcomes.applied_explicit_count ?? 0) +
+			(outcomes.succeeded_after_shown_count ?? 0) +
+			(outcomes.ignored_count ?? 0) +
+			(outcomes.violated_count ?? 0) +
+			(outcomes.contradicted_count ?? 0) +
+			(outcomes.failed_after_shown_count ?? 0);
+		// Require net-negative signal AND enough evidence to act on.
+		if (signal < signalThreshold && totalEvidence >= minOutcomes) {
+			flagIds.add(e.id);
+		}
+	}
+	for (const e of recovered) flagIds.add(e.id); // clear stale flag
+
+	if (flagIds.size === 0) return;
+
+	// Apply the flag flips + (optionally) quarantine via transactKnowledge.
+	// For 'quarantine' action, route the floor-quarantines through
+	// quarantineEntry after the flag transaction commits.
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	const hivePath = resolveHiveKnowledgePath();
+	const toQuarantine: Array<{ id: string; tier: 'swarm' | 'hive' }> = [];
+
+	await transactKnowledge<KnowledgeEntryBase>(swarmPath, (swarmEntries) => {
+		const now = new Date().toISOString();
+		for (const entry of swarmEntries) {
+			if (!flagIds.has(entry.id)) continue;
+			const atFloorEntry = atFloor.find((e) => e.id === entry.id);
+			if (atFloorEntry) {
+				entry.confidence_floor_demoted = true;
+				if (action === 'quarantine') {
+					toQuarantine.push({ id: entry.id, tier: 'swarm' });
+				}
+			} else {
+				// recovered — clear stale flag
+				entry.confidence_floor_demoted = false;
+			}
+			entry.updated_at = now;
+		}
+		return swarmEntries;
+	}).catch((err) => {
+		console.warn(
+			'[knowledge-store] confidence-floor swarm flag transaction failed (best-effort):',
+			err instanceof Error ? err.message : String(err),
+		);
+	});
+
+	// Hive flag flips (separate transaction).
+	// Note: quarantineEntry reads only the swarm knowledge file, so it cannot
+	// quarantine hive-tier entries. For hive entries the confidence_floor_demoted
+	// FLAG is the effective action (it's honored by search-knowledge.ts
+	// regardless of tier); we deliberately do NOT push hive IDs into
+	// toQuarantine, which would imply a quarantine that won't happen.
+	const hiveFlagIds = new Set<string>();
+	for (const e of atFloor) {
+		if (e.tier === 'hive' && flagIds.has(e.id)) hiveFlagIds.add(e.id);
+	}
+	for (const e of recovered) {
+		if (e.tier === 'hive' && flagIds.has(e.id)) hiveFlagIds.add(e.id);
+	}
+	if (hiveFlagIds.size > 0) {
+		await transactKnowledge<KnowledgeEntryBase>(hivePath, (hiveEntries) => {
+			const now = new Date().toISOString();
+			for (const entry of hiveEntries) {
+				if (!hiveFlagIds.has(entry.id)) continue;
+				const atFloorEntry = atFloor.find((e) => e.id === entry.id);
+				if (atFloorEntry) {
+					entry.confidence_floor_demoted = true;
+				} else {
+					entry.confidence_floor_demoted = false;
+				}
+				entry.updated_at = now;
+			}
+			return hiveEntries;
+		}).catch((err) => {
+			console.warn(
+				'[knowledge-store] confidence-floor hive flag transaction failed (best-effort):',
+				err instanceof Error ? err.message : String(err),
+			);
+		});
+	}
+
+	// Route quarantine action (deferred until after the flag transaction).
+	// Dynamic import avoids a static store↔validator cycle. Only swarm-tier
+	// entries are collected (see hive note above).
+	if (action === 'quarantine' && toQuarantine.length > 0) {
+		const { quarantineEntry } = await import('./knowledge-validator.js');
+		for (const { id } of toQuarantine) {
+			await quarantineEntry(directory, id, 'confidence_floor_negative_outcome', 'auto').catch((err) => {
+				console.warn(
+					'[knowledge-store] confidence-floor quarantine failed (best-effort):',
+					err instanceof Error ? err.message : String(err),
+				);
+			});
+		}
+	}
+}
+
+/** Options for the G2 confidence-floor action in bumpKnowledgeConfidenceBatch. */
+export interface ConfidenceFloorOptions {
+	/** Action when a just-bumped entry sits at the confidence floor with a
+	 * net-negative outcome signal. `'none'` preserves the legacy dead-end
+	 * behavior. Default `'demote'`. */
+	floorAction?: 'none' | 'demote' | 'quarantine';
+	/** Minimum total outcome-evidence count required before acting on a
+	 * floor entry. Avoids demoting brand-new entries with one stray negative.
+	 * Default 3. */
+	floorMinOutcomes?: number;
+	/** Outcome-signal threshold below which a floor entry is acted on
+	 * (`computeOutcomeSignal` returns (-1, 1); net-negative is `< 0`).
+	 * Default 0. */
+	floorSignalThreshold?: number;
+}
+
+/**
  * Internal helper: apply a set of confidence deltas to a single JSONL file.
  * Acquires a directory lock for the full read-modify-write cycle.
+ *
+ * Returns the entries that received a delta (post-mutation, with the new
+ * confidence), so the caller can run a post-bump sweep (e.g. the G2
+ * confidence-floor action) without a separate re-read of the file.
  */
 async function applyConfidenceDeltas(
 	filePath: string,
 	deltas: Array<{ id: string; delta: number }>,
-): Promise<void> {
+): Promise<KnowledgeEntryBase[]> {
 	const idDeltaMap = new Map<string, number>();
 	for (const d of deltas) {
 		const existing = idDeltaMap.get(d.id);
 		idDeltaMap.set(d.id, existing !== undefined ? existing + d.delta : d.delta);
 	}
 
+	const touched: KnowledgeEntryBase[] = [];
 	let release: (() => Promise<void>) | null = null;
 	try {
 		const dir = path.dirname(filePath);
@@ -908,7 +1095,7 @@ async function applyConfidenceDeltas(
 		});
 
 		const entries = await readKnowledge<KnowledgeEntryBase>(filePath);
-		if (entries.length === 0) return;
+		if (entries.length === 0) return [];
 
 		const now = new Date().toISOString();
 		let mutated = false;
@@ -923,6 +1110,7 @@ async function applyConfidenceDeltas(
 			);
 			entry.updated_at = now;
 			mutated = true;
+			touched.push(entry);
 		}
 
 		if (mutated) {
@@ -945,6 +1133,7 @@ async function applyConfidenceDeltas(
 			}
 		}
 	}
+	return touched;
 }
 
 // ============================================================================
