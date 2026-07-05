@@ -571,9 +571,10 @@ describe('checkFileAuthorityWithRules - DENY-first evaluation', () => {
 				TEST_CWD,
 				authorityConfig,
 			);
-			// dist/ is typically in production zone, not generated
-			// This depends on zone classification
-			expect(result.allowed).toBe(true);
+			// Generated output dirs such as dist/ stay blocked even when an
+			// allow glob would otherwise match.
+			expect(result.allowed).toBe(false);
+			expect(result.zone).toBe('generated');
 		});
 
 		test('coder blocked config zone - opencode.json', () => {

@@ -481,7 +481,7 @@ def main():
 		const jsNode = Object.values(graph.nodes).find(
 			(n) => n.moduleName === 'Foo.JS',
 		);
-		expect(jsNode?.language).toBe('typescript');
+		expect(jsNode?.language).toBe('javascript');
 
 		const tsNode = Object.values(graph.nodes).find(
 			(n) => n.moduleName === 'Bar.TS',

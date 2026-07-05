@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as toolsIndex from '../../../src/tools/index';
 import { TOOL_MANIFEST } from '../../../src/tools/manifest';
 import {
@@ -22,6 +25,29 @@ const DISABLED_MESSAGE =
 	'External skill curation is not enabled. Set external_skills.curation_enabled to true in your opencode config.';
 
 describe('External Skill Curation Tool Registrations', () => {
+	let disabledConfigDir: string;
+
+	beforeAll(() => {
+		disabledConfigDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'external-skill-disabled-')),
+		);
+		fs.mkdirSync(path.join(disabledConfigDir, '.opencode'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(disabledConfigDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({
+				external_skills: {
+					curation_enabled: false,
+				},
+			}),
+		);
+	});
+
+	afterAll(() => {
+		fs.rmSync(disabledConfigDir, { recursive: true, force: true });
+	});
+
 	describe('1 — Tool names in TOOL_NAMES and TOOL_NAME_SET', () => {
 		for (const tool of EXTERNAL_SKILL_TOOLS) {
 			test(`${tool} is in TOOL_NAMES`, () => {
@@ -116,7 +142,9 @@ describe('External Skill Curation Tool Registrations', () => {
 			test(`${tool} execute() returns disabled message string`, async () => {
 				const handler = TOOL_MANIFEST[tool as keyof typeof TOOL_MANIFEST]();
 				// execute is a method on the returned tool definition
-				const result = await handler.execute({}, '/fake/directory');
+				const result = await handler.execute({}, {
+					directory: disabledConfigDir,
+				} as Parameters<typeof handler.execute>[1]);
 				expect(result).toBe(DISABLED_MESSAGE);
 			});
 		}

@@ -23,6 +23,33 @@ describe('System Enhancer real-time learning nudge', () => {
 		const swarmDir = join(tempDir, '.swarm');
 		await mkdir(swarmDir, { recursive: true });
 		await writeFile(join(swarmDir, 'plan.md'), '# Plan\nCurrent phase: 2\n');
+		await writeFile(
+			join(swarmDir, 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Learning nudge test plan',
+				swarm: 'test',
+				current_phase: 2,
+				phases: [
+					{
+						id: 2,
+						name: 'Execute',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: '2.1',
+								phase: 2,
+								status: 'in_progress',
+								size: 'small',
+								description: 'Exercise realtime learning nudge',
+								depends: [],
+								files_touched: [],
+							},
+						],
+					},
+				],
+			}),
+		);
 		await writeFile(join(swarmDir, 'context.md'), '# Context\n');
 	});
 
@@ -67,6 +94,7 @@ describe('System Enhancer real-time learning nudge', () => {
 		max_iterations: 5,
 		qa_retry_limit: 3,
 		inject_phase_reminders: true,
+		context_budget: { max_injection_tokens: 20_000 },
 	};
 
 	it('injects the nudge at the first default threshold and suppresses duplicates', async () => {

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as realChildProcess from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11,9 +10,6 @@ const mockSpawnSync = mock(() => ({
 	stdout: Buffer.from(''),
 }));
 
-const mockWriteFileSync = mock(() => '');
-const mockUnlinkSync = mock(() => '');
-const mockPathJoin = mock((...args: string[]) => path.join(...args));
 const mockBatchCheckEquivalence = mock(
 	async () =>
 		[] as Array<{
@@ -25,28 +21,13 @@ const mockBatchCheckEquivalence = mock(
 		}>,
 );
 
-mock.module('node:child_process', () => ({
-	...realChildProcess,
-	spawnSync: mockSpawnSync,
-}));
-
-mock.module('node:fs', () => ({
-	unlinkSync: mockUnlinkSync,
-	writeFileSync: mockWriteFileSync,
-}));
-
-mock.module('node:path', () => ({
-	default: {
-		join: mockPathJoin,
-	},
-}));
-
 mock.module('../../../src/mutation/equivalence.js', () => ({
 	batchCheckEquivalence: mockBatchCheckEquivalence,
 }));
 
 // Import after mocking
 import {
+	_internals,
 	executeMutationSuite,
 	type MutationPatch,
 	type MutationResult,
@@ -66,18 +47,15 @@ function makeSpawnSuccess(stdout = 'Tests passed') {
 
 describe('executeMutationSuite — equivalence detection wiring', () => {
 	let tempDir: string;
+	let savedSpawnSync: typeof _internals.spawnSync;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-equiv-'));
+		tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-equiv-')),
+		);
+		savedSpawnSync = _internals.spawnSync;
 		mockSpawnSync.mockClear();
-		mockWriteFileSync.mockClear();
-		mockUnlinkSync.mockClear();
-		mockPathJoin.mockClear();
 		mockBatchCheckEquivalence.mockClear();
-
-		mockWriteFileSync.mockImplementation(() => '');
-		mockUnlinkSync.mockImplementation(() => '');
-		mockPathJoin.mockImplementation((...args: string[]) => path.join(...args));
 
 		// Default: successful git apply and revert, test passes
 		mockSpawnSync.mockImplementation(
@@ -91,23 +69,13 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 				return makeSpawnSuccess('all tests passed');
 			},
 		);
+		_internals.spawnSync =
+			mockSpawnSync as unknown as typeof _internals.spawnSync;
 	});
 
 	afterEach(() => {
-		mock.restore();
-		try {
-			const entries = fs.readdirSync(tempDir);
-			for (const entry of entries) {
-				try {
-					fs.unlinkSync(path.join(tempDir, entry));
-				} catch {
-					/* ignore */
-				}
-			}
-			fs.rmdirSync(tempDir);
-		} catch {
-			/* ignore */
-		}
+		_internals.spawnSync = savedSpawnSync;
+		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	// Helper to create a MutationPatch

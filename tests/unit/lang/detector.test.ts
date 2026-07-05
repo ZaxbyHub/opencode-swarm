@@ -88,14 +88,16 @@ describe('detectProjectLanguages', () => {
 		}
 	});
 
-	it('Dir with only package.json file → detects typescript profile', async () => {
+	it('Dir with only package.json file → detects typescript and javascript profiles', async () => {
 		await writeFile(
 			join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'test' }),
 		);
 		const profiles = await detectProjectLanguages(tempDir);
-		expect(profiles).toHaveLength(1);
-		expect(profiles[0].id).toBe('typescript');
+		expect(profiles).toHaveLength(2);
+		const ids = profiles.map((p) => p.id);
+		expect(ids).toContain('typescript');
+		expect(ids).toContain('javascript');
 	});
 
 	it('Dir with only Cargo.toml file → detects rust profile', async () => {
@@ -125,16 +127,17 @@ describe('detectProjectLanguages', () => {
 		expect(profiles[0].id).toBe('dart');
 	});
 
-	it('Dir with package.json AND go.mod → detects both typescript and go profiles', async () => {
+	it('Dir with package.json AND go.mod → detects typescript, javascript, and go profiles', async () => {
 		await writeFile(
 			join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'test' }),
 		);
 		await writeFile(join(tempDir, 'go.mod'), 'module test\n\ngo 1.21');
 		const profiles = await detectProjectLanguages(tempDir);
-		expect(profiles).toHaveLength(2);
+		expect(profiles).toHaveLength(3);
 		const ids = profiles.map((p) => p.id);
 		expect(ids).toContain('typescript');
+		expect(ids).toContain('javascript');
 		expect(ids).toContain('go');
 	});
 
@@ -182,7 +185,7 @@ describe('detectProjectLanguages', () => {
 		expect(profiles[0].id).toBe('typescript');
 	});
 
-	it('Monorepo: root has package.json, subdirectory has Cargo.toml → both typescript and rust detected', async () => {
+	it('Monorepo: root has package.json, subdirectory has Cargo.toml → typescript, javascript, and rust detected', async () => {
 		await writeFile(
 			join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'root' }),
@@ -194,9 +197,10 @@ describe('detectProjectLanguages', () => {
 			'[package]\nname = "rust-service"\nversion = "0.1.0"',
 		);
 		const profiles = await detectProjectLanguages(tempDir);
-		expect(profiles).toHaveLength(2);
+		expect(profiles).toHaveLength(3);
 		const ids = profiles.map((p) => p.id);
 		expect(ids).toContain('typescript');
+		expect(ids).toContain('javascript');
 		expect(ids).toContain('rust');
 	});
 
@@ -210,13 +214,15 @@ describe('detectProjectLanguages', () => {
 			'plugins { kotlin("jvm") version "1.9.0" }',
 		);
 		const profiles = await detectProjectLanguages(tempDir);
-		// package.json → TypeScript (tier 1), build.gradle.kts → Kotlin & Java (both tier 2) = 3 profiles total
+		// package.json → TypeScript + JavaScript (tier 1), build.gradle.kts → Kotlin & Java (both tier 2)
 		expect(profiles.length).toBeGreaterThanOrEqual(2);
-		// TypeScript (tier 1) should come before Kotlin and Java (both tier 2)
+		// Tier 1 profiles should come before Kotlin and Java (both tier 2).
 		expect(profiles[0].id).toBe('typescript');
 		expect(profiles[0].tier).toBe(1);
-		// Remaining profiles should be tier 2
-		const tier2Profiles = profiles.slice(1);
+		expect(profiles[1].id).toBe('javascript');
+		expect(profiles[1].tier).toBe(1);
+		// Remaining profiles should be tier 2.
+		const tier2Profiles = profiles.slice(2);
 		tier2Profiles.forEach((p) => expect(p.tier).toBe(2));
 		const ids = profiles.map((p) => p.id);
 		expect(ids).toContain('kotlin');
@@ -298,6 +304,7 @@ describe('detectProjectLanguages adversarial', () => {
 		// Even with malformed JSON, the presence of package.json triggers detection.
 		const ids = profiles!.map((p) => p.id);
 		expect(ids).toContain('typescript');
+		expect(ids).toContain('javascript');
 	});
 
 	it('Directory with a glob-pattern name matching *.csproj (F-004) — directory named "MyProject.csproj" must NOT trigger C# detection', async () => {

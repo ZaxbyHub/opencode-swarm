@@ -12,12 +12,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-
-afterEach(() => {
-	mock.restore();
-});
-
-import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
 	KnowledgeConfig,
@@ -28,27 +22,80 @@ import type {
 // Mocks Setup
 // ============================================================================
 
+const readPriorDriftReports = mock(async () => []);
+const buildDriftInjectionText = mock(() => '');
+const readMergedKnowledge = mock(async () => [] as RankedEntry[]);
+const readRejectedLessons = mock(async () => []);
+const loadPlan = mock(async () => null as unknown);
+const extractCurrentPhaseFromPlan = mock(() => 'Phase 1: Setup');
+const getRunMemorySummary = mock(async () => null as string | null);
+let searchResults: RankedEntry[] = [];
+const searchKnowledge = mock(async () => ({
+	trace_id: 'trace-test',
+	results: searchResults,
+}));
+const recordKnowledgeEvent = mock(async () => {});
+const recordKnowledgeShown = mock(async () => {});
+const readRecentEscalations = mock(async () => []);
+const buildEscalationBriefing = mock(() => '');
+
 mock.module('../../../src/hooks/curator-drift.js', () => ({
-	readPriorDriftReports: mock(async () => []),
-	buildDriftInjectionText: mock(() => ''),
+	readPriorDriftReports,
+	buildDriftInjectionText,
 }));
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
-	readMergedKnowledge: mock(async () => []),
+	readMergedKnowledge,
 }));
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
-	readRejectedLessons: mock(async () => []),
+	readRejectedLessons,
+	readKnowledge: async () => [],
+	readRetractionRecords: async () => [],
+	appendRetractionRecord: async () => {},
+	resolveSwarmKnowledgePath: () => '',
+	resolveSwarmRejectedPath: () => '',
+	resolveSwarmRetractionsPath: () => '',
+	resolveHiveKnowledgePath: () => '',
+	resolveHiveRejectedPath: () => '',
+	resolveHiveEventsPath: () => '',
+	normalizeEntry: (e: unknown) => e,
+	appendKnowledge: async () => {},
+	appendKnowledgeWithCapEnforcement: async () => {},
+	rewriteKnowledge: async () => {},
+	transactKnowledge: async () => {},
+	transactFile: async () => false,
+	getArchivedKnowledgeIds: async () => new Set<string>(),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	appendRejectedLesson: async () => {},
+	normalize: (t: string) => t,
+	wordBigrams: (t: string) => new Set<string>(),
+	jaccardBigram: () => 0,
+	findNearDuplicate: () => null,
+	computeConfidence: () => 0.5,
+	inferTags: () => [],
+	getPlatformConfigDir: () => '/tmp',
+	computeOutcomeSignal: () => 0,
+	OUTCOME_SIGNAL_SMOOTHING: 0.5,
+	_internals: {},
 }));
 mock.module('../../../src/plan/manager.js', () => ({
-	loadPlan: mock(async () => null),
+	loadPlan,
+	getCurrentTaskId: () => undefined,
 	updateTaskStatus: mock(),
 	loadPlanJsonOnly: mock(),
 	updatePlanPhase: mock(),
 	regeneratePlanMarkdown: mock(),
 	isPlanMdInSync: mock(),
+	savePlan: async () => {},
+	savePlanWithAutoAcknowledgedRemovals: async () => {},
+	rebuildPlan: async () => {},
+	retryCasWithBackoff: async (fn: () => unknown) => fn(),
+	isTaskSettled: async () => false,
+	derivePlanMarkdown: () => '',
+	migrateLegacyPlan: async () => {},
+	resetStartupLedgerCheck: () => {},
 	readSwarmFileAsync: mock(),
 	readSwarmFile: mock(),
 	writeSwarmFile: mock(),
@@ -56,8 +103,18 @@ mock.module('../../../src/plan/manager.js', () => ({
 	_snapshot_test_exports: {},
 }));
 mock.module('../../../src/hooks/extractors.js', () => ({
-	extractCurrentPhaseFromPlan: mock(() => 'Phase 1: Setup'),
+	extractCurrentPhaseFromPlan,
+	extractCurrentPhase: () => null,
+	extractCurrentTask: () => null,
+	extractCurrentTaskFromPlan: () => null,
+	extractDecisions: () => [],
+	extractIncompleteTasks: () => [],
+	extractIncompleteTasksFromPlan: () => [],
+	extractPatterns: () => [],
+	extractPlanCursor: () => null,
+	_internals: {},
 }));
+const zodStub = { parse: (v: unknown) => v, shape: {} };
 mock.module('../../../src/config/schema.js', () => ({
 	stripKnownSwarmPrefix: mock((name: string) => {
 		const prefixes = ['mega_', 'local_', 'paid_'];
@@ -66,21 +123,182 @@ mock.module('../../../src/config/schema.js', () => ({
 		}
 		return name;
 	}),
+	isKnownCanonicalRole: () => false,
+	getCanonicalAgentRole: () => null,
+	resolveGeneratedAgentRole: () => null,
+	resolveExternalSkillsConfig: () => ({}),
+	resolveGuardrailsConfig: () => ({}),
+	AdversarialDetectionConfigSchema: zodStub,
+	AdversarialTestingConfigSchema: zodStub,
+	AgentAuthorityRuleSchema: zodStub,
+	AgentOverrideConfigSchema: zodStub,
+	AgentReasoningConfigSchema: zodStub,
+	AgentThinkingConfigSchema: zodStub,
+	ArchitecturalSupervisionConfigSchema: zodStub,
+	AuthorityConfigSchema: zodStub,
+	AutoReviewConfigSchema: zodStub,
+	AutomationCapabilitiesSchema: zodStub,
+	AutomationConfigSchema: zodStub,
+	AutomationModeSchema: zodStub,
+	CheckpointConfigSchema: zodStub,
+	CompactionAdvisoryConfigSchema: zodStub,
+	CompactionConfigSchema: zodStub,
+	ContextBudgetConfigSchema: zodStub,
+	ContextMapConfigSchema: zodStub,
+	CouncilConfigSchema: zodStub,
+	CuratorConfigSchema: zodStub,
+	DEFAULT_AGENT_PROFILES: {},
+	DEFAULT_ARCHITECT_PROFILE: {},
+	DEFAULT_EXTERNAL_SKILLS_CONFIG: {},
+	DEFAULT_SKILLS_CONFIG: {},
+	DecisionDecaySchema: zodStub,
+	DesignDocsConfigSchema: zodStub,
+	DiscoverySourceSchema: zodStub,
+	DocsConfigSchema: zodStub,
+	EpicConfigSchema: zodStub,
+	EvidenceConfigSchema: zodStub,
+	ExternalSkillCandidateEvaluationVerdictSchema: zodStub,
+	ExternalSkillCandidateSchema: zodStub,
+	ExternalSkillCandidateSourceTypeSchema: zodStub,
+	ExternalSkillsConfigSchema: zodStub,
+	GateConfigSchema: zodStub,
+	GateFeatureSchema: zodStub,
+	GeneralCouncilConfigSchema: zodStub,
+	GuardrailsConfigSchema: zodStub,
+	GuardrailsProfileSchema: zodStub,
+	HooksConfigSchema: zodStub,
+	IncrementalVerifyConfigSchema: zodStub,
+	IntegrationAnalysisConfigSchema: zodStub,
+	KnowledgeApplicationConfigSchema: zodStub,
+	KnowledgeConfigSchema: zodStub,
+	LeanTurboConfig: {},
+	LeanTurboConfigSchema: zodStub,
+	LeanTurboStrategyConfigSchema: zodStub,
+	LintConfigSchema: zodStub,
+	MemoryConfigSchema: zodStub,
+	ModelPricingConfigSchema: zodStub,
+	ParallelizationConfigSchema: zodStub,
+	PhaseCompleteConfigSchema: zodStub,
+	PipelineConfigSchema: zodStub,
+	PlaceholderScanConfigSchema: zodStub,
+	PlanCursorConfigSchema: zodStub,
+	PluginConfigSchema: zodStub,
+	PricingConfigSchema: zodStub,
+	PrMonitorConfigSchema: zodStub,
+	PrmConfigSchema: zodStub,
+	QualityBudgetConfigSchema: zodStub,
+	RepoGraphConfigSchema: zodStub,
+	ReviewPassesConfigSchema: zodStub,
+	ScoringConfigSchema: zodStub,
+	ScoringWeightsSchema: zodStub,
+	SecretscanConfigSchema: zodStub,
+	SelfReviewConfigSchema: zodStub,
+	SkillImproverConfigSchema: zodStub,
+	SkillPropagationConfigSchema: zodStub,
+	SkillsConfigSchema: zodStub,
+	SlopDetectorConfigSchema: zodStub,
+	SpecWriterConfigSchema: zodStub,
+	StandardTurboConfigSchema: zodStub,
+	SummaryConfigSchema: zodStub,
+	SwarmConfigSchema: zodStub,
+	TokenRatiosSchema: zodStub,
+	ToolFilterConfigSchema: zodStub,
+	TurboConfig: {},
+	TurboConfigSchema: zodStub,
+	UIReviewConfigSchema: zodStub,
+	WatchdogConfigSchema: zodStub,
+	WorktreeIsolationConfigSchema: zodStub,
+	_internals: {},
 }));
 mock.module('../../../src/services/run-memory.js', () => ({
-	getRunMemorySummary: mock(async () => null),
+	getRunMemorySummary,
+}));
+mock.module('../../../src/hooks/search-knowledge.js', () => ({
+	searchKnowledge,
+}));
+mock.module('../../../src/hooks/knowledge-application.js', () => ({
+	recordKnowledgeShown,
+}));
+mock.module('../../../src/hooks/knowledge-events.js', () => ({
+	KNOWLEDGE_EVENT_SCHEMA_VERSION: 1,
+	MAX_EVENT_LOG_ENTRIES: 5000,
+	RECEIPT_EVENT_TYPES: new Set(),
+	MAX_VIOLATION_TIMESTAMPS: 10,
+	recordKnowledgeEvent,
+	appendKnowledgeEvent: mock(async () => {}),
+	appendHiveKnowledgeEvent: mock(async () => {}),
+	recordHiveKnowledgeEvent: mock(async () => {}),
+	effectiveRetrievalOutcomes: mock(() => ({})),
+	resolveKnowledgeEventsPath: mock(() => ''),
+	resolveKnowledgeCounterBaselinePath: mock(() => ''),
+	resolveHiveEventsPath: mock(() => ''),
+	resolveLegacyApplicationLogPath: mock(() => ''),
+	newTraceId: mock(() => 'trace-test'),
+	newEventId: mock(() => 'event-test'),
+	readKnowledgeEvents: mock(async () => []),
+	readHiveKnowledgeEvents: mock(async () => []),
+	readLegacyApplicationRecords: mock(async () => []),
+	recomputeCounters: mock(() => ({})),
+	countViolationsInWindow: mock(() => 0),
+	countEntryViolationsInWindow: mock(async () => 0),
+	readKnowledgeCounterRollups: mock(async () => []),
+	applyKnowledgeVerdictFeedback: mock(async () => ({})),
+	_internals: {},
 }));
 
-// Import mocked modules
-import {
-	buildDriftInjectionText,
-	readPriorDriftReports,
-} from '../../../src/hooks/curator-drift.js';
-import { extractCurrentPhaseFromPlan } from '../../../src/hooks/extractors.js';
-import { readMergedKnowledge } from '../../../src/hooks/knowledge-reader.js';
-import { readRejectedLessons } from '../../../src/hooks/knowledge-store.js';
-import { loadPlan } from '../../../src/plan/manager.js';
-import { getRunMemorySummary } from '../../../src/services/run-memory.js';
+const { _internals: injectorInternals, createKnowledgeInjectorHook } =
+	await import('../../../src/hooks/knowledge-injector.js');
+
+const realSearchKnowledge = injectorInternals.searchKnowledge;
+const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
+const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
+const realReadRecentEscalations = injectorInternals.readRecentEscalations;
+const realBuildEscalationBriefing = injectorInternals.buildEscalationBriefing;
+
+afterEach(() => {
+	injectorInternals.searchKnowledge = realSearchKnowledge;
+	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
+	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
+	injectorInternals.readRecentEscalations = realReadRecentEscalations;
+	injectorInternals.buildEscalationBriefing = realBuildEscalationBriefing;
+	mock.clearAllMocks();
+});
+
+function setSearchResults(results: RankedEntry[]): void {
+	searchResults = results;
+}
+
+function resetMocks(): void {
+	mock.clearAllMocks();
+	searchResults = [];
+	injectorInternals.searchKnowledge =
+		searchKnowledge as typeof realSearchKnowledge;
+	injectorInternals.recordKnowledgeEvent =
+		recordKnowledgeEvent as typeof realRecordKnowledgeEvent;
+	injectorInternals.recordKnowledgeShown =
+		recordKnowledgeShown as typeof realRecordKnowledgeShown;
+	injectorInternals.readRecentEscalations =
+		readRecentEscalations as typeof realReadRecentEscalations;
+	injectorInternals.buildEscalationBriefing =
+		buildEscalationBriefing as typeof realBuildEscalationBriefing;
+	searchKnowledge.mockImplementation(async () => ({
+		trace_id: 'trace-test',
+		results: searchResults,
+	}));
+	readRecentEscalations.mockResolvedValue([]);
+	buildEscalationBriefing.mockReturnValue('');
+	readPriorDriftReports.mockResolvedValue([]);
+	buildDriftInjectionText.mockReturnValue('');
+	loadPlan.mockResolvedValue({
+		current_phase: 1,
+		title: 'Test Project',
+		phases: [],
+	});
+	readMergedKnowledge.mockResolvedValue([]);
+	readRejectedLessons.mockResolvedValue([]);
+	extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
+	getRunMemorySummary.mockResolvedValue(null);
+}
 
 // ============================================================================
 // Helper Factories
@@ -151,8 +369,7 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('Adversarial: Malformed drift report structure', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -175,7 +392,7 @@ describe('Adversarial: Malformed drift report structure', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2
 		loadPlan.mockResolvedValue({
@@ -212,8 +429,7 @@ describe('Adversarial: Malformed drift report structure', () => {
 
 describe('Adversarial: Oversized drift text', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -248,7 +464,7 @@ describe('Adversarial: Oversized drift text', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2 — use fresh output to avoid idempotency guard
 		const output2 = makeOutput('architect');
@@ -286,8 +502,7 @@ describe('Adversarial: Oversized drift text', () => {
 
 describe('Adversarial: Array with null entry', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -313,7 +528,7 @@ describe('Adversarial: Array with null entry', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2
 		loadPlan.mockResolvedValue({
@@ -350,8 +565,7 @@ describe('Adversarial: Array with null entry', () => {
 
 describe('Adversarial: buildDriftInjectionText throws synchronously', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -381,7 +595,7 @@ describe('Adversarial: buildDriftInjectionText throws synchronously', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2
 		loadPlan.mockResolvedValue({
@@ -420,8 +634,7 @@ describe('Adversarial: buildDriftInjectionText throws synchronously', () => {
 
 describe('Adversarial: Wrong type returned (empty string instead of array)', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -439,7 +652,7 @@ describe('Adversarial: Wrong type returned (empty string instead of array)', () 
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2
 		loadPlan.mockResolvedValue({
@@ -478,8 +691,7 @@ describe('Adversarial: Wrong type returned (empty string instead of array)', () 
 
 describe('Adversarial: cachedInjectionText is empty string', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -507,7 +719,7 @@ describe('Adversarial: cachedInjectionText is empty string', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2 - this triggers drift injection
 		loadPlan.mockResolvedValue({
@@ -554,8 +766,7 @@ describe('Adversarial: cachedInjectionText is empty string', () => {
 
 describe('Adversarial: Context budget stressed', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -628,7 +839,7 @@ describe('Adversarial: Context budget stressed', () => {
 
 		// Set up for successful injection BEFORE the hook call
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase to 2
 		loadPlan.mockResolvedValue({
@@ -672,8 +883,7 @@ describe('Adversarial: Context budget stressed', () => {
 
 describe('Adversarial: Additional edge cases', () => {
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
+		resetMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -691,7 +901,7 @@ describe('Adversarial: Additional edge cases', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase
 		loadPlan.mockResolvedValue({
@@ -734,7 +944,7 @@ describe('Adversarial: Additional edge cases', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase
 		loadPlan.mockResolvedValue({
@@ -774,7 +984,7 @@ describe('Adversarial: Additional edge cases', () => {
 
 		// Set up knowledge entries
 		const entries = [makeSwarmEntry('Test lesson', 0.85)];
-		readMergedKnowledge.mockResolvedValue(entries);
+		setSearchResults(entries);
 
 		// Change phase
 		loadPlan.mockResolvedValue({

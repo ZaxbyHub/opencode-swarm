@@ -77,8 +77,8 @@ echo "=== Check 3: mock.module allowlist ==="
 # To add a new mock target: add it to scripts/mock-allowlist.txt with a comment explaining why.
 ALLOWLIST_FILE="$(dirname "$0")/mock-allowlist.txt"
 if [ ! -f "$ALLOWLIST_FILE" ]; then
-  echo "ERROR: $ALLOWLIST_FILE not found — mock.module allowlist is required for Check 3"
-  echo "       Run: scripts/generate-mock-allowlist.sh to regenerate, or manually add targets to $ALLOWLIST_FILE"
+  echo "ERROR: $ALLOWLIST_FILE not found — mock.module allowlist is required for Check 3" >&2
+  echo "       Run: scripts/generate-mock-allowlist.sh to regenerate, or manually add targets to $ALLOWLIST_FILE" >&2
   violations=$((violations + 1))
 else
   # Pre-load allowlist into associative array once so lookup is O(1) instead of O(N·M)

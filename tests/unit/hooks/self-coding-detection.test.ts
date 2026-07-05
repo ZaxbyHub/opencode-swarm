@@ -79,10 +79,10 @@ describe('architect self-coding detection (Task 2.1)', () => {
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
 		startAgentSession(sessionId, ORCHESTRATOR_NAME);
 
-		// Architect writes to .swarm/state.json (a non-blocked .swarm/ file)
+		// Architect writes to a non-config .swarm/ file.
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = {
-			args: { filePath: '.swarm/state.json', content: '{}' },
+			args: { filePath: '.swarm/outputs/state.txt', content: '{}' },
 		};
 
 		await hook.toolBefore(toolInput as any, toolOutput as any);
@@ -551,10 +551,10 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 			timestamp: Date.now() - 30_000,
 		};
 
-		// Architect writes to .swarm/ (not a self-fix - this is legit plan update)
+		// Architect writes to a non-config .swarm/ path (not a self-fix).
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = {
-			args: { filePath: '.swarm/state.json', content: '{}' },
+			args: { filePath: '.swarm/outputs/state.txt', content: '{}' },
 		};
 		await hook.toolBefore(toolInput as any, toolOutput as any);
 
@@ -1913,7 +1913,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = {
-			args: { filePath: '.swarm/./state.json', content: '{}' },
+			args: { filePath: '.swarm/./outputs/state.txt', content: '{}' },
 		};
 		await hook.toolBefore(toolInput as any, toolOutput as any);
 

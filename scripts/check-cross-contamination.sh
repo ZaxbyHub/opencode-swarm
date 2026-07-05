@@ -4,22 +4,19 @@
 # leak vi.mock('node:fs') and vi.mock('node:child_process') across files, causing
 # false test failures that don't appear when tests run individually.
 #
-# KNOWN pre-existing leaks are tracked with an additional "known_expected" field.
-# A regression occurs when the pass count drops below the known_expected value.
-# This lets us track known issues without blocking CI, while catching new leaks.
+# Known or recently-fixed leak pairs are tracked with an additional
+# "known_expected" field. For active known issues, a regression occurs when the
+# pass count drops below that baseline. For fixed pairs, known_expected equals
+# the individual pass-count sum, so any future contamination drop fails.
 set -euo pipefail
 
 # Format: file_a|file_b|individual_pass_a|individual_pass_b|known_expected_co_run
 # known_expected_co_run is the current actual pass count when co-run.
-# When the _internals DI seam migration fixes the leak, update this value to match
-# the expected sum. When it reaches the sum, remove the entry entirely.
+# When the _internals DI seam migration fixes a leak, update known_expected to
+# match the expected sum so the pair becomes a regression sentinel.
 PAIRS=(
-  "tests/unit/diff/ast-diff.test.ts|src/hooks/__tests__/semantic-diff-injection.test.ts|41|16|33"
-  # knowledge-reader.test.ts uses file-scoped mock.module('node:fs'...) which leaks
-  # into skill-generator.test.ts when run in the same Bun process, causing 9 spurious
-  # failures. Tracked here so a new leak (count drop below 63) triggers a regression
-  # alert. Resolved when knowledge-reader migrates to the _internals DI seam.
-  "tests/unit/hooks/knowledge-reader.test.ts|tests/unit/services/skill-generator.test.ts|20|52|63"
+  "tests/unit/diff/ast-diff.test.ts|src/hooks/__tests__/semantic-diff-injection.test.ts|41|16|57"
+  "tests/unit/hooks/knowledge-reader.test.ts|tests/unit/services/skill-generator.test.ts|20|82|102"
 )
 
 regression=0

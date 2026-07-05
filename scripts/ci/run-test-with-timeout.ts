@@ -77,31 +77,40 @@ async function main(): Promise<void> {
 	});
 
 	let killTimer: Timer | null = null;
+	let resolveTimeoutExit: ((exitCode: number) => void) | null = null;
+	const timeoutExit = new Promise<number>((resolve) => {
+		resolveTimeoutExit = resolve;
+	});
 
 	killTimer = setTimeout(async () => {
 		timedOut = true;
 		try {
 			if (process.platform === "win32") {
 				// taskkill /T /F /PID kills the entire process tree on Windows
-				await Bun.spawn([
-					"taskkill",
-					"/T",
-					"/F",
-					"/PID",
-					String(child.pid!),
-				]);
+				const killer = Bun.spawn(
+					["taskkill", "/T", "/F", "/PID", String(child.pid!)],
+					{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+				);
+				await killer.exited;
 			} else {
 				// Negative PID sends SIGKILL to the entire process group (requires detached:true)
 				process.kill(-child.pid!, "SIGKILL");
 			}
 		} catch {
 			// Child may have already exited between timer firing and kill attempt
+		} finally {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// Best-effort fallback only.
+			}
+			resolveTimeoutExit?.(124);
 		}
 	}, killTimeoutMs);
 
 	let rawExitCode = 0;
 	try {
-		rawExitCode = await child.exited;
+		rawExitCode = await Promise.race([child.exited, timeoutExit]);
 	} catch {
 		rawExitCode = timedOut ? 124 : 1;
 	} finally {

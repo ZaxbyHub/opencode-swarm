@@ -18,6 +18,37 @@ import {
 } from '../../../src/tools/set-qa-gates';
 
 describe('final_council gate integration', () => {
+	function writeValidPlan(directory: string): void {
+		const swarmDir = join(directory, '.swarm');
+		mkdirSync(swarmDir, { recursive: true });
+		const planJson = {
+			schema_version: '1.0.0',
+			title: 'Test Plan',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			migration_status: 'native',
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending',
+							description: 'Test task',
+						},
+					],
+				},
+			],
+		};
+		writeFileSync(
+			join(swarmDir, 'plan.json'),
+			JSON.stringify(planJson, null, 2),
+		);
+	}
+
 	// -------------------------------------------------------------------------
 	// VERIFICATION TESTS
 	// -------------------------------------------------------------------------
@@ -30,13 +61,20 @@ describe('final_council gate integration', () => {
 		it('ALL_GATE_NAMES includes final_council (verified via command error message)', async () => {
 			// Pass an invalid gate name; the error should list all valid gates
 			// which includes 'final_council'
+			const tempDir = mkdtempSync(join(tmpdir(), 'final-council-gate-test-'));
+			writeValidPlan(tempDir);
 			const result = await handleQaGatesCommand(
-				process.cwd(),
+				tempDir,
 				['enable', 'not_a_real_gate_name'],
 				'test-session',
 			);
-			// The command returns an error string listing valid gates
-			expect(result).toContain('final_council');
+			try {
+				// The command returns an error string listing valid gates
+				expect(result).toContain('final_council');
+			} finally {
+				closeProjectDb(tempDir);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
 		});
 
 		it('final_council is last entry in ALL_GATE_NAMES (verified via DEFAULT_QA_GATES key ordering)', () => {
@@ -107,35 +145,7 @@ describe('final_council gate integration', () => {
 
 		beforeEach(() => {
 			tempDir = mkdtempSync(join(tmpdir(), 'final-council-gate-test-'));
-			// Create minimal .swarm/ directory structure with valid plan.json
-			const swarmDir = join(tempDir, '.swarm');
-			mkdirSync(swarmDir, { recursive: true });
-			// Write a valid plan.json that passes PlanSchema validation
-			const planJson = {
-				schema_version: '1.0.0',
-				title: 'Test Plan',
-				swarm: 'test-swarm',
-				current_phase: 1,
-				phases: [
-					{
-						id: 1,
-						name: 'Phase 1',
-						status: 'in_progress',
-						tasks: [
-							{
-								id: '1.1',
-								phase: 1,
-								status: 'pending',
-								description: 'Test task',
-							},
-						],
-					},
-				],
-			};
-			writeFileSync(
-				join(swarmDir, 'plan.json'),
-				JSON.stringify(planJson, null, 2),
-			);
+			writeValidPlan(tempDir);
 		});
 
 		afterEach(() => {

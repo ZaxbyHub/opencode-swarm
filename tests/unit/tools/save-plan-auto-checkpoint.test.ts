@@ -123,13 +123,15 @@ describe('save_plan auto-checkpoint (Task 5.4)', () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 
 			const args2 = createValidArgs();
-			args2.title = 'Second Project';
+			args2.title = 'First Project';
+			args2.phases[0]!.name = 'Updated Phase';
 			const result2 = await executeSavePlan(args2, tempDir);
 			expect(result2.success).toBe(true);
 
 			const planJsonPath = path.join(tempDir, '.swarm', 'plan.json');
 			const plan = JSON.parse(fs.readFileSync(planJsonPath, 'utf-8'));
-			expect(plan.title).toBe('Second Project');
+			expect(plan.title).toBe('First Project');
+			expect(plan.phases[0].name).toBe('Updated Phase');
 		});
 	});
 

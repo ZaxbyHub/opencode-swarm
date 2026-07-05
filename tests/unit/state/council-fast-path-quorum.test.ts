@@ -52,7 +52,9 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 4,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', { minimumMembers: 3 }),
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
+				minimumMembers: 3,
+			}),
 		).not.toThrow();
 	});
 
@@ -64,7 +66,9 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 2,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', { minimumMembers: 2 }),
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
+				minimumMembers: 2,
+			}),
 		).not.toThrow();
 	});
 
@@ -76,7 +80,9 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 1,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', { minimumMembers: 1 }),
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
+				minimumMembers: 1,
+			}),
 		).not.toThrow();
 	});
 
@@ -88,7 +94,7 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 5,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', {
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
 				requireAllMembers: true,
 			}),
 		).not.toThrow();
@@ -102,7 +108,7 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 4,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', {
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
 				requireAllMembers: true,
 			}),
 		).toThrow(/INVALID_TASK_STATE_TRANSITION/);
@@ -116,7 +122,7 @@ describe('council fast-path — quorum gate', () => {
 			quorumSize: 4,
 		});
 		expect(() =>
-			advanceTaskState(session, 'q-task', 'complete', {
+			advanceTaskState(session, 'q-task', 'complete', undefined, {
 				minimumMembers: 2,
 				requireAllMembers: true,
 			}),

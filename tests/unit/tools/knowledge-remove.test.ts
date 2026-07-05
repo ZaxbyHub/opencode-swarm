@@ -9,13 +9,17 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { knowledge_add } from '../../../src/tools/knowledge-add';
-import { knowledge_remove } from '../../../src/tools/knowledge-remove';
+import {
+	knowledge_remove,
+	_internals as knowledgeRemoveInternals,
+} from '../../../src/tools/knowledge-remove';
 
 // The two filesystem-permission tests below simulate denial via chmod, which
 // cannot work when the process runs as root (uid 0 bypasses permission bits).
 // CI runners and sandboxes often run as root, so skip those cases there — their
 // premise is unsatisfiable, not broken.
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+const realTransactKnowledge = knowledgeRemoveInternals.transactKnowledge;
 
 describe('knowledge_remove tool verification tests', () => {
 	let tmpDir: string;
@@ -36,6 +40,7 @@ describe('knowledge_remove tool verification tests', () => {
 	afterEach(async () => {
 		// Restore original cwd
 		process.chdir(originalCwd);
+		knowledgeRemoveInternals.transactKnowledge = realTransactKnowledge;
 		// Clean up the temporary directory
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
@@ -295,47 +300,31 @@ describe('knowledge_remove tool verification tests', () => {
 			expect(parsed.message).toBe('entry not found');
 		});
 
-		it.skipIf(isRoot)(
-			'Returns write error when file permissions prevent rewriting',
-			async () => {
-				// Add an entry first so we have something to remove
-				const addResult = await knowledge_add.execute(
-					{
-						lesson: 'This entry will trigger a write error when removed',
-						category: 'process',
-						tags: ['test'],
-						applies_to_agents: ['coder'],
-						required_actions: ['remove this entry to exercise the write path'],
-					},
-					tmpDir,
-				);
-				const addParsed = JSON.parse(addResult);
-				const entryId = addParsed.id;
+		it('Returns write error when the knowledge transaction fails', async () => {
+			// Add an entry first so we have something to remove
+			const addResult = await knowledge_add.execute(
+				{
+					lesson: 'This entry will trigger a write error when removed',
+					category: 'process',
+					tags: ['test'],
+					applies_to_agents: ['coder'],
+					required_actions: ['remove this entry to exercise the write path'],
+				},
+				tmpDir,
+			);
+			const addParsed = JSON.parse(addResult);
+			const entryId = addParsed.id;
 
-				// Make the knowledge file read-only so rewriteKnowledge fails
-				const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
+			knowledgeRemoveInternals.transactKnowledge = async () => {
+				throw new Error('simulated write failure');
+			};
 
-				// On Windows, use chmod to make file read-only
-				// 0o444 = read-only
-				await fs.chmod(knowledgePath, 0o444);
+			const result = await knowledge_remove.execute({ id: entryId }, tmpDir);
 
-				try {
-					const result = await knowledge_remove.execute(
-						{ id: entryId },
-						tmpDir,
-					);
-
-					const parsed = JSON.parse(result);
-					expect(parsed.success).toBe(false);
-					expect(parsed.error).toBeDefined();
-					expect(typeof parsed.error).toBe('string');
-					expect(parsed.error.length).toBeGreaterThan(0);
-				} finally {
-					// Restore write permissions before cleanup
-					await fs.chmod(knowledgePath, 0o644).catch(() => {});
-				}
-			},
-		);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toBe('simulated write failure');
+		});
 
 		it.skipIf(isRoot)(
 			'Returns read error when file permissions prevent reading',

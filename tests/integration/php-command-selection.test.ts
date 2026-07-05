@@ -159,7 +159,7 @@ describe('PHP command selection — cross-fixture assertions', () => {
 		const profile = LANGUAGE_REGISTRY.getById('php');
 		const pest = profile!.test.frameworks.find((f) => f.name === 'Pest');
 		const phpunit = profile!.test.frameworks.find((f) => f.name === 'PHPUnit');
-		expect(pest!.priority).toBeLessThan(phpunit!.priority);
+		expect(pest!.priority).toBeGreaterThan(phpunit!.priority);
 	});
 
 	it('Laravel command always wins over Pest and PHPUnit (artisan test wraps both)', () => {

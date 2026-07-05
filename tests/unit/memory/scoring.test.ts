@@ -173,7 +173,7 @@ describe('memory scoring', () => {
 	test('recall suppresses low-Q memories unless includeLowQ is set', () => {
 		const lowQ = makeRecord({
 			text: 'This repository uses bun for tests.',
-			qValue: 0.1,
+			metadata: { qValue: 0.1 },
 		});
 		const suppressed = scoreMemoryRecord(lowQ, {
 			...makeRequest(),
@@ -187,17 +187,17 @@ describe('memory scoring', () => {
 
 		expect(suppressed).toBeNull();
 		expect(included).not.toBeNull();
-		expect(included?.signals.qValue).toBe(0.1);
+		expect(included?.reason).toContain('qvalue=0.10');
 	});
 
 	test('Q-value boost changes ranking for otherwise equivalent memories', () => {
 		const highQ = makeRecord({
 			id: 'mem_highq000000000',
-			qValue: 0.9,
+			metadata: { qValue: 0.9 },
 		});
 		const lowQ = makeRecord({
 			id: 'mem_lowq0000000000',
-			qValue: 0.2,
+			metadata: { qValue: 0.2 },
 		});
 		const result = scoreMemoryRecordsWithDiagnostics([lowQ, highQ], {
 			...makeRequest(),
@@ -209,7 +209,7 @@ describe('memory scoring', () => {
 			'mem_highq000000000',
 			'mem_lowq0000000000',
 		]);
-		expect(result.items[0]?.reason).toContain('q_value=0.90');
+		expect(result.items[0]?.reason).toContain('qvalue=0.90');
 	});
 });
 

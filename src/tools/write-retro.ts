@@ -5,6 +5,8 @@
  * This fixes the bug where Architect was writing flat JSON that failed EvidenceBundleSchema.parse().
  */
 
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import {
@@ -72,6 +74,16 @@ export async function executeWriteRetro(
 			{
 				success: false,
 				message: 'Invalid directory: reserved device name',
+			},
+			null,
+			2,
+		);
+	}
+	if (!existsSync(path.join(directory, '.swarm'))) {
+		return JSON.stringify(
+			{
+				success: false,
+				message: `Cannot write evidence in "${directory}" — no .swarm/ folder was found. Run write_retro from an initialized project root.`,
 			},
 			null,
 			2,

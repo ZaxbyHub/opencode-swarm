@@ -1,11 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-import * as realChildProcess from 'node:child_process';
-import * as realFs from 'node:fs';
 import * as path from 'node:path';
 import type { ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
-import * as realRepoGraph from '../../tools/repo-graph.js';
+import { _internals } from '../semantic-diff-injection.js';
 
 // Top-level mock function references (same pattern as diff-summary.test.ts)
 let mockExecFileSync: ReturnType<typeof vi.fn>;
@@ -18,11 +16,10 @@ let mockGenerateSummaryMarkdown: ReturnType<typeof vi.fn>;
 let mockGetCachedGraph: ReturnType<typeof vi.fn>;
 let mockGetImporters: ReturnType<typeof vi.fn>;
 
+const originalInternals = { ..._internals };
+
 describe('buildSemanticDiffBlock', () => {
 	beforeEach(async () => {
-		// Clear module cache so fresh mocks are used
-		delete require.cache[require.resolve('../semantic-diff-injection.js')];
-
 		// Create fresh mock functions
 		mockExecFileSync = vi.fn();
 		mockReadFileSync = vi.fn();
@@ -34,64 +31,44 @@ describe('buildSemanticDiffBlock', () => {
 		mockGetCachedGraph = vi.fn();
 		mockGetImporters = vi.fn();
 
-		// Mock the modules
-		vi.mock('node:child_process', () => ({
-			...realChildProcess,
-			execFileSync: mockExecFileSync,
-			execFile: (
-				command: string,
-				args: string[],
-				options: unknown,
-				callback: (error: Error | null, stdout: string, stderr: string) => void,
-			) => {
-				try {
-					const stdout = mockExecFileSync(command, args, options);
-					callback(null, stdout ?? '', '');
-				} catch (error) {
-					callback(error as Error, '', '');
-				}
-			},
-		}));
-
-		vi.mock('node:fs', () => ({
-			...realFs,
-			readFileSync: mockReadFileSync,
-			realpathSync: mockRealpathSync,
-			promises: {
-				readFile: (filePath: string, encoding: BufferEncoding) => {
-					try {
-						return Promise.resolve(mockReadFileSync(filePath, encoding));
-					} catch (error) {
-						return Promise.reject(error);
-					}
-				},
-			},
-		}));
-
-		vi.mock('../../diff/ast-diff.js', () => ({
-			computeASTDiff: mockComputeASTDiff,
-		}));
-
-		vi.mock('../../diff/semantic-classifier.js', () => ({
-			classifyChanges: mockClassifyChanges,
-		}));
-
-		vi.mock('../../diff/summary-generator.js', () => ({
-			generateSummary: mockGenerateSummary,
-			generateSummaryMarkdown: mockGenerateSummaryMarkdown,
-		}));
-
-		vi.mock('../repo-graph-injection.js', () => ({
-			getCachedGraph: mockGetCachedGraph,
-		}));
-
-		vi.mock('../../tools/repo-graph.js', () => ({
-			...realRepoGraph,
-			getImporters: mockGetImporters,
-		}));
+		_internals.execFile = ((
+			command: string,
+			args: string[],
+			options: unknown,
+			callback: (error: Error | null, stdout: string, stderr: string) => void,
+		) => {
+			try {
+				const stdout = mockExecFileSync(command, args, options);
+				callback(null, stdout ?? '', '');
+			} catch (error) {
+				callback(error as Error, '', '');
+			}
+		}) as typeof _internals.execFile;
+		_internals.realpathSync =
+			mockRealpathSync as typeof _internals.realpathSync;
+		_internals.readFile = ((filePath: string, encoding: BufferEncoding) => {
+			try {
+				return Promise.resolve(mockReadFileSync(filePath, encoding));
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		}) as typeof _internals.readFile;
+		_internals.computeASTDiff =
+			mockComputeASTDiff as typeof _internals.computeASTDiff;
+		_internals.classifyChanges =
+			mockClassifyChanges as typeof _internals.classifyChanges;
+		_internals.generateSummary =
+			mockGenerateSummary as typeof _internals.generateSummary;
+		_internals.generateSummaryMarkdown =
+			mockGenerateSummaryMarkdown as typeof _internals.generateSummaryMarkdown;
+		_internals.getCachedGraph =
+			mockGetCachedGraph as typeof _internals.getCachedGraph;
+		_internals.getImporters =
+			mockGetImporters as typeof _internals.getImporters;
 	});
 
 	afterEach(() => {
+		Object.assign(_internals, originalInternals);
 		vi.clearAllMocks();
 		vi.restoreAllMocks();
 	});

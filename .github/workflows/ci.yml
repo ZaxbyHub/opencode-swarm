@@ -158,15 +158,15 @@ jobs:
           # Drop known-red pre-existing failures (issue #1705) so the gate reflects
           # new regressions, not the debt backlog CI's old broken detection had been
           # silently hiding. See scripts/ci/quarantined-tests.txt for the tracked list.
-          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt > "$tmpdir/quarantined-raw.txt"
+          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt > "$tmpdir/quarantined-raw.txt" || true
           # RUNNER_OS is a GitHub Actions default env var (Linux/Windows/macOS).
           # merge_group runs the full 3-OS matrix; some pre-existing failures
           # only reproduce on one non-Linux OS (see scripts/ci/quarantined-tests-{macos,windows}.txt).
           if [ "$RUNNER_OS" = "macOS" ] && [ -f scripts/ci/quarantined-tests-macos.txt ]; then
-            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-macos.txt >> "$tmpdir/quarantined-raw.txt"
+            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-macos.txt >> "$tmpdir/quarantined-raw.txt" || true
           fi
           if [ "$RUNNER_OS" = "Windows" ] && [ -f scripts/ci/quarantined-tests-windows.txt ]; then
-            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-windows.txt >> "$tmpdir/quarantined-raw.txt"
+            grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-windows.txt >> "$tmpdir/quarantined-raw.txt" || true
           fi
           sort -u "$tmpdir/quarantined-raw.txt" > "$tmpdir/quarantined.txt"
           comm -23 "$tmpdir/all-tests.txt" "$tmpdir/quarantined.txt" > "$tmpdir/gated-tests.txt"
@@ -298,41 +298,12 @@ jobs:
         run: |
           set -e
           echo "Running coverage measurement for gate enforcement..."
-          # Drop known-red pre-existing failures (issue #1705) — same list and
-          # rationale as the unit job's per-shard gating above.
-          find tests/unit -name '*.test.ts' -type f | sort > all-tests.txt
-          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt | sort > quarantined.txt
-          comm -23 all-tests.txt quarantined.txt > gated-tests.txt
-          # Avoid dollar-paren command substitution here: this workflow's own
-          # security scan (tests/security/ci-workflow-security.test.ts) flags
-          # that syntax inside a run: step as a command-injection risk pattern.
-          wc -l < quarantined.txt > quarantined-count.txt
-          read -r quarantined_count < quarantined-count.txt
-          echo "${quarantined_count} file(s) quarantined repo-wide, issue #1705"
-          # Run the full (non-quarantined) unit test suite with coverage (no
-          # --smol: that flag crashes Bun with SIGILL when combined with
-          # --coverage on large suites). xargs -a appends gated-tests.txt's
-          # lines as arguments without needing command substitution.
-          xargs -a gated-tests.txt bun test --coverage --timeout 60000 > coverage-output.txt 2>&1 || test_exit=$?
-          # Extract line coverage from "All files" row using awk.
-          # Bun's coverage table columns: File | % Funcs | % Lines | Uncovered Line #s
-          awk -F'|' '/All files/ { gsub(/ /,"",$3); print substr($3, 1, 5); exit }' coverage-output.txt > coverage-value.txt
-          if [ ! -s coverage-value.txt ]; then
-            echo "::warning::Could not parse coverage output"
-            echo "0" > coverage-value.txt
-          fi
-          read -r COVERAGE < coverage-value.txt || COVERAGE="0"
-          THRESHOLD=41.48
-          echo "Coverage: ${COVERAGE}% (threshold: ${THRESHOLD}%)"
-          if awk "BEGIN {exit !($COVERAGE < $THRESHOLD)}"; then
-            echo "::error::Coverage gate failed: ${COVERAGE}% < ${THRESHOLD}%"
-            exit 1
-          fi
-          echo "Coverage gate passed: ${COVERAGE}% >= ${THRESHOLD}%"
-          if [ "${test_exit:-0}" -ne 0 ]; then
-            echo "::error::Coverage measurement run failed (exit ${test_exit}) even though coverage was above threshold"
-            exit 1
-          fi
+          # Run each file in its own coverage process so file-scoped mocks and
+          # runtime state cannot contaminate later files in the merge-queue
+          # coverage gate (issue #1712). The helper merges the per-file lcov
+          # records before enforcing the threshold, so the gate still measures
+          # the full non-quarantined suite rather than a single shard.
+          bash scripts/ci/run-coverage-gate.sh
       - name: Upload coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -377,7 +348,7 @@ jobs:
           # Drop known-red pre-existing failures (issue #1705) — same rationale
           # as the unit/coverage jobs' quarantine lists. See
           # scripts/ci/quarantined-integration-tests.txt for the tracked list.
-          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt"
+          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt" || true
           comm -23 "$tmpdir/int-all-tests.txt" "$tmpdir/int-quarantined.txt" > "$tmpdir/int-gated-tests.txt"
           while IFS= read -r f; do
             [ -f "$f" ] || continue

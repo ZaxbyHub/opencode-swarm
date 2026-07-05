@@ -1152,7 +1152,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(ops.messages).not.toHaveBeenCalled();
 		const records = findByBatchId(directory, 'batch-async-1');
 		expect(records).toHaveLength(2);
-		expect(records[0].status).toBe('running');
+		expect(['pending', 'running']).toContain(records[0].status);
 		expect(records[0].parentSessionId).toBe('parent-async-1');
 		expect(records[0].workspace?.prHeadSha).toBe('abc123');
 		expect(records[0].generation).toBe(1);

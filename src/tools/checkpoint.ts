@@ -452,10 +452,15 @@ function handleRestore(label: string, directory: string): string {
 			);
 		}
 
-		// Restore tracked files to the checkpoint SHA. The checkpoint log itself
-		// lives under .swarm/ and is excluded from checkpoint commits, so it remains
-		// available after the reset.
+		// Preserve the runtime checkpoint log across the hard reset. .swarm/ is
+		// normally untracked, but a user commit can accidentally track it before a
+		// restore; reset --hard would then remove the active log if the target SHA
+		// predates that file.
+		const logBeforeReset = log;
+
+		// Restore tracked files to the checkpoint SHA.
 		gitExec(['reset', '--hard', checkpoint.sha], directory);
+		writeCheckpointLog(logBeforeReset, directory);
 
 		return JSON.stringify(
 			{

@@ -8,14 +8,7 @@
  * - Args/options are passed through correctly
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
-import * as path from 'node:path';
-
-afterEach(() => {
-	mock.restore();
-});
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 // ===== MOCK TRACKERS =====
 
@@ -25,15 +18,6 @@ const sastScanCalls: Array<{ input: unknown; directory: string }> = [];
 // Track calls to detectDarkMatter
 const detectDarkMatterCalls: Array<{ directory: string; options: unknown }> =
 	[];
-
-// ===== MOCK saveEvidence =====
-mock.module('../../../src/evidence/manager', () => ({
-	saveEvidence: mock().mockImplementation(async () => undefined),
-}));
-
-// ===== MOCK sast-scan module =====
-// We need to preserve the tool definition while tracking sastScan calls
-const originalSastScanModule = await import('../../../src/tools/sast-scan');
 
 const mockSastScan = async (
 	input: unknown,
@@ -60,17 +44,6 @@ const mockSastScan = async (
 	};
 };
 
-// Mock the entire module
-mock.module('../../../src/tools/sast-scan', () => ({
-	...originalSastScanModule,
-	sastScan: mockSastScan,
-}));
-
-// ===== MOCK co-change-analyzer module =====
-const originalCoChangeModule = await import(
-	'../../../src/tools/co-change-analyzer'
-);
-
 const mockDetectDarkMatter = async (directory: string, options?: unknown) => {
 	// Track the call
 	detectDarkMatterCalls.push({ directory, options });
@@ -78,33 +51,29 @@ const mockDetectDarkMatter = async (directory: string, options?: unknown) => {
 	return [];
 };
 
-// Mock the entire module
-mock.module('../../../src/tools/co-change-analyzer', () => ({
-	...originalCoChangeModule,
-	detectDarkMatter: mockDetectDarkMatter,
-}));
+import {
+	co_change_analyzer,
+	_internals as coChangeInternals,
+} from '../../../src/tools/co-change-analyzer';
+import {
+	sast_scan,
+	_internals as sastInternals,
+} from '../../../src/tools/sast-scan';
 
-// ===== MOCK semgrep module =====
-mock.module('../../../src/sast/semgrep', () => ({
-	isSemgrepAvailable: mock(() => false),
-	runSemgrep: mock().mockImplementation(async () => ({
-		available: false,
-		findings: [],
-		engine: 'tier_a',
-	})),
-	resetSemgrepCache: mock(),
-}));
+const realSastScan = sastInternals.sastScan;
+const realDetectDarkMatter = coChangeInternals.detectDarkMatter;
 
-import { co_change_analyzer } from '../../../src/tools/co-change-analyzer';
-// ===== IMPORT TOOLS AFTER MOCKS =====
-// Re-import to get the mocked versions
-import { sast_scan } from '../../../src/tools/sast-scan';
+afterEach(() => {
+	sastInternals.sastScan = realSastScan;
+	coChangeInternals.detectDarkMatter = realDetectDarkMatter;
+});
 
 describe('sast_scan tool directory injection verification', () => {
 	beforeEach(() => {
 		// Clear call trackers
 		sastScanCalls.length = 0;
 		detectDarkMatterCalls.length = 0;
+		sastInternals.sastScan = mockSastScan;
 	});
 
 	describe('When ctx provides directory', () => {
@@ -260,6 +229,7 @@ describe('co_change_analyzer tool directory injection verification', () => {
 		// Clear call trackers
 		sastScanCalls.length = 0;
 		detectDarkMatterCalls.length = 0;
+		coChangeInternals.detectDarkMatter = mockDetectDarkMatter;
 	});
 
 	describe('When ctx provides directory', () => {

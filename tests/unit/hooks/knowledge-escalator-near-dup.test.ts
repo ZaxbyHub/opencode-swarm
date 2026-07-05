@@ -246,8 +246,10 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 
 		// Near-duplicate entry lives only in the hive store.
 		const origHome = process.env.HOME;
+		const origLocalAppData = process.env.LOCALAPPDATA;
 		const hiveHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hive-home-'));
 		process.env.HOME = hiveHome;
+		process.env.LOCALAPPDATA = path.join(hiveHome, 'AppData', 'Local');
 		try {
 			const { resolveHiveKnowledgePath } = await import(
 				'../../../src/hooks/knowledge-store.js'
@@ -268,7 +270,16 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 			expect(result.from).toBe('medium');
 			expect(result.to).toBe('critical');
 		} finally {
-			process.env.HOME = origHome;
+			if (origHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = origHome;
+			}
+			if (origLocalAppData === undefined) {
+				delete process.env.LOCALAPPDATA;
+			} else {
+				process.env.LOCALAPPDATA = origLocalAppData;
+			}
 			fs.rmSync(hiveHome, { recursive: true, force: true });
 		}
 	});

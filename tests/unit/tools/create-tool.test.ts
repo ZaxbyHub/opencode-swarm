@@ -3,37 +3,21 @@
  * Covers directory injection, fallback behavior, args passthrough, and return values
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-
-afterEach(() => {
-	mock.restore();
-});
+import { describe, expect, it } from 'bun:test';
 
 import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 
-// Mock the tool function from @opencode-ai/plugin
-const mockTool = mock();
-mock.module('@opencode-ai/plugin', () => ({
-	tool: (...args: unknown[]) => mockTool(...args),
-	type: {},
-}));
-
-// Import after mock is set up
 import { createSwarmTool } from '../../../src/tools/create-tool';
 
 describe('createSwarmTool', () => {
-	beforeEach(() => {
-		mock.restore();
-	});
-
 	describe('Group 1: Directory from ctx', () => {
 		it('When execute is called with ctx = { directory: "/project" }, the execute callback receives "/project" as directory', async () => {
 			const testArgs = { foo: 'bar' };
 			const receivedArgs: Array<{ args: unknown; directory: string }> = [];
 
 			// Create a swarm tool with an execute callback that captures the arguments
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {
 					foo: z.string(),
@@ -43,14 +27,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			// Get the execute function passed to tool()
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// Call execute with a context containing a directory
 			const result = await toolConfig.execute(testArgs, {
@@ -71,7 +47,7 @@ describe('createSwarmTool', () => {
 
 			const expectedCwd = process.cwd();
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {
 					foo: z.string(),
@@ -81,13 +57,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// Call execute without a context
 			const result = await toolConfig.execute(testArgs, undefined);
@@ -106,7 +75,7 @@ describe('createSwarmTool', () => {
 
 			const expectedCwd = process.cwd();
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {
 					foo: z.string(),
@@ -116,13 +85,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// Call execute with an empty context object
 			const result = await toolConfig.execute(testArgs, {} as ToolContext);
@@ -143,7 +105,7 @@ describe('createSwarmTool', () => {
 			};
 			const receivedArgs: Array<unknown> = [];
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {
 					name: z.string(),
@@ -155,13 +117,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// Call execute with test args
 			await toolConfig.execute(testArgs, { directory: '/test' } as ToolContext);
@@ -176,7 +131,7 @@ describe('createSwarmTool', () => {
 		it('The string returned by the execute callback is returned by the tool', async () => {
 			const expectedReturnValue = 'test return value';
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {
 					foo: z.string(),
@@ -185,13 +140,6 @@ describe('createSwarmTool', () => {
 					return expectedReturnValue;
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// Call execute
 			const result = await toolConfig.execute({ foo: 'bar' }, {
@@ -207,7 +155,7 @@ describe('createSwarmTool', () => {
 		it('Multiple execute calls each receive correct directory', async () => {
 			const receivedArgs: Array<{ args: unknown; directory: string }> = [];
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: { foo: z.string() },
 				execute: async (args, directory) => {
@@ -215,13 +163,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			// First call with directory from context
 			await toolConfig.execute({ foo: '1' }, {
@@ -247,16 +188,12 @@ describe('createSwarmTool', () => {
 			const description = 'Test tool description';
 			const args = { foo: z.string(), bar: z.number() };
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description,
 				args,
 				execute: async () => 'result',
 			});
 
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls).toHaveLength(1);
-
-			const toolConfig = toolCalls[0][0];
 			expect(toolConfig.description).toBe(description);
 			expect(toolConfig.args).toEqual(args);
 		});
@@ -264,7 +201,7 @@ describe('createSwarmTool', () => {
 		it('Empty args object is handled correctly', async () => {
 			const receivedArgs: Array<unknown> = [];
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: {},
 				execute: async (args) => {
@@ -272,13 +209,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			await toolConfig.execute({}, { directory: '/test' } as ToolContext);
 
@@ -290,7 +220,7 @@ describe('createSwarmTool', () => {
 		it('Async execute callback works correctly', async () => {
 			let resolveExecute: ((value: string) => void) | undefined;
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: { foo: z.string() },
 				execute: async () => {
@@ -299,13 +229,6 @@ describe('createSwarmTool', () => {
 					});
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			const resultPromise = toolConfig.execute({ foo: 'bar' }, {
 				directory: '/test',
@@ -325,7 +248,7 @@ describe('createSwarmTool', () => {
 		it('createSwarmTool passes the ToolContext as the third argument to execute callback', async () => {
 			const receivedCtx: Array<ToolContext | undefined> = [];
 
-			createSwarmTool({
+			const toolConfig = createSwarmTool({
 				description: 'Test tool',
 				args: { foo: z.string() },
 				execute: async (args, directory, ctx) => {
@@ -333,13 +256,6 @@ describe('createSwarmTool', () => {
 					return 'result';
 				},
 			});
-
-			const toolCalls = mockTool.mock.calls;
-			expect(toolCalls.length).toBeGreaterThan(0);
-
-			const toolConfig = toolCalls[0][0] as {
-				execute: (args: unknown, ctx?: ToolContext) => Promise<string>;
-			};
 
 			const mockContext: ToolContext = {
 				sessionID: 'test-session-123',

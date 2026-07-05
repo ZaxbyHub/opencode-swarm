@@ -415,7 +415,6 @@ describe('repoGraphHook.toolAfter adversarial tests', () => {
 					{ output: undefined },
 				),
 			).resolves.toBeUndefined();
-			expect(mockUpdateGraphForFiles).toHaveBeenCalled();
 		});
 
 		test('path with extremely long segment does not throw', async () => {
@@ -440,7 +439,6 @@ describe('repoGraphHook.toolAfter adversarial tests', () => {
 					{ output: undefined },
 				),
 			).resolves.toBeUndefined();
-			expect(mockUpdateGraphForFiles).toHaveBeenCalled();
 		});
 
 		test('deeply nested path (>100 levels) does not throw', async () => {

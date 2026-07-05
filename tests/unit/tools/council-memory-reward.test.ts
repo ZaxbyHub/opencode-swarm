@@ -9,7 +9,7 @@ import {
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
 import { clearPool } from '../../../src/memory/provider-pool';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { resetSwarmState } from '../../../src/state';
 
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
@@ -42,8 +42,60 @@ afterEach(async () => {
 	await rmWithRetries(tmpDir);
 });
 
-describe('council verdict memory reward wiring', () => {
-	test('submit_council_verdicts rewards recalled memories by session id', async () => {
+describe('phase council memory reward wiring', () => {
+	test('submit_phase_council_verdicts rewards memories recalled by trusted ctx.sessionID', async () => {
+		const { submit_phase_council_verdicts } = await import(
+			'../../../src/tools/submit-phase-council-verdicts'
+		);
+		const record = await seedRecall('session-phase');
+		await writePassingMutationGate(2);
+
+		const raw = await submit_phase_council_verdicts.execute(
+			{
+				phaseNumber: 2,
+				swarmId: 'mega',
+				phaseSummary: 'Phase completed the memory learning loop.',
+				roundNumber: 1,
+				verdicts: [memberVerdict('reviewer', 'APPROVE')],
+				provenanceSessionId: 'untrusted-model-supplied-id',
+				working_directory: tmpDir,
+			},
+			{ directory: tmpDir, sessionID: 'session-phase' } as unknown as any,
+		);
+		const parsed = JSON.parse(raw as string) as { success: boolean };
+		const updated = await readMemory(record.id);
+
+		expect(parsed).toMatchObject({ success: true });
+		expect(updated.metadata.qValue).toBeCloseTo(0.55, 5);
+	});
+
+	test('submit_phase_council_verdicts does not trust provenanceSessionId as a reward join key', async () => {
+		const { submit_phase_council_verdicts } = await import(
+			'../../../src/tools/submit-phase-council-verdicts'
+		);
+		const record = await seedRecall('provenance-only-session');
+		await writePassingMutationGate(1);
+
+		const raw = await submit_phase_council_verdicts.execute(
+			{
+				phaseNumber: 1,
+				swarmId: 'mega',
+				phaseSummary: 'Phase with only caller supplied provenance.',
+				roundNumber: 1,
+				verdicts: [memberVerdict('reviewer', 'APPROVE')],
+				provenanceSessionId: 'provenance-only-session',
+				working_directory: tmpDir,
+			},
+			{ directory: tmpDir } as unknown as any,
+		);
+		const parsed = JSON.parse(raw as string) as { success: boolean };
+		const unchanged = await readMemory(record.id);
+
+		expect(parsed).toMatchObject({ success: true });
+		expect(unchanged.metadata.qValue).toBeUndefined();
+	});
+
+	test('submit_council_verdicts returns tool synthesis only; A.4 reward is hook-owned', async () => {
 		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
@@ -61,213 +113,13 @@ describe('council verdict memory reward wiring', () => {
 		);
 		const parsed = JSON.parse(raw as string) as {
 			success: boolean;
-			memoryReward?: { success: boolean; updatedMemoryIds: string[] };
-		};
-		const updated = await readMemory(record.id);
-
-		expect(parsed).toMatchObject({ success: true });
-		expect(parsed.memoryReward).toMatchObject({
-			success: true,
-			updatedMemoryIds: [record.id],
-		});
-		expect(updated.qValue).toBeCloseTo(0.55, 5);
-	});
-
-	test('submit_phase_council_verdicts rewards recalled memories by provenance session id, when that session id is real/tracked', async () => {
-		const { submit_phase_council_verdicts } = await import(
-			'../../../src/tools/submit-phase-council-verdicts'
-		);
-		const record = await seedRecall('session-phase');
-		await writePassingMutationGate(2);
-		// provenanceSessionId is caller-supplied and unvalidated by itself — the
-		// reward path must confirm it resolves to a real, tracked session (via
-		// getAgentSession) before trusting it. Simulate that tracking here, the
-		// way the plugin runtime's tool-call hooks would in real usage.
-		ensureAgentSession('session-phase', 'reviewer', tmpDir);
-
-		const raw = await submit_phase_council_verdicts.execute(
-			{
-				phaseNumber: 2,
-				swarmId: 'mega',
-				phaseSummary: 'Phase completed the memory learning loop.',
-				roundNumber: 1,
-				verdicts: [memberVerdict('reviewer', 'APPROVE')],
-				provenanceSessionId: 'session-phase',
-				working_directory: tmpDir,
-			},
-			{ directory: tmpDir } as unknown as any,
-		);
-		const parsed = JSON.parse(raw as string) as {
-			success: boolean;
-			memoryReward?: { success: boolean; updatedMemoryIds: string[] };
-		};
-		const updated = await readMemory(record.id);
-
-		expect(parsed).toMatchObject({ success: true });
-		expect(parsed.memoryReward).toMatchObject({
-			success: true,
-			updatedMemoryIds: [record.id],
-		});
-		expect(updated.qValue).toBeCloseTo(0.55, 5);
-	});
-
-	// Trust-boundary fix (PR #1636 review F-001): an unvalidated provenanceSessionId
-	// must NOT act as an unscoped "grab whatever's recent" fallback. An id that
-	// does not resolve to a real, currently-tracked session is dropped, and a
-	// genuinely mismatched/unknown session returns no_recall_usage_for_run —
-	// it must never silently reward an unrelated recall bundle.
-	test('an unregistered/spoofed provenanceSessionId is dropped, not trusted as a fallback match', async () => {
-		const { submit_phase_council_verdicts } = await import(
-			'../../../src/tools/submit-phase-council-verdicts'
-		);
-		const record = await seedRecall('task-agent-run-abc');
-		await writePassingMutationGate(1);
-
-		// architect-session-xyz was never registered via ensureAgentSession —
-		// it must be treated as unverifiable, not as a valid reward target.
-		const raw = await submit_phase_council_verdicts.execute(
-			{
-				phaseNumber: 1,
-				swarmId: 'mega',
-				phaseSummary: 'Phase with an unregistered provenance session id.',
-				roundNumber: 1,
-				verdicts: [memberVerdict('reviewer', 'APPROVE')],
-				provenanceSessionId: 'architect-session-xyz',
-				working_directory: tmpDir,
-			},
-			{ directory: tmpDir } as unknown as any,
-		);
-		const parsed = JSON.parse(raw as string) as {
-			success: boolean;
-			memoryReward?: {
-				success: boolean;
-				updatedMemoryIds: string[];
-				reason?: string;
-			};
+			memoryReward?: unknown;
 		};
 		const unchanged = await readMemory(record.id);
 
 		expect(parsed).toMatchObject({ success: true });
-		expect(parsed.memoryReward).toMatchObject({
-			success: false,
-			reason: 'no_recall_usage_for_run',
-		});
-		// The unrelated bundle recalled under task-agent-run-abc must be
-		// completely untouched — no cross-session reward leakage.
-		expect(unchanged.qValue).toBeUndefined();
-	});
-
-	test('applyRecallRewardForCouncil returns no_recall_usage_for_run for a stale/unrelated runId', async () => {
-		const { submit_phase_council_verdicts } = await import(
-			'../../../src/tools/submit-phase-council-verdicts'
-		);
-		const record = await seedRecallWithTimestamp(
-			'stale-run',
-			new Date(Date.now() - 31 * 60 * 1000).toISOString(),
-		);
-		await writePassingMutationGate(1);
-
-		const raw = await submit_phase_council_verdicts.execute(
-			{
-				phaseNumber: 1,
-				swarmId: 'mega',
-				phaseSummary: 'No matching recall for this run.',
-				roundNumber: 1,
-				verdicts: [memberVerdict('reviewer', 'APPROVE')],
-				provenanceSessionId: 'completely-unknown-session',
-				working_directory: tmpDir,
-			},
-			{ directory: tmpDir } as unknown as any,
-		);
-		const parsed = JSON.parse(raw as string) as {
-			success: boolean;
-			memoryReward?: { success: boolean; reason?: string };
-		};
-
-		expect(parsed).toMatchObject({ success: true });
-		expect(parsed.memoryReward).toMatchObject({
-			success: false,
-			reason: 'no_recall_usage_for_run',
-		});
-		const unchanged = await readMemory(record.id);
-		expect(unchanged.qValue).toBeUndefined();
-	});
-
-	// Sub-agent/architect session mismatch fix (PR #1636 review F-003): when the
-	// architect reports each dispatched council member's own session id via the
-	// per-verdict `sessionId` field, that member's own recall bundle is rewarded
-	// too, not just the architect's own session.
-	test('rewards a dispatched council member recall bundle via the per-verdict sessionId field', async () => {
-		const { submit_council_verdicts } = await import(
-			'../../../src/tools/convene-council'
-		);
-		const architectRecord = await seedRecall('session-arch-multi');
-		const criticRecord = await seedRecall('session-critic-multi');
-		ensureAgentSession('session-critic-multi', 'critic', tmpDir);
-
-		const raw = await submit_council_verdicts.execute(
-			{
-				taskId: '1.1',
-				swarmId: 'multi-session-swarm',
-				roundNumber: 1,
-				verdicts: [
-					{
-						...memberVerdict('critic', 'APPROVE'),
-						sessionId: 'session-critic-multi',
-					},
-				],
-				working_directory: tmpDir,
-			},
-			{
-				directory: tmpDir,
-				sessionID: 'session-arch-multi',
-			} as unknown as any,
-		);
-		const parsed = JSON.parse(raw as string) as {
-			success: boolean;
-			memoryReward?: { success: boolean; updatedMemoryIds: string[] };
-		};
-		const architectUpdated = await readMemory(architectRecord.id);
-		const criticUpdated = await readMemory(criticRecord.id);
-
-		expect(parsed).toMatchObject({ success: true });
-		expect(parsed.memoryReward?.success).toBe(true);
-		expect(parsed.memoryReward?.updatedMemoryIds?.sort()).toEqual(
-			[architectRecord.id, criticRecord.id].sort(),
-		);
-		expect(architectUpdated.qValue).toBeCloseTo(0.55, 5);
-		expect(criticUpdated.qValue).toBeCloseTo(0.55, 5);
-	});
-
-	// Idempotency fix (PR #1636 review F-004): resubmitting the identical
-	// taskId+swarmId+round verdict does not re-apply the EMA update.
-	test('resubmitting the same task/round verdict does not double-apply the reward', async () => {
-		const { submit_council_verdicts } = await import(
-			'../../../src/tools/convene-council'
-		);
-		const record = await seedRecall('session-idempotent');
-		const args = {
-			taskId: '2.1',
-			swarmId: 'idempotent-swarm',
-			roundNumber: 1,
-			verdicts: [memberVerdict('critic', 'APPROVE')],
-			working_directory: tmpDir,
-		};
-		const ctx = {
-			directory: tmpDir,
-			sessionID: 'session-idempotent',
-		} as unknown as any;
-
-		await submit_council_verdicts.execute(args, ctx);
-		const secondRaw = await submit_council_verdicts.execute(args, ctx);
-		const secondParsed = JSON.parse(secondRaw as string) as {
-			memoryReward?: { success: boolean; reason?: string };
-		};
-		const updated = await readMemory(record.id);
-
-		expect(secondParsed.memoryReward?.reason).toBe('already_rewarded');
-		// EMA applied exactly once (0.5 -> 0.55), not twice.
-		expect(updated.qValue).toBeCloseTo(0.55, 5);
+		expect(parsed.memoryReward).toBeUndefined();
+		expect(unchanged.metadata.qValue).toBeUndefined();
 	});
 });
 
@@ -286,36 +138,6 @@ async function writePassingMutationGate(phaseNumber: number): Promise<void> {
 		}),
 		'utf-8',
 	);
-}
-
-async function seedRecallWithTimestamp(
-	runId: string,
-	timestamp: string,
-): Promise<MemoryRecord> {
-	const provider = new SQLiteMemoryProvider(tmpDir, {
-		enabled: true,
-		provider: 'sqlite',
-	});
-	try {
-		const record = await provider.upsert(
-			makeRecord(`Memory reward record for ${runId}.`),
-		);
-		await provider.recordRecallUsage?.({
-			bundleId: `bundle-${runId}`,
-			query: 'memory reward',
-			scopes: [{ type: 'repository', repoId: 'repo-a' }],
-			kinds: ['repo_convention'],
-			memoryIds: [record.id],
-			scores: [0.8],
-			tokenEstimate: 12,
-			agentRole: 'architect',
-			runId,
-			timestamp,
-		});
-		return record;
-	} finally {
-		provider.close();
-	}
 }
 
 async function seedRecall(runId: string): Promise<MemoryRecord> {

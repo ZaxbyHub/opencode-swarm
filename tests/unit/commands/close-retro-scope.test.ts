@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { initLedger } from '../../../src/plan/ledger';
 
 // ── Import under test ─────────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -36,22 +37,33 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
+async function writePlan(
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
 	const plan = {
 		title: 'Retro Scope Test Project',
+		swarm: 'retro-scope-test',
 		schema_version: '1.0.0',
 		current_phase: 1,
 		phases: [
 			{
 				id: 1,
 				name: 'Phase 1',
-				status: 'in_progress',
-				tasks: [{ id: '1.1', status: 'in_progress', description: 'Task A' }],
+				status: 'completed',
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						description: 'Task A',
+					},
+				],
 			},
 		],
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await initLedger(testDir, plan.swarm, undefined, plan);
 }
 
 function makeConfig(): Record<string, unknown> {
@@ -231,7 +243,7 @@ afterEach(() => {
 
 describe('handleCloseCommand — retro-lesson dedup (FR-015)', () => {
 	it('dedupes retro lessons already committed in the knowledge store', async () => {
-		writePlan();
+		await writePlan();
 		writeKnowledgeEntry('Already committed lesson');
 		writeRetroEvidence([
 			'Already committed lesson',
@@ -250,7 +262,7 @@ describe('handleCloseCommand — retro-lesson dedup (FR-015)', () => {
 	});
 
 	it('passes through all retro lessons when knowledge.jsonl is absent (fail-open)', async () => {
-		writePlan();
+		await writePlan();
 		writeRetroEvidence([
 			'Already committed lesson',
 			'New lesson from this session',
@@ -269,7 +281,7 @@ describe('handleCloseCommand — retro-lesson dedup (FR-015)', () => {
 	});
 
 	it('dedupes case-insensitively against the knowledge store', async () => {
-		writePlan();
+		await writePlan();
 		writeKnowledgeEntry('Already committed lesson');
 		writeRetroEvidence([
 			'ALREADY COMMITTED LESSON',

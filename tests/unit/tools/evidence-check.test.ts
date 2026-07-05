@@ -399,21 +399,6 @@ describe('evidence-check adversarial tests', () => {
 
 	// ============ Dotted Filename Tests (Task 1.31) ============
 	describe('dotted evidence filename support (task 1.31)', () => {
-		beforeEach(() => {
-			originalCwd = process.cwd();
-			testDir = setupTestDir();
-			process.chdir(testDir);
-		});
-
-		afterEach(() => {
-			process.chdir(originalCwd);
-			try {
-				rmSync(testDir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		});
-
 		test('1. Dotted task ID filenames like "1.21.json" are accepted', async () => {
 			createPlanFile(`
 - [x] 1.21: Dotted task
@@ -545,21 +530,6 @@ describe('evidence-check adversarial tests', () => {
 
 	// ============ Deep Task ID Tests (Task 1.33) ============
 	describe('deep completed task ID parsing (task 1.33)', () => {
-		beforeEach(() => {
-			originalCwd = process.cwd();
-			testDir = setupTestDir();
-			process.chdir(testDir);
-		});
-
-		afterEach(() => {
-			process.chdir(originalCwd);
-			try {
-				rmSync(testDir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		});
-
 		test('1. Task ID with two segments "1.2" is parsed correctly', async () => {
 			createPlanFile(`
 - [x] 1.2: Two segment task
@@ -675,21 +645,6 @@ describe('evidence-check adversarial tests', () => {
 
 	// ============ Aggregate Gate-Evidence Tests (Task 1.32) ============
 	describe('aggregate gate-evidence parsing (task 1.32)', () => {
-		beforeEach(() => {
-			originalCwd = process.cwd();
-			testDir = setupTestDir();
-			process.chdir(testDir);
-		});
-
-		afterEach(() => {
-			process.chdir(originalCwd);
-			try {
-				rmSync(testDir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		});
-
 		test('1. Aggregate format with gates object is expanded to individual evidence', async () => {
 			createPlanFile(`
 - [x] 1.1: Aggregate task
@@ -789,21 +744,6 @@ describe('evidence-check adversarial tests', () => {
 
 	// ============ Legacy Type Normalization Tests (Task 1.32) ============
 	describe('legacy evidence type normalization (task 1.32)', () => {
-		beforeEach(() => {
-			originalCwd = process.cwd();
-			testDir = setupTestDir();
-			process.chdir(testDir);
-		});
-
-		afterEach(() => {
-			process.chdir(originalCwd);
-			try {
-				rmSync(testDir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		});
-
 		test('1. Legacy "review" type is normalized to "reviewer"', async () => {
 			createPlanFile(`
 - [x] 1.1: Legacy review task

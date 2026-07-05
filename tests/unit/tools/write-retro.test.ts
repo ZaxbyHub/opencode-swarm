@@ -45,6 +45,7 @@ describe('write_retro tool', () => {
 
 		// Create .swarm directory structure
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
 	});
 
 	afterEach(() => {

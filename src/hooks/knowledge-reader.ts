@@ -273,12 +273,12 @@ async function transactShownFile(
 	shownFile: string,
 	mutate: (data: Record<string, string[]>) => Record<string, string[]> | null,
 ): Promise<boolean> {
-	return transactFile<Record<string, string[]>>(
+	return _internals.transactFile<Record<string, string[]>>(
 		shownFile,
 		async (filePath) => {
-			if (!existsSync(filePath)) return {};
+			if (!_internals.existsSync(filePath)) return {};
 			try {
-				const content = await readFile(filePath, 'utf-8');
+				const content = await _internals.readFile(filePath, 'utf-8');
 				return JSON.parse(content);
 			} catch {
 				// Malformed JSON — start fresh (safe fallback)
@@ -286,7 +286,7 @@ async function transactShownFile(
 			}
 		},
 		async (filePath, data) => {
-			await atomicWriteFile(filePath, JSON.stringify(data, null, 2));
+			await _internals.atomicWriteFile(filePath, JSON.stringify(data, null, 2));
 		},
 		mutate,
 	);
@@ -315,10 +315,10 @@ async function recordLessonsShown(
 			return shownData;
 		});
 		if (!ok) {
-			warn('[swarm] Knowledge: failed to record shown lessons');
+			_internals.warn('[swarm] Knowledge: failed to record shown lessons');
 		}
 	} catch {
-		warn('[swarm] Knowledge: failed to record shown lessons');
+		_internals.warn('[swarm] Knowledge: failed to record shown lessons');
 	}
 }
 
@@ -333,14 +333,15 @@ export async function readMergedKnowledge(
 	opts?: { skipScopeFilter?: boolean },
 ): Promise<RankedEntry[]> {
 	// Step 1: Read swarm entries
-	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarmEntries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+	const swarmPath = _internals.resolveSwarmKnowledgePath(directory);
+	const swarmEntries =
+		await _internals.readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 
 	// Step 2: Read hive entries if enabled
 	let hiveEntries: HiveKnowledgeEntry[] = [];
 	if (config.hive_enabled !== false) {
-		const hivePath = resolveHiveKnowledgePath();
-		hiveEntries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
+		const hivePath = _internals.resolveHiveKnowledgePath();
+		hiveEntries = await _internals.readKnowledge<HiveKnowledgeEntry>(hivePath);
 	}
 
 	// Step 3: Merge with deduplication — hive wins
@@ -349,7 +350,7 @@ export async function readMergedKnowledge(
 
 	// Add hive entries first (they win in deduplication)
 	for (const entry of hiveEntries) {
-		const normalized = normalize(entry.lesson);
+		const normalized = _internals.normalize(entry.lesson);
 		seenLessons.add(normalized);
 		merged.push({
 			...entry,
@@ -360,7 +361,7 @@ export async function readMergedKnowledge(
 
 	// Add swarm entries only if not duplicate
 	for (const entry of swarmEntries) {
-		const normalized = normalize(entry.lesson);
+		const normalized = _internals.normalize(entry.lesson);
 
 		// Skip exact duplicates
 		if (seenLessons.has(normalized)) {
@@ -368,13 +369,15 @@ export async function readMergedKnowledge(
 		}
 
 		// Skip near-duplicates using Jaccard threshold
-		const swarmBigrams = wordBigrams(normalized);
+		const swarmBigrams = _internals.wordBigrams(normalized);
 
 		// Check against hive entries (hive wins over swarm)
 		const isHiveNearDup = hiveEntries.some(
 			(hiveEntry) =>
-				jaccardBigram(swarmBigrams, wordBigrams(normalize(hiveEntry.lesson))) >=
-				JACCARD_THRESHOLD,
+				_internals.jaccardBigram(
+					swarmBigrams,
+					_internals.wordBigrams(_internals.normalize(hiveEntry.lesson)),
+				) >= JACCARD_THRESHOLD,
 		);
 		if (isHiveNearDup) continue;
 
@@ -382,8 +385,10 @@ export async function readMergedKnowledge(
 		const isSwarmNearDup = merged.some(
 			(m) =>
 				m.tier === 'swarm' &&
-				jaccardBigram(swarmBigrams, wordBigrams(normalize(m.lesson))) >=
-					JACCARD_THRESHOLD,
+				_internals.jaccardBigram(
+					swarmBigrams,
+					_internals.wordBigrams(_internals.normalize(m.lesson)),
+				) >= JACCARD_THRESHOLD,
 		);
 		if (isSwarmNearDup) continue;
 
@@ -395,7 +400,7 @@ export async function readMergedKnowledge(
 		});
 	}
 
-	const retractionRecords = await readRetractionRecords(directory);
+	const retractionRecords = await _internals.readRetractionRecords(directory);
 	const suppressedLessons = new Set(
 		retractionRecords
 			.map((record) => record.normalized_lesson)
@@ -418,7 +423,7 @@ export async function readMergedKnowledge(
 			(opts?.skipScopeFilter ||
 				scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern)) &&
 			entry.status !== QUARANTINED_STATUS &&
-			!suppressedLessons.has(normalize(entry.lesson)),
+			!suppressedLessons.has(_internals.normalize(entry.lesson)),
 	);
 
 	// Step 4: Compute finalScore using three-tier weighted scoring
@@ -525,7 +530,10 @@ export async function readMergedKnowledge(
 			topN.map((e) => e.id),
 			context.currentPhase,
 		).catch((err) => {
-			warn('[knowledge-reader] recordLessonsShown unexpected rejection:', err);
+			_internals.warn(
+				'[knowledge-reader] recordLessonsShown unexpected rejection:',
+				err,
+			);
 		});
 	}
 
@@ -545,7 +553,7 @@ export async function updateRetrievalOutcome(
 
 	try {
 		// Exit early if file doesn't exist
-		if (!existsSync(shownFile)) {
+		if (!_internals.existsSync(shownFile)) {
 			return;
 		}
 
@@ -554,7 +562,7 @@ export async function updateRetrievalOutcome(
 		// via transactShownFile below (LF-1 fix).
 		let shownIds: string[] | undefined;
 		try {
-			const content = await readFile(shownFile, 'utf-8');
+			const content = await _internals.readFile(shownFile, 'utf-8');
 			const shownData: Record<string, string[]> = JSON.parse(content);
 			shownIds = shownData[phaseInfo];
 		} catch {
@@ -601,7 +609,7 @@ export async function updateRetrievalOutcome(
 			});
 		}
 	} catch {
-		warn('[swarm] Knowledge: failed to update retrieval outcomes');
+		_internals.warn('[swarm] Knowledge: failed to update retrieval outcomes');
 	}
 }
 
@@ -680,11 +688,35 @@ export const _internals: {
 	updateRetrievalOutcome: typeof updateRetrievalOutcome;
 	scoreDirectiveAgainstContext: typeof scoreDirectiveAgainstContext;
 	transactShownFile: typeof transactShownFile;
+	existsSync: typeof existsSync;
+	readFile: typeof readFile;
+	atomicWriteFile: typeof atomicWriteFile;
+	transactFile: typeof transactFile;
+	warn: typeof warn;
+	readKnowledge: typeof readKnowledge;
+	readRetractionRecords: typeof readRetractionRecords;
+	resolveHiveKnowledgePath: typeof resolveHiveKnowledgePath;
+	resolveSwarmKnowledgePath: typeof resolveSwarmKnowledgePath;
+	jaccardBigram: typeof jaccardBigram;
+	normalize: typeof normalize;
+	wordBigrams: typeof wordBigrams;
 	recordKnowledgeEvent: typeof recordKnowledgeEvent;
 } = {
 	readMergedKnowledge,
 	updateRetrievalOutcome,
 	scoreDirectiveAgainstContext,
 	transactShownFile,
+	existsSync,
+	readFile,
+	atomicWriteFile,
+	transactFile,
+	warn,
+	readKnowledge,
+	readRetractionRecords,
+	resolveHiveKnowledgePath,
+	resolveSwarmKnowledgePath,
+	jaccardBigram,
+	normalize,
+	wordBigrams,
 	recordKnowledgeEvent,
 };
