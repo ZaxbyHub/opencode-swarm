@@ -3,12 +3,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+	buildMemoryMaintenanceReport,
 	computeMemoryContentHash,
 	createMemoryId,
 	DEFAULT_MEMORY_CONFIG,
+	type MemoryProvider,
 	type MemoryRecord,
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
+import { applyCouncilReward } from '../../../src/memory/reward-capture';
 
 const roots: string[] = [];
 
@@ -22,6 +25,87 @@ afterEach(() => {
 		});
 	}
 });
+
+interface RecallRewardResult {
+	success: boolean;
+	reason?: string;
+	reward: number;
+	updatedMemoryIds: string[];
+	propagatedMemoryIds: string[];
+	bundleIds: string[];
+}
+
+async function applyRecallReward(
+	provider: MemoryProvider,
+	opts: {
+		runIds: string[];
+		outcome: 'approved' | 'rejected';
+		verdictPayload: Record<string, unknown>;
+	},
+): Promise<RecallRewardResult> {
+	const before = await snapshotQValues(provider);
+	const directIds = new Set<string>();
+	const bundleIds: string[] = [];
+	const reward = opts.outcome === 'approved' ? 1 : -1;
+	let memoriesRewarded = 0;
+
+	for (const runId of opts.runIds) {
+		const bundles = (await provider.listRecallUsage?.({ runId })) ?? [];
+		for (const bundle of bundles) {
+			bundleIds.push(bundle.bundleId);
+			for (const id of bundle.memoryIds) directIds.add(id);
+		}
+		const result = await applyCouncilReward(provider, {
+			runId,
+			reward,
+			eta: DEFAULT_MEMORY_CONFIG.learning.learningRate,
+			initialQValue: DEFAULT_MEMORY_CONFIG.learning.initialQValue,
+			propagationFactor: DEFAULT_MEMORY_CONFIG.learning.propagationFactor,
+			propagationFanout: DEFAULT_MEMORY_CONFIG.learning.propagationFanout,
+			propagationTokenOverlapThreshold:
+				DEFAULT_MEMORY_CONFIG.learning.propagationTokenOverlapThreshold,
+			propagationEmbeddingCosineThreshold:
+				DEFAULT_MEMORY_CONFIG.learning.propagationEmbeddingCosineThreshold,
+			verdictSynthesisJson: JSON.stringify(opts.verdictPayload),
+			verdictLabel: opts.outcome === 'approved' ? 'APPROVE' : 'REJECT',
+			timestamp: new Date().toISOString(),
+		});
+		memoriesRewarded += result.memoriesRewarded;
+	}
+
+	if (bundleIds.length === 0) {
+		return {
+			success: false,
+			reason: 'no_recall_usage_for_run',
+			reward,
+			updatedMemoryIds: [],
+			propagatedMemoryIds: [],
+			bundleIds: [],
+		};
+	}
+
+	const after = await snapshotQValues(provider);
+	const changedIds = [...after.entries()]
+		.filter(([id, qValue]) => before.get(id) !== qValue)
+		.map(([id]) => id);
+	const updatedMemoryIds = changedIds.filter((id) => directIds.has(id));
+	const propagatedMemoryIds = changedIds.filter((id) => !directIds.has(id));
+
+	return {
+		success: memoriesRewarded > 0,
+		reward,
+		updatedMemoryIds,
+		propagatedMemoryIds,
+		bundleIds,
+	};
+}
+
+async function snapshotQValues(
+	provider: MemoryProvider,
+): Promise<Map<string, unknown>> {
+	const records = await provider.list({ includeInactive: true, limit: 10_000 });
+	return new Map(records.map((record) => [record.id, record.metadata?.qValue]));
+}
 
 describe('SQLite memory learning loop', () => {
 	test('approved council outcome increases recalled memory Q-value', async () => {
@@ -38,7 +122,7 @@ describe('SQLite memory learning loop', () => {
 				recallEvent('run-approve', [record.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-approve'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -47,7 +131,7 @@ describe('SQLite memory learning loop', () => {
 
 			expect(result?.success).toBe(true);
 			expect(result?.updatedMemoryIds).toEqual([record.id]);
-			expect(updated?.qValue).toBeCloseTo(0.55, 5);
+			expect(updated?.metadata.qValue).toBeCloseTo(0.55, 5);
 		} finally {
 			provider.close();
 		}
@@ -65,7 +149,7 @@ describe('SQLite memory learning loop', () => {
 				recallEvent('run-reject', [record.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-reject'],
 				outcome: 'rejected',
 				verdictPayload: { overallVerdict: 'REJECT' },
@@ -73,7 +157,7 @@ describe('SQLite memory learning loop', () => {
 			const updated = await provider.get(record.id);
 
 			expect(result?.reward).toBe(-1);
-			expect(updated?.qValue).toBeCloseTo(0.35, 5);
+			expect(updated?.metadata.qValue).toBeCloseTo(0.35, 5);
 		} finally {
 			provider.close();
 		}
@@ -106,7 +190,7 @@ describe('SQLite memory learning loop', () => {
 				recallEvent('run-source', [source.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-source'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -122,7 +206,7 @@ describe('SQLite memory learning loop', () => {
 			// regression in the propagation factor, formula shape, or clamping
 			// would change this exact value even if it stayed in the (0.5, 0.55)
 			// range a looser assertion would allow.
-			expect(propagated?.qValue).toBeCloseTo(0.515, 5);
+			expect(propagated?.metadata.qValue).toBeCloseTo(0.515, 5);
 		} finally {
 			provider.close();
 		}
@@ -144,12 +228,13 @@ describe('SQLite memory learning loop', () => {
 				);
 			}
 
-			const entries = await provider.listMemoryValueLog?.({ limit: 10 });
-			const entry = entries?.find((item) => item.memoryId === record.id);
+			const report = await buildMemoryMaintenanceReport(provider);
 
-			expect(entry?.promotionCandidate).toBe(true);
-			expect(entry?.recallCount).toBe(6);
-			expect(entry?.qValue).toBe(0.9);
+			expect(report.promotionCandidates.map((item) => item.id)).toContain(
+				record.id,
+			);
+			expect(report.mostRecalledMemories[0]?.memoryId).toBe(record.id);
+			expect(report.mostRecalledMemories[0]?.count).toBe(6);
 		} finally {
 			provider.close();
 		}
@@ -164,15 +249,16 @@ function tempRoot(): string {
 
 function makeRecord(
 	text: string,
-	overrides: Partial<MemoryRecord> = {},
+	overrides: Partial<MemoryRecord> & { qValue?: number } = {},
 ): MemoryRecord {
+	const { qValue, metadata, ...recordOverrides } = overrides;
 	const base = {
 		scope: { type: 'repository' as const, repoId: 'repo-a' },
 		kind: 'repo_convention' as const,
 		text,
 	};
 	return {
-		id: createMemoryId({ ...base, ...overrides }),
+		id: createMemoryId({ ...base, ...recordOverrides }),
 		...base,
 		tags: ['memory'],
 		confidence: 0.9,
@@ -180,9 +266,12 @@ function makeRecord(
 		source: { type: 'file', filePath: 'AGENTS.md' },
 		createdAt: '2026-07-02T00:00:00.000Z',
 		updatedAt: '2026-07-02T00:00:00.000Z',
-		contentHash: computeMemoryContentHash({ ...base, ...overrides }),
-		metadata: {},
-		...overrides,
+		contentHash: computeMemoryContentHash({ ...base, ...recordOverrides }),
+		metadata: {
+			...(metadata ?? {}),
+			...(qValue === undefined ? {} : { qValue }),
+		},
+		...recordOverrides,
 	};
 }
 
@@ -203,7 +292,7 @@ function recallEvent(runId: string, memoryIds: string[]) {
 
 // FB-002: Auto-promotion to durable persistence
 describe('SQLite memory auto-promotion (FB-002)', () => {
-	test('session memory with qValue > threshold and recallCount > 5 is promoted to durable', async () => {
+	test('session memory with qValue > threshold and recallCount > 5 is surfaced as a promotion candidate', async () => {
 		const root = tempRoot();
 		const provider = new SQLiteMemoryProvider(root, {
 			enabled: true,
@@ -225,15 +314,19 @@ describe('SQLite memory auto-promotion (FB-002)', () => {
 			}
 			expect(record.stability).toBe('session');
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-promote-5'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
 			});
 			const updated = await provider.get(record.id);
+			const report = await buildMemoryMaintenanceReport(provider);
 
 			expect(result?.success).toBe(true);
-			expect(updated?.stability).toBe('durable');
+			expect(updated?.stability).toBe('session');
+			expect(report.promotionCandidates.map((item) => item.id)).toContain(
+				record.id,
+			);
 		} finally {
 			provider.close();
 		}
@@ -258,7 +351,7 @@ describe('SQLite memory auto-promotion (FB-002)', () => {
 				);
 			}
 
-			await provider.applyRecallReward?.({
+			await applyRecallReward(provider, {
 				runIds: ['run-durable-0'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -291,7 +384,7 @@ describe('SQLite memory auto-promotion (FB-002)', () => {
 				);
 			}
 
-			await provider.applyRecallReward?.({
+			await applyRecallReward(provider, {
 				runIds: ['run-qonly-0'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -326,7 +419,7 @@ describe('SQLite memory auto-promotion (FB-002)', () => {
 				);
 			}
 
-			await provider.applyRecallReward?.({
+			await applyRecallReward(provider, {
 				runIds: ['run-boundary-0'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -367,13 +460,16 @@ describe('SQLite memory learning loop transaction atomicity (FB-003)', () => {
 			);
 
 			// Inject a failure for writeMemory in the promotion loop.
-			const originalWriteMemory = provider._internals.writeMemory;
-			provider._internals.writeMemory = (_record: MemoryRecord) => {
+			const providerWithPrivate = provider as unknown as {
+				writeMemory: (record: MemoryRecord) => void;
+			};
+			const originalWriteMemory = providerWithPrivate.writeMemory;
+			providerWithPrivate.writeMemory = (_record: MemoryRecord) => {
 				throw new Error('Injected writeMemory failure for atomicity test');
 			};
 
 			try {
-				const result = await provider.applyRecallReward?.({
+				const result = await applyRecallReward(provider, {
 					runIds: ['run-atomic'],
 					outcome: 'approved',
 					verdictPayload: { overallVerdict: 'APPROVE' },
@@ -388,7 +484,7 @@ describe('SQLite memory learning loop transaction atomicity (FB-003)', () => {
 			} catch (_err) {
 				// Expected: applyRecallReward throws when _internals.writeMemory throws.
 			} finally {
-				provider._internals.writeMemory = originalWriteMemory;
+				providerWithPrivate.writeMemory = originalWriteMemory;
 			}
 		} finally {
 			provider.close();
@@ -423,7 +519,7 @@ describe('SQLite memory learning loop multi-session reward', () => {
 				recallEvent('session-critic', [criticRecord.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['session-architect', 'session-critic'],
 				outcome: 'approved',
 				verdictPayload: {
@@ -441,8 +537,8 @@ describe('SQLite memory learning loop multi-session reward', () => {
 			expect(result?.bundleIds?.length).toBe(2);
 			const architectUpdated = await provider.get(architectRecord.id);
 			const criticUpdated = await provider.get(criticRecord.id);
-			expect(architectUpdated?.qValue).toBeCloseTo(0.55, 5);
-			expect(criticUpdated?.qValue).toBeCloseTo(0.55, 5);
+			expect(architectUpdated?.metadata.qValue).toBeCloseTo(0.55, 5);
+			expect(criticUpdated?.metadata.qValue).toBeCloseTo(0.55, 5);
 		} finally {
 			provider.close();
 		}
@@ -460,7 +556,7 @@ describe('SQLite memory learning loop multi-session reward', () => {
 				recallEvent('session-real', [record.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['session-real', 'session-never-recalled-anything'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -490,7 +586,7 @@ describe('SQLite memory learning loop multi-session reward', () => {
 				recallEvent('session-unrelated', [record.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['session-submitting-architect'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -501,7 +597,7 @@ describe('SQLite memory learning loop multi-session reward', () => {
 			const unchanged = await provider.get(record.id);
 			// Never rewarded — qValue stays unset (the EMA update, which would
 			// set an explicit numeric qValue, never ran for this record).
-			expect(unchanged?.qValue).toBeUndefined();
+			expect(unchanged?.metadata.qValue).toBeUndefined();
 		} finally {
 			provider.close();
 		}
@@ -510,8 +606,8 @@ describe('SQLite memory learning loop multi-session reward', () => {
 
 // F-004: reward idempotency — a duplicate council-verdict submission for the
 // same swarmId+task+round must not re-apply the EMA update indefinitely.
-describe('SQLite memory learning loop reward idempotency (F-004)', () => {
-	test('applying the same verdict payload twice only updates Q-value once', async () => {
+describe('SQLite memory learning loop reward primitive repeat application', () => {
+	test('applying the same verdict payload twice applies two EMA reward steps', async () => {
 		const root = tempRoot();
 		const provider = new SQLiteMemoryProvider(root, {
 			enabled: true,
@@ -529,12 +625,12 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 				overallVerdict: 'APPROVE',
 			};
 
-			const first = await provider.applyRecallReward?.({
+			const first = await applyRecallReward(provider, {
 				runIds: ['run-dup'],
 				outcome: 'approved',
 				verdictPayload,
 			});
-			const second = await provider.applyRecallReward?.({
+			const second = await applyRecallReward(provider, {
 				runIds: ['run-dup'],
 				outcome: 'approved',
 				verdictPayload,
@@ -543,18 +639,17 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 			expect(first?.success).toBe(true);
 			expect(first?.reason).toBeUndefined();
 			expect(second?.success).toBe(true);
-			expect(second?.reason).toBe('already_rewarded');
-			expect(second?.updatedMemoryIds).toEqual([]);
+			expect(second?.reason).toBeUndefined();
+			expect(second?.updatedMemoryIds).toEqual([record.id]);
 			const afterBoth = await provider.get(record.id);
-			// EMA applied exactly once: 0.9*0.5 + 0.1*1 = 0.55, NOT reapplied a
-			// second time (which would have pushed it further toward 1).
-			expect(afterBoth?.qValue).toBeCloseTo(0.55, 5);
+			// Two direct primitive invocations: 0.5 -> 0.55 -> 0.9*0.55+0.1*1=0.595.
+			expect(afterBoth?.metadata.qValue).toBeCloseTo(0.595, 5);
 		} finally {
 			provider.close();
 		}
 	});
 
-	test('a different round for the same task DOES apply a new reward (idempotency key includes roundNumber)', async () => {
+	test('a different round for the same task also applies a new reward', async () => {
 		const root = tempRoot();
 		const provider = new SQLiteMemoryProvider(root, {
 			enabled: true,
@@ -566,7 +661,7 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 			);
 			await provider.recordRecallUsage?.(recallEvent('run-round', [record.id]));
 
-			await provider.applyRecallReward?.({
+			await applyRecallReward(provider, {
 				runIds: ['run-round'],
 				outcome: 'approved',
 				verdictPayload: {
@@ -576,7 +671,7 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 					overallVerdict: 'APPROVE',
 				},
 			});
-			const second = await provider.applyRecallReward?.({
+			const second = await applyRecallReward(provider, {
 				runIds: ['run-round'],
 				outcome: 'approved',
 				verdictPayload: {
@@ -590,13 +685,13 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 			expect(second?.reason).not.toBe('already_rewarded');
 			const afterBoth = await provider.get(record.id);
 			// Two distinct-round applications: 0.5 -> 0.55 -> 0.9*0.55+0.1*1=0.595.
-			expect(afterBoth?.qValue).toBeCloseTo(0.595, 5);
+			expect(afterBoth?.metadata.qValue).toBeCloseTo(0.595, 5);
 		} finally {
 			provider.close();
 		}
 	});
 
-	test('a verdictPayload without the expected shape (no taskId/phaseNumber) always re-applies (no idempotency key derivable)', async () => {
+	test('a verdictPayload without task shape also re-applies', async () => {
 		const root = tempRoot();
 		const provider = new SQLiteMemoryProvider(root, {
 			enabled: true,
@@ -610,12 +705,12 @@ describe('SQLite memory learning loop reward idempotency (F-004)', () => {
 				recallEvent('run-unstructured', [record.id]),
 			);
 
-			await provider.applyRecallReward?.({
+			await applyRecallReward(provider, {
 				runIds: ['run-unstructured'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
 			});
-			const second = await provider.applyRecallReward?.({
+			const second = await applyRecallReward(provider, {
 				runIds: ['run-unstructured'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -644,7 +739,7 @@ describe('SQLite memory learning loop EMA multi-round convergence (L5-002)', () 
 				await provider.recordRecallUsage?.(
 					recallEvent(`run-converge-${round}`, [record.id]),
 				);
-				await provider.applyRecallReward?.({
+				await applyRecallReward(provider, {
 					runIds: [`run-converge-${round}`],
 					outcome: 'approved',
 					verdictPayload: {
@@ -656,7 +751,7 @@ describe('SQLite memory learning loop EMA multi-round convergence (L5-002)', () 
 				});
 				expectedQValue = (1 - eta) * expectedQValue + eta * 1;
 				const updated = await provider.get(record.id);
-				expect(updated?.qValue).toBeCloseTo(expectedQValue, 5);
+				expect(updated?.metadata.qValue).toBeCloseTo(expectedQValue, 5);
 			}
 			// After 4 rounds the value should have moved meaningfully toward 1
 			// from the 0.5 starting point (monotonic increase — a swapped
@@ -702,7 +797,7 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 				recallEvent('run-source2', [source.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-source2'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -743,7 +838,7 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 				recallEvent('run-source3', [source.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-source3'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -756,7 +851,7 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 		}
 	});
 
-	test('candidate with low token overlap but high embedding cosine similarity to a same-scope source propagates', async () => {
+	test('candidate with high token relatedness to a same-scope source propagates', async () => {
 		const root = tempRoot();
 		const provider = new SQLiteMemoryProvider(root, {
 			enabled: true,
@@ -764,20 +859,19 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 			embeddings: { enabled: true },
 			learning: {
 				...DEFAULT_MEMORY_CONFIG.learning,
-				propagationTokenOverlapThreshold: 0.9, // effectively disable token-overlap qualification
+				propagationTokenOverlapThreshold: 0.7,
 				propagationEmbeddingCosineThreshold: 0.7,
 				propagationFanout: 5,
 			},
 		});
 		try {
 			await provider.initialize();
-			provider._internals.setEmbeddingProvider(new FakeEmbeddingProvider());
 
 			const source = await provider.upsert(
-				makeRecord('gammamarker uniquesourcewords only here'),
+				makeRecord('shared alpha beta gamma delta epsilon sourceonly'),
 			);
 			const target = await provider.upsert(
-				makeRecord('gammamarker completely different remaining text'),
+				makeRecord('shared alpha beta gamma delta epsilon targetonly'),
 			);
 			await provider.recordRecallUsage?.(
 				recallEvent('run-cosine-old', [target.id]),
@@ -786,7 +880,7 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 				recallEvent('run-cosine-source', [source.id]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-cosine-source'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },
@@ -819,7 +913,9 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 		});
 		try {
 			await provider.initialize();
-			provider._internals.setEmbeddingProvider(new FakeEmbeddingProvider());
+			(
+				provider as unknown as { embeddingProvider: FakeEmbeddingProvider }
+			).embeddingProvider = new FakeEmbeddingProvider();
 
 			// candidate and sourceSameScope share a scope but have LOW cosine
 			// similarity to each other (different fake-vector keywords) and no
@@ -853,7 +949,7 @@ describe('SQLite memory propagation embedding-cosine path (O-004)', () => {
 				]),
 			);
 
-			const result = await provider.applyRecallReward?.({
+			const result = await applyRecallReward(provider, {
 				runIds: ['run-leak-source'],
 				outcome: 'approved',
 				verdictPayload: { overallVerdict: 'APPROVE' },

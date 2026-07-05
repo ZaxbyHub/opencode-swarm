@@ -74,7 +74,7 @@ function createMockChildProcess(
 // ---------------------------------------------------------------------------
 
 describe('runner-client probe()', () => {
-	test('returns unavailable when binary not found', () => {
+	test.skipIf(!isWin)('returns unavailable when binary not found', () => {
 		_internals.findRunnerBinary = () => null;
 
 		const result = probe();

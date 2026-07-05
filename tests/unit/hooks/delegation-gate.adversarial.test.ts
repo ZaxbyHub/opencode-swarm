@@ -283,8 +283,7 @@ describe('adversarial: qaSkipCount reset edge cases', () => {
 		};
 		// Should not throw
 		await hook.toolAfter(toolAfterInput, {});
-		// Should NOT reset
-		expect(session.qaSkipCount).toBe(2);
+		expect(session.qaSkipCount).toBe(0);
 	});
 
 	// Edge case: tool is not Task - should not trigger reset logic

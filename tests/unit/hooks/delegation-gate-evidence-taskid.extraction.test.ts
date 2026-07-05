@@ -163,8 +163,6 @@ describe('delegation-gate: evidence task ID extraction', () => {
 			threw = true;
 		}
 
-		// Evidence exists for 1.2 but plan says pending — should this block?
-		// The key is whether evidence task ID matches the blocking task
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });

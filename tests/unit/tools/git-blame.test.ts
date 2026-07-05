@@ -20,7 +20,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Get workspace root for integration tests - this is a real git repo
-const WORKSPACE_ROOT = path.resolve(__dirname, '../../../..');
+const WORKSPACE_ROOT = path.resolve(__dirname, '../../..');
 
 describe('git_blame tool', () => {
 	let tempDir: string;
@@ -419,8 +419,10 @@ describe('git_blame - integration with real git repo', () => {
 		const { git_blame } = await import('../../../src/tools/git-blame');
 
 		// Create a temp directory that is NOT a git repo
+		const scratch = path.join(WORKSPACE_ROOT, '.swarm', 'test-tmp');
+		fs.mkdirSync(scratch, { recursive: true });
 		const nonGitDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-dir-test-')),
+			fs.mkdtempSync(path.join(scratch, 'non-git-dir-test-')),
 		);
 
 		// Create a file in it

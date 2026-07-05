@@ -232,6 +232,7 @@ function wasEscalationDetected(logs: string[], pattern?: string): boolean {
 describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 	let originalConsoleLog: typeof console.log;
 	let originalConsoleWarn: typeof console.warn;
+	let originalDebugEnv: string | undefined;
 
 	beforeEach(() => {
 		// Save original _internals properties
@@ -266,6 +267,8 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		// Save original console.log and console.warn
 		originalConsoleLog = console.log;
 		originalConsoleWarn = console.warn;
+		originalDebugEnv = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
 		// Setup console.log mock - capture all calls
 		console.log = (...args: unknown[]) => {
 			consoleLogCalls.push(args.join(' '));
@@ -293,6 +296,11 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		// Restore console.log and console.warn to original
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
+		if (originalDebugEnv === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebugEnv;
+		}
 		telemetryCalls.length = 0;
 		consoleLogCalls.length = 0;
 		consoleWarnCalls.length = 0;

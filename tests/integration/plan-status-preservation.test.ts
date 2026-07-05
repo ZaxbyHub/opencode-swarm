@@ -155,7 +155,7 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 
 		// Step 5: save_plan with restructured plan — same task 1.1, new task 1.3 added
 		const restructuredPlan: SavePlanArgs = {
-			title: 'Status Preservation Test v2',
+			title: 'Status Preservation Test',
 			swarm_id: 'regression',
 			phases: [
 				{
@@ -223,7 +223,7 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 		// Issue #853: dropping the basePlan's three tasks (1.1, 1.2, 2.1) must
 		// now be acknowledged via removed_task_ids + removal_reason.
 		const newIdsPlan: SavePlanArgs = {
-			title: 'New IDs Plan',
+			title: 'Status Preservation Test',
 			swarm_id: 'regression',
 			phases: [
 				{
@@ -274,7 +274,7 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 
 		// Re-save with same IDs (descriptions changed)
 		const revisedPlan: SavePlanArgs = {
-			title: 'Status Preservation Test — Revised',
+			title: 'Status Preservation Test',
 			swarm_id: 'regression',
 			phases: [
 				{

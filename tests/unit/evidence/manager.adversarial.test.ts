@@ -8,6 +8,7 @@ import type {
 	RetrospectiveEvidence,
 } from '../../../src/config/evidence-schema';
 import {
+	_internals,
 	type LoadEvidenceResult,
 	loadEvidence,
 	saveEvidence,
@@ -52,14 +53,17 @@ function createRetrospectiveEvidence(
 
 describe('legacy task_complexity remapping - adversarial tests', () => {
 	let tempDir: string;
+	const realValidateProjectRoot = _internals.validateProjectRoot;
 
 	beforeEach(() => {
+		_internals.validateProjectRoot = () => {};
 		tempDir = createTempDir();
 		// Create .swarm directory structure
 		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 	});
 
 	afterEach(() => {
+		_internals.validateProjectRoot = realValidateProjectRoot;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -171,13 +175,16 @@ describe('legacy task_complexity remapping - adversarial tests', () => {
 
 describe('file persistence failure handling - adversarial tests', () => {
 	let tempDir: string;
+	const realValidateProjectRoot = _internals.validateProjectRoot;
 
 	beforeEach(() => {
+		_internals.validateProjectRoot = () => {};
 		tempDir = createTempDir();
 		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 	});
 
 	afterEach(() => {
+		_internals.validateProjectRoot = realValidateProjectRoot;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -266,13 +273,16 @@ describe('file persistence failure handling - adversarial tests', () => {
 
 describe('concurrent write safety - adversarial tests', () => {
 	let tempDir: string;
+	const realValidateProjectRoot = _internals.validateProjectRoot;
 
 	beforeEach(() => {
+		_internals.validateProjectRoot = () => {};
 		tempDir = createTempDir();
 		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 	});
 
 	afterEach(() => {
+		_internals.validateProjectRoot = realValidateProjectRoot;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -385,13 +395,16 @@ describe('concurrent write safety - adversarial tests', () => {
 
 describe('edge cases for task_complexity handling', () => {
 	let tempDir: string;
+	const realValidateProjectRoot = _internals.validateProjectRoot;
 
 	beforeEach(() => {
+		_internals.validateProjectRoot = () => {};
 		tempDir = createTempDir();
 		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 	});
 
 	afterEach(() => {
+		_internals.validateProjectRoot = realValidateProjectRoot;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -409,11 +422,9 @@ describe('edge cases for task_complexity handling', () => {
 		) as unknown as Evidence;
 		(evidence as any).task_complexity = 'invalid';
 
-		const result = await saveEvidence(tempDir, taskId, evidence);
-
-		// Save may accept it but load should fail
-		const loadResult = await loadEvidence(tempDir, taskId);
-		expect(loadResult.status).toBe('invalid_schema');
+		await expect(saveEvidence(tempDir, taskId, evidence)).rejects.toThrow(
+			/Invalid option/,
+		);
 	});
 
 	test('empty task_complexity is handled', async () => {
@@ -425,11 +436,9 @@ describe('edge cases for task_complexity handling', () => {
 		) as unknown as Evidence;
 		(evidence as any).task_complexity = '';
 
-		const result = await saveEvidence(tempDir, taskId, evidence);
-		const loadResult = await loadEvidence(tempDir, taskId);
-
-		// Should fail validation
-		expect(loadResult.status).toBe('invalid_schema');
+		await expect(saveEvidence(tempDir, taskId, evidence)).rejects.toThrow(
+			/Invalid option/,
+		);
 	});
 
 	test('case-sensitive task_complexity values', async () => {
@@ -442,11 +451,9 @@ describe('edge cases for task_complexity handling', () => {
 		) as unknown as Evidence;
 		(evidence as any).task_complexity = 'Simple';
 
-		const result = await saveEvidence(tempDir, taskId, evidence);
-		const loadResult = await loadEvidence(tempDir, taskId);
-
-		// Should fail validation - wrong case
-		expect(loadResult.status).toBe('invalid_schema');
+		await expect(saveEvidence(tempDir, taskId, evidence)).rejects.toThrow(
+			/Invalid option/,
+		);
 	});
 
 	test('saveEvidence creates directory structure if not exists', async () => {

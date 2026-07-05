@@ -33,6 +33,10 @@ import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
+import {
+	clearRealtimeLearningNudgeSession,
+	resetRealtimeLearningNudgeState,
+} from './hooks/realtime-learning-nudge.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import {
 	isTaskSettled,
@@ -545,6 +549,7 @@ export function resetSwarmState(): void {
 	// cannot inherit stale scope from the previous swarm.
 	clearPendingCoderScope();
 	resetStandardWorktreeIsolationState();
+	resetRealtimeLearningNudgeState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.
 	_councilDisagreementWarned.clear();
@@ -852,6 +857,7 @@ export function startAgentSession(
  */
 export function endAgentSession(sessionId: string): void {
 	swarmState.agentSessions.delete(sessionId);
+	clearRealtimeLearningNudgeSession(sessionId);
 }
 
 /**

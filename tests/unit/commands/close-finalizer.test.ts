@@ -748,11 +748,13 @@ describe('handleCloseCommand — finalizer stages', () => {
 			expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(false);
 		});
 
-		it('preserves ALL active-state files when only non-active-state artifacts are archived', async () => {
+		it('preserves unarchived non-plan active-state files when only non-active-state artifacts are archived', async () => {
 			// Create context.md (in ARCHIVE_ARTIFACTS but NOT in ACTIVE_STATE_TO_CLEAN)
 			// and make ALL active-state files fail to archive by creating them
 			// as directories. This means archivedFileCount > 0 (context.md succeeds)
-			// but archivedActiveStateFiles is empty → no active-state files deleted.
+			// but archivedActiveStateFiles is empty. Non-plan active-state files
+			// must be preserved; plan projections may still be removed because
+			// close intentionally prevents CLOSED-plan resurrection.
 			writeFileSync(
 				path.join(swarmDir(), 'context.md'),
 				'# Context\nImportant context.',
@@ -804,9 +806,11 @@ describe('handleCloseCommand — finalizer stages', () => {
 			expect(existsSync(path.join(swarmDir(), 'escalation-report.md'))).toBe(
 				true,
 			);
-			// archivedActiveStateFiles is empty → uses the bulk skip warning
+			// Plan projections are removed even without archive copies to prevent
+			// the next session from resurrecting a closed plan. Other unarchived
+			// active-state files above stay preserved.
 			expect(result).toContain(
-				'Skipped active-state cleanup because no active-state files were archived',
+				'plan.json was not archived; removing it anyway to prevent CLOSED-plan resurrection next session',
 			);
 		});
 

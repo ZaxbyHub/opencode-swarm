@@ -590,14 +590,11 @@ describe('ERROR HANDLING — malformed directory inputs', () => {
 
 	it('empty string resolves to CWD and validates correctly (no crash)', () => {
 		// Empty string resolves to CWD via realpathSync('')
-		// Validation walks UP from CWD. On developer machines with an ancestor
-		// .swarm/ + project indicator, the guard should fail closed.
+		// The repo root itself is a valid evidence root when it contains both
+		// .swarm/ and a project indicator; this verifies the edge case is handled,
+		// not that it rejects the current checkout.
 		// This verifies empty string is handled, not a crash
-		if (detectSwarmAncestor(process.cwd())) {
-			expect(() => validateProjectRoot('')).toThrow('Cannot write evidence');
-		} else {
-			expect(() => validateProjectRoot('')).not.toThrow();
-		}
+		expect(() => validateProjectRoot('')).not.toThrow();
 	});
 
 	it('root filesystem path / or C:\\ does not crash', () => {

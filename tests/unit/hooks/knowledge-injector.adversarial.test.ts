@@ -101,13 +101,17 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	appendRetractionRecord: async () => {},
 	resolveSwarmKnowledgePath: () => '',
 	resolveSwarmRejectedPath: () => '',
+	resolveSwarmRetractionsPath: () => '',
 	resolveHiveKnowledgePath: () => '',
 	resolveHiveRejectedPath: () => '',
+	resolveHiveEventsPath: () => '',
 	normalizeEntry: (e: unknown) => e,
 	appendKnowledge: async () => {},
+	appendKnowledgeWithCapEnforcement: async () => {},
 	rewriteKnowledge: async () => {},
 	transactKnowledge: async () => {},
 	transactFile: async () => false,
+	getArchivedKnowledgeIds: async () => new Set<string>(),
 	bumpKnowledgeConfidenceBatch: async () => {},
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
@@ -121,15 +125,21 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	inferTags: () => [],
 	getPlatformConfigDir: () => '/tmp',
 	computeOutcomeSignal: () => 0,
+	OUTCOME_SIGNAL_SMOOTHING: 0.5,
 	_internals: {},
 }));
 mock.module('../../../src/plan/manager.js', () => ({
 	loadPlan: mockLoadPlan,
 	// Stubs for ESM named-import resolution — transitive consumers reference these.
 	loadPlanJsonOnly: async () => null,
+	isPlanMdInSync: async () => true,
+	regeneratePlanMarkdown: async () => {},
+	retryCasWithBackoff: async (fn: () => unknown) => fn(),
 	savePlan: async () => {},
+	savePlanWithAutoAcknowledgedRemovals: async () => {},
 	rebuildPlan: async () => {},
 	updateTaskStatus: () => {},
+	isTaskSettled: async () => false,
 	derivePlanMarkdown: () => '',
 	getCurrentTaskId: () => undefined,
 	migrateLegacyPlan: async () => {},
@@ -156,19 +166,24 @@ mock.module('../../../src/hooks/extractors.js', () => ({
 // every export that transitive imports may reference.  These stubs are never
 // called in the adversarial tests — they exist solely to satisfy ESM
 // named-import resolution at module-load time.
-const zodStub = { parse: (v: unknown) => v };
+const zodStub = { parse: (v: unknown) => v, shape: {} };
 
 mock.module('../../../src/config/schema.js', () => ({
 	stripKnownSwarmPrefix: mockStripKnownSwarmPrefix,
 	isKnownCanonicalRole: () => false,
 	getCanonicalAgentRole: () => null,
 	resolveGeneratedAgentRole: () => null,
+	resolveExternalSkillsConfig: () => ({}),
 	resolveGuardrailsConfig: () => ({}),
 	AdversarialDetectionConfigSchema: zodStub,
 	AdversarialTestingConfigSchema: zodStub,
 	AgentAuthorityRuleSchema: zodStub,
 	AgentOverrideConfigSchema: zodStub,
+	AgentReasoningConfigSchema: zodStub,
+	AgentThinkingConfigSchema: zodStub,
+	ArchitecturalSupervisionConfigSchema: zodStub,
 	AuthorityConfigSchema: zodStub,
+	AutoReviewConfigSchema: zodStub,
 	AutomationCapabilitiesSchema: zodStub,
 	AutomationConfigSchema: zodStub,
 	AutomationModeSchema: zodStub,
@@ -176,11 +191,23 @@ mock.module('../../../src/config/schema.js', () => ({
 	CompactionAdvisoryConfigSchema: zodStub,
 	CompactionConfigSchema: zodStub,
 	ContextBudgetConfigSchema: zodStub,
+	ContextMapConfigSchema: zodStub,
 	CouncilConfigSchema: zodStub,
 	CuratorConfigSchema: zodStub,
+	DEFAULT_AGENT_PROFILES: {},
+	DEFAULT_ARCHITECT_PROFILE: {},
+	DEFAULT_SKILLS_CONFIG: {},
 	DecisionDecaySchema: zodStub,
+	DesignDocsConfigSchema: zodStub,
+	DiscoverySourceSchema: zodStub,
 	DocsConfigSchema: zodStub,
+	EpicConfigSchema: zodStub,
 	EvidenceConfigSchema: zodStub,
+	DEFAULT_EXTERNAL_SKILLS_CONFIG: {},
+	ExternalSkillCandidateEvaluationVerdictSchema: zodStub,
+	ExternalSkillCandidateSchema: zodStub,
+	ExternalSkillCandidateSourceTypeSchema: zodStub,
+	ExternalSkillsConfigSchema: zodStub,
 	GateConfigSchema: zodStub,
 	GateFeatureSchema: zodStub,
 	GeneralCouncilConfigSchema: zodStub,
@@ -196,7 +223,12 @@ mock.module('../../../src/config/schema.js', () => ({
 	LeanTurboStrategyConfigSchema: zodStub,
 	LintConfigSchema: zodStub,
 	MemoryConfigSchema: zodStub,
+	ModelPricingConfigSchema: zodStub,
 	ParallelizationConfigSchema: zodStub,
+	PricingConfigSchema: zodStub,
+	PrMonitorConfigSchema: zodStub,
+	RepoGraphConfigSchema: zodStub,
+	SkillsConfigSchema: zodStub,
 	StandardTurboConfigSchema: zodStub,
 	TurboConfig: {} as any,
 	TurboConfigSchema: zodStub,
@@ -222,6 +254,8 @@ mock.module('../../../src/config/schema.js', () => ({
 	ToolFilterConfigSchema: zodStub,
 	UIReviewConfigSchema: zodStub,
 	WatchdogConfigSchema: zodStub,
+	WorktreeIsolationConfigSchema: zodStub,
+	_internals: {},
 }));
 mock.module('../../../src/services/run-memory.js', () => ({
 	getRunMemorySummary: mockGetRunMemorySummary,
@@ -262,9 +296,25 @@ mock.module('../../../src/hooks/utils.js', () => ({
 }));
 
 // Dynamic import after mock.module() so Bun intercepts before the source loads.
-const { createKnowledgeInjectorHook } = await import(
-	'../../../src/hooks/knowledge-injector.js'
-);
+const { _internals: injectorInternals, createKnowledgeInjectorHook } =
+	await import('../../../src/hooks/knowledge-injector.js');
+
+const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
+const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
+const mockRecordKnowledgeEvent = mock(async () => {});
+const mockRecordKnowledgeShown = mock(async () => {});
+
+beforeEach(() => {
+	injectorInternals.recordKnowledgeEvent =
+		mockRecordKnowledgeEvent as typeof realRecordKnowledgeEvent;
+	injectorInternals.recordKnowledgeShown =
+		mockRecordKnowledgeShown as typeof realRecordKnowledgeShown;
+});
+
+afterEach(() => {
+	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
+	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
+});
 
 // ============================================================================
 // Helper Factories

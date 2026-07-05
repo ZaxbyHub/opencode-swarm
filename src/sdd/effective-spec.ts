@@ -374,8 +374,23 @@ export function detectSpeckit(directory: string): SpeckitDetection {
 	// statSync (not lstatSync) so a symlinked marker dir is followed; a regular file
 	// named .specify is correctly rejected as non-conformant with the Spec-Kit layout.
 	const markerPath = path.join(root, SPECKIT_MARKER);
-	const markerPresent =
-		fs.statSync(markerPath, { throwIfNoEntry: false })?.isDirectory() ?? false;
+	let markerPresent = false;
+	try {
+		markerPresent =
+			fs.statSync(markerPath, { throwIfNoEntry: false })?.isDirectory() ??
+			false;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (
+			code !== 'ENOENT' &&
+			code !== 'ENOTDIR' &&
+			code !== 'EACCES' &&
+			code !== 'EPERM' &&
+			code !== 'EUNKNOWN'
+		) {
+			throw error;
+		}
+	}
 
 	if (!markerPresent) {
 		return { markerPresent: false, features: [] };
@@ -894,6 +909,10 @@ export function readEffectiveSpecSync(
 	directory: string,
 	opts?: ReadEffectiveSpecOpts,
 ): EffectiveSpec | null {
+	if (directory.includes('\0')) {
+		return null;
+	}
+
 	const root = path.resolve(directory);
 	const swSpecPath = path.join(root, SWARM_SPEC_REL);
 
@@ -912,7 +931,14 @@ export function readEffectiveSpecSync(
 			};
 		}
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (
+			code !== 'ENOENT' &&
+			code !== 'ENOTDIR' &&
+			code !== 'EACCES' &&
+			code !== 'EPERM' &&
+			code !== 'EUNKNOWN'
+		) {
 			throw error;
 		}
 	}

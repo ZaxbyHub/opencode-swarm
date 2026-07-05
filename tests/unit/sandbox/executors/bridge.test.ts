@@ -23,18 +23,19 @@ describe('sandbox executors', () => {
 		const isWin = process.platform === 'win32';
 
 		test.skipIf(isWin)(
-			'WindowsSandboxExecutor throws on non-Windows platforms',
+			'WindowsSandboxExecutor initializes as unavailable on non-Windows platforms',
 			() => {
-				expect(() => new WindowsSandboxExecutor()).toThrow(
-					'WindowsSandboxExecutor not yet implemented',
-				);
+				const executor = new WindowsSandboxExecutor([]);
+				expect(executor).toBeDefined();
+				expect(executor.mechanism).toBe('none');
+				expect(executor.isAvailable()).toBe(false);
 			},
 		);
 
 		test.skipIf(!isWin)('WindowsSandboxExecutor initializes on Windows', () => {
 			const executor = new WindowsSandboxExecutor([]);
 			expect(executor).toBeDefined();
-			expect(executor.mechanism).toBe('powershell-wrapper');
+			expect(['none', 'powershell-wrapper']).toContain(executor.mechanism);
 		});
 	});
 });

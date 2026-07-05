@@ -128,6 +128,8 @@ describe('phase_complete integration — events.jsonl', () => {
 					type: 'drift_verification',
 					timestamp: new Date().toISOString(),
 					agent: 'critic',
+					agent_name: 'critic',
+					session_id: 'sess1',
 					verdict: 'approved',
 					summary: 'Drift check passed',
 				},
@@ -448,7 +450,9 @@ describe('phase_complete integration — events.jsonl', () => {
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('warned');
 			expect(parsed.warnings.length).toBeGreaterThan(0);
-			expect(parsed.warnings[0]).toContain('missing required agents');
+			expect(parsed.warnings).toSatisfy((warnings: string[]) =>
+				warnings.some((warning) => warning.includes('missing required agents')),
+			);
 			expect(parsed.agentsMissing).toContain('reviewer');
 			expect(parsed.agentsMissing).toContain('test_engineer');
 

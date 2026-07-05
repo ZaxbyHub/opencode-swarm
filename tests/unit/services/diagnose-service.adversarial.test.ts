@@ -10,11 +10,13 @@ const mockRegistry: Record<string, Function> = {};
 
 // --- Create mock functions before mock.module so factory refs are stable ---
 const mockReadSwarmFileAsync = mock(() => Promise.resolve(null));
+const mockReadEffectiveSpecSync = mock(() => null);
 const mockReaddirSync = mock(() => [] as realFs.Dirent[]);
 const mockExistsSync = mock(() => true);
 const mockStatSync = mock(() => ({ isDirectory: () => true }));
 
 mockRegistry.readSwarmFileAsync = mockReadSwarmFileAsync;
+mockRegistry.readEffectiveSpecSync = mockReadEffectiveSpecSync;
 mockRegistry.readdirSync = mockReaddirSync;
 mockRegistry.existsSync = mockExistsSync;
 mockRegistry.statSync = mockStatSync;
@@ -36,6 +38,9 @@ mock.module('../../../src/evidence/manager.js', () => {
 });
 mock.module('../../../src/hooks/utils.js', () => ({
 	readSwarmFileAsync: mockReadSwarmFileAsync,
+}));
+mock.module('../../../src/sdd/effective-spec.js', () => ({
+	readEffectiveSpecSync: mockReadEffectiveSpecSync,
 }));
 mock.module('../../../src/config/loader.js', () => {
 	const m = mock(() => null);
@@ -71,6 +76,8 @@ const mockListEvidenceTaskIds = mockRegistry.listEvidenceTaskIds as ReturnType<
 >;
 const mockReadSwarmFileAsyncFromReg =
 	mockRegistry.readSwarmFileAsync as ReturnType<typeof mock>;
+const mockReadEffectiveSpecSyncFromReg =
+	mockRegistry.readEffectiveSpecSync as ReturnType<typeof mock>;
 const mockLoadPluginConfig = mockRegistry.loadPluginConfig as ReturnType<
 	typeof mock
 >;
@@ -125,6 +132,7 @@ beforeEach(() => {
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
 	mockListEvidenceTaskIds.mockResolvedValue([]);
 	mockReadSwarmFileAsyncFromReg.mockResolvedValue(null);
+	mockReadEffectiveSpecSyncFromReg.mockReturnValue(null);
 	mockLoadPluginConfig.mockReturnValue(null);
 	mockReaddirSyncFromReg.mockImplementation(() => [] as realFs.Dirent[]);
 	mockExistsSyncFromReg.mockReturnValue(true);
@@ -462,11 +470,10 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 					'#'.repeat(100000) + '\nSome content\n# Test Project';
 
 				mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-				mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-					if (file === 'spec.md') {
-						return maliciousSpecSingleLine;
-					}
-					return '# Test\n\n- [x] Task 1.1';
+				mockReadEffectiveSpecSyncFromReg.mockReturnValue({
+					source: 'native',
+					path: '.swarm/spec.md',
+					content: maliciousSpecSingleLine,
 				});
 
 				process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -499,11 +506,10 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 			const maliciousSpecManyLines = lines.join('\n') + '\n# Different Title';
 
 			mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-			mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-				if (file === 'spec.md') {
-					return maliciousSpecManyLines;
-				}
-				return '# Test\n\n- [x] Task 1.1';
+			mockReadEffectiveSpecSyncFromReg.mockReturnValue({
+				source: 'native',
+				path: '.swarm/spec.md',
+				content: maliciousSpecManyLines,
 			});
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -553,11 +559,10 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 				lines.join('\n') + '\n# Test Plan Title';
 
 			mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-			mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-				if (file === 'spec.md') {
-					return maliciousSpecWithTestTitle;
-				}
-				return '# Test\n\n- [x] Task 1.1';
+			mockReadEffectiveSpecSyncFromReg.mockReturnValue({
+				source: 'native',
+				path: '.swarm/spec.md',
+				content: maliciousSpecWithTestTitle,
 			});
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -603,11 +608,10 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 			const specContent = '# \0malicious\0title\0\n\nSome content';
 
 			mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-			mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-				if (file === 'spec.md') {
-					return specContent;
-				}
-				return null;
+			mockReadEffectiveSpecSyncFromReg.mockReturnValue({
+				source: 'native',
+				path: '.swarm/spec.md',
+				content: specContent,
 			});
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -767,12 +771,7 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
 			mockReaddirSync.mockReturnValue(
-				backupFiles.map((name) => ({
-					name,
-					isDirectory: () => false,
-					isFile: () => true,
-					isSymbolicLink: () => false,
-				})),
+				backupFiles as unknown as realFs.Dirent[],
 			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -797,12 +796,7 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
 			mockReaddirSync.mockReturnValue(
-				backupFiles.map((name) => ({
-					name,
-					isDirectory: () => false,
-					isFile: () => true,
-					isSymbolicLink: () => false,
-				})),
+				backupFiles as unknown as realFs.Dirent[],
 			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
@@ -827,12 +821,7 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
 			mockReaddirSync.mockReturnValue(
-				backupFiles.map((name) => ({
-					name,
-					isDirectory: () => false,
-					isFile: () => true,
-					isSymbolicLink: () => false,
-				})),
+				backupFiles as unknown as realFs.Dirent[],
 			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';

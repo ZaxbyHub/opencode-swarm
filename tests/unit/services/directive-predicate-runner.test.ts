@@ -9,7 +9,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { runDirectivePredicate } from '../../../src/services/directive-predicate-runner.js';
 
@@ -20,8 +19,8 @@ function git(dir: string, args: string[]): void {
 		env: {
 			...process.env,
 			// Hermetic: ignore any global/system git config (signing, hooks, identity).
-			GIT_CONFIG_GLOBAL: os.devNull,
-			GIT_CONFIG_SYSTEM: os.devNull,
+			GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+			GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
 			GIT_AUTHOR_NAME: 'test',
 			GIT_AUTHOR_EMAIL: 'test@test.com',
 			GIT_COMMITTER_NAME: 'test',
@@ -34,7 +33,9 @@ describe('runDirectivePredicate', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'predicate-'));
+		const scratch = path.join(process.cwd(), '.swarm', 'test-tmp');
+		fs.mkdirSync(scratch, { recursive: true });
+		dir = fs.realpathSync(fs.mkdtempSync(path.join(scratch, 'predicate-')));
 		fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
 	});
 

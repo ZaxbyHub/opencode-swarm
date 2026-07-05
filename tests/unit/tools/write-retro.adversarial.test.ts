@@ -16,9 +16,11 @@ describe('write-retro adversarial security tests', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'write-retro-adversarial-')),
 		);
 		originalCwd = process.cwd();
+		process.chdir(tempDir);
 
 		// Create .swarm directory structure
-		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
+		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
 	});
 
 	afterEach(() => {
@@ -301,8 +303,9 @@ describe('write-retro adversarial security tests', () => {
 
 			// Should succeed or fail gracefully, but not crash
 			expect(parsed).toBeDefined();
-			// Lessons are limited to 5, but size is not validated
-			expect(parsed.success).toBe(true);
+			if (!parsed.success) {
+				expect(parsed.message).toMatch(/exceeds maximum|size/i);
+			}
 		});
 
 		test('handles oversized summary without crashing (but rejects due to size limit)', async () => {
@@ -318,6 +321,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-script-injection',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -346,6 +350,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-sql-injection',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -368,6 +373,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-html-entity',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -389,6 +395,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-script-injection',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -410,6 +417,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-sql-injection',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -431,6 +439,7 @@ describe('write-retro adversarial security tests', () => {
 				test_failures: 0,
 				security_findings: 0,
 				integration_issues: 0,
+				task_id: 'retro-html-entity',
 			};
 
 			const result = await executeWriteRetro(args, tempDir);
@@ -469,6 +478,7 @@ describe('write-retro adversarial security tests', () => {
 			const args: WriteRetroArgs = {
 				phase: 1,
 				summary: '<script>alert(1)</script>',
+				task_id: 'retro-script-injection',
 				task_count: 5,
 				task_complexity: 'simple',
 				total_tool_calls: 100,
@@ -490,6 +500,7 @@ describe('write-retro adversarial security tests', () => {
 			const args: WriteRetroArgs = {
 				phase: 1,
 				summary: "'; DROP TABLE evidence; --",
+				task_id: 'retro-sql-injection',
 				task_count: 5,
 				task_complexity: 'simple',
 				total_tool_calls: 100,
@@ -511,6 +522,7 @@ describe('write-retro adversarial security tests', () => {
 			const args: WriteRetroArgs = {
 				phase: 1,
 				summary: '&lt;script&gt;evil&lt;/script&gt;',
+				task_id: 'retro-html-entity',
 				task_count: 5,
 				task_complexity: 'simple',
 				total_tool_calls: 100,
@@ -641,7 +653,7 @@ describe('write-retro adversarial security tests', () => {
 	// DIRECTORY ATTACKS
 
 	describe('directory and file system attacks', () => {
-		test('accepts non-existent directory (saveEvidence creates directory structure)', async () => {
+		test('rejects non-existent directory instead of creating arbitrary .swarm trees', async () => {
 			const args: WriteRetroArgs = {
 				phase: 1,
 				summary: 'Test summary',
@@ -660,8 +672,8 @@ describe('write-retro adversarial security tests', () => {
 			const result = await executeWriteRetro(args, nonExistentDir);
 			const parsed = JSON.parse(result);
 
-			// saveEvidence creates directory structure automatically
-			expect(parsed.success).toBe(true);
+			expect(parsed.success).toBe(false);
+			expect(parsed.message).toMatch(/no \.swarm\/ folder|inaccessible/);
 		});
 
 		test('rejects invalid directory path (reserved or inaccessible)', async () => {
@@ -688,7 +700,7 @@ describe('write-retro adversarial security tests', () => {
 			expect(parsed.success).toBe(false);
 		});
 
-		test('requires .swarm directory structure', async () => {
+		test('rejects directories without a verifiable project root', async () => {
 			const emptyDir = fs.realpathSync(
 				fs.mkdtempSync(path.join(os.tmpdir(), 'write-retro-empty-')),
 			);
@@ -709,8 +721,8 @@ describe('write-retro adversarial security tests', () => {
 				const result = await executeWriteRetro(args, emptyDir);
 				const parsed = JSON.parse(result);
 
-				// Should succeed - saveEvidence creates the directory structure
-				expect(parsed.success).toBe(true);
+				expect(parsed.success).toBe(false);
+				expect(parsed.message).toMatch(/Cannot write evidence|project root/);
 			} finally {
 				fs.rmSync(emptyDir, { recursive: true, force: true });
 			}

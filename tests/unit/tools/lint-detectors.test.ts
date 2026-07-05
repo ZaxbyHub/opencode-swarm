@@ -47,7 +47,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('build.gradle.kts'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
 		});
@@ -63,7 +63,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					!p.endsWith('.kts')
 				);
 			});
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
 		});
@@ -75,7 +75,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['Main.kt', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['Main.kt', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
 		});
@@ -87,7 +87,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['script.kts', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['script.kts', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ktlint');
 		});
@@ -99,7 +99,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.includes('.editorconfig'),
 			);
-			mockReaddirSync.mockImplementation(['.editorconfig']);
+			mockReaddirSync.mockImplementation(() => ['.editorconfig']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -111,7 +111,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('build.gradle.kts'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -123,7 +123,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('pom.xml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
@@ -138,7 +138,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					(p.endsWith('build.gradle') || p.endsWith('gradlew'))
 				);
 			});
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
@@ -150,7 +150,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('build.gradle.kts'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('checkstyle');
 		});
@@ -162,7 +162,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('pom.xml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -175,7 +175,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					(p.endsWith('build.gradle') || p.endsWith('build.gradle.kts'))
 				);
 			});
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -189,7 +189,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('CMakeLists.txt'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -201,7 +201,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['main.cpp', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['main.cpp', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -213,7 +213,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['main.c', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['main.c', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -225,7 +225,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['header.h', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['header.h', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -237,7 +237,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['source.cc', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['source.cc', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -249,7 +249,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['source.cxx', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['source.cxx', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -261,7 +261,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['header.hpp', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['header.hpp', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('cppcheck');
 		});
@@ -319,7 +319,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['README.md', '.gitignore']);
+			mockReaddirSync.mockImplementation(() => ['README.md', '.gitignore']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -331,7 +331,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['main.c']);
+			mockReaddirSync.mockImplementation(() => ['main.c']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -345,7 +345,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('Gemfile'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('rubocop');
 		});
@@ -357,7 +357,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('gems.rb'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('rubocop');
 		});
@@ -369,7 +369,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('.rubocop.yml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('rubocop');
 		});
@@ -381,7 +381,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('.rubocop.yml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('rubocop');
 		});
@@ -390,8 +390,8 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'rubocop',
 			);
-			mockExistsSync.mockImplementation(false);
-			mockReaddirSync.mockImplementation(['README.md', '.gitignore']);
+			mockExistsSync.mockImplementation(() => false);
+			mockReaddirSync.mockImplementation(() => ['README.md', '.gitignore']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -403,7 +403,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('Gemfile'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -417,7 +417,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['MyApp.csproj', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['MyApp.csproj', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('dotnet-format');
 		});
@@ -429,7 +429,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['MySolution.sln', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['MySolution.sln', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('dotnet-format');
 		});
@@ -441,17 +441,17 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['README.md', 'Program.cs']);
+			mockReaddirSync.mockImplementation(() => ['README.md', 'Program.cs']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
 
 		it('returns null when .csproj exists but dotnet not available', () => {
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p === testCwd,
 			);
-			mockReaddirSync.mockImplementation(['MyApp.csproj', 'README.md']);
+			mockReaddirSync.mockImplementation(() => ['MyApp.csproj', 'README.md']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe(null);
 		});
@@ -467,7 +467,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 					typeof p === 'string' && (p.endsWith('ruff.toml') || p === testCwd)
 				);
 			});
-			mockReaddirSync.mockImplementation(['main.kt']);
+			mockReaddirSync.mockImplementation(() => ['main.kt']);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ruff');
 		});
@@ -481,7 +481,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('ruff.toml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('ruff');
 		});
@@ -493,7 +493,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('Cargo.toml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('clippy');
 		});
@@ -505,7 +505,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('go.mod'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('golangci-lint');
 		});
@@ -517,7 +517,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('Package.swift'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('swiftlint');
 		});
@@ -529,7 +529,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('pubspec.yaml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('dart-analyze');
 		});
@@ -541,7 +541,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation(
 				(p: string) => typeof p === 'string' && p.endsWith('pubspec.yaml'),
 			);
-			mockReaddirSync.mockImplementation([]);
+			mockReaddirSync.mockImplementation(() => []);
 
 			expect(detectAdditionalLinter(testCwd)).toBe('dart-analyze');
 		});

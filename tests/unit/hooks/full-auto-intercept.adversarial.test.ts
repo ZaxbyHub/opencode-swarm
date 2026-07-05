@@ -179,6 +179,9 @@ mock.module('../../../src/agents/critic.js', () => ({
 const { createFullAutoInterceptHook } = await import(
 	'../../../src/hooks/full-auto-intercept.js'
 );
+const { loadFullAutoRunState } = await import(
+	'../../../src/full-auto/state.js'
+);
 
 // Track console.log calls to verify detection happened
 const consoleLogCalls: string[] = [];
@@ -240,6 +243,7 @@ describe('full-auto-intercept ADVERSARIAL tests', () => {
 	let originalConsoleWarn: typeof console.warn;
 	let originalConsoleError: typeof console.error;
 	let originalProcessExit: typeof process.exit;
+	let originalDebugEnv: string | undefined;
 
 	beforeEach(() => {
 		// Save original _internals properties
@@ -272,6 +276,8 @@ describe('full-auto-intercept ADVERSARIAL tests', () => {
 		originalConsoleWarn = console.warn;
 		originalConsoleError = console.error;
 		originalProcessExit = process.exit;
+		originalDebugEnv = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
 
 		// Mock console.log
 		console.log = (...args: unknown[]) => {
@@ -315,6 +321,11 @@ describe('full-auto-intercept ADVERSARIAL tests', () => {
 		console.warn = originalConsoleWarn;
 		console.error = originalConsoleError;
 		process.exit = originalProcessExit;
+		if (originalDebugEnv === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebugEnv;
+		}
 
 		telemetryCalls.length = 0;
 		consoleLogCalls.length = 0;
@@ -967,7 +978,7 @@ export { foo, test };
 	// ADVERSARIAL TEST 7: Terminate mode escalation
 	// ========================================================================
 	describe('ADVERSARIAL: Terminate mode escalation', () => {
-		it('calls process.exit(1) when escalation_mode is terminate', async () => {
+		it('marks durable full-auto state terminated when escalation_mode is terminate', async () => {
 			mockHasActiveFullAutoFn.mockImplementation(() => true);
 
 			const config = createFullAutoConfig({
@@ -979,35 +990,21 @@ export { foo, test };
 
 			const question = 'Deadlock question?';
 
-			// Track if process.exit was called
-			let exitCalled = false;
-			const originalExit = process.exit;
-			(process.exit as typeof process.exit) = ((code: number) => {
-				processExitCalls.push({ code });
-				exitCalled = true;
-				// Don't throw - just set flag so we can verify and continue
-			}) as typeof process.exit;
-
-			try {
-				// Submit same question 3 times to trigger deadlock with terminate mode
-				for (let i = 0; i < 3; i++) {
-					const messages = makeMessages(
-						makeArchitectMessage(question, 'session-terminate'),
-					);
-					await hooks.messagesTransform({}, { messages });
-				}
-
-				// After 3rd call, process.exit should have been called
-				expect(exitCalled).toBe(true);
-				expect(processExitCalls.length).toBeGreaterThanOrEqual(1);
-				expect(processExitCalls[processExitCalls.length - 1]?.code).toBe(1);
-			} finally {
-				// Restore original process.exit
-				process.exit = originalExit;
+			// Submit same question 3 times to trigger deadlock with terminate mode
+			for (let i = 0; i < 3; i++) {
+				const messages = makeMessages(
+					makeArchitectMessage(question, 'session-terminate'),
+				);
+				await hooks.messagesTransform({}, { messages });
 			}
+
+			const durableState = loadFullAutoRunState(testDir, 'session-terminate');
+			expect(durableState?.status).toBe('terminated');
+			expect(durableState?.terminateReason).toBe('deadlock');
+			expect(processExitCalls.length).toBe(0);
 		});
 
-		it('logs error message before calling process.exit in terminate mode', async () => {
+		it('logs error message before marking terminate mode durable state', async () => {
 			mockHasActiveFullAutoFn.mockImplementation(() => true);
 
 			const config = createFullAutoConfig({
@@ -1017,30 +1014,22 @@ export { foo, test };
 			});
 			const hooks = createFullAutoInterceptHook(config, testDir);
 
-			let exitCalled = false;
-			const originalExit = process.exit;
-			(process.exit as typeof process.exit) = ((code: number) => {
-				processExitCalls.push({ code });
-				exitCalled = true;
-			}) as typeof process.exit;
-
-			try {
-				// Exceed interaction limit
-				for (let i = 0; i < 3; i++) {
-					const messages = makeMessages(
-						makeArchitectMessage(`Question ${i}?`, 'session-terminate-2'),
-					);
-					await hooks.messagesTransform({}, { messages });
-				}
-
-				// Verify error was logged before exit
-				const terminateLog = consoleErrorCalls.some((log) =>
-					log.includes('ESCALATION (terminate mode)'),
+			// Exceed interaction limit
+			for (let i = 0; i < 3; i++) {
+				const messages = makeMessages(
+					makeArchitectMessage(`Question ${i}?`, 'session-terminate-2'),
 				);
-				expect(terminateLog).toBe(true);
-			} finally {
-				process.exit = originalExit;
+				await hooks.messagesTransform({}, { messages });
 			}
+
+			const terminateLog = consoleErrorCalls.some((log) =>
+				log.includes('ESCALATION (terminate mode)'),
+			);
+			expect(terminateLog).toBe(true);
+			const durableState = loadFullAutoRunState(testDir, 'session-terminate-2');
+			expect(durableState?.status).toBe('terminated');
+			expect(durableState?.terminateReason).toBe('interaction_limit');
+			expect(processExitCalls.length).toBe(0);
 		});
 
 		it('does NOT call process.exit in pause mode even on escalation', async () => {

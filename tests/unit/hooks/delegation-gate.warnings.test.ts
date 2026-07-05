@@ -17,6 +17,14 @@ import {
 
 // Zero-coder-delegation detection tests (v6.12)
 describe('zero-coder-delegation detection', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+	});
+
 	it('should warn when architect writes code without delegating to coder', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());

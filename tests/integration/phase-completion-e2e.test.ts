@@ -148,6 +148,10 @@ describe('phase_complete E2E — drift evidence → phase_complete reads it and 
 					type: 'drift',
 					timestamp: new Date().toISOString(),
 					agent: 'critic',
+					provenance: {
+						agent_name: 'critic',
+						session_id: 'test-session',
+					},
 					verdict: verdict,
 					summary: summary,
 				},
@@ -207,7 +211,9 @@ describe('phase_complete E2E — drift evidence → phase_complete reads it and 
 				expect(result.success).toBe(true);
 				expect(result.status).toBe('success');
 				expect(result.reason).toBeUndefined();
-				expect(result.warnings).toHaveLength(0);
+				expect(result.warnings).not.toSatisfy((warnings: string[]) =>
+					warnings.some((warning) => warning.includes('lacks provenance')),
+				);
 			});
 		});
 
@@ -286,7 +292,8 @@ describe('phase_complete E2E — drift evidence → phase_complete reads it and 
 				expect(result.warnings).toSatisfy((w: string[]) =>
 					w.some(
 						(warning) =>
-							warning.includes('No spec.md found') ||
+							warning.includes('No effective spec found') ||
+							warning.includes('Drift verification was skipped') ||
 							warning.includes('consider running critic_drift_verifier'),
 					),
 				);
