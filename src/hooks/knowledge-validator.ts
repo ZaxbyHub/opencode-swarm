@@ -1102,6 +1102,22 @@ export async function unarchiveEntry(
 		const restoredStatus: KnowledgeEntryBase['status'] =
 			target.archived_from ?? 'candidate';
 
+		// PRR-019: defense-in-depth — re-validate that archived_from is one of
+		// the retrieval-ACTIVE statuses. An archived entry should restore to
+		// candidate/established/promoted; if the store was corrupted to set
+		// archived_from to an inactive status (or garbage), restoring to it
+		// would silently leave the entry inactive. Fall back to 'candidate'.
+		const validRestoreTargets: ReadonlySet<string> = new Set([
+			'candidate',
+			'established',
+			'promoted',
+		]);
+		const finalStatus: KnowledgeEntryBase['status'] = validRestoreTargets.has(
+			restoredStatus,
+		)
+			? restoredStatus
+			: 'candidate';
+
 		// Strip archive metadata, restore status, and reset G7 demotion counters
 		// so a restored-promoted entry gets a fresh window rather than inheriting
 		// stale negativity from before archival.
@@ -1114,7 +1130,7 @@ export async function unarchiveEntry(
 		} = target;
 		const restored: KnowledgeEntryBase = {
 			...rest,
-			status: restoredStatus,
+			status: finalStatus,
 			updated_at: new Date().toISOString(),
 			recent_negative_phase_count: 0,
 			last_demotion_phase: undefined,
@@ -1127,7 +1143,7 @@ export async function unarchiveEntry(
 				: '';
 		await atomicWriteFile(knowledgePath, jsonlContent);
 
-		return { restored: true, restored_to: restoredStatus };
+		return { restored: true, restored_to: finalStatus };
 	} finally {
 		if (release) {
 			await release();

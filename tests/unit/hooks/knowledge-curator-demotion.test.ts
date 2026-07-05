@@ -216,4 +216,133 @@ describe('runAutoDemotion (G7 #1716)', () => {
 		expect(m.get('candidate-id')!.status).toBe('candidate');
 		expect(m.get('candidate-id')!.last_demotion_phase).toBeUndefined();
 	});
+
+	// PRR-018: verify last_demotion_phase value AFTER demotion. The code sets
+	// entry.last_demotion_phase = phaseNumber BEFORE the demotion block; on
+	// demotion recent_negative_phase_count resets to 0 but last_demotion_phase
+	// persists. Pin the exact post-demotion value so a future regression (e.g.
+	// resetting it on demotion, which would break the next phase's dedupe) is
+	// caught.
+	test('PRR-018: last_demotion_phase persists post-demotion', async () => {
+		// Pre-seed count=2 so one negative phase → 3 → demotes.
+		await seed([
+			entry('bad', {
+				retrieval_outcomes: NEGATIVE_OUTCOMES,
+				recent_negative_phase_count: 2,
+			}),
+		]);
+		await runAutoDemotion(tempDir, config, 7);
+		const m = await readBack();
+		const bad = m.get('bad')!;
+		expect(bad.status).toBe('established');
+		expect(bad.recent_negative_phase_count).toBe(0);
+		expect(bad.last_demotion_phase).toBe(7);
+	});
+
+	// PRR-010a: verify runAutoDemotion skips the file rewrite when no promoted
+	// entries exist (the `if (changed)` guard + the per-entry counter-unchanged
+	// guard). Captures the mtime before and after to prove no write happened.
+	test('PRR-010a: no spurious file rewrite when no promoted entries exist', async () => {
+		const { statSync } = await import('node:fs');
+		await seed([
+			entry('established', {
+				id: 'established-id',
+				status: 'established',
+				hive_eligible: false,
+				retrieval_outcomes: NEGATIVE_OUTCOMES,
+			} as Partial<SwarmKnowledgeEntry>),
+		]);
+		const kp = resolveSwarmKnowledgePath(tempDir);
+		const before = statSync(kp).mtimeMs;
+		// Wait a moment so mtime resolution isn't ambiguous.
+		await new Promise((r) => setTimeout(r, 20));
+		await runAutoDemotion(tempDir, config, 1);
+		const after = statSync(kp).mtimeMs;
+		expect(after).toBe(before);
+	});
+
+	// PRR-016: verify no phantom updated_at churn when a promoted entry has a
+	// consistently-positive signal (counter stays at 0, no semantic change).
+	test('PRR-016: no updated_at churn on a consistently-positive promoted entry', async () => {
+		// POSITIVE_OUTCOMES → signal well above -0.3 → counter resets/stays at 0.
+		await seed([entry('good', { retrieval_outcomes: POSITIVE_OUTCOMES })]);
+		const before = await readBack();
+		const beforeUpdatedAt = before.get('good')!.updated_at;
+		// Wait so the timestamp would differ if rewritten.
+		await new Promise((r) => setTimeout(r, 20));
+		await runAutoDemotion(tempDir, config, 1);
+		const after = await readBack();
+		expect(after.get('good')!.status).toBe('promoted');
+		expect(after.get('good')!.recent_negative_phase_count).toBe(0);
+		// updated_at unchanged — no phantom churn.
+		expect(after.get('good')!.updated_at).toBe(beforeUpdatedAt);
+	});
+
+	// PRR-004: boundary tests for the threshold and the min_phases gate.
+	describe('PRR-004: threshold and min_phases boundaries', () => {
+		// Construct outcomes whose computeOutcomeSignal is exactly at or just
+		// above the default threshold (-0.3). computeOutcomeSignal is
+		// (pos - neg) / (total + 4) with Laplace smoothing 4.
+		// For exactly-at-threshold: pick pos/neg so (pos-neg)/(pos+neg+4) ≈ -0.3.
+		// Solve: pos-neg = -0.3*(pos+neg+4). With pos=2, neg=4: (2-4)/(6+4) = -0.2.
+		// With pos=1, neg=4: (1-4)/(5+4) = -3/9 = -0.333 — just below -0.3.
+		// With pos=2, neg=5: (2-5)/(7+4) = -3/11 = -0.273 — just above -0.3.
+		const JUST_BELOW_THRESHOLD: RetrievalOutcome = {
+			...EMPTY_OUTCOMES,
+			applied_explicit_count: 1,
+			ignored_count: 4,
+		}; // signal ≈ -0.333 (<= -0.3 → increments)
+		const JUST_ABOVE_THRESHOLD: RetrievalOutcome = {
+			...EMPTY_OUTCOMES,
+			applied_explicit_count: 2,
+			ignored_count: 5,
+		}; // signal ≈ -0.273 (> -0.3 → resets)
+
+		test('signal just below threshold increments the counter', async () => {
+			await seed([
+				entry('edge-below', { retrieval_outcomes: JUST_BELOW_THRESHOLD }),
+			]);
+			await runAutoDemotion(tempDir, config, 1);
+			const m = await readBack();
+			expect(m.get('edge-below')!.recent_negative_phase_count).toBe(1);
+		});
+
+		test('signal just above threshold resets the counter to 0', async () => {
+			// Pre-seed a non-zero counter; the just-above signal must reset it.
+			await seed([
+				entry('edge-above', {
+					retrieval_outcomes: JUST_ABOVE_THRESHOLD,
+					recent_negative_phase_count: 2,
+				}),
+			]);
+			await runAutoDemotion(tempDir, config, 1);
+			const m = await readBack();
+			expect(m.get('edge-above')!.recent_negative_phase_count).toBe(0);
+		});
+
+		test('min_phases boundary: demotes at exactly 3, not at 2', async () => {
+			// Counter pre-seeded at 2; one negative phase → 3 → demotes.
+			await seed([
+				entry('boundary', {
+					retrieval_outcomes: NEGATIVE_OUTCOMES,
+					recent_negative_phase_count: 2,
+				}),
+			]);
+			await runAutoDemotion(tempDir, config, 1);
+			let m = await readBack();
+			expect(m.get('boundary')!.status).toBe('established');
+
+			// Counter pre-seeded at 1; one negative phase → 2 → no demotion.
+			await seed([
+				entry('boundary2', {
+					retrieval_outcomes: NEGATIVE_OUTCOMES,
+					recent_negative_phase_count: 1,
+				}),
+			]);
+			await runAutoDemotion(tempDir, config, 2);
+			m = await readBack();
+			expect(m.get('boundary2')!.status).toBe('promoted');
+			expect(m.get('boundary2')!.recent_negative_phase_count).toBe(2);
+		});
+	});
 });

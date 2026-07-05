@@ -28,6 +28,7 @@ import {
 } from '../hooks/knowledge-events.js';
 import {
 	getArchivedKnowledgeIds,
+	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
@@ -134,6 +135,20 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					});
 				}
 				try {
+					// PRR-003: verify the entry exists before calling quarantineEntry.
+					// quarantineEntry silently returns void on not-found (it only
+					// warns), so without this check the tool would report
+					// `success:true` for a missing id — diverging from the archive
+					// mode which returns `{success:false, message:'entry not found'}`.
+					const swarmEntries = await readKnowledge<KnowledgeEntryBase>(
+						resolveSwarmKnowledgePath(directory),
+					);
+					if (!swarmEntries.some((e) => e.id === id)) {
+						return JSON.stringify({
+							success: false,
+							message: 'entry not found',
+						});
+					}
 					const reportedBy: 'architect' | 'user' | 'auto' =
 						ctx?.agent === 'architect' ? 'architect' : 'user';
 					await quarantineEntry(directory, id, reason, reportedBy);

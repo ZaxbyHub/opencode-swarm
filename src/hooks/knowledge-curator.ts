@@ -1359,7 +1359,10 @@ export async function runAutoPromotion(
 
 /**
  * G7 (#1716): Auto-demote swarm entries that have sustained a net-negative
- * outcome signal over consecutive phase evaluations.
+ * outcome signal over consecutive phase EVALUATIONS (i.e. consecutive
+ * `runAutoDemotion` invocations with distinct phase numbers — a skipped phase
+ * in between still counts, matching the issue's "≥3 consecutive" intent as
+ * implemented against evaluation cadence, not wall-clock phase contiguity).
  *
  * Companion to {@link runAutoPromotion}. For each `promoted` entry:
  *  1. Dedupe by phase: if `entry.last_demotion_phase === phaseNumber`, this
@@ -1408,12 +1411,30 @@ export async function runAutoDemotion(
 
 		const threshold = config.promoted_demotion_signal_threshold;
 		const minPhases = config.promoted_demotion_min_negative_phases;
-		const next =
-			signal <= threshold ? (entry.recent_negative_phase_count ?? 0) + 1 : 0;
+		const prevCount = entry.recent_negative_phase_count ?? 0;
+		const next = signal <= threshold ? prevCount + 1 : 0;
+
+		// PRR-016: avoid phantom `updated_at` churn + file rewrites when nothing
+		// changed. Three real state transitions: counter increments, counter
+		// resets from a non-zero value (the entry "recovered" this phase), or
+		// demotion fires. A consistently-positive entry that stays at 0 between
+		// phases is a no-op — its `last_demotion_phase` update is the only
+		// change and isn't worth a rewrite (the dedupe gate keys off it but a
+		// missing update is harmless: the next phase just re-evaluates).
+		const counterChanged = next !== prevCount;
+		const willDemote = next >= minPhases;
+		if (!counterChanged && !willDemote) {
+			// Still record the phase marker so the dedupe gate works for this
+			// phase; this is a pure in-memory mutation that only persists if
+			// some OTHER entry in the loop sets `changed`.
+			entry.last_demotion_phase = phaseNumber;
+			continue;
+		}
+
 		entry.recent_negative_phase_count = next;
 		entry.last_demotion_phase = phaseNumber;
 
-		if (next >= minPhases) {
+		if (willDemote) {
 			// Demote: promoted → established. The boost-table raise (G7.2) means
 			// an `established` entry (+0.10) outranks a `candidate` (+0.0) but
 			// is outranked by a still-`promoted` entry (+0.15) — satisfying the

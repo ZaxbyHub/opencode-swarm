@@ -127,6 +127,10 @@ describe('knowledge_archive', () => {
 			const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 			expect(entries).toHaveLength(1);
 			expect(entries[0].status).toBe('archived');
+			// PRR-002: producer-side archived_from assertion — verify the tool
+			// records the prior status so unarchiveEntry can restore it.
+			expect(entries[0].archived_from).toBe('candidate');
+			expect(entries[0].archived_at).toBeTruthy();
 
 			const tomb = (await readKnowledgeEvents(dir)).filter(
 				(e): e is ArchivedEvent => e.type === 'archived',
@@ -206,6 +210,19 @@ describe('knowledge_archive', () => {
 			const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 			expect(entries).toHaveLength(1);
 			expect(entries[0].status).toBe('candidate');
+		});
+
+		it('PRR-003: quarantine returns not-found (not false-success) for a missing id', async () => {
+			const raw = await knowledge_archive.execute(
+				{ id: 'missing', reason: 'suspect', mode: 'quarantine' },
+				ctx(dir),
+			);
+			const parsed = JSON.parse(raw);
+			// PRR-003: quarantineEntry silently returns void on not-found, so
+			// the tool MUST pre-check and report not-found rather than
+			// reporting success:true (matching archive mode's behavior).
+			expect(parsed.success).toBe(false);
+			expect(parsed.message).toBe('entry not found');
 		});
 
 		it('purges (hard-deletes) with allow_purge:true and still writes a tombstone', async () => {
@@ -303,7 +320,11 @@ describe('knowledge_archive', () => {
 			// clear error. The old behavior silently flipped status in place
 			// and produced an unrestorable orphan; erroring is strictly better.
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toMatch(/swarm-only/i);
+			// PRR-011: pin the actionable guidance, not just the swarm-only fragment.
+			expect(parsed.error).toMatch(
+				/quarantine via the archive tool is swarm-only/i,
+			);
+			expect(parsed.error).toMatch(/\/swarm knowledge quarantine/);
 
 			// The hive entry is unchanged.
 			const entries = await readKnowledge<HiveKnowledgeEntry>(hivePath);

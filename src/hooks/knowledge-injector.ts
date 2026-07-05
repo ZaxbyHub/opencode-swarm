@@ -36,6 +36,7 @@ import type {
 	KnowledgeRetrievalContext,
 	MessageWithParts,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 import { extractModelInfo, resolveModelLimit } from './model-limits.js';
 import { searchKnowledge } from './search-knowledge.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
@@ -1018,7 +1019,9 @@ export function createKnowledgeInjectorHook(
 					.filter((e) => renderedDirectiveIdSet.has(e.id))
 					.filter(
 						(e) =>
-							e.directive_priority === 'critical' && e.status !== 'archived',
+							// G4 (#1716): canonical inactive check — also excludes
+							// `quarantined` and `quarantined_unactionable` directives.
+							e.directive_priority === 'critical' && isActiveStatus(e.status),
 					)
 					.map((e) => e.id);
 				cachedCriticalIds = criticalIds;

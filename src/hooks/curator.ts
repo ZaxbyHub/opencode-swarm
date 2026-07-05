@@ -1647,7 +1647,15 @@ export async function applyCuratorKnowledgeUpdates(
 						confidence: Math.min(1.0, (entry.confidence ?? 0) + 0.1),
 						updated_at: new Date().toISOString(),
 					};
-				case 'archive':
+				case 'archive': {
+					// PRR-015: guard against re-archiving an already-archived entry.
+					// A duplicate/late recommendation targeting an archived entry
+					// would otherwise record `archived_from: 'archived'`
+					// (self-referential), breaking unarchive's status recovery.
+					// Preserve the existing archived_from and skip the rewrite.
+					if (entry.status === 'archived') {
+						return entry;
+					}
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
@@ -1660,6 +1668,7 @@ export async function applyCuratorKnowledgeUpdates(
 						archived_at: new Date().toISOString(),
 						updated_at: new Date().toISOString(),
 					};
+				}
 				case 'flag_contradiction':
 					appliedIds.add(entry.id);
 					txApplied++;

@@ -120,6 +120,10 @@ describe('unarchiveEntry (G6 #1716)', () => {
 			// fresh G7 window rather than inheriting stale negativity.
 			expect(after.recent_negative_phase_count).toBe(0);
 			expect(after.last_demotion_phase).toBeUndefined();
+			// PRR-023: hive_eligible is preserved through unarchive (the entry
+			// was hive-eligible before archival and a status restore shouldn't
+			// silently strip that standing — only G7 demotion clears it).
+			expect(after.hive_eligible).toBe(true);
 		});
 	});
 
@@ -156,6 +160,27 @@ describe('unarchiveEntry (G6 #1716)', () => {
 			expect(result.restored).toBe(true);
 			expect(result.restored_to).toBe('candidate');
 			expect((await readBack())[0].status).toBe('candidate');
+		});
+
+		// PRR-019: defense-in-depth — a corrupted archived_from value (out of
+		// the active-status enum, e.g. 'archived' self-reference or garbage)
+		// falls back to 'candidate' rather than persisting the invalid value.
+		it('PRR-019: invalid archived_from value falls back to candidate', async () => {
+			const archived: SwarmKnowledgeEntry = {
+				...baseEntry('k-corrupt'),
+				status: 'archived',
+				// Simulate store corruption or a self-referential archived_from.
+				archived_from: 'archived' as SwarmKnowledgeEntry['status'],
+				archived_at: '2024-06-01T00:00:00Z',
+			};
+			await seed([archived]);
+
+			const result = await unarchiveEntry(tempDir, 'k-corrupt');
+			expect(result.restored_to).toBe('candidate');
+			const after = (await readBack())[0];
+			expect(after.status).toBe('candidate');
+			// The invalid archived_from must not have been preserved as status.
+			expect(after.status).not.toBe('archived');
 		});
 	});
 

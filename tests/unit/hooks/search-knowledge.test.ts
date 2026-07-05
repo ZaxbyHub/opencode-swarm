@@ -380,6 +380,19 @@ describe('searchKnowledge (unified retrieval)', () => {
 		// Ranking order: promoted (+0.15) > established (+0.10) > candidate (+0.0).
 		expect(ids.indexOf('prom')).toBeLessThan(ids.indexOf('estab'));
 		expect(ids.indexOf('estab')).toBeLessThan(ids.indexOf('cand'));
+
+		// PRR-012: also pin the boost VALUES, not just ordering. The lessons
+		// share the query terms so base text scores are nearly identical; the
+		// finalScore deltas between adjacent ranks should approximate the boost
+		// deltas (promoted→established ≈ 0.05, established→candidate ≈ 0.10).
+		// A symmetric scale-down (e.g. promoted +0.06 / established +0.05)
+		// would still pass ordering but fail these delta assertions.
+		const byId = new Map(results.map((r) => [r.id, r]));
+		const promScore = byId.get('prom')!.finalScore;
+		const estabScore = byId.get('estab')!.finalScore;
+		const candScore = byId.get('cand')!.finalScore;
+		expect(promScore - estabScore).toBeCloseTo(0.05, 1);
+		expect(estabScore - candScore).toBeCloseTo(0.1, 1);
 	});
 
 	it('applies agent-role scoping for entries that declare applies_to_agents', async () => {

@@ -215,6 +215,14 @@ export const OUTCOME_BLOCK_THRESHOLD = -0.3;
  * `undefined`/`null`/unknown strings (preserves the #828 deny-list intent:
  * entries with unexpected status values are not silently dropped). Returns
  * `false` only for the three known inactive statuses.
+ *
+ * PRR-009 / design note: issue #1716's G4 section literally requested an
+ * allow-list ("future statuses default to excluded"). We deliberately use a
+ * deny-list here to preserve the #828 regression-guard intent (entries with
+ * missing/unknown status after migration are not silently dropped from
+ * retrieval). The known-inactive leak the issue cares about (the 3 statuses
+ * above) is closed; the hypothetical-future-status robustness is the tradeoff.
+ * Switching to an allow-list would re-introduce #828.
  */
 export function isActiveStatus(status: string | undefined | null): boolean {
 	return !INACTIVE_STATUSES.has(status ?? '');

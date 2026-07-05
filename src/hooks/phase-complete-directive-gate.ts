@@ -22,6 +22,7 @@ import {
 	readKnowledgeEvents,
 	recordKnowledgeEvent,
 } from './knowledge-events.js';
+import { isActiveStatus } from './knowledge-types.js';
 import {
 	collectPhaseDirectiveIds,
 	readEntriesById,
@@ -187,7 +188,8 @@ async function readCriticalIdsForPhase(
 	return ids.filter((id) => {
 		const e = entries.get(id);
 		if (!e) return false;
-		if (e.status === 'archived' || e.status === 'quarantined') return false;
+		// G4 (#1716): canonical helper — also excludes `quarantined_unactionable`.
+		if (!isActiveStatus(e.status)) return false;
 		return e.directive_priority === 'critical';
 	});
 }

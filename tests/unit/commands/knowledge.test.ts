@@ -236,6 +236,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 describe('handleKnowledgeRestoreCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockRestoreEntry.mockReset();
 		mockUnarchiveEntry.mockReset();
@@ -364,6 +365,32 @@ describe('handleKnowledgeRestoreCommand', () => {
 		expect(result).toContain('neither archived nor quarantined');
 		expect(mockRestoreEntry).not.toHaveBeenCalled();
 		expect(mockUnarchiveEntry).not.toHaveBeenCalled();
+	});
+
+	// PRR-007: when a prefix matches BOTH an archived swarm entry AND a
+	// quarantined sidecar entry, the dispatch documented precedence is
+	// archived-swarm wins (the new G6 path is checked first). Pin the
+	// behavior so it's intentional, not accidental.
+	it('G6/PRR-007: prefix collision — archived swarm wins over quarantined sidecar', async () => {
+		// Swarm read: an archived entry whose id starts with the prefix.
+		// (The quarantine read is never reached because the archived branch
+		// returns, so we only mock the swarm read here.)
+		mockReadKnowledge.mockResolvedValueOnce([
+			makeEntry('colliding-id', { status: 'archived' }),
+		]);
+		mockUnarchiveEntry.mockResolvedValueOnce({
+			restored: true,
+			restored_to: 'candidate',
+		});
+		const result = await handleKnowledgeRestoreCommand('/test/dir', [
+			'colliding',
+		]);
+		expect(mockUnarchiveEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			'colliding-id',
+		);
+		expect(mockRestoreEntry).not.toHaveBeenCalled();
+		expect(result).toContain('colliding-id');
 	});
 });
 
