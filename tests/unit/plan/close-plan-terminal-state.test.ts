@@ -101,6 +101,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async () => {}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -169,6 +170,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async () => {}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -208,6 +210,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async () => {}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -266,6 +269,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mockBunWrite,
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -296,7 +300,7 @@ describe('closePlanTerminalState', () => {
 	// -------------------------------------------------------------------------
 	// Test 5: atomic plan.json write (temp+rename)
 	// -------------------------------------------------------------------------
-	test('5. writes plan.json via atomic temp+rename (renameSync called)', async () => {
+	test('5. writes plan.json via atomic temp+rename (atomicRename called)', async () => {
 		const mockAppendLedgerEvent = mock(async () => {});
 		const mockTakeSnapshotEvent = mock(async () => ({}));
 
@@ -306,10 +310,12 @@ describe('closePlanTerminalState', () => {
 		}));
 
 		const mockBunWrite = mock(async () => {});
+		const mockAtomicRename = mock(async (_tmp: string, _final: string) => {});
 		const mockRenameSync = mock(() => {});
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mockBunWrite,
+			atomicRename: mockAtomicRename,
 			bunHash: mock(() => 0n),
 		}));
 
@@ -325,8 +331,8 @@ describe('closePlanTerminalState', () => {
 			closedTaskIds: [],
 		});
 
-		// Verify renameSync was called (for plan.json temp file)
-		const renameCalls = mockRenameSync.mock.calls;
+		// Verify atomicRename was called (for plan.json + plan.md temp files)
+		const renameCalls = mockAtomicRename.mock.calls;
 		expect(renameCalls.length).toBeGreaterThanOrEqual(2); // plan.json + plan.md
 
 		// bunWrite should have been called with temp paths that include 'plan.json.close.'
@@ -358,6 +364,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mockBunWrite,
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -402,6 +409,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mockBunWrite,
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -440,6 +448,7 @@ describe('closePlanTerminalState', () => {
 		const mockAppendLedgerEvent = mock(async () => {});
 		const mockTakeSnapshotEvent = mock(async () => ({}));
 		const mockBunWrite = mock(async () => {});
+		const mockAtomicRename = mock(async (_tmp: string, _final: string) => {});
 		const mockRenameSync = mock(() => {});
 
 		mock.module('../../../src/plan/ledger', () => ({
@@ -449,6 +458,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mockBunWrite,
+			atomicRename: mockAtomicRename,
 			bunHash: mock(() => 0n),
 		}));
 
@@ -482,7 +492,7 @@ describe('closePlanTerminalState', () => {
 
 		// Plan files should still be written
 		expect(mockBunWrite.mock.calls.length).toBe(4); // plan.json, in_progress marker, plan.md, final marker
-		expect(mockRenameSync.mock.calls.length).toBe(2); // plan.json rename, plan.md rename
+		expect(mockAtomicRename.mock.calls.length).toBe(2); // plan.json rename, plan.md rename
 	});
 
 	// -------------------------------------------------------------------------
@@ -507,6 +517,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async () => {}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -555,6 +566,7 @@ describe('closePlanTerminalState', () => {
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async () => {}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 

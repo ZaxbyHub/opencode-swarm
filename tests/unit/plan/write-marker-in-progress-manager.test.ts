@@ -94,6 +94,7 @@ describe('savePlan write-marker in_progress', () => {
 			bunWrite: mock(async (path: string, content: string) => {
 				bunWriteCalls.push({ path, content });
 			}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -150,6 +151,7 @@ describe('savePlan write-marker in_progress', () => {
 			bunWrite: mock(async (path: string, content: string) => {
 				bunWriteCalls.push({ path, content });
 			}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -215,6 +217,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 			bunWrite: mock(async (path: string, content: string) => {
 				bunWriteCalls.push({ path, content });
 			}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -255,6 +258,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 			bunWrite: mock(async (path: string, content: string) => {
 				bunWriteCalls.push({ path, content });
 			}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
@@ -317,6 +321,7 @@ describe('closePlanTerminalState write-marker in_progress', () => {
 			bunWrite: mock(async (path: string, content: string) => {
 				bunWriteCalls.push({ path, content });
 			}),
+			atomicRename: mock(async (_tmp: string, _final: string) => {}),
 			bunHash: mock(() => 0n),
 		}));
 
