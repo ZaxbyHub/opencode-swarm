@@ -9,15 +9,33 @@ description: >
 This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: SPECIFY
-Activates when: user asks to "specify", "define requirements", "write a spec", or "define a feature"; OR `/swarm specify` is invoked; OR no `.swarm/spec.md` exists and no `.swarm/plan.md` exists.
+Activates when: user asks to "specify", "define requirements", "write a spec", or "define a feature"; OR `/swarm specify` is invoked; OR no EFFECTIVE spec exists and no `.swarm/plan.md` exists (use `/swarm sdd status` to determine effective-spec existence — native `.swarm/spec.md`, OpenSpec `openspec/`, or Spec-Kit `.specify/`).
 
-1. Check if `.swarm/spec.md` already exists.
-   - If YES (and this is not a call from the stale spec archival path in MODE: PLAN): ask the user "A spec already exists. Do you want to overwrite it or refine it?"
-     - Overwrite → ARCHIVE FIRST: read the existing spec, extract version (priority order): (1) from spec heading, look for patterns like "v{semver}" or "Version {semver}" in the first H1/H2; (2) from package.json version field in project root; create `.swarm/spec-archive/` directory if it does not exist; copy existing spec.md to `.swarm/spec-archive/spec-v{version}.md`; if version cannot be determined, use date-based fallback: `.swarm/spec-archive/spec-{YYYY-MM-DD}.md`; log the archive location to the user ("Archived existing spec to .swarm/spec-archive/spec-v{version}.md"); then proceed to generation (step 2)
-     - Refine → delegate to MODE: CLARIFY-SPEC
-   - If NO: proceed to generation (step 2)
-   - If this is called from the stale spec archival path (MODE: PLAN option 1) — archival was already completed; skip this check and proceed directly to generation (step 2)
-1b. Run CODEBASE REALITY CHECK for any codebase references mentioned by the user or implied by the feature. Skip if work is purely greenfield (no existing codebase to check). Report discrepancies before proceeding to explorer.
+   1. Run `/swarm sdd status` to determine whether an effective spec exists and, if so, how it should be handled. An effective spec exists iff `/swarm sdd status` reports a resolved spec. `/swarm sdd status` reflects `readEffectiveSpecSync`, which returns null (NO effective spec) for: no sources, multiple competing sources (openspec+speckit), multi-feature Spec-Kit without a selected feature, or any unresolvable state. When `/swarm sdd status` reports a resolved spec, classify it as NATIVE (native `.swarm/spec.md`) vs NON-NATIVE (projected). When it reports NO resolved spec, do NOT treat any source as an effective spec. Based on this classification, branch to the appropriate sub-step:
+     - **NATIVE**: proceed to step 1a (overwrite/refine/archive).
+     - **NON-NATIVE**: proceed to step 1b (non-shadowing choice).
+     - **NO effective spec** (ambiguous or no sources): if multiple SDD sources are present, proceed to step 1c (disambiguation); otherwise proceed to step 1d (native authoring).
+     - If this is called from the stale spec archival path (MODE: PLAN option 1) — archival was already completed; skip all branches and proceed directly to generation (step 2).
+1a. **NATIVE SPEC — overwrite/refine/archive.** Ask the user "A spec already exists. Do you want to overwrite it or refine it?"
+      - Overwrite → ARCHIVE FIRST: read the existing spec, extract version (priority order): (1) from spec heading, look for patterns like "v{semver}" or "Version {semver}" in the first H1/H2; (2) from package.json version field in project root; create `.swarm/spec-archive/` directory if it does not exist; copy existing spec.md to `.swarm/spec-archive/spec-v{version}.md`; if version cannot be determined, use date-based fallback: `.swarm/spec-archive/spec-{YYYY-MM-DD}.md`; log the archive location to the user ("Archived existing spec to .swarm/spec-archive/spec-v{version}.md"); then proceed to generation (step 2)
+      - Refine → delegate to MODE: CLARIFY-SPEC
+1b. **NON-NATIVE SPEC — non-shadowing check (FR-002).** The effective spec comes from `openspec/` or `.specify/` sources with no native `.swarm/spec.md`. Do NOT silently author a competing native spec. Instead OFFER the user a choice:
+      - **(a) Project/ingest** the existing SDD sources into `.swarm/spec.md` via the agent-invocable `/swarm sdd project` command. Obtain EXPLICIT user consent before proceeding. (Do not pass `--overwrite` in this branch — no native spec exists yet.)
+      - **(b) Proceed with native authoring** (`/swarm specify`) if the user explicitly chooses to ignore the SDD sources and write a new spec from scratch.
+      - **(c) Cancel** — abort SPECIFY; the existing SDD sources remain the effective spec.
+     - If the user chooses option (a) and `/swarm sdd project` completes successfully: the projected spec is now materialized as `.swarm/spec.md` (NATIVE). Do NOT proceed to generation (step 2) — that would overwrite the just-projected spec. Instead route to step 1a (overwrite/refine/archive) so the user can refine, overwrite, or archive the projected spec.
+     - If the user chooses option (b): proceed directly to generation (step 2) with a note that existing SDD sources were bypassed per user decision.
+     - If the user chooses option (a) and `/swarm sdd project` fails: report the failure and re-offer the choices.
+1c. **AMBIGUOUS — multiple SDD sources detected.** Both `openspec/` AND `.specify/` exist with no native `.swarm/spec.md`. Per `readEffectiveSpecSync` semantics this is NOT an effective spec (the function returns null). Do NOT treat this as a single-source NON-NATIVE choice. Instead:
+        - Inform the user: "Multiple SDD sources detected (openspec AND speckit) but no native spec exists. This is ambiguous — there is no single effective spec. You must choose which source to project, or disambiguate via `/swarm sdd status --source`."
+       - Offer the user a choice:
+         - **(a) Project from openspec** — run `/swarm sdd project --source openspec` (after consent) to project the openspec source into `.swarm/spec.md`.
+          - **(b) Project from speckit** — run `/swarm sdd project --source speckit` (after consent) to project the speckit source into `.swarm/spec.md`.
+         - **(c) Cancel** — abort SPECIFY; the ambiguous sources remain as-is.
+       - After a successful projection (a or b): the spec is now NATIVE → route to step 1a (overwrite/refine/archive).
+       - After a failed projection: report the failure and re-offer the choices.
+1d. **NO EFFECTIVE SPEC.** Proceed directly to generation (step 2).
+1e. Run CODEBASE REALITY CHECK for any codebase references mentioned by the user or implied by the feature. Skip if work is purely greenfield (no existing codebase to check). Report discrepancies before proceeding to explorer.
 2. Delegate to `the active swarm's explorer agent` to scan the codebase for relevant context (existing patterns, related code, affected areas).
 3. Delegate to `the active swarm's sme agent` for domain research on the feature area to surface known constraints, best practices, and integration concerns.
 4. Generate `.swarm/spec.md` capturing:

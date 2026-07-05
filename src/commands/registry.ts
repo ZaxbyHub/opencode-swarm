@@ -761,14 +761,16 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
 		subcommandOf: 'sdd',
-		args: '[--dry-run] [--json] [--change <id>]',
+		args: '[--dry-run] [--overwrite] [--json] [--change <id>]',
 		category: 'utility',
-		toolPolicy: 'human-only',
+		toolPolicy: 'agent',
 	},
 	// Aliases for the TUI shortcuts 'swarm-sdd-status' / 'swarm-sdd-validate' /
 	// 'swarm-sdd-project', which normalize to single dash tokens. See the
 	// 'pr-subscribe' alias note above. Each inherits its canonical tool policy
-	// (sdd project is human-only) via canonicalCommandKey (aliasOf).
+	// (sdd project is now agent-invocable; overwriting an existing native
+	// .swarm/spec.md requires --overwrite — consent is obtained by the SKILL
+	// layer, not the command) via canonicalCommandKey (aliasOf).
 	'sdd-status': {
 		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
 		description:

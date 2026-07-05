@@ -7,6 +7,7 @@ import {
 	handleSddProjectCommand,
 	handleSddStatusCommand,
 	handleSddValidateCommand,
+	_internals as sddInternals,
 } from '../../../src/commands/sdd';
 import { writeSpeckitFixture } from '../../helpers/speckit-fixture';
 
@@ -115,6 +116,92 @@ describe('/swarm sdd command handlers', () => {
 		expect(out).toContain('SDD projection written');
 		expect(spec).toContain('Effective SDD Projection');
 		expect(spec).toContain('FR-001: The system MUST let users sign in.');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// FR-004 overwrite gate — /swarm sdd project (Path B consent)
+// ---------------------------------------------------------------------------
+describe('/swarm sdd project — overwrite consent gate (FR-004)', () => {
+	let overwiteDir: string;
+
+	beforeEach(() => {
+		// Separate tempDir so we can pre-populate a .swarm/spec.md
+		overwiteDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-overwrite-')),
+		);
+		// Write a valid OpenSpec layout so handleSddProjectCommand can project
+		fs.mkdirSync(path.join(overwiteDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(overwiteDir, 'openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST let users sign in.\n',
+		);
+	});
+
+	afterEach(() => {
+		fs.rmSync(overwiteDir, { recursive: true, force: true });
+	});
+
+	const NATIVE_SPEC = '.swarm/spec.md';
+
+	test('(a) overwrite refused — existing native .swarm/spec.md rejected without --overwrite', async () => {
+		// First, materialize a native spec
+		const first = await handleSddProjectCommand(overwiteDir, []);
+		expect(first).toContain('SDD projection written');
+		expect(fs.existsSync(path.join(overwiteDir, NATIVE_SPEC))).toBe(true);
+
+		// Attempt a second projection without --overwrite — must refuse
+		const second = await handleSddProjectCommand(overwiteDir, []);
+		expect(second).toContain('Error:');
+		expect(second).toContain('.swarm/spec.md already exists');
+		expect(second).toContain('--overwrite');
+
+		// Verify the original spec was NOT modified
+		const spec = fs.readFileSync(path.join(overwiteDir, NATIVE_SPEC), 'utf-8');
+		expect(spec).toContain('FR-001: The system MUST let users sign in.');
+	});
+
+	test('(b) overwrite proceeds with --overwrite flag', async () => {
+		// First, materialize a native spec
+		const first = await handleSddProjectCommand(overwiteDir, []);
+		expect(first).toContain('SDD projection written');
+
+		// Overwrite with --overwrite — must succeed
+		const second = await handleSddProjectCommand(overwiteDir, ['--overwrite']);
+		expect(second).toContain('SDD projection written');
+		// Since there's no change in content, archivePath may or may not be present
+		expect(second).toContain('Path:');
+		expect(fs.existsSync(path.join(overwiteDir, NATIVE_SPEC))).toBe(true);
+	});
+
+	test('(c) first-time projection needs no flag — no native .swarm/spec.md exists', async () => {
+		// overwiteDir starts with OpenSpec but no .swarm/spec.md
+		expect(fs.existsSync(path.join(overwiteDir, NATIVE_SPEC))).toBe(false);
+
+		const out = await handleSddProjectCommand(overwiteDir, []);
+		expect(out).toContain('SDD projection written');
+		expect(fs.existsSync(path.join(overwiteDir, NATIVE_SPEC))).toBe(true);
+	});
+
+	test('(d) --dry-run never writes regardless of --overwrite', async () => {
+		// First materialize so .swarm/spec.md exists
+		await handleSddProjectCommand(overwiteDir, []);
+		const original = fs.readFileSync(
+			path.join(overwiteDir, NATIVE_SPEC),
+			'utf-8',
+		);
+
+		// --dry-run + --overwrite: must be a preview, never a write
+		const out = await handleSddProjectCommand(overwiteDir, [
+			'--dry-run',
+			'--overwrite',
+		]);
+		expect(out).toContain('SDD projection preview');
+		expect(fs.existsSync(path.join(overwiteDir, NATIVE_SPEC))).toBe(true);
+		const after = fs.readFileSync(path.join(overwiteDir, NATIVE_SPEC), 'utf-8');
+		expect(after).toBe(original);
 	});
 });
 
@@ -228,6 +315,25 @@ describe('parseArgs — --source and --feature flags', () => {
 		expect(result.error).toBeUndefined();
 		expect(result.source).toBe('speckit');
 		expect(result.feature).toBe('001-auth');
+	});
+
+	// FR-004: parseArgs --overwrite flag
+	test('accepts --overwrite flag', () => {
+		const result = parseArgs(['--overwrite']);
+		expect(result.error).toBeUndefined();
+		expect(result.overwrite).toBe(true);
+	});
+
+	test('accepts --dry-run and --overwrite together', () => {
+		const result = parseArgs(['--dry-run', '--overwrite']);
+		expect(result.error).toBeUndefined();
+		expect(result.dryRun).toBe(true);
+		expect(result.overwrite).toBe(true);
+	});
+
+	test('--overwrite defaults to false', () => {
+		const result = parseArgs([]);
+		expect(result.overwrite).toBe(false);
 	});
 });
 
@@ -865,5 +971,108 @@ describe('/swarm sdd validate --source swarm', () => {
 		expect(parsed.errors).toHaveLength(0);
 
 		fs.rmSync(errorDir, { recursive: true, force: true });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// TOCTOU error propagation — --json mode (task 1.1 review fix)
+// ---------------------------------------------------------------------------
+describe('/swarm sdd project — TOCTOU error propagation in --json mode', () => {
+	let toctouDir: string;
+	const originalWrite = sddInternals.writeProjectedSpecSync;
+
+	beforeEach(() => {
+		toctouDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-toctou-')),
+		);
+		// OpenSpec layout so the handler reaches writeProjectedSpecSync
+		fs.mkdirSync(path.join(toctouDir, 'openspec', 'specs', 'auth'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(toctouDir, 'openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n',
+			'utf-8',
+		);
+	});
+
+	afterEach(() => {
+		sddInternals.writeProjectedSpecSync = originalWrite;
+		fs.rmSync(toctouDir, { recursive: true, force: true });
+	});
+
+	test('OpenSpec branch: TOCTOU EEXIST error surfaces under --json with error field', async () => {
+		// Inject a TOCTOU EEXIST via the _internals seam
+		sddInternals.writeProjectedSpecSync = () => ({
+			written: false,
+			projection: null,
+			path: path.join(toctouDir, '.swarm', 'spec.md'),
+			error: '.swarm/spec.md already exists; pass --overwrite to replace it',
+		});
+
+		const out = await handleSddProjectCommand(toctouDir, ['--json']);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.written).toBe(false);
+		expect(parsed.error).toBeDefined();
+		expect(parsed.error).toContain('.swarm/spec.md already exists');
+	});
+
+	test('OpenSpec branch: TOCTOU EEXIST error surfaces in human-readable mode', async () => {
+		sddInternals.writeProjectedSpecSync = () => ({
+			written: false,
+			projection: null,
+			path: path.join(toctouDir, '.swarm', 'spec.md'),
+			error: '.swarm/spec.md already exists; pass --overwrite to replace it',
+		});
+
+		const out = await handleSddProjectCommand(toctouDir, []);
+
+		expect(out).toContain('Error:');
+		expect(out).toContain('.swarm/spec.md already exists');
+		expect(out).toContain('--overwrite');
+	});
+
+	test('Spec-Kit branch: TOCTOU EEXIST error surfaces under --json with error field', async () => {
+		// Write a Spec-Kit fixture so the handler takes the speckit path
+		writeSpeckitFixture(toctouDir, { variant: 'single-explicit-fr' });
+
+		sddInternals.writeProjectedSpecSync = () => ({
+			written: false,
+			projection: null,
+			path: path.join(toctouDir, '.swarm', 'spec.md'),
+			error: '.swarm/spec.md already exists; pass --overwrite to replace it',
+		});
+
+		const out = await handleSddProjectCommand(toctouDir, [
+			'--source',
+			'speckit',
+			'--json',
+		]);
+		const parsed = JSON.parse(out);
+
+		expect(parsed.written).toBe(false);
+		expect(parsed.error).toBeDefined();
+		expect(parsed.error).toContain('.swarm/spec.md already exists');
+	});
+
+	test('Spec-Kit branch: TOCTOU EEXIST error surfaces in human-readable mode', async () => {
+		writeSpeckitFixture(toctouDir, { variant: 'single-explicit-fr' });
+
+		sddInternals.writeProjectedSpecSync = () => ({
+			written: false,
+			projection: null,
+			path: path.join(toctouDir, '.swarm', 'spec.md'),
+			error: '.swarm/spec.md already exists; pass --overwrite to replace it',
+		});
+
+		const out = await handleSddProjectCommand(toctouDir, [
+			'--source',
+			'speckit',
+		]);
+
+		expect(out).toContain('Error:');
+		expect(out).toContain('.swarm/spec.md already exists');
+		expect(out).toContain('--overwrite');
 	});
 });

@@ -27,7 +27,8 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory import')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory migrate')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory compact')).toBe(true);
-		expect(HUMAN_ONLY_SWARM_COMMANDS.has('sdd project')).toBe(true);
+		// FR-004: sdd project is now agent-invocable (overwrite gated by --overwrite)
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('sdd project')).toBe(false);
 	});
 
 	describe('classifySwarmCommandToolUse — chat-tool path', () => {
@@ -162,7 +163,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			}
 		});
 
-		test('sdd read-only diagnostics are allowed, but project is human-only', () => {
+		test('sdd read-only diagnostics are allowed, and project is now agent-invocable (FR-004)', () => {
 			expect(classifySwarmCommandToolUse(resolve(['sdd'])).allowed).toBe(true);
 			expect(
 				classifySwarmCommandToolUse(resolve(['sdd', 'status'])).allowed,
@@ -188,11 +189,9 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 					resolve(['sdd', 'validate', '--change', '../escape']),
 				).allowed,
 			).toBe(false);
+			// FR-004: sdd project is now agent-invocable (overwrite gated by --overwrite)
 			const project = classifySwarmCommandToolUse(resolve(['sdd', 'project']));
-			expect(project.allowed).toBe(false);
-			if (project.allowed === false) {
-				expect(project.message).toContain('human-only');
-			}
+			expect(project.allowed).toBe(true);
 		});
 	});
 
@@ -235,11 +234,11 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			expect(result.allowed).toBe(false);
 		});
 
-		test('sdd project stays blocked because it mutates .swarm spec state', () => {
+		test('sdd project is now ALLOWED through chat fallback (FR-004: agent-invocable, overwrite gated by --overwrite)', () => {
 			const result = classifySwarmCommandChatFallbackUse(
 				resolve(['sdd', 'project']),
 			);
-			expect(result.allowed).toBe(false);
+			expect(result.allowed).toBe(true);
 		});
 	});
 });

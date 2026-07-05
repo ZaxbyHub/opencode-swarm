@@ -340,12 +340,12 @@ export async function executeSavePlan(
 			return {
 				success: false,
 				message:
-					'SPEC_REQUIRED: an effective spec must exist before saving a plan. Run /swarm specify first, or add OpenSpec-compatible openspec/specs or openspec/changes artifacts and run /swarm sdd validate.',
+					'SPEC_REQUIRED: an effective spec (native .swarm/spec.md, OpenSpec openspec/specs or openspec/changes, or Spec-Kit .specify/) must exist before saving a plan.',
 				errors: [
-					'Missing .swarm/spec.md and no valid OpenSpec-compatible projection found',
+					'No effective spec found — .swarm/spec.md is absent and no OpenSpec/Spec-Kit projection succeeded.',
 				],
 				recovery_guidance:
-					'Create or restore .swarm/spec.md, or generate a projection with /swarm sdd project before saving a plan. Never write .swarm/plan.json or .swarm/plan.md directly.',
+					'Obtain explicit user consent, then run /swarm sdd project (agent-invocable) to materialize an effective spec from SDD sources. If .swarm/spec.md already exists, pass --overwrite after consent. Alternatively, run /swarm specify to author a native spec. Never write .swarm/plan.json or .swarm/plan.md directly.',
 			};
 		}
 		specMtime = spec.mtime ?? undefined;

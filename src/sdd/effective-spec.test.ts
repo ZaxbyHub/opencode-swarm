@@ -105,7 +105,7 @@ describe('effective spec provider', () => {
 		);
 	});
 
-	test('materializes projection atomically and archives an existing spec', () => {
+	test('materializes projection atomically and archives an existing spec (overwrite=true)', () => {
 		write(
 			path.join('.swarm', 'spec.md'),
 			'# Specification: Old\n\n## Requirements\n- FR-001 MUST be archived.\n',
@@ -115,7 +115,7 @@ describe('effective spec provider', () => {
 			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n#### Scenario: Successful login\n- **WHEN** the user logs in\n- **THEN** the system authenticates the user.\n',
 		);
 
-		const result = writeProjectedSpecSync(tempDir);
+		const result = writeProjectedSpecSync(tempDir, { overwrite: true });
 		const written = fs.readFileSync(
 			path.join(tempDir, '.swarm', 'spec.md'),
 			'utf-8',
@@ -126,6 +126,79 @@ describe('effective spec provider', () => {
 		expect(written).toContain('Effective SDD Projection');
 		expect(written).toContain('FR-001: The system MUST allow login.');
 		expect(fs.existsSync(result.archivePath!)).toBe(true);
+	});
+
+	test('overwrite=false with existing .swarm/spec.md refuses (O_EXCL / wx flag, TOCTOU-safe)', () => {
+		// Pre-populate a native spec — the EEXIST path must fire.
+		write(
+			path.join('.swarm', 'spec.md'),
+			'# Specification: Native\n\n## Requirements\n- FR-001 MUST stay.\n',
+		);
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n#### Scenario: Successful login\n- **WHEN** the user logs in\n- **THEN** the system authenticates.\n',
+		);
+
+		const result = writeProjectedSpecSync(tempDir, { overwrite: false });
+
+		// Must NOT have written — the wx (O_EXCL) flag rejects silently.
+		expect(result.written).toBe(false);
+		expect(result.error).toContain('.swarm/spec.md already exists');
+		expect(result.error).toContain('--overwrite');
+		expect(result.projection).not.toBeNull(); // projection was built, just not written
+
+		// Original spec must be untouched — prove TOCTOU cannot replace it.
+		const original = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+		expect(original).toContain('MUST stay.');
+		expect(original).not.toContain('Effective SDD Projection');
+	});
+
+	test('overwrite=false with no existing .swarm/spec.md succeeds (first-time projection, O_EXCL creates)', () => {
+		// No .swarm/spec.md exists — the wx flag creates the file.
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n#### Scenario: Successful login\n- **WHEN** the user logs in\n- **THEN** the system authenticates.\n',
+		);
+
+		const result = writeProjectedSpecSync(tempDir, { overwrite: false });
+
+		expect(result.written).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(result.projection).not.toBeNull();
+
+		const written = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+		expect(written).toContain('Effective SDD Projection');
+		expect(written).toContain('FR-001: The system MUST allow login.');
+	});
+
+	test('overwrite=true replaces existing spec and archives only when content differs', () => {
+		write(
+			path.join('.swarm', 'spec.md'),
+			'# Specification: Old\n\n## Requirements\n- FR-001 MUST be archived.\n',
+		);
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST allow login.\n#### Scenario: Successful login\n- **WHEN** the user logs in\n- **THEN** the system authenticates.\n',
+		);
+
+		const result = writeProjectedSpecSync(tempDir, { overwrite: true });
+
+		expect(result.written).toBe(true);
+		// Archive must exist because content differs.
+		expect(result.archivePath).toBeDefined();
+		expect(fs.existsSync(result.archivePath!)).toBe(true);
+
+		const written = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+		expect(written).toContain('Effective SDD Projection');
 	});
 
 	test('does not build a projection when OpenSpec artifacts contain no parsable requirements', () => {
