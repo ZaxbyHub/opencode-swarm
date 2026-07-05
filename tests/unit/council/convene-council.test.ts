@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { AGENT_TOOL_MAP } from '../../../src/config/constants';
+import {
+	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+} from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
 
 describe('submit_council_verdicts — registration', () => {
@@ -11,14 +14,17 @@ describe('submit_council_verdicts — registration', () => {
 		expect(TOOL_NAME_SET.has('submit_council_verdicts')).toBe(true);
 	});
 
-	test('submit_council_verdicts is in AGENT_TOOL_MAP.architect', () => {
-		expect(AGENT_TOOL_MAP.architect).toContain('submit_council_verdicts');
+	test('submit_council_verdicts is in COUNCIL_AGENT_TOOL_MAP.architect', () => {
+		expect(COUNCIL_AGENT_TOOL_MAP.architect).toContain(
+			'submit_council_verdicts',
+		);
 	});
 
-	test('submit_council_verdicts is architect-only — no other agent has it', () => {
+	test('submit_council_verdicts is opt-in architect-only — no base agent has it', () => {
 		const otherAgents = Object.keys(AGENT_TOOL_MAP).filter(
 			(a) => a !== 'architect',
 		) as Array<keyof typeof AGENT_TOOL_MAP>;
+		expect(AGENT_TOOL_MAP.architect).not.toContain('submit_council_verdicts');
 		for (const agent of otherAgents) {
 			expect(AGENT_TOOL_MAP[agent]).not.toContain('submit_council_verdicts');
 		}

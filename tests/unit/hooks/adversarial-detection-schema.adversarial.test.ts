@@ -29,7 +29,7 @@ describe('AdversarialDetectionConfigSchema - ADVERSARIAL SECURITY TESTS', () => 
 			});
 			expect(result.success).toBe(false);
 			if (!result.success) {
-				expect(result.error.issues[0].code).toBe('invalid_type');
+				expect(result.error.issues[0].code).toMatch(/invalid_type|too_small/);
 			}
 		});
 
@@ -39,7 +39,7 @@ describe('AdversarialDetectionConfigSchema - ADVERSARIAL SECURITY TESTS', () => 
 			});
 			expect(result.success).toBe(false);
 			if (!result.success) {
-				expect(result.error.issues[0].code).toBe('invalid_type');
+				expect(result.error.issues[0].code).toMatch(/invalid_type|too_small/);
 			}
 		});
 

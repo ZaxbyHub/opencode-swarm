@@ -234,7 +234,7 @@ describe('Agent Activity Hooks', () => {
 				},
 			);
 
-			// Test case 3: null output (failure)
+			// Test case 3: explicit success=false (failure)
 			const callID3 = 'null-call';
 			hooks.toolBefore(
 				{ tool, sessionID: 'session3', callID: callID3 },
@@ -249,11 +249,12 @@ describe('Agent Activity Hooks', () => {
 				{
 					title: 'Test',
 					output: null as any,
+					success: false,
 					metadata: {},
 				},
 			);
 
-			// Test case 4: undefined output (failure)
+			// Test case 4: explicit error (failure)
 			const callID4 = 'undefined-call';
 			hooks.toolBefore(
 				{ tool, sessionID: 'session4', callID: callID4 },
@@ -267,7 +268,8 @@ describe('Agent Activity Hooks', () => {
 				},
 				{
 					title: 'Test',
-					output: undefined as any, // undefined - should count as failure
+					output: undefined as any,
+					error: new Error('tool failed'),
 					metadata: {},
 				},
 			);
@@ -276,7 +278,7 @@ describe('Agent Activity Hooks', () => {
 			const aggregate = swarmState.toolAggregates.get(tool)!;
 			expect(aggregate.count).toBe(4);
 			expect(aggregate.successCount).toBe(2); // non-null + empty string
-			expect(aggregate.failureCount).toBe(2); // null + undefined
+			expect(aggregate.failureCount).toBe(2); // explicit failure signals
 		});
 
 		it('should accumulate aggregate data for multiple calls to same tool', async () => {
@@ -317,6 +319,7 @@ describe('Agent Activity Hooks', () => {
 				{
 					title: 'Test',
 					output: null as any,
+					success: false,
 					metadata: {},
 				},
 			);

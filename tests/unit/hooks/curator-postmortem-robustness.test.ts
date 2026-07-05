@@ -65,6 +65,30 @@ function getExpectedReportPath(dir: string): string {
 	);
 }
 
+function assembleLLMInputForTest(
+	planId: string,
+	planSummary: string,
+	knowledgeSummary: Parameters<typeof _internals.assembleLLMInput>[4],
+	curatorDigest: string | null,
+	proposals: Array<{ source: string; content: string }>,
+	unactionable: unknown[],
+	retrospectives: string[],
+	driftReports: string[],
+): string {
+	return _internals.assembleLLMInput(
+		planId,
+		'project',
+		undefined,
+		planSummary,
+		knowledgeSummary,
+		curatorDigest,
+		proposals,
+		unactionable,
+		retrospectives,
+		driftReports,
+	);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -72,7 +96,7 @@ function getExpectedReportPath(dir: string): string {
 describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 	test('truncates a knowledge lesson longer than 500 chars to exactly 500 chars', () => {
 		const longLesson = 'x'.repeat(800);
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[
@@ -109,7 +133,7 @@ describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 		const longRetro = 'z'.repeat(700);
 		const longDrift = 'w'.repeat(700);
 
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[],
@@ -144,7 +168,7 @@ describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 
 	test('does not alter lessons shorter than 500 chars', () => {
 		const shortLesson = 'short lesson';
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[
@@ -173,7 +197,7 @@ describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 	test('lesson exactly at 500 chars is preserved unchanged (boundary — no truncation)', () => {
 		// 500 x's: the exact MAX_INPUT_TEXT_CHARS boundary — slice(0,500) returns same string
 		const boundaryLesson = 'a'.repeat(500);
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[
@@ -203,7 +227,7 @@ describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 	test('lesson of 501 chars is truncated to exactly 500 (boundary + 1)', () => {
 		// 501 x's → slice(0,500) keeps only first 500
 		const longLesson = 'b'.repeat(501);
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[
@@ -232,7 +256,7 @@ describe('FR-007 — assembleLLMInput truncates long knowledge lessons', () => {
 
 	test('empty string lesson is preserved as empty string (edge case)', () => {
 		// slice(0,500) on '' returns '', which serializes as "lesson":""
-		const result = _internals.assembleLLMInput(
+		const result = assembleLLMInputForTest(
 			'plan-1',
 			'Plan summary',
 			[

@@ -382,7 +382,13 @@ function _tokenizeToNGrams(content: string, n: number): string[] {
 }
 
 /**
- * Find duplicate n-grams in content
+ * Find duplicate lines using a sliding-window approach.
+ *
+ * NOTE: Sliding windows overlap by design — a file with N repetitions of the
+ * same minLines-sized block will count (N - 1) * minLines duplicate lines per
+ * unique window, which may overcount relative to the true amount of non-original
+ * content. This is acceptable for a heuristic metric; the ratio is capped at
+ * lines.length to prevent impossible values.
  */
 function findDuplicateLines(content: string, minLines: number): number {
 	const lines = content.split('\n').filter((line) => line.trim().length > 0);
@@ -391,23 +397,21 @@ function findDuplicateLines(content: string, minLines: number): number {
 		return 0;
 	}
 
-	// Group identical lines
-	const lineCounts = new Map<string, number>();
-	for (const line of lines) {
-		const normalized = line.trim();
-		lineCounts.set(normalized, (lineCounts.get(normalized) || 0) + 1);
+	const normalizedLines = lines.map((line) => line.trim());
+	const windowCounts = new Map<string, number>();
+	for (let i = 0; i <= normalizedLines.length - minLines; i++) {
+		const window = normalizedLines.slice(i, i + minLines).join('\n');
+		windowCounts.set(window, (windowCounts.get(window) || 0) + 1);
 	}
 
-	// Count duplicate line instances (total occurrences beyond the first)
 	let duplicateCount = 0;
-	for (const [_line, count] of lineCounts) {
+	for (const [_window, count] of windowCounts) {
 		if (count > 1) {
-			// Add all occurrences beyond the first one
-			duplicateCount += count - 1;
+			duplicateCount += (count - 1) * minLines;
 		}
 	}
 
-	return duplicateCount;
+	return Math.min(duplicateCount, lines.length);
 }
 
 /**

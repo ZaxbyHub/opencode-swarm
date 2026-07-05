@@ -307,10 +307,12 @@ describe('curateAndStoreSwarm folds insight candidates (Task 5.2)', () => {
 		// The same lesson arrives as a retro prose lesson WITH a delegate that
 		// makes it actionable; the insight copy must dedup (not double-store).
 		const v3 = async () =>
-			JSON.stringify({
-				applies_to_agents: ['coder'],
-				required_actions: ['run the full suite before finishing a refactor'],
-			});
+			JSON.stringify([
+				{
+					applies_to_agents: ['coder'],
+					required_actions: ['run the full suite before finishing a refactor'],
+				},
+			]);
 		const result = await curateAndStoreSwarm(
 			[shared],
 			'proj',

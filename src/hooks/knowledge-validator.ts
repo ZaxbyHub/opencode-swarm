@@ -840,7 +840,7 @@ export async function quarantineEntry(
 	const rejectedPath = resolveSwarmRejectedPath(directory);
 	const swarmDir = resolveKnowledgeStoreDir(directory);
 
-	// 3. Ensure store dir exists
+	// 3. Ensure .swarm store dir exists
 	await mkdir(swarmDir, { recursive: true });
 
 	// 4. Acquire lock FIRST, then read and write (all inside lock)

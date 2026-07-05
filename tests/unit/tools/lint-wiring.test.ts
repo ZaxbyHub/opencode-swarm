@@ -115,13 +115,13 @@ describe('getAdditionalLinterCommand', () => {
 				// Match both gradlew (Unix) and gradlew.bat (Windows)
 				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 			});
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual([gradlewPath, 'checkstyleMain']);
 		});
 
 		it('check mode with no gradlew but gradle available returns gradle checkstyleMain', () => {
-			mockExistsSync.mockImplementation(false);
+			mockExistsSync.mockImplementation(() => false);
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'gradle',
 			);
@@ -130,8 +130,8 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode with neither gradlew nor gradle returns mvn checkstyle:check', () => {
-			mockExistsSync.mockImplementation(false);
-			mockIsCommandAvailable.mockImplementation(false);
+			mockExistsSync.mockImplementation(() => false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual(['mvn', 'checkstyle:check']);
 		});
@@ -148,7 +148,7 @@ describe('getAdditionalLinterCommand', () => {
 			mockExistsSync.mockImplementation((p: string) =>
 				p.endsWith('gradlew.bat'),
 			);
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual([gradlewBatPath, 'checkstyleMain']);
 
@@ -166,7 +166,7 @@ describe('getAdditionalLinterCommand', () => {
 			mockExistsSync.mockImplementation((p: string) => {
 				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 			});
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'fix', '/test');
 			expect(result).toEqual([gradlewPath, 'checkstyleMain']);
 		});
@@ -262,13 +262,13 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode without bundle returns rubocop', () => {
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('rubocop', 'check', '/test');
 			expect(result).toEqual(['rubocop']);
 		});
 
 		it('fix mode without bundle returns rubocop -A', () => {
-			mockIsCommandAvailable.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('rubocop', 'fix', '/test');
 			expect(result).toEqual(['rubocop', '-A']);
 		});
@@ -280,8 +280,8 @@ describe('runAdditionalLint', () => {
 
 	beforeEach(() => {
 		mock.restore();
-		mockIsCommandAvailable.mockImplementation(true);
-		mockExistsSync.mockImplementation(false);
+		mockIsCommandAvailable.mockImplementation(() => true);
+		mockExistsSync.mockImplementation(() => false);
 		originalSpawn = Bun.spawn;
 	});
 
@@ -345,7 +345,7 @@ describe('runAdditionalLint', () => {
 	});
 
 	it('command execution throws error returns LintErrorResult with success:false and Execution failed error', async () => {
-		Bun.spawn = mock(() => () => {
+		Bun.spawn = mock(() => {
 			throw new Error('Command not found');
 		}) as typeof Bun.spawn;
 

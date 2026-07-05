@@ -32,13 +32,19 @@ beforeEach(() => {
 	})) as typeof prSubscribeInternals.loadPluginConfig;
 	// Mock subscribe via DI seam
 	prSubscribeInternals.subscribe = mockSubscribe;
-	// Reset per-test state for the execSync seam used by bare-number resolution.
-	prRefInternals.execSync = (cmd: string, opts: Record<string, unknown>) => {
-		if (cmd === 'git remote get-url origin') {
-			return 'https://github.com/test-owner/test-repo.git\n';
+	// Reset per-test state for the spawnSync seam used by bare-number resolution.
+	// detectGitRemote() calls _internals.spawnSync('git', ['remote', 'get-url', 'origin'], ...)
+	// — see src/commands/_shared/url-security.ts.
+	prRefInternals.spawnSync = ((_bin: string, args: string[]) => {
+		if (args.join(' ') === 'remote get-url origin') {
+			return {
+				status: 0,
+				stdout: 'https://github.com/test-owner/test-repo.git\n',
+				error: undefined,
+			};
 		}
 		throw new Error('unexpected git command');
-	};
+	}) as typeof prRefInternals.spawnSync;
 });
 
 afterEach(() => {
@@ -98,10 +104,10 @@ describe('handlePrSubscribeCommand', () => {
 
 	describe('looksLikePrRef=true but parsePrRef=null → resolution error', () => {
 		test('bare number with no origin remote returns resolution error', async () => {
-			// Simulate no origin remote by having execSync throw.
-			prRefInternals.execSync = (() => {
+			// Simulate no origin remote by having spawnSync throw.
+			prRefInternals.spawnSync = (() => {
 				throw new Error('fatal: No such remote');
-			}) as typeof prRefInternals.execSync;
+			}) as typeof prRefInternals.spawnSync;
 
 			const result = await handlePrSubscribeCommand(
 				tempDir,
@@ -352,8 +358,11 @@ describe('pr-subscribe adversarial security tests', () => {
 			},
 		})) as typeof prSubscribeInternals.loadPluginConfig;
 		prSubscribeInternals.subscribe = mockSubscribe;
-		prRefInternals.execSync = (() =>
-			'https://github.com/test-owner/test-repo.git\n') as typeof prRefInternals.execSync;
+		prRefInternals.spawnSync = (() => ({
+			status: 0,
+			stdout: 'https://github.com/test-owner/test-repo.git\n',
+			error: undefined,
+		})) as typeof prRefInternals.spawnSync;
 		mockSubscribe.mockReset();
 	});
 
@@ -422,25 +431,24 @@ describe('pr-subscribe adversarial security tests', () => {
 			expect(result).toContain('not a valid PR reference');
 		});
 
-		test('URL with embedded null byte is accepted and preserved (security gap)', async () => {
+		test('URL with embedded null byte is rejected (control-character guard in parsePrRef)', async () => {
 			mockSubscribe.mockImplementation(() => Promise.resolve({}));
 
-			// URL parser preserves the null byte as-is in the hostname
+			// parsePrRef's full-URL branch runs containsControlCharacters() on the
+			// captured owner/repo groups (src/commands/pr-ref.ts) and rejects any
+			// match containing a control character, including NUL. The ref still
+			// *looks* like a PR ref (starts with https://), so the handler reports
+			// the "could not be resolved" error rather than "not a valid PR
+			// reference" — and subscribe() is never called.
 			const result = await handlePrSubscribeCommand(
 				tempDir,
 				['https://github.com/owner\0malicious/repo/pull/123'],
 				'session-1',
 			);
 
-			// Null byte is preserved, not rejected — subscription succeeds
-			expect(result).toContain('Subscribed to');
-			// The null byte appears directly in the constructed prUrl
-			expect(mockSubscribe).toHaveBeenCalledWith(
-				tempDir,
-				expect.objectContaining({
-					prUrl: expect.stringContaining('\0'),
-				}),
-			);
+			expect(result).toContain('Could not resolve PR reference from');
+			expect(result).not.toContain('Subscribed to');
+			expect(mockSubscribe).not.toHaveBeenCalled();
 		});
 	});
 
@@ -448,8 +456,11 @@ describe('pr-subscribe adversarial security tests', () => {
 		test('PR number exceeding MAX_SAFE_INTEGER is accepted (security gap)', async () => {
 			// parseInt on a 20-digit number returns a non-safe integer.
 			// parsePrRef doesn't validate safe integer — the huge number flows to subscribe().
-			prRefInternals.execSync = (() =>
-				'https://github.com/test-owner/test-repo.git\n') as typeof prRefInternals.execSync;
+			prRefInternals.spawnSync = (() => ({
+				status: 0,
+				stdout: 'https://github.com/test-owner/test-repo.git\n',
+				error: undefined,
+			})) as typeof prRefInternals.spawnSync;
 			const hugeNumber = '99999999999999999999';
 			await handlePrSubscribeCommand(tempDir, [hugeNumber], 'session-1');
 
@@ -462,8 +473,11 @@ describe('pr-subscribe adversarial security tests', () => {
 		});
 
 		test('PR number that is just under safe integer boundary works', async () => {
-			prRefInternals.execSync = (() =>
-				'https://github.com/test-owner/test-repo.git\n') as typeof prRefInternals.execSync;
+			prRefInternals.spawnSync = (() => ({
+				status: 0,
+				stdout: 'https://github.com/test-owner/test-repo.git\n',
+				error: undefined,
+			})) as typeof prRefInternals.spawnSync;
 			// MAX_SAFE_INTEGER = 9007199254740991, this is 9007199254740990
 			const maxSafe = '9007199254740990';
 			const result = await handlePrSubscribeCommand(
@@ -586,24 +600,24 @@ describe('pr-subscribe adversarial security tests', () => {
 			);
 		});
 
-		test('newline injection in owner/repo is accepted (security gap)', async () => {
+		test('newline injection in owner/repo is rejected (control-character guard in parsePrRef)', async () => {
 			mockSubscribe.mockImplementation(() => Promise.resolve({}));
 
-			// [^#]+ captures the newline; URL construction includes it literally
+			// The shorthand branch's [^/]+ capture (owner) allows a literal newline,
+			// but parsePrRef then runs containsControlCharacters() on both the owner
+			// and repo captures (src/commands/pr-ref.ts) and rejects the match. The
+			// token still *looks* like a PR ref shorthand, so the handler reports the
+			// "could not be resolved" error rather than "not a valid PR reference" —
+			// and subscribe() is never called.
 			const result = await handlePrSubscribeCommand(
 				tempDir,
 				['owner\nmalicious/repo#123'],
 				'session-1',
 			);
 
-			expect(result).toContain('Subscribed to');
-			expect(mockSubscribe).toHaveBeenCalledWith(
-				tempDir,
-				expect.objectContaining({
-					repoFullName: 'owner\nmalicious/repo',
-					prUrl: 'https://github.com/owner\nmalicious/repo/pull/123',
-				}),
-			);
+			expect(result).toContain('Could not resolve PR reference from');
+			expect(result).not.toContain('Subscribed to');
+			expect(mockSubscribe).not.toHaveBeenCalled();
 		});
 
 		test('template literal injection is accepted (security gap)', async () => {

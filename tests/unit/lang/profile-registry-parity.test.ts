@@ -6,13 +6,13 @@ import { languageDefinitions } from '../../../src/lang/registry';
  * Phase 1 parity test — guards against future drift between the two language
  * registries:
  *
- *   - `src/lang/profiles.ts` (LANGUAGE_REGISTRY) — 12 high-level language
+ *   - `src/lang/profiles.ts` (LANGUAGE_REGISTRY) — 13 high-level language
  *     profiles with build / test / lint / audit / SAST / prompt metadata.
  *     Used by the build-discovery, syntax-check, sast-scan, and (later)
  *     LanguageBackend dispatch paths.
  *   - `src/lang/registry.ts` (languageDefinitions) — 20 fine-grained
- *     tree-sitter parser entries (12 in common with above + 8 split or
- *     parser-only: javascript, c, tsx, css, bash, powershell, ini, regex).
+ *     tree-sitter parser entries (13 in common with above + 7 split or
+ *     parser-only: c, tsx, css, bash, powershell, ini, regex).
  *     Used by ast-diff, syntax-check's parser-only paths.
  *
  * They serve different concerns and intentionally do NOT have the same
@@ -24,7 +24,7 @@ import { languageDefinitions } from '../../../src/lang/registry';
  *   2. Every profile in LANGUAGE_REGISTRY has the new
  *      `treeSitter.commentNodes` field populated as a non-empty array.
  *   3. The asymmetry list is exactly the documented set
- *      (registry-only: javascript, c, tsx, css, bash, powershell, ini, regex).
+ *      (registry-only: c, tsx, css, bash, powershell, ini, regex).
  *      Adding a new parser entry in registry.ts that isn't a documented
  *      asymmetry (and isn't a profile either) would fail this test —
  *      forcing the contributor to either add a profile or document why.
@@ -62,9 +62,8 @@ describe('LANGUAGE_REGISTRY ↔ languageDefinitions parity', () => {
 
 	test('registry-only ids match the documented asymmetry list', () => {
 		const REGISTRY_ONLY_DOCUMENTED = new Set([
-			// JS / TS family splits — tree-sitter has separate grammars for these
-			// even though the typescript profile covers all six extensions.
-			'javascript',
+			// TSX grammar split — tree-sitter has a separate grammar even though
+			// the typescript profile covers `.tsx`.
 			'tsx',
 			// C / C++ split — tree-sitter has separate grammars; the cpp profile
 			// covers both for build/test/lint dispatch.
@@ -100,11 +99,11 @@ describe('LANGUAGE_REGISTRY ↔ languageDefinitions parity', () => {
 		}
 	});
 
-	test('LANGUAGE_REGISTRY has 12 profiles', () => {
+	test('LANGUAGE_REGISTRY has 13 profiles', () => {
 		// Sanity: locks the profile count so future additions trigger a
 		// matching test update. If this fails after adding a language, also
 		// update the asymmetry list above and this number.
-		expect(LANGUAGE_REGISTRY.getAll().length).toBe(12);
+		expect(LANGUAGE_REGISTRY.getAll().length).toBe(13);
 	});
 
 	test('languageDefinitions has 20 entries', () => {

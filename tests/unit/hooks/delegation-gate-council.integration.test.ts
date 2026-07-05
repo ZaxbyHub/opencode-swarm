@@ -197,7 +197,7 @@ describe('delegation-gate: council mode integration', () => {
 		expect(threw).toBe(true);
 	});
 
-	it('should allow council delegation even when blocking task exists', async () => {
+	it('should block council delegation when another task awaits completion', async () => {
 		const hook = createDelegationGateHook(
 			makeConfig({ enabled: true }),
 			tempDir,
@@ -215,7 +215,7 @@ describe('delegation-gate: council mode integration', () => {
 			threw = true;
 		}
 
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });
 

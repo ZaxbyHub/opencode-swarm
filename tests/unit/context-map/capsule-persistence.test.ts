@@ -454,16 +454,26 @@ describe('_internals DI seam', () => {
 	test('override verification: mock writeFileSync, verify it is called', () => {
 		// This is verified implicitly by every saveCapsule test, but we
 		// make it explicit here so the seam contract is self-documenting.
-		const original = _internals.writeFileSync;
+		const originalWriteFileSync = _internals.writeFileSync;
+		const originalMkdirSync = _internals.mkdirSync;
+		const originalRenameSync = _internals.renameSync;
 		const spy = mock(() => {});
+		const mkdirSpy = mock(() => {});
+		const renameSpy = mock(() => {});
 		_internals.writeFileSync = spy;
+		_internals.mkdirSync = mkdirSpy;
+		_internals.renameSync = renameSpy;
 
-		const capsule = makeCapsule({ task_id: '11.1' });
-		saveCapsule(capsule, '/test');
+		try {
+			const capsule = makeCapsule({ task_id: '11.1' });
+			saveCapsule(capsule, '/test');
 
-		expect(spy).toHaveBeenCalledTimes(1);
-
-		_internals.writeFileSync = original;
+			expect(spy).toHaveBeenCalledTimes(1);
+		} finally {
+			_internals.writeFileSync = originalWriteFileSync;
+			_internals.mkdirSync = originalMkdirSync;
+			_internals.renameSync = originalRenameSync;
+		}
 	});
 });
 

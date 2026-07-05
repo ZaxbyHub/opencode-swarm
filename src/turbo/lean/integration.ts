@@ -18,6 +18,7 @@ import {
 	type LaneEvidence,
 	listLaneEvidence,
 	readPhaseEvidence,
+	type ValidationArtifact,
 } from './evidence';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -165,6 +166,11 @@ interface CriticPackage {
 		completedLanes: number;
 		failedLanes: number;
 	};
+	validationArtifacts?: {
+		build?: ValidationArtifact;
+		test?: ValidationArtifact;
+		lint?: ValidationArtifact;
+	};
 	degradationSummary: {
 		totalDegraded: number;
 		resolvedDegraded: number;
@@ -265,6 +271,10 @@ async function compileCriticPackage(
 			pendingDegraded,
 		},
 	};
+
+	if (phaseEvidence?.validationArtifacts) {
+		pkg.validationArtifacts = phaseEvidence.validationArtifacts;
+	}
 
 	return pkg;
 }

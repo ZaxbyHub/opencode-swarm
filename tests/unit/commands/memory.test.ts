@@ -21,6 +21,7 @@ import {
 	type MemoryRecord,
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
+import { clearPool } from '../../../src/memory/provider-pool';
 
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
@@ -39,6 +40,14 @@ afterEach(async () => {
 	} else {
 		process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
 	}
+	// Command handlers acquire SQLite providers through the process-level
+	// provider pool (src/memory/provider-pool.ts), which intentionally keeps
+	// released connections open for reuse rather than closing them on
+	// refcount-zero. That's correct for long-lived production sessions, but
+	// each test here uses its own throwaway tmpDir, so the pooled connection
+	// must be force-closed before the tmpDir is removed — otherwise the
+	// still-open SQLite file handle makes `fs.rm` fail with EBUSY on Windows.
+	clearPool();
 	await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -109,9 +118,20 @@ describe('/swarm memory commands', () => {
 		const output = await handleMemoryEvaluateCommand(tmpDir, ['--json']);
 		const report = JSON.parse(output);
 
-		expect(report.summary.fixture_count).toBe(5);
-		expect(report.summary.run_count).toBe(30);
-		expect(report.summary.noisy_injection_count).toBe(0);
+		// Bundled fixture count grew from 5 to 8 (three `paraphrase-*` fixtures
+		// added in e0b0c8d3 for hybrid lexical-dense retrieval); 8 fixtures x 2
+		// providers x 3 modes = 48 runs.
+		expect(report.summary.fixture_count).toBe(8);
+		expect(report.summary.run_count).toBe(48);
+		// The default `/swarm memory evaluate` config runs with embeddings
+		// disabled (DEFAULT_EMBEDDINGS_CONFIG.enabled === false), so the
+		// paraphrase fixtures — which are specifically designed to require
+		// dense/semantic matching (see recall-evaluation.test.ts's "precision@k
+		// == 0 with embeddings disabled" regression test) — degrade to
+		// lexical-only matching and surface same-scope noise under injection
+		// mode. Non-zero noisy_injection_count is therefore expected here, not
+		// a regression.
+		expect(report.summary.noisy_injection_count).toBeGreaterThan(0);
 		expect(report.summary.same_scope_noise_count).toBeGreaterThan(0);
 		expect(report.summary.cross_scope_leak_count).toBe(0);
 		expect(report.summary.stale_memory_count).toBe(0);
@@ -123,7 +143,7 @@ describe('/swarm memory commands', () => {
 		const output = await handleMemoryEvaluateCommand(tmpDir, []);
 
 		expect(output).toContain('## Swarm Memory Recall Evaluation');
-		expect(output).toContain('Fixtures: `5`');
+		expect(output).toContain('Fixtures: `8`');
 		expect(output).toContain('Same-scope noise: `');
 		expect(output).toContain(
 			'Use `/swarm memory evaluate --json` for the full report.',

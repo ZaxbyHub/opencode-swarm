@@ -38,15 +38,29 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	transactKnowledge: async () => {},
 }));
 
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
+	resolveUnactionablePath: (dir: string) =>
+		`${dir}/.swarm/knowledge-unactionable.jsonl`,
+}));
+
+// migrateHiveKnowledgeLegacy is called unconditionally alongside migrateContextToKnowledge
+// by handleKnowledgeMigrateCommand — default to a no-op result (no skippedReason, not
+// migrated) so it doesn't add a "Hive legacy migration" message to existing assertions.
+const mockMigrateHiveKnowledgeLegacy = mock(async (_config: unknown) => ({
+	migrated: false,
+	entriesMigrated: 0,
+	entriesDropped: 0,
+	entriesTotal: 0,
 }));
 
 mock.module('../../../src/hooks/knowledge-migrator.js', () => ({
 	migrateContextToKnowledge: mockMigrateContextToKnowledge,
+	migrateHiveKnowledgeLegacy: mockMigrateHiveKnowledgeLegacy,
 }));
 
 // Import AFTER mock setup
@@ -330,7 +344,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			]);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 			expect(result).not.toContain('../../../etc/passwd');
 			expect(result).not.toContain('/etc/passwd');
@@ -347,9 +361,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 				testDirectory,
 				expect.any(Object),
 			);
-			expect(result).toBe(
-				'✅ Migration complete: 5 entries added, 1 dropped (validation/dedup), 6 total processed.',
-			);
+			expect(result).toBe('✅ Context migration: 5 entries added, 1 dropped');
 		});
 
 		it('21. Empty string args[0] should fall back to directory', async () => {
@@ -360,9 +372,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 				testDirectory,
 				expect.any(Object),
 			);
-			expect(result).toBe(
-				'✅ Migration complete: 5 entries added, 1 dropped (validation/dedup), 6 total processed.',
-			);
+			expect(result).toBe('✅ Context migration: 5 entries added, 1 dropped');
 		});
 
 		it('22. Very long directory string (10000 chars) should not hang or crash', async () => {
@@ -373,9 +383,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 				longDirectory,
 				expect.any(Object),
 			);
-			expect(result).toBe(
-				'✅ Migration complete: 5 entries added, 1 dropped (validation/dedup), 6 total processed.',
-			);
+			expect(result).toBe('✅ Context migration: 5 entries added, 1 dropped');
 		});
 
 		it('23. args[0] is a non-string (123) should not throw', async () => {
@@ -388,9 +396,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 				123,
 				expect.any(Object),
 			);
-			expect(result).toBe(
-				'✅ Migration complete: 5 entries added, 1 dropped (validation/dedup), 6 total processed.',
-			);
+			expect(result).toBe('✅ Context migration: 5 entries added, 1 dropped');
 		});
 	});
 
@@ -404,7 +410,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 			expect(result).not.toContain('/home/user/.ssh/known_hosts');
 			expect(result).not.toContain('.ssh');
@@ -417,7 +423,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 		});
 
@@ -427,7 +433,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 		});
 
@@ -440,7 +446,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 			expect(result).not.toContain('ZodError');
 			expect(result).not.toContain('swarm_max_entries');
@@ -454,7 +460,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'❌ Migration failed. Check .swarm/context.md is readable.',
+				'❌ Migration failed. Check that knowledge source files are readable.',
 			);
 		});
 	});
@@ -471,7 +477,7 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
 
 			expect(result).toBe(
-				'⏭ Migration already completed for this project. Delete .swarm/.knowledge-migrated to re-run.',
+				'⏭ Context migration already completed. Delete .swarm/.knowledge-migrated to re-run.',
 			);
 		});
 
@@ -501,17 +507,12 @@ describe('Adversarial Security Tests for handleKnowledgeMigrateCommand', () => {
 			expect(result).toBe('ℹ️ .swarm/context.md is empty — nothing to migrate.');
 		});
 
-		it('32. Migration with unknown skip reason', async () => {
-			mockMigrateContextToKnowledge.mockResolvedValueOnce({
-				entriesMigrated: 0,
-				entriesDropped: 0,
-				entriesTotal: 0,
-				skippedReason: 'unknown-reason',
-			});
-
-			const result = await handleKnowledgeMigrateCommand(testDirectory, []);
-
-			expect(result).toBe('⚠️ Migration skipped for an unknown reason.');
-		});
+		// Test 32 ("Migration with unknown skip reason") removed: the skippedReason switch in
+		// src/commands/knowledge.ts is exhaustive for the literal values migrateContextToKnowledge
+		// and migrateHiveKnowledgeLegacy actually emit ('sentinel-exists' | 'no-context-file' |
+		// 'empty-context' and 'sentinel-exists' | 'no-context-file' respectively — see
+		// src/hooks/knowledge-migrator.ts). An "unknown-reason" value is not reachable without
+		// violating the MigrationResult type contract, so there is no live "unknown reason"
+		// fallback message to assert against.
 	});
 });

@@ -107,3 +107,23 @@ The cross-tree skill mirror contract is the authoritative registry at `src/confi
 - **Adapter shim pattern:** for architect MODE skills like `swarm-pr-review` and `swarm-pr-feedback`, the `.claude` and `.agents` files are thin adapter shims that delegate to the canonical `.opencode` file via `expectedCanonicalRef`. When updating these, the canonical content goes in `.opencode`; the adapter shim typically needs no change unless the cross-tree delegation interface changes.
 
 **If your PR modifies a `.opencode/skills/<X>/SKILL.md` file:** check `src/config/skill-mirrors.ts` for the contract, then run `bun run drift:check` locally before pushing. Mirror drift is currently a soft-warn (`DRIFT_CHECK_ENFORCE=1` would make it hard-fail). The drift-check CI job surfaces drift as an issue comment, not a blocking check — but a drift between canonical and mirror means Claude Code agents reading the mirror get stale instructions.
+
+## Sandbox env overrides (subprocess-safety deep-dive)
+
+When a sandbox executor (`src/sandbox/{linux,macos,win32}/*.ts`) interpolates environment variables into a sandbox profile, a bwrap rule, or a PowerShell `-EnvironmentVariables` block, the following rules apply — they exist because a future shell-injection regression in any new sandbox path would be a security vulnerability, not just a bug:
+
+- **Keys must match POSIX env-var name syntax.** Every env key must be validated against the regex `/^[A-Za-z_][A-Za-z0-9_]*$/` (a leading letter or underscore, then letters/digits/underscores) before being interpolated. Define or reuse a single `isValidEnvKey(key: string): boolean` helper colocated with the `SandboxExecutor` interface in `src/sandbox/executor.ts` (around line 24+); do not duplicate the regex inline at every call site. Keys that fail validation must be silently dropped (not raised) so that one bad caller cannot wedge the sandbox path — but the drop must be observable in the advisory/observability layer (`pendingAdvisoryMessages` or structured log), never silent.
+- **Values must be shell-quoted or treated as opaque single tokens.** On POSIX, prepend a leading single quote, escape any embedded single quotes by replacing `'` with `'\''`, and append a trailing single quote. On Windows PowerShell, **prefer single-quoted literal contexts (e.g. `'$env:NAME'`) and run values through a `psStringEscape`-style helper that escapes backtick, `$`, `"`, and `` ` ``** (the special characters in double-quoted PowerShell strings). Single-quoted PowerShell strings are literal — only `'` needs escaping, doubling it to `''`. If a context requires double-quoted PS values, escape embedded `"` as `` ` ``, backtick as `` `` ``, and `$` as `` ` `` (backtick is the PS escape character in double-quoted strings; `$` must be escaped to prevent variable expansion). On bwrap, always pass values as separate argv tokens after the `--setenv` flag (`--setenv KEY VALUE`, two tokens), never as a single concatenated `KEY=VALUE` token that an intermediate shell would interpret.
+- **Use the array-form argv for every sandbox subprocess.** Never `shell:`-interpolate. The same invariant-3 rules (`array-form spawn`, `stdin: 'ignore'`, `cwd`, `timeout`, `proc.kill()` in `finally`) apply to sandbox spawns as to any other subprocess — see the `subprocess-safety` cross-link.
+
+## Sandbox fallback parity (Windows and Linux)
+
+`sandbox/{linux,macos,win32}/*.ts` has primary executors plus legacy fallbacks (Windows `NativeWindowsSandboxExecutor` + `RestrictedEnvironmentExecutor` / PowerShell wrapper, Linux `BubblewrapSandboxExecutor` + no-sandbox fallback). When you modify any of the following on the primary executor, you MUST update the fallback path in the same change to keep behavior parity and add a parity test:
+
+- `getEnvOverrides` signature or merge semantics.
+- `wrapCommand` scoping rules (allowed roots, read-only mounts, temp-dir allocation).
+- `isAvailable()` / capability probe logic.
+- Failure-mode handling (does a missing sandbox envelope hard-fail or soft-fail to env-only isolation?).
+- Scope-materialization for lane-scoped resources.
+
+A divergence between primary and fallback that is not exercised by a parity test is a regression. The existing per-OS test files `tests/unit/sandbox/{linux,macos,win32}.test.ts` must continue to cover both the primary and fallback paths after every env-affecting change — extend these tests rather than relying on dedicated sandbox-envoverride test files that may or may not exist in your branch.

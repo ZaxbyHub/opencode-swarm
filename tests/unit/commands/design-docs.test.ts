@@ -10,13 +10,20 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleDesignDocsCommand } from '../../../src/commands/design-docs';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 // A project dir with design_docs enabled, so the gate lets the signal through.
 let enabledDir: string;
 // A project dir with no config → design_docs disabled (default).
 let disabledDir: string;
+// Isolates XDG_CONFIG_HOME/HOME/APPDATA/LOCALAPPDATA so a developer's real
+// user-level opencode-swarm.json (which may set design_docs.enabled: true)
+// cannot leak into loadPluginConfigWithMeta()'s user-config lookup and make
+// the "disabled" gate test non-deterministic across machines.
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 
 beforeAll(() => {
+	isolatedEnv = createIsolatedTestEnv();
 	enabledDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-enabled-'));
 	fs.mkdirSync(path.join(enabledDir, '.opencode'), { recursive: true });
 	fs.writeFileSync(
@@ -30,6 +37,7 @@ beforeAll(() => {
 afterAll(() => {
 	fs.rmSync(enabledDir, { recursive: true, force: true });
 	fs.rmSync(disabledDir, { recursive: true, force: true });
+	isolatedEnv.cleanup();
 });
 
 describe('handleDesignDocsCommand — opt-in gate', () => {

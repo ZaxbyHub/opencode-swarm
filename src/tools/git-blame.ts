@@ -102,7 +102,11 @@ function validateFilePath(filePath: string): string | null {
 	if (filePath.length > MAX_PATH_LENGTH) {
 		return `file path exceeds maximum length of ${MAX_PATH_LENGTH}`;
 	}
-	if (path.isAbsolute(filePath)) {
+	if (
+		path.isAbsolute(filePath) ||
+		/^[A-Za-z]:[\\/]/.test(filePath) ||
+		filePath.startsWith('\\\\')
+	) {
 		return 'absolute paths are not allowed; use a relative path from the project root';
 	}
 	if (containsPathTraversal(filePath)) {

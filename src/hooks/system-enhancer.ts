@@ -39,6 +39,45 @@ import {
 } from '../utils/swarm-artifact-cache';
 
 const SPEC_STALENESS_CACHE_NAMESPACE = 'spec-staleness-json:v1';
+const HANDOFF_SOURCE_SESSION_PREFIX =
+	'<!-- opencode-swarm-handoff-source-session:';
+
+function parseSessionScopedHandoff(content: string): {
+	body: string;
+	sourceSessionID?: string;
+} {
+	const newlineIndex = content.indexOf('\n');
+	const firstLine =
+		newlineIndex === -1 ? content : content.slice(0, newlineIndex);
+	if (
+		firstLine.startsWith(HANDOFF_SOURCE_SESSION_PREFIX) &&
+		firstLine.endsWith('-->')
+	) {
+		const encodedSessionID = firstLine
+			.slice(HANDOFF_SOURCE_SESSION_PREFIX.length, -'-->'.length)
+			.trim();
+		try {
+			return {
+				body: newlineIndex === -1 ? '' : content.slice(newlineIndex + 1),
+				sourceSessionID: decodeURIComponent(encodedSessionID),
+			};
+		} catch {
+			return { body: content };
+		}
+	}
+	return { body: content };
+}
+
+function shouldConsumeHandoff(
+	handoff: { sourceSessionID?: string },
+	currentSessionID?: string,
+): boolean {
+	return !(
+		currentSessionID &&
+		handoff.sourceSessionID &&
+		handoff.sourceSessionID === currentSessionID
+	);
+}
 
 /**
  * Build the [spec-drift] advisory injected into the model's system prompt
@@ -881,44 +920,48 @@ export function createSystemEnhancerHook(
 									planReadCache,
 								);
 								if (handoffContent) {
-									// Validate paths BEFORE rename
-									const handoffPath = validateSwarmPath(
-										directory,
-										'handoff.md',
-									);
-									const consumedPath = validateSwarmPath(
-										directory,
-										'handoff-consumed.md',
-									);
-
-									// Check for duplicate handoff-consumed.md (warn but continue)
-									if (fs.existsSync(consumedPath)) {
-										warn(
-											'Duplicate handoff detected: handoff-consumed.md already exists',
-										);
-										fs.unlinkSync(consumedPath);
-									}
-
-									// Rename BEFORE injection - only inject if rename succeeds
-									fs.renameSync(handoffPath, consumedPath);
-
-									// Clean up supplementary handoff-prompt.md artifact if present
-									try {
-										const promptPath = validateSwarmPath(
+									const scopedHandoff =
+										parseSessionScopedHandoff(handoffContent);
+									if (shouldConsumeHandoff(scopedHandoff, _input.sessionID)) {
+										// Validate paths BEFORE rename
+										const handoffPath = validateSwarmPath(
 											directory,
-											'handoff-prompt.md',
+											'handoff.md',
 										);
-										fs.unlinkSync(promptPath);
-									} catch {
-										// handoff-prompt.md may not exist — non-blocking
-									}
+										const consumedPath = validateSwarmPath(
+											directory,
+											'handoff-consumed.md',
+										);
 
-									// Only inject if rename succeeded
-									const handoffBlock = `## HANDOFF — Resuming from model switch
+										// Check for duplicate handoff-consumed.md (warn but continue)
+										if (fs.existsSync(consumedPath)) {
+											warn(
+												'Duplicate handoff detected: handoff-consumed.md already exists',
+											);
+											fs.unlinkSync(consumedPath);
+										}
+
+										// Rename BEFORE injection - only inject if rename succeeds
+										fs.renameSync(handoffPath, consumedPath);
+
+										// Clean up supplementary handoff-prompt.md artifact if present
+										try {
+											const promptPath = validateSwarmPath(
+												directory,
+												'handoff-prompt.md',
+											);
+											fs.unlinkSync(promptPath);
+										} catch {
+											// handoff-prompt.md may not exist — non-blocking
+										}
+
+										// Only inject if rename succeeded
+										const handoffBlock = `## HANDOFF — Resuming from model switch
 The previous model's session ended. Here is your starting context:
 
-${handoffContent}`;
-									tryInject(`[HANDOFF BRIEF]\n${handoffBlock}`);
+${scopedHandoff.body}`;
+										tryInject(`[HANDOFF BRIEF]\n${handoffBlock}`);
+									}
 								}
 								// biome-ignore lint/suspicious/noExplicitAny: error type is unknown from catch clause
 							} catch (error: any) {
@@ -1712,38 +1755,55 @@ ${handoffContent}`;
 								planReadCache,
 							);
 							if (handoffContent) {
-								// Validate paths BEFORE rename
-								const handoffPath = validateSwarmPath(directory, 'handoff.md');
-								const consumedPath = validateSwarmPath(
-									directory,
-									'handoff-consumed.md',
-								);
-
-								// Check for duplicate handoff-consumed.md (warn but continue)
-								if (fs.existsSync(consumedPath)) {
-									warn(
-										'Duplicate handoff detected: handoff-consumed.md already exists',
+								const scopedHandoff = parseSessionScopedHandoff(handoffContent);
+								if (shouldConsumeHandoff(scopedHandoff, _input.sessionID)) {
+									// Validate paths BEFORE rename
+									const handoffPath = validateSwarmPath(
+										directory,
+										'handoff.md',
 									);
-									fs.unlinkSync(consumedPath);
-								}
+									const consumedPath = validateSwarmPath(
+										directory,
+										'handoff-consumed.md',
+									);
 
-								// Rename BEFORE adding to candidates - only add if rename succeeds
-								fs.renameSync(handoffPath, consumedPath);
+									// Check for duplicate handoff-consumed.md (warn but continue)
+									if (fs.existsSync(consumedPath)) {
+										warn(
+											'Duplicate handoff detected: handoff-consumed.md already exists',
+										);
+										fs.unlinkSync(consumedPath);
+									}
 
-								// Only add to candidates if rename succeeded
-								const handoffBlock = `## HANDOFF — Resuming from model switch
+									// Rename BEFORE adding to candidates - only add if rename succeeds
+									fs.renameSync(handoffPath, consumedPath);
+
+									// Clean up supplementary handoff-prompt.md artifact if present
+									try {
+										const promptPath = validateSwarmPath(
+											directory,
+											'handoff-prompt.md',
+										);
+										fs.unlinkSync(promptPath);
+									} catch {
+										// handoff-prompt.md may not exist - non-blocking
+									}
+
+									// Only add to candidates if rename succeeded
+									const handoffBlock = `## HANDOFF — Resuming from model switch
 The previous model's session ended. Here is your starting context:
 
-${handoffContent}`;
-								const handoffText = `[HANDOFF BRIEF]\n${handoffBlock}`;
-								candidates.push({
-									id: `candidate-${idCounter++}`,
-									kind: 'phase' as ContextCandidate['kind'],
-									text: handoffText,
-									tokens: estimateTokens(handoffText),
-									priority: 1,
-									metadata: { contentType: 'markdown' as ContentType },
-								});
+${scopedHandoff.body}`;
+									const handoffText = `[HANDOFF BRIEF]\n${handoffBlock}`;
+									candidates.push({
+										id: `candidate-${idCounter++}`,
+										kind: 'phase' as ContextCandidate['kind'],
+										text: handoffText,
+										tokens: estimateTokens(handoffText),
+										priority: 1,
+										metadata: { contentType: 'markdown' as ContentType },
+									});
+								}
 							}
 							// biome-ignore lint/suspicious/noExplicitAny: error type is unknown from catch clause
 						} catch (error: any) {

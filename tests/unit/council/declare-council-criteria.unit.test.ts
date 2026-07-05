@@ -8,7 +8,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AGENT_TOOL_MAP } from '../../../src/config/constants';
+import {
+	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+} from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
 
 let tempDir: string;
@@ -357,14 +360,17 @@ describe('declare_council_criteria — registration', () => {
 		expect(TOOL_NAME_SET.has('declare_council_criteria')).toBe(true);
 	});
 
-	test('declare_council_criteria is in AGENT_TOOL_MAP.architect', () => {
-		expect(AGENT_TOOL_MAP.architect).toContain('declare_council_criteria');
+	test('declare_council_criteria is in COUNCIL_AGENT_TOOL_MAP.architect', () => {
+		expect(COUNCIL_AGENT_TOOL_MAP.architect).toContain(
+			'declare_council_criteria',
+		);
 	});
 
-	test('declare_council_criteria is architect-only (no other agent has it)', () => {
+	test('declare_council_criteria is opt-in architect-only (no base agent has it)', () => {
 		const otherAgents = Object.keys(AGENT_TOOL_MAP).filter(
 			(a) => a !== 'architect',
 		) as Array<keyof typeof AGENT_TOOL_MAP>;
+		expect(AGENT_TOOL_MAP.architect).not.toContain('declare_council_criteria');
 		for (const agent of otherAgents) {
 			expect(AGENT_TOOL_MAP[agent]).not.toContain('declare_council_criteria');
 		}

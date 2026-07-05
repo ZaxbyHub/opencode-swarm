@@ -36,6 +36,45 @@ function makeHooks(dir: string, overrides?: Partial<GuardrailsConfig>) {
 	return createGuardrailsHooks(dir, undefined, makeConfig(overrides));
 }
 
+async function waitForExistingFile(filePath: string): Promise<string> {
+	for (let i = 0; i < 20; i++) {
+		if (fs.existsSync(filePath)) return filePath;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	return filePath;
+}
+
+async function waitForJsonlLines(
+	filePath: string,
+	minLines: number,
+): Promise<string[]> {
+	for (let i = 0; i < 20; i++) {
+		if (fs.existsSync(filePath)) {
+			const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
+			if (lines.length >= minLines) return lines;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	if (!fs.existsSync(filePath)) return [];
+	return fs.readFileSync(filePath, 'utf-8').trim().split('\n');
+}
+
+function shellAuditEntries(filePath: string): Array<Record<string, unknown>> {
+	if (!fs.existsSync(filePath)) return [];
+	return fs
+		.readFileSync(filePath, 'utf-8')
+		.trim()
+		.split('\n')
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter(
+			(entry) =>
+				(entry.type === undefined || entry.type === 'shell') &&
+				typeof entry.tool === 'string' &&
+				typeof entry.command === 'string',
+		);
+}
+
 // ─── redactShellCommand ───────────────────────────────────────────────────────
 
 describe('redactShellCommand', () => {
@@ -319,6 +358,10 @@ describe('shell audit log', () => {
 		return path.join(dir, '.swarm', 'session', 'shell-audit.jsonl');
 	}
 
+	async function waitForAuditLog(dir: string): Promise<string> {
+		return waitForExistingFile(auditLogPath(dir));
+	}
+
 	it('writes an audit entry for a bash command when shell_audit_log is true', async () => {
 		startAgentSession(SESSION, 'coder');
 		swarmState.activeAgent.set(SESSION, 'coder');
@@ -329,10 +372,11 @@ describe('shell audit log', () => {
 			{ args: { command: 'echo hello' } },
 		);
 
-		const logFile = auditLogPath(tmpDir);
+		const logFile = await waitForExistingFile(
+			path.join(tmpDir, '.swarm', 'session', 'shell-audit.jsonl'),
+		);
 		expect(fs.existsSync(logFile)).toBe(true);
-		const line = fs.readFileSync(logFile, 'utf-8').trim();
-		const entry = JSON.parse(line);
+		const entry = shellAuditEntries(logFile)[0];
 		expect(entry.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 		expect(entry.sessionID).toBe(SESSION);
 		expect(entry.agent).toBe('coder');
@@ -381,8 +425,7 @@ describe('shell audit log', () => {
 			},
 		);
 
-		const line = fs.readFileSync(auditLogPath(tmpDir), 'utf-8').trim();
-		const entry = JSON.parse(line);
+		const entry = shellAuditEntries(await waitForAuditLog(tmpDir))[0];
 		expect(entry.command).not.toContain('supersecrettoken123');
 		expect(entry.command).toContain('[REDACTED]');
 	});
@@ -401,13 +444,13 @@ describe('shell audit log', () => {
 			{ args: { command: 'echo second' } },
 		);
 
-		const lines = fs
-			.readFileSync(auditLogPath(tmpDir), 'utf-8')
-			.trim()
-			.split('\n');
-		expect(lines).toHaveLength(2);
-		expect(JSON.parse(lines[0]).command).toBe('echo first');
-		expect(JSON.parse(lines[1]).command).toBe('echo second');
+		await waitForJsonlLines(auditLogPath(tmpDir), 2);
+		const entries = shellAuditEntries(auditLogPath(tmpDir)).filter((entry) =>
+			['echo first', 'echo second'].includes(String(entry.command)),
+		);
+		expect(entries).toHaveLength(2);
+		const commands = entries.map((entry) => entry.command).sort();
+		expect(commands).toEqual(['echo first', 'echo second']);
 	});
 
 	it('creates .swarm/session/ directory if it does not exist', async () => {
@@ -433,8 +476,7 @@ describe('shell audit log', () => {
 			{ args: { command: 'pwd' } },
 		);
 
-		const line = fs.readFileSync(auditLogPath(tmpDir), 'utf-8').trim();
-		const entry = JSON.parse(line);
+		const entry = shellAuditEntries(await waitForAuditLog(tmpDir))[0];
 		expect(entry.tool).toBe('shell');
 		expect(entry.command).toBe('pwd');
 	});
@@ -457,9 +499,11 @@ describe('shell audit log', () => {
 		).rejects.toThrow('BLOCKED');
 
 		// Audit log exists with the blocked command
-		const logFile = auditLogPath(tmpDir);
+		const logFile = await waitForExistingFile(
+			path.join(tmpDir, '.swarm', 'session', 'shell-audit.jsonl'),
+		);
 		expect(fs.existsSync(logFile)).toBe(true);
-		const entry = JSON.parse(fs.readFileSync(logFile, 'utf-8').trim());
+		const entry = shellAuditEntries(logFile)[0];
 		expect(entry.agent).toBe('reviewer');
 		expect(entry.command).toBe('cat /etc/passwd');
 	});
@@ -520,11 +564,13 @@ describe('adversarial fixes', () => {
 			{ args: { command: 'ls /tmp' } },
 		);
 
-		const logFile = path.join(tmpDir, '.swarm', 'session', 'shell-audit.jsonl');
+		const logFile = await waitForExistingFile(
+			path.join(tmpDir, '.swarm', 'session', 'shell-audit.jsonl'),
+		);
 		expect(fs.existsSync(logFile)).toBe(true);
 
-		const lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n');
-		const entry = JSON.parse(lines[lines.length - 1]);
+		const entries = shellAuditEntries(logFile);
+		const entry = entries[entries.length - 1];
 		expect(entry.tool).toBe('Bash');
 		expect(entry.command).toBe('ls /tmp');
 		expect(entry.sessionID).toBe(SESSION);

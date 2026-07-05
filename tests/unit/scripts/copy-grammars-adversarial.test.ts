@@ -51,7 +51,18 @@ const originalConsole = { ...console };
 
 describe('copy-grammars.ts - Adversarial Tests', () => {
 	beforeEach(() => {
-		// No need to reset module-level mocks; mock.restore() in afterEach handles cleanup
+		// Module-level mock functions persist across tests; clear call history so
+		// high-volume adversarial cases do not pollute later count assertions.
+		for (const fn of [
+			existsSync,
+			mkdirSync,
+			copyFileSync,
+			readdirSync,
+			cpSync,
+			join,
+		]) {
+			(fn as any).mockClear?.();
+		}
 	});
 
 	afterEach(() => {

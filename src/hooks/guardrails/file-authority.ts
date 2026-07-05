@@ -196,13 +196,12 @@ export function normalizePathWithCache(filePath: string, cwd: string): string {
 /**
  * Gets or creates a cached picomatch matcher for a glob pattern.
  * @param pattern Glob pattern to compile
- * @param caseInsensitive Whether to use case-insensitive matching (default: true on Windows/macOS)
+ * @param caseInsensitive Whether to use case-insensitive matching (default: true for cross-platform policy consistency)
  * @returns Matcher function that returns true if path matches the pattern
  */
 export function getGlobMatcher(
 	pattern: string,
-	caseInsensitive = process.platform === 'win32' ||
-		process.platform === 'darwin',
+	caseInsensitive = true,
 ): (path: string) => boolean {
 	const cacheKey = `${caseInsensitive ? 'nocase' : 'case'}\0${pattern}`;
 	const cached = globMatcherCache.get(cacheKey);

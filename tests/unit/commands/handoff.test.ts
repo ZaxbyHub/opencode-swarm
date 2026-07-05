@@ -3,7 +3,10 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleHandoffCommand } from '../../../src/commands/handoff';
+import {
+	formatSessionScopedHandoffMarkdown,
+	handleHandoffCommand,
+} from '../../../src/commands/handoff';
 
 describe('handleHandoffCommand', () => {
 	let tempDir: string;
@@ -36,6 +39,18 @@ describe('handleHandoffCommand', () => {
 		const files = await readdir(swarmDir);
 		const tempFiles = files.filter((f) => f.includes('.tmp.'));
 		expect(tempFiles.length).toBe(0);
+	});
+
+	test('session-scoped handoff formatter marks only new session handoffs', () => {
+		const markdown = '## Swarm Handoff\nContinue from here.';
+
+		expect(formatSessionScopedHandoffMarkdown(markdown)).toBe(markdown);
+
+		const scoped = formatSessionScopedHandoffMarkdown(markdown, 'session 1/2');
+		expect(scoped).toStartWith(
+			'<!-- opencode-swarm-handoff-source-session: session%201%2F2 -->',
+		);
+		expect(scoped).toContain(markdown);
 	});
 
 	test('returns markdown with brief content and instructions', async () => {

@@ -513,19 +513,19 @@ describe('A3: Traceability check in MODE: PLAN', () => {
 
 	it('requires every FR-### to map to at least one task', () => {
 		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 400);
+		const traceSection = planSkill.substring(traceIdx, traceIdx + 1200);
 		expect(traceSection).toContain('FR-###');
 	});
 
 	it('flags tasks with no FR as gold-plating risk', () => {
 		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 400);
+		const traceSection = planSkill.substring(traceIdx, traceIdx + 1200);
 		expect(traceSection).toContain('gold-plating');
 	});
 
 	it('traceability check is skipped when no spec.md exists', () => {
 		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 600);
+		const traceSection = planSkill.substring(traceIdx, traceIdx + 1600);
 		expect(traceSection).toMatch(/no spec\.md|spec\.md.*skip/i);
 	});
 

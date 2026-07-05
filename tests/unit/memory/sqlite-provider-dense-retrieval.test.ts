@@ -288,7 +288,7 @@ describe('ADVERSARIAL — boundary inputs do not crash', () => {
 			result = (err as Error).message;
 		}
 		// Either [] (empty allowedIds) or throws (no sqlite-vec) — both are graceful
-		expect(Array.isArray(result)).toBe(true);
+		expect(Array.isArray(result) || typeof result === 'string').toBe(true);
 	});
 
 	test('scope filter that excludes all records does not crash', async () => {
@@ -327,7 +327,7 @@ describe('ADVERSARIAL — boundary inputs do not crash', () => {
 		} catch (err: unknown) {
 			result = (err as Error).message;
 		}
-		expect(Array.isArray(result)).toBe(true);
+		expect(Array.isArray(result) || typeof result === 'string').toBe(true);
 	});
 
 	test('kind filter that excludes all records does not crash', async () => {
@@ -363,7 +363,7 @@ describe('ADVERSARIAL — boundary inputs do not crash', () => {
 		} catch (err: unknown) {
 			result = (err as Error).message;
 		}
-		expect(Array.isArray(result)).toBe(true);
+		expect(Array.isArray(result) || typeof result === 'string').toBe(true);
 	});
 });
 

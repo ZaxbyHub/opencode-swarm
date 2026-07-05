@@ -1028,8 +1028,12 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			);
 			expect(coderAbs.allowed).toBe(false);
 			if (isDenied(coderAbs)) {
-				expect(coderAbs.reason).toContain(
-					'resolves outside the working directory',
+				// Cross-platform: an absolute out-of-root path blocks with the
+				// POSIX "resolves outside" wording, or — when cwd and target
+				// parse to different filesystem roots on Windows — the
+				// cross-drive wording. Both are valid containment blocks.
+				expect(coderAbs.reason).toMatch(
+					/resolves outside the working directory|different drive\/root/,
 				);
 			}
 
@@ -1042,8 +1046,10 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			);
 			expect(archAbs.allowed).toBe(false);
 			if (isDenied(archAbs)) {
-				expect(archAbs.reason).toContain(
-					'resolves outside the working directory',
+				// Cross-platform: see the coder case above — POSIX "resolves
+				// outside" wording, or the Windows cross-drive wording.
+				expect(archAbs.reason).toMatch(
+					/resolves outside the working directory|different drive\/root/,
 				);
 			}
 

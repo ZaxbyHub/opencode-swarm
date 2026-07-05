@@ -48,9 +48,8 @@ describe('safeHook — advisory wrapper', () => {
 });
 
 describe('composeHandlers — advisory chain', () => {
-	test('rejects fail-closed handlers so they cannot be silently swallowed', async () => {
-		const composed = composeHandlers(markFailClosed(async () => {}));
-		await expect(composed({}, {})).rejects.toThrow(
+	test('rejects fail-closed handlers synchronously so they cannot be silently swallowed', () => {
+		expect(() => composeHandlers(markFailClosed(async () => {}))).toThrow(
 			/composeHandlers cannot wrap fail-closed handlers/,
 		);
 	});

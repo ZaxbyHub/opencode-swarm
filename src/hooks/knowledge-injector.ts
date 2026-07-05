@@ -934,8 +934,9 @@ export function createKnowledgeInjectorHook(
 			// 1. Recently-escalated directives (Change 3) — prepended above the
 			// directive block so the architect sees auto-escalations first.
 			try {
-				const escalations = await readRecentEscalations(directory);
-				const escalationBriefing = buildEscalationBriefing(escalations);
+				const escalations = await _internals.readRecentEscalations(directory);
+				const escalationBriefing =
+					_internals.buildEscalationBriefing(escalations);
 				if (escalationBriefing && escalationBriefing.length <= remaining) {
 					parts.push(escalationBriefing);
 					remaining -= escalationBriefing.length;
@@ -1084,8 +1085,12 @@ export const _internals: {
 	searchKnowledge: typeof searchKnowledge;
 	recordKnowledgeEvent: typeof recordKnowledgeEvent;
 	recordKnowledgeShown: typeof recordKnowledgeShown;
+	readRecentEscalations: typeof readRecentEscalations;
+	buildEscalationBriefing: typeof buildEscalationBriefing;
 } = {
 	searchKnowledge,
 	recordKnowledgeEvent,
 	recordKnowledgeShown,
+	readRecentEscalations,
+	buildEscalationBriefing,
 };

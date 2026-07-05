@@ -173,10 +173,18 @@ describe('lean_turbo_acquire_locks tool', () => {
 			);
 
 			const locksDir = path.join(tmpDir, '.swarm', 'locks');
-			const lockFiles = fs
+			// The locks dir holds BOTH the sentinel `<hash>.lock` file and
+			// proper-lockfile's own `<hash>.lock.lock` lock DIRECTORY — both end
+			// in `.lock`, so deriving the sidecar name from a `.lock` entry and
+			// indexing [0] is order-dependent (readdirSync order varies by
+			// OS/filesystem: it passes on Linux `bun test` but returns the
+			// `.lock.lock` dir first under macOS/APFS and Linux coverage runs,
+			// yielding a nonexistent `<hash>.lock.meta`). Assert on the `.meta`
+			// sidecar directly instead.
+			const metaFiles = fs
 				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.lock'));
-			const metaFiles = lockFiles.map((f) => f.replace(/\.lock$/, '.meta'));
+				.filter((f) => f.endsWith('.meta'));
+			expect(metaFiles.length).toBeGreaterThan(0);
 			const metaPath = path.join(locksDir, metaFiles[0]);
 			expect(fs.existsSync(metaPath)).toBe(true);
 			const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));

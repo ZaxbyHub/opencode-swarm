@@ -510,8 +510,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// microtask, runs in the background, and completes long before the architect
 	// reads any SKILL.md at runtime (the user must send a turn first). It is
 	// still HARD-BOUNDED + fail-open: the async variant yields between files so
-	// withTimeout (which unref's its timer) can bound it; missing-only,
-	// never-overwrite, symlink-guarded, byte/file-bounded. On timeout/error we
+	// withTimeout (which unref's its timer) can bound it; content-equality-checked,
+	// atomic-overwrite-with-rollback, symlink-guarded, byte/file-bounded. On timeout/error we
 	// fail open — the command-path sync remains as a backstop.
 	queueMicrotask(() => {
 		void withTimeout(

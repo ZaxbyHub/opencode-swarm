@@ -26,6 +26,7 @@ import {
 	loadFullAutoRunState,
 	pauseFullAutoRun,
 	recordFullAutoOversight,
+	startFullAutoRun,
 	terminateFullAutoRun,
 } from '../full-auto/state';
 import { tryAcquireLock } from '../parallel/file-locks.js';
@@ -999,6 +1000,9 @@ async function handleEscalation(
 		// hook.  Do NOT use process.exit(1) — that kills the entire OpenCode
 		// host process, violating Invariant #1 (fast, bounded, fail-open).
 		if (sessionID) {
+			if (!loadFullAutoRunState(directory, sessionID)) {
+				startFullAutoRun(directory, sessionID, { enabled: true });
+			}
 			terminateFullAutoRun(directory, sessionID, reason);
 		}
 		return true;
@@ -1009,6 +1013,12 @@ async function handleEscalation(
 	logger.warn(
 		`[full-auto-intercept] ESCALATION (pause mode) — reason: ${reason}, session: ${sessionID}`,
 	);
+	if (sessionID) {
+		if (!loadFullAutoRunState(directory, sessionID)) {
+			startFullAutoRun(directory, sessionID, { enabled: true });
+		}
+		pauseFullAutoRun(directory, sessionID, reason);
+	}
 	return true;
 }
 

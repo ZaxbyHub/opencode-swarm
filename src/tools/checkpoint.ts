@@ -432,7 +432,7 @@ export function saveCheckpointRecord(
 }
 
 /**
- * Handle 'restore' action - soft reset to saved SHA
+ * Handle 'restore' action - hard reset tracked files to saved SHA
  */
 function handleRestore(label: string, directory: string): string {
 	try {
@@ -452,8 +452,15 @@ function handleRestore(label: string, directory: string): string {
 			);
 		}
 
-		// Soft reset to the checkpoint SHA (preserves working tree)
-		gitExec(['reset', '--soft', checkpoint.sha], directory);
+		// Preserve the runtime checkpoint log across the hard reset. .swarm/ is
+		// normally untracked, but a user commit can accidentally track it before a
+		// restore; reset --hard would then remove the active log if the target SHA
+		// predates that file.
+		const logBeforeReset = log;
+
+		// Restore tracked files to the checkpoint SHA.
+		gitExec(['reset', '--hard', checkpoint.sha], directory);
+		writeCheckpointLog(logBeforeReset, directory);
 
 		return JSON.stringify(
 			{
@@ -461,7 +468,7 @@ function handleRestore(label: string, directory: string): string {
 				success: true,
 				label,
 				sha: checkpoint.sha,
-				message: `Restored to checkpoint: "${label}" (soft reset)`,
+				message: `Restored to checkpoint: "${label}" (hard reset)`,
 			},
 			null,
 			2,
@@ -565,7 +572,7 @@ function handleDelete(label: string, directory: string): string {
 export const checkpoint: ToolDefinition = createSwarmTool({
 	description:
 		'Save, restore, list, and delete git checkpoints. ' +
-		'Use save to create a named snapshot, restore to return to a checkpoint (soft reset), ' +
+		'Use save to create a named snapshot, restore to return tracked files to a checkpoint, ' +
 		'list to see all checkpoints, and delete to remove a checkpoint from the log. ' +
 		'Git commits are preserved on delete.',
 	args: {

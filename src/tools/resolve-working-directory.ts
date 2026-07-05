@@ -76,16 +76,19 @@ export function resolveWorkingDirectory(
 		};
 	}
 
-	// Windows device path check
-	if (process.platform === 'win32') {
-		const devicePathPattern = /^\\\\|^(NUL|CON|AUX|COM[1-9]|LPT[1-9])(\..*)?$/i;
-		if (devicePathPattern.test(workingDirectory)) {
-			return {
-				success: false,
-				message:
-					'Invalid working_directory: Windows device paths are not allowed',
-			};
-		}
+	// Windows device path check. UNC paths are rejected on every platform because
+	// a Linux/macOS CI host must still validate Windows-targeted attack strings.
+	const reservedDevicePattern = /^(NUL|CON|AUX|COM[1-9]|LPT[1-9])(\..*)?$/i;
+	if (
+		workingDirectory.startsWith('\\\\') ||
+		(process.platform === 'win32' &&
+			reservedDevicePattern.test(workingDirectory))
+	) {
+		return {
+			success: false,
+			message:
+				'Invalid working_directory: Windows device paths are not allowed',
+		};
 	}
 
 	// Check for traversal in raw input before normalizing (normalize resolves .. before we can detect it).

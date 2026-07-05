@@ -1,26 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { spawnSync } from 'node:child_process';
-import * as realChildProcess from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockSpawnSync = vi.fn<
 	[string, string[], unknown?],
 	ReturnType<typeof spawnSync>
 >();
-const mockWriteFileSync = vi.fn<[string, string], void>();
-const mockUnlinkSync = vi.fn<[string], void>();
 
-vi.mock('node:child_process', () => ({
-	spawnSync: (...args: unknown[]) =>
-		mockSpawnSync(...(args as [string, string[], unknown?])),
-}));
-
-vi.mock('node:fs', () => ({
-	unlinkSync: (...args: unknown[]) => mockUnlinkSync(...(args as [string])),
-	writeFileSync: (...args: unknown[]) =>
-		mockWriteFileSync(...(args as [string, string])),
-}));
-
-import { executeMutation } from '../../../src/mutation/engine';
+import { _internals, executeMutation } from '../../../src/mutation/engine';
 
 const mockPatch = {
 	id: 'test-mutation-1',
@@ -30,8 +19,6 @@ const mockPatch = {
 	patch:
 		'--- a/test.ts\n+++ b/test.ts\n@@ -1 +1 @@\n-exports.fn = () => 1;\n+exports.fn = () => 2;\n',
 };
-
-const mockWorkingDir = '/fake/working/dir';
 
 function makeErrorENOENT(): ReturnType<typeof spawnSync> {
 	const error = new Error('spawnSync ENOENT') as NodeJS.ErrnoException;
@@ -72,15 +59,23 @@ function makeGitApplyFailed(status: number): ReturnType<typeof spawnSync> {
 }
 
 describe('executeMutation — ENOENT error handling', () => {
+	let mockWorkingDir: string;
+	let savedSpawnSync: typeof _internals.spawnSync;
+
 	beforeEach(() => {
 		vi.clearAllMocks();
+		savedSpawnSync = _internals.spawnSync;
+		_internals.spawnSync =
+			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		mockWorkingDir = realpathSync(
+			mkdtempSync(join(tmpdir(), 'mutation-enoent-')),
+		);
 		mockSpawnSync.mockReturnValue(makeSuccess());
-		mockWriteFileSync.mockReturnValue(undefined as unknown as undefined);
-		mockUnlinkSync.mockReturnValue(undefined as unknown as undefined);
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		_internals.spawnSync = savedSpawnSync;
+		rmSync(mockWorkingDir, { recursive: true, force: true });
 	});
 
 	describe('git apply ENOENT', () => {

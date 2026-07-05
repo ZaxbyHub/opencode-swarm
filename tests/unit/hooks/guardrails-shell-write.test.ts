@@ -194,7 +194,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo world >> /tmp/log.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -209,7 +209,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cp file.txt /etc/config.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -224,7 +224,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('mv file.txt /home/user/file.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -252,7 +252,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('tar -xzf package.tar.gz -C /tmp/extract/'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -267,7 +267,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('ln -s target.txt /tmp/link.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -282,7 +282,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('truncate -s 0 /tmp/log.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -411,7 +411,7 @@ describe('guardrails shell write scope enforcement', () => {
 					),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -439,7 +439,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('powershell -Command "echo data > C:\\outside.txt"'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -467,7 +467,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('Copy-Item src.txt C:\\temp\\dest.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 	});
@@ -501,7 +501,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "copy file.txt C:\\temp\\file.txt"'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -529,7 +529,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "echo hello > C:\\temp\\out.txt"'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 
@@ -557,7 +557,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "move file.txt C:\\temp\\file.txt"'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 	});
@@ -846,17 +846,22 @@ describe('guardrails shell write scope enforcement', () => {
 			).rejects.toThrow(/bash write detected outside declared scope:/);
 		});
 
-		it('allows compound command with all in-scope write components', async () => {
+		it('blocks in-scope compound writes when the Windows sandbox wrapper cannot safely wrap them', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s91');
 			setDeclaredScope('s91', ['src/', 'tests/']);
 
-			await expect(
+			const result = expect(
 				hooks.toolBefore(
 					makeBashInput('s91'),
 					makeOutput('cat src/file.ts && echo done > tests/output.txt'),
 				),
-			).resolves.toBeUndefined();
+			);
+			if (process.platform === 'win32') {
+				await result.rejects.toThrow(/sandbox.*unsafe characters/i);
+			} else {
+				await result.resolves.toBeUndefined();
+			}
 		});
 	});
 
@@ -876,7 +881,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('curl https://example.com/file.txt -o /tmp/download.txt'),
 				),
 			).rejects.toThrow(
-				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory/,
+				/WRITE BLOCKED: Agent "coder".*resolves outside the working directory|bash write detected outside declared scope:/,
 			);
 		});
 

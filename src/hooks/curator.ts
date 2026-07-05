@@ -211,22 +211,38 @@ async function autoRetireSkills(
 				continue;
 			}
 
-			// Delegate archive-based retirement/stale decision to retireOrMarkStale
-			const result = await _internals.retireOrMarkStale(
-				directory,
-				path.dirname(active.path),
-				allArchivedIds,
-			);
-			if (result.action === 'retire') {
-				observations.push(
-					`Skill '${active.slug}' auto-retired: all source knowledge entries archived`,
+			let archivedSourceMatched = false;
+			if (allArchivedIds.size > 0) {
+				try {
+					const content = await _internals.readFileAsync(active.path, 'utf-8');
+					const sourceIds =
+						_internals.parseDraftFrontmatter(content)?.sourceKnowledgeIds ?? [];
+					archivedSourceMatched = sourceIds.some((id) =>
+						allArchivedIds.has(id),
+					);
+				} catch {
+					archivedSourceMatched = false;
+				}
+			}
+
+			if (archivedSourceMatched) {
+				// Delegate archive-based retirement/stale decision to retireOrMarkStale
+				const result = await _internals.retireOrMarkStale(
+					directory,
+					path.dirname(active.path),
+					allArchivedIds,
 				);
-				logger.warn(`[curator] ${observations[observations.length - 1]}`);
-			} else if (result.action === 'stale') {
-				observations.push(
-					`Skill '${active.slug}' marked stale: some source knowledge entries archived`,
-				);
-				logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				if (result.action === 'retire') {
+					observations.push(
+						`Skill '${active.slug}' auto-retired: all source knowledge entries archived`,
+					);
+					logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				} else if (result.action === 'stale') {
+					observations.push(
+						`Skill '${active.slug}' marked stale: some source knowledge entries archived`,
+					);
+					logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				}
 			}
 		}
 	} catch (autoRetireErr) {
@@ -276,6 +292,31 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 			// Match "- entry <uuid> (observable): text" or "- entry <uuid> (observable, directive hint): text"
 			const match = trimmed.match(/^-\s+entry\s+(\S+)\s+\(([^)]+)\):\s+(.+)$/i);
 			if (!match) {
+				const newCandidate = trimmed.match(/^-\s+new candidate:\s+(.+)$/i);
+				if (newCandidate) {
+					const text = newCandidate[1].trim().replace(/\s+\([^)]+\)$/, '');
+					recommendations.push({
+						action: 'promote',
+						entry_id: undefined,
+						lesson: text,
+						reason: text,
+					});
+					continue;
+				}
+				const staleEntry = trimmed.match(
+					/^-\s+entry\s+(\S+)\s+appears stale:\s+(.+)$/i,
+				);
+				if (staleEntry) {
+					const uuid = staleEntry[1];
+					const text = staleEntry[2].trim().replace(/\s+\([^)]+\)$/, '');
+					recommendations.push({
+						action: 'archive',
+						entry_id: UUID_V4.test(uuid) ? uuid : undefined,
+						lesson: text,
+						reason: text,
+					});
+					continue;
+				}
 				diagnostics.push({
 					section: 'OBSERVATIONS',
 					line: trimmed,
