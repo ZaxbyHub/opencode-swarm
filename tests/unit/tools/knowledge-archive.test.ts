@@ -140,21 +140,58 @@ describe('knowledge_archive', () => {
 			expect(tomb[0].tier).toBe('swarm');
 		});
 
-		it('quarantines when mode=quarantine', async () => {
+		it('quarantines when mode=quarantine (routes through quarantineEntry — G5 #1716)', async () => {
 			const raw = await knowledge_archive.execute(
 				{ id: 'k1', reason: 'suspect', mode: 'quarantine', evidence: 'flaky' },
 				ctx(dir),
 			);
 			const parsed = JSON.parse(raw);
+			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('quarantined');
 			expect(parsed.tier).toBe('swarm');
-			const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
-			expect(entries[0].status).toBe('quarantined');
+
+			// G5: the entry is MOVED to knowledge-quarantined.jsonl (not left
+			// in place with a flipped status). The main store no longer has it.
+			const swarmEntries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+			expect(swarmEntries).toHaveLength(0);
+
+			const quarantinePath = join(
+				resolveSwarmKnowledgePath(dir).replace(/knowledge\.jsonl$/, ''),
+				'knowledge-quarantined.jsonl',
+			);
+			const quarantined = await readKnowledge<
+				SwarmKnowledgeEntry & {
+					original_status: string;
+					quarantine_reason: string;
+				}
+			>(quarantinePath);
+			expect(quarantined).toHaveLength(1);
+			expect(quarantined[0].id).toBe('k1');
+			expect(quarantined[0].status).toBe('quarantined');
+			expect(quarantined[0].original_status).toBe('candidate');
+			expect(quarantined[0].quarantine_reason).toBe('suspect');
+
+			// G5: NO events tombstone is written for quarantine mode — the
+			// short-circuit returns before the tombstone block, and
+			// `quarantineEntry` writes its own audit trail (rejected-file
+			// tombstone) which is the canonical record for quarantine.
 			const tomb = (await readKnowledgeEvents(dir)).filter(
 				(e): e is ArchivedEvent => e.type === 'archived',
 			);
-			expect(tomb[0].evidence).toBe('flaky');
-			expect(tomb[0].tier).toBe('swarm');
+			expect(tomb).toHaveLength(0);
+
+			// G5 (B5): the `queueMicrotask` skill-invalidation must NOT fire for
+			// quarantine mode. The only writer of `skill-stale-batch` is that
+			// microtask; if it (incorrectly) ran for quarantine, this event
+			// would appear. Skill-retirement is irreversible and is for
+			// archive/purge only.
+			// The microtask is queued before the test reads events; drain it by
+			// awaiting a microtask tick.
+			await new Promise((resolve) => queueMicrotask(resolve));
+			const skillEvents = (await readKnowledgeEvents(dir)).filter(
+				(e) => (e as { type?: string }).type === 'skill-stale-batch',
+			);
+			expect(skillEvents).toHaveLength(0);
 		});
 
 		it('refuses to purge without the admin flag', async () => {
@@ -251,7 +288,7 @@ describe('knowledge_archive', () => {
 			expect(localTomb).toHaveLength(0);
 		});
 
-		it('quarantines hive entry when tier=hive and mode=quarantine', async () => {
+		it('rejects quarantine when tier=hive and mode=quarantine (G5 #1716: swarm-only)', async () => {
 			const raw = await knowledge_archive.execute(
 				{
 					id: 'hive-1',
@@ -262,17 +299,22 @@ describe('knowledge_archive', () => {
 				ctx(dir),
 			);
 			const parsed = JSON.parse(raw);
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('quarantined');
-			expect(parsed.tier).toBe('hive');
+			// G5: hive-tier quarantine via the archive tool is rejected with a
+			// clear error. The old behavior silently flipped status in place
+			// and produced an unrestorable orphan; erroring is strictly better.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toMatch(/swarm-only/i);
 
+			// The hive entry is unchanged.
 			const entries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-			expect(entries[0].status).toBe('quarantined');
+			expect(entries).toHaveLength(1);
+			expect(entries[0].status).toBe('established');
 
+			// No tombstone written.
 			const tomb = (await readHiveKnowledgeEvents()).filter(
 				(e): e is ArchivedEvent => e.type === 'archived',
 			);
-			expect(tomb[0].tier).toBe('hive');
+			expect(tomb).toHaveLength(0);
 		});
 
 		it('purges hive entry with allow_purge:true when tier=hive', async () => {

@@ -20,10 +20,12 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 // Mock knowledge-validator module
 const mockQuarantineEntry = mock();
 const mockRestoreEntry = mock();
+const mockUnarchiveEntry = mock();
 
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
+	unarchiveEntry: mockUnarchiveEntry,
 }));
 
 // Mock knowledge-migrator module
@@ -234,6 +236,9 @@ describe('handleKnowledgeQuarantineCommand', () => {
 describe('handleKnowledgeRestoreCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mockReadKnowledge.mockResolvedValue([]);
+		mockRestoreEntry.mockReset();
+		mockUnarchiveEntry.mockReset();
 	});
 
 	it('returns usage message when entryId is missing (empty args)', async () => {
@@ -252,7 +257,15 @@ describe('handleKnowledgeRestoreCommand', () => {
 		expect(mockRestoreEntry).not.toHaveBeenCalled();
 	});
 
+	// G6 (#1716): the restore handler now dispatches by current status. For a
+	// quarantined entry, it reads the swarm store first (looking for an archived
+	// entry), finds none archived, then falls through to the quarantine sidecar.
+	// Each test must therefore mock TWO reads: an empty/non-archived swarm read
+	// followed by the quarantine sidecar read.
 	it('calls restoreEntry with correct args when valid', async () => {
+		// swarm read: no archived match (entry is in quarantine, not main store)
+		mockReadKnowledge.mockResolvedValueOnce([]);
+		// quarantine sidecar read: the entry
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		await handleKnowledgeRestoreCommand('/test/dir', ['test-id']);
@@ -261,6 +274,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 	});
 
 	it('returns success message with entryId on successful restore', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([]);
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
@@ -270,6 +284,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 	});
 
 	it('returns generic error message when restoreEntry throws', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([]);
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockRejectedValueOnce(new Error('Entry not found'));
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
@@ -282,6 +297,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 
 	it('resolves by unique prefix and restores the matched entry', async () => {
 		const fullId = 'abc123def456-quarantined-uuid';
+		mockReadKnowledge.mockResolvedValueOnce([]);
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry(fullId)]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
@@ -294,12 +310,60 @@ describe('handleKnowledgeRestoreCommand', () => {
 	it('rejects ambiguous prefix for restore and lists matching candidates', async () => {
 		const id1 = 'abcd1111-quarantined-one';
 		const id2 = 'abcd2222-quarantined-two';
+		mockReadKnowledge.mockResolvedValueOnce([]);
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry(id1), makeEntry(id2)]);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', ['abcd']);
 		expect(mockRestoreEntry).not.toHaveBeenCalled();
 		expect(result).toContain("Ambiguous prefix 'abcd'");
 		expect(result).toContain(id1);
 		expect(result).toContain(id2);
+	});
+
+	// G6 (#1716): an archived entry in the main swarm store routes to
+	// `unarchiveEntry` instead of `restoreEntry`.
+	it('G6: routes an archived entry to unarchiveEntry', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([
+			makeEntry('archived-id', { status: 'archived' }),
+		]);
+		mockUnarchiveEntry.mockResolvedValueOnce({
+			restored: true,
+			restored_to: 'established',
+		});
+		const result = await handleKnowledgeRestoreCommand('/test/dir', [
+			'archived-id',
+		]);
+		expect(mockUnarchiveEntry).toHaveBeenCalledTimes(1);
+		expect(mockUnarchiveEntry).toHaveBeenCalledWith('/test/dir', 'archived-id');
+		expect(mockRestoreEntry).not.toHaveBeenCalled();
+		expect(result).toContain('archived-id');
+		expect(result).toContain('established');
+	});
+
+	it('G6: reports failure when unarchiveEntry cannot restore', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([
+			makeEntry('bad-id', { status: 'archived' }),
+		]);
+		mockUnarchiveEntry.mockResolvedValueOnce({
+			restored: false,
+			reason: 'invalid_lesson',
+		});
+		const result = await handleKnowledgeRestoreCommand('/test/dir', ['bad-id']);
+		expect(result).toContain('could not be unarchived');
+		expect(result).toContain('invalid_lesson');
+	});
+
+	it('G6: clear error for a non-archived, non-quarantined entry', async () => {
+		// Swarm read returns a candidate (active) entry; quarantine read empty.
+		mockReadKnowledge.mockResolvedValueOnce([
+			makeEntry('active-id', { status: 'candidate' }),
+		]);
+		mockReadKnowledge.mockResolvedValueOnce([]);
+		const result = await handleKnowledgeRestoreCommand('/test/dir', [
+			'active-id',
+		]);
+		expect(result).toContain('neither archived nor quarantined');
+		expect(mockRestoreEntry).not.toHaveBeenCalled();
+		expect(mockUnarchiveEntry).not.toHaveBeenCalled();
 	});
 });
 
@@ -382,6 +446,8 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	});
 
 	it('knowledge restore <id> routes to restore handler', async () => {
+		// G6: handler reads swarm first (no archived match), then quarantine sidecar.
+		mockReadKnowledge.mockResolvedValueOnce([]);
 		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [

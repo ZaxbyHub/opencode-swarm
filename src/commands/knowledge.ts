@@ -18,6 +18,7 @@ import {
 	quarantineEntry,
 	resolveUnactionablePath,
 	restoreEntry,
+	unarchiveEntry,
 } from '../hooks/knowledge-validator.js';
 import type { HardenableRecord } from '../services/unactionable-hardening.js';
 
@@ -90,7 +91,11 @@ export async function handleKnowledgeQuarantineCommand(
 
 /**
  * Handles /swarm knowledge restore <id> command.
- * Restores a quarantined knowledge entry.
+ * Restores a quarantined OR archived knowledge entry.
+ *  - If the matched entry is `archived` in `knowledge.jsonl`, calls
+ *    `unarchiveEntry` (G6 #1716) to restore it to its pre-archive status.
+ *  - Otherwise falls through to the quarantine path: reads
+ *    `knowledge-quarantined.jsonl` and calls `restoreEntry`.
  * Accepts a full ID or a unique prefix.
  */
 export async function handleKnowledgeRestoreCommand(
@@ -107,6 +112,25 @@ export async function handleKnowledgeRestoreCommand(
 	}
 
 	try {
+		// G6 (#1716): dispatch by current status. Archived entries live in the
+		// main swarm store with status='archived'; quarantined entries live in
+		// the sidecar file. Resolve the prefix against BOTH stores.
+		const swarmEntries = await readKnowledge<KnowledgeEntryBase>(
+			resolveSwarmKnowledgePath(directory),
+		);
+		const swarmResolved = resolveEntryByPrefix(swarmEntries, inputId);
+		if ('entry' in swarmResolved && swarmResolved.entry.status === 'archived') {
+			const fullId = swarmResolved.entry.id;
+			const result = await unarchiveEntry(directory, fullId);
+			if (result.restored) {
+				return `✅ Archived entry ${fullId} restored to '${result.restored_to}'.`;
+			}
+			return `❌ Entry ${fullId} could not be unarchived${
+				result.reason ? ` (${result.reason})` : ''
+			}.`;
+		}
+
+		// Fall through to the quarantine path.
 		const quarantinePath = join(
 			resolveKnowledgeStoreDir(directory),
 			'knowledge-quarantined.jsonl',
@@ -114,6 +138,11 @@ export async function handleKnowledgeRestoreCommand(
 		const entries = await readKnowledge<KnowledgeEntryBase>(quarantinePath);
 		const resolved = resolveEntryByPrefix(entries, inputId);
 		if ('error' in resolved) {
+			// If the prefix matched a non-archived swarm entry, give a clearer
+			// error than "no quarantined entry found."
+			if ('entry' in swarmResolved) {
+				return `❌ Entry ${swarmResolved.entry.id} is neither archived nor quarantined (status: '${swarmResolved.entry.status}'). Only archived or quarantined entries can be restored.`;
+			}
 			return `❌ ${resolved.error}`;
 		}
 		const fullId = resolved.entry.id;

@@ -475,6 +475,65 @@ describe('readMergedKnowledge — basic merge', () => {
 		expect(result.length).toBe(1);
 		expect(result[0].id).toBe(nullStatusEntry.id);
 	});
+
+	// G4 (#1716): the merge layer used to deny-list only `'quarantined'`, so a
+	// `quarantined_unactionable`-status row that ever landed in knowledge.jsonl
+	// would slip through to retrieval. The canonical `isActiveStatus` helper
+	// now excludes all three inactive statuses, closing the leak while still
+	// preserving #828's undefined/null passthrough (Tests 5a/5f above).
+	it('Test 5g: quarantined_unactionable entries are excluded (G4 leak fix)', async () => {
+		const unactionableEntry = makeSwarmEntry({
+			lesson: 'Lesson that failed the actionability gate',
+			status: 'quarantined_unactionable',
+		});
+		const activeEntry = makeSwarmEntry({
+			lesson: 'Active lesson that should be included',
+			status: 'established',
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [unactionableEntry, activeEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		const config = makeConfig();
+		const result = await readMergedKnowledge('/proj', config);
+
+		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(activeEntry.id);
+	});
+
+	// G4 (#1716): the merge layer used to deny-list only `'quarantined'`, so an
+	// `archived`-status row was NOT excluded here (it was caught downstream by
+	// search-knowledge.ts). The canonical helper now excludes `archived` at the
+	// merge layer too — defense-in-depth.
+	it('Test 5h: archived entries are excluded at the merge layer (G4 leak fix)', async () => {
+		const archivedEntry = makeSwarmEntry({
+			lesson: 'Archived lesson that should be filtered out',
+			status: 'archived',
+		});
+		const activeEntry = makeSwarmEntry({
+			lesson: 'Active lesson that should be included',
+			status: 'established',
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [archivedEntry, activeEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		const config = makeConfig();
+		const result = await readMergedKnowledge('/proj', config);
+
+		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(activeEntry.id);
+	});
 });
 
 // ============================================================================

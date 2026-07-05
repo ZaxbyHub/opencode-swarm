@@ -601,7 +601,9 @@ Move a knowledge entry to quarantine. Quarantined entries are excluded from agen
 
 ### `/swarm knowledge restore <entry-id>`
 
-Restore a quarantined entry back to active knowledge.
+Restore a quarantined or archived entry back to active knowledge. Dispatches by
+current status: an `archived` entry is restored to its pre-archive status; a
+`quarantined` entry is restored from the quarantine sidecar.
 
 ### `/swarm memory`
 

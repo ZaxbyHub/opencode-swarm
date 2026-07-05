@@ -14,6 +14,7 @@ import type {
 	RejectedLesson,
 	RetrievalOutcome,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 const KNOWLEDGE_JSONL_CACHE_NAMESPACE = 'knowledge-jsonl:normalized:v1';
 
@@ -238,6 +239,13 @@ export function normalizeEntry<T>(raw: T): T {
 			// Completely frozen/sealed object — nothing we can do
 		}
 	}
+	// G7 (#1716): default the demotion counter for entries created before this
+	// field existed. `last_demotion_phase` and the G6 archive metadata
+	// (`archived_from`, `archived_at`) are left `undefined` if absent — they're
+	// optional and old entries simply haven't been archived/demoted yet.
+	if (typeof obj.recent_negative_phase_count !== 'number') {
+		obj.recent_negative_phase_count = 0;
+	}
 	// Ensure actionable arrays are at least undefined-or-array (never wrong type).
 	const arrayFields: Array<keyof ActionableDirectiveFields> = [
 		'triggers',
@@ -452,11 +460,10 @@ export async function getArchivedKnowledgeIds(
 		for (const line of lines) {
 			try {
 				const entry = JSON.parse(line);
-				if (
-					entry.status === 'archived' ||
-					entry.status === 'quarantined' ||
-					entry.status === 'quarantined_unactionable'
-				) {
+				// G4 (#1716): canonical helper — single source of truth for the
+				// inactive set. Note this is "not active" rather than status ===
+				// 'archived' so it agrees with retrieval filters end-to-end.
+				if (!isActiveStatus(entry.status)) {
 					archived.add(entry.id);
 				}
 			} catch {
@@ -464,7 +471,7 @@ export async function getArchivedKnowledgeIds(
 			}
 		}
 	} catch {
-		// file doesn't exist yet — continue to hive check
+		// file doesn't exist yet — return whatever we have
 	}
 
 	// Hive entries
@@ -475,11 +482,7 @@ export async function getArchivedKnowledgeIds(
 		for (const line of lines) {
 			try {
 				const entry = JSON.parse(line);
-				if (
-					entry.status === 'archived' ||
-					entry.status === 'quarantined' ||
-					entry.status === 'quarantined_unactionable'
-				) {
+				if (!isActiveStatus(entry.status)) {
 					archived.add(entry.id);
 				}
 			} catch {
@@ -581,11 +584,8 @@ function selectKnowledgeCapSurvivors<T>(entries: T[], maxEntries: number): T[] {
 function getKnowledgeCapStatusPriority(
 	status?: KnowledgeEntryBase['status'],
 ): number {
-	if (
-		status === 'archived' ||
-		status === 'quarantined' ||
-		status === 'quarantined_unactionable'
-	) {
+	// G4 (#1716): canonical helper. Inactive statuses get the lowest priority.
+	if (!isActiveStatus(status)) {
 		return 0;
 	}
 	return 1;
@@ -641,6 +641,10 @@ export async function sweepAgedEntries<T extends KnowledgeEntryBase>(
 			const ttl = entry.max_phases ?? defaultMaxPhases;
 			// max_phases=N means entry can live N complete phases; archive on N+1.
 			if (entry.phases_alive > ttl) {
+				// G6 (#1716): record prior status so `unarchiveEntry` can restore.
+				// (Promoted entries never reach here — they skip the loop body.)
+				entry.archived_from = entry.status;
+				entry.archived_at = now;
 				entry.status = 'archived';
 				entry.updated_at = now;
 				result.archived++;
@@ -871,9 +875,7 @@ export async function bumpKnowledgeConfidenceBatch(
 
 	try {
 		// --- Swarm pass ---
-		touchedSwarm.push(
-			...(await applyConfidenceDeltas(swarmPath, deltas)),
-		);
+		touchedSwarm.push(...(await applyConfidenceDeltas(swarmPath, deltas)));
 
 		// --- Hive pass (only for IDs not found in swarm) ---
 		const swarmIds = new Set(touchedSwarm.map((e) => e.id));
@@ -889,10 +891,11 @@ export async function bumpKnowledgeConfidenceBatch(
 		// Confidence used to dead-end at the floor with no consequence. Now an
 		// entry clamped to the floor with a net-negative outcome signal is
 		// demoted (default) or quarantined per config, closing the loop.
-		await applyConfidenceFloorAction(directory, [
-			...touchedSwarm,
-			...touchedHive,
-		], options).catch((err) => {
+		await applyConfidenceFloorAction(
+			directory,
+			[...touchedSwarm, ...touchedHive],
+			options,
+		).catch((err) => {
 			console.warn(
 				'[knowledge-store] confidence-floor action sweep failed (best-effort):',
 				err instanceof Error ? err.message : String(err),
@@ -933,7 +936,9 @@ async function applyConfidenceFloorAction(
 		(e) => e.confidence <= CONFIDENCE_FLOOR + FLOOR_EPSILON,
 	);
 	const recovered = touched.filter(
-		(e) => e.confidence > CONFIDENCE_FLOOR + FLOOR_EPSILON && e.confidence_floor_demoted,
+		(e) =>
+			e.confidence > CONFIDENCE_FLOOR + FLOOR_EPSILON &&
+			e.confidence_floor_demoted,
 	);
 
 	if (atFloor.length === 0 && recovered.length === 0) return;
@@ -941,16 +946,18 @@ async function applyConfidenceFloorAction(
 	// Read the events rollup ONCE (the expensive re-read) — keyed by entry id.
 	// Dynamic import avoids a static store↔events cycle (events already
 	// dynamic-imports store for the bump itself; this mirrors that precedent).
-	const { readKnowledgeCounterRollups, effectiveRetrievalOutcomes } = await import(
-		'./knowledge-events.js'
-	);
+	const { readKnowledgeCounterRollups, effectiveRetrievalOutcomes } =
+		await import('./knowledge-events.js');
 	const rollups = await readKnowledgeCounterRollups(directory);
 
 	// Helper: persist the confidence_floor_demoted flag flip on a single entry
 	// via a tiny locked transaction. Re-uses transactKnowledge for safety.
 	const flagIds = new Set<string>();
 	for (const e of atFloor) {
-		const outcomes = effectiveRetrievalOutcomes(e.retrieval_outcomes, rollups?.get(e.id));
+		const outcomes = effectiveRetrievalOutcomes(
+			e.retrieval_outcomes,
+			rollups?.get(e.id),
+		);
 		const signal = computeOutcomeSignal(outcomes);
 		const totalEvidence =
 			(outcomes.applied_explicit_count ?? 0) +
@@ -1040,7 +1047,12 @@ async function applyConfidenceFloorAction(
 	if (action === 'quarantine' && toQuarantine.length > 0) {
 		const { quarantineEntry } = await import('./knowledge-validator.js');
 		for (const { id } of toQuarantine) {
-			await quarantineEntry(directory, id, 'confidence_floor_negative_outcome', 'auto').catch((err) => {
+			await quarantineEntry(
+				directory,
+				id,
+				'confidence_floor_negative_outcome',
+				'auto',
+			).catch((err) => {
 				console.warn(
 					'[knowledge-store] confidence-floor quarantine failed (best-effort):',
 					err instanceof Error ? err.message : String(err),

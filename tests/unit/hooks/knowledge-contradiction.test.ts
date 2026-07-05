@@ -9,17 +9,23 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
+import { applyCuratorKnowledgeUpdates } from '../../../src/hooks/curator.js';
 import { maybeQuarantineOnContradiction } from '../../../src/hooks/knowledge-escalator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
-import { applyCuratorKnowledgeUpdates } from '../../../src/hooks/curator.js';
 
 function makeTempDir(): string {
 	return mkdtempSync(join(tmpdir(), 'contradiction-test-'));
@@ -56,10 +62,7 @@ function writeEvents(
 	writeFileSync(fp, content, 'utf-8');
 }
 
-function writeEntry(
-	dir: string,
-	opts: { id: string; status?: string },
-): void {
+function writeEntry(dir: string, opts: { id: string; status?: string }): void {
 	const fp = resolveSwarmKnowledgePath(dir);
 	mkdirSync(join(dir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -144,7 +147,14 @@ describe('G3 contradiction unification (#1715)', () => {
 		writeEntry(dir, { id });
 		await applyCuratorKnowledgeUpdates(
 			dir,
-			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason: 'conflicts with new evidence' }],
+			[
+				{
+					action: 'flag_contradiction',
+					entry_id: id,
+					lesson: 'Test',
+					reason: 'conflicts with new evidence',
+				},
+			],
 			defaultConfig,
 		);
 		const events = await readKnowledgeEvents(dir);
@@ -159,10 +169,19 @@ describe('G3 contradiction unification (#1715)', () => {
 		writeEntry(dir, { id });
 		await applyCuratorKnowledgeUpdates(
 			dir,
-			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason: 'spaces vs tabs' }],
+			[
+				{
+					action: 'flag_contradiction',
+					entry_id: id,
+					lesson: 'Test',
+					reason: 'spaces vs tabs',
+				},
+			],
 			defaultConfig,
 		);
-		const entries = await readKnowledge<{ id: string; tags?: string[] }>(resolveSwarmKnowledgePath(dir));
+		const entries = await readKnowledge<{ id: string; tags?: string[] }>(
+			resolveSwarmKnowledgePath(dir),
+		);
 		expect(entries[0].tags).toContain('contradiction:spaces vs tabs');
 	});
 
@@ -239,7 +258,14 @@ describe('G3 contradiction unification (#1715)', () => {
 		]);
 		await applyCuratorKnowledgeUpdates(
 			dir,
-			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason: 'third strike' }],
+			[
+				{
+					action: 'flag_contradiction',
+					entry_id: id,
+					lesson: 'Test',
+					reason: 'third strike',
+				},
+			],
 			defaultConfig,
 		);
 		// 2 prior + 1 curator-emitted = 3 → threshold crossed → quarantined.
@@ -260,7 +286,14 @@ describe('G3 contradiction unification (#1715)', () => {
 		]);
 		await applyCuratorKnowledgeUpdates(
 			dir,
-			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason: 'third strike' }],
+			[
+				{
+					action: 'flag_contradiction',
+					entry_id: id,
+					lesson: 'Test',
+					reason: 'third strike',
+				},
+			],
 			{ ...defaultConfig, contradiction_threshold_action: 'tag_only' },
 		);
 		// 3 contradicted events but tag_only → no quarantine, entry stays established

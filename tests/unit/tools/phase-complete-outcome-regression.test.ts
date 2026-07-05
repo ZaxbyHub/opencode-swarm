@@ -37,7 +37,8 @@ describe('G1 phase-complete outcome wiring regression (#1715)', () => {
 	test('the call site passes the `success` variable (the real outcome)', () => {
 		// The fix passes `success` — the variable finalized from agentsMissing +
 		// policy. Match any call whose third arg is the identifier `success`.
-		const successVarCall = /updateRetrievalOutcome\s*\([^)]*,\s*success\b[^)]*\)/;
+		const successVarCall =
+			/updateRetrievalOutcome\s*\([^)]*,\s*success\b[^)]*\)/;
 		expect(successVarCall.test(SRC)).toBe(true);
 	});
 

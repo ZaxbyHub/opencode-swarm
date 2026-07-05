@@ -87,10 +87,20 @@ function writeEntry(
 async function readEntry(
 	dir: string,
 	id: string,
-): Promise<{ confidence: number; confidence_floor_demoted?: boolean; status?: string } | undefined> {
+): Promise<
+	| { confidence: number; confidence_floor_demoted?: boolean; status?: string }
+	| undefined
+> {
 	const fp = resolveSwarmKnowledgePath(dir);
-	const { readKnowledge } = await import('../../../src/hooks/knowledge-store.js');
-	const entries = await readKnowledge<{ id: string; confidence: number; confidence_floor_demoted?: boolean; status?: string }>(fp);
+	const { readKnowledge } = await import(
+		'../../../src/hooks/knowledge-store.js'
+	);
+	const entries = await readKnowledge<{
+		id: string;
+		confidence: number;
+		confidence_floor_demoted?: boolean;
+		status?: string;
+	}>(fp);
 	return entries.find((e) => e.id === id);
 }
 
@@ -101,7 +111,9 @@ describe('G2 confidence-floor action (#1715)', () => {
 	});
 	afterEach(() => {
 		try {
-			import('node:fs').then(({ rmSync }) => rmSync(dir, { recursive: true, force: true }));
+			import('node:fs').then(({ rmSync }) =>
+				rmSync(dir, { recursive: true, force: true }),
+			);
 		} catch {
 			/* ignore */
 		}
@@ -163,8 +175,14 @@ describe('G2 confidence-floor action (#1715)', () => {
 		// First bump with no outcome evidence → flag would not be SET (no signal),
 		// so seed the flag manually first by writing it directly.
 		const fp = resolveSwarmKnowledgePath(dir);
-		const { readKnowledge } = await import('../../../src/hooks/knowledge-store.js');
-		const entries = await readKnowledge<{ id: string; confidence_floor_demoted?: boolean; confidence: number }>(fp);
+		const { readKnowledge } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+		const entries = await readKnowledge<{
+			id: string;
+			confidence_floor_demoted?: boolean;
+			confidence: number;
+		}>(fp);
 		entries[0].confidence_floor_demoted = true;
 		writeFileSync(fp, JSON.stringify(entries[0]) + '\n', 'utf-8');
 
@@ -184,11 +202,9 @@ describe('G2 confidence-floor action (#1715)', () => {
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 		]);
-		await bumpKnowledgeConfidenceBatch(
-			dir,
-			[{ id, delta: -0.1 }],
-			{ floorAction: 'none' },
-		);
+		await bumpKnowledgeConfidenceBatch(dir, [{ id, delta: -0.1 }], {
+			floorAction: 'none',
+		});
 		const entry = await readEntry(dir, id);
 		expect(entry?.confidence).toBe(0.1);
 		expect(entry?.confidence_floor_demoted).toBeUndefined();

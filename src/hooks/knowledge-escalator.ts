@@ -32,6 +32,7 @@ import type {
 	DirectivePriority,
 	KnowledgeEntryBase,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 const NEAR_DUPLICATE_THRESHOLD = 0.6;
 
@@ -325,11 +326,7 @@ export async function maybeQuarantineOnContradiction(
 		if (!entry) {
 			return { quarantined: false, entryId, contradictionsInWindow: count };
 		}
-		if (
-			entry.status === 'quarantined' ||
-			entry.status === 'quarantined_unactionable' ||
-			entry.status === 'archived'
-		) {
+		if (!isActiveStatus(entry.status)) {
 			return {
 				quarantined: false,
 				entryId,

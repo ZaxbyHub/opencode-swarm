@@ -65,6 +65,7 @@ import type {
 	KnowledgeRecommendation,
 	PhaseDigestEntry,
 } from './curator-types.js';
+import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
 	getArchivedKnowledgeIds,
@@ -72,7 +73,6 @@ import {
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from './knowledge-store.js';
-import { recordKnowledgeEvent } from './knowledge-events.js';
 import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
@@ -1654,6 +1654,10 @@ export async function applyCuratorKnowledgeUpdates(
 					return {
 						...entry,
 						status: 'archived' as const,
+						// G6 (#1716): record prior status so `unarchiveEntry` can
+						// restore the entry to its pre-archive lifecycle position.
+						archived_from: entry.status,
+						archived_at: new Date().toISOString(),
 						updated_at: new Date().toISOString(),
 					};
 				case 'flag_contradiction':

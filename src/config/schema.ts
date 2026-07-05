@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
 import { type AgentName, ALL_AGENT_NAMES } from './constants';
 
 /**
@@ -1127,6 +1128,21 @@ export const KnowledgeConfigSchema = z.object({
 	/** G3: window (in days) for counting `contradicted` events toward the
 	 * threshold. */
 	contradiction_quarantine_window_days: z.number().int().positive().default(30),
+	/** G7 (#1716): minimum consecutive net-negative phase evaluations
+	 * required to demote a `promoted` entry to `established`. Each phase
+	 * evaluation where the entry's outcome signal is at or below
+	 * `promoted_demotion_signal_threshold` increments the counter; a
+	 * non-negative phase resets it to 0. */
+	promoted_demotion_min_negative_phases: z.number().int().positive().default(3),
+	/** G7 (#1716): outcome-signal threshold at or below which a promoted
+	 * entry's `recent_negative_phase_count` increments for the current phase.
+	 * Defaults to `OUTCOME_BLOCK_THRESHOLD` (-0.3) — the same value that
+	 * blocks promotion — so promotion and demotion share one threshold. */
+	promoted_demotion_signal_threshold: z
+		.number()
+		.min(-1)
+		.max(1)
+		.default(OUTCOME_BLOCK_THRESHOLD),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({

@@ -17,6 +17,7 @@ import {
 
 let tempDir: string;
 const realRunAutoPromotion = _internals.runAutoPromotion;
+const realRunAutoDemotion = _internals.runAutoDemotion;
 const config = KnowledgeConfigSchema.parse({});
 const LESSON =
 	'Run the full test suite before declaring a phase complete to catch cross-task regressions that per-task checks miss.';
@@ -40,6 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	_internals.runAutoPromotion = realRunAutoPromotion;
+	_internals.runAutoDemotion = realRunAutoDemotion;
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -75,5 +77,67 @@ describe('curateAndStoreSwarm skipAutoPromotion', () => {
 		);
 
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	// G7 (#1716) — the phase_number > 0 gate: close.ts hardcodes
+	// { phase_number: 0 }, so demotion must NOT run at close time. Phase-complete
+	// passes the real phase number and demotion runs there only.
+	test('G7: does NOT call runAutoDemotion when phase_number is 0 (close-time gate)', async () => {
+		const promoSpy = mock(async () => {});
+		const demotionSpy = mock(async () => {});
+		_internals.runAutoPromotion = promoSpy;
+		_internals.runAutoDemotion = demotionSpy;
+
+		await curateAndStoreSwarm(
+			[LESSON],
+			'proj',
+			{ phase_number: 0 }, // close.ts path
+			tempDir,
+			config,
+			{ llmDelegate: v3Delegate },
+		);
+
+		// Promotion runs (no skipAutoPromotion); demotion does NOT (phase 0 gate).
+		expect(promoSpy).toHaveBeenCalledTimes(1);
+		expect(demotionSpy).not.toHaveBeenCalled();
+	});
+
+	test('G7: calls runAutoDemotion when phase_number > 0 (phase-complete path)', async () => {
+		const promoSpy = mock(async () => {});
+		const demotionSpy = mock(async () => {});
+		_internals.runAutoPromotion = promoSpy;
+		_internals.runAutoDemotion = demotionSpy;
+
+		await curateAndStoreSwarm(
+			[LESSON],
+			'proj',
+			{ phase_number: 5 }, // phase-complete.ts path
+			tempDir,
+			config,
+			{ llmDelegate: v3Delegate },
+		);
+
+		expect(promoSpy).toHaveBeenCalledTimes(1);
+		expect(demotionSpy).toHaveBeenCalledTimes(1);
+		expect(demotionSpy).toHaveBeenCalledWith(tempDir, config, 5);
+	});
+
+	test('G7: skipAutoPromotion also skips runAutoDemotion (they are a pair)', async () => {
+		const promoSpy = mock(async () => {});
+		const demotionSpy = mock(async () => {});
+		_internals.runAutoPromotion = promoSpy;
+		_internals.runAutoDemotion = demotionSpy;
+
+		await curateAndStoreSwarm(
+			[LESSON],
+			'proj',
+			{ phase_number: 3 },
+			tempDir,
+			config,
+			{ skipAutoPromotion: true, llmDelegate: v3Delegate },
+		);
+
+		expect(promoSpy).not.toHaveBeenCalled();
+		expect(demotionSpy).not.toHaveBeenCalled();
 	});
 });

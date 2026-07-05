@@ -27,6 +27,7 @@ import type {
 	KnowledgeRetrievalContext,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 // ============================================================================
 // Exported Types
@@ -64,7 +65,11 @@ const HIVE_TIER_BOOST = 0.05;
 // Default same project penalty (used when config is not available): -0.05
 const DEFAULT_SAME_PROJECT_PENALTY = -0.05;
 
-const QUARANTINED_STATUS = 'quarantined';
+// G4 (#1716): inactive-status filtering for the merge layer uses the canonical
+// `isActiveStatus` helper. The previous local `QUARANTINED_STATUS = 'quarantined'`
+// constant was a single-status deny-list that leaked `archived` and
+// `quarantined_unactionable`; the helper closes both leaks while preserving the
+// #828 intent (undefined/null/unknown statuses pass through).
 
 // ============================================================================
 // Internal Helper: computeRelevance
@@ -409,15 +414,17 @@ export async function readMergedKnowledge(
 	// Manual recall opts out (skipScopeFilter) so an explicit text query can
 	// surface stack:/project:-scoped lessons, matching pre-unification behavior.
 	const scopeFilter = config.scope_filter ?? ['global'];
-	// Filter out quarantined entries and suppress lessons retracted by
-	// architect retrospectives. Using a deny-list (status !== 'quarantined')
-	// instead of an allow-list so entries with unexpected or missing status
-	// values (e.g., after migration) are not silently dropped.
+	// Filter out inactive-status entries (archived/quarantined/
+	// quarantined_unactionable) and suppress lessons retracted by architect
+	// retrospectives. Using the canonical `isActiveStatus` helper (backed by a
+	// deny-list of known inactive statuses) instead of an allow-list, so entries
+	// with unexpected or missing status values (e.g., after migration) are not
+	// silently dropped — preserves the #828 regression-guard intent.
 	const filtered = merged.filter(
 		(entry) =>
 			(opts?.skipScopeFilter ||
 				scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern)) &&
-			entry.status !== QUARANTINED_STATUS &&
+			isActiveStatus(entry.status) &&
 			!suppressedLessons.has(normalize(entry.lesson)),
 	);
 

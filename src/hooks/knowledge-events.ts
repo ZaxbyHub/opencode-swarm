@@ -1157,7 +1157,11 @@ export async function applyKnowledgeVerdictFeedback(
 			const { bumpKnowledgeConfidenceBatch } = await import(
 				'./knowledge-store.js'
 			);
-			await bumpKnowledgeConfidenceBatch(directory, deltas, options?.floorOptions);
+			await bumpKnowledgeConfidenceBatch(
+				directory,
+				deltas,
+				options?.floorOptions,
+			);
 		}
 
 		return {

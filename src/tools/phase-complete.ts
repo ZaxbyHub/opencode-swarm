@@ -30,13 +30,13 @@ import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
 import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator.js';
 import { updateRetrievalOutcome } from '../hooks/knowledge-reader.js';
+import type { ConfidenceFloorOptions } from '../hooks/knowledge-store.js';
 import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	sweepAgedEntries,
 	sweepStaleTodos,
 } from '../hooks/knowledge-store.js';
-import type { ConfidenceFloorOptions } from '../hooks/knowledge-store.js';
 import type {
 	KnowledgeConfig,
 	KnowledgeEntryBase,
