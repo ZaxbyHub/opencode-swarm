@@ -9,7 +9,13 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,7 +25,7 @@ import {
 } from '../../../src/hooks/knowledge-store.js';
 
 function makeTempDir(): string {
-	return mkdtempSync(join(tmpdir(), 'floor-action-test-'));
+	return realpathSync(mkdtempSync(join(tmpdir(), 'floor-action-test-')));
 }
 
 function eventsPath(dir: string): string {
@@ -110,13 +116,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 		dir = makeTempDir();
 	});
 	afterEach(() => {
-		try {
-			import('node:fs').then(({ rmSync }) =>
-				rmSync(dir, { recursive: true, force: true }),
-			);
-		} catch {
-			/* ignore */
-		}
+		rmSync(dir, { recursive: true, force: true });
 	});
 
 	test('demotes a floor entry with net-negative outcome signal (default demote)', async () => {
@@ -225,5 +225,40 @@ describe('G2 confidence-floor action (#1715)', () => {
 		const entry = await readEntry(dir, id);
 		expect(entry?.confidence).toBe(0.1);
 		expect(entry?.confidence_floor_demoted).toBe(true);
+	});
+
+	test('floorAction:"quarantine" routes to canonical quarantineEntry with original_status preserved', async () => {
+		const id = randomUUID();
+		writeEntry(dir, { id, confidence: 0.15 });
+		// 4 violated events → net-negative signal, ≥3 outcomes (min default)
+		writeEvents(dir, [
+			{ type: 'violated', knowledge_id: id },
+			{ type: 'violated', knowledge_id: id },
+			{ type: 'violated', knowledge_id: id },
+			{ type: 'violated', knowledge_id: id },
+		]);
+		// -0.1 delta clamps to floor 0.1, triggering quarantine routing
+		await bumpKnowledgeConfidenceBatch(dir, [{ id, delta: -0.1 }], {
+			floorAction: 'quarantine',
+		});
+
+		// Entry must NOT appear in the main knowledge file (removed by quarantineEntry)
+		const mainEntry = await readEntry(dir, id);
+		expect(mainEntry).toBeUndefined();
+
+		// Entry must appear in the quarantine sidecar with original_status preserved
+		const quarantineFp = join(dir, '.swarm', 'knowledge-quarantined.jsonl');
+		const { readKnowledge: readQuarantine } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+		const quarantined = await readQuarantine<{
+			id: string;
+			status: string;
+			original_status?: string;
+		}>(quarantineFp);
+		const found = quarantined.find((e) => e.id === id);
+		expect(found).toBeDefined();
+		expect(found?.status).toBe('quarantined');
+		expect(found?.original_status).toBe('established');
 	});
 });

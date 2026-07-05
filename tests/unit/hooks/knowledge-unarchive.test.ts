@@ -143,7 +143,12 @@ describe('unarchiveEntry (G6 #1716)', () => {
 
 			const result = await unarchiveEntry(tempDir, 'k-ttl');
 			expect(result.restored_to).toBe('established');
-			expect((await readBack())[0].status).toBe('established');
+			const after = (await readBack())[0];
+			expect(after.status).toBe('established');
+			// Counters reset on unarchive so a restored-promoted entry gets a fresh
+			// G7 window rather than inheriting stale negativity.
+			expect(after.recent_negative_phase_count).toBe(0);
+			expect(after.last_demotion_phase).toBeUndefined();
 		});
 	});
 

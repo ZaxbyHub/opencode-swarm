@@ -205,6 +205,15 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 							return entries.filter((e) => e.id !== id);
 						}
 
+						// PRR-015 / G6 (#1716): guard against re-archiving an already-
+						// archived entry. A duplicate/late archive call would otherwise
+						// record `archived_from: 'archived'` (self-referential), breaking
+						// unarchive's status recovery. Preserve the existing archived_from
+						// and skip the rewrite. Matches curator path (curator.ts:1692-1699).
+						if (target.status === 'archived') {
+							resultStatus = 'archived';
+							return entries;
+						}
 						// G6 (#1716): record `archived_from` so `unarchiveEntry` can
 						// restore the prior status. Only the `archive` mode reaches here
 						// (quarantine was short-circuited above; purge returns early).

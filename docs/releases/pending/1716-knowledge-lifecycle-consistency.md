@@ -11,7 +11,7 @@ Retrieval filters in `search-knowledge.ts` and `knowledge-reader.ts` used
 deny-lists that enumerated only `'archived'` and `'quarantined'`, missing
 `'quarantined_unactionable'`. Any future producer (or a foreign import that
 survives `normalizeEntry`) writing such a row to `knowledge.jsonl` would have
-leaked into retrieval. The three filter points also disagreed with
+leaked into retrieval. The filter points also disagreed with
 `getArchivedKnowledgeIds` on what counts as "inactive."
 
 Fixed by centralizing the inactive-status set in a single canonical
@@ -19,9 +19,13 @@ Fixed by centralizing the inactive-status set in a single canonical
 allow-list-equivalent deny-list of the three known inactive statuses. The
 helper preserves the #828 regression-guard intent: entries with
 `undefined`/`null`/unknown statuses still pass through (not silently dropped).
-Three duplicate literal arrays (`knowledge-reinforcement.ts`,
-`hive-promoter.ts`, `knowledge-escalator.ts`) and a fourth inline check
-(`knowledge-store.ts`) were collapsed into the helper — single source of truth.
+Ten consumer sites now use the helper: `search-knowledge.ts` (retrieval filter),
+`knowledge-reader.ts` (merge-layer filter), `knowledge-reinforcement.ts`,
+`hive-promoter.ts`, `knowledge-escalator.ts`, `knowledge-store.ts`, plus
+the three directive/injection sites (`knowledge-injector.ts`,
+`phase-directives.ts`, `phase-complete-directive-gate.ts`) updated in the
+follow-up commit `9bed1c866`, and `knowledge-curator.ts` (G7 demotion
+counter clearance).
 
 ### G5 — Quarantine producers unified (closed)
 The `knowledge_archive` tool's `mode:'quarantine'` branch used to flip status
@@ -91,14 +95,26 @@ that, and G5/G6/G7 were careful not to re-introduce new literal arrays.
 
 ## Acceptance criteria — all met
 - G4: `quarantined_unactionable`-status entry in `knowledge.jsonl` is NOT
-  retrieved, consistently across all three filter points.
+  retrieved, consistently across all filter points.
+  Tests: `tests/unit/hooks/search-knowledge.test.ts` (filter parity),
+  `tests/unit/hooks/knowledge-reader.test.ts` (merge-layer filtering).
 - G5: an entry quarantined via `knowledge_archive mode:'quarantine'` CAN be
   restored via `restoreEntry`.
+  Tests: `tests/unit/hooks/knowledge-store.test.ts` (quarantine routing),
+  `tests/unit/tools/knowledge-archive.test.ts` (tool path).
 - G6: an `archived` entry CAN be un-archived via `/swarm knowledge restore <id>`;
   status returns to its pre-archive status; it's retrievable again.
+  Tests: `tests/unit/hooks/knowledge-unarchive.test.ts` (all producers),
+  `tests/unit/commands/knowledge.test.ts` (restore dispatch).
 - G7: a sustained-net-negative promoted entry demotes to `established` and no
   longer receives the `promoted` statusBoost.
-- Transition tests for each new path (G5/G6/G7).
+  Tests: `tests/unit/hooks/knowledge-curator-demotion.test.ts`
+  (threshold + dedupe),
+  `tests/unit/hooks/knowledge-curator-skip-promotion.test.ts` (phase gate).
+- Boost-table: recall-ranking suite passes with corrected `promoted` +0.15
+  vs `established` +0.10 ordering.
+  Tests: `tests/unit/hooks/search-knowledge.test.ts` (recall-ranking suite),
+  `tests/unit/knowledge/relevance-scoring-task3-4.test.ts`.
 
 ## Out of scope
 - Promotion gates and TTL logic are unchanged (the boost-table raise is a
@@ -106,9 +122,6 @@ that, and G5/G6/G7 were careful not to re-introduce new literal arrays.
   records metadata).
 - Cap-survivor priority is unchanged (the `isActiveStatus` rewrite preserves the
   identical mapping).
-- Three non-retrieval filter sites (`knowledge-injector.ts`,
-  `phase-directives.ts`, `phase-complete-directive-gate.ts`) are unchanged —
-  documented as a known residual for a follow-up.
 - Hive-tier quarantine via the archive tool is rejected with a clear error
   rather than silently flipping status (the old behavior was already
   unrestorable).
