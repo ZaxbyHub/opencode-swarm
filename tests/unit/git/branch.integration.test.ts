@@ -12,6 +12,31 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { getGitRepositoryStatus, isGitRepo } from '../../../src/git/branch';
 
+function runGit(cwd: string, args: string[]): void {
+	let lastResult: child_process.SpawnSyncReturns<string> | null = null;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const result = child_process.spawnSync('git', args, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: 30_000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			windowsHide: true,
+		});
+		if (result.status === 0) return;
+		lastResult = result;
+		if (
+			result.error === undefined &&
+			result.signal === null &&
+			result.status !== null
+		) {
+			break;
+		}
+	}
+	throw new Error(
+		`git ${args.join(' ')} failed: status=${lastResult?.status ?? 'null'} signal=${lastResult?.signal ?? 'null'} error=${lastResult?.error?.message ?? 'none'} stderr=${lastResult?.stderr ?? ''}`,
+	);
+}
+
 describe('Git branch integration tests (real git)', () => {
 	let gitDir: string;
 	let nonGitDir: string;
@@ -22,31 +47,10 @@ describe('Git branch integration tests (real git)', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'git-repo-test-')),
 		);
 		// Initialize it as a real git repo using real spawnSync
-		const initResult = child_process.spawnSync('git', ['init'], {
-			cwd: gitDir,
-			encoding: 'utf-8',
-			timeout: 30_000,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-		});
-		if (initResult.status !== 0) {
-			throw new Error(`git init failed: ${initResult.stderr}`);
-		}
+		runGit(gitDir, ['init']);
 		// Configure git user for this repo (required for commits)
-		child_process.spawnSync('git', ['config', 'user.email', 'test@test.com'], {
-			cwd: gitDir,
-			encoding: 'utf-8',
-			timeout: 30_000,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-		});
-		child_process.spawnSync('git', ['config', 'user.name', 'Test User'], {
-			cwd: gitDir,
-			encoding: 'utf-8',
-			timeout: 30_000,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-		});
+		runGit(gitDir, ['config', 'user.email', 'test@test.com']);
+		runGit(gitDir, ['config', 'user.name', 'Test User']);
 
 		// Create a real temp non-git directory
 		nonGitDir = fs.realpathSync(
@@ -72,13 +76,7 @@ describe('Git branch integration tests (real git)', () => {
 	test('isGitRepo returns true for a real git repository', () => {
 		// Make an initial commit so HEAD exists; getGitRepositoryStatus (which
 		// isGitRepo delegates to) requires a HEAD reference to confirm a repo.
-		child_process.spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], {
-			cwd: gitDir,
-			encoding: 'utf-8',
-			timeout: 30_000,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-		});
+		runGit(gitDir, ['commit', '--allow-empty', '-m', 'init']);
 
 		const result = isGitRepo(gitDir);
 		expect(result).toBe(true);
@@ -87,13 +85,7 @@ describe('Git branch integration tests (real git)', () => {
 	test('getGitRepositoryStatus reports isRepo true for a real git repository', () => {
 		// Same setup as the isGitRepo test, but exercises the new status API
 		// directly to confirm the underlying probe agrees with the wrapper.
-		child_process.spawnSync('git', ['commit', '--allow-empty', '-m', 'init'], {
-			cwd: gitDir,
-			encoding: 'utf-8',
-			timeout: 30_000,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-		});
+		runGit(gitDir, ['commit', '--allow-empty', '-m', 'init']);
 
 		const status = getGitRepositoryStatus(gitDir);
 		expect(status.isRepo).toBe(true);

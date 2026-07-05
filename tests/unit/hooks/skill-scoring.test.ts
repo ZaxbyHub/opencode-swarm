@@ -487,8 +487,12 @@ describe('rankSkillsForContext', () => {
 		);
 
 		expect(results).toHaveLength(2);
-		// They have identical scores and identical usage counts, order is stable
-		expect(results[0].score).toBeCloseTo(results[1].score, 10);
+		// They have identical scores and identical usage counts, order is stable.
+		// Precision 9 (tol 5e-10), not 10: the two scores are accumulated in
+		// different float orders and differ at ~6e-11 — still "effectively
+		// identical" for ordering-stability, but 10 digits is tighter than
+		// float determinism allows and flaked under coverage instrumentation.
+		expect(results[0].score).toBeCloseTo(results[1].score, 9);
 	});
 });
 

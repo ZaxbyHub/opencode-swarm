@@ -91,13 +91,16 @@ export function composeHandlers<I, O>(
 		return async () => {};
 	}
 
+	for (const fn of fns) {
+		if (isFailClosedHandler(fn)) {
+			throw new Error(
+				'composeHandlers cannot wrap fail-closed handlers; use composeBlockingHandlers or await them directly',
+			);
+		}
+	}
+
 	return async (input: I, output: O) => {
 		for (const fn of fns) {
-			if (isFailClosedHandler(fn)) {
-				throw new Error(
-					'composeHandlers cannot wrap fail-closed handlers; use composeBlockingHandlers or await them directly',
-				);
-			}
 			const safeFn = _internals.safeHook(fn);
 			await safeFn(input, output);
 		}

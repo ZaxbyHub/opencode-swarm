@@ -388,9 +388,10 @@ describe('extractFileSymbols — adversarial attack vectors (task 1.1 step 5m)',
 
 		// Must not throw; null (timeout) or partial facts both acceptable
 		expect(facts === null || typeof facts === 'object').toBe(true);
-		// Must complete within a generous wall-clock — the 500 ms AST_TIMEOUT_MS
-		// provides the hard bound; we allow up to 3 s so the test is reliable.
-		expect(elapsed).toBeLessThan(3000);
+		// Must complete within a generous wall-clock. Coverage instrumentation
+		// adds overhead on Windows, so keep this as a bounded-hang assertion
+		// rather than a micro-benchmark.
+		expect(elapsed).toBeLessThan(5000);
 	});
 
 	// -----------------------------------------------------------------------

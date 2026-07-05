@@ -9,6 +9,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 // Create mock functions before mock.module to ensure they're available in the mock
 const mockLoadEvidence = mock();
@@ -41,6 +43,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 mock.module('../../../src/plan/manager.js', () => ({
 	loadPlan: mockLoadPlan,
 	loadPlanJsonOnly: mockLoadPlanJsonOnly,
+	isTaskSettled: mock(() => false),
 	derivePlanMarkdown: mock((plan: any) => '# Derived Plan\n'),
 	savePlan: mock(),
 	updateTaskStatus: mock(),
@@ -51,6 +54,16 @@ mock.module('../../../src/plan/manager.js', () => ({
 }));
 
 describe('System Enhancer - loadEvidence Discriminated Union Migration', () => {
+	async function loadFixturePlan(directory: string): Promise<unknown | null> {
+		try {
+			return JSON.parse(
+				await readFile(join(directory, '.swarm', 'plan.json'), 'utf-8'),
+			);
+		} catch {
+			return null;
+		}
+	}
+
 	beforeEach(() => {
 		// Clear all mocks before each test
 		mockLoadEvidence.mockClear();
@@ -65,7 +78,10 @@ describe('System Enhancer - loadEvidence Discriminated Union Migration', () => {
 	});
 
 	afterEach(() => {
-		// Clean up after each test
+		mockLoadPlan.mockImplementation(loadFixturePlan);
+		mockLoadPlanJsonOnly.mockImplementation(loadFixturePlan);
+		mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
+		mockListEvidenceTaskIds.mockResolvedValue([]);
 	});
 
 	const getBuildRetroInjection = () => {

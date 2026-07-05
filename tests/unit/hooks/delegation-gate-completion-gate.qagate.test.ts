@@ -14,11 +14,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import {
-	ensureAgentSession,
-	getTaskState,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 function derivePlanId(plan: { swarm: string; title: string }): string {
 	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
@@ -160,7 +156,7 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 	});
 
 	describe('QA gate profile integration', () => {
-		it('should NOT throw when qa_gate_profile is empty (no gates set)', async () => {
+		it('should throw when a tests_run task is not completed even with an empty qa_gate_profile', async () => {
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
@@ -175,7 +171,7 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 				threw = true;
 			}
 
-			expect(threw).toBe(false);
+			expect(threw).toBe(true);
 		});
 
 		it('should throw when qa_gate_profile.reviewer is true but task not reviewed', async () => {
@@ -201,21 +197,14 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 			expect(threw).toBe(true);
 		});
 
-		it('should NOT throw when reviewer gate is satisfied (task has review evidence)', async () => {
+		it('should NOT throw when the task has advanced past coder_delegated into reviewer_run', async () => {
 			const profile = getOrCreateProfile(tempDir, PLAN_ID);
 			setGates(tempDir, PLAN_ID, { reviewer: true });
 			profile.gates = { reviewer: true };
 
-			// Mark task 1.1 as reviewed in qa-gate-profile
-			const taskState = getTaskState(tempDir);
-			taskState.taskReviewStatus.set('1.1', {
-				status: 'approved',
-				evidence: { files: ['tests/unit/foo.test.ts'] },
-			});
-
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
-			session.taskWorkflowStates.set('1.1', 'tests_run');
+			session.taskWorkflowStates.set('1.1', 'reviewer_run');
 
 			let threw = false;
 			try {
@@ -309,7 +298,6 @@ describe('delegation-gate: update_task_status from tests_run state', () => {
 			threw = true;
 		}
 
-		// Should not throw — we're not delegating a new task
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });

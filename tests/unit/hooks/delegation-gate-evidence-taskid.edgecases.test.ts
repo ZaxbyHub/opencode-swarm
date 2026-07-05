@@ -176,8 +176,7 @@ describe('delegation-gate: evidence task ID edge cases', () => {
 			threw = true;
 		}
 
-		// Should handle gracefully without throwing
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 
 	it('should handle evidence for task in wrong phase', async () => {
@@ -198,7 +197,6 @@ describe('delegation-gate: evidence task ID edge cases', () => {
 			threw = true;
 		}
 
-		// Evidence for task in different phase should not block
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });

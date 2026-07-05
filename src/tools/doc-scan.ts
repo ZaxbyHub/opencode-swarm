@@ -255,13 +255,6 @@ export async function scanDocIndex(
 		}
 
 		for (const entry of entries) {
-			// Stop processing as soon as the cap is reached — avoids stat-ing and
-			// reading files that will be discarded by the post-walk splice.
-			if (discoveredFiles.length >= MAX_INDEXED_FILES) {
-				truncated = true;
-				return;
-			}
-
 			const isDir = entry.isDirectory();
 			let isFile = entry.isFile();
 
@@ -309,6 +302,14 @@ export async function scanDocIndex(
 
 			// Only process files that match doc patterns
 			if (!matchesDocPattern(relPath, allPatterns)) continue;
+
+			// Stop processing only when an additional matching doc would exceed the
+			// cap. Seeing skipped directories or non-doc files after the 100th doc is
+			// not truncation.
+			if (discoveredFiles.length >= MAX_INDEXED_FILES) {
+				truncated = true;
+				return;
+			}
 
 			// Get mtime for cache invalidation
 			let fileStat: fs.Stats;

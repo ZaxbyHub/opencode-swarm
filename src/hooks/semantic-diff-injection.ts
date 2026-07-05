@@ -28,6 +28,19 @@ import {
 } from '../utils/git-binary-missing-error.js';
 import { getCachedGraph } from './repo-graph-injection.js';
 
+export const _internals = {
+	execFile: child_process.execFile,
+	realpathSync: fs.realpathSync,
+	readFile: fs.promises.readFile,
+	computeASTDiff,
+	classifyChanges,
+	generateSummary,
+	generateSummaryMarkdown,
+	getCachedGraph,
+	getImporters,
+	normalizeGraphPath,
+};
+
 async function execGit(
 	directory: string,
 	args: string[],
@@ -45,7 +58,7 @@ async function execGit(
 				maxBuffer: options?.maxBuffer,
 				stdio: ['ignore', 'pipe', 'pipe'],
 			};
-			child_process.execFile(
+			_internals.execFile(
 				'git',
 				args,
 				execOpts as child_process.ExecFileOptionsWithStringEncoding,
@@ -95,7 +108,7 @@ export async function buildSemanticDiffBlock(
 	if (changedFiles.length === 0) return null;
 
 	try {
-		const realDirectory = fs.realpathSync(directory);
+		const realDirectory = _internals.realpathSync(directory);
 
 		// Cap to prevent excessive computation
 		const filesToProcess = changedFiles.slice(0, maxFiles);
@@ -103,7 +116,7 @@ export async function buildSemanticDiffBlock(
 		const astDiffs: ASTDiffResult[] = [];
 
 		// Build fileConsumers map from repo graph
-		const graph = getCachedGraph(directory);
+		const graph = _internals.getCachedGraph(directory);
 		const fileConsumers: Record<string, number> = {};
 		if (graph) {
 			for (const f of filesToProcess) {
@@ -111,8 +124,11 @@ export async function buildSemanticDiffBlock(
 				const relativePath = path.isAbsolute(f)
 					? path.relative(directory, f)
 					: f;
-				const normalized = normalizeGraphPath(relativePath);
-				fileConsumers[normalized] = getImporters(graph, normalized).length;
+				const normalized = _internals.normalizeGraphPath(relativePath);
+				fileConsumers[normalized] = _internals.getImporters(
+					graph,
+					normalized,
+				).length;
 				// Store with original path for classifyChanges lookup
 				fileConsumers[f] = fileConsumers[normalized];
 			}
@@ -128,7 +144,7 @@ export async function buildSemanticDiffBlock(
 
 			let realResolvedPath: string;
 			try {
-				realResolvedPath = fs.realpathSync(resolvedPath);
+				realResolvedPath = _internals.realpathSync(resolvedPath);
 			} catch {
 				// Broken symlink or missing file — skip gracefully
 				continue;
@@ -166,12 +182,9 @@ export async function buildSemanticDiffBlock(
 						})
 					: '';
 
-				const newContent = await fs.promises.readFile(
-					realResolvedPath,
-					'utf-8',
-				);
+				const newContent = await _internals.readFile(realResolvedPath, 'utf-8');
 
-				const astResult = await computeASTDiff(
+				const astResult = await _internals.computeASTDiff(
 					filePath,
 					oldContent,
 					newContent,
@@ -195,15 +208,16 @@ export async function buildSemanticDiffBlock(
 
 		if (astDiffs.length === 0) return null;
 
-		const classifiedChanges: ClassifiedChange[] = classifyChanges(
+		const classifiedChanges: ClassifiedChange[] = _internals.classifyChanges(
 			astDiffs,
 			fileConsumers,
 		);
 
 		if (classifiedChanges.length === 0) return null;
 
-		const summary: SemanticDiffSummary = generateSummary(classifiedChanges);
-		const markdown = generateSummaryMarkdown(summary);
+		const summary: SemanticDiffSummary =
+			_internals.generateSummary(classifiedChanges);
+		const markdown = _internals.generateSummaryMarkdown(summary);
 
 		return `## SEMANTIC DIFF SUMMARY\n${markdown}`;
 	} catch {

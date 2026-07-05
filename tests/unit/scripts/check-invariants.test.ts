@@ -36,7 +36,9 @@ function runCheckInvariants(cwd: string): {
 	if (isWindows) {
 		throw new Error('bash not available on Windows');
 	}
-	const result = spawnSync('bash', [SCRIPT_PATH], {
+	const localScript = path.join(cwd, 'scripts', 'check-invariants.sh');
+	const scriptPath = fs.existsSync(localScript) ? localScript : SCRIPT_PATH;
+	const result = spawnSync('bash', [scriptPath], {
 		cwd,
 		encoding: 'utf-8',
 		stdio: ['pipe', 'pipe', 'pipe'],
@@ -46,7 +48,7 @@ function runCheckInvariants(cwd: string): {
 	return {
 		stdout: result.stdout || '',
 		stderr: result.stderr || '',
-		exitCode: result.status || 1,
+		exitCode: result.status ?? 1,
 	};
 }
 
@@ -84,7 +86,7 @@ describe('check-invariants.sh', () => {
 		if (isWindows) return;
 		const result = runCheckInvariants(REPO_ROOT);
 		expect(result.stdout).toContain('All engineering invariant checks passed');
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
 
 	test('should detect missing mock allowlist file', () => {
@@ -110,7 +112,9 @@ describe('check-invariants.sh', () => {
 
 		const result = runCheckInvariants(fixtureDir);
 		expect(result.exitCode).not.toBe(0);
-		expect(result.stderr).toContain('mock-allowlist.txt not found');
+		expect(result.stderr + result.stdout).toContain(
+			'mock-allowlist.txt not found',
+		);
 
 		fs.rmSync(fixtureDir, { recursive: true, force: true });
 	});
@@ -163,7 +167,9 @@ describe('check-invariants.sh', () => {
 		);
 
 		const result = runCheckInvariants(fixtureDir);
-		expect(result.stdout).not.toContain('bun-compat.ts');
+		expect(result.stdout).not.toContain(
+			'WARNING: src/bun-compat.ts uses spawn/spawnSync',
+		);
 		expect(result.stdout).toContain('not-bun-compat.ts');
 
 		fs.rmSync(fixtureDir, { recursive: true, force: true });

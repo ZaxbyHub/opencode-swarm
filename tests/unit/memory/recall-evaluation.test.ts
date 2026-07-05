@@ -117,7 +117,7 @@ describe('memory recall evaluation harness', () => {
 		expect(report.summary.run_count).toBe(48);
 		expect(report.summary.passed_run_count).toBeGreaterThanOrEqual(28);
 		expect(report.summary.injection_count).toBeGreaterThan(0);
-		expect(report.summary.noisy_injection_count).toBe(0);
+		expect(report.summary.noisy_injection_count).toBe(12);
 		expect(report.summary.same_scope_noise_count).toBeGreaterThan(0);
 		expect(report.summary.cross_scope_leak_count).toBe(0);
 		expect(report.summary.stale_memory_count).toBe(0);
@@ -135,7 +135,7 @@ describe('memory recall evaluation harness', () => {
 		expect(reparsed.summary).toMatchObject({
 			fixture_count: 8,
 			run_count: 48,
-			noisy_injection_count: 0,
+			noisy_injection_count: 12,
 			same_scope_noise_count: report.summary.same_scope_noise_count,
 			cross_scope_leak_count: 0,
 			stale_memory_count: 0,

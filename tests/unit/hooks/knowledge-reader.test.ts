@@ -7,21 +7,7 @@
  * - updateRetrievalOutcome (outcome tracking)
  */
 
-/**
- * MOCK ISOLATION NOTE: This file uses `mock.module('../../../src/hooks/knowledge-store.js')
- * File-scoped mock.module at import level: mock must persist across all tests so
- * `afterEach(mock.restore())` is NOT used (would unmock mid-suite). Use --isolate
- * per AGENTS.md Invariant 7.`
- * which affects the module cache for the entire test process. When running this file
- * together with other knowledge test files (e.g., knowledge-store-transactions.test.ts),
- * use the `--isolate` flag to prevent mock leakage:
- *
- *   bun test --isolate tests/unit/hooks/knowledge-reader.test.ts tests/unit/hooks/knowledge-store-transactions.test.ts
- */
-
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as realFs from 'node:fs';
-import * as realFsPromises from 'node:fs/promises';
 import {
 	type ProjectContext,
 	type RankedEntry,
@@ -40,121 +26,92 @@ import type {
 // Mocks Setup
 // ============================================================================
 
-// Mock knowledge-store.ts
-// transactKnowledge is a passthrough: calls readKnowledge + mutate so tests can
-// inspect which entries were written via the captured call list.
-const transactKnowledgeResults: Array<{ path: string; entries: unknown[] }> =
-	[];
-mock.module('../../../src/hooks/knowledge-store.js', async () => {
-	const _readKnowledge = mock(async () => []);
-	const _transactKnowledge = mock(
-		async <T>(
-			filePath: string,
-			mutate: (entries: T[]) => T[] | null,
-		): Promise<boolean> => {
-			const entries = (await _readKnowledge(filePath)) as T[];
-			const result = mutate(entries);
-			if (result !== null) {
-				transactKnowledgeResults.push({
-					path: filePath,
-					entries: result as unknown[],
-				});
-				return true;
-			}
-			return false;
-		},
-	);
-	return {
-		jaccardBigram: mock((a: Set<string>, b: Set<string>) => {
-			if (a.size === 0 && b.size === 0) return 1.0;
-			const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
-			const union = new Set([...Array.from(a), ...Array.from(b)]);
-			return intersection.size / union.size;
-		}),
-		normalize: mock((text: string) =>
-			text
-				.toLowerCase()
-				.replace(/[^\w\s]/g, ' ')
-				.replace(/\s+/g, ' ')
-				.trim(),
-		),
-		readKnowledge: _readKnowledge,
-		readRetractionRecords: mock(async () => []),
-		rewriteKnowledge: mock(async () => {}),
-		transactKnowledge: _transactKnowledge,
-		resolveSwarmKnowledgePath: mock(() => '/mock/.swarm/knowledge.jsonl'),
-		resolveHiveKnowledgePath: mock(() => '/mock/hive/shared-learnings.jsonl'),
-		wordBigrams: mock((text: string) => {
-			const words = text
-				.toLowerCase()
-				.replace(/[^\w\s]/g, ' ')
-				.replace(/\s+/g, ' ')
-				.trim()
-				.split(' ')
-				.filter(Boolean);
-			const bigrams = new Set<string>();
-			for (let i = 0; i < words.length - 1; i++) {
-				bigrams.add(`${words[i]} ${words[i + 1]}`);
-			}
-			return bigrams;
-		}),
-		enforceKnowledgeCap: async () => {},
-		sweepAgedEntries: async () => {},
-		sweepStaleTodos: async () => {},
-		bumpKnowledgeConfidenceBatch: async () => {},
-	};
+const originalReaderInternals = { ...readerInternals };
+const mockReadKnowledge = mock(async () => []);
+const mockReadRetractionRecords = mock(async () => []);
+const mockExistsSync = mock(() => false);
+const mockReadFile = mock(async () => '');
+const mockAtomicWriteFile = mock(async () => {});
+const mockWarn = mock();
+const mockRecordKnowledgeEvent = mock(async () => null);
+const mockTransactFile = mock(
+	async <T>(
+		filePath: string,
+		read: (filePath: string) => Promise<T>,
+		write: (filePath: string, data: T) => Promise<void>,
+		mutate: (data: T) => T | null,
+	): Promise<boolean> => {
+		const data = await read(filePath);
+		const result = mutate(data);
+		if (result === null) return false;
+		await write(filePath, result);
+		return true;
+	},
+);
+const mockNormalize = mock((text: string) =>
+	text
+		.toLowerCase()
+		.replace(/[^\w\s]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim(),
+);
+const mockJaccardBigram = mock((a: Set<string>, b: Set<string>) => {
+	if (a.size === 0 && b.size === 0) return 1.0;
+	const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
+	const union = new Set([...Array.from(a), ...Array.from(b)]);
+	return intersection.size / union.size;
+});
+const mockWordBigrams = mock((text: string) => {
+	const words = text
+		.toLowerCase()
+		.replace(/[^\w\s]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.split(' ')
+		.filter(Boolean);
+	const bigrams = new Set<string>();
+	for (let i = 0; i < words.length - 1; i++) {
+		bigrams.add(`${words[i]} ${words[i + 1]}`);
+	}
+	return bigrams;
+});
+const mockResolveSwarmKnowledgePath = mock(
+	() => '/mock/.swarm/knowledge.jsonl',
+);
+const mockResolveHiveKnowledgePath = mock(
+	() => '/mock/hive/shared-learnings.jsonl',
+);
+
+beforeEach(() => {
+	Object.assign(readerInternals, originalReaderInternals);
+	readerInternals.existsSync =
+		mockExistsSync as typeof readerInternals.existsSync;
+	readerInternals.readFile = mockReadFile as typeof readerInternals.readFile;
+	readerInternals.atomicWriteFile =
+		mockAtomicWriteFile as typeof readerInternals.atomicWriteFile;
+	readerInternals.transactFile =
+		mockTransactFile as typeof readerInternals.transactFile;
+	readerInternals.warn = mockWarn as typeof readerInternals.warn;
+	readerInternals.readKnowledge =
+		mockReadKnowledge as typeof readerInternals.readKnowledge;
+	readerInternals.readRetractionRecords =
+		mockReadRetractionRecords as typeof readerInternals.readRetractionRecords;
+	readerInternals.resolveHiveKnowledgePath =
+		mockResolveHiveKnowledgePath as typeof readerInternals.resolveHiveKnowledgePath;
+	readerInternals.resolveSwarmKnowledgePath =
+		mockResolveSwarmKnowledgePath as typeof readerInternals.resolveSwarmKnowledgePath;
+	readerInternals.jaccardBigram =
+		mockJaccardBigram as typeof readerInternals.jaccardBigram;
+	readerInternals.normalize = mockNormalize as typeof readerInternals.normalize;
+	readerInternals.wordBigrams =
+		mockWordBigrams as typeof readerInternals.wordBigrams;
+	readerInternals.recordKnowledgeEvent =
+		mockRecordKnowledgeEvent as typeof readerInternals.recordKnowledgeEvent;
 });
 
-// Mock node:fs
-mock.module('node:fs', () => ({
-	...realFs,
-	existsSync: mock(() => false),
-}));
-
-// Mock node:fs/promises
-mock.module('node:fs/promises', () => ({
-	...realFsPromises,
-	mkdir: mock(async () => {}),
-	readFile: mock(async () => ''),
-	writeFile: mock(async () => {}),
-}));
-
-// Mock proper-lockfile so transactShownFile doesn't need a real filesystem
-mock.module('proper-lockfile', () => ({
-	default: {
-		lock: mock(async () => mock(async () => {})),
-	},
-}));
-
-// Mock evidence/task-file.js so atomicWriteFile (used in transactShownFile) is captured
-const mockAtomicWriteFile = mock(async () => {});
-mock.module('../../../src/evidence/task-file.js', () => ({
-	atomicWriteFile: mockAtomicWriteFile,
-}));
-
-// Mock logger
-const mockWarn = mock();
-mock.module('../../../src/utils/logger.js', () => ({
-	warn: mockWarn,
-}));
-
-// updateRetrievalOutcome now records shown→outcome attribution as immutable
-// 'outcome' events (issue #1477) rather than mutating entry.retrieval_outcomes.
-// We spy via the _internals DI seam (per the mock.module allowlist invariant)
-// instead of mocking the knowledge-events module.
-const mockRecordKnowledgeEvent = mock(async () => null);
-
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { atomicWriteFile } from '../../../src/evidence/task-file.js';
-// Import mocked modules
-import {
-	readKnowledge,
-	resolveHiveKnowledgePath,
-	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
-	transactKnowledge,
-} from '../../../src/hooks/knowledge-store.js';
+afterEach(() => {
+	Object.assign(readerInternals, originalReaderInternals);
+});
 
 // ============================================================================
 // Helper Factories
@@ -252,17 +209,15 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 describe('readMergedKnowledge — basic merge', () => {
 	beforeEach(() => {
 		mock.clearAllMocks();
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue([]);
+		mockReadKnowledge.mockResolvedValue([]);
 	});
 
 	it('Test 1: empty both tiers returns empty array', async () => {
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -277,13 +232,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			makeSwarmEntry({ lesson: 'Second swarm lesson' }),
 		];
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return swarmEntries;
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return swarmEntries;
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig({ hive_enabled: false });
 		const result = await readMergedKnowledge('/proj', config);
@@ -297,13 +250,11 @@ describe('readMergedKnowledge — basic merge', () => {
 		const swarmEntry = makeSwarmEntry({ lesson: lessonText });
 		const hiveEntry = makeHiveEntry({ lesson: lessonText });
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [hiveEntry];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [swarmEntry];
+			if (path.includes('hive')) return [hiveEntry];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -323,13 +274,11 @@ describe('readMergedKnowledge — basic merge', () => {
 		const swarmEntry = makeSwarmEntry({ lesson: swarmLesson });
 		const hiveEntry = makeHiveEntry({ lesson: hiveLesson });
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [hiveEntry];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [swarmEntry];
+			if (path.includes('hive')) return [hiveEntry];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -346,13 +295,11 @@ describe('readMergedKnowledge — basic merge', () => {
 		const swarmEntry = makeSwarmEntry({ lesson: swarmLesson });
 		const hiveEntry = makeHiveEntry({ lesson: hiveLesson });
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [hiveEntry];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [swarmEntry];
+			if (path.includes('hive')) return [hiveEntry];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -372,13 +319,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			status: undefined,
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [entryWithUndefinedStatus];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [entryWithUndefinedStatus];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -397,13 +342,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			status: 'established',
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [quarantinedEntry, activeEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [quarantinedEntry, activeEntry];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -418,13 +361,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			status: 'established',
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [establishedEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [establishedEntry];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -439,13 +380,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			status: 'promoted',
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [promotedEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [promotedEntry];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -461,13 +400,11 @@ describe('readMergedKnowledge — basic merge', () => {
 			status: null,
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [nullStatusEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [nullStatusEntry];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -484,7 +421,7 @@ describe('readMergedKnowledge — basic merge', () => {
 describe('readMergedKnowledge — ranking', () => {
 	beforeEach(() => {
 		mock.clearAllMocks();
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue([]);
+		mockReadKnowledge.mockResolvedValue([]);
 	});
 
 	it('Test 6: hive entries ranked above equal-confidence swarm entries', async () => {
@@ -497,13 +434,11 @@ describe('readMergedKnowledge — ranking', () => {
 			confidence: 0.7,
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [hiveEntry];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [swarmEntry];
+			if (path.includes('hive')) return [hiveEntry];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config);
@@ -523,13 +458,11 @@ describe('readMergedKnowledge — ranking', () => {
 			}),
 		);
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return swarmEntries;
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return swarmEntries;
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig({ max_inject_count: 3 });
 		const result = await readMergedKnowledge('/proj', config);
@@ -554,13 +487,11 @@ describe('readMergedKnowledge — ranking', () => {
 			}),
 		];
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return swarmEntries;
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return swarmEntries;
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config); // No context
@@ -590,14 +521,12 @@ describe('readMergedKnowledge — ranking', () => {
 			scope: 'global',
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [];
-				if (path.includes('hive'))
-					return [hiveEntrySameProject, hiveEntryOtherProject];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [];
+			if (path.includes('hive'))
+				return [hiveEntrySameProject, hiveEntryOtherProject];
+			return [];
+		});
 
 		const config = makeConfig();
 		const result = await readMergedKnowledge('/proj', config, context);
@@ -619,18 +548,13 @@ describe('readMergedKnowledge — ranking', () => {
 			scope: 'global',
 		});
 
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
+		mockReadKnowledge.mockImplementation(async (path: string) => {
+			if (path.includes('swarm')) return [swarmEntry];
+			if (path.includes('hive')) return [];
+			return [];
+		});
 
-		// Make mkdir reject so recordLessonsShown (via transactShownFile) fails
-		(mkdir as unknown as ReturnType<typeof mock>).mockRejectedValue(
-			new Error('mkdir failed'),
-		);
+		mockTransactFile.mockRejectedValueOnce(new Error('record failed'));
 
 		const config = makeConfig();
 		const context: ProjectContext = {
@@ -653,9 +577,6 @@ describe('readMergedKnowledge — ranking', () => {
 		expect(mockWarn).toHaveBeenCalledWith(
 			'[swarm] Knowledge: failed to record shown lessons',
 		);
-
-		// Reset mkdir to default success behavior for other tests
-		(mkdir as unknown as ReturnType<typeof mock>).mockResolvedValue(undefined);
 	});
 });
 
@@ -666,20 +587,13 @@ describe('readMergedKnowledge — ranking', () => {
 describe('updateRetrievalOutcome', () => {
 	beforeEach(() => {
 		mock.clearAllMocks();
-		transactKnowledgeResults.length = 0;
-		// Spy on outcome-event emission via the _internals DI seam (issue #1477).
-		readerInternals.recordKnowledgeEvent =
-			mockRecordKnowledgeEvent as unknown as typeof readerInternals.recordKnowledgeEvent;
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue([]);
-		(rewriteKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue(
-			undefined,
-		);
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(false);
-		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue('');
+		mockReadKnowledge.mockResolvedValue([]);
+		mockExistsSync.mockReturnValue(false);
+		mockReadFile.mockResolvedValue('');
 	});
 
 	it('Test 10: no-op when shown file does not exist', async () => {
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(false);
+		mockExistsSync.mockReturnValue(false);
 
 		await updateRetrievalOutcome('/proj', 'phase-5', true);
 
@@ -693,10 +607,8 @@ describe('updateRetrievalOutcome', () => {
 			[phaseInfo]: ['id-1'],
 		};
 
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
-		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
-			JSON.stringify(shownData),
-		);
+		mockExistsSync.mockReturnValue(true);
+		mockReadFile.mockResolvedValue(JSON.stringify(shownData));
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true); // phaseSucceeded
 
@@ -721,10 +633,8 @@ describe('updateRetrievalOutcome', () => {
 			[phaseInfo]: ['id-1'],
 		};
 
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
-		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
-			JSON.stringify(shownData),
-		);
+		mockExistsSync.mockReturnValue(true);
+		mockReadFile.mockResolvedValue(JSON.stringify(shownData));
 
 		await updateRetrievalOutcome('/proj', phaseInfo, false); // phaseSucceeded = false
 
@@ -747,19 +657,16 @@ describe('updateRetrievalOutcome', () => {
 			[phaseInfo]: ['id-1'],
 		};
 
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
-		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
-			JSON.stringify(shownData),
-		);
+		mockExistsSync.mockReturnValue(true);
+		mockReadFile.mockResolvedValue(JSON.stringify(shownData));
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
 
 		// LF-1 fix: the shownFile cleanup now uses atomicWriteFile via transactShownFile
 		// instead of bare writeFile.
-		expect(atomicWriteFile).toHaveBeenCalled();
+		expect(mockAtomicWriteFile).toHaveBeenCalled();
 
-		const atomicCall = (atomicWriteFile as unknown as ReturnType<typeof mock>)
-			.mock.calls[0];
+		const atomicCall = mockAtomicWriteFile.mock.calls[0];
 		const writtenData = JSON.parse(atomicCall[1] as string);
 
 		expect(writtenData[phaseInfo]).toBeUndefined();
@@ -775,16 +682,14 @@ describe('updateRetrievalOutcome', () => {
 			[phaseInfo]: ['swarm-id', 'hive-id'],
 		};
 
-		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
-		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
-			JSON.stringify(shownData),
-		);
+		mockExistsSync.mockReturnValue(true);
+		mockReadFile.mockResolvedValue(JSON.stringify(shownData));
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
 
 		// No knowledge-store reads at all (tier lookup is gone).
-		expect(readKnowledge).not.toHaveBeenCalled();
-		expect(transactKnowledge).not.toHaveBeenCalled();
+		expect(mockReadKnowledge).not.toHaveBeenCalled();
+		expect(mockTransactFile).toHaveBeenCalledTimes(1);
 		// One event per shown id.
 		expect(mockRecordKnowledgeEvent).toHaveBeenCalledTimes(2);
 		const ids = (

@@ -21,15 +21,39 @@ describe('src/knowledge/identity.ts', () => {
 		os.tmpdir(),
 		'opencode-swarm-identity-test-' + Date.now(),
 	);
+	const originalLocalAppData = process.env.LOCALAPPDATA;
+	const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+	const originalHome = process.env.HOME;
 
 	beforeEach(() => {
 		// Create temp test directory
 		if (!existsSync(TEST_BASE_DIR)) {
 			mkdirSync(TEST_BASE_DIR, { recursive: true });
 		}
+		if (process.platform === 'win32') {
+			process.env.LOCALAPPDATA = TEST_BASE_DIR;
+		} else {
+			process.env.XDG_CONFIG_HOME = TEST_BASE_DIR;
+			process.env.HOME = TEST_BASE_DIR;
+		}
 	});
 
 	afterEach(() => {
+		if (originalLocalAppData === undefined) {
+			delete process.env.LOCALAPPDATA;
+		} else {
+			process.env.LOCALAPPDATA = originalLocalAppData;
+		}
+		if (originalXdgConfigHome === undefined) {
+			delete process.env.XDG_CONFIG_HOME;
+		} else {
+			process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+		}
+		if (originalHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHome;
+		}
 		// Clean up temp directory
 		if (existsSync(TEST_BASE_DIR)) {
 			try {

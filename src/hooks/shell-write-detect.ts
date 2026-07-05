@@ -1710,7 +1710,11 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
 	if (isWindowsPath) {
 		return path.win32.resolve(cwd, pathText);
 	}
-	return path.posix.resolve(cwd, pathText);
+	const normalizedRelativeWindowsPath =
+		!path.posix.isAbsolute(pathText) && !/^[a-zA-Z]:[\\/]/.test(pathText)
+			? pathText.replace(/\\/g, '/')
+			: pathText;
+	return path.posix.resolve(cwd, normalizedRelativeWindowsPath);
 }
 
 /**

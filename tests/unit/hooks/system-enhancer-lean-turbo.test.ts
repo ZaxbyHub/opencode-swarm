@@ -97,10 +97,8 @@ describe('System Enhancer — Lean Turbo Banner Injection', () => {
 			);
 		});
 
-		it('banner states standard Turbo Stage B bypass does NOT apply', () => {
-			expect(LEAN_TURBO_BANNER).toContain(
-				'Standard Turbo Stage B bypass does NOT apply to Lean Turbo lanes',
-			);
+		it('banner states lane tasks skip per-task Stage B', () => {
+			expect(LEAN_TURBO_BANNER).toContain('Lane tasks skip per-task Stage B');
 		});
 	});
 

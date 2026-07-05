@@ -141,10 +141,10 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Should not crash
-		// Object is truthy but typeof !== 'string', so regex.test() is never called
-		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		// Should not crash; structured provider errors are normalized so
+		// transient details in error.message still trigger model fallback.
+		expect(session.model_fallback_index).toBe(1);
+		expect(session.pendingAdvisoryMessages?.length).toBe(1);
 	});
 
 	// -------------------------------------------------------------------------

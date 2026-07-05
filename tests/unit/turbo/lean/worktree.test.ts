@@ -169,10 +169,19 @@ describe('provisionWorktree', () => {
 		expect(p).toContain(fakeLaneId);
 	});
 
-	test('returns error when branch already exists', async () => {
-		// git show-ref --verify --quiet exits 0 → branch exists
+	test('returns error when branch already exists in an active worktree', async () => {
+		const branchName = 'swarm-lane/session-abc/lane-1';
+		const worktreeList = `worktree C:\\active-worktree
+HEAD abc123
+branch refs/heads/${branchName}
+`;
+
+		// git show-ref exits 0 and worktree list reports the branch as active.
 		_internals.bunSpawn = (args: string[]) => {
 			if (args.includes('show-ref')) return mockProc(0, '', '');
+			if (args.includes('worktree') && args.includes('list')) {
+				return mockProc(0, worktreeList, '');
+			}
 			return mockProc(0, '', '');
 		};
 
@@ -184,7 +193,8 @@ describe('provisionWorktree', () => {
 		);
 
 		expect(result).toEqual({
-			error: 'Branch already exists: swarm-lane/session-abc/lane-1',
+			error:
+				'Branch already exists and worktree is active: swarm-lane/session-abc/lane-1 (owned by another session)',
 		});
 	});
 

@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$0")"
 ALLOWLIST_FILE="$SCRIPT_DIR/mock-allowlist.txt"
+ALLOWLIST_DISPLAY="scripts/mock-allowlist.txt"
 TEMP_ALLOWLIST="$(mktemp)"
 trap "rm -f '$TEMP_ALLOWLIST'" EXIT
 
@@ -84,5 +85,5 @@ else
   } > "$ALLOWLIST_FILE"
   
   ENTRY_COUNT=$(wc -l < "$TEMP_ALLOWLIST")
-  echo "✓ Updated $ALLOWLIST_FILE with $ENTRY_COUNT entries" >&2
+  echo "✓ Updated $ALLOWLIST_DISPLAY with $ENTRY_COUNT entries" >&2
 fi

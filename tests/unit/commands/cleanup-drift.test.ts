@@ -51,6 +51,10 @@ export const PRESERVED_SWARM_PATHS = [
 	'knowledge.jsonl',
 	'knowledge-rejected.jsonl',
 	'knowledge-retractions.jsonl',
+	// Quarantined suspect entries (durable, FIFO-capped; close never touches it —
+	// see KNOWLEDGE_FAMILY_ARTIFACTS note in close.ts. Written by quarantineEntry
+	// in knowledge-validator.ts).
+	'knowledge-quarantined.jsonl',
 
 	// Spec / curator drift signals (advisory reports consumed by PHASE-WRAP
 	// and final council; must survive the session that produced them)
@@ -260,6 +264,8 @@ test('singleton preservation drift guard (FR-020) — new singleton in swarmStat
 	swarmState.fullAutoEnabledInConfig = true;
 	swarmState.curatorInitAgentNames = ['__fr020_init'];
 	swarmState.curatorPhaseAgentNames = ['__fr020_phase'];
+	swarmState.curatorPostmortemAgentNames = ['__fr020_postmortem'];
+	swarmState.curatorConsolidationAgentNames = ['__fr020_consolidation'];
 	swarmState.skillImproverAgentNames = ['__fr020_skill'];
 	swarmState.specWriterAgentNames = ['__fr020_spec'];
 	swarmState.generatedAgentNames = ['__fr020_gen'];
@@ -274,6 +280,8 @@ test('singleton preservation drift guard (FR-020) — new singleton in swarmStat
 		'fullAutoEnabledInConfig',
 		'curatorInitAgentNames',
 		'curatorPhaseAgentNames',
+		'curatorPostmortemAgentNames',
+		'curatorConsolidationAgentNames',
 		'skillImproverAgentNames',
 		'specWriterAgentNames',
 		'generatedAgentNames',
@@ -321,7 +329,7 @@ test('singleton preservation drift guard (FR-020) — new singleton in swarmStat
 				`  cleared but not preserved: ${clearedNotInPreserve.join(', ')}\n` +
 				`  This happens when a new init-time singleton is added to swarmState (in src/state.ts) and cleared in resetSwarmState, ` +
 				`but the name was not added to the save/restore list inside resetSwarmStatePreservingSingletons (and to the preserveList in this test).\n` +
-				`  Known preserve list (7): ${preserveList.join(', ')}`,
+				`  Known preserve list (9): ${preserveList.join(', ')}`,
 		);
 	}
 

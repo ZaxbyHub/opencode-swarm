@@ -8,7 +8,8 @@
  *
  * Strategy: run `buildWorkspaceGraph` on synthetic files containing
  * adversarial content and assert that the scan completes within a tight
- * wall-clock budget (500 ms per file for a single-file graph).
+ * wall-clock budget (1500 ms per file for a single-file graph; coverage
+ * instrumentation adds measurable overhead on Windows).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -17,7 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildWorkspaceGraph } from '../../../src/tools/repo-graph';
 
-const REDOS_TIME_BUDGET_MS = 500;
+const REDOS_TIME_BUDGET_MS = 1500;
 
 describe('parseFileImports ReDoS resistance', () => {
 	let tempDir: string;

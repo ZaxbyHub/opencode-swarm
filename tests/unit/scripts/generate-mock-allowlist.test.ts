@@ -38,14 +38,14 @@ function runGenerateAllowlist(checkMode = false): {
 	return {
 		stdout: result.stdout || '',
 		stderr: result.stderr || '',
-		exitCode: result.status || 1,
+		exitCode: result.status ?? 1,
 	};
 }
 
 describe('generate-mock-allowlist.sh', () => {
 	afterEach(() => {
 		// Restore the original allowlist after each test
-		spawnSync('git', ['checkout', ALLOWLIST_PATH], {
+		spawnSync('git', ['checkout', '--', 'scripts/mock-allowlist.txt'], {
 			cwd: REPO_ROOT,
 			stdio: 'pipe',
 		});
@@ -55,7 +55,7 @@ describe('generate-mock-allowlist.sh', () => {
 		if (isWindows) return;
 		// On the live repo the allowlist is already current
 		const result = runGenerateAllowlist(true);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 		expect(result.stderr).toContain('up-to-date');
 	});
 
@@ -89,7 +89,7 @@ describe('generate-mock-allowlist.sh', () => {
 		expect(result.stderr).toMatch(
 			/Updated scripts\/mock-allowlist\.txt with \d+ entries/,
 		);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
 
 	test('should produce valid allowlist format', () => {

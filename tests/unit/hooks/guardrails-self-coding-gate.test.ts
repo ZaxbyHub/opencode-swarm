@@ -72,13 +72,13 @@ describe('guardrails self-coding detection gate (Task 7A.2)', () => {
 			expect(session?.architectWriteCount).toBe(0);
 		});
 
-		it('architect writes to package.json → should NOT increment architectWriteCount', async () => {
+		it('architect writes to docs/guide.md → should NOT increment architectWriteCount', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: 'package.json' });
+			const output = makeOutput({ filePath: 'docs/guide.md' });
 
 			await hooks.toolBefore(input, output);
 
@@ -213,10 +213,10 @@ describe('guardrails self-coding detection gate (Task 7A.2)', () => {
 				makeOutput({ filePath: 'src/auth/login.ts' }),
 			);
 
-			// Write to package.json (not counted)
+			// Write to docs (not counted)
 			await hooks.toolBefore(
 				makeInput('test-session', 'write', 'call-4'),
-				makeOutput({ filePath: 'package.json' }),
+				makeOutput({ filePath: 'docs/guide.md' }),
 			);
 
 			const session = getAgentSession('test-session');

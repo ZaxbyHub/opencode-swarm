@@ -150,6 +150,7 @@ let testDir: string;
 let originalConsoleLog: typeof console.log;
 let originalConsoleWarn: typeof console.warn;
 let originalConsoleError: typeof console.error;
+let originalDebugEnv: string | undefined;
 
 describe('parseCriticResponse', () => {
 	beforeEach(() => {
@@ -173,6 +174,8 @@ describe('parseCriticResponse', () => {
 		originalConsoleLog = console.log;
 		originalConsoleWarn = console.warn;
 		originalConsoleError = console.error;
+		originalDebugEnv = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
 		consoleLogCalls.length = 0;
 		consoleWarnCalls.length = 0;
 		consoleErrorCalls.length = 0;
@@ -200,6 +203,11 @@ describe('parseCriticResponse', () => {
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
 		console.error = originalConsoleError;
+		if (originalDebugEnv === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebugEnv;
+		}
 
 		// Restore cross-module mocks
 		mock.restore();
@@ -639,6 +647,8 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 		originalConsoleLog = console.log;
 		originalConsoleWarn = console.warn;
 		originalConsoleError = console.error;
+		originalDebugEnv = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
 		consoleLogCalls.length = 0;
 		consoleWarnCalls.length = 0;
 		consoleErrorCalls.length = 0;
@@ -666,6 +676,11 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
 		console.error = originalConsoleError;
+		if (originalDebugEnv === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebugEnv;
+		}
 		try {
 			fs.rmSync(testDir, { recursive: true, force: true });
 		} catch {

@@ -178,6 +178,58 @@ const CAS_BACKOFF_CAP_MS = 250;
 const CAS_BACKOFF_JITTER = 0.25;
 const CAS_MAX_RETRIES = 3; // matches pre-existing maxRetries: 3 call sites
 
+function derivePhaseStatusesInPlace(plan: Plan): void {
+	for (const phase of plan.phases) {
+		const tasks = phase.tasks;
+		if (tasks.length > 0 && tasks.every((t) => t.status === 'completed')) {
+			phase.status = 'complete';
+		} else if (tasks.some((t) => t.status === 'in_progress')) {
+			phase.status = 'in_progress';
+		} else if (tasks.some((t) => t.status === 'blocked')) {
+			phase.status = 'blocked';
+		} else {
+			phase.status = 'pending';
+		}
+	}
+}
+
+function overlayLedgerStatuses(
+	validated: Plan,
+	replayed: Plan,
+	ledgerStatusTaskIds: ReadonlySet<string>,
+): Plan {
+	const projected = structuredClone(validated);
+	const statusByTaskId = new Map<string, TaskStatus>();
+	for (const phase of replayed.phases) {
+		for (const task of phase.tasks) {
+			if (ledgerStatusTaskIds.has(task.id)) {
+				statusByTaskId.set(task.id, task.status);
+			}
+		}
+	}
+	for (const phase of projected.phases) {
+		for (const task of phase.tasks) {
+			const replayedStatus = statusByTaskId.get(task.id);
+			if (replayedStatus) task.status = replayedStatus;
+		}
+	}
+	derivePhaseStatusesInPlace(projected);
+	return projected;
+}
+
+function collectLedgerStatusTaskIds(events: LedgerEvent[]): Set<string> {
+	const statusTaskIds = new Set<string>();
+	for (const event of events) {
+		if (
+			event.event_type === 'task_status_changed' &&
+			typeof event.task_id === 'string'
+		) {
+			statusTaskIds.add(event.task_id);
+		}
+	}
+	return statusTaskIds;
+}
+
 /**
  * Append a ledger event with exponential-backoff retry on stale-writer conflicts.
  *
@@ -1079,18 +1131,7 @@ export async function savePlan(
 
 	// Derive phase status from task statuses on every save (fixes remaining Issue #145):
 	// Ensures phase status is always consistent even when architect calls save_plan directly.
-	for (const phase of validated.phases) {
-		const tasks = phase.tasks;
-		if (tasks.length > 0 && tasks.every((t) => t.status === 'completed')) {
-			phase.status = 'complete';
-		} else if (tasks.some((t) => t.status === 'in_progress')) {
-			phase.status = 'in_progress';
-		} else if (tasks.some((t) => t.status === 'blocked')) {
-			phase.status = 'blocked';
-		} else {
-			phase.status = 'pending';
-		}
-	}
+	derivePhaseStatusesInPlace(validated);
 
 	// LEDGER-FIRST: Append task_updated events before writing projections.
 	// The ledger is the source of truth; plan.json is a projection.
@@ -1442,11 +1483,34 @@ export async function savePlan(
 		}
 	}
 
+	const ledgerStatusTaskIds = collectLedgerStatusTaskIds(
+		await readLedgerEvents(directory),
+	);
+	const replayedBeforeProjection = await replayFromLedger(directory);
+	const projectionCandidate = replayedBeforeProjection
+		? overlayLedgerStatuses(
+				validated,
+				replayedBeforeProjection,
+				ledgerStatusTaskIds,
+			)
+		: validated;
+	if (
+		replayedBeforeProjection &&
+		computePlanHash(replayedBeforeProjection) !==
+			computePlanHash(projectionCandidate)
+	) {
+		await takeSnapshotEvent(directory, projectionCandidate, {
+			planHashAfter: computePlanHash(projectionCandidate),
+			source: 'savePlan_structural_projection',
+		});
+	}
+
 	// After the ledger event loop, replay the authoritative ledger before writing
 	// derived projections. Concurrent writers may have appended valid events since
 	// the caller built `validated`; plan.json and plan.md must reflect the ledger,
 	// not a stale caller snapshot.
-	const projectedPlan = (await replayFromLedger(directory)) ?? validated;
+	const projectedPlan =
+		(await replayFromLedger(directory)) ?? projectionCandidate;
 
 	// After the ledger event loop, check if we should take a snapshot
 	const SNAPSHOT_INTERVAL = 50;

@@ -225,7 +225,7 @@ export async function handleCouplingCommand(
 			persistStatus = {
 				requested: true,
 				written: true,
-				path: path.relative(directory, writtenAt),
+				path: path.relative(directory, writtenAt).replace(/\\/g, '/'),
 			};
 		} catch (err) {
 			persistStatus = {

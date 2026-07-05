@@ -100,7 +100,7 @@ function readUnitId(db: Database, bundleId: string): string | null {
 // 1. Migration v8 applies, is idempotent, and adds the column + index
 // ---------------------------------------------------------------------------
 describe('migration v8 — add_recall_usage_unit_id', () => {
-	test('applies exactly once, advances max version to 8, and adds unit_id column + index', async () => {
+	test('applies exactly once and adds unit_id column + index', async () => {
 		const root = await providerRoot('migration-v8');
 		const provider = track(
 			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
@@ -131,7 +131,7 @@ describe('migration v8 — add_recall_usage_unit_id', () => {
 				'SELECT MAX(version) as version FROM schema_migrations',
 			)
 			.get();
-		expect(maxVersion?.version).toBe(8);
+		expect(maxVersion?.version).toBeGreaterThanOrEqual(8);
 
 		const columns = verify
 			.query<{ name: string }, []>('PRAGMA table_info(memory_recall_usage)')

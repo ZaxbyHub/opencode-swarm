@@ -54,7 +54,7 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 	});
 
 	describe('Wiring existence in src/index.ts', () => {
-		test('safeHook(repoGraphHook.toolAfter) call exists at line 1055', () => {
+		test('safeHook(repoGraphHook.toolAfter) call exists in the toolAfter chain', () => {
 			// Read the source file to verify the wiring exists
 			const indexPath = path.resolve(__dirname, '../../../src/index.ts');
 			const sourceCode = readFileSync(indexPath, 'utf-8');
@@ -68,11 +68,6 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 			);
 
 			expect(wiringLine).not.toBe(-1);
-
-			// Verify the line number is in a plausible range (allowing for file growth)
-			const actualLineNum = wiringLine + 1;
-			expect(actualLineNum).toBeGreaterThanOrEqual(1050);
-			expect(actualLineNum).toBeLessThanOrEqual(1600);
 		});
 
 		test('wiring comment "Repo graph incremental update on write tools" exists', () => {
@@ -409,7 +404,7 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 			expect(typeof hook.toolAfter).toBe('function');
 		});
 
-		test('repoGraphHook is created and initialized at lines 162-163 in src/index.ts', () => {
+		test('repoGraphHook is created and initialized via deferred queueMicrotask in src/index.ts', () => {
 			const indexPath = path.resolve(__dirname, '../../../src/index.ts');
 			const sourceCode = readFileSync(indexPath, 'utf-8');
 			const lines = sourceCode.split('\n');
@@ -422,16 +417,10 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 					line.includes('createRepoGraphBuilderHook'),
 			);
 			expect(createLine).not.toBe(-1);
-			// Line number range grows as file grows; allow a wide upper bound
-			expect(createLine + 1).toBeGreaterThanOrEqual(160);
-			expect(createLine + 1).toBeLessThanOrEqual(500);
 
-			// After creation, init is dispatched via queueMicrotask (not called inline)
-			const nextLine = lines[createLine + 1];
-			expect(
-				nextLine.includes('repoGraphHook.init()') ||
-					nextLine.includes('queueMicrotask'),
-			).toBe(true);
+			const initWindow = lines.slice(createLine, createLine + 15).join('\n');
+			expect(initWindow).toContain('queueMicrotask');
+			expect(initWindow).toMatch(/repoGraphHook\s*\.\s*init\s*\(/);
 		});
 	});
 });

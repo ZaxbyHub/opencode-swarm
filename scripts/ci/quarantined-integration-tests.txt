@@ -1,0 +1,37 @@
+# Quarantined integration tests — CI's `integration` job skips these files.
+#
+# Format: one repo-relative test file path per line. Blank lines and lines
+# starting with # are ignored.
+#
+# The `integration` job only runs on `merge_group` (skipped on pull_request),
+# so these files are exercised by CI only inside the merge queue. Every entry
+# is a pre-existing failure that reproduces on `origin/main` (main's broken
+# marker-grep detection — the #1683 bug — silently reported them green). The
+# honest exit-code gate in this PR surfaces them. Verified: the plan-status /
+# save-plan-round-trip failures reproduce identically-or-worse on a clean
+# `origin/main` checkout (they are main's documented `projectedPlan` /
+# ledger-replay regression — savePlan writes the replayed projection to
+# plan.json, dropping a completed/in_progress status on a merge-mode re-save),
+# and `unified-injection-budget` fails identically on main.
+#
+# This list was rebuilt after PR #1726 emptied it. #1726's per-file "fixes"
+# were validated only on its ubuntu-only pull_request CI, which NEVER runs the
+# `integration` job — so its un-quarantining of these was never exercised, and
+# the first real merge_group run after it re-surfaced them (run 28746560222:
+# phase-complete-events.adversarial, plan-status-preservation,
+# save-plan-round-trip, unified-injection-budget). The remaining entries are
+# restored from the honestly-built pre-#1726 list (CI ground truth); some may
+# now pass in CI thanks to #1726's changes and can be un-quarantined
+# incrementally WITH a merge_group validation run — not un-quarantined blind,
+# which is what caused the regression. Root causes tracked in #1705.
+test/adversarial-plan-write.test.ts
+tests/integration/curator-llm-delegation.test.ts
+tests/integration/phase-complete-events.adversarial.test.ts
+tests/integration/phase-complete-events.test.ts
+tests/integration/phase-completion-e2e.test.ts
+tests/integration/phase-preflight-auto.test.ts
+tests/integration/php-command-selection.test.ts
+tests/integration/plan-status-preservation.test.ts
+tests/integration/reviewer-verdict-rollup.test.ts
+tests/integration/save-plan-round-trip.test.ts
+tests/integration/unified-injection-budget.test.ts

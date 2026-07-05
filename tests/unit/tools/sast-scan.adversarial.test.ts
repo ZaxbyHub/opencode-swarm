@@ -21,13 +21,17 @@ import * as fs from 'node:fs';
 import { sastScan } from '../../../src/tools/sast-scan';
 
 describe('SAST Scan - Adversarial Tests (R2)', () => {
-	const MOCK_DIR = 'C:\\opencode\\opencode-swarm\\src';
+	const MOCK_DIR = process.cwd();
 
 	beforeEach(() => {
 		// Mock fs.existsSync to return false for non-existent paths
 		spyOn(fs, 'existsSync').mockImplementation((path: any) => {
 			const pathStr = String(path);
-			return pathStr.includes('valid') || pathStr.includes('exists');
+			return (
+				pathStr === MOCK_DIR ||
+				pathStr.includes('valid') ||
+				pathStr.includes('exists')
+			);
 		});
 
 		// Mock fs.statSync

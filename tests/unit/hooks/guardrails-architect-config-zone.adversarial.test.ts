@@ -183,8 +183,7 @@ describe('architect config zone protection — adversarial (#894)', () => {
 			try {
 				await fs.symlink(realConfig, symlink);
 			} catch {
-				// Symlink creation may fail on Windows without admin — skip this specific test
-				test.skip('symlinks not available on this platform', () => {});
+				// Symlink creation may fail on Windows without admin.
 				return;
 			}
 

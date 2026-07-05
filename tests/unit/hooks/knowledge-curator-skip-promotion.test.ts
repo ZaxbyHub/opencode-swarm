@@ -26,10 +26,12 @@ const LESSON =
 // (which has dedicated suites), so provide an enrichment delegate that returns
 // valid v3 fields and lets the entry store through the real pipeline.
 const v3Delegate = async (): Promise<string> =>
-	JSON.stringify({
-		applies_to_agents: ['architect'],
-		required_actions: ['run the full test suite before phase completion'],
-	});
+	JSON.stringify([
+		{
+			applies_to_agents: ['architect'],
+			required_actions: ['run the full test suite before phase completion'],
+		},
+	]);
 
 beforeEach(() => {
 	tempDir = realpathSync(

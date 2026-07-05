@@ -15,6 +15,15 @@ import {
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
+export const _internals = {
+	transactKnowledge,
+	getArchivedKnowledgeIds,
+	findSkillsBySourceKnowledgeId,
+	findStaleSkillsBySourceKnowledgeId,
+	retireOrMarkStale,
+	recordKnowledgeEvent,
+};
+
 export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
@@ -53,22 +62,25 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 			let remaining = 0;
 			let isPromoted = false;
 			try {
-				await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
-					const entryToDelete = entries.find((entry) => entry.id === id);
-					if (!entryToDelete) return null; // not found, no write
+				await _internals.transactKnowledge<SwarmKnowledgeEntry>(
+					swarmPath,
+					(entries) => {
+						const entryToDelete = entries.find((entry) => entry.id === id);
+						if (!entryToDelete) return null; // not found, no write
 
-					// Guard: prevent deletion of promoted entries by default
-					if (entryToDelete.status === 'promoted') {
-						isPromoted = true;
-						return null; // no write
-					}
+						// Guard: prevent deletion of promoted entries by default
+						if (entryToDelete.status === 'promoted') {
+							isPromoted = true;
+							return null; // no write
+						}
 
-					const filtered = entries.filter((entry) => entry.id !== id);
-					if (filtered.length === entries.length) return null; // not found, no write
-					found = true;
-					remaining = filtered.length;
-					return filtered;
-				});
+						const filtered = entries.filter((entry) => entry.id !== id);
+						if (filtered.length === entries.length) return null; // not found, no write
+						found = true;
+						remaining = filtered.length;
+						return filtered;
+					},
+				);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : 'Unknown error';
 				return JSON.stringify({
@@ -101,19 +113,19 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 			// Read the full set of already-archived IDs BEFORE queuing the
 			// microtask so retireOrMarkStale can correctly determine if ALL
 			// sources for a multi-source skill are archived.
-			const allArchivedIds = await getArchivedKnowledgeIds(directory);
+			const allArchivedIds =
+				await _internals.getArchivedKnowledgeIds(directory);
 			allArchivedIds.add(id);
 
 			queueMicrotask(async () => {
 				try {
-					const affectedSkillDirs = await findSkillsBySourceKnowledgeId(
-						directory,
-						id,
-					);
-					const staleSkillDirs = await findStaleSkillsBySourceKnowledgeId(
-						directory,
-						allArchivedIds,
-					);
+					const affectedSkillDirs =
+						await _internals.findSkillsBySourceKnowledgeId(directory, id);
+					const staleSkillDirs =
+						await _internals.findStaleSkillsBySourceKnowledgeId(
+							directory,
+							allArchivedIds,
+						);
 					const allSkillDirs = new Set([
 						...affectedSkillDirs,
 						...staleSkillDirs,
@@ -128,7 +140,7 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 						const slug = path.basename(skillDir);
 						if (slugSet.has(slug)) continue;
 						slugSet.add(slug);
-						const result = await retireOrMarkStale(
+						const result = await _internals.retireOrMarkStale(
 							directory,
 							skillDir,
 							allArchivedIds,
@@ -145,7 +157,7 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 						retiredCount,
 						staleCount,
 					};
-					await recordKnowledgeEvent(directory, batchEvent);
+					await _internals.recordKnowledgeEvent(directory, batchEvent);
 				} catch (err) {
 					warn(
 						`[knowledge-remove] post-purge skill invalidation failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -831,7 +831,8 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
  *
  * Verifies:
  * - scope:"all" without allow_full_suite returns error
- * - scope:"all" with allow_full_suite:true does NOT return error (guard passes through)
+ * - scope:"all" with allow_full_suite:true still returns error unless the
+ *   process-level CI opt-in is set
  * - scope:"all" with allow_full_suite:false returns error
  * - scope:"convention" and scope:"graph" are unaffected by allow_full_suite
  */
@@ -893,11 +894,7 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			15000,
 		);
 
-		test('scope:"all" with allow_full_suite:true and files:[] passes through zero-test-files guard', async () => {
-			// This test verifies that scope:"all" with allow_full_suite:true does NOT get rejected
-			// by the zero-test-files guard when files is an empty array.
-			// Uses a temp dir with no framework so we get "No test framework detected"
-			// rather than actually running the project's test suite.
+		test('scope:"all" with allow_full_suite:true and files:[] is still blocked for agent use', async () => {
 			const noFrameworkDir = fs.realpathSync(
 				fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-allfiles-')),
 			);
@@ -910,15 +907,11 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Should NOT have the zero-test-files guard error
 			expect(parsed.error).not.toContain(
 				'Provided source files resolved to zero test files',
 			);
-			// Should NOT have the allow_full_suite error
 			expect(parsed.error).not.toContain('allow_full_suite');
-			// Will have "No test framework detected" since there's no framework in temp dir
-			// This proves the code passed through the scope dispatch and reached framework detection
-			expect(parsed.error).toContain('No test framework detected');
+			expect(parsed.error).toContain('scope "all" is blocked');
 
 			process.chdir(savedCwd);
 			(() => {
@@ -930,10 +923,7 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			})();
 		});
 
-		test('scope:"all" with allow_full_suite:true passes through zero-test-files guard', async () => {
-			// Codex Bug 1 fix verification: scope:"all" with allow_full_suite:true and NO files argument
-			// Uses a temp dir with no framework so we get "No test framework detected"
-			// rather than actually running the project's test suite.
+		test('scope:"all" with allow_full_suite:true and no files is still blocked for agent use', async () => {
 			const noFrameworkDir = fs.realpathSync(
 				fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-allnofiles-')),
 			);
@@ -946,14 +936,11 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Should NOT have the zero-test-files guard error
 			expect(parsed.error).not.toContain(
 				'Provided source files resolved to zero test files',
 			);
-			// Should NOT have the allow_full_suite error
 			expect(parsed.error).not.toContain('allow_full_suite');
-			// Result should be "No test framework detected" (proving it passed through to framework detection)
-			expect(parsed.error).toContain('No test framework detected');
+			expect(parsed.error).toContain('scope "all" is blocked');
 
 			process.chdir(savedCwd);
 			(() => {
@@ -1663,13 +1650,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		const originalCwd = process.cwd();
 		process.chdir(tempDir);
 
-		fs.writeFileSync(
-			'package.json',
-			JSON.stringify({
-				scripts: { test: 'vitest run' },
-				devDependencies: { vitest: '^1.0.0' },
-			}),
-		);
+		fs.writeFileSync('package.json', JSON.stringify({ name: 'no-runner' }));
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
 
@@ -1866,13 +1847,6 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		const originalCwd = process.cwd();
 		process.chdir(tempDir);
 
-		fs.writeFileSync(
-			'package.json',
-			JSON.stringify({
-				scripts: { test: 'vitest run' },
-				devDependencies: { vitest: '^1.0.0' },
-			}),
-		);
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
 		fs.writeFileSync(
@@ -1880,14 +1854,11 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 			'import { x } from "./utils"; export const v = x;',
 		);
 
-		const result = await test_runner.execute(
-			{ scope: 'convention', files: ['src/utils.ts', 'src/utils.test.ts'] },
-			{} as any,
-		);
-		const parsed = JSON.parse(result);
-
-		// Must NOT hit the source-file guard (1 source file is within limit)
-		expect(parsed.error).not.toContain('accepts at most');
+		const resolved = getTestFilesFromConvention([
+			'src/utils.ts',
+			'src/utils.test.ts',
+		]).map((p) => p.replace(/\\/g, '/'));
+		expect(resolved).toEqual(['src/utils.test.ts']);
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1897,7 +1868,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 				/* ignore */
 			}
 		})();
-	}, 15000);
+	}, 5000);
 
 	test('scope "all" blocked error does not recommend "graph" with multiple files', async () => {
 		const result = await test_runner.execute({ scope: 'all' }, {} as any);

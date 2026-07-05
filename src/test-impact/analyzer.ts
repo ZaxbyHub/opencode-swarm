@@ -390,6 +390,7 @@ function addImpactEdgesForTestFile(
 async function buildImpactMapInternal(
 	cwd: string,
 ): Promise<Record<string, string[]>> {
+	_clearGoModuleCache();
 	const testFiles = findTestFilesSync(cwd);
 	const impactMap: Record<string, string[]> = {};
 

@@ -53,6 +53,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	computeConfidence: mockComputeConfidence,
 	inferTags: mockInferTags,
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
+	getArchivedKnowledgeIds: mock(async () => new Set<string>()),
 	sweepStaleTodos: mock(async () => ({ swept: 0, remaining: 0 })),
 	sweepAgedEntries: mock(async () => ({ swept: 0, remaining: 0 })),
 	bumpKnowledgeConfidenceBatch: async () => {},

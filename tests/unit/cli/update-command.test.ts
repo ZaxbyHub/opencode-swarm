@@ -362,7 +362,8 @@ describe('evictLockFiles', () => {
 		// Lock file failure → exit 1
 		expect(exitCode).toBe(1);
 		expect(stderr).toContain('Could not clear lock file');
-		expect(stderr).toContain('path is a directory');
+		expect(stderr).toContain('bun.lock');
+		expect(stderr).toMatch(/path is a directory|EISDIR|EPERM/);
 	});
 
 	test('no-cache-found path lists lock file paths in console output', async () => {

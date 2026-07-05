@@ -19,6 +19,7 @@ import {
 import { startAgentSession, swarmState } from '../../../src/state';
 
 let tmpDir: string;
+let originalXdgConfigHome: string | undefined;
 const SESSION_ID = 'sess-full-auto-cmd';
 
 beforeEach(() => {
@@ -26,6 +27,8 @@ beforeEach(() => {
 		fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-cmd-')),
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+	originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+	process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'xdg-config');
 	swarmState.fullAutoEnabledInConfig = true;
 	startAgentSession(SESSION_ID, 'architect');
 });
@@ -33,6 +36,11 @@ beforeEach(() => {
 afterEach(() => {
 	swarmState.agentSessions.delete(SESSION_ID);
 	swarmState.fullAutoEnabledInConfig = false;
+	if (originalXdgConfigHome === undefined) {
+		delete process.env.XDG_CONFIG_HOME;
+	} else {
+		process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+	}
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {

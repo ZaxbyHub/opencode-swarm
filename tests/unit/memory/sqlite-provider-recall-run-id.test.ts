@@ -283,11 +283,10 @@ describe('backfillRecallRunIds — one-time guard prevents re-scan', () => {
 				'SELECT MAX(version) as version FROM schema_migrations',
 			)
 			.get();
-		// Highest applied migration. Advances as additive migrations are added
-		// (v8 add_recall_usage_unit_id — B.1). The invariant under test is that
-		// migration 7 is applied exactly once (asserted above), not that 7 is the
-		// terminal version.
-		expect(maxVersion?.version).toBe(8);
+		// Highest applied migration can advance as additive migrations are added.
+		// The invariant under test is that migration 7 is applied exactly once
+		// (asserted above), not that 7/8 is the terminal version.
+		expect(maxVersion?.version).toBeGreaterThanOrEqual(8);
 	});
 });
 
