@@ -25,6 +25,7 @@ tests/unit/cli/update-command.test.ts
 tests/unit/full-auto/adversarial-fixes.test.ts
 tests/unit/hooks/destructive-command-guard.test.ts
 tests/unit/tools/pre-check-batch-sast-preexisting.test.ts
+tests/unit/tools/repo-map.test.ts
 tests/unit/tools/save-plan-adversarial.test.ts
 tests/unit/worktree/provision-worktree.adversarial.test.ts
 tests/unit/worktree/provision-worktree.test.ts

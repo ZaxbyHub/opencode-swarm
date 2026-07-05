@@ -44,7 +44,13 @@ describe('normalizePathWithCache', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('resolves outside the working directory');
+			// Cross-platform: an out-of-root path is blocked with the POSIX
+			// "resolves outside" wording, or — for a cross-drive absolute path
+			// on Windows (e.g. /etc/passwd vs a D:\ cwd) — the cross-drive
+			// wording. Both are valid containment-block reasons.
+			expect(result.reason).toMatch(
+				/resolves outside the working directory|different drive\/root/,
+			);
 		}
 	});
 
@@ -58,7 +64,13 @@ describe('normalizePathWithCache', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('resolves outside the working directory');
+			// Cross-platform: an out-of-root path is blocked with the POSIX
+			// "resolves outside" wording, or — for a cross-drive absolute path
+			// on Windows (e.g. /etc/passwd vs a D:\ cwd) — the cross-drive
+			// wording. Both are valid containment-block reasons.
+			expect(result.reason).toMatch(
+				/resolves outside the working directory|different drive\/root/,
+			);
 		}
 	});
 });
@@ -876,7 +888,13 @@ describe('Security: path traversal protection', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('resolves outside the working directory');
+			// Cross-platform: an out-of-root path is blocked with the POSIX
+			// "resolves outside" wording, or — for a cross-drive absolute path
+			// on Windows (e.g. /etc/passwd vs a D:\ cwd) — the cross-drive
+			// wording. Both are valid containment-block reasons.
+			expect(result.reason).toMatch(
+				/resolves outside the working directory|different drive\/root/,
+			);
 		}
 	});
 
@@ -888,7 +906,13 @@ describe('Security: path traversal protection', () => {
 		const result = checkFileAuthority('coder', '/etc/passwd', TEST_CWD);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('resolves outside the working directory');
+			// Cross-platform: an out-of-root path is blocked with the POSIX
+			// "resolves outside" wording, or — for a cross-drive absolute path
+			// on Windows (e.g. /etc/passwd vs a D:\ cwd) — the cross-drive
+			// wording. Both are valid containment-block reasons.
+			expect(result.reason).toMatch(
+				/resolves outside the working directory|different drive\/root/,
+			);
 		}
 	});
 });
