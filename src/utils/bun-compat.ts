@@ -114,68 +114,6 @@ export function bunFile(filePath: string): BunCompatFile {
 }
 
 /**
- * Renames `tempPath` to `finalPath` and fsyncs the parent directory so the
- * rename is durable and immediately visible to subsequent reads.
- *
- * Why this exists: a plain `rename()` can complete before the directory
- * entry update is flushed — on macOS/APFS this is documented, and the same
- * class of delayed-visibility gap has been observed on Linux CI runners
- * (container overlay filesystems). Without this fsync, a reader that opens
- * `finalPath` immediately after a caller's `renameSync` resolves can
- * transiently see the *previous* file's contents or ENOENT.
- *
- * Every call site in this codebase that does its own `bunWrite(tempPath,
- * ...)` + separate rename (rather than routing through `bunWrite`'s own
- * internal Node-fallback rename) must use this helper instead of a raw
- * `renameSync`/`fs.rename` — that raw call is exactly the gap this closes.
- *
- * Includes the Windows EEXIST/EBUSY/EPERM retry loop: on Windows, rename can
- * race with file-handle release shortly after a write.
- */
-export async function atomicRename(
-	tempPath: string,
-	finalPath: string,
-): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			await fsPromises.rename(tempPath, finalPath);
-			lastError = undefined;
-			break;
-		} catch (err) {
-			lastError = err;
-			const code = (err as NodeJS.ErrnoException).code;
-			if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
-				break;
-			}
-			await new Promise((r) => setTimeout(r, WINDOWS_RENAME_RETRY_DELAY_MS));
-		}
-	}
-	if (lastError) {
-		try {
-			await fsPromises.unlink(tempPath);
-		} catch {
-			// ignore — original error is what matters
-		}
-		throw lastError;
-	}
-
-	// fsync the parent directory so the rename is durable and immediately
-	// visible to subsequent reads (see doc comment above).
-	try {
-		const dir = path.dirname(finalPath);
-		const dirFd = await fsPromises.open(dir, 'r');
-		try {
-			await dirFd.sync();
-		} finally {
-			await dirFd.close();
-		}
-	} catch {
-		// fsync is best-effort; some filesystems/OSes don't support directory fsync.
-	}
-}
-
-/**
  * Atomic file write. On Bun this delegates to `Bun.write`. On Node we write
  * to a temp file in the same directory and rename atomically — the same
  * semantics every existing call site already expects via Bun.write.
@@ -221,7 +159,46 @@ export async function bunWrite(
 	}
 
 	await fsPromises.writeFile(tempPath, buffer);
-	await atomicRename(tempPath, filePath);
+
+	// Windows can briefly hold a file handle after close, so retry on EEXIST/EBUSY.
+	let lastError: unknown;
+	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
+		try {
+			await fsPromises.rename(tempPath, filePath);
+			lastError = undefined;
+			break;
+		} catch (err) {
+			lastError = err;
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
+				break;
+			}
+			await new Promise((r) => setTimeout(r, WINDOWS_RENAME_RETRY_DELAY_MS));
+		}
+	}
+	if (lastError) {
+		// Rename failed permanently. Best-effort temp cleanup.
+		try {
+			await fsPromises.unlink(tempPath);
+		} catch {
+			// ignore — original error is what matters
+		}
+		throw lastError;
+	}
+
+	// fsync the parent directory so the rename is durable on macOS/APFS.
+	// On macOS the rename can complete before the directory entry is flushed;
+	// subsequent reads may see stale data or null without this.
+	try {
+		const dirFd = await fsPromises.open(dir, 'r');
+		try {
+			await dirFd.sync();
+		} finally {
+			await dirFd.close();
+		}
+	} catch {
+		// fsync is best-effort; some filesystems/OSes don't support directory fsync.
+	}
 
 	const stats = await fsPromises.stat(filePath);
 	return stats.size;

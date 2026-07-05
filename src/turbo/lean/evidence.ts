@@ -12,7 +12,7 @@
 import { rmSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { atomicRename, bunWrite } from '../../utils/bun-compat';
+import { bunWrite } from '../../utils/bun-compat';
 
 /**
  * Evidence record for a single lane.
@@ -181,7 +181,7 @@ async function atomicWriteJson<T>(filePath: string, data: T): Promise<void> {
 	const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
 	try {
 		await bunWrite(tempPath, content);
-		await atomicRename(tempPath, filePath);
+		await fs.rename(tempPath, filePath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {

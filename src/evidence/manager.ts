@@ -24,7 +24,7 @@ import {
 } from '../config/evidence-schema';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
-import { atomicRename, bunWrite } from '../utils/bun-compat';
+import { bunWrite } from '../utils/bun-compat';
 import { withEvidenceLock } from './lock.js';
 
 /**
@@ -312,7 +312,7 @@ export async function saveEvidence(
 			);
 			try {
 				await bunWrite(tempPath, bundleJson);
-				await atomicRename(tempPath, evidencePath);
+				await fs.rename(tempPath, evidencePath);
 			} catch (error) {
 				// Clean up temp file on failure
 				try {
@@ -454,7 +454,7 @@ export async function loadEvidence(
 						);
 						try {
 							await bunWrite(tempPath, bundleJson);
-							await atomicRename(tempPath, evidencePath);
+							await fs.rename(tempPath, evidencePath);
 						} catch (writeError) {
 							try {
 								rmSync(tempPath, { force: true });

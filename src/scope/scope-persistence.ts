@@ -52,7 +52,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
-import { atomicRename, bunWrite } from '../utils/bun-compat';
+import { bunWrite } from '../utils/bun-compat';
 
 const SCOPE_SCHEMA_VERSION = 1 as const;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -220,7 +220,7 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
 	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
 		await bunWrite(tempPath, content);
-		await atomicRename(tempPath, targetPath);
+		fs.renameSync(tempPath, targetPath);
 	} finally {
 		try {
 			fs.unlinkSync(tempPath);

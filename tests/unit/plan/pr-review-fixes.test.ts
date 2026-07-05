@@ -89,7 +89,6 @@ function createTestPlan(overrides?: Partial<Plan>): Plan {
 function makeBunCompatMock() {
 	return {
 		bunWrite: mock(async (_p: string, _data: string | Uint8Array) => {}),
-		atomicRename: mock(async (_tmp: string, _final: string) => {}),
 		bunHash: mock(() => 0n),
 		bunFile: (_path: string) => ({
 			text: async () => '',

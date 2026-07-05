@@ -5,12 +5,12 @@
  * Records timing, success/failure, and periodically flushes aggregated stats.
  */
 
-import { unlinkSync } from 'node:fs';
+import { renameSync, unlinkSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import type { PluginConfig } from '../config/schema';
 import { swarmState } from '../state';
 import { warn } from '../utils';
-import { atomicRename, bunWrite } from '../utils/bun-compat';
+import { bunWrite } from '../utils/bun-compat';
 import { recordRealtimeLearningToolCall } from './realtime-learning-nudge';
 import { readSwarmFileAsync } from './utils';
 
@@ -169,7 +169,7 @@ async function doFlush(directory: string): Promise<void> {
 		const tempPath = `${path}.tmp`;
 		try {
 			await bunWrite(tempPath, updated);
-			await atomicRename(tempPath, path);
+			renameSync(tempPath, path);
 		} catch (writeError) {
 			try {
 				unlinkSync(tempPath);
