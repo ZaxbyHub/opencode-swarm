@@ -634,7 +634,7 @@ describe('AC-006: Temporary directory is writable', () => {
 					throw new Error('sandbox-exec not available on this macOS machine');
 				}
 
-				const systemTemp = os.tmpdir();
+				const systemTemp = realpathSync(os.tmpdir());
 				const tempFile = path.join(systemTemp, `ac006-temp-${process.pid}.txt`);
 
 				// sandbox-exec allows the temp dir to be explicitly added as a scope path
@@ -667,7 +667,7 @@ describe('AC-006: Temporary directory is writable', () => {
 					throw new Error('Windows sandbox not available');
 				}
 
-				const systemTemp = os.tmpdir();
+				const systemTemp = realpathSync(os.tmpdir());
 				const tempFile = path.join(systemTemp, `ac006-temp-${process.pid}.txt`);
 
 				// Use cmd.exe for reliable file write

@@ -11,7 +11,7 @@
  * 6. Adversarial: empty string, empty batch, concurrent calls, post-degradation calls
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -628,7 +628,9 @@ if (isPosix) {
 		});
 
 		test('XDG_CACHE_HOME with .swarm segment — fallback to safe default', () => {
-			const homeDir = os.tmpdir();
+			// Use realpathSync(os.tmpdir()) for canonical path on macOS
+			// (/var → /private/var symlink). Issue #1729.
+			const homeDir = realpathSync(os.tmpdir());
 			process.env.HOME = homeDir;
 			process.env.XDG_CACHE_HOME = path.join(
 				homeDir,
@@ -665,7 +667,7 @@ if (isPosix) {
 		});
 
 		test('XDG_CACHE_HOME deeply nested under .swarm/ — fallback path still safe', () => {
-			const homeDir = os.tmpdir();
+			const homeDir = realpathSync(os.tmpdir());
 			process.env.HOME = homeDir;
 			process.env.XDG_CACHE_HOME = path.join(
 				homeDir,
@@ -694,7 +696,7 @@ if (isPosix) {
 		});
 
 		test('non-.swarm XDG_CACHE_HOME — no fallback, normal path returned', () => {
-			const homeDir = os.tmpdir();
+			const homeDir = realpathSync(os.tmpdir());
 			process.env.HOME = homeDir;
 			process.env.XDG_CACHE_HOME = path.join(homeDir, 'my-app-cache');
 
@@ -750,7 +752,7 @@ if (!isPosix) {
 		});
 
 		test('LOCALAPPDATA with .swarm segment — fallback to safe default', () => {
-			const homeDir = os.tmpdir();
+			const homeDir = realpathSync(os.tmpdir());
 			process.env.HOME = homeDir;
 			process.env.LOCALAPPDATA = path.join(
 				homeDir,
@@ -787,7 +789,7 @@ if (!isPosix) {
 		});
 
 		test('non-.swarm LOCALAPPDATA — no fallback, normal path returned', () => {
-			const homeDir = os.tmpdir();
+			const homeDir = realpathSync(os.tmpdir());
 			process.env.HOME = homeDir;
 			process.env.LOCALAPPDATA = path.join(homeDir, 'MyAppData');
 
@@ -838,8 +840,9 @@ describe('FR-011 — darwin path (macOS ~/Library/Caches)', () => {
 		});
 		// Ensure XDG_CACHE_HOME is unset so darwin falls back to ~/Library/Caches
 		delete process.env.XDG_CACHE_HOME;
-		// Set a known HOME so the path is deterministic
-		process.env.HOME = os.tmpdir();
+		// Set a known HOME so the path is deterministic.
+		// Use realpathSync for canonical path on macOS (/var → /private/var symlink). Issue #1729.
+		process.env.HOME = realpathSync(os.tmpdir());
 		process.env.OPENCODE_SWARM_DEBUG = '1';
 	});
 
@@ -888,7 +891,10 @@ describe('FR-011 — darwin path (macOS ~/Library/Caches)', () => {
 	test('darwin with XDG_CACHE_HOME set — XDG IGNORED, ~/Library/Caches used instead', () => {
 		// STRICT FR-011: On darwin, XDG_CACHE_HOME is IGNORED.
 		// darwin always resolves to ~/Library/Caches/opencode/embeddings, never XDG.
-		process.env.XDG_CACHE_HOME = path.join(os.tmpdir(), 'my-xdg-cache');
+		process.env.XDG_CACHE_HOME = path.join(
+			realpathSync(os.tmpdir()),
+			'my-xdg-cache',
+		);
 
 		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -916,7 +922,11 @@ describe('FR-011 — darwin path (macOS ~/Library/Caches)', () => {
 		// Setting XDG_CACHE_HOME to a .swarm path on darwin has NO effect — XDG is never consulted,
 		// so there is NO fallback path to trigger, NO warning fires, and the resolved path is
 		// ~/Library/Caches/opencode/embeddings directly (no .swarm segment at all).
-		process.env.XDG_CACHE_HOME = path.join(os.tmpdir(), '.swarm', 'xdg-cache');
+		process.env.XDG_CACHE_HOME = path.join(
+			realpathSync(os.tmpdir()),
+			'.swarm',
+			'xdg-cache',
+		);
 
 		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 

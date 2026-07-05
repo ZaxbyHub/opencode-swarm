@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Engineering invariant checks for opencode-swarm.
 # Runs three grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7.
-# Compatible with GitHub Actions (ubuntu-latest, bash).
-# NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
+# Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
+# NOTE: uses POSIX-compatible grep -E (extended regex) and explicit quote
+# alternation so BSD grep on macOS works just like GNU grep on Linux.
+# Avoid grep -P (Perl regex) — BSD grep does not support it.
 set -euo pipefail
 
 # Load shared normalization routine
@@ -91,9 +93,17 @@ else
   while IFS= read -r file; do
     # Filter: only non-comment lines containing mock.module(
     # This avoids false positives from commented-out code.
-    active_lines=$(grep -E 'mock\.module\(' "$file" | grep -vE '^\s*//' | grep -vE '^\s*\*' || true)
+    active_lines=$(grep -E 'mock\.module\(' "$file" | grep -vE '^[[:space:]]*//' | grep -vE '^[[:space:]]*\*' || true)
     call_count=$(echo "$active_lines" | grep -cE 'mock\.module\(' || true)
-    target_count=$(echo "$active_lines" | grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]' | wc -l || true)
+    # POSIX-portable extraction of mock.module('target' / mock.module("target".
+    # The previous form used `grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]'`
+    # which requires Perl regex (BSD grep on macOS does not support -P or \x27).
+    # Replace with an explicit single/double-quote alternation under grep -Eo.
+    # Two separate patterns (one for ', one for ") keep the regex portable and
+    # match the original "non-quote chars inside the quotes" semantics.
+    target_count=$(echo "$active_lines" \
+      | grep -Eo "mock\.module\([[:space:]]*'[^']+'|mock\.module\([[:space:]]*\"[^\"]+\"" \
+      | wc -l || true)
     if [ "$call_count" -ne "$target_count" ]; then
       echo "ERROR: $file has $call_count mock.module call(s) but only $target_count target(s) extracted."
       echo "       Multiline mock.module calls (target on a separate line from mock.module()) are not supported."
@@ -126,9 +136,14 @@ else
         echo "       Use _internals DI seam, or run: scripts/generate-mock-allowlist.sh"
         violations=$((violations + 1))
       fi
+    # Extract targets from the same filtered (non-comment) lines.
+    # POSIX-portable: emit the mock.module('target' / mock.module("target"
+    # spans via grep -Eo, then strip the mock.module( prefix and the
+    # surrounding quotes with sed. The previous grep -oP form (Perl regex)
+    # is replaced with an explicit quote alternation for BSD grep on macOS.
     done < <(echo "$active_lines" \
-      | grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]' \
-      | sed "s/^mock\.module(\s*[\"']//;s/[\"']$//" || true)
+      | grep -Eo "mock\.module\([[:space:]]*'[^']+'|mock\.module\([[:space:]]*\"[^\"]]+\"" \
+      | sed -E "s/^mock\.module\([[:space:]]*//; s/^'([^']+)'$/\1/; s/^\"([^\"]+)\"$/\1/" || true)
   done < <(grep -rl 'mock\.module(' tests/ src/ --include="*.test.ts" \
     --exclude-dir=node_modules --exclude-dir=dist || true)
 fi

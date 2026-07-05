@@ -61,8 +61,10 @@ describe('generate-mock-allowlist.sh', () => {
 
 	test('should detect when allowlist is out of sync', () => {
 		if (isWindows) return;
+		// Wrap os.tmpdir() in realpathSync for canonical path on macOS
+		// (/var → /private/var symlink). Issue #1729.
 		const tempAllowlist = path.join(
-			os.tmpdir(),
+			fs.realpathSync(os.tmpdir()),
 			'mock-allowlist-drift-' + Date.now(),
 		);
 		fs.copyFileSync(ALLOWLIST_PATH, tempAllowlist);

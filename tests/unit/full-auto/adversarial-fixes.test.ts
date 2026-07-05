@@ -135,8 +135,16 @@ describe('H1 — classifyPathRisk follows symlinks', () => {
 		try {
 			fs.symlinkSync(linkTarget, linkSource);
 		} catch {
-			// symlink may fail on some Windows test runners; bail early
-			return;
+			// Unprivileged symlink creation is unreliable on Windows (requires
+			// Developer Mode or admin). On Windows, bail early; on POSIX, a
+			// symlink failure here is a real environment problem and must
+			// surface rather than silently passing (issue #1729 Windows
+			// quarantine: the previous unconditional `return` masked real
+			// regressions on every platform).
+			if (process.platform === 'win32') return;
+			throw new Error(
+				`symlink creation failed on non-Windows platform: ${linkSource} -> ${linkTarget}`,
+			);
 		}
 		const risk = classifyPathRisk('passwd-link', { directory: tmpDir });
 		expect(risk.withinProjectRoot).toBe(false);

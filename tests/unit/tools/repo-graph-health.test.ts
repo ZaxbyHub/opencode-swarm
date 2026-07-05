@@ -19,7 +19,12 @@ describe('repo graph health diagnostics', () => {
 	let originalExtractFileSymbols: typeof builderInternals.extractFileSymbols;
 
 	beforeEach(() => {
-		tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-health-'));
+		// realpathSync resolves the macOS /var → /private/var symlink (and Windows
+		// 8.3 short names) so the canonical workspace root matches what production
+		// code compares against. Issue #1729 macOS quarantine.
+		tmp = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-health-')),
+		);
 		originalExtractFileSymbols = builderInternals.extractFileSymbols;
 	});
 

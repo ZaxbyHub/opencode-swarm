@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'bun:test';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
@@ -14,7 +15,12 @@ import {
 } from '../../../src/state';
 import * as utilsModule from '../../../src/utils';
 
-const TEST_DIR = os.tmpdir();
+// Resolve through realpathSync so the test cwd matches the canonical path
+// production code compares against. On macOS, os.tmpdir() returns
+// /var/folders/... (symlinked to /private/var/folders/...); without realpath,
+// the .swarm containment guards and repo-graph boundary checks reject the
+// fixture ("resolves outside the working directory"). Issue #1729 macOS.
+const TEST_DIR = fs.realpathSync(os.tmpdir());
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,

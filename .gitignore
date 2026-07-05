@@ -63,3 +63,9 @@ events.jsonl
 .codex/issue-traces/
 .Codex/issue-traces/
 
+
+# ZCode session artifacts (investigation traces, swarm-mode state)
+.zcode/
+
+# graphify exploration output (local, transient)
+graphify-out/
