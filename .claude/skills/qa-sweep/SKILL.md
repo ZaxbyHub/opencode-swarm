@@ -48,6 +48,18 @@ self-review as independent review.
 - Reference official documentation to verify whether any behavior is intended before treating it as a bug.
 - Do not trust assumptions — prove every behavior against actual code.
 
+### Pre-implementation static-gate baseline
+
+Before the first coder dispatch in any phase, capture a static-gate baseline so findings are scoped to the phase, not to pre-existing code:
+
+- **Defining the pre-phase file set**: the canonical source is the file list passed to `declare_scope({ taskId, files })` (see the swarm-implement skill for the discipline). If `declare_scope` was called with the task's exact file list, that IS the pre-phase file set. If `declare_scope` was not called (e.g., the file list is not 100% obvious), use the containing directories declared in the previous call, OR fall back to the task's `files_touched` array in the plan (`save_plan` writes this). Never use the entire repository as the pre-phase file set — that defeats the point of phase scoping.
+- **SAST**: if `sast_scan` is available with `capture_baseline:true`, invoke it once at phase open against the pre-phase file set. Subsequent phase-scoped scans only fail on NEW findings. If swarm tools are unavailable, document the gap in the closure report and skip the baseline capture (do not silently fall back to a project-wide scan that fires on every historical finding).
+- **`placeholder_scan`**: this gate has no baseline concept — it only supports an `allow_globs` filter. Pre-configure `allow_globs` for any TODO/FIXME/HACK comments that are intentionally retained (technical debt tracked elsewhere). Do not delete real placeholders to silence the gate; add them to the allowlist.
+- Re-baseline if co-change detection expands the file list after the initial baseline — a missed re-baseline will mis-attribute pre-existing findings to the phase.
+
+### Acceptance tests first
+Before running any broader test suite, run the smallest test set that covers the task's acceptance criteria. Full-suite passes can mask targeted failures when ordering or concurrency changes — exercise each FR's acceptance criterion explicitly first.
+
 ### Phase 2 — Independent Adversarial Review (Mandatory)
 After implementation, spawn a FRESH sub-agent that has not participated in any prior work. Give it this directive verbatim:
 > "Assume all work done by the implementing agent is incorrect until you can prove otherwise with
