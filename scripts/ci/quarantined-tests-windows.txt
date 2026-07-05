@@ -1,7 +1,30 @@
 # Windows-only quarantined tests — CI's unit job skips these on
-# windows-latest runners specifically.
+# windows-latest runners specifically (they pass on ubuntu-latest).
 #
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# No Windows-only tests are currently quarantined.
+# These fail ONLY on the windows-latest runner and pass on ubuntu-latest.
+# The failures are Windows-environment artifacts, not product regressions —
+# for example:
+#   - `bun.cmd` not resolvable in $PATH when spawning a subprocess
+#     (cli/install-default-agent-configs, ENOENT errno -4058).
+#   - 8.3 short-name paths (C:\Users\RUNNER~1\... vs long ...\runneradmin\...)
+#     breaking path-equality assertions (worktree/provision-worktree*).
+#   - Windows symlink semantics differing from POSIX in containment checks
+#     (full-auto/adversarial-fixes, hooks/destructive-command-guard).
+#   - Case/normalization and path-separator differences (save-plan-adversarial,
+#     pre-check-batch-sast-preexisting).
+#
+# Root cause per file is not yet individually diagnosed/fixed — tracked in
+# https://github.com/ZaxbyHub/opencode-swarm/issues/1705. This list was
+# rebuilt after PR #1726 emptied it: #1726's PR CI runs ubuntu-only, so its
+# un-quarantining of these was never exercised on Windows.
+tests/unit/cli/install-default-agent-configs.test.ts
+tests/unit/cli/update-command.test.ts
+tests/unit/full-auto/adversarial-fixes.test.ts
+tests/unit/hooks/destructive-command-guard.test.ts
+tests/unit/tools/pre-check-batch-sast-preexisting.test.ts
+tests/unit/tools/save-plan-adversarial.test.ts
+tests/unit/worktree/provision-worktree.adversarial.test.ts
+tests/unit/worktree/provision-worktree.test.ts
