@@ -69,8 +69,8 @@ describe('Group 1: SUPPORTED_FRAMEWORKS constant', () => {
 		}
 	});
 
-	it('has 16 total frameworks (7 original + 9 new)', () => {
-		expect(SUPPORTED_FRAMEWORKS).toHaveLength(16);
+	it('has 19 total frameworks (7 original + 12 new)', () => {
+		expect(SUPPORTED_FRAMEWORKS).toHaveLength(19);
 	});
 
 	it('all values are distinct (no duplicates)', () => {

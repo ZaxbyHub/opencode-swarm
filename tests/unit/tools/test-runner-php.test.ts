@@ -60,4 +60,34 @@ describe('PHP test_runner support', () => {
 			'tests/Feature/HealthTest.php',
 		]);
 	});
+
+	test('detects Laravel (php-artisan) through legacy and dispatch paths', async () => {
+		// Laravel projects have an `artisan` file and `composer.json`
+		fs.writeFileSync(
+			path.join(tempDir, 'artisan'),
+			'#!/usr/bin/env php\n<?php\n',
+		);
+		fs.writeFileSync(
+			path.join(tempDir, 'composer.json'),
+			JSON.stringify({
+				name: 'laravel/laravel',
+				require: { 'laravel/framework': '^10.0' },
+			}),
+		);
+
+		expect(await detectTestFramework(tempDir)).toBe('php-artisan');
+		expect(await detectTestFrameworkViaDispatch(tempDir)).toBe('php-artisan');
+	});
+
+	test('detects Pest through legacy and dispatch paths', async () => {
+		// Pest projects have a Pest.php file in the project root
+		fs.writeFileSync(path.join(tempDir, 'Pest.php'), '<?php\n');
+		fs.writeFileSync(
+			path.join(tempDir, 'composer.json'),
+			JSON.stringify({ name: 'pest/pest' }),
+		);
+
+		expect(await detectTestFramework(tempDir)).toBe('pest');
+		expect(await detectTestFrameworkViaDispatch(tempDir)).toBe('pest');
+	});
 });

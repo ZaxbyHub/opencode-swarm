@@ -149,3 +149,32 @@ describe('AWS integration — end-to-end gate', () => {
 		);
 	});
 });
+
+describe('vacuous-pass guard (F-002)', () => {
+	/**
+	 * F-002: When files are provided but ALL are excluded by extension,
+	 * files_scanned === 0. The gate must fail closed (gates_passed === false)
+	 * to prevent a vacuous pass — a scan that scanned nothing reporting success.
+	 */
+	test('fails the gate when all provided files are excluded by extension', async () => {
+		// .png is in DEFAULT_EXCLUDE_EXTENSIONS — file exists but is never scanned
+		fs.writeFileSync(
+			path.join(tempDir, 'screenshot.png'),
+			Buffer.from([0x89, 0x50, 0x4e, 0x47]), // minimal PNG header
+		);
+
+		const result = await runPreCheckBatch({
+			directory: tempDir,
+			files: ['screenshot.png'],
+		});
+
+		expect(result.secretscan.ran).toBe(true);
+		expect(result.gates_passed).toBe(false);
+		const scanResult = result.secretscan.result as {
+			files_scanned: number;
+			skipped_files: number;
+		};
+		expect(scanResult.files_scanned).toBe(0);
+		expect(scanResult.skipped_files).toBe(1);
+	});
+});
