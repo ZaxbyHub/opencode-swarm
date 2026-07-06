@@ -93,7 +93,9 @@ describe('process-improvement skill guidance', () => {
 		}
 
 		// FB-001: isolated assertion — swarm-implement must have its own Phase 0b section
-		const implementSource = readSkill('.opencode/skills/swarm-implement/SKILL.md');
+		const implementSource = readSkill(
+			'.opencode/skills/swarm-implement/SKILL.md',
+		);
 		expect(implementSource).toContain('### Phase 0b');
 		expect(implementSource).toContain('PR branch checkout pre-flight');
 	});
