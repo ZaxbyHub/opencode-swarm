@@ -16,24 +16,14 @@
  *  - 'hive':            archives a shared hive entry (cross-project knowledge).
  */
 
-import * as path from 'node:path';
 import { z } from 'zod';
 import {
-	recordHiveKnowledgeEvent,
-	recordKnowledgeEvent,
-} from '../hooks/knowledge-events.js';
-import {
-	getArchivedKnowledgeIds,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
-import {
-	findSkillsBySourceKnowledgeId,
-	findStaleSkillsBySourceKnowledgeId,
-	retireOrMarkStale,
-} from '../services/skill-generator.js';
+import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -156,85 +146,19 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				return JSON.stringify({ success: false, message: 'entry not found' });
 			}
 
-			// Append the audit tombstone. Fire-and-forget (fail-open): the status
-			// change already persisted; a telemetry failure must not undo it.
-			//
-			// Route the tombstone to the same scope as the store it describes:
-			// hive-tier mutations write to the shared, cross-project hive events
-			// log so any project can audit why a shared lesson was remediated;
-			// swarm-tier mutations write to the project-local events log.
-			const tombstone = {
-				type: 'archived' as const,
-				entry_id: id,
+			// G11 (issue #1717): route through the shared tombstone + retire/stale
+			// invalidator so this path cannot diverge from the curator archive
+			// path and knowledge-remove. Fire-and-forget (fail-open).
+			await writeArchiveTombstoneAndInvalidateSkills({
+				directory,
+				entryId: id,
 				tier,
 				actor: ctx?.agent ?? 'unknown',
 				reason,
 				mode,
 				evidence,
-				previous_status: previousStatus,
-			};
-			if (tier === 'hive') {
-				await recordHiveKnowledgeEvent(tombstone);
-			} else {
-				await recordKnowledgeEvent(directory, tombstone);
-			}
-
-			// Fire-and-forget: invalidate derived skills after archival.
-			// SC-004: async/deferred after tombstone write — archive returns immediately.
-			//
-			// Read the full set of already-archived/quarantined IDs BEFORE queuing
-			// the microtask so retireOrMarkStale can correctly determine if ALL
-			// sources for a multi-source skill are archived (Issue 1 fix).
-			const allArchivedIds = await getArchivedKnowledgeIds(directory);
-			allArchivedIds.add(id);
-
-			queueMicrotask(async () => {
-				try {
-					const affectedSkillDirs = await findSkillsBySourceKnowledgeId(
-						directory,
-						id,
-					);
-					const staleSkillDirs = await findStaleSkillsBySourceKnowledgeId(
-						directory,
-						allArchivedIds,
-					);
-					const allSkillDirs = new Set([
-						...affectedSkillDirs,
-						...staleSkillDirs,
-					]);
-					if (allSkillDirs.size === 0) return;
-
-					const slugSet = new Set<string>();
-					let retiredCount = 0;
-					let staleCount = 0;
-
-					for (const skillDir of allSkillDirs) {
-						const slug = path.basename(skillDir);
-						if (slugSet.has(slug)) continue;
-						slugSet.add(slug);
-						const result = await retireOrMarkStale(
-							directory,
-							skillDir,
-							allArchivedIds,
-						);
-						if (result.action === 'retire') retiredCount++;
-						else staleCount++;
-					}
-
-					// Emit batch event (fire-and-forget, fail-open)
-					const batchEvent = {
-						type: 'skill-stale-batch' as const,
-						skillIds: Array.from(slugSet),
-						archivedIds: Array.from(allArchivedIds),
-						retiredCount,
-						staleCount,
-					};
-					await recordKnowledgeEvent(directory, batchEvent);
-				} catch (err) {
-					warn(
-						`[knowledge-archive] post-archive skill invalidation failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+				previousStatus,
+				sourceLabel: 'knowledge-archive',
 			});
 
 			return JSON.stringify({

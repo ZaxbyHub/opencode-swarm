@@ -630,6 +630,36 @@ export function validateActionableFields(
 		errors.push('generated_skill_path must be repo-local under allowed prefix');
 	}
 
+	// G10/G12 (issue #1717): validate the new draft/retire fields.
+	if (fields.draft_generated_skill_slug !== undefined) {
+		if (
+			typeof fields.draft_generated_skill_slug !== 'string' ||
+			!/^[a-z0-9][a-z0-9-]{0,63}$/.test(fields.draft_generated_skill_slug)
+		) {
+			errors.push('draft_generated_skill_slug must be a kebab-case slug');
+		}
+	}
+	if (
+		fields.draft_generated_skill_path !== undefined &&
+		!validateSkillPath(fields.draft_generated_skill_path)
+	) {
+		errors.push(
+			'draft_generated_skill_path must be repo-local under allowed prefix',
+		);
+	}
+	if (fields.retired_skill_history !== undefined) {
+		if (!Array.isArray(fields.retired_skill_history)) {
+			errors.push('retired_skill_history must be an array of slugs');
+		} else if (
+			!fields.retired_skill_history.every(
+				(s: unknown) =>
+					typeof s === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(s),
+			)
+		) {
+			errors.push('retired_skill_history entries must be kebab-case slugs');
+		}
+	}
+
 	return { valid: errors.length === 0, errors };
 }
 

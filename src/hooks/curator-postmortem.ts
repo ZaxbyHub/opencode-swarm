@@ -1185,6 +1185,10 @@ export const _internals = {
 				const activation = await activateProposal(directory, slug, false, {
 					evaluate: true,
 					operation: 'post_mortem_queue_triage',
+					// G8 (issue #1717): headless auto path preserves existing
+					// semantics — the surface-and-confirm gate is enforced for
+					// the interactive skill_apply tool only.
+					confirmUnevaluated: true,
 				});
 				if (activation.activated) {
 					result.approved.push(slug);

@@ -1,27 +1,15 @@
-import * as path from 'node:path';
 import { z } from 'zod';
-import { recordKnowledgeEvent } from '../hooks/knowledge-events.js';
 import {
-	getArchivedKnowledgeIds,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
-import {
-	findSkillsBySourceKnowledgeId,
-	findStaleSkillsBySourceKnowledgeId,
-	retireOrMarkStale,
-} from '../services/skill-generator.js';
-import { warn } from '../utils/logger.js';
+import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
 import { createSwarmTool } from './create-tool.js';
 
 export const _internals = {
 	transactKnowledge,
-	getArchivedKnowledgeIds,
-	findSkillsBySourceKnowledgeId,
-	findStaleSkillsBySourceKnowledgeId,
-	retireOrMarkStale,
-	recordKnowledgeEvent,
+	writeArchiveTombstoneAndInvalidateSkills,
 };
 
 export const knowledge_remove: ReturnType<typeof createSwarmTool> =
@@ -104,65 +92,18 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			// Fire-and-forget: invalidate derived skills after hard-delete.
-			// The purged entry is gone — retire or mark affected skills stale
-			// depending on whether all their source knowledge entries are archived.
-			// Placed BEFORE the return so the microtask is queued; it executes
-			// after the caller receives the response (microtask timing).
-			//
-			// Read the full set of already-archived IDs BEFORE queuing the
-			// microtask so retireOrMarkStale can correctly determine if ALL
-			// sources for a multi-source skill are archived.
-			const allArchivedIds =
-				await _internals.getArchivedKnowledgeIds(directory);
-			allArchivedIds.add(id);
-
-			queueMicrotask(async () => {
-				try {
-					const affectedSkillDirs =
-						await _internals.findSkillsBySourceKnowledgeId(directory, id);
-					const staleSkillDirs =
-						await _internals.findStaleSkillsBySourceKnowledgeId(
-							directory,
-							allArchivedIds,
-						);
-					const allSkillDirs = new Set([
-						...affectedSkillDirs,
-						...staleSkillDirs,
-					]);
-					if (allSkillDirs.size === 0) return;
-
-					const slugSet = new Set<string>();
-					let retiredCount = 0;
-					let staleCount = 0;
-
-					for (const skillDir of allSkillDirs) {
-						const slug = path.basename(skillDir);
-						if (slugSet.has(slug)) continue;
-						slugSet.add(slug);
-						const result = await _internals.retireOrMarkStale(
-							directory,
-							skillDir,
-							allArchivedIds,
-						);
-						if (result.action === 'retire') retiredCount++;
-						else staleCount++;
-					}
-
-					// Emit batch event (fire-and-forget, fail-open)
-					const batchEvent = {
-						type: 'skill-stale-batch' as const,
-						skillIds: Array.from(slugSet),
-						archivedIds: Array.from(allArchivedIds),
-						retiredCount,
-						staleCount,
-					};
-					await _internals.recordKnowledgeEvent(directory, batchEvent);
-				} catch (err) {
-					warn(
-						`[knowledge-remove] post-purge skill invalidation failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+			// G11 (issue #1717): route through the shared invalidator. Hard-delete
+			// preserves its historical no-tombstone behavior via skipTombstone;
+			// the microtask still fires to retire/mark-stale derived skills.
+			await _internals.writeArchiveTombstoneAndInvalidateSkills({
+				directory,
+				entryId: id,
+				tier: 'swarm',
+				actor: 'knowledge_remove',
+				reason: 'hard-delete via knowledge_remove tool',
+				mode: 'purge',
+				skipTombstone: true,
+				sourceLabel: 'knowledge-remove',
 			});
 
 			return JSON.stringify({
