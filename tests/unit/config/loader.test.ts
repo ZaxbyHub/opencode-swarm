@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -678,6 +678,155 @@ describe('config/loader', () => {
 			expect(Object.hasOwn(result, '_loadedFromFile')).toBe(false);
 
 			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('loads partial gates config without falling back to bare defaults', () => {
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 7,
+					gates: {
+						placeholder_scan: {
+							enabled: false,
+							max_allowed_findings: 2,
+						},
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			const result = loadPluginConfig(projectDir);
+
+			expect(result.max_iterations).toBe(7);
+			expect(result.gates?.placeholder_scan.enabled).toBe(false);
+			expect(result.gates?.placeholder_scan.max_allowed_findings).toBe(2);
+			expect(result.gates?.quality_budget.enabled).toBe(true);
+
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('warns and keeps valid config when one gates subsection is invalid', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 7,
+					qa_retry_limit: 8,
+					gates: {
+						syntax_check: { enabled: false },
+						placeholder_scan: {
+							deny_patterns: 'TODO',
+						},
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			try {
+				const result = loadPluginConfig(projectDir);
+
+				expect(result.max_iterations).toBe(7);
+				expect(result.qa_retry_limit).toBe(8);
+				expect(result.gates?.syntax_check.enabled).toBe(false);
+				expect(result.gates?.placeholder_scan.enabled).toBe(true);
+				expect(
+					Array.isArray(result.gates?.placeholder_scan.deny_patterns),
+				).toBe(true);
+
+				const warnings = warnSpy.mock.calls.flat().join('\n');
+				expect(warnings).toContain('gates.placeholder_scan');
+				expect(warnings).toContain('other config sections remain active');
+			} finally {
+				warnSpy.mockRestore();
+				fs.rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it('warns and ignores typoed gates sections without disabling other config', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 6,
+					gates: {
+						placeholder_scn: { enabled: false },
+						syntax_check: { enabled: false },
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			try {
+				const result = loadPluginConfig(projectDir);
+
+				expect(result.max_iterations).toBe(6);
+				expect(result.gates?.syntax_check.enabled).toBe(false);
+
+				const warnings = warnSpy.mock.calls.flat().join('\n');
+				expect(warnings).toContain('gates.placeholder_scn');
+				expect(warnings).toContain('Other config sections remain active');
+			} finally {
+				warnSpy.mockRestore();
+				fs.rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it('warns and ignores typoed gates keys without disabling other config', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 6,
+					gates: {
+						placeholder_scan: {
+							enabled: false,
+							max_allowed_finding: 2,
+						},
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			try {
+				const result = loadPluginConfig(projectDir);
+
+				expect(result.max_iterations).toBe(6);
+				expect(result.gates?.placeholder_scan.enabled).toBe(false);
+				expect(result.gates?.placeholder_scan.max_allowed_findings).toBe(0);
+
+				const warnings = warnSpy.mock.calls.flat().join('\n');
+				expect(warnings).toContain(
+					'gates.placeholder_scan.max_allowed_finding',
+				);
+				expect(warnings).toContain('Other config sections remain active');
+			} finally {
+				warnSpy.mockRestore();
+				fs.rmSync(projectDir, { recursive: true, force: true });
+			}
 		});
 
 		// Security fix: fail-secure fallback tests
