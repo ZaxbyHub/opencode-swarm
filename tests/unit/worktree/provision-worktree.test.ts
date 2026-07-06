@@ -62,6 +62,34 @@ function tmpDir(): string {
 	);
 }
 
+/**
+ * Canonicalize a filesystem path for comparison. Mirrors the production
+ * `normalizeGitPath` helper (src/worktree/core.ts): realpath-resolve (so Windows
+ * 8.3 short-name vs long-name temp-dir mismatches don't defeat the compare),
+ * then normalize separators and trim trailing slashes. Falls back to the lexical
+ * form if the path doesn't exist.
+ *
+ * Issue #1729 Windows quarantine: GitHub's windows-latest RunnerAdmin user
+ * exposes the temp dir as `C:\Users\RUNNER~1\...` while `git worktree list
+ * --porcelain` emits the long form `C:\Users\runneradmin\...`, so a raw string
+ * compare silently mismatches.
+ */
+function normalizeGitPath(p: string): string {
+	const lexical = p.replace(/\\/g, '/').replace(/\/+$/, '');
+	try {
+		return fs.realpathSync(p).replace(/\\/g, '/').replace(/\/+$/, '');
+	} catch {
+		return lexical;
+	}
+}
+
+/** Normalize every `worktree <path>` line in raw porcelain output. */
+function normalizePorcelainPaths(porcelain: string): string {
+	return porcelain.replace(/^worktree (.+)$/gm, (_m, p: string) =>
+		normalizeGitPath(p),
+	);
+}
+
 /** Creates a real worktree in a git repo via real git commands. */
 async function createRealWorktree(
 	repoDir: string,
@@ -119,8 +147,12 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			repoDir,
 		);
 		expect(listResult.exitCode).toBe(0);
-		expect(listResult.stdout.replace(/\\/g, '/')).toContain(
-			handle.worktreePath.replace(/\\/g, '/'),
+		// Issue #1729 Windows quarantine: normalize BOTH sides through realpath so
+		// the Windows 8.3 short-name (RUNNER~1) vs long-name (runneradmin) temp
+		// dir mismatch between the test-built path and `git worktree list
+		// --porcelain` output doesn't defeat the assertion.
+		expect(normalizePorcelainPaths(listResult.stdout)).toContain(
+			normalizeGitPath(handle.worktreePath),
 		);
 
 		// Cleanup
@@ -160,8 +192,11 @@ describe('provisionWorktree — verification (FR-004)', () => {
 				['worktree', 'list', '--porcelain'],
 				repoDir,
 			);
-			expect(listResult.stdout.replace(/\\/g, '/')).toContain(
-				result.worktreePath.replace(/\\/g, '/'),
+			// Issue #1729 Windows quarantine: realpath both sides (see
+			// normalizeGitPath above) so the 8.3 vs long-name temp-dir mismatch
+			// doesn't defeat the assertion.
+			expect(normalizePorcelainPaths(listResult.stdout)).toContain(
+				normalizeGitPath(result.worktreePath),
 			);
 			// Cleanup
 			await runGit(['worktree', 'remove', result.worktreePath], repoDir);

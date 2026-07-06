@@ -332,6 +332,11 @@ export async function listLaneEvidence(
 		}
 		throw error;
 	}
+	// fs.readdir returns entries in filesystem-dependent order (ext4 vs APFS
+	// differ), which made laneSummaries[0].laneId nondeterministic across OSes
+	// (issue #1729 merge_group: macOS returned lane-2 before lane-1). Sort for
+	// deterministic cross-platform lane ordering.
+	entries.sort();
 
 	const lanes: LaneEvidence[] = [];
 

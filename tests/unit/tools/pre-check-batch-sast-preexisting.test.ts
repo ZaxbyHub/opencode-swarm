@@ -403,6 +403,19 @@ describe('runPreCheckBatch SAST gate integration', () => {
 					cwd: tempDir,
 					stdio: 'pipe',
 				});
+				// Force LF line endings on Windows so committed content (and
+				// therefore diff line ranges) matches the SAST finding locations.
+				// core.autocrlf=false alone can be overridden by a system-level
+				// core.autocrlf=true on the GitHub windows runner; core.eol=lf
+				// + a .gitattributes entry makes it stick. Issue #1729.
+				execSync('git config core.eol lf', {
+					cwd: tempDir,
+					stdio: 'pipe',
+				});
+				fs.writeFileSync(
+					path.join(tempDir, '.gitattributes'),
+					'* text=auto eol=lf\n',
+				);
 				execSync('git config user.email "test@test.com"', {
 					cwd: tempDir,
 					stdio: 'pipe',
@@ -515,6 +528,19 @@ describe('runPreCheckBatch SAST gate integration', () => {
 					cwd: tempDir,
 					stdio: 'pipe',
 				});
+				// Force LF line endings on Windows so committed content (and
+				// therefore diff line ranges) matches the SAST finding locations.
+				// core.autocrlf=false alone can be overridden by a system-level
+				// core.autocrlf=true on the GitHub windows runner; core.eol=lf
+				// + a .gitattributes entry makes it stick. Issue #1729.
+				execSync('git config core.eol lf', {
+					cwd: tempDir,
+					stdio: 'pipe',
+				});
+				fs.writeFileSync(
+					path.join(tempDir, '.gitattributes'),
+					'* text=auto eol=lf\n',
+				);
 				execSync('git config user.email "test@test.com"', {
 					cwd: tempDir,
 					stdio: 'pipe',

@@ -135,10 +135,12 @@ describe('Sandbox recovery scenarios', () => {
 			() => {
 				// macOS executor constructor calls probeSandboxExec once.
 				// wrapCommand re-checks before each wrap.
+				// Probe sequence: constructor (call 1, true), first wrapCommand
+				// (call 2, true), second wrapCommand (call 3, false ΓåÆ throws).
 				let callCount = 0;
 				macosInternals.probeSandboxExec = mock(() => {
 					callCount++;
-					return callCount === 1;
+					return callCount <= 2;
 				});
 
 				const executor = new MacOSSandboxExecutor([]);
@@ -147,11 +149,12 @@ describe('Sandbox recovery scenarios', () => {
 				const wasAvailable = executor.isAvailable();
 				const result1 = executor.wrapCommand('echo first', []);
 
-				// Second call ΓÇö probe now fails, executor must disable and passthrough
-				const result2 = executor.wrapCommand('echo second', []);
+				// Second call ΓÇö probe now fails, executor must disable and throw
+				expect(() => executor.wrapCommand('echo second', [])).toThrow(
+					SandboxError,
+				);
 
 				expect(executor.isAvailable()).toBe(false);
-				expect(result2).toBe('echo second');
 
 				if (wasAvailable) {
 					expect(result1).not.toBe('echo first');
@@ -163,17 +166,24 @@ describe('Sandbox recovery scenarios', () => {
 		test.skipIf(!isMac)(
 			'MacOSSandboxExecutor: isAvailable() returns false after mid-session probe failure',
 			() => {
+				// Probe sequence: constructor (call 1, true), first wrapCommand
+				// (call 2, true), second wrapCommand (call 3, false ΓåÆ throws and
+				// disables the executor).
 				let probeCallCount = 0;
 				macosInternals.probeSandboxExec = mock(() => {
 					probeCallCount++;
-					return probeCallCount < 3;
+					return probeCallCount <= 2;
 				});
 
 				const executor = new MacOSSandboxExecutor([]);
 				expect(executor.isAvailable()).toBe(true);
 
 				executor.wrapCommand('echo hello', []);
-				executor.wrapCommand('echo again', []);
+				// Second wrapCommand's probe fails ΓåÆ throws SandboxError and flips
+				// _available to false.
+				expect(() => executor.wrapCommand('echo again', [])).toThrow(
+					SandboxError,
+				);
 
 				expect(executor.isAvailable()).toBe(false);
 			},

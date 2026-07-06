@@ -595,9 +595,15 @@ describe('adversarial — edge cases and robustness', () => {
 
 // bun:test does not support test.skip() inside test bodies.
 // Use two separate describe blocks gated on platform.
-const isPosix = process.platform !== 'win32';
+// NOTE: the XDG_CACHE_HOME containment tests are LINUX-ONLY. On darwin,
+// production code (src/memory/embeddings/local-provider.ts) IGNORES
+// XDG_CACHE_HOME entirely and always returns ~/Library/Caches — so the .swarm
+// fallback path these tests assert never fires on macOS (issue #1729
+// merge_group: hardcoded ~/.cache expectation failed on darwin).
+const isLinux = process.platform === 'linux';
+const isWindows = process.platform === 'win32';
 
-if (isPosix) {
+if (isLinux) {
 	describe('FR-011 — .swarm containment via XDG_CACHE_HOME (POSIX)', () => {
 		const savedEnv = {
 			XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
@@ -721,7 +727,7 @@ if (isPosix) {
 	});
 }
 
-if (!isPosix) {
+if (isWindows) {
 	describe('FR-011 — .swarm containment via LOCALAPPDATA (Windows)', () => {
 		const savedEnv = {
 			LOCALAPPDATA: process.env.LOCALAPPDATA,

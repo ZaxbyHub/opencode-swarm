@@ -89,7 +89,10 @@ describe('generate-mock-allowlist.sh', () => {
 		const result = runGenerateAllowlist(false);
 		expect(result.stderr).toContain('Scanning test files');
 		expect(result.stderr).toMatch(
-			/Updated scripts\/mock-allowlist\.txt with \d+ entries/,
+			// BSD wc (macOS) right-justifies the count in a field of spaces
+			// ("with      111 entries"); GNU wc does not. Allow flexible
+			// whitespace. Issue #1729.
+			/Updated scripts\/mock-allowlist\.txt with\s+\d+ entries/,
 		);
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});

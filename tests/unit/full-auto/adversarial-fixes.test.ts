@@ -130,13 +130,22 @@ describe('C5 — state writes are atomic and recoverable', () => {
 
 describe('H1 — classifyPathRisk follows symlinks', () => {
 	test('a symlink pointing outside the project root is flagged out-of-root', () => {
-		const linkTarget = '/etc/passwd';
+		// Issue #1729 Windows quarantine: a dangling `/etc/passwd` target doesn't
+		// exist on Windows, so realpathSync falls back to resolving the parent
+		// (tmpDir) which IS within the project root → withinProjectRoot wrongly
+		// returns true. Use a REAL file that lives OUTSIDE tmpDir on every
+		// platform so the symlink is non-dangling and resolves out-of-root.
+		const linkTarget = path.join(
+			os.tmpdir(),
+			'outside-root-target-' + Date.now(),
+		);
+		fs.writeFileSync(linkTarget, 'x');
 		const linkSource = path.join(tmpDir, 'passwd-link');
 		try {
 			fs.symlinkSync(linkTarget, linkSource);
 		} catch (err) {
 			// Unprivileged symlink creation is unreliable on Windows (requires
-			// Developer Mode or admin) and can also be restricted on hardened
+			// DeveloperMode or admin) and can also be restricted on hardened
 			// Linux CI containers (EPERM/EACCES). The previous unconditional
 			// `return` masked real regressions on every platform; the previous
 			// hard throw turned environment symlink restrictions into red CI on
@@ -159,8 +168,16 @@ describe('H1 — classifyPathRisk follows symlinks', () => {
 				`symlink creation failed unexpectedly on ${process.platform} (${code ?? 'unknown'}): ${linkSource} -> ${linkTarget}`,
 			);
 		}
-		const risk = classifyPathRisk('passwd-link', { directory: tmpDir });
-		expect(risk.withinProjectRoot).toBe(false);
+		try {
+			const risk = classifyPathRisk('passwd-link', { directory: tmpDir });
+			expect(risk.withinProjectRoot).toBe(false);
+		} finally {
+			try {
+				fs.unlinkSync(linkTarget);
+			} catch {
+				/* best-effort cleanup of the outside-root target */
+			}
+		}
 	});
 });
 
