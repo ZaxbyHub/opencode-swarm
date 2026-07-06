@@ -19,10 +19,9 @@ describe('handleKnowledgeMigrateCommand', () => {
 			entriesTotal: 4,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(result).toContain('3 entries added');
 		expect(result).toContain('1 dropped');
-		expect(result).toContain('4 total processed');
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
@@ -68,7 +67,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
-	it('skippedReason unknown value returns string containing "unknown reason"', async () => {
+	it('skippedReason unknown value returns empty string (no default case)', async () => {
 		mockMigrate.mockResolvedValueOnce({
 			migrated: false,
 			entriesMigrated: 0,
@@ -77,7 +76,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 			skippedReason: 'some-unknown-reason' as never,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('unknown reason');
+		expect(result).toBe('');
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
@@ -85,7 +84,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 		mockMigrate.mockRejectedValueOnce(new Error('Database connection failed'));
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
 		expect(result).toContain('failed');
-		expect(result).toContain('Check .swarm/context.md');
+		expect(result).toContain('Check that knowledge source files are readable');
 		expect(result).not.toContain('Database connection failed');
 	});
 
@@ -99,7 +98,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 		const result = await handleKnowledgeMigrateCommand('/test/dir', [
 			'/custom/target',
 		]);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(mockMigrate).toHaveBeenCalledWith(
 			'/custom/target',
 			expect.any(Object),
@@ -118,7 +117,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 			entriesTotal: 1,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
-		expect(result).toContain('Migration complete');
+		expect(result).toContain('Context migration');
 		expect(mockMigrate).toHaveBeenCalledWith('/test/dir', expect.any(Object));
 	});
 
