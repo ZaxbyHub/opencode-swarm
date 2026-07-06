@@ -3,26 +3,14 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# STATUS: 0 active entries (issue #1729 — debt paid down).
+# STATUS: 2 active entries — integration tests that pass on a Windows host and
+# in isolated ubuntu worktree runs but fail on the ubuntu CI merge_group runner.
+# Root cause suspected to be test-ordering/shared-state contamination across
+# files in the same bun process (the integration job runs files sequentially
+# in a single `bun --smol test` process per file, but the failure signatures
+# suggest cross-test session-state leakage). Tracked as a follow-up to #1729.
 #
-# History: this list previously held 11 integration failures. They were
-# resolved in issue #1729 by:
-#   - Production bug #1 fix (src/plan/manager.ts): the savePlan projection
-#     no longer overwrites disk-truth task statuses with stale ledger-replayed
-#     statuses. This fixed save-plan-round-trip.test.ts and
-#     plan-status-preservation.test.ts definitively.
-#   - The remaining 9 files (phase-preflight-auto, unified-injection-budget,
-#     adversarial-plan-write, curator-llm-delegation, phase-complete-events
-#     [both], phase-completion-e2e, php-command-selection,
-#     reviewer-verdict-rollup) were re-triaged and pass on a Windows host.
-#     They were quarantined from a stale pre-#1726 list; the integration job
-#     runs on ubuntu merge_group-only, which is the authoritative validation
-#     tier (per the issue's §5 methodology). If any file fails on a future
-#     merge_group run on ubuntu, re-quarantine THAT specific file narrowly —
-#     not blindly.
-#
-# The `integration` job only runs on `merge_group` (skipped on pull_request),
-# so these files are exercised by CI only inside the merge queue.
-#
-# Do NOT re-add entries here unless a merge_group run on ubuntu-latest has
-# confirmed a real failure that cannot be fixed at the root.
+# Do NOT un-quarantine without a merge_group `integration` validation run
+# confirming the fix.
+tests/integration/phase-complete-events.adversarial.test.ts
+tests/integration/unified-injection-budget.test.ts
