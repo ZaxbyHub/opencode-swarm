@@ -100,6 +100,8 @@ whether reviewer and critic passes are required.
 
 Implement in coherent, reviewable chunks. Follow existing repository patterns.
 
+**`declare_scope` discipline.** Before every coder or test-engineer delegation (and before every retry of one), call `declare_scope({ taskId, files })` with the exact file list the delegated agent is allowed to modify — including generated/lockfile paths the change will produce (e.g. `dist/*`, `package-lock.json`, `bun.lock`). Scope is enforced at the Edit/Write/Patch tool layer only — bash-based writes (`sed -i`, `echo >`, `cat > <<HEREDOC`, heredoc-to-file redirects) bypass the check (see issue #520), so do not rely on `declare_scope` to bound shell-redirect writes. If the file list is not 100% obvious from the prompt, declare the containing directories instead. Repeat the declaration before every retry, even when files appear unchanged — scope state is per-attempt, not per-task.
+
 If the project exposes `sast_scan` with `capture_baseline`, capture the
 phase-scoped SAST baseline before first coder delegation so later scans fail only
 on new findings rather than pre-existing infrastructure noise.

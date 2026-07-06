@@ -91,6 +91,11 @@ describe('process-improvement skill guidance', () => {
 			expect(lower).toContain('check out');
 			expect(source).toContain('base_ref..head_ref');
 		}
+
+		// FB-001: isolated assertion — swarm-implement must have its own Phase 0b section
+		const implementSource = readSkill('.opencode/skills/swarm-implement/SKILL.md');
+		expect(implementSource).toContain('### Phase 0b');
+		expect(implementSource).toContain('PR branch checkout pre-flight');
 	});
 
 	test('regression coverage requires falsification evidence in authoring and phase gates', () => {
@@ -118,6 +123,12 @@ describe('process-improvement skill guidance', () => {
 			expect(adapter).toContain('canonical workflow');
 			expect(adapter).not.toContain('### Phase 0b');
 		}
+
+		// FB-002: line-count bound — ADDITIONAL contract adapters must stay thin
+		const claudeLines = claudeAdapter.split('\n').length;
+		const codexLines = codexAdapter.split('\n').length;
+		expect(claudeLines).toBeLessThan(30);
+		expect(codexLines).toBeLessThan(30);
 	});
 
 	test('writing-tests keeps .opencode canonical with thin Claude/Codex adapters', () => {
@@ -130,5 +141,9 @@ describe('process-improvement skill guidance', () => {
 		expect(claudeAdapter).toContain('canonical workflow');
 		expect(codexAdapter).toContain('.opencode/skills/writing-tests/SKILL.md');
 		expect(codexAdapter).toContain('Regression tests must also be falsifiable');
+
+		// FB-002: line-count bound — ADDITIONAL contract adapters must stay thin
+		const claudeAdapterLines = claudeAdapter.split('\n').length;
+		expect(claudeAdapterLines).toBeLessThan(30);
 	});
 });
