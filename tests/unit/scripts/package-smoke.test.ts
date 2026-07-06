@@ -26,6 +26,7 @@ const requiredProjectSkillSlugs = [
 	'deep-dive',
 	'deep-research',
 	'codebase-review-swarm',
+	'swarm-implement',
 	'design-docs',
 	'swarm-pr-review',
 	'swarm-pr-feedback',
