@@ -187,4 +187,95 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 		// Description revision lands.
 		expect(projected.phases[0].tasks[0].description).toBe('Task 1.1 (revised)');
 	});
+
+	// -------------------------------------------------------------------------
+	// statusRank coverage: exercise every rank arm with inputs that
+	// observationally distinguish `>` from `<` and confirm upgrades/downgrades
+	// route correctly. Each test names the (validated -> replayed) rank pair.
+	// -------------------------------------------------------------------------
+
+	test('rank coverage: validated closed (5) survives replayed completed (4) — downgrade rejected', async () => {
+		// Disk says closed; ledger records a completed transition (downgrade).
+		// Merge must keep closed: rank(completed=4) > rank(closed=5) is FALSE.
+		// A `<` typo (override when replayed is LESS terminal) would let
+		// completed win — caught here.
+		await savePlan(tmpDir, makePlan('closed', 'pending'));
+		const completedPlan = makePlan('completed', 'pending');
+		await appendLedgerEvent(
+			tmpDir,
+			{
+				plan_id: derivePlanId(completedPlan),
+				event_type: 'task_status_changed',
+				task_id: '1.1',
+				phase_id: 1,
+				from_status: 'closed',
+				to_status: 'completed',
+				source: 'test_downgrade_attempt',
+			},
+			{ planHashAfter: computePlanHash(completedPlan) },
+		);
+
+		await savePlan(tmpDir, makePlan('closed', 'pending'));
+		const projected = await readPlanJson();
+		expect(projected.phases[0].tasks.find((t) => t.id === '1.1')?.status).toBe(
+			'closed',
+		);
+	});
+
+	test('rank coverage: validated pending (1) upgrades to replayed blocked (3) — upgrade accepted', async () => {
+		// Disk says pending; ledger records blocked. Merge must upgrade to
+		// blocked: rank(blocked=3) > rank(pending=1) is TRUE. A `<`/`<=` flip
+		// would block the upgrade — caught here. Also exercises the blocked
+		// rank arm (rank 3) which was previously uncovered.
+		await savePlan(tmpDir, makePlan('pending', 'pending'));
+		const blockedPlan = makePlan('blocked', 'pending');
+		await appendLedgerEvent(
+			tmpDir,
+			{
+				plan_id: derivePlanId(blockedPlan),
+				event_type: 'task_status_changed',
+				task_id: '1.1',
+				phase_id: 1,
+				from_status: 'pending',
+				to_status: 'blocked',
+				source: 'test_concurrent_writer',
+			},
+			{ planHashAfter: computePlanHash(blockedPlan) },
+		);
+
+		// Caller still believes 1.1 is pending; merge must adopt blocked.
+		await savePlan(tmpDir, makePlan('pending', 'pending'));
+		const projected = await readPlanJson();
+		expect(projected.phases[0].tasks.find((t) => t.id === '1.1')?.status).toBe(
+			'blocked',
+		);
+	});
+
+	test('rank coverage: validated blocked (3) survives replayed in_progress (2) — downgrade rejected', async () => {
+		// Disk says blocked; ledger records in_progress (a LOWER rank). Merge
+		// must keep blocked: rank(in_progress=2) > rank(blocked=3) is FALSE.
+		// Confirms the blocked rank arm survives a downgrade attempt — the
+		// mirror of the previous test.
+		await savePlan(tmpDir, makePlan('blocked', 'pending'));
+		const inProgressPlan = makePlan('in_progress', 'pending');
+		await appendLedgerEvent(
+			tmpDir,
+			{
+				plan_id: derivePlanId(inProgressPlan),
+				event_type: 'task_status_changed',
+				task_id: '1.1',
+				phase_id: 1,
+				from_status: 'blocked',
+				to_status: 'in_progress',
+				source: 'test_downgrade_attempt',
+			},
+			{ planHashAfter: computePlanHash(inProgressPlan) },
+		);
+
+		await savePlan(tmpDir, makePlan('blocked', 'pending'));
+		const projected = await readPlanJson();
+		expect(projected.phases[0].tasks.find((t) => t.id === '1.1')?.status).toBe(
+			'blocked',
+		);
+	});
 });

@@ -76,10 +76,11 @@ statuses is removed; the merged `projectionCandidate` is written directly.
 ### Coverage gate
 
 The coverage job (structurally fixed in #1726 to run each file in its own
-`--isolate` process) is exercised by this PR's merge_group run. **Promoting
-`coverage` to a required check (ruleset `17809658`) is a post-merge follow-up**
-— the issue §2.5 explicitly requires this be done AFTER landing on main to
-avoid blocking other open PRs.
+`--isolate` process) is exercised by this PR's merge_group run. `coverage` is
+**already a required check** in ruleset `17809658` (added 2026-06-30, verified
+via `gh api repos/ZaxbyHub/opencode-swarm/rulesets/17809658`). The issue's
+§2.5 "post-merge sequencing" guidance was satisfied independently before this
+PR landed.
 
 ## Why
 

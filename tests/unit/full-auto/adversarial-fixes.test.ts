@@ -134,16 +134,29 @@ describe('H1 — classifyPathRisk follows symlinks', () => {
 		const linkSource = path.join(tmpDir, 'passwd-link');
 		try {
 			fs.symlinkSync(linkTarget, linkSource);
-		} catch {
+		} catch (err) {
 			// Unprivileged symlink creation is unreliable on Windows (requires
-			// Developer Mode or admin). On Windows, bail early; on POSIX, a
-			// symlink failure here is a real environment problem and must
-			// surface rather than silently passing (issue #1729 Windows
-			// quarantine: the previous unconditional `return` masked real
-			// regressions on every platform).
-			if (process.platform === 'win32') return;
+			// Developer Mode or admin) and can also be restricted on hardened
+			// Linux CI containers (EPERM/EACCES). The previous unconditional
+			// `return` masked real regressions on every platform; the previous
+			// hard throw turned environment symlink restrictions into red CI on
+			// POSIX. Distinguish: environment denial (bail with a notice) vs
+			// genuine failure (surface). Issue #1729 Windows quarantine.
+			const code =
+				(err as NodeJS.ErrnoException | undefined)?.code ?? undefined;
+			const isEnvDenial =
+				process.platform === 'win32' ||
+				code === 'EPERM' ||
+				code === 'EACCES' ||
+				code === 'ENOSYS';
+			if (isEnvDenial) {
+				console.warn(
+					`[adversarial-fixes] symlink creation denied (${code ?? 'win32'}) — skipping H1 symlink-escape assertion`,
+				);
+				return;
+			}
 			throw new Error(
-				`symlink creation failed on non-Windows platform: ${linkSource} -> ${linkTarget}`,
+				`symlink creation failed unexpectedly on ${process.platform} (${code ?? 'unknown'}): ${linkSource} -> ${linkTarget}`,
 			);
 		}
 		const risk = classifyPathRisk('passwd-link', { directory: tmpDir });

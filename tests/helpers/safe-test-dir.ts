@@ -58,14 +58,25 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	const lexicalTarget = path.resolve(targetPath);
-	const lexicalBase = path.resolve(os.tmpdir());
+	// Compute the base BOTH lexically and via realpath so the containment
+	// guards below work regardless of which form the caller passed in.
+	// createSafeTestDir now returns a realpath-resolved dir (issue #1729 macOS
+	// /var -> /private/var symlink fix), so lexicalTarget may be the resolved
+	// /private/var/... form while os.tmpdir() returns the /var/... symlink.
+	// Comparing resolved-target against resolved-base keeps the lexical guard
+	// consistent with how createSafeTestDir canonicalizes its return value.
 	const realBase = fs.realpathSync(os.tmpdir());
-	if (lexicalTarget === lexicalBase) {
+	const lexicalBase = path.resolve(os.tmpdir());
+	const resolvedBase = path.resolve(realBase);
+	if (lexicalTarget === lexicalBase || lexicalTarget === resolvedBase) {
 		throw new Error('safeRmRecursive: refusing to remove os.tmpdir() itself');
 	}
-	if (!lexicalTarget.startsWith(lexicalBase + path.sep)) {
+	if (
+		!lexicalTarget.startsWith(lexicalBase + path.sep) &&
+		!lexicalTarget.startsWith(resolvedBase + path.sep)
+	) {
 		throw new Error(
-			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase}`,
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase} (resolved ${resolvedBase})`,
 		);
 	}
 
