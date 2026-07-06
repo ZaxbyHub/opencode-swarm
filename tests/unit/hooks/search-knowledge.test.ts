@@ -300,6 +300,101 @@ describe('searchKnowledge (unified retrieval)', () => {
 		expect(ids).not.toContain('quar');
 	});
 
+	// G4 (#1716): the search filter used to deny-list only `archived` and
+	// `quarantined`, so a `quarantined_unactionable`-status row that ever
+	// landed in knowledge.jsonl would slip through. The canonical
+	// `isActiveStatus` helper now excludes all three inactive statuses.
+	it('G4: filters quarantined_unactionable entries (allow-list fix)', async () => {
+		await appendKnowledge(
+			kp,
+			makeEntry({ id: 'live', lesson: 'live testing lesson about retries' }),
+		);
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'unactionable',
+				lesson: 'unactionable testing lesson about retries',
+				status: 'quarantined_unactionable',
+			}),
+		);
+
+		const { results } = await searchKnowledge({
+			directory: dir,
+			config,
+			query: 'testing lesson retries',
+			mode: 'manual',
+			tier: 'swarm',
+			emitEvent: false,
+		});
+		const ids = results.map((r) => r.id);
+		expect(ids).toContain('live');
+		expect(ids).not.toContain('unactionable');
+	});
+
+	// G7.2 (#1716): the boost-table raise (promoted +0.15, established +0.10,
+	// candidate +0.0) means a demoted (promoted → established) entry no longer
+	// outranks a still-promoted one. This test pins the semantic guarantee —
+	// a future swap-back to promoted: +0.05 would break it.
+	it('G7.2: promoted outranks established outranks candidate at equal base scores', async () => {
+		// Distinct lessons that share the query terms but differ enough to clear
+		// the Jaccard near-duplicate threshold (0.6) — otherwise the merge layer
+		// dedups them and only one entry reaches ranking.
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'cand',
+				lesson: 'candidate testing lesson about retries and timeouts',
+				status: 'candidate',
+			}),
+		);
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'estab',
+				lesson: 'established testing lesson about retries and backoff',
+				status: 'established',
+			}),
+		);
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'prom',
+				lesson: 'promoted testing lesson about retries and circuit breakers',
+				status: 'promoted',
+			}),
+		);
+
+		const { results } = await searchKnowledge({
+			directory: dir,
+			config,
+			query: 'testing lesson retries',
+			mode: 'manual',
+			tier: 'swarm',
+			emitEvent: false,
+		});
+		const ids = results.map((r) => r.id);
+		// All three surface.
+		expect(ids).toContain('cand');
+		expect(ids).toContain('estab');
+		expect(ids).toContain('prom');
+		// Ranking order: promoted (+0.15) > established (+0.10) > candidate (+0.0).
+		expect(ids.indexOf('prom')).toBeLessThan(ids.indexOf('estab'));
+		expect(ids.indexOf('estab')).toBeLessThan(ids.indexOf('cand'));
+
+		// PRR-012: also pin the boost VALUES, not just ordering. The lessons
+		// share the query terms so base text scores are nearly identical; the
+		// finalScore deltas between adjacent ranks should approximate the boost
+		// deltas (promoted→established ≈ 0.05, established→candidate ≈ 0.10).
+		// A symmetric scale-down (e.g. promoted +0.06 / established +0.05)
+		// would still pass ordering but fail these delta assertions.
+		const byId = new Map(results.map((r) => [r.id, r]));
+		const promScore = byId.get('prom')!.finalScore;
+		const estabScore = byId.get('estab')!.finalScore;
+		const candScore = byId.get('cand')!.finalScore;
+		expect(promScore - estabScore).toBeCloseTo(0.05, 1);
+		expect(estabScore - candScore).toBeCloseTo(0.1, 1);
+	});
+
 	it('applies agent-role scoping for entries that declare applies_to_agents', async () => {
 		await appendKnowledge(
 			kp,
@@ -610,5 +705,48 @@ describe('searchKnowledge (unified retrieval)', () => {
 		});
 		// The valid entry must survive the malformed neighbor.
 		expect(results.map((r) => r.id)).toContain('valid');
+	});
+
+	it('G2 (#1715): a confidence-floor-demoted entry ranks below an equal healthy entry', async () => {
+		// Two DISTINCT lessons that both match the query (identical text would
+		// be deduped by the Jaccard≥0.6 rule). The only score-relevant
+		// difference: one carries the confidence_floor_demoted flag.
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'healthy',
+				lesson: 'Always validate user input before processing http requests',
+			}),
+		);
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'demoted',
+				lesson:
+					'Validate user input thoroughly before processing form submissions',
+				confidence_floor_demoted: true,
+			}),
+		);
+
+		const { results } = await searchKnowledge({
+			directory: dir,
+			config,
+			query: 'validate user input',
+			mode: 'manual',
+			agent: 'architect',
+			sessionId: 's1',
+			tier: 'swarm',
+			applyScopeFilter: false,
+			emitEvent: false,
+		});
+
+		// Both surface (demote suppresses the statusBoost, not retrieval entirely).
+		expect(results.map((r) => r.id)).toContain('healthy');
+		expect(results.map((r) => r.id)).toContain('demoted');
+		// The healthy entry must rank above the demoted one — the demoted entry
+		// loses its `established` statusBoost (0.1) so its score is strictly lower.
+		const healthyIdx = results.findIndex((r) => r.id === 'healthy');
+		const demotedIdx = results.findIndex((r) => r.id === 'demoted');
+		expect(healthyIdx).toBeLessThan(demotedIdx);
 	});
 });

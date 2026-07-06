@@ -50,6 +50,7 @@ import type {
 	KnowledgeConfig,
 	KnowledgeRetrievalContext,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 const TEXT_WEIGHT = 0.6;
 const META_WEIGHT = 0.4;
@@ -236,10 +237,13 @@ function tieBreak(
 	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-/** Status boost mirrors the legacy manual-recall boost. */
+/** Status boost mirrors the legacy manual-recall boost.
+ * G7 (#1716): `promoted` is the lifecycle apex and gets the highest boost.
+ * A demoted entry (`promoted → established` via runAutoDemotion) drops to the
+ * `established` boost, below a still-`promoted` entry but above `candidate`. */
 function statusBoost(status: string): number {
+	if (status === 'promoted') return 0.15;
 	if (status === 'established') return 0.1;
-	if (status === 'promoted') return 0.05;
 	return 0;
 }
 
@@ -308,12 +312,12 @@ export async function searchKnowledge(
 		);
 		const counterRollups = await readKnowledgeCounterRollups(directory);
 
-		// Tier post-filter (hive-only), quarantined exclusion, and archived exclusion.
-		// readMergedKnowledge uses a deny-list (excludes only quarantined); archived
-		// entries must also be hidden here.
+		// Tier post-filter (hive-only) + inactive-status exclusion.
+		// G4 (#1716): use the canonical `isActiveStatus` helper so any future
+		// inactive status is excluded by default. `isActiveStatus` returns `true`
+		// for unknown/missing statuses, matching the #828 deny-list intent.
 		candidates = candidates.filter((e) => {
-			if (e.status === 'archived') return false;
-			if (e.status === 'quarantined') return false;
+			if (!isActiveStatus(e.status)) return false;
 			if (tier === 'hive' && e.tier !== 'hive') return false;
 			return true;
 		});
@@ -484,7 +488,12 @@ export async function searchKnowledge(
 						coldStartBonus +
 						synonymBoost +
 						triggerRecallBoost +
-						(hasQuery ? statusBoost(entry.status) : 0),
+						// G2 (#1715): a floor-demoted entry loses its status boost
+						// so it sinks to the bottom of ranking without introducing
+						// a new retrieval-leaking status.
+						(hasQuery && !entry.confidence_floor_demoted
+							? statusBoost(entry.status)
+							: 0),
 				),
 			);
 

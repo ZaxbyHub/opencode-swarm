@@ -110,7 +110,10 @@ describe('buildSlashCommandsList (via createArchitectAgent)', () => {
 
 	it('knowledge subcommand "restore" appears in output', () => {
 		expect(prompt).toContain('`/swarm knowledge restore`');
-		expect(prompt).toContain('Restores a quarantined knowledge entry');
+		// G6 (#1716): restore now dispatches by status (archived OR quarantined).
+		expect(prompt).toContain(
+			'Restore a quarantined or archived knowledge entry',
+		);
 	});
 
 	// ============ SUBCOMMAND PARENT ENTRY ============

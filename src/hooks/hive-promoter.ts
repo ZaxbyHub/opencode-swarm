@@ -21,6 +21,7 @@ import type {
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 /** Carry a swarm entry's actionable-directive metadata onto a promoted hive
  *  entry (Phase 4 review, MEDIUM finding). Dropping these fields on promotion
@@ -119,9 +120,9 @@ export function isHiveEligible(
 }
 
 function isActiveForHivePromotion(entry: SwarmKnowledgeEntry): boolean {
-	return !['archived', 'quarantined', 'quarantined_unactionable'].includes(
-		entry.status,
-	);
+	// G4 (#1716): route through the canonical helper so the inactive set has a
+	// single source of truth.
+	return isActiveStatus(entry.status);
 }
 
 /**

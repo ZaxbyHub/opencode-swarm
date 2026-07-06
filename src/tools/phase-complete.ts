@@ -30,6 +30,7 @@ import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
 import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator.js';
 import { updateRetrievalOutcome } from '../hooks/knowledge-reader.js';
+import type { ConfidenceFloorOptions } from '../hooks/knowledge-store.js';
 import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
@@ -970,9 +971,10 @@ export async function executePhaseComplete(
 				}
 			}
 
-			// Record retrieval outcome: mark shown lessons from this phase as applied.
-			// Phase completed successfully at this point — lessons applied = positive signal.
-			await updateRetrievalOutcome(dir, `Phase ${phase}`, true);
+			// Retrieval-outcome recording moved below — it now runs after the
+			// phase's real success/failure is determined (see the call after
+			// `result` is built). Recording `true` here was wrong: it asserted
+			// success before the outcome was known.
 		} catch (error) {
 			// Log warning but don't block phase completion
 			safeWarn(
@@ -1163,11 +1165,19 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// G2 (#1715): confidence-floor options derived from config once, reused by
+	// both feedback bridges (skill-usage and verdict) so they stay consistent.
+	const floorOptions: ConfidenceFloorOptions = {
+		floorAction: knowledgeConfig.confidence_floor_action,
+		floorMinOutcomes: knowledgeConfig.confidence_floor_min_outcomes,
+		floorSignalThreshold: knowledgeConfig.confidence_floor_signal_threshold,
+	};
+
 	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
 	// Idempotency is provided by feedback_applied markers in the skill-usage log itself.
 	// Errors never block phase_complete.
 	try {
-		const feedbackResult = await applySkillUsageFeedback(dir);
+		const feedbackResult = await applySkillUsageFeedback(dir, { floorOptions });
 
 		if (feedbackResult.processed > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
@@ -1218,6 +1228,7 @@ export async function executePhaseComplete(
 		const verdictResult = await applyKnowledgeVerdictFeedback(dir, {
 			sinceTimestamp: verdictSinceTimestamp,
 			sinceEventId: verdictSinceEventId,
+			floorOptions,
 		});
 
 		if (verdictResult.lastProcessedTimestamp) {
@@ -1361,6 +1372,21 @@ export async function executePhaseComplete(
 		agentsMissing,
 		warnings,
 	};
+
+	// Record retrieval outcome for shown lessons from this phase, using the
+	// REAL outcome. Previously this was hardcoded `true` and ran before `success`
+	// was determined — so a failed phase (policy=enforce + missing required
+	// agents) could never record a 'failure' outcome, leaving the negative half
+	// of the outcome signal dead (G1). Now it runs after `success` is finalized.
+	if (
+		retroFound &&
+		retroEntry?.lessons_learned &&
+		retroEntry.lessons_learned.length > 0
+	) {
+		await updateRetrievalOutcome(dir, `Phase ${phase}`, success).catch(() => {
+			// Never throw out of phase-complete on a knowledge-store failure.
+		});
+	}
 
 	// Regression sweep check: advisory warning if enforce=true and no sweep found
 	if (phaseCompleteConfig.regression_sweep?.enforce) {
