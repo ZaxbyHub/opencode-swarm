@@ -22,7 +22,13 @@ describe('createSafeTestDir', () => {
 	it('creates a directory inside os.tmpdir()', () => {
 		const { dir, cleanup } = createSafeTestDir();
 		try {
-			const tmpdir = os.tmpdir();
+			// The helper now returns a realpath-resolved dir (issue #1729: wraps
+			// mkdtempSync in realpathSync so the canonical path matches what
+			// production code compares against on macOS, where os.tmpdir()
+			// returns the /var/... symlink but the real path is /private/var/...).
+			// Compare against the realpath-resolved tmpdir base so the assertion
+			// holds on macOS too.
+			const tmpdir = fs.realpathSync(os.tmpdir());
 			const resolvedDir = path.resolve(dir);
 			const resolvedTmpdir = path.resolve(tmpdir);
 			expect(

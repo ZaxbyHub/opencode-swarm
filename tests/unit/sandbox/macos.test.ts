@@ -50,30 +50,40 @@ describe('MacOSSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
 
 	describe('constructor', () => {
-		test('accepts scopePaths array when implemented (Phase 3)', () => {
-			// The placeholder throws on construction.
-			// Once implemented, constructor should accept scopePaths.
-			// const executor = new MacOSSandboxExecutor(['/Users/user/scope']);
-			// expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		// MacOSSandboxExecutor is implemented (issue #1729 macOS quarantine:
+		// the previous "throws on construction" placeholders were stale). On
+		// non-darwin the constructor throws 'MacOSSandboxExecutor not yet
+		// implemented'; on darwin it constructs and self-disables when
+		// sandbox-exec is unavailable. The tests below exercise the new
+		// contract on each platform.
+
+		test.skipIf(!isMac)('accepts scopePaths array on darwin', () => {
+			const executor = new MacOSSandboxExecutor(['/Users/user/scope']);
+			expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
+			expect(executor.mechanism).toBe('sandbox-exec');
 		});
 
-		test('accepts scopePaths and tempDir when implemented (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor(
-			//   ['/Users/user/scope'],
-			//   '/tmp/custom-tmp',
-			// );
-			// expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		test.skipIf(!isMac)('accepts scopePaths and tempDir on darwin', () => {
+			const executor = new MacOSSandboxExecutor(
+				['/Users/user/scope'],
+				'/tmp/custom-tmp',
+			);
+			expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
 		});
 
-		test('mechanism property is SandboxExec when implemented (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.mechanism).toBe('SandboxExec');
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		test.skipIf(!isMac)('mechanism property is sandbox-exec on darwin', () => {
+			const executor = new MacOSSandboxExecutor([]);
+			expect(executor.mechanism).toBe('sandbox-exec');
 		});
+
+		test.skipIf(isMac)(
+			'throws MacOSSandboxExecutor not yet implemented on non-darwin',
+			() => {
+				expect(() => new MacOSSandboxExecutor([])).toThrow(
+					'MacOSSandboxExecutor not yet implemented',
+				);
+			},
+		);
 	});
 
 	// -----------------------------------------------------------------------

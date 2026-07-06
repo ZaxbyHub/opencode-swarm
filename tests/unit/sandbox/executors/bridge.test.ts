@@ -12,11 +12,39 @@ describe('sandbox executors', () => {
 	});
 
 	describe('macos', () => {
-		test('MacOSSandboxExecutor throws on construction', () => {
-			expect(() => new MacOSSandboxExecutor()).toThrow(
-				'MacOSSandboxExecutor not yet implemented',
-			);
-		});
+		// MacOSSandboxExecutor is now implemented (issue #1729 macOS quarantine:
+		// the previous "throws on construction" assertion was stale). Current
+		// contract:
+		//   - On non-darwin platforms, the constructor throws
+		//     'MacOSSandboxExecutor not yet implemented' (early platform guard).
+		//   - On darwin, the constructor succeeds and self-disables when
+		//     sandbox-exec is unavailable (the GitHub macOS runner has no
+		//     functional sandbox-exec). The executor reports
+		//     mechanism='sandbox-exec' and isAvailable() reflects the probe.
+		const isDarwin = process.platform === 'darwin';
+
+		test.skipIf(isDarwin)(
+			'MacOSSandboxExecutor throws on non-darwin platforms',
+			() => {
+				expect(() => new MacOSSandboxExecutor()).toThrow(
+					'MacOSSandboxExecutor not yet implemented',
+				);
+			},
+		);
+
+		test.skipIf(!isDarwin)(
+			'MacOSSandboxExecutor constructs on darwin and self-disables when sandbox-exec is unavailable',
+			() => {
+				const executor = new MacOSSandboxExecutor();
+				expect(executor).toBeDefined();
+				expect(executor.mechanism).toBe('sandbox-exec');
+				// The GitHub macOS runner has no functional sandbox-exec, so the
+				// executor self-disables. Locally (with sandbox-exec present) it
+				// would be available. Assert the mechanism/shape, not the
+				// probe result, so the test is portable across both environments.
+				expect(typeof executor.isAvailable()).toBe('boolean');
+			},
+		);
 	});
 
 	describe('windows', () => {

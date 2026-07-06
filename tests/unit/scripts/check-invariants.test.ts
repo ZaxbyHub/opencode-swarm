@@ -56,8 +56,12 @@ function runCheckInvariants(cwd: string): {
  * Set up a temp fixture dir with a copy of the scripts and controlled src/tests
  */
 function setupFixtureDir(fixtureName: string): string {
+	// Wrap os.tmpdir() in realpathSync so the canonical path matches what
+	// production code compares against. On macOS, os.tmpdir() returns
+	// /var/folders/... (symlinked to /private/var/folders/...); without
+	// realpath, the fixture cwd would mismatch containment guards. Issue #1729.
 	const fixtureDir = path.join(
-		os.tmpdir(),
+		fs.realpathSync(os.tmpdir()),
 		`check-invariants-${fixtureName}-${Date.now()}`,
 	);
 	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'lib'), { recursive: true });
@@ -92,7 +96,7 @@ describe('check-invariants.sh', () => {
 	test('should detect missing mock allowlist file', () => {
 		if (isWindows) return;
 		const fixtureDir = path.join(
-			os.tmpdir(),
+			fs.realpathSync(os.tmpdir()),
 			'check-invariants-missing-allowlist-' + Date.now(),
 		);
 		fs.mkdirSync(path.join(fixtureDir, 'scripts', 'lib'), { recursive: true });

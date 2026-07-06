@@ -9,6 +9,7 @@
  * @module worktree
  */
 
+import { realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { bunSpawn } from '../utils/bun-compat';
@@ -234,7 +235,21 @@ export function shortenWorktreePath(
 	sessionId: string,
 	laneId: string,
 ): string {
-	return path.join(_internals.osTmpdir(), 'swwt', sessionId, laneId);
+	// Resolve os.tmpdir() through realpathSync so the shortened worktree path
+	// is canonical. On the GitHub windows-latest runner, os.tmpdir() returns
+	// the 8.3 short name (C:\Users\RUNNER~1\...) while git worktree porcelain
+	// emits the long form (C:\Users\runneradmin\...). Building the shortened
+	// fallback path from the resolved long form keeps it consistent with the
+	// porcelain output and with the realpath-resolved fixtures in the tests
+	// (issue #1729 Windows quarantine).
+	let tmp = _internals.osTmpdir();
+	try {
+		tmp = realpathSync(tmp);
+	} catch {
+		// Best-effort: if tmpdir itself doesn't resolve (shouldn't happen in
+		// practice), fall through with the lexical form.
+	}
+	return path.join(tmp, 'swwt', sessionId, laneId);
 }
 
 export interface ProvisionSuccess extends WorktreeHandle {}
@@ -359,8 +374,27 @@ export async function provisionWorktree(
 			directory,
 		);
 
-		const normalizeGitPath = (p: string) =>
-			p.replace(/\\/g, '/').replace(/\/+$/, '');
+		// Normalize a filesystem path for equality comparison against git
+		// porcelain output. Beyond the trailing-slash/backslash normalization,
+		// realpath-canonicalize so that Windows 8.3 short-name vs long-name
+		// mismatches don't defeat the comparison (issue #1729 Windows quarantine:
+		// GitHub's windows-latest RunnerAdmin user exposes the temp dir as
+		// C:\Users\RUNNER~1\... while `git worktree list --porcelain` emits the
+		// long form C:\Users\runneradmin\..., so a pure string compare silently
+		// mismatches and the active-collision check at line ~409 fires
+		// incorrectly — or, conversely, fails to detect a real collision).
+		// realpathSync resolves both sides to the canonical underlying path.
+		// Best-effort: if the path doesn't exist (e.g. a worktree whose
+		// directory was removed but is still registered), fall back to the
+		// lexical normalized form so porcelain parsing still works.
+		const normalizeGitPath = (p: string): string => {
+			const lexical = p.replace(/\\/g, '/').replace(/\/+$/, '');
+			try {
+				return realpathSync(p).replace(/\\/g, '/').replace(/\/+$/, '');
+			} catch {
+				return lexical;
+			}
+		};
 		const expectedPath = normalizeGitPath(worktreePath);
 
 		// Parse all worktree entries from porcelain output.

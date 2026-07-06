@@ -279,7 +279,14 @@ export function readTaskEvidenceRaw(
 		const raw = readFileSync(evidencePath, 'utf-8');
 		return TaskEvidenceSchema.parse(JSON.parse(raw));
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		const code = (error as NodeJS.ErrnoException).code;
+		// ENOENT: no evidence file → fall through to session state.
+		// ENAMETOOLONG: the taskId produces a filename exceeding the platform's
+		// NAME_MAX (255 bytes on HFS+/APFS/ext4/NTFS). The file cannot exist,
+		// so treat it as missing rather than corrupt (issue #1729: a 999-char
+		// taskId was reported as "corrupt or unreadable" on macOS instead of
+		// falling through to the session-state gate check).
+		if (code === 'ENOENT' || code === 'ENAMETOOLONG') return null;
 		throw error;
 	}
 }

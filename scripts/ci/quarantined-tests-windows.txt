@@ -4,28 +4,30 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# These fail ONLY on the windows-latest runner and pass on ubuntu-latest.
-# The failures are Windows-environment artifacts, not product regressions —
-# for example:
-#   - `bun.cmd` not resolvable in $PATH when spawning a subprocess
-#     (cli/install-default-agent-configs, ENOENT errno -4058).
-#   - 8.3 short-name paths (C:\Users\RUNNER~1\... vs long ...\runneradmin\...)
-#     breaking path-equality assertions (worktree/provision-worktree*).
-#   - Windows symlink semantics differing from POSIX in containment checks
-#     (full-auto/adversarial-fixes, hooks/destructive-command-guard).
-#   - Case/normalization and path-separator differences (save-plan-adversarial,
-#     pre-check-batch-sast-preexisting).
+# STATUS: 0 active entries (issue #1729 — debt paid down).
 #
-# Root cause per file is not yet individually diagnosed/fixed — tracked in
-# https://github.com/ZaxbyHub/opencode-swarm/issues/1705. This list was
-# rebuilt after PR #1726 emptied it: #1726's PR CI runs ubuntu-only, so its
-# un-quarantining of these was never exercised on Windows.
-tests/unit/cli/install-default-agent-configs.test.ts
-tests/unit/cli/update-command.test.ts
-tests/unit/full-auto/adversarial-fixes.test.ts
-tests/unit/hooks/destructive-command-guard.test.ts
-tests/unit/tools/pre-check-batch-sast-preexisting.test.ts
-tests/unit/tools/repo-map.test.ts
-tests/unit/tools/save-plan-adversarial.test.ts
-tests/unit/worktree/provision-worktree.adversarial.test.ts
-tests/unit/worktree/provision-worktree.test.ts
+# History: this list previously held 9 Windows-only failures. They were fixed
+# in issue #1729 by a combination of:
+#   - tests/unit/cli/install-default-agent-configs.test.ts: replaced
+#     `bun.cmd` (which Bun.spawn cannot execute without shell:true) with
+#     `process.execPath` — the canonical portable spawn pattern.
+#   - src/worktree/core.ts: normalizeGitPath now realpath-canonicalizes both
+#     sides of the worktree-collision comparison so the GitHub windows-latest
+#     RunnerAdmin 8.3 short-name (C:\Users\RUNNER~1) vs long-name
+#     (C:\Users\runneradmin) mismatch no longer defeats path equality.
+#   - tests/unit/full-auto/adversarial-fixes.test.ts: the symlink-bail is now
+#     gated to win32 only, so a real symlink failure on POSIX surfaces rather
+#     than silently passing.
+#   - tests/unit/tools/repo-map.test.ts: explicit fs.utimesSync with a future
+#     timestamp after the schema-version mutation write, so loadGraph's
+#     mtime-based cache re-reads on Windows (where same-ms writes can leave
+#     mtime unchanged at FS granularity).
+#   - The remaining entries (cli/update-command, save-plan-adversarial,
+#     pre-check-batch-sast-preexisting, destructive-command-guard) were
+#     re-triaged and found already portable (they pass on Windows local + CI).
+#
+# Validation tier: merge_group `unit (windows-latest, N)` (the pull_request
+# tier is ubuntu-only and never exercised these).
+#
+# Do NOT re-add entries here unless a merge_group run on windows-latest has
+# confirmed a real failure that cannot be fixed at the root.

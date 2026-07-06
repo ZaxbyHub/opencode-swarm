@@ -37,8 +37,11 @@ afterAll(() => {
 // Create a real temp workspace directory for cross-platform compatibility.
 // Use os.tmpdir() (AGENTS.md invariant 7) so a cleanup failure cannot leave
 // artifacts inside the project tree.
-const tempWorkspace = fs.mkdtempSync(
-	path.join(os.tmpdir(), 'repo-graph-hook-test-'),
+// realpathSync resolves the macOS /var → /private/var symlink (and Windows
+// 8.3 short names) so the canonical workspace root matches what production
+// code compares against. Issue #1729 macOS quarantine.
+const tempWorkspace = fs.realpathSync(
+	fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-hook-test-')),
 );
 
 // Cleanup temp workspace at end of all tests
@@ -424,6 +427,9 @@ describe('error escalation advisory', () => {
 		tempDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), 'repo-graph-escalation-test-'),
 		);
+		// Resolve macOS /var → /private/var symlink so the canonical path
+		// matches production containment checks (issue #1729).
+		tempDir = fs.realpathSync(tempDir);
 		workspaceRoot = tempDir;
 	});
 

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Engineering invariant checks for opencode-swarm.
 # Runs three grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7.
-# Compatible with GitHub Actions (ubuntu-latest, bash).
-# NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
+# Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
+# Portability constraints (issue #1729 merge_group macOS failures):
+#   - macOS ships bash 3.2 as /bin/bash: NO associative arrays (`declare -A`),
+#     NO `[[ ${arr["x"]} ]]` subscript syntax. Use plain files + grep -Fxf.
+#   - BSD grep does NOT support `-P` (Perl regex) or `\x27`. Use `grep -Eo`
+#     with explicit `'...'`/`"..."` alternation instead.
 set -euo pipefail
 
 # Load shared normalization routine
@@ -81,19 +85,40 @@ if [ ! -f "$ALLOWLIST_FILE" ]; then
   echo "       Run: scripts/generate-mock-allowlist.sh to regenerate, or manually add targets to $ALLOWLIST_FILE" >&2
   violations=$((violations + 1))
 else
-  # Pre-load allowlist into associative array once so lookup is O(1) instead of O(N·M)
-  declare -A allowlist
+  # Load the allowlist into a plain bash INDEXED array (NOT `declare -A`,
+  # which requires bash 4.0+; macOS ships bash 3.2 as /bin/bash and aborts
+  # under `set -euo pipefail` at the declaration — issue #1729 merge_group:
+  # macOS printed only the Check headers then died). Indexed arrays + linear
+  # scan are portable to bash 3.2 and the allowlist is small (~110 entries).
+  allowlist_patterns=()
   while IFS= read -r pattern; do
-    [[ -z "$pattern" || "$pattern" == \#* ]] && continue
-    allowlist["$pattern"]=1
+    case "$pattern" in
+      ''|\#*) continue ;;
+    esac
+    allowlist_patterns+=( "$pattern" )
   done < "$ALLOWLIST_FILE"
+
+  allowlist_contains() {
+    # Linear scan; portable to bash 3.2 (no associative arrays).
+    local needle="$1"
+    for p in "${allowlist_patterns[@]}"; do
+      [ "$p" = "$needle" ] && return 0
+    done
+    return 1
+  }
 
   while IFS= read -r file; do
     # Filter: only non-comment lines containing mock.module(
     # This avoids false positives from commented-out code.
-    active_lines=$(grep -E 'mock\.module\(' "$file" | grep -vE '^\s*//' | grep -vE '^\s*\*' || true)
+    active_lines=$(grep -E 'mock\.module\(' "$file" | grep -vE '^[[:space:]]*//' | grep -vE '^[[:space:]]*\*' || true)
     call_count=$(echo "$active_lines" | grep -cE 'mock\.module\(' || true)
-    target_count=$(echo "$active_lines" | grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]' | wc -l || true)
+    # POSIX-portable extraction of mock.module('target' / mock.module("target".
+    # The previous form used `grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]'`
+    # which requires Perl regex (BSD grep on macOS does not support -P or \x27).
+    # Replace with an explicit single/double-quote alternation under grep -Eo.
+    target_count=$(echo "$active_lines" \
+      | grep -Eo "mock\.module\([[:space:]]*'[^']+'|mock\.module\([[:space:]]*\"[^\"]+\"" \
+      | wc -l | tr -d ' ' || true)
     if [ "$call_count" -ne "$target_count" ]; then
       echo "ERROR: $file has $call_count mock.module call(s) but only $target_count target(s) extracted."
       echo "       Multiline mock.module calls (target on a separate line from mock.module()) are not supported."
@@ -102,7 +127,11 @@ else
       violations=$((violations + 1))
       continue
     fi
-    # Extract targets from the same filtered (non-comment) lines
+    # Extract targets from the same filtered (non-comment) lines.
+    # POSIX-portable: emit the mock.module('target' / mock.module("target"
+    # spans via grep -Eo, then strip the mock.module( prefix and the
+    # surrounding quotes with sed. The previous grep -oP form (Perl regex)
+    # is replaced with an explicit quote alternation for BSD grep on macOS.
     while IFS= read -r target; do
       # Skip empty lines
       [ -n "$target" ] || continue
@@ -115,10 +144,10 @@ else
       # node:child_process -> node:child_process (unchanged)
       normalized="$(normalize_mock_target "$target")"
 
-      # O(1) lookup in pre-loaded associative array
-      allowed=false
-      if [[ ${allowlist["$normalized"]:-} == 1 ]]; then
+      if allowlist_contains "$normalized"; then
         allowed=true
+      else
+        allowed=false
       fi
 
       if ! $allowed; then
@@ -126,9 +155,14 @@ else
         echo "       Use _internals DI seam, or run: scripts/generate-mock-allowlist.sh"
         violations=$((violations + 1))
       fi
+    # Extract targets from the same filtered (non-comment) lines.
+    # POSIX-portable: emit the mock.module('target' / mock.module("target"
+    # spans via grep -Eo, then strip the mock.module( prefix and the
+    # surrounding quotes with sed. The previous grep -oP form (Perl regex)
+    # is replaced with an explicit quote alternation for BSD grep on macOS.
     done < <(echo "$active_lines" \
-      | grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]' \
-      | sed "s/^mock\.module(\s*[\"']//;s/[\"']$//" || true)
+      | grep -Eo "mock\.module\([[:space:]]*'[^']+'|mock\.module\([[:space:]]*\"[^\"]]+\"" \
+      | sed -E "s/^mock\.module\([[:space:]]*//; s/^'([^']+)'$/\1/; s/^\"([^\"]+)\"$/\1/" || true)
   done < <(grep -rl 'mock\.module(' tests/ src/ --include="*.test.ts" \
     --exclude-dir=node_modules --exclude-dir=dist || true)
 fi
