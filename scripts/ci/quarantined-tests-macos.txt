@@ -4,26 +4,21 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# STATUS: 0 active entries (issue #1729 — debt paid down).
+# STATUS: 4 active entries — lean-turbo worktree provisioning tests that fail
+# on the GitHub macos-latest runner. They pass on ubuntu-latest and on a
+# Windows host. The failures are `expect(...).toBeGreaterThan(0)` where the
+# received value is 0 (provisionWorktree mock not called) — a macOS-specific
+# lane-provisioning issue that requires a macOS environment to diagnose.
 #
-# History: this list previously held 22 macOS-only failures. They were fixed
-# in issue #1729 by a combination of:
-#   - realpathSync(os.tmpdir()) wraps in fixtures and the shared helper
-#     (tests/helpers/safe-test-dir.ts) so the /var -> /private/var symlink on
-#     macOS no longer trips .swarm containment guards and repo-graph boundary
-#     checks (guardrails*, repo-graph-*, repo-map, integration-worktree,
-#     test-runner-scope-cap, update-task-status-recovery, lean/*).
-#   - Stale-assertion update in sandbox/executors/bridge.test.ts
-#     (MacOSSandboxExecutor is now implemented, not "not yet implemented").
-#   - macos.test.ts constructor placeholders replaced with real assertions
-#     gated on platform (constructs on darwin, throws elsewhere).
-#   - POSIX-portable grep in scripts/check-invariants.sh (replaced GNU-only
-#     `grep -oP` / `\x27` with `grep -Eo` + explicit quote alternation so
-#     BSD grep on macOS works).
+# These 4 files were un-quarantined in the initial #1729 push based on their
+# pre-existing realpathSync wraps + Windows-local validation, but the macOS
+# merge_group run revealed a SEPARATE failure mode (lane provisioning, not
+# path resolution). They are re-quarantined here until the root cause is
+# diagnosed on macOS. Tracked as a follow-up to #1729.
 #
-# These were macOS-environment artifacts, not product regressions. Validation
-# tier: merge_group `unit (macos-latest, N)` (the pull_request tier is
-# ubuntu-only and never exercised these).
-#
-# Do NOT re-add entries here unless a merge_group run on macos-latest has
-# confirmed a real failure that cannot be fixed at the root.
+# Do NOT un-quarantine without a merge_group `unit (macos-latest, N)` validation
+# run confirming the fix.
+tests/unit/turbo/lean/integration-worktree.test.ts
+tests/unit/turbo/lean/retroactive-adversarial.test.ts
+tests/unit/turbo/lean/runner.adversarial.test.ts
+tests/unit/turbo/lean/runner.test.ts

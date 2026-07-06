@@ -49,8 +49,14 @@ async function initGitRepo(tmpDir: string): Promise<string> {
 }
 
 function tmpDir(): string {
+	// realpathSync(os.tmpdir()) so every downstream fixture path is canonical.
+	// On the GitHub windows-latest runner, os.tmpdir() returns the 8.3 short
+	// name (C:\Users\RUNNER~1\...) while git worktree porcelain emits the long
+	// form (C:\Users\runneradmin\...). Building the fixture under the resolved
+	// long form from the start makes every path comparison consistent without
+	// needing per-assertion realpath helpers. Issue #1729.
 	return path.join(
-		os.tmpdir(),
+		fs.realpathSync(os.tmpdir()),
 		'pw-adv-' + Math.random().toString(36).slice(2),
 	);
 }
