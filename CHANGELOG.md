@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.107.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.4...v7.107.5) (2026-07-06)
+
+
+### Bug Fixes
+
+* **ci:** pay down test quarantine debt ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([fce4c64](https://github.com/ZaxbyHub/opencode-swarm/commit/fce4c64eaa6696bc352e9d4d225deb251bbf037d))
+* **ci:** re-quarantine 2 integration tests with ubuntu CI-only failures ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([2a73d49](https://github.com/ZaxbyHub/opencode-swarm/commit/2a73d4959edd4de746c191323436d9bcd941e884))
+* **ci:** resolve merge_group failures across macOS + Windows ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([980e4a7](https://github.com/ZaxbyHub/opencode-swarm/commit/980e4a724fea78991144ea88aa543f64bc5f15e8))
+* **ci:** skip coverage when unit fails + fix Windows worktree tmpdir + re-quarantine macOS lean worktree tests ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([a8d9c34](https://github.com/ZaxbyHub/opencode-swarm/commit/a8d9c34c20db3263d9bd89bd77c8d199012e4b9a))
+* **test:** bump pre-check-batch-sast test timeout to 90s for Windows CI ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([8813555](https://github.com/ZaxbyHub/opencode-swarm/commit/88135552cfa4fb67655b1190afed7e09c2bf620f))
+* **worktree:** realpath-resolve tmpdir in shortenWorktreePath ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([6733e8b](https://github.com/ZaxbyHub/opencode-swarm/commit/6733e8b3d49bb13a0dde468ae8ed41d1bb51a8ed))
+* **worktree:** use suffix-based path comparison for Windows 8.3 portability ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([409d1fc](https://github.com/ZaxbyHub/opencode-swarm/commit/409d1fcf5f136cb9319c54f66bb63b154081c86b))
+
 ## [7.107.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.3...v7.107.4) (2026-07-06)
 
 
