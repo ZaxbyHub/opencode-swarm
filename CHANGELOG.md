@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.107.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.5...v7.107.6) (2026-07-06)
+
+
+### Bug Fixes
+
+* biome format — wrap long line in process-improvements test ([2e24ed7](https://github.com/ZaxbyHub/opencode-swarm/commit/2e24ed74eafd950a22890cafa4c2309d0f2f5432))
+* resolve .claude adapter in phase-wrap design-docs test ([0161dcf](https://github.com/ZaxbyHub/opencode-swarm/commit/0161dcf86272241e008ba1469083b19ddee66e43))
+* resolve swarm-pr-review findings + merge conflict fixes ([4704882](https://github.com/ZaxbyHub/opencode-swarm/commit/4704882420df41c9de1394a1884ddcb5d7b0a3f4))
+* **skills:** codify retrospective process guidance ([e0ce947](https://github.com/ZaxbyHub/opencode-swarm/commit/e0ce9476571143e3146a9b071fc145d2088980c5))
+* **skills:** codify retrospective process guidance ([01f6ccd](https://github.com/ZaxbyHub/opencode-swarm/commit/01f6ccd121bd450a6f8a9f3d4577503b808799b6))
+
 ## [7.107.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.4...v7.107.5) (2026-07-06)
 
 
