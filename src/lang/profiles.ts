@@ -593,7 +593,7 @@ LANGUAGE_REGISTRY.register({
 		command: 'govulncheck -json ./...',
 		outputFormat: 'json',
 	},
-	sast: { nativeRuleSet: null, semgrepSupport: 'ga' },
+	sast: { nativeRuleSet: 'go', semgrepSupport: 'ga' },
 	prompts: {
 		coderConstraints: [
 			'Always check and return errors; never discard error return values',

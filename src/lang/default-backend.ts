@@ -271,6 +271,21 @@ export function defaultBuildTestCommand(
 				'-e',
 				'Dir.glob("test/**/*_test.rb").sort.each { |f| require_relative f }',
 			];
+		case 'pest': {
+			const args: string[] = [phpVendorBin('pest')];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
+		case 'phpunit': {
+			const args: string[] = [phpVendorBin('phpunit')];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
+		case 'php-artisan': {
+			const args: string[] = ['php', 'artisan', 'test'];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
 		default: {
 			// Unknown framework — fall back to registry-driven tokenization so
 			// a profile that adds a new framework entry without updating this
@@ -283,6 +298,14 @@ export function defaultBuildTestCommand(
 			return [...argv, ...files];
 		}
 	}
+}
+
+function phpVendorBin(name: string): string {
+	return path.join(
+		'vendor',
+		'bin',
+		process.platform === 'win32' ? `${name}.bat` : name,
+	);
 }
 
 /**
@@ -508,6 +531,26 @@ export function defaultParseTestOutput(
 				skipped = parseInt(minitestMatch[4], 10);
 				failed = failures + errors;
 				passed = total - failed - skipped;
+			}
+			break;
+		}
+		case 'pest':
+		case 'phpunit':
+		case 'php-artisan': {
+			const phpunitMatch = output.match(
+				/Tests:\s*(\d+),\s*Assertions:\s*\d+(?:,\s*Failures:\s*(\d+))?(?:,\s*Errors:\s*(\d+))?(?:,\s*Skipped:\s*(\d+))?/,
+			);
+			const okMatch = output.match(/OK\s*\((\d+)\s+tests?/);
+			if (phpunitMatch) {
+				total = parseInt(phpunitMatch[1], 10);
+				const failures = phpunitMatch[2] ? parseInt(phpunitMatch[2], 10) : 0;
+				const errors = phpunitMatch[3] ? parseInt(phpunitMatch[3], 10) : 0;
+				skipped = phpunitMatch[4] ? parseInt(phpunitMatch[4], 10) : 0;
+				failed = failures + errors;
+				passed = total - failed - skipped;
+			} else if (okMatch) {
+				total = parseInt(okMatch[1], 10);
+				passed = total;
 			}
 			break;
 		}

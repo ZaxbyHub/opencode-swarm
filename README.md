@@ -542,7 +542,7 @@ Built-in tools verify every task before it ships:
 
 - **syntax_check** — Tree-sitter validation across the configured language grammar map
 - **placeholder_scan** — Catches TODOs, stubs, incomplete code
-- **sast_scan** — 65 security rules across 7 languages (offline)
+- **sast_scan** — 68 security rules across 8 languages (offline)
 - **sbom_generate** — Dependency tracking (CycloneDX)
 - **quality_budget** — Complexity, duplication, test ratio limits
 
@@ -798,7 +798,7 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 |------|-------------|
 | syntax_check | Tree-sitter validation across the configured language grammar map |
 | placeholder_scan | Catches TODOs, FIXMEs, stubs, placeholder text |
-| sast_scan | Offline security analysis, 65 rules, 7 languages |
+| sast_scan | Offline security analysis, 68 rules, 8 languages |
 | sbom_generate | CycloneDX dependency tracking, 8 ecosystems |
 | build_check | Runs your project's native build/typecheck |
 | incremental_verify | Post-coder hook for TS/JS, Go, Rust, Python, and C#; configured by `incremental_verify.*`, not invoked as a registered tool |

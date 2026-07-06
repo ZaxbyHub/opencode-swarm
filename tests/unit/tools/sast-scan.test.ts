@@ -256,9 +256,7 @@ describe('sastScan', () => {
 			expect(yamlFinding).toBeDefined();
 		});
 
-		it('should scan Go files', async () => {
-			// Note: Go has nativeRuleSet: null (no native Tier-A rules) and relies on Semgrep
-			// which is not available in test env, so no findings are expected
+		it('should detect command injection in Go files', async () => {
 			const testFile = path.join(tempDir, 'test.go');
 			fs.writeFileSync(
 				testFile,
@@ -276,21 +274,20 @@ func main() {
 
 			const result = await sastScan(input, tempDir);
 
-			// Go has no native rules and Semgrep is not available in tests
-			expect(result.findings.length).toBe(0);
+			expect(result.summary.files_scanned).toBe(1);
+			expect(
+				result.findings.some((f) => f.rule_id === 'sast/go-shell-injection'),
+			).toBe(true);
 		});
 
 		it('should detect hardcoded secrets in Go', async () => {
-			// Note: Go has nativeRuleSet: null and relies on Semgrep which is not
-			// available in test env, so no findings are expected
 			const testFile = path.join(tempDir, 'test.go');
-			// Use shell injection which would be a known working pattern if rules existed
 			fs.writeFileSync(
 				testFile,
 				`package main
-import "os/exec"
 func main() {
-	cmd := exec.Command("sh", "-c", userInput)
+	secret_token := "supersecret12345"
+	_ = secret_token
 }`,
 			);
 
@@ -301,8 +298,32 @@ func main() {
 
 			const result = await sastScan(input, tempDir);
 
-			// Go has no native rules and Semgrep is not available in tests
-			expect(result.findings.length).toBe(0);
+			expect(
+				result.findings.some((f) => f.rule_id === 'sast/go-hardcoded-secret'),
+			).toBe(true);
+		});
+
+		it('should detect camelCase hardcoded secrets in Go (F-001)', async () => {
+			const testFile = path.join(tempDir, 'test.go');
+			fs.writeFileSync(
+				testFile,
+				`package main
+func main() {
+	apiKey := "AKIAIOSFODNN7EXAMPLE"
+	_ = apiKey
+}`,
+			);
+
+			const input: SastScanInput = {
+				changed_files: [testFile],
+				severity_threshold: 'medium',
+			};
+
+			const result = await sastScan(input, tempDir);
+
+			expect(
+				result.findings.some((f) => f.rule_id === 'sast/go-hardcoded-secret'),
+			).toBe(true);
 		});
 
 		it('should scan Java files', async () => {

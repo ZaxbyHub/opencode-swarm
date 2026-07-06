@@ -31,6 +31,24 @@ const mockRunSecretscan = mock(async () => ({
 		scan_time_ms: 0,
 	},
 }));
+const mockRunSecretscanOnFiles = mock(
+	async (files: string[], directory: string) => {
+		const findings: Array<{ type: string; path: string; line: number }> = [];
+		for (const file of files) {
+			const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
+			if (/api[_-]?key|sk-[a-z0-9]/i.test(content)) {
+				findings.push({ type: 'api_key', path: file, line: 1 });
+			}
+		}
+		return {
+			scan_dir: directory,
+			findings,
+			count: findings.length,
+			files_scanned: files.length,
+			skipped_files: 0,
+		};
+	},
+);
 const mockSastScan = mock(async () => ({
 	verdict: 'pass' as const,
 	findings: [],
@@ -76,6 +94,7 @@ mock.module('../../../src/tools/lint', () => ({
 
 mock.module('../../../src/tools/secretscan', () => ({
 	runSecretscan: mockRunSecretscan,
+	runSecretscanOnFiles: mockRunSecretscanOnFiles,
 }));
 
 mock.module('../../../src/tools/sast-scan', () => ({

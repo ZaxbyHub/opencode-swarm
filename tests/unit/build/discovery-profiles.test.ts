@@ -221,6 +221,49 @@ describe('discoverBuildCommandsFromProfiles - detectFile Filtering', () => {
 		expect(result.commands[0].ecosystem).toBe('python');
 		expect(result.skipped).toHaveLength(0);
 	});
+
+	it('selects the highest numeric priority profile command when multiple are available', async () => {
+		const mockProfile: MockLanguageProfile = {
+			id: 'custom',
+			displayName: 'Custom',
+			tier: 1,
+			extensions: ['.custom'],
+			treeSitter: { grammarId: 'custom', wasmFile: 'tree-sitter-custom.wasm' },
+			build: {
+				detectFiles: ['project.custom'],
+				commands: [
+					{
+						name: 'low',
+						cmd: 'node low.js',
+						detectFile: 'project.custom',
+						priority: 1,
+					},
+					{
+						name: 'high',
+						cmd: 'node high.js',
+						detectFile: 'project.custom',
+						priority: 10,
+					},
+				],
+			},
+			test: { detectFiles: [], frameworks: [] },
+			lint: { detectFiles: [], linters: [] },
+			audit: { detectFiles: [], command: null, outputFormat: 'json' },
+			sast: { nativeRuleSet: null, semgrepSupport: 'none' },
+			prompts: { coderConstraints: [], reviewerChecklist: [] },
+		};
+		fs.writeFileSync(path.join(TEST_DIR, 'project.custom'), '');
+		mockDetectProjectLanguages.mockResolvedValue([mockProfile]);
+		mockLangRegistryGet.mockReturnValue(mockProfile);
+
+		const module = await import('../../../src/build/discovery');
+		module.clearToolchainCache();
+
+		const result = await module.discoverBuildCommandsFromProfiles(TEST_DIR);
+
+		expect(result.commands).toHaveLength(1);
+		expect(result.commands[0].command).toBe('node high.js');
+	});
 });
 
 // ============ Test Suite 3: discoverBuildCommands - Profile vs ECOSYSTEMS Priority ============
