@@ -6,4 +6,5 @@
 tests/unit/commands/cleanup-drift.test.ts
 tests/unit/commands/knowledge.adversarial.test.ts
 tests/unit/hooks/knowledge-injector-drift-adversarial.test.ts
+tests/unit/hooks/knowledge-floor-action.test.ts
 tests/unit/tools/knowledge-recall.test.ts
