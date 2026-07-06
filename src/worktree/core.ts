@@ -235,7 +235,21 @@ export function shortenWorktreePath(
 	sessionId: string,
 	laneId: string,
 ): string {
-	return path.join(_internals.osTmpdir(), 'swwt', sessionId, laneId);
+	// Resolve os.tmpdir() through realpathSync so the shortened worktree path
+	// is canonical. On the GitHub windows-latest runner, os.tmpdir() returns
+	// the 8.3 short name (C:\Users\RUNNER~1\...) while git worktree porcelain
+	// emits the long form (C:\Users\runneradmin\...). Building the shortened
+	// fallback path from the resolved long form keeps it consistent with the
+	// porcelain output and with the realpath-resolved fixtures in the tests
+	// (issue #1729 Windows quarantine).
+	let tmp = _internals.osTmpdir();
+	try {
+		tmp = realpathSync(tmp);
+	} catch {
+		// Best-effort: if tmpdir itself doesn't resolve (shouldn't happen in
+		// practice), fall through with the lexical form.
+	}
+	return path.join(tmp, 'swwt', sessionId, laneId);
 }
 
 export interface ProvisionSuccess extends WorktreeHandle {}
