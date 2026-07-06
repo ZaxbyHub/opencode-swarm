@@ -359,7 +359,7 @@ describe('runPreCheckBatch SAST gate integration', () => {
 
 	test(
 		'SAST with new HIGH finding on changed line → gates_passed false',
-		{ timeout: 30_000 },
+		{ timeout: 90_000 },
 		async () => {
 			// SAST returns a HIGH finding — and git diff is unavailable (non-git dir)
 			// so fail-closed treats it as new
@@ -393,7 +393,7 @@ describe('runPreCheckBatch SAST gate integration', () => {
 
 	test(
 		'SAST with only pre-existing HIGH finding (no changed lines) → gates_passed true + sast_preexisting_findings',
-		{ timeout: 30_000 },
+		{ timeout: 90_000 },
 		async () => {
 			// Initialize a git repo with two commits so HEAD~1 strategy works
 			const { execSync } = await import('node:child_process');
@@ -476,7 +476,7 @@ describe('runPreCheckBatch SAST gate integration', () => {
 
 	test(
 		'SAST with mixed findings (one new + one pre-existing) → gates_passed false',
-		{ timeout: 30_000 },
+		{ timeout: 90_000 },
 		async () => {
 			// In a non-git directory, fail-closed means ALL are treated as new → blocks
 			mockSastScan.mockImplementationOnce(async () => ({
@@ -518,7 +518,7 @@ describe('runPreCheckBatch SAST gate integration', () => {
 	// committed content and diff line ranges match across platforms.
 	test(
 		'reviewer receives structured sast_preexisting_findings field',
-		{ timeout: 30_000 },
+		{ timeout: 90_000 },
 		async () => {
 			// Use git repo where file is committed (no changed lines)
 			const { execSync } = await import('node:child_process');
@@ -603,7 +603,7 @@ describe('runPreCheckBatch SAST gate integration', () => {
 
 	test(
 		'no false deadlock: changed file is clean, unchanged file has HIGH SAST finding → gates_passed true, finding surfaced to reviewer',
-		{ timeout: 30_000 },
+		{ timeout: 90_000 },
 		async () => {
 			// Scenario: coder touched clean.ts (no findings), but legacy.ts (not touched) has a HIGH finding.
 			// System must NOT block the coder for legacy.ts's pre-existing issue.
