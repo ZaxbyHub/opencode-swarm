@@ -64,14 +64,21 @@ async function runGit(
  */
 async function initGitRepo(repoDir: string): Promise<void> {
 	mkdirSync(repoDir, { recursive: true });
+	// Init repo FIRST — git config fails in a non-git directory on some CI environments
+	const initResult = await runGit(repoDir, ['init']);
+	if (initResult.exitCode !== 0)
+		throw new Error(`git init failed: ${initResult.stderr}`);
 	await runGit(repoDir, ['config', 'user.email', 'test@test.local']);
 	await runGit(repoDir, ['config', 'user.name', 'Test User']);
-	const result = await runGit(repoDir, ['init']);
-	if (result.exitCode !== 0)
-		throw new Error(`git init failed: ${result.stderr}`);
 	writeFileSync(path.join(repoDir, 'README.md'), '# test\n');
 	await runGit(repoDir, ['add', '.']);
-	await runGit(repoDir, ['commit', '-m', 'initial commit']);
+	const commitResult = await runGit(repoDir, [
+		'commit',
+		'-m',
+		'initial commit',
+	]);
+	if (commitResult.exitCode !== 0)
+		throw new Error(`git commit failed: ${commitResult.stderr}`);
 	// Ensure branch is named 'main' regardless of git's default (master on some systems)
 	await runGit(repoDir, ['branch', '-m', 'main']);
 }
