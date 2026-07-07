@@ -43,6 +43,7 @@ import {
 	handleKnowledgeRetryHardeningCommand,
 	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
+import { handleLanesCommand } from './lanes.js';
 import { handleLearningCommand } from './learning.js';
 import { handleLinkCommand } from './link.js';
 import { handleLoopCommand } from './loop.js';
@@ -478,6 +479,14 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: true,
 	},
+	lanes: {
+		handler: (ctx) =>
+			Promise.resolve(handleLanesCommand(ctx.directory, ctx.args)),
+		description: 'List active, awaiting-merge, and conflicted worktree lanes',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
 	'sync-plan': {
 		handler: (ctx) => handleSyncPlanCommand(ctx.directory, ctx.args),
 		description: 'Ensure plan.json and plan.md are synced',
@@ -761,14 +770,16 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
 		subcommandOf: 'sdd',
-		args: '[--dry-run] [--json] [--change <id>]',
+		args: '[--dry-run] [--overwrite] [--json] [--change <id>]',
 		category: 'utility',
-		toolPolicy: 'human-only',
+		toolPolicy: 'agent',
 	},
 	// Aliases for the TUI shortcuts 'swarm-sdd-status' / 'swarm-sdd-validate' /
 	// 'swarm-sdd-project', which normalize to single dash tokens. See the
 	// 'pr-subscribe' alias note above. Each inherits its canonical tool policy
-	// (sdd project is human-only) via canonicalCommandKey (aliasOf).
+	// (sdd project is now agent-invocable; overwriting an existing native
+	// .swarm/spec.md requires --overwrite — consent is obtained by the SKILL
+	// layer, not the command) via canonicalCommandKey (aliasOf).
 	'sdd-status': {
 		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
 		description:

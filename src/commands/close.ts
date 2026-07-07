@@ -1,4 +1,4 @@
-﻿import { spawnSync } from 'node:child_process';
+﻿import * as child_process from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -48,6 +48,7 @@ import {
 	swarmState,
 } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
+import { mergeEnvForChild } from '../utils/bun-compat';
 
 interface PlanPhase {
 	id: number;
@@ -897,6 +898,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 async function copySqliteSafe(
 	srcPath: string,
 	destPath: string,
+	laneEnv?: Record<string, string>,
 ): Promise<
 	| { success: true; skipped?: true; reason?: string }
 	| { success: false; reason: string; skipped?: boolean }
@@ -915,7 +917,7 @@ async function copySqliteSafe(
 	// Step 1 — flush WAL → main DB via sqlite3 CLI (no SQLite library dep).
 	let checkpointVerified = false;
 	try {
-		const result = spawnSync(
+		const result = _internals.spawnSync(
 			'sqlite3',
 			[srcPath, 'PRAGMA wal_checkpoint(TRUNCATE);'],
 			{
@@ -925,6 +927,7 @@ async function copySqliteSafe(
 				timeout: 10_000,
 				windowsHide: true,
 				maxBuffer: 1024,
+				envOverrides: laneEnv,
 			},
 		);
 		if (result.error) {
@@ -961,7 +964,7 @@ async function copySqliteSafe(
 		//   busy|log|checkpointed
 		//   0|0|0          ← busy=0 means checkpoint completed
 		//   1|104|103      ← busy=1 means checkpoint incomplete
-		const output = (result.stdout || '').trim();
+		const output = ((result.stdout as string) || '').trim();
 		const lines = output.split('\n').filter((l) => l.trim());
 		if (lines.length >= 1) {
 			const dataLine = lines[0];
@@ -1058,7 +1061,7 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 				// intentionally NOT archived or cleaned — SQLite recreates them on
 				// next open. The user will see benign "Preserved" warnings for these
 				// files in the clean stage, which is correct and informational.
-				const result = await copySqliteSafe(srcPath, destPath);
+				const result = await copySqliteSafe(srcPath, destPath, undefined);
 				if (result.skipped) {
 					// ENOENT — file absent; treat as silent skip, same as other artifacts.
 				} else if (result.success) {
@@ -2044,4 +2047,28 @@ export const _internals = {
 	archiveEvidence,
 	closePlanTerminalState,
 	endAgentSession,
+	spawnSync: (
+		cmd: string,
+		args: string[],
+		options?: {
+			cwd?: string;
+			encoding?: BufferEncoding;
+			timeout?: number;
+			maxBuffer?: number;
+			windowsHide?: boolean;
+			stdio?:
+				| 'pipe'
+				| 'ignore'
+				| 'inherit'
+				| Array<'pipe' | 'ignore' | 'inherit'>;
+			env?: Record<string, string | undefined>;
+			envOverrides?: Record<string, string | null>;
+		},
+	) => {
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		return child_process.spawnSync(cmd, args, {
+			...options,
+			env: mergedEnv as NodeJS.ProcessEnv | undefined,
+		});
+	},
 };

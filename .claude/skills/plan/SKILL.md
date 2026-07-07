@@ -11,22 +11,25 @@ This protocol is loaded on demand by the architect stub in src/agents/architect.
 ### MODE: PLAN
 
 SPEC GATE (soft — check before planning):
-- If `.swarm/spec.md` does NOT exist:
+
+An effective spec exists iff `/swarm sdd status` reports a resolved spec (it reflects `readEffectiveSpecSync`, which returns null for no sources, multiple competing sources, multi-feature Spec-Kit without a selected feature, or any unresolvable state). Do NOT enumerate these cases — defer to `/swarm sdd status`.
+
+- If NO effective spec exists (confirmed via `/swarm sdd status`):
   - PLAN INGESTION DETECTION: Check if the user is providing an external plan (indicators: markdown content with Phase/Task structure, or phrases like "ingest this plan", "implement this plan", "prepare for implementation", "here is a plan", "here's the plan"):
-    - If plan ingestion is detected AND no spec.md exists: offer this choice FIRST before any planning:
+    - If plan ingestion is detected AND no effective spec exists: offer this choice FIRST before any planning:
       1. "Generate spec from this plan first" → enter EXTERNAL PLAN IMPORT PATH in MODE: SPECIFY to reverse-engineer a spec.md from the provided plan, then return to planning
       2. "Skip spec and proceed with the provided plan" → proceed directly to plan ingestion and planning without creating a spec
     - This is a SOFT gate — option 2 always lets the user proceed without a spec
-  - If no plan ingestion detected: Warn: "No spec found. A spec helps ensure the plan covers all requirements and gives the critic something to verify against. Would you like to create one first?"
+  - If no plan ingestion detected: Warn: "No effective spec found. A spec helps ensure the plan covers all requirements and gives the critic something to verify against. Would you like to create one first?"
     - Offer two options:
       1. "Create a spec first" → transition to MODE: SPECIFY
       2. "Skip and plan directly" → continue with the steps below unchanged
-- If `.swarm/spec.md` EXISTS:
+- If an effective spec EXISTS:
   - NOTE: Stale detection is intentionally heuristic (compare headings) — false positives are acceptable because this is a SOFT gate. When in doubt, ask the user.
-  - Read the spec and compare its first heading (or feature description) against the current planning context (the user's request and any existing plan.md title/phase names)
+  - Read the spec (using the effective spec path reported by `/swarm sdd status`) and compare its first heading (or feature description) against the current planning context (the user's request and any existing plan.md title/phase names)
   - STALE SPEC DETECTION: If the spec heading or feature description does NOT match the current work being planned (e.g., spec describes "user authentication" but user is asking to plan "payment integration"), treat the spec as potentially stale and offer three options:
     1. **Archive and create new spec** → attempt to rename .swarm/spec.md to .swarm/spec-archive/spec-{YYYY-MM-DD}.md (create the directory if needed); if archival succeeds: enter MODE: SPECIFY and skip the "spec already exists" prompt; if archival fails: inform user of the failure and offer: retry archival, or proceed with option 2, or proceed with option 3
-    2. **Keep existing spec** → use spec.md as-is and proceed with planning below
+    2. **Keep existing spec** → use the effective spec as-is and proceed with planning below
     3. **Skip spec entirely** → proceed to planning below ignoring the existing spec
   - If the spec appears current (heading matches the work being planned) OR user chose option 2 above, proceed with spec:
     - Read it and use it as the primary input for planning
@@ -37,7 +40,16 @@ SPEC GATE (soft — check before planning):
 
 This is a SOFT gate. When the user chooses "Skip and plan directly", proceed to the steps below exactly as before — do NOT modify any planning behavior.
 
-Run CODEBASE REALITY CHECK scoped to codebase elements referenced in spec.md or user constraints. Discrepancies must be reflected in the generated plan.
+**SAVE_PLAN SPEC_REQUIRED RECOVERY:**
+When `save_plan` returns a SPEC_REQUIRED rejection (no effective spec found), the architect MUST:
+1. DIAGNOSE: run `/swarm sdd status` to determine why no effective spec resolved.
+   - (a) If `/swarm sdd status` shows NO sources → transition to MODE: SPECIFY.
+   - (b) If `/swarm sdd status` shows multiple competing sources (e.g., openspec AND specify with no native) → ask the user which provider to use (`openspec` or `speckit`), then run `/swarm sdd project --source <user_choice>` (obtain explicit consent first; add `--overwrite` only if a native `.swarm/spec.md` already exists). Then re-attempt `save_plan`.
+   - (c) If `/swarm sdd status` shows Spec-Kit with multiple features → ask the user which feature, then run `/swarm sdd project --source speckit --feature <id>` (obtain explicit consent first; add `--overwrite` only if a native `.swarm/spec.md` already exists). Then re-attempt `save_plan`.
+2. If `/swarm sdd status` shows a single resolvable source but it was not yet materialized: run `/swarm sdd project` (obtain explicit consent first; add `--overwrite` only if a native `.swarm/spec.md` already exists). Then re-attempt `save_plan`.
+3. If the user does NOT consent to materializing an effective spec: surface the blockage and stop — do not silently skip or retry without a spec.
+
+Run CODEBASE REALITY CHECK scoped to codebase elements referenced in the effective spec or user constraints. Discrepancies must be reflected in the generated plan.
 
 ### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)
 
@@ -305,17 +317,17 @@ PHASE COUNT GUIDANCE:
 
 Also create .swarm/context.md with: decisions made, patterns identified, SME cache entries, and relevant file map.
 
-TRACEABILITY CHECK (run after plan is written, when spec.md exists):
+TRACEABILITY CHECK (run after plan is written, when an effective spec exists):
 
 OBLIGATION TRACEABILITY — STRUCTURAL COMPLETENESS PRECONDITION
 The obligation-traceability mapping is a STRUCTURAL COMPLETENESS precondition. It MUST be evaluated BEFORE the critic begins its substantive 5-axis/7-dimension rubric. An unmapped MUST/SHALL obligation makes the plan structurally incomplete — it is not an afterthought.
 
 1. FR-### MAPPING (existing requirement):
-   - Every FR-### in spec.md MUST map to at least one task → unmapped FRs = coverage gap, flag to user
+   - Every FR-### in the effective spec (resolved via `/swarm sdd status`) MUST map to at least one task → unmapped FRs = coverage gap, flag to user
    - Every task MUST reference its source FR-### in the description or acceptance field → tasks with no FR = potential gold-plating, flag to critic
 
 2. SC-### MAPPING (MUST/SHALL obligations):
-   - Parse spec.md for every SC-### line whose obligation text contains MUST or SHALL/SHALL NOT
+   - Parse the effective spec (resolved via `/swarm sdd status`) for every SC-### line whose obligation text contains MUST or SHALL/SHALL NOT
    - Each such MUST/SHALL SC-### MUST be referenced by ≥1 task's description or acceptance field
    - Unmapped MUST/SHALL SC-### are structural coverage gaps that must be resolved — surface them prominently, not buried
    - A plan where every MUST/SHALL SC-### is referenced by ≥1 task passes this check and is not blocked by it
@@ -324,7 +336,7 @@ The obligation-traceability mapping is a STRUCTURAL COMPLETENESS precondition. I
 REPORT FORMAT:
 "TRACEABILITY: <N> FRs mapped, <M> unmapped FRs (gap), <K> tasks with no FR mapping (gold-plating risk), <P> MUST/SHALL SCs mapped, <Q> unmapped MUST/SHALL SCs (structural gap)"
 
-- If no spec.md: skip this check silently.
+- If no effective spec: skip this check silently.
 
 ### Transition to CRITIC-GATE
 

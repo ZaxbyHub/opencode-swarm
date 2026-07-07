@@ -30,9 +30,9 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
 Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged approval snapshot (e.g. a plan approved before this mechanical gate existed, or one where the recording heuristic didn't fire) — in that case the first coder dispatch will fail with `PLAN_CRITIC_GATE_VIOLATION`. If that happens, do not assume CRITIC-GATE is satisfied; re-run it and get a fresh APPROVED verdict.
 
 6j. SPEC-GATE (Execute BEFORE any save_plan call):
-- The save_plan tool will REJECT if .swarm/spec.md does not exist (enforced at the tool level via SWARM_SKIP_SPEC_GATE env var bypass).
-- Before calling save_plan, verify spec.md is present using lint_spec.
-- If spec.md is absent: do NOT call save_plan. Use /swarm specify to create a spec first, or inform the user.
+- An effective spec exists iff `/swarm sdd status` reports a resolved spec (it reflects `readEffectiveSpecSync`, which returns null — NO effective spec — for no sources, multiple competing sources (openspec+specify), multi-feature Spec-Kit without a selected feature, or any unresolvable state). `save_plan` rejects (SPEC_REQUIRED) when `/swarm sdd status` reports no resolved spec. The gate is overridable via `SWARM_SKIP_SPEC_GATE=1`.
+- Before calling save_plan, verify an effective spec exists (via `/swarm sdd status` or `lint_spec`).
+- If no effective spec exists: do NOT call save_plan. Generate one first — native via `/swarm specify`, or via the agent-invocable `/swarm sdd project` (from SDD sources, after consent).
 - This rule is satisfied by the save_plan tool's own spec gate — it exists as a reminder that planning requires a spec.
 
 6k. SPEC-STALENESS GUARD:
@@ -62,7 +62,13 @@ Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged app
 
 6l. OBLIGATION TRACEABILITY CHECK (FR-003):
 - Before the critic's substantive rubric, the critic MUST cross-reference every
-  MUST/SHALL SC-### obligation in .swarm/spec.md against the plan tasks.
+  MUST/SHALL SC-### obligation in the EFFECTIVE spec against the plan tasks.
+  An effective spec exists iff `/swarm sdd status` reports a resolved spec (it
+  reflects `readEffectiveSpecSync`, which returns null — NO effective spec — for
+  no sources, multiple competing sources (openspec+specify), multi-feature
+  Spec-Kit without a selected feature, or any unresolvable state). Obligations
+  are traced only against the resolved effective spec; in a null/unresolved
+  state there is nothing to trace (this check is not applicable).
 - If ANY MUST/SHALL SC-### has zero corresponding plan tasks, the critic MUST
   return VERDICT: REJECTED enumerating each unmapped obligation.
 - The critic MUST evaluate coverage against the FULL plan — each task's

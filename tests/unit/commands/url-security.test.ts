@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
 	containsControlCharacters,
 	isIPv4ZeroNetwork,
@@ -7,6 +9,7 @@ import {
 	parseGitRemoteUrl,
 	sanitizeErrorEcho,
 	sanitizeUrl,
+	_internals as urlSecurityInternals,
 	validateAndSanitizeGithubUrl,
 } from '../../../src/commands/_shared/url-security';
 
@@ -247,5 +250,50 @@ describe('url-security shared helpers', () => {
 			);
 			expect('error' in result).toBe(true);
 		});
+	});
+});
+
+describe('_internals.spawnSync envOverrides', () => {
+	const TEST_KEY = 'URL_SECURITY_SPAWN_TEST_VAR';
+
+	function getChildEnvValue(
+		envOverrides?: Record<string, string | null>,
+	): string {
+		const js = `process.stdout.write(process.env.${TEST_KEY} ?? 'undefined')`;
+		const res = urlSecurityInternals.spawnSync(process.execPath, ['-e', js], {
+			encoding: 'utf-8',
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: 5000,
+			env: { [TEST_KEY]: 'child_value' },
+			envOverrides,
+		});
+		if (!res) {
+			throw new Error(
+				'spawnSync returned null — process.execPath not found in PATH',
+			);
+		}
+		return (res.stdout as string).trim();
+	}
+
+	test('envOverrides sets a new var in child env', () => {
+		// Override a var that is NOT in the base env (child_value)
+		const result = getChildEnvValue({ [TEST_KEY]: 'overridden_in_child' });
+		expect(result).toBe('overridden_in_child');
+	});
+
+	test('envOverrides(null) deletes an inherited var from child env', () => {
+		// envOverrides with null should delete the var from the merged env
+		const result = getChildEnvValue({ [TEST_KEY]: null });
+		expect(result).toBe('undefined');
+	});
+
+	test('process.env is NOT mutated after the call', () => {
+		process.env[TEST_KEY] = 'original_value';
+		try {
+			getChildEnvValue({ [TEST_KEY]: 'overridden_in_child' });
+			expect(process.env[TEST_KEY]).toBe('original_value');
+		} finally {
+			delete process.env[TEST_KEY];
+		}
 	});
 });

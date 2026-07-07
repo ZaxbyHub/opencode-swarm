@@ -534,6 +534,8 @@ describe('Command registration parity', () => {
 			'sdd',
 			'sdd status',
 			'sdd validate',
+			// FR-004: sdd project moved from human-only to agent
+			'sdd project',
 			'sync-plan',
 			'export',
 			'auto-proceed',
@@ -550,7 +552,7 @@ describe('Command registration parity', () => {
 			'memory compact',
 			'memory import',
 			'memory migrate',
-			'sdd project',
+			// FR-004: sdd project removed — moved to agent
 		]);
 
 		// Authoritative pre-existing baseline (33 tool commands = 29 allowlist + 4 human-only)
@@ -559,7 +561,7 @@ describe('Command registration parity', () => {
 			'memory compact',
 			'memory import',
 			'memory migrate',
-			'sdd project',
+			// FR-004: sdd project removed — now in allowlist
 		]);
 
 		// Authoritative pre-existing baseline (14 no-args entries)
@@ -599,12 +601,8 @@ describe('Command registration parity', () => {
 			// HUMAN_ONLY_SWARM_COMMANDS). `clear` (→ reset-session, restricted)
 			// is a pre-existing alias that the canonical-aware derivation now
 			// also covers, closing a latent bypass.
-			humanOnly: new Set([
-				'sdd-project',
-				'memory-import',
-				'memory-migrate',
-				'clear',
-			]),
+			// FR-004: sdd-project removed — canonical target (sdd project) is now agent
+			humanOnly: new Set(['memory-import', 'memory-migrate', 'clear']),
 			toolCommands: new Set([
 				'pr subscribe',
 				'pr unsubscribe',

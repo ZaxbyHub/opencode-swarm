@@ -939,7 +939,11 @@ describe('cleanupOrphanedBranches', () => {
 		// Branch list returns 2 branches: one active, one orphan
 		_internals.bunSpawn = (args: string[]) => {
 			// git branch --list 'swarm-lane/*'
-			if (args.includes('branch') && args.includes('--list')) {
+			if (
+				args.includes('branch') &&
+				args.some((a) => a.startsWith('--format')) &&
+				!args.includes('-D')
+			) {
 				return mockProc(
 					0,
 					'swarm-lane/session-active/lane-1\nswarm-lane/session-orphan/lane-2',
@@ -993,13 +997,10 @@ describe('cleanupOrphanedBranches', () => {
 		_internals.bunSpawn = (args: string[]) => {
 			if (
 				args.includes('branch') &&
-				args.includes('--list') &&
-				args.includes('swarm-lane/*')
+				args.some((a) => a.startsWith('--format')) &&
+				!args.includes('-D')
 			) {
 				return mockProc(0, 'swarm-lane/session-orphan/lane-fail', '');
-			}
-			if (args.includes('branch') && args.includes('--list')) {
-				return mockProc(0, '', '');
 			}
 			if (args.includes('branch') && args.includes('-D')) {
 				return mockProc(1, '', 'error: branch not found');
@@ -1031,8 +1032,8 @@ describe('cleanupOrphanedBranches', () => {
 		expect(result.removed).toEqual([]);
 		expect(result.skipped).toEqual([]);
 		expect(result.errors).toEqual([]);
-		// Should have called both branch namespace lists + worktree prune
-		expect(callCount).toBe(3);
+		// Should have called branch list + worktree prune
+		expect(callCount).toBe(2);
 	});
 
 	test('handles `* ` prefix when current branch is a swarm-lane branch (simulated git branch --list output)', async () => {
@@ -1044,7 +1045,11 @@ describe('cleanupOrphanedBranches', () => {
 		// Here we verify the --format-based output works with `* ` in
 		// a mixed scenario: one branch prefixed (old format), one not.
 		_internals.bunSpawn = (args: string[]) => {
-			if (args.includes('branch') && args.includes('--list')) {
+			if (
+				args.includes('branch') &&
+				args.some((a) => a.startsWith('--format')) &&
+				!args.includes('-D')
+			) {
 				// Simulate --format output: clean names, no `* ` prefix
 				return mockProc(
 					0,
@@ -1075,9 +1080,9 @@ describe('cleanupOrphanedBranches', () => {
 
 		await cleanupOrphanedBranches(fakeDir, []);
 
-		// First call: git branch --list 'swarm-lane/*'
+		// First call: git branch --format (list all branches)
 		expect(spawnCalls[0]).toContain('branch');
-		expect(spawnCalls[0]).toContain('--list');
+		expect(spawnCalls[0].some((a) => a.startsWith('--format'))).toBe(true);
 
 		// Last call: git worktree prune
 		const pruneCall = spawnCalls.find(

@@ -12,16 +12,20 @@ import {
 import { containsControlChars } from '../utils/path-security';
 
 /**
- * Native swarm-spec relative path — MUST match the engine's
- * `SWARM_SPEC_REL` in src/sdd/effective-spec.ts so the command layer's native
- * precedence check (FR-009) agrees with the resolver's branch (a).
+ * DI seam for testing TOCTOU error propagation without filesystem races.
+ * Tests override `_internals.writeProjectedSpecSync` to inject an error result,
+ * then restore the original in `afterEach`.
  */
+export const _internals = {
+	writeProjectedSpecSync,
+};
+
 const SWARM_SPEC_REL = path.join('.swarm', 'spec.md');
 
 const USAGE = `Usage:
   /swarm sdd status [--json] [--source <provider>]
   /swarm sdd validate [--json] [--change <id>] [--source <provider>] [--feature <id>]
-  /swarm sdd project [--dry-run] [--json] [--change <id>] [--source <provider>] [--feature <id>]
+  /swarm sdd project [--dry-run] [--overwrite] [--json] [--change <id>] [--source <provider>] [--feature <id>]
 
 Source options (required when both openspec and speckit are detected):
   --source <swarm|openspec|speckit>  select the SDD provider explicitly
@@ -41,6 +45,7 @@ Spec-Kit SDD support:
 interface ParsedSddArgs {
 	json: boolean;
 	dryRun: boolean;
+	overwrite: boolean;
 	changeId?: string;
 	source?: 'swarm' | 'openspec' | 'speckit';
 	feature?: string;
@@ -71,13 +76,19 @@ function isUnsafeId(value: string): boolean {
 }
 
 function parseArgs(args: string[]): ParsedSddArgs {
-	const parsed: ParsedSddArgs = { json: false, dryRun: false };
+	const parsed: ParsedSddArgs = {
+		json: false,
+		dryRun: false,
+		overwrite: false,
+	};
 	for (let i = 0; i < args.length; i++) {
 		const token = args[i];
 		if (token === '--json') {
 			parsed.json = true;
 		} else if (token === '--dry-run') {
 			parsed.dryRun = true;
+		} else if (token === '--overwrite') {
+			parsed.overwrite = true;
 		} else if (token === '--change') {
 			if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
 				return { ...parsed, error: '--change requires a value' };
@@ -482,6 +493,31 @@ export async function handleSddProjectCommand(
 		return `Error: --source swarm selects the native .swarm/spec.md and does not generate a projection. Use --source openspec or --source speckit.\n\n${USAGE}`;
 	}
 
+	// --overwrite consent gate (FR-004 Path B): the `--overwrite` flag is the
+	// mechanical gate that permits overwriting an existing .swarm/spec.md.
+	// Consent is obtained by the SKILL layer (Phase 2) before the architect
+	// passes this flag; a malicious agent bypassing its skills is out of scope
+	// for this single command's policy.
+	//
+	// This `existsSync` pre-check provides a fast-fail for a cleaner user-facing
+	// error message.  The AUTHORITATIVE enforcement boundary is the atomic
+	// exclusive-create (`wx` / O_EXCL) inside `writeProjectedSpecSync`, which
+	// catches any native spec that appears between this check and the write
+	// (TOCTOU race).
+	if (!parsed.dryRun) {
+		const nativeSpecPath = path.join(directory, SWARM_SPEC_REL);
+		if (fs.existsSync(nativeSpecPath)) {
+			if (!parsed.overwrite) {
+				return [
+					'Error: .swarm/spec.md already exists.',
+					'Pass --overwrite to replace it.',
+					'',
+					USAGE,
+				].join('\n');
+			}
+		}
+	}
+
 	// Determine whether to use the Spec-Kit projection path.
 	let useSpeckit = false;
 
@@ -529,29 +565,61 @@ export async function handleSddProjectCommand(
 
 		// Reuse the atomic-write + archive logic in writeProjectedSpecSync (task 2.2).
 		// Pass resolution.feature so the auto-selected feature id is always explicit.
-		const result = writeProjectedSpecSync(directory, {
+		const result = _internals.writeProjectedSpecSync(directory, {
 			source: 'speckit',
 			feature: resolution.feature,
 			dryRun: parsed.dryRun,
+			overwrite: parsed.overwrite,
 		});
 
-		const response = {
-			written: result.written,
-			dryRun: parsed.dryRun,
-			path: result.path,
-			archivePath: result.archivePath ?? null,
-			hash: result.projection?.hash ?? null,
-			sourcePaths: result.projection?.sourcePaths ?? [],
-			warnings: result.projection?.warnings ?? [],
-		};
-		if (parsed.json) return JSON.stringify(response, null, 2);
+		if (result.error) {
+			// Trust boundary: the atomic exclusive-create in writeProjectedSpecSync
+			// is the AUTHORITATIVE enforcement.  If a native spec appeared between
+			// the existsSync pre-check above and the write (TOCTOU race), the wx
+			// flag caught it — surface the error in both output modes.
+			if (parsed.json) {
+				return JSON.stringify(
+					{
+						written: false,
+						dryRun: parsed.dryRun,
+						path: result.path,
+						error: result.error,
+					},
+					null,
+					2,
+				);
+			}
+			return `Error: ${result.error}\n\n${USAGE}`;
+		}
 		if (!result.projection) {
+			if (parsed.json) {
+				return JSON.stringify(
+					{
+						written: false,
+						dryRun: parsed.dryRun,
+						path: result.path,
+						error: 'no valid Spec-Kit projection could be built',
+					},
+					null,
+					2,
+				);
+			}
 			return [
 				'SDD projection failed: no valid Spec-Kit projection could be built.',
 				'',
 				USAGE,
 			].join('\n');
 		}
+		const response = {
+			written: result.written,
+			dryRun: parsed.dryRun,
+			path: result.path,
+			archivePath: result.archivePath ?? null,
+			hash: result.projection.hash,
+			sourcePaths: result.projection.sourcePaths,
+			warnings: result.projection.warnings,
+		};
+		if (parsed.json) return JSON.stringify(response, null, 2);
 		return [
 			parsed.dryRun ? 'SDD projection preview' : 'SDD projection written',
 			`Path: ${result.path}`,
@@ -565,27 +633,59 @@ export async function handleSddProjectCommand(
 	}
 
 	// OpenSpec projection path — byte-identical to pre-task behavior (FR-011).
-	const result = writeProjectedSpecSync(directory, {
+	const result = _internals.writeProjectedSpecSync(directory, {
 		changeId: parsed.changeId,
 		dryRun: parsed.dryRun,
+		overwrite: parsed.overwrite,
 	});
-	const response = {
-		written: result.written,
-		dryRun: parsed.dryRun,
-		path: result.path,
-		archivePath: result.archivePath ?? null,
-		hash: result.projection?.hash ?? null,
-		sourcePaths: result.projection?.sourcePaths ?? [],
-		warnings: result.projection?.warnings ?? [],
-	};
-	if (parsed.json) return JSON.stringify(response, null, 2);
+	if (result.error) {
+		// Trust boundary: the atomic exclusive-create in writeProjectedSpecSync
+		// is the AUTHORITATIVE enforcement.  If a native spec appeared between
+		// the existsSync pre-check above and the write (TOCTOU race), the wx
+		// flag caught it — surface the error in both output modes.
+		if (parsed.json) {
+			return JSON.stringify(
+				{
+					written: false,
+					dryRun: parsed.dryRun,
+					path: result.path,
+					error: result.error,
+				},
+				null,
+				2,
+			);
+		}
+		return `Error: ${result.error}\n\n${USAGE}`;
+	}
 	if (!result.projection) {
+		if (parsed.json) {
+			return JSON.stringify(
+				{
+					written: false,
+					dryRun: parsed.dryRun,
+					path: result.path,
+					error: 'no valid OpenSpec-compatible projection could be built',
+				},
+				null,
+				2,
+			);
+		}
 		return [
 			'SDD projection failed: no valid OpenSpec-compatible projection could be built.',
 			'',
 			USAGE,
 		].join('\n');
 	}
+	const response = {
+		written: result.written,
+		dryRun: parsed.dryRun,
+		path: result.path,
+		archivePath: result.archivePath ?? null,
+		hash: result.projection.hash,
+		sourcePaths: result.projection.sourcePaths,
+		warnings: result.projection.warnings,
+	};
+	if (parsed.json) return JSON.stringify(response, null, 2);
 	return [
 		parsed.dryRun ? 'SDD projection preview' : 'SDD projection written',
 		`Path: ${result.path}`,

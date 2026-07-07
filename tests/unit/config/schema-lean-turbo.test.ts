@@ -30,11 +30,11 @@ describe('LeanTurboConfigSchema — worktree_isolation field', () => {
 			}
 		});
 
-		test('accepts worktree_isolation omitted (defaults to false)', () => {
+		test('accepts worktree_isolation omitted (defaults to true)', () => {
 			const result = LeanTurboConfigSchema.safeParse({});
 			expect(result.success).toBe(true);
 			if (result.success) {
-				expect(result.data.worktree_isolation).toBe(false);
+				expect(result.data.worktree_isolation).toBe(true);
 			}
 		});
 	});
@@ -172,7 +172,7 @@ describe('LeanTurboConfigSchema — default config', () => {
 			expect(result.data.phase_critic).toBe(true);
 			expect(result.data.integrated_diff_required).toBe(true);
 			expect(result.data.allow_docs_only_without_reviewer).toBe(false);
-			expect(result.data.worktree_isolation).toBe(false);
+			expect(result.data.worktree_isolation).toBe(true);
 			expect(result.data.merge_strategy).toBe('merge');
 			expect(result.data.worktree_dir).toBeUndefined();
 		}
@@ -180,8 +180,8 @@ describe('LeanTurboConfigSchema — default config', () => {
 });
 
 describe('DEFAULT_LEAN_TURBO_CONFIG constants', () => {
-	test('has worktree_isolation: false', () => {
-		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(false);
+	test('has worktree_isolation: true', () => {
+		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(true);
 	});
 
 	test('has merge_strategy: "merge"', () => {

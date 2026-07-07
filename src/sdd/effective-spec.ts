@@ -351,6 +351,55 @@ function renderRequirement(
 }
 
 /**
+ * Strip brackets, backticks, newlines, tabs, and control chars so they
+ * cannot break the [NEEDS CLARIFICATION ... ] envelope
+ * (FR-005 bracket-injection hardening).
+ */
+function sanitizeFeatureLabel(label: string): string {
+	let out = '';
+	for (const ch of label) {
+		const code = ch.codePointAt(0) ?? 0;
+		out +=
+			ch === '[' || ch === ']' || ch === '`' || code < 0x20 || code === 0x7f
+				? '-'
+				: ch;
+	}
+	return out;
+}
+
+/**
+ * Allocate the next free SC id from `usedIds`, then render a scaffold
+ * `## Success Criteria` section containing a single
+ * `[NEEDS CLARIFICATION — …]` placeholder.
+ *
+ * `featureLabel` is sanitised so that brackets and control characters cannot
+ * break the envelope structure (FR-005 bracket-injection hardening).
+ *
+ * Returns the lines to append (blank line, heading, SC placeholder).
+ */
+function renderSuccessCriteriaScaffold(
+	featureLabel: string,
+	usedIds: Set<string>,
+): string[] {
+	let scId: string | undefined;
+	for (let n = 1; n <= 999; n++) {
+		const candidate = `SC-${String(n).padStart(3, '0')}`;
+		if (!usedIds.has(candidate)) {
+			scId = candidate;
+			usedIds.add(candidate);
+			break;
+		}
+	}
+	const resolvedId = scId ?? 'SC-PLACEHOLDER';
+	const safeLabel = sanitizeFeatureLabel(featureLabel);
+	return [
+		'',
+		'## Success Criteria',
+		`### ${resolvedId}: [NEEDS CLARIFICATION — define success criterion for ${safeLabel}]`,
+	];
+}
+
+/**
  * Detect whether `directory` is a GitHub Spec-Kit project (FR-001, A-001).
  *
  * Detection key: the `.specify/` marker directory at the repo root.
@@ -622,6 +671,11 @@ export function resolveSpeckitProjection(
 		lines.push(renderRequirement(req, usedIds, warnings, reservedIds));
 	}
 
+	// FR-005 (SC-004): append scaffold Success Criteria section.
+	lines.push(
+		...renderSuccessCriteriaScaffold(selectedFeature.featureId, usedIds),
+	);
+
 	const projected = `${lines.join('\n')}\n`;
 
 	if (projected.length > MAX_SPEC_BYTES) {
@@ -816,6 +870,16 @@ export function buildOpenSpecProjectionSync(
 		for (const req of reqs) {
 			lines.push(renderRequirement(req, usedIds, warnings));
 		}
+		// FR-005 (SC-004): append scaffold SC placeholder per change.
+		lines.push(...renderSuccessCriteriaScaffold(changeId, usedIds));
+	}
+
+	// FR-005 (SC-004): append scaffold SC placeholder for current requirements
+	// when no changes exist (or in addition to per-change scaffolds).
+	if (currentRequirements.length > 0) {
+		lines.push(
+			...renderSuccessCriteriaScaffold('current-requirements', usedIds),
+		);
 	}
 
 	const content = `${lines.join('\n')}\n`;
@@ -999,6 +1063,21 @@ export function readEffectiveSpecSync(
 	return buildSpeckitProjectionSync(root, { feature: opts?.feature });
 }
 
+/**
+ * Write an SDD projection to `.swarm/spec.md`.
+ *
+ * **Overwrite enforcement (FR-004, TOCTOU-safe):**
+ * When `overwrite` is `false` (default), the write uses `O_EXCL` exclusive
+ * creation (`fs.writeFileSync(target, data, { flag: 'wx' })`).  If the
+ * target already exists the kernel returns `EEXIST` and the function
+ * returns `written: false` with an `error` field — no archive, no replace.
+ * This closes the TOCTOU race at the write boundary: a native spec that
+ * appears between a pre-check and this call cannot be silently replaced.
+ *
+ * When `overwrite` is `true`, the existing archive-then-replace path runs.
+ *
+ * The `--dry-run` early-return remains untouched (before any write).
+ */
 export function writeProjectedSpecSync(
 	directory: string,
 	options: {
@@ -1008,12 +1087,18 @@ export function writeProjectedSpecSync(
 		source?: 'openspec' | 'speckit';
 		/** Feature selector forwarded to buildSpeckitProjectionSync when source is speckit. */
 		feature?: string;
+		/**
+		 * When true, archive the existing spec and overwrite.
+		 * When false (default), use O_EXCL (wx flag) — refuse if target exists.
+		 */
+		overwrite?: boolean;
 	} = {},
 ): {
 	written: boolean;
 	projection: EffectiveSpec | null;
 	archivePath?: string;
 	path: string;
+	error?: string;
 } {
 	const root = path.resolve(directory);
 	const projection =
@@ -1026,6 +1111,28 @@ export function writeProjectedSpecSync(
 	}
 
 	fs.mkdirSync(path.dirname(target), { recursive: true });
+
+	if (!options.overwrite) {
+		// ATOMIC no-overwrite path: use wx (O_EXCL) so the kernel refuses
+		// creation if the target already exists — no TOCTOU gap.
+		try {
+			fs.writeFileSync(target, projection.content, { flag: 'wx' });
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+				return {
+					written: false,
+					projection,
+					path: target,
+					error:
+						'.swarm/spec.md already exists; pass --overwrite to replace it',
+				};
+			}
+			throw err;
+		}
+		return { written: true, projection, path: target };
+	}
+
+	// overwrite=true: archive existing spec then replace.
 	let archivePath: string | undefined;
 	if (fs.existsSync(target)) {
 		const prior = fs.readFileSync(target, 'utf-8');

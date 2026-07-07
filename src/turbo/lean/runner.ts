@@ -22,7 +22,7 @@ import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { derivePlanId } from '../../plan/utils';
-import { hasActiveFullAuto, swarmState } from '../../state';
+import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
@@ -39,7 +39,9 @@ import { loadLeanTurboRunState, saveLeanTurboRunState } from './state';
 import { withTurboStateLock } from './state-lock';
 import {
 	assertCleanWorkingTree,
+	parseLeanLaneIndex,
 	provisionWorktree,
+	removeLaneProfileFromDiskReal,
 	removeWorktree,
 } from './worktree';
 
@@ -241,6 +243,32 @@ function isTransientProvisionError(errorMsg: string): boolean {
  * await runner.cleanup();
  * ```
  */
+
+// ─── Module-level helpers ───────────────────────────────────────────────────────
+
+/**
+ * FR-106: Pushes a dirty-tree downgrade advisory into the architect's advisory queue.
+ *
+ * @param sessionID - The session to push the advisory into
+ * @param reason - The dirty-tree reason (error message from assertCleanWorkingTree)
+ * @param lanesAffected - Optional list of lane IDs affected by the downgrade
+ */
+function pushDirtyTreeDowngradeAdvisory(
+	sessionID: string,
+	reason: string,
+	lanesAffected: string[] = [],
+): void {
+	const session = ensureAgentSession(sessionID);
+	session.pendingAdvisoryMessages ??= [];
+	const affected =
+		lanesAffected.length > 0
+			? `; affected lanes: ${lanesAffected.join(', ')}`
+			: '';
+	session.pendingAdvisoryMessages.push(
+		`LEAN_TURBO_DIRTY_TREE_DOWNGRADE: ${reason}${affected}. Worktree isolation is OFF for this phase; lanes run in the shared working tree.`,
+	);
+}
+
 export class LeanTurboRunner {
 	/**
 	 * Test-only dependency-injection seam.
@@ -262,12 +290,15 @@ export class LeanTurboRunner {
 		laneDispatchTimeoutMs: number | undefined;
 		provisionWorktree: typeof provisionWorktree;
 		removeWorktree: typeof removeWorktree;
+		removeLaneProfileFromDisk: typeof removeLaneProfileFromDiskReal;
 		mergeLaneBranch: typeof mergeLaneBranch;
 		postMergeCleanup: typeof postMergeCleanup;
 		attemptMergeBackFromDirty: typeof attemptMergeBackFromDirty;
 		startupOrphanRecovery: typeof startupOrphanRecovery;
 		getMergeStrategy: typeof getMergeStrategy;
 		assertCleanWorkingTree: typeof assertCleanWorkingTree;
+		/** DI seam for ensureAgentSession — allows tests to intercept advisory queue writes. */
+		ensureAgentSession: typeof ensureAgentSession;
 	} = {
 		loadPlanJsonOnly,
 		planLeanTurboLanes,
@@ -282,12 +313,14 @@ export class LeanTurboRunner {
 		laneDispatchTimeoutMs: undefined,
 		provisionWorktree,
 		removeWorktree,
+		removeLaneProfileFromDisk: removeLaneProfileFromDiskReal,
 		mergeLaneBranch,
 		postMergeCleanup,
 		attemptMergeBackFromDirty,
 		startupOrphanRecovery,
 		getMergeStrategy,
 		assertCleanWorkingTree,
+		ensureAgentSession,
 	};
 
 	/**
@@ -335,6 +368,13 @@ export class LeanTurboRunner {
 
 	/** Lean-mode configuration passed at construction. Undefined means use defaults. */
 	private readonly _leanConfig?: LeanTurboConfig;
+
+	/**
+	 * FR-106: Records a pending dirty-tree downgrade so we can enumerate affected lanes
+	 * after `planLeanTurboLanes` runs and push a per-lane advisory to the architect.
+	 * Null when no downgrade is pending.
+	 */
+	private _pendingDowngrade: { reason: string } | null = null;
 
 	constructor(options: {
 		/** Project root directory */
@@ -442,6 +482,10 @@ export class LeanTurboRunner {
 						this._directory,
 					);
 				if (!cleanResult.clean) {
+					// FR-106: Record the downgrade so we can enumerate affected lanes after planning
+					this._pendingDowngrade = {
+						reason: cleanResult.error ?? 'uncommitted changes',
+					};
 					console.warn(
 						`[lean-turbo] worktree isolation requires clean working tree: ${cleanResult.error}`,
 					);
@@ -451,6 +495,10 @@ export class LeanTurboRunner {
 				// If the check itself fails (e.g. not a git repo), degrade gracefully
 				const assertMsg =
 					assertErr instanceof Error ? assertErr.message : String(assertErr);
+				// FR-106: Record the downgrade so we can enumerate affected lanes after planning
+				this._pendingDowngrade = {
+					reason: `cleanliness check failed: ${assertMsg}`,
+				};
 				console.warn(
 					`[lean-turbo] unable to verify working tree cleanliness: ${assertMsg} — degrading to shared directory`,
 				);
@@ -469,6 +517,18 @@ export class LeanTurboRunner {
 				{ phases: plan.phases as any },
 				leanConfig,
 			);
+
+		// FR-106: If a dirty-tree downgrade was recorded before planning, enumerate the
+		// affected lanes and push a session-visible advisory to the architect.
+		if (this._pendingDowngrade) {
+			const lanesAffected = lanePlan.lanes.map((l) => l.laneId);
+			pushDirtyTreeDowngradeAdvisory(
+				this._sessionID,
+				this._pendingDowngrade.reason,
+				lanesAffected,
+			);
+			this._pendingDowngrade = null;
+		}
 
 		const degradedTasks = lanePlan.degradedTasks.map((d) => d.taskId);
 
@@ -883,12 +943,12 @@ export class LeanTurboRunner {
 	 * If not provided, sensible defaults are used.
 	 */
 	private _getLeanConfig(config?: LeanTurboConfig): LeanTurboConfig {
-		const defaults = DEFAULT_LEAN_TURBO_CONFIG;
-
 		if (config) {
-			return { ...defaults, ...config };
+			// Deep clone the merged config to prevent shared-reference mutations
+			// to nested runtime_isolation (env_overrides, cache_redirects).
+			return structuredClone({ ...DEFAULT_LEAN_TURBO_CONFIG, ...config });
 		}
-		return defaults;
+		return { ...DEFAULT_LEAN_TURBO_CONFIG };
 	}
 
 	/**
@@ -1232,18 +1292,45 @@ export class LeanTurboRunner {
 						// Mark for post-merge cleanup AFTER worktree removal (branch delete
 						// fails while the branch is still checked out in an active worktree).
 						needsPostMergeCleanup = true;
-					} else if ('partial' in mergeResult && mergeResult.partial) {
+
+						// FR-205 SC-134: Remove lane profile at successful merge-back.
+						// Best-effort — non-fatal if removal fails (e.g. file already gone).
+						const leanLaneIndex = parseLeanLaneIndex(lr.laneId);
+						try {
+							await LeanTurboRunner._internals.removeLaneProfileFromDisk(
+								laneInState.worktreePath,
+								leanLaneIndex,
+							);
+						} catch {
+							/* non-fatal */
+						}
+					} else if (
+						('conflict' in mergeResult && mergeResult.conflict) ||
+						('partial' in mergeResult && mergeResult.partial)
+					) {
+						// Merge conflict or partial failure: log warning, do NOT remove worktree, record failure
+						const isConflict =
+							'conflict' in mergeResult && mergeResult.conflict === true;
+						const conflictFiles =
+							'conflictFiles' in mergeResult &&
+							Array.isArray(
+								(mergeResult as { conflictFiles?: unknown }).conflictFiles,
+							)
+								? (mergeResult as { conflictFiles: string[] }).conflictFiles
+								: [];
+						const reason =
+							('message' in mergeResult &&
+								typeof (mergeResult as { message?: unknown }).message ===
+									'string' &&
+								((mergeResult as { message: string }).message || '')) ||
+							'merge-back partially failed';
 						const failureInfo: MergeBackFailureInfo = {
 							laneId: lr.laneId,
 							branchName: laneInState.branchName,
 							worktreePath: laneInState.worktreePath,
-							status:
-								mergeResult.conflictFiles &&
-								mergeResult.conflictFiles.length > 0
-									? 'conflict'
-									: 'partial',
-							reason: mergeResult.message || 'merge-back partially failed',
-							conflictFiles: mergeResult.conflictFiles,
+							status: isConflict ? 'conflict' : 'partial',
+							reason,
+							conflictFiles,
 						};
 						mergeBackFailures.push(failureInfo);
 						lr.status = 'failed';

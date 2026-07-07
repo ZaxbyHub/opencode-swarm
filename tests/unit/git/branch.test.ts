@@ -1039,3 +1039,72 @@ describe('Git Branch Module', () => {
 		});
 	});
 });
+
+describe('_internals.spawnSync envOverrides', () => {
+	const testCwd = '/test/repo';
+
+	beforeEach(() => {
+		// Reset the mock implementation set by previous test
+		mockSpawnSync.mockReset();
+		callIndex = 0;
+		returnValues = [];
+	});
+
+	test('spawnSync with envOverrides: null deletes an inherited var from child env', () => {
+		const key = 'BRANCH_SPAWN_TEST_DELETE';
+		process.env[key] = 'parent_value';
+		setupMock({ status: 0, stdout: '', stderr: '' });
+
+		branch._internals.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testCwd,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: null },
+		});
+
+		// Verify the env passed to spawnSync did NOT contain the key
+		expect(mockSpawnSync).toHaveBeenCalled();
+		const lastCall =
+			mockSpawnSync.mock.calls[mockSpawnSync.mock.calls.length - 1];
+		const envArg = lastCall?.[2]?.env as Record<string, string> | undefined;
+		expect(envArg?.[key]).toBeUndefined();
+		delete process.env[key];
+	});
+
+	test('spawnSync with envOverrides sets a new var in child env', () => {
+		const key = 'BRANCH_SPAWN_TEST_NEW';
+		setupMock({ status: 0, stdout: '', stderr: '' });
+
+		branch._internals.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testCwd,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: 'new_value' },
+		});
+
+		expect(mockSpawnSync).toHaveBeenCalled();
+		const lastCall =
+			mockSpawnSync.mock.calls[mockSpawnSync.mock.calls.length - 1];
+		const envArg = lastCall?.[2]?.env as Record<string, string> | undefined;
+		expect(envArg?.[key]).toBe('new_value');
+	});
+
+	test('process.env is NOT mutated after the call', () => {
+		const key = 'BRANCH_SPAWN_TEST_MUTATION';
+		process.env[key] = 'original_value';
+		setupMock({ status: 0, stdout: '', stderr: '' });
+
+		branch._internals.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testCwd,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: 'overridden' },
+		});
+
+		expect(process.env[key]).toBe('original_value');
+		delete process.env[key];
+	});
+});

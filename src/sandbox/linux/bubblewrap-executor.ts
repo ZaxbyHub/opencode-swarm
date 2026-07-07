@@ -9,7 +9,7 @@
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { warn } from '../../utils/logger';
-import { SandboxError, type SandboxExecutor } from '../executor';
+import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
 
 /** Magic exit code bwrap returns when --version is passed */
 const BWRAP_VERSION_EXIT = 0;
@@ -160,10 +160,17 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 	 * @param command   - Raw shell command to execute inside the sandbox
 	 * @param scopePaths - Additional scope paths to bind (merged with constructor scope)
 	 * @param tempDir   - Optional temp directory override
+	 * @param envOverrides - Optional per-call env overrides: string sets the var, null unsets it.
+	 *                      When omitted, no per-call env override is applied.
 	 * @returns A bwrap-wrapped command string ready for shell execution,
 	 *          or the raw command string when the sandbox is unavailable (passthrough mode)
 	 */
-	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
+	wrapCommand(
+		command: string,
+		scopePaths: string[],
+		tempDir?: string,
+		envOverrides?: Record<string, string | null>,
+	): string {
 		// Re-check availability before each wrap — bwrap may become unavailable mid-session
 		if (!this._available) {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
@@ -179,6 +186,27 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			`'${shellEscape(p)}'`,
 			`'${shellEscape(p)}'`,
 		]);
+
+		// Build env override arguments for bwrap
+		// --setenv KEY=VALUE for string values (two separate args), --unsetenv KEY for null values.
+		// bwrap passes these directly to execve — values are NOT shell-interpreted.
+		// Keys are validated upfront to prevent shell-injection.
+		const envArgs: string[] = [];
+		if (envOverrides) {
+			for (const [key, value] of Object.entries(envOverrides)) {
+				// Reject invalid env var names silently — they cannot be safely interpolated.
+				if (!isValidEnvKey(key)) {
+					continue;
+				}
+				if (value === null) {
+					envArgs.push('--unsetenv', key);
+				} else {
+					// Use 3-arg form: --setenv KEY VALUE (three separate args).
+					// bwrap parses the 3-arg form unambiguously; value may contain '='.
+					envArgs.push('--setenv', key, value);
+				}
+			}
+		}
 
 		// Core sandbox arguments
 		const args = [
@@ -211,6 +239,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'--proc',
 			'/proc',
 			'--unshare-pid',
+			...envArgs,
 			'--',
 			'bash',
 			'-c',
