@@ -124,6 +124,9 @@ describe('2: FR-011 OpenSpec regression guard: parseRequirements drops id-less o
 			'',
 			'## Current Requirements',
 			'- FR-001: The system MUST allow users to sign in. #### Scenario: Successful login - **WHEN** the user submits valid credentials - **THEN** the system signs them in. _(source: openspec/specs/auth/spec.md)_',
+			'',
+			'## Success Criteria',
+			'### SC-001: [NEEDS CLARIFICATION — define success criterion for current-requirements]',
 		].join('\n') + '\n';
 
 	beforeEach(() => {

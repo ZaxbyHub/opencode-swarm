@@ -435,7 +435,7 @@ All tasks in phase done
 │ - Architect calls `write_drift_evidence(phase, verdict, summary)` tool after critic_drift_verifier returns
 │ - Writes drift verification evidence to .swarm/evidence/{phase}/drift-verifier.json
 │ - Verdict automatically normalized: APPROVED → approved, NEEDS_REVISION → rejected
-│ - Skip this step if spec.md does not exist
+│ - Skip this step if no effective spec exists (determined via `/swarm sdd status` or `readEffectiveSpecSync` — native .swarm/spec.md, OpenSpec openspec/, or Spec-Kit .specify/)
 ├── 5.6. Verify mandatory gate evidence exists:
 │         - .swarm/evidence/{phase}/completion-verify.json (auto-written by completion-verify gate)
 │         - .swarm/evidence/{phase}/drift-verifier.json (written by @critic_drift_verifier)

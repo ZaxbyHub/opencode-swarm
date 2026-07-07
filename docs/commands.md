@@ -168,15 +168,17 @@ Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful be
 
 ### `/swarm sdd ...`
 
-Inspect and project OpenSpec-compatible spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files.
+Inspect and project OpenSpec-compatible and Spec-Kit spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files (or from Spec-Kit `specs/<feature>/spec.md` files when `.specify/` is present). The projected `.swarm/spec.md` includes a scaffold `## Success Criteria` section with placeholder `SC-###` identifiers and `[NEEDS CLARIFICATION]` markers — fill these in with concrete success criteria before planning.
 
 ```text
-/swarm sdd status             # show .swarm/spec.md plus openspec/ artifact status
+/swarm sdd status             # show .swarm/spec.md plus SDD artifact status
 /swarm sdd status --json      # machine-readable status
-/swarm sdd validate           # validate the OpenSpec projection
+/swarm sdd validate           # validate the effective spec projection
 /swarm sdd validate --change add-login
 /swarm sdd project --dry-run  # preview .swarm/spec.md materialization
-/swarm sdd project            # write .swarm/spec.md from OpenSpec artifacts
+/swarm sdd project            # write .swarm/spec.md (first projection)
+/swarm sdd project --overwrite # overwrite existing .swarm/spec.md (requires --overwrite)
+/swarm sdd project --source speckit --feature 001-my-feature  # Spec-Kit projection
 ```
 
 `openspec/changes/*/tasks.md` is proposal input only. Execution state still lives in `.swarm/plan-ledger.jsonl`; never hand-edit `.swarm/plan.json` or `.swarm/plan.md`.

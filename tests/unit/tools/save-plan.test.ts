@@ -1488,4 +1488,98 @@ describe('save-plan tool verification tests', () => {
 			expect(savedPlan.phases[0].tasks[0].status).toBe('completed');
 		});
 	});
+
+	// ========== GROUP 10: SPEC_REQUIRED rejection message accuracy (FR-004) ==========
+	describe('Group 10: SPEC_REQUIRED rejection message accuracy (FR-004)', () => {
+		it('SPEC_REQUIRED rejection mentions "effective spec", OpenSpec/Spec-Kit, "sdd project", and "--overwrite"', async () => {
+			// Create a temp workspace with no effective spec at all (no .swarm/spec.md,
+			// no openspec/, no .specify/) so the spec gate fires.
+			const specTmpDir = await fs.mkdtemp(
+				path.join(os.tmpdir(), 'spec-required-test-'),
+			);
+			await fs.mkdir(path.join(specTmpDir, '.swarm'), { recursive: true });
+			// NOTE: intentionally NOT creating .swarm/spec.md, openspec/, or .specify/
+
+			const result = await executeSavePlan({
+				title: 'Spec Required Test',
+				swarm_id: 'mega',
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						tasks: [{ id: '1.1', description: 'Task A' }],
+					},
+				],
+				working_directory: specTmpDir,
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.message).toBeDefined();
+			expect(typeof result.message).toBe('string');
+			expect(result.errors).toBeDefined();
+			expect(result.errors!.length).toBeGreaterThan(0);
+			expect(result.recovery_guidance).toBeDefined();
+			expect(typeof result.recovery_guidance).toBe('string');
+
+			// message must mention "effective spec" (not just "spec")
+			const combinedMessage = `${result.message} ${result.errors!.join(' ')}`;
+			expect(combinedMessage.toLowerCase()).toContain('effective spec');
+
+			// recovery_guidance must mention the agent-invocable sdd project command
+			expect(result.recovery_guidance!).toContain('sdd project');
+
+			// recovery_guidance must mention --overwrite (the consent flag)
+			expect(result.recovery_guidance!).toContain('--overwrite');
+
+			// message/errors must mention OpenSpec or Spec-Kit (the effective-spec sources)
+			const specSources = combinedMessage + result.recovery_guidance!;
+			const hasOpenSpec = /openspec/i.test(specSources);
+			const hasSpecKit = /spec[\s-]?kit/i.test(specSources);
+			expect(hasOpenSpec || hasSpecKit).toBe(true);
+
+			// Clean up
+			await fs.rm(specTmpDir, { recursive: true, force: true });
+		});
+
+		it('SPEC_REQUIRED is skipped when SWARM_SKIP_SPEC_GATE=1', async () => {
+			const orig = process.env.SWARM_SKIP_SPEC_GATE;
+			process.env.SWARM_SKIP_SPEC_GATE = '1';
+			try {
+				// Even without a spec, the gate should be bypassed
+				const noSpecTmpDir = await fs.mkdtemp(
+					path.join(os.tmpdir(), 'no-spec-test-'),
+				);
+				await fs.mkdir(path.join(noSpecTmpDir, '.swarm'), { recursive: true });
+				// Write context.md so gate-selection check doesn't also fail
+				await fs.writeFile(
+					path.join(noSpecTmpDir, '.swarm', 'context.md'),
+					'## Pending QA Gate Selection\n',
+				);
+
+				const result = await executeSavePlan({
+					title: 'No Spec Test',
+					swarm_id: 'mega',
+					phases: [
+						{
+							id: 1,
+							name: 'Phase 1',
+							tasks: [{ id: '1.1', description: 'Task A' }],
+						},
+					],
+					working_directory: noSpecTmpDir,
+				});
+
+				// With the skip flag, spec gate is bypassed so this may succeed
+				// (or fail for other reasons like missing spec-snapshot, but NOT spec-required)
+				const isSpecRequiredFailure =
+					result.message?.includes('SPEC_REQUIRED') ?? false;
+				expect(isSpecRequiredFailure).toBe(false);
+
+				await fs.rm(noSpecTmpDir, { recursive: true, force: true });
+			} finally {
+				if (orig === undefined) delete process.env.SWARM_SKIP_SPEC_GATE;
+				else process.env.SWARM_SKIP_SPEC_GATE = orig;
+			}
+		});
+	});
 });

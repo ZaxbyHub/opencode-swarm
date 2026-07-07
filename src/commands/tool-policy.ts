@@ -331,8 +331,7 @@ export function classifySwarmCommandChatFallbackUse(
 		canonicalKey === 'knowledge restore' ||
 		canonicalKey === 'memory import' ||
 		canonicalKey === 'memory migrate' ||
-		canonicalKey === 'memory compact' ||
-		canonicalKey === 'sdd project'
+		canonicalKey === 'memory compact'
 	) {
 		return {
 			allowed: false,

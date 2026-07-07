@@ -738,7 +738,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('bunx opencode-swarm run sdd project → BLOCKED (compound sdd)', async () => {
+		test('bunx opencode-swarm run sdd project → ALLOWED (FR-004: agent-invocable)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -746,9 +746,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				'bunx opencode-swarm run sdd project',
 			);
 			const output = makeBashOutput('bunx opencode-swarm run sdd project');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/human-only swarm command/,
-			);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
 		test('bunx opencode-swarm run rollback 2 → BLOCKED (positional arg bypass)', async () => {
