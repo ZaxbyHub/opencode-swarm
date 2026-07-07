@@ -409,17 +409,6 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 		// Mark the active session
 		createActiveSession(activeSessionId);
 
-		// DIAG-1: Check branches before recovery
-		const branchesBefore = await runGit(activeDir, [
-			'branch',
-			'--format=%(refname:short)',
-		]);
-		console.error(
-			'[DIAG-1] branchesBefore:',
-			JSON.stringify(branchesBefore.stdout),
-		);
-		console.error('[DIAG-1] activeSessionId:', activeSessionId);
-
 		// Save real
 		const realCleanup = MergeInternals.cleanupOrphanedBranches;
 
@@ -447,16 +436,6 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 		try {
 			const result = await runInitOrphanRecovery(activeDir);
 
-			// DIAG-2: Log result after recovery
-			console.error(
-				'[DIAG-2] result:',
-				JSON.stringify({
-					attempted: result.attempted,
-					orphanedBranches: result.orphanedBranches,
-					warnings: result.warnings,
-				}),
-			);
-
 			// The active session's branch should still exist
 			const listResult = await runGit(activeDir, [
 				'branch',
@@ -466,14 +445,6 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 				.split('\n')
 				.map((b) => b.trim())
 				.filter((b) => b.startsWith('swarm-lane/'));
-
-			// DIAG-3: Log before assertion
-			console.error('[DIAG-3] listResult.exitCode:', listResult.exitCode);
-			console.error(
-				'[DIAG-3] listResult.stdout:',
-				JSON.stringify(listResult.stdout),
-			);
-			console.error('[DIAG-3] remaining:', JSON.stringify(remaining));
 
 			// Active session branch should be preserved
 			expect(remaining.some((b) => b.includes(activeSessionId))).toBe(true);
