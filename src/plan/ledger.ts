@@ -194,6 +194,61 @@ export function computePlanHash(plan: Plan): string {
 }
 
 /**
+ * Compute a SHA-256 hash of the plan's STRUCTURE, excluding transient
+ * execution progress fields (`phase.status` and `task.status`).
+ *
+ * This mirrors {@link computePlanHash}'s normalization byte-for-byte EXCEPT it
+ * omits the two status fields from the hashed payload. It exists solely for the
+ * plan-critic execution gate (`assertPlanCriticApprovedForExecution`), which
+ * must recognize a plan as "the same plan the critic approved" even after the
+ * architect flips a task to `in_progress` before delegating its coder. Including
+ * status (as `computePlanHash` does) would make the gate fire on the very first
+ * conforming coder dispatch, because `update_task_status(taskId,'in_progress')`
+ * runs before it and mutates the status-inclusive hash.
+ *
+ * IMPORTANT: This is intentionally a SEPARATE function, not a refactor of
+ * `computePlanHash`. `computePlanHash` is load-bearing for ledger replay and
+ * staleness/integrity detection (its output is persisted on-disk as
+ * `plan_hash_after`), so its byte output must never change. Do NOT collapse
+ * these two into a shared normalizer.
+ *
+ * @param plan - The plan to hash
+ * @returns Hex-encoded SHA-256 hash of the status-excluded structure
+ */
+export function computePlanStructureHash(plan: Plan): string {
+	// Deterministic representation matching computePlanHash, minus status fields.
+	const normalized = {
+		schema_version: plan.schema_version,
+		title: plan.title,
+		swarm: plan.swarm,
+		current_phase: plan.current_phase,
+		migration_status: plan.migration_status,
+		execution_profile: plan.execution_profile,
+		phases: plan.phases.map((phase) => ({
+			id: phase.id,
+			name: phase.name,
+			required_agents: phase.required_agents
+				? [...phase.required_agents].sort()
+				: undefined,
+			tasks: phase.tasks.map((task) => ({
+				id: task.id,
+				phase: task.phase,
+				size: task.size,
+				description: task.description,
+				depends: [...task.depends].sort(),
+				acceptance: task.acceptance,
+				files_touched: [...task.files_touched].sort(),
+				evidence_path: task.evidence_path,
+				blocked_reason: task.blocked_reason,
+			})),
+		})),
+	};
+
+	const jsonString = JSON.stringify(normalized);
+	return crypto.createHash('sha256').update(jsonString, 'utf8').digest('hex');
+}
+
+/**
  * Read the current plan.json and compute its hash.
  *
  * @param directory - The working directory
@@ -605,6 +660,14 @@ export async function takeSnapshotWithRetry(
  *   - approvalMetadata: optional free-form metadata embedded into the
  *     snapshot payload (e.g. phase number, verdict, summary) so that
  *     downstream readers can filter without decoding prompts.
+ *   - payloadHashOverride: when supplied, stored as the snapshot payload's
+ *     `payload_hash` INSTEAD of the default `computePlanHash(plan)`. Used by the
+ *     plan-critic gate to persist a status-excluded structural hash
+ *     (`computePlanStructureHash`) so the gate can match the plan across the
+ *     architect's pre-delegation `in_progress` status flip. Note this only
+ *     changes the embedded snapshot `payload_hash`; the ledger event's
+ *     hash-chain field `plan_hash_after` is unaffected (still governed by
+ *     `planHashAfter` / on-disk plan.json), preserving replay integrity.
  * @returns The LedgerEvent that was written
  */
 export async function takeSnapshotEvent(
@@ -614,9 +677,10 @@ export async function takeSnapshotEvent(
 		planHashAfter?: string;
 		source?: string;
 		approvalMetadata?: Record<string, unknown>;
+		payloadHashOverride?: string;
 	},
 ): Promise<LedgerEvent> {
-	const payloadHash = computePlanHash(plan);
+	const payloadHash = options?.payloadHashOverride ?? computePlanHash(plan);
 	const snapshotPayload: SnapshotEventPayload & {
 		approval?: Record<string, unknown>;
 	} = {
@@ -1158,6 +1222,64 @@ export async function loadLastApprovedPlan(
 	expectedPlanId?: string,
 ): Promise<ApprovedSnapshotInfo | null> {
 	const events = await readLedgerEvents(directory);
+	return findLastApprovedSnapshot(events, expectedPlanId);
+}
+
+/**
+ * Find the most recent PLAN-CRITIC-approved snapshot in the ledger.
+ *
+ * Like {@link loadLastApprovedPlan}, but additionally requires the snapshot's
+ * embedded `approval.source === 'plan_critic_gate'`. This distinguishes the
+ * plan-critic execution-gate approval (recorded by
+ * `recordPlanCriticApprovalSnapshotIfApplicable` in the delegation gate) from
+ * the UNRELATED per-phase drift-verification snapshots that
+ * `src/tools/write-drift-evidence.ts` also writes with
+ * `source: 'critic_approved'` (but `approval: {phase, verdict, summary}` and no
+ * `plan_critic_gate` marker).
+ *
+ * Without this filter, a drift-verification snapshot landing AFTER a legitimate
+ * plan-critic approval would shadow it (being more recent), causing the gate to
+ * spuriously reject execution. This loader skips non-matching `critic_approved`
+ * snapshots and keeps scanning backward to find the plan-critic approval.
+ *
+ * SAFETY: `loadLastApprovedPlan`'s default behavior is intentionally left
+ * unchanged — other callers (`get-approved-plan`, restore/recovery paths) want
+ * ANY `critic_approved` snapshot as a restore point regardless of approval shape.
+ *
+ * @param directory - Working directory containing `.swarm/plan-ledger.jsonl`
+ * @param expectedPlanId - Optional plan identity filter (see loadLastApprovedPlan)
+ * @returns The most recent plan-critic-approved snapshot info, or null
+ */
+export async function loadLastPlanCriticApprovedSnapshot(
+	directory: string,
+	expectedPlanId?: string,
+): Promise<ApprovedSnapshotInfo | null> {
+	const events = await readLedgerEvents(directory);
+	return findLastApprovedSnapshot(
+		events,
+		expectedPlanId,
+		(payload) => payload.approval?.source === 'plan_critic_gate',
+	);
+}
+
+/**
+ * Shared reverse-scan for the latest `critic_approved` snapshot event.
+ *
+ * @param events - Ledger events in ascending seq order
+ * @param expectedPlanId - Optional plan identity filter
+ * @param extraFilter - Optional additional predicate on the snapshot payload.
+ *   When provided, a `critic_approved` snapshot that fails the predicate is
+ *   SKIPPED and the scan continues backward (it is not treated as a stopping
+ *   point), so an earlier snapshot satisfying the predicate can still match.
+ * @returns The most recent matching snapshot info, or null
+ */
+function findLastApprovedSnapshot(
+	events: LedgerEvent[],
+	expectedPlanId: string | undefined,
+	extraFilter?: (
+		payload: SnapshotEventPayload & { approval?: Record<string, unknown> },
+	) => boolean,
+): ApprovedSnapshotInfo | null {
 	if (events.length === 0) {
 		return null;
 	}
@@ -1193,6 +1315,12 @@ export async function loadLastApprovedPlan(
 			}
 		}
 
+		// Caller-supplied predicate (e.g. the plan-critic gate marker). A
+		// failing snapshot is skipped so the scan keeps looking further back.
+		if (extraFilter && !extraFilter(payload)) {
+			continue;
+		}
+
 		return {
 			plan: payload.plan,
 			seq: event.seq,
@@ -1211,6 +1339,7 @@ export async function loadLastApprovedPlan(
 
 export const _internals = {
 	computePlanHash,
+	computePlanStructureHash,
 	computeCurrentPlanHash,
 	ledgerExists,
 	getLatestLedgerSeq,
@@ -1225,6 +1354,7 @@ export const _internals = {
 	quarantineLedgerSuffix,
 	replayWithIntegrity,
 	loadLastApprovedPlan,
+	loadLastPlanCriticApprovedSnapshot,
 	getLedgerPath,
 	getPlanJsonPath,
 };

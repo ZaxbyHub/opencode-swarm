@@ -25,6 +25,7 @@ import {
 	standardWorktreeSerializationSessions,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(
 	overrides?: Partial<WorktreeIsolationConfig>,
@@ -60,7 +61,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options?: {
 		tasks?: Array<{
@@ -71,7 +72,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options?.currentPhase ?? 1;
 	const tasks = options?.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -103,6 +104,11 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	// PR #1706: any coder-role Task dispatch made while .swarm/plan.json exists
+	// now requires a plan-critic-approval ledger snapshot or the gate throws
+	// PLAN_CRITIC_GATE_VIOLATION before the worktree-serialization gate this
+	// file actually exercises ever runs.
+	await recordPlanCriticApproval(dir, plan);
 }
 
 /**
@@ -138,11 +144,11 @@ async function callToolBeforeCoder(
 describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		resetStandardWorktreeIsolationState();
 		tempDir = makeTempProject('fr104-sc112-gate-');
-		writePlanJson(tempDir);
+		await writePlanJson(tempDir);
 		// Mock removeWorktree to be a no-op
 		isolationInternals.removeWorktree = async () => {};
 	});
@@ -229,11 +235,11 @@ describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 describe('FR-104 SC-111: count release reachable via public gating path', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		resetStandardWorktreeIsolationState();
 		tempDir = makeTempProject('fr104-sc111-gate-');
-		writePlanJson(tempDir);
+		await writePlanJson(tempDir);
 		isolationInternals.removeWorktree = async () => {};
 	});
 

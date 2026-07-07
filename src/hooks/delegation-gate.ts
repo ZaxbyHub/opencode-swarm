@@ -16,7 +16,13 @@ import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import {
+	computePlanStructureHash,
+	loadLastPlanCriticApprovedSnapshot,
+	takeSnapshotEvent,
+} from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
@@ -439,6 +445,157 @@ function extractPlanTaskId(text: string): string | null {
 	return null;
 }
 
+function outputText(output: unknown): string {
+	if (typeof output === 'string') return output;
+	if (typeof output === 'number' || typeof output === 'boolean') {
+		return String(output);
+	}
+	if (Array.isArray(output)) {
+		return output.map(outputText).filter(Boolean).join('\n');
+	}
+	if (output && typeof output === 'object') {
+		const record = output as Record<string, unknown>;
+		const preferred = ['output', 'text', 'content', 'message', 'result'];
+		const parts: string[] = [];
+		for (const key of preferred) {
+			if (key in record) parts.push(outputText(record[key]));
+		}
+		if (parts.length > 0) return parts.filter(Boolean).join('\n');
+		try {
+			return JSON.stringify(output);
+		} catch {
+			return '';
+		}
+	}
+	return '';
+}
+
+function extractPlanCriticVerdict(
+	output: unknown,
+): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
+	const match = /^\s*VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+		outputText(output),
+	);
+	if (!match) return null;
+	return match[1].toUpperCase() as 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED';
+}
+
+function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
+	const text = [
+		args.prompt,
+		args.task,
+		args.description,
+		args.message,
+		args.input,
+	]
+		.filter((value): value is string => typeof value === 'string')
+		.join('\n')
+		.toLowerCase();
+	if (!text) return false;
+	// Broad-recall-biased on purpose: the caller already narrows to
+	// `subagent_type === 'critic'` (a target the trusted architect controls), so
+	// a false positive is low-risk, while a false negative silently blocks ALL
+	// EXECUTE-phase coder work with no auto-recovery. Any single signal below —
+	// drawn from the phrasings the critic-gate/plan skills tell the architect to
+	// send — is therefore sufficient; no AND-pairing.
+	return PLAN_CRITIC_TASK_SIGNALS.some((signal) => text.includes(signal));
+}
+
+// Substrings that, in a dispatch to `subagent_type: 'critic'`, mark it as a
+// plan critic-gate review. Kept lowercase (text is lowercased before matching).
+const PLAN_CRITIC_TASK_SIGNALS = [
+	'critic-gate', // "MODE: CRITIC-GATE", "critic-gate protocol/review"
+	'plan critic',
+	'review plan',
+	'review the plan',
+	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
+	'approve the plan',
+	'plan approval',
+] as const;
+
+async function assertPlanCriticApprovedForExecution(
+	directory: string,
+	plan: Plan | null,
+): Promise<void> {
+	if (!plan) return;
+
+	const planId = derivePlanId(plan);
+	// Use the plan-critic-scoped loader (not the general loadLastApprovedPlan):
+	// it looks PAST unrelated `critic_approved` snapshots (e.g. per-phase
+	// drift-verification snapshots from write-drift-evidence.ts) to find the
+	// snapshot carrying the `plan_critic_gate` approval marker. Otherwise a later
+	// drift snapshot would shadow a still-valid plan-critic approval (bug F-A2).
+	const approved = await loadLastPlanCriticApprovedSnapshot(directory, planId);
+	if (!approved) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
+				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE.',
+		);
+	}
+
+	// Verdict is still load-bearing: the loader filters on the plan_critic_gate
+	// marker but not on the verdict value, so a (malformed) non-APPROVED
+	// plan-critic snapshot must still be rejected here.
+	if (
+		approved.approval?.verdict !== 'APPROVED' ||
+		approved.approval?.source !== 'plan_critic_gate'
+	) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Latest approved-plan snapshot does not contain plan critic VERDICT: APPROVED evidence. ' +
+				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution.',
+		);
+	}
+
+	// Compare STRUCTURAL hashes (excluding phase/task status). The plan-critic
+	// snapshot is taken while all tasks are `pending`, but the EXECUTE skill
+	// mandates flipping the current task to `in_progress` (a status-only
+	// mutation, dual-written into plan.json) BEFORE delegating its coder. A
+	// status-inclusive comparison would therefore fire on the first conforming
+	// coder dispatch of every run (bug F-A1). An actual structural change
+	// (description, files, dependencies, ...) still trips this staleness check.
+	if (approved.payloadHash !== computePlanStructureHash(plan)) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
+				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
+		);
+	}
+}
+
+async function recordPlanCriticApprovalSnapshotIfApplicable(
+	directory: string,
+	input: { sessionID: string; callID: string },
+	args: Record<string, unknown>,
+	output: unknown,
+): Promise<void> {
+	const targetAgent =
+		typeof args.subagent_type === 'string'
+			? stripKnownSwarmPrefix(args.subagent_type)
+			: null;
+	if (targetAgent !== 'critic') return;
+	if (!taskLooksLikePlanCritic(args)) return;
+	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) return;
+
+	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
+	// so `assertPlanCriticApprovedForExecution` can match this approval after the
+	// architect flips the current task to `in_progress` before delegating its
+	// coder. This MUST be the same hash function the gate compares against
+	// (`computePlanStructureHash`), or the staleness check would never match.
+	await takeSnapshotEvent(directory, plan, {
+		source: 'critic_approved',
+		approvalMetadata: {
+			verdict: 'APPROVED',
+			source: 'plan_critic_gate',
+			session_id: input.sessionID,
+			call_id: input.callID,
+			approved_at: new Date().toISOString(),
+		},
+		payloadHashOverride: computePlanStructureHash(plan),
+	});
+}
+
 /**
  * Returns the task ID to use when seeding cross-session state, derived from
  * the originating session's currentTaskId or lastCoderDelegationTaskId.
@@ -849,6 +1006,7 @@ export const _internals = {
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
 	resetStandardWorktreeIsolationState,
+	PLAN_CRITIC_TASK_SIGNALS,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},
@@ -1086,6 +1244,8 @@ export function createDelegationGateHook(
 			? new Set(plan.phases.flatMap((phase) => phase.tasks.map((t) => t.id)))
 			: new Set<string>();
 		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+
+		await assertPlanCriticApprovedForExecution(directory, plan);
 
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
 		// review. In parallel mode (parallelization_enabled), dispatching a coder
@@ -1552,6 +1712,22 @@ export function createDelegationGateHook(
 				}
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				return;
+			}
+
+			if (typeof subagentType === 'string') {
+				try {
+					const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+					await recordPlanCriticApprovalSnapshotIfApplicable(
+						directory,
+						input,
+						mergedArgs,
+						_output,
+					);
+				} catch (err) {
+					logger.warn(
+						`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
 			}
 
 			if (standardDispatch) {

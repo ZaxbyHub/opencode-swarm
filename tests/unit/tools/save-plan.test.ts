@@ -519,7 +519,12 @@ describe('save-plan tool verification tests', () => {
 					{
 						id: 1,
 						name: 'Implementation',
-						tasks: [{ id: '1.1', description: 'Implement checkout flow' }],
+						tasks: [
+							{
+								id: '1.1',
+								description: 'Implement FR-001 checkout flow',
+							},
+						],
 					},
 				],
 				working_directory: tmpDir,
@@ -907,9 +912,12 @@ describe('save-plan tool verification tests', () => {
 
 		beforeEach(() => {
 			// Create a temporary directory for each test
-			tmpDir = mkdirSync(os.tmpdir() + '/save-plan-test-' + Date.now(), {
-				recursive: true,
-			}) as string;
+			tmpDir = mkdirSync(
+				path.join(os.tmpdir(), 'save-plan-test-' + Date.now()),
+				{
+					recursive: true,
+				},
+			) as string;
 			// Create .swarm/spec.md required by the spec gate
 			mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 			writeFileSync(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');

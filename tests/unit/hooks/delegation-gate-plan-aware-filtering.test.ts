@@ -18,6 +18,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -44,7 +45,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options: {
 		tasks?: Array<{
@@ -55,7 +56,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -87,6 +88,13 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	// PR #1706: any coder-role Task dispatch made while .swarm/plan.json exists now
+	// requires a plan-critic-approval ledger snapshot or the gate throws
+	// PLAN_CRITIC_GATE_VIOLATION. Record the matching approval for THIS plan after
+	// every write (including mid-test rewrites) so the tests exercise the intended
+	// downstream logic (completion/reviewer gate + resolveDelegatedPlanTaskId
+	// ambiguity filtering) instead of failing at the plan-critic precondition.
+	await recordPlanCriticApproval(dir, plan);
 }
 
 async function callToolBefore(
@@ -104,10 +112,10 @@ async function callToolBefore(
 describe('resolveDelegatedPlanTaskId — plan-aware filtering (PR #961 tighten)', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-plan-aware-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },
@@ -191,7 +199,7 @@ describe('resolveDelegatedPlanTaskId — plan-aware filtering (PR #961 tighten)'
 
 		it('N.M version that IS in plan → NOT filtered → causes ambiguity', async () => {
 			// Plan has 3.4 as a task
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				tasks: [
 					{ id: '1.1', status: 'pending' },
 					{ id: '3.4', status: 'pending' }, // 3.4 IS in the plan
@@ -285,7 +293,7 @@ describe('resolveDelegatedPlanTaskId — plan-aware filtering (PR #961 tighten)'
 		});
 
 		it('prompt with three plan task IDs → ambiguous → blocks', async () => {
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				tasks: [
 					{ id: '1.1', status: 'pending' },
 					{ id: '1.2', status: 'pending' },

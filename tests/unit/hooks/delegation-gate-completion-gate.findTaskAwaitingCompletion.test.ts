@@ -19,6 +19,7 @@ import {
 	getTaskState,
 	resetSwarmState,
 } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(
 	overrides?: Record<string, unknown>,
@@ -49,7 +50,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options: {
 		tasks?: Array<{
@@ -60,7 +61,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -92,6 +93,7 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	await recordPlanCriticApproval(dir, plan);
 }
 
 function makeMessages(
@@ -124,10 +126,10 @@ async function callToolBefore(
 describe('delegation-gate: completion gate integration — findTaskAwaitingCompletion (PR #961)', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-completion-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },
@@ -181,7 +183,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 
 		it('should return null when task in tests_run is already completed in plan', async () => {
 			// Update plan: task 1.1 is completed
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				tasks: [
 					{ id: '1.1', status: 'completed' },
 					{ id: '1.2', status: 'pending' },
