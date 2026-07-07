@@ -243,14 +243,14 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 					{ path: goFile, additions: 1 },
 				],
 				mode: 'changed',
-				languages: ['typescript'],
+				languages: ['javascript'],
 			};
 
 			const result = await syntaxCheck(input, tmpDir);
 
-			// .js files map to 'typescript' profile in LANGUAGE_REGISTRY
+			// .js files map to the javascript profile in LANGUAGE_REGISTRY.
 			expect(result.files).toHaveLength(1);
-			expect(result.files[0]?.language).toBe('typescript');
+			expect(result.files[0]?.language).toBe('javascript');
 			expect(result.files[0]?.ok).toBe(true);
 		});
 
@@ -287,14 +287,14 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 					{ path: jsFile, additions: 1 },
 				],
 				mode: 'changed',
-				languages: ['typescript'],
+				languages: ['javascript'],
 			};
 
 			const result = await syntaxCheck(input, tmpDir);
 
-			// .xyz extension not supported, should only process .js (which maps to 'typescript' profile)
+			// .xyz extension is not supported, so only the .js file is processed.
 			expect(result.files).toHaveLength(1);
-			expect(result.files[0]?.language).toBe('typescript');
+			expect(result.files[0]?.language).toBe('javascript');
 		});
 
 		test('case sensitivity in language filter', async () => {
@@ -305,13 +305,13 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			const input: SyntaxCheckInput = {
 				changed_files: [{ path: jsFile, additions: 1 }],
 				mode: 'changed',
-				languages: ['TYPESCRIPT'], // Should match (case-insensitive)
+				languages: ['JAVASCRIPT'], // Should match (case-insensitive)
 			};
 
 			const result = await syntaxCheck(input, tmpDir);
 
 			expect(result.files).toHaveLength(1);
-			expect(result.files[0]?.language).toBe('typescript');
+			expect(result.files[0]?.language).toBe('javascript');
 		});
 
 		test('handles multiple language filters', async () => {
@@ -329,14 +329,14 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 					{ path: goFile, additions: 1 },
 				],
 				mode: 'changed',
-				languages: ['typescript', 'python'],
+				languages: ['javascript', 'python'],
 			};
 
 			const result = await syntaxCheck(input, tmpDir);
 
 			expect(result.files).toHaveLength(2);
 			const languages = result.files.map((f) => f.language).sort();
-			expect(languages).toEqual(['python', 'typescript']);
+			expect(languages).toEqual(['javascript', 'python']);
 		});
 	});
 
@@ -435,14 +435,14 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			const input: SyntaxCheckInput = {
 				changed_files: [{ path: jsFile, additions: 1 }],
 				mode: 'changed',
-				languages: ['unknown-language', 'typescript', 'another-unknown'],
+				languages: ['unknown-language', 'javascript', 'another-unknown'],
 			};
 
 			const result = await syntaxCheck(input, tmpDir);
 
-			// Should process since typescript is in the list (.js maps to 'typescript' profile)
+			// Should process since javascript is in the list.
 			expect(result.files).toHaveLength(1);
-			expect(result.files[0]?.language).toBe('typescript');
+			expect(result.files[0]?.language).toBe('javascript');
 		});
 
 		test('handles language filter with empty string', async () => {
@@ -452,7 +452,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			const input: SyntaxCheckInput = {
 				changed_files: [{ path: jsFile, additions: 1 }],
 				mode: 'changed',
-				languages: ['typescript', ''],
+				languages: ['javascript', ''],
 			};
 
 			// Should not crash, should handle gracefully

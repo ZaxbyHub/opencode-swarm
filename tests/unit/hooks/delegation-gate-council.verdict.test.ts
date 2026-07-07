@@ -181,7 +181,7 @@ describe('delegation-gate: council verdict enforcement', () => {
 		expect(threw).toBe(true);
 	});
 
-	it('should allow council member delegation when other council member is in tests_run', async () => {
+	it('should block council member delegation when another task awaits completion', async () => {
 		const hook = createDelegationGateHook(
 			makeConfig({ enabled: true }),
 			tempDir,
@@ -199,6 +199,6 @@ describe('delegation-gate: council verdict enforcement', () => {
 			threw = true;
 		}
 
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });

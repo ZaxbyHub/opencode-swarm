@@ -5,7 +5,7 @@
  * Executes a small, fail-closed predicate DSL attached to a knowledge directive
  * (`verification_predicate`). Handlers:
  *
- *   grep:<regex>:<path-glob>   PASS when ripgrep finds zero matches in the glob.
+ *   grep:<regex>:<path-glob>   PASS when a bounded in-process scan finds zero matches in the glob.
  *                              (A "forbidden pattern" predicate: absence = pass.)
  *   tool:<argv>                PASS when the command exits 0. Shell-free (argv
  *                              array), binary must be on a conservative allowlist.
@@ -29,8 +29,9 @@
  * NOT on the allowlist for this reason.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
+import picomatch from 'picomatch';
 import { bunSpawn } from '../utils/bun-compat.js';
 import { warn } from '../utils/logger.js';
 
@@ -43,6 +44,20 @@ export interface PredicateOutcome {
 
 /** Hard wall-clock cap for any single predicate execution. */
 export const PREDICATE_TIMEOUT_MS = 15_000;
+const GREP_MAX_FILES = 10_000;
+const GREP_MAX_BYTES_PER_FILE = 1_000_000;
+const GREP_SKIP_DIRECTORIES = new Set([
+	'.git',
+	'.swarm',
+	'node_modules',
+	'dist',
+	'coverage',
+]);
+type GrepDirent = {
+	name: string;
+	isDirectory(): boolean;
+	isFile(): boolean;
+};
 
 /**
  * Conservative allowlist of `tool:` binaries. Read-only verification/lint tools
@@ -193,39 +208,60 @@ async function runGrepPredicate(
 			detail: `grep: unsafe or empty path-glob "${rawGlob}"`,
 		};
 	}
-	const rg = findBinaryInPath('rg');
-	if (!rg) return { result: 'error', detail: 'grep: ripgrep (rg) not found' };
-	// `--` terminates option parsing so a regex starting with `-` is not a flag.
-	const argv = [
-		rg,
-		'--count-matches',
-		'--no-messages',
-		'--glob',
-		glob,
-		'--',
-		regex,
-		'.',
-	];
-	const res = await runArgv(argv, directory);
-	if (res.timedOut) {
-		return { result: 'error', detail: 'grep: timed out' };
+	let pattern: RegExp;
+	try {
+		pattern = new RegExp(regex, 'm');
+	} catch (err) {
+		return {
+			result: 'error',
+			detail: `grep: invalid regex ${err instanceof Error ? err.message : String(err)}`,
+		};
 	}
-	// ripgrep exit: 0 = matches found, 1 = no matches, 2 = error.
-	if (res.exitCode === 1) {
-		return { result: 'pass', detail: 'grep: zero matches' };
-	}
-	if (res.exitCode === 0) {
-		const count = res.stdout
-			.split('\n')
-			.map((l) => Number.parseInt(l.split(':').pop() ?? '0', 10))
-			.filter((n) => !Number.isNaN(n))
-			.reduce((a, b) => a + b, 0);
-		return { result: 'fail', detail: `grep: ${count} match(es) found` };
-	}
-	return {
-		result: 'error',
-		detail: `grep: ripgrep error (exit ${res.exitCode}) ${res.stderr.slice(0, 200)}`,
+
+	const matcher = picomatch(glob, { dot: true });
+	let visited = 0;
+	let matches = 0;
+
+	const walk = (dir: string): void => {
+		if (visited >= GREP_MAX_FILES) return;
+		let entries: GrepDirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (visited >= GREP_MAX_FILES) return;
+			const fullPath = path.join(dir, entry.name);
+			const relPath = path.relative(directory, fullPath).replace(/\\/g, '/');
+			if (entry.isDirectory()) {
+				if (!GREP_SKIP_DIRECTORIES.has(entry.name)) walk(fullPath);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			visited++;
+			if (!matcher(relPath)) continue;
+			try {
+				const st = statSync(fullPath);
+				if (st.size > GREP_MAX_BYTES_PER_FILE) continue;
+				const content = readFileSync(fullPath, 'utf-8');
+				const found = content.match(pattern);
+				if (found) matches += found.length;
+			} catch {
+				// Unreadable or non-UTF8 files do not make the predicate pass.
+			}
+		}
 	};
+
+	walk(directory);
+	if (visited >= GREP_MAX_FILES) {
+		return {
+			result: 'error',
+			detail: `grep: file scan exceeded ${GREP_MAX_FILES} files`,
+		};
+	}
+	if (matches === 0) return { result: 'pass', detail: 'grep: zero matches' };
+	return { result: 'fail', detail: `grep: ${matches} match(es) found` };
 }
 
 async function runToolPredicate(

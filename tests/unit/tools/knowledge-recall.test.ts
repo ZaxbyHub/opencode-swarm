@@ -21,7 +21,7 @@ import {
 	it,
 	mock,
 } from 'bun:test';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -34,12 +34,24 @@ import { knowledge_recall } from '../../../src/tools/knowledge-recall';
 describe('knowledge_recall tool verification tests (FR-A1)', () => {
 	let tmpDir: string;
 	let originalCwd: string;
+	let originalHome: string | undefined;
+	let originalLocalAppData: string | undefined;
+	let originalXdgDataHome: string | undefined;
+	let originalXdgConfigHome: string | undefined;
 
 	beforeEach(async () => {
 		// Create a temporary directory for each test
 		tmpDir = await fs.realpath(
 			await fs.mkdtemp(path.join(os.tmpdir(), 'knowledge-recall-test-')),
 		);
+		originalHome = process.env.HOME;
+		originalLocalAppData = process.env.LOCALAPPDATA;
+		originalXdgDataHome = process.env.XDG_DATA_HOME;
+		originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+		process.env.HOME = tmpDir;
+		process.env.LOCALAPPDATA = tmpDir;
+		process.env.XDG_DATA_HOME = path.join(tmpDir, '.local', 'share');
+		process.env.XDG_CONFIG_HOME = path.join(tmpDir, '.config');
 		// Ensure .swarm/ directory exists
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		// Save original cwd and change to tmpDir for tests
@@ -50,6 +62,10 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 	afterEach(async () => {
 		// Restore original cwd
 		process.chdir(originalCwd);
+		restoreEnv('HOME', originalHome);
+		restoreEnv('LOCALAPPDATA', originalLocalAppData);
+		restoreEnv('XDG_DATA_HOME', originalXdgDataHome);
+		restoreEnv('XDG_CONFIG_HOME', originalXdgConfigHome);
 		// Clean up the temporary directory
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
@@ -59,6 +75,39 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 		// Restore cross-module mocks to prevent contamination
 		mock.restore();
 	});
+
+	function restoreEnv(name: string, value: string | undefined): void {
+		if (value === undefined) {
+			delete process.env[name];
+		} else {
+			process.env[name] = value;
+		}
+	}
+
+	function hiveKnowledgePath(): string {
+		if (process.platform === 'win32') {
+			return path.join(
+				process.env.LOCALAPPDATA ?? tmpDir,
+				'opencode-swarm',
+				'Data',
+				'shared-learnings.jsonl',
+			);
+		}
+		if (process.platform === 'darwin') {
+			return path.join(
+				process.env.HOME ?? tmpDir,
+				'Library',
+				'Application Support',
+				'opencode-swarm',
+				'shared-learnings.jsonl',
+			);
+		}
+		return path.join(
+			process.env.XDG_DATA_HOME ?? path.join(tmpDir, '.local', 'share'),
+			'opencode-swarm',
+			'shared-learnings.jsonl',
+		);
+	}
 
 	// Mock resolveHiveKnowledgePath to return a path inside tmpDir so hive knowledge
 	// doesn't leak from the real global hive file across test runs.
@@ -130,7 +179,8 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 
 	// Helper to write hive knowledge file
 	function writeHiveKnowledge(entries: HiveKnowledgeEntry[]): void {
-		const hivePath = path.join(tmpDir, '.swarm', 'shared-learnings.jsonl');
+		const hivePath = hiveKnowledgePath();
+		mkdirSync(path.dirname(hivePath), { recursive: true });
 		writeFileSync(
 			hivePath,
 			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',

@@ -777,12 +777,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		sessionID: string,
 		tool: string,
 		args: unknown,
+		commandOverride?: string,
 	): void {
 		if (tool !== 'bash' && tool !== 'shell') return;
 
 		const toolArgs = args as Record<string, unknown> | undefined;
 		const command =
-			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
+			typeof commandOverride === 'string'
+				? commandOverride.trim()
+				: typeof toolArgs?.command === 'string'
+					? toolArgs.command.trim()
+					: '';
 
 		if (!command) return;
 
@@ -1806,24 +1811,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Block full test suite execution without file argument
 		handleTestSuiteBlocking(input.tool, output.args);
 
-		// Apply sandbox wrapping / advisories for shell tools before other checks
-		const agentNameForSandbox = (() => {
-			const rawAgent = swarmState.activeAgent.get(input.sessionID);
-			return rawAgent ? stripKnownSwarmPrefix(rawAgent) : 'unknown';
-		})();
 		const rawShellCommand = (() => {
 			const bashArgs = output.args as Record<string, unknown> | undefined;
 			return typeof bashArgs?.command === 'string' ? bashArgs.command : '';
 		})();
-		await applySandboxExecution(
-			input.sessionID,
-			input.tool,
-			output.args,
-			agentNameForSandbox,
-			rawShellCommand,
-			shellAuditPath,
-			shellAuditEnabled,
-		);
 
 		// Shell audit log
 		const normalizedAuditTool = normalizeToolName(input.tool).toLowerCase();
@@ -1929,7 +1920,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// Shell write scope enforcement
 		try {
-			checkShellWriteScope(input.sessionID, input.tool, output.args);
+			checkShellWriteScope(
+				input.sessionID,
+				input.tool,
+				output.args,
+				rawShellCommand,
+			);
 		} catch (err) {
 			const toolArgs = output.args as Record<string, unknown> | undefined;
 			const declaredScope = resolveDeclaredScope(input.sessionID);
@@ -2007,6 +2003,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			throw err;
 		}
 
+		// Apply sandbox wrapping / advisories for shell tools after guardrail
+		// checks have inspected the original command text.
+		const agentNameForSandbox = (() => {
+			const rawAgent = swarmState.activeAgent.get(input.sessionID);
+			return rawAgent ? stripKnownSwarmPrefix(rawAgent) : 'unknown';
+		})();
+		await applySandboxExecution(
+			input.sessionID,
+			input.tool,
+			output.args,
+			agentNameForSandbox,
+			rawShellCommand,
+			shellAuditPath,
+			shellAuditEnabled,
+		);
+
 		// Issue #853 Layer B: structural spec-drift block
 		enforceSpecDriftGate(effectiveDirectory, input.tool);
 
@@ -2024,8 +2036,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				toolArgs?.file ??
 				toolArgs?.target;
 			if (typeof targetPath === 'string' && targetPath.length > 0) {
-				const agentName =
-					swarmState.activeAgent.get(input.sessionID) ?? 'unknown';
+				const agentName = swarmState.activeAgent.get(input.sessionID);
+				if (!agentName) {
+					throw new Error(
+						`WRITE BLOCKED: No active agent registered for session "${input.sessionID}". Call startAgentSession before issuing write tool calls.`,
+					);
+				}
 				// lstat: block writes through symlinks
 				const lstatBlock = checkWriteTargetForSymlink(
 					targetPath,
@@ -2054,12 +2070,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						},
 					);
 					throw new Error(lstatBlock);
-				}
-
-				if (!agentName) {
-					throw new Error(
-						`WRITE BLOCKED: No active agent registered for session "${input.sessionID}". Call startAgentSession before issuing write tool calls.`,
-					);
 				}
 
 				// Universal deny prefixes

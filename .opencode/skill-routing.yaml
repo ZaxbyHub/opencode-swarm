@@ -27,7 +27,7 @@ routing:
       keywords: ["code", "implementation", "tracer", "issue"]
     - path: .claude/skills/qa-sweep/SKILL.md
       keywords: ["code", "qa", "quality"]
-    - path: .claude/skills/swarm-implement/SKILL.md
+    - path: .opencode/skills/swarm-implement/SKILL.md
       keywords: ["code", "implementation", "swarm"]
     - path: .claude/skills/research-first/SKILL.md
       keywords: ["research", "investigate", "domain"]

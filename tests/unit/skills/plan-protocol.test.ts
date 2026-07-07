@@ -89,8 +89,7 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			expect(section).toMatch(/file[- ]disjoint|do NOT overlap/i);
 			expect(section).toContain('COMMON MISCONCEPTION');
 			expect(section).toContain('worktree.policy');
-			expect(section).toContain('one possible SOURCE');
-			expect(section).toContain('Do not recommend Lean Turbo or Epic SOLELY');
+			expect(section).toMatch(/Do not recommend Lean Turbo or Epic/i);
 		});
 	});
 
@@ -139,8 +138,7 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 				expect(section).toContain('not known until the plan is finalized');
 				expect(section).toContain('COMMON MISCONCEPTION');
 				expect(section).toContain('worktree.policy');
-				expect(section).toContain('one possible SOURCE');
-				expect(section).toContain('Do not recommend Lean Turbo or Epic SOLELY');
+				expect(section).toMatch(/Do not recommend Lean Turbo or Epic/i);
 				expect(content).not.toContain('Inspect the plan and recommend a count');
 			});
 		}

@@ -245,13 +245,13 @@ describe('isWriteToEvidenceFile - edge cases', () => {
 		expect(isWriteToEvidenceFile(input)).toBe(true);
 	});
 
-	test('file field is evidence file, path field is not - should match via file', () => {
+	test('path field takes precedence when both path and file are present', () => {
 		const input = {
 			toolName: 'write',
 			path: '.swarm/plan.md',
 			file: '.swarm/evidence/retro-3/evidence.json',
 		};
-		expect(isWriteToEvidenceFile(input)).toBe(true);
+		expect(isWriteToEvidenceFile(input)).toBe(false);
 	});
 
 	test('retro identifier with special characters: retro-3_2', () => {

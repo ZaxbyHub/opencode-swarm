@@ -9,6 +9,7 @@ import {
 	type MemoryRecord,
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
+import { evictAndClose } from '../../../src/memory/provider-pool';
 
 let tmpDir: string;
 
@@ -19,6 +20,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	evictAndClose(tmpDir);
 	await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -429,10 +431,11 @@ describe('MemoryGateway', () => {
 
 		expect(bundle.items).toHaveLength(0);
 		expect(bundle.diagnostics).toMatchObject({
-			injectionSkipReason: 'no_signal',
+			injectionSkipReason: 'no_results',
 			candidateCount: 2,
 			preScoredFilteredCount: 1,
 			noSignalCount: 1,
+			belowThresholdCount: 0,
 		});
 	});
 

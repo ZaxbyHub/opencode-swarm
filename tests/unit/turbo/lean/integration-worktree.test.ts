@@ -615,9 +615,17 @@ describe('AC-4: merge-back success after successful lane', () => {
 		LeanTurboRunner._internals.releaseLaneLocks = mock(() =>
 			Promise.resolve(1),
 		);
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
+		// Success path now goes through attemptMergeBackFromDirty (commit dirty
+		// lane work + clean untracked, then merge) rather than a bare
+		// mergeLaneBranch. See runner.ts _sequentialWorktreeCleanup.
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() => {
 			callOrder.push('merge');
-			return Promise.resolve({ merged: true, strategy: 'merge' });
+			return Promise.resolve({
+				merged: true,
+				strategy: 'merge',
+				autoCommitted: true,
+				cleaned: true,
+			});
 		});
 		LeanTurboRunner._internals.postMergeCleanup = mock(() => {
 			callOrder.push('cleanup');
@@ -649,10 +657,19 @@ describe('AC-4: merge-back success after successful lane', () => {
 		setupWorktreeMocks();
 
 		const mergeArgs: unknown[] = [];
-		LeanTurboRunner._internals.mergeLaneBranch = mock(
-			(...args: Parameters<typeof savedRunnerInternals.mergeLaneBranch>) => {
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
+			(
+				...args: Parameters<
+					typeof savedRunnerInternals.attemptMergeBackFromDirty
+				>
+			) => {
 				mergeArgs.push(args);
-				return Promise.resolve({ merged: true, strategy: 'merge' });
+				return Promise.resolve({
+					merged: true,
+					strategy: 'merge',
+					autoCommitted: true,
+					cleaned: true,
+				});
 			},
 		);
 
@@ -661,10 +678,11 @@ describe('AC-4: merge-back success after successful lane', () => {
 		restoreAllSeams();
 
 		expect(mergeArgs.length).toBeGreaterThan(0);
-		// First arg = primary directory
-		expect(mergeArgs[0][0]).toBe(tmpDir);
+		// attemptMergeBackFromDirty signature: (worktreePath, branchName, directory, strategy)
 		// Second arg = branch name
 		expect(mergeArgs[0][1]).toBe(branchName);
+		// Third arg = primary directory
+		expect(mergeArgs[0][2]).toBe(tmpDir);
 	});
 
 	test('session.create receives worktree path, not primary directory', async () => {
@@ -812,9 +830,6 @@ describe('AC-5: failed lane isolation', () => {
 		// Override mockSessionOps for this test
 		injectMockSessionOps(runner, selectiveFailingOps);
 
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
-			Promise.resolve({ merged: true, strategy: 'merge' }),
-		);
 		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
 			Promise.resolve({ cleaned: true }),
 		);
@@ -834,7 +849,10 @@ describe('AC-5: failed lane isolation', () => {
 
 		restoreAllSeams();
 
-		expect(result.ok).toBe(true);
+		// A failed lane now records a merge-back failure, so the phase is not ok
+		// overall — but the isolation property (the healthy lane still completes)
+		// is what this test verifies.
+		expect(result.ok).toBe(false);
 		expect(result.lanes.length).toBe(2);
 
 		const completedLanes = result.lanes.filter(
@@ -880,29 +898,36 @@ describe('AC-6: conflict handling — merge conflicts', () => {
 			}),
 		);
 
-		// Merge returns a conflict
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+		// Dirty merge-back reports a conflict (partial result with conflictFiles).
+		let removeCalled = false;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() =>
 			Promise.resolve({
-				conflict: true,
-				files: ['src/a.ts'],
+				partial: true,
+				conflictFiles: ['src/a.ts'],
 				message: 'CONFLICT (content) Merge conflict in src/a.ts',
 			}),
 		);
-		LeanTurboRunner._internals.removeWorktree = mock(() =>
-			Promise.resolve({ success: true }),
-		);
+		LeanTurboRunner._internals.removeWorktree = mock(() => {
+			removeCalled = true;
+			return Promise.resolve({ success: true });
+		});
 
-		// runPhase should still complete without throwing
+		// runPhase should complete without throwing, but the conflicted lane
+		// is now marked failed and its worktree preserved for manual recovery.
 		const result = await runner.runPhase(1);
 
 		restoreAllSeams();
 
-		expect(result.ok).toBe(true);
-		// Lane should still complete — dispatch succeeded even if merge had conflict
-		const completedLanes = result.lanes.filter(
-			(l: LaneResult) => l.status === 'completed',
+		expect(result.ok).toBe(false);
+		// The lane fails on merge-back conflict and its worktree is preserved.
+		const failedLanes = result.lanes.filter(
+			(l: LaneResult) => l.status === 'failed',
 		);
-		expect(completedLanes.length).toBeGreaterThan(0);
+		expect(failedLanes.length).toBeGreaterThan(0);
+		expect(result.mergeBackFailures).toHaveLength(1);
+		expect(result.mergeBackFailures?.[0].status).toBe('conflict');
+		// Worktree preserved for manual recovery — not removed.
+		expect(removeCalled).toBe(false);
 	});
 
 	test('getMergeStrategy returns config merge_strategy or defaults to merge', () => {
@@ -1736,9 +1761,14 @@ describe('end-to-end: full lane lifecycle with worktree isolation', () => {
 			return Promise.resolve(1);
 		});
 
-		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
-			pipelineOrder.push('mergeLaneBranch');
-			return Promise.resolve({ merged: true, strategy: 'merge' });
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() => {
+			pipelineOrder.push('mergeBack');
+			return Promise.resolve({
+				merged: true,
+				strategy: 'merge',
+				autoCommitted: true,
+				cleaned: true,
+			});
 		});
 
 		LeanTurboRunner._internals.postMergeCleanup = mock(() => {
@@ -1762,7 +1792,7 @@ describe('end-to-end: full lane lifecycle with worktree isolation', () => {
 		expect(pipelineOrder).toContain('acquireLocks');
 		expect(pipelineOrder).toContain('provisionWorktree');
 		expect(pipelineOrder).toContain('releaseLocks');
-		expect(pipelineOrder).toContain('mergeLaneBranch');
+		expect(pipelineOrder).toContain('mergeBack');
 		expect(pipelineOrder).toContain('postMergeCleanup');
 		expect(pipelineOrder).toContain('removeWorktree');
 
@@ -1770,9 +1800,9 @@ describe('end-to-end: full lane lifecycle with worktree isolation', () => {
 		expect(pipelineOrder.indexOf('acquireLocks')).toBeLessThan(
 			pipelineOrder.indexOf('provisionWorktree'),
 		);
-		// Merge should come after locks are released
+		// Merge-back should come after locks are released
 		expect(pipelineOrder.indexOf('releaseLocks')).toBeLessThan(
-			pipelineOrder.indexOf('mergeLaneBranch'),
+			pipelineOrder.indexOf('mergeBack'),
 		);
 		// Remove should come before cleanup
 		expect(pipelineOrder.indexOf('removeWorktree')).toBeLessThan(
@@ -1782,11 +1812,11 @@ describe('end-to-end: full lane lifecycle with worktree isolation', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// End-to-end: Failed lane with dirty merge-back pipeline
+// End-to-end: Failed lane preserves worktree without merge-back
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('end-to-end: failed lane dirty merge-back pipeline', () => {
-	test('failed lane calls attemptMergeBackFromDirty then removeWorktree', async () => {
+describe('end-to-end: failed lane preserves worktree without merge-back', () => {
+	test('failed dispatch lane records a merge-back failure and preserves its worktree', async () => {
 		writeMinimalPlan(1);
 		writeScopeFiles({ '1.1': ['src/a.ts'] });
 
@@ -1833,17 +1863,18 @@ describe('end-to-end: failed lane dirty merge-back pipeline', () => {
 
 		restoreAllSeams();
 
-		expect(result.ok).toBe(true);
+		// A dispatch-failed lane is no longer dirty-merged: its worktree is
+		// preserved untouched for manual inspection and the phase is not ok.
+		expect(result.ok).toBe(false);
 		const failedLanes = result.lanes.filter(
 			(l: LaneResult) => l.status === 'failed',
 		);
 		expect(failedLanes.length).toBeGreaterThan(0);
+		expect(result.mergeBackFailures).toHaveLength(1);
 
-		// Failed lane should trigger dirty merge-back then remove
-		expect(pipelineOrder).toContain('attemptMergeBackFromDirty');
-		expect(pipelineOrder).toContain('removeWorktree');
-		expect(pipelineOrder.indexOf('attemptMergeBackFromDirty')).toBeLessThan(
-			pipelineOrder.indexOf('removeWorktree'),
-		);
+		// Failed lanes must NOT auto-commit/merge partial work, and their
+		// worktree must NOT be removed.
+		expect(pipelineOrder).not.toContain('attemptMergeBackFromDirty');
+		expect(pipelineOrder).not.toContain('removeWorktree');
 	});
 });

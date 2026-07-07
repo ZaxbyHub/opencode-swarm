@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 
 describe('cross-platform path normalization', () => {
 	// Test A: Path normalization — forward slash test paths match directory pattern
@@ -75,9 +75,24 @@ describe('cross-platform path normalization', () => {
 });
 
 describe('isCommandAvailable', () => {
-	test('returns true for node command (always available)', () => {
-		const { isCommandAvailable } = require('../../../src/build/discovery');
-		const result = isCommandAvailable('node');
+	afterEach(() => {
+		const { _internals } = require('../../../src/build/discovery');
+		_internals.clearToolchainCache();
+	});
+
+	test('returns true when the command probe succeeds', () => {
+		const {
+			_internals,
+			isCommandAvailable,
+		} = require('../../../src/build/discovery');
+		const originalSpawnSyncImpl = _internals.spawnSyncImpl;
+		let result = false;
+		try {
+			_internals.spawnSyncImpl = () => ({ success: true });
+			result = isCommandAvailable('known-tool');
+		} finally {
+			_internals.spawnSyncImpl = originalSpawnSyncImpl;
+		}
 		expect(typeof result).toBe('boolean');
 		expect(result).toBe(true);
 	});

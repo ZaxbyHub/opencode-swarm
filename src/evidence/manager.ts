@@ -6,6 +6,7 @@ import {
 	statSync,
 } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { ZodError } from 'zod';
 import {
@@ -135,6 +136,41 @@ export const PROJECT_INDICATORS = [
 	'CMakeLists.txt',
 ] as const;
 
+function isWeakConfigContainerRoot(directory: string): boolean {
+	try {
+		const resolved = realpathSync(directory);
+		return (
+			resolved === realpathSync(os.tmpdir()) ||
+			resolved === realpathSync(os.homedir())
+		);
+	} catch {
+		const resolved = path.resolve(directory);
+		return (
+			resolved === path.resolve(os.tmpdir()) ||
+			resolved === path.resolve(os.homedir())
+		);
+	}
+}
+
+function hasAccessibleProjectIndicator(
+	directory: string,
+	options: { allowConfigOnly?: boolean } = {},
+): boolean {
+	const allowConfigOnly = options.allowConfigOnly ?? true;
+	for (const indicator of PROJECT_INDICATORS) {
+		if (!allowConfigOnly && indicator === '.opencode') {
+			continue;
+		}
+		try {
+			const indicatorStat = statSync(path.join(directory, indicator));
+			if (indicatorStat.isFile() || indicatorStat.isDirectory()) {
+				return true;
+			}
+		} catch {}
+	}
+	return false;
+}
+
 /**
  * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
  * of a project that already has a .swarm/ at its root.
@@ -162,33 +198,18 @@ export function validateProjectRoot(directory: string): void {
 		depth++;
 		const parent = path.dirname(current);
 		if (parent === current) break; // reached filesystem root
+		if (path.dirname(parent) === parent) {
+			current = parent;
+			continue;
+		}
 		const parentSwarm = path.join(parent, '.swarm');
 		try {
 			if (statSync(parentSwarm).isDirectory()) {
-				// Check for at least one project indicator to confirm this is a real project
-				let hasProjectIndicator = false;
-				for (const indicator of PROJECT_INDICATORS) {
-					try {
-						const indicatorStat = statSync(path.join(parent, indicator));
-						if (indicatorStat.isFile() || indicatorStat.isDirectory()) {
-							hasProjectIndicator = true;
-							break;
-						}
-					} catch (error) {
-						if (
-							error instanceof Error &&
-							'code' in error &&
-							(error as NodeJS.ErrnoException).code === 'ENOENT'
-						) {
-							// indicator doesn't exist — continue checking next one
-						} else {
-							// Non-ENOENT error (EPERM, EBUSY, etc.) — can't verify, assume indicator present (fail-closed)
-							hasProjectIndicator = true;
-							break;
-						}
-					}
-				}
-				if (hasProjectIndicator) {
+				if (
+					hasAccessibleProjectIndicator(parent, {
+						allowConfigOnly: !isWeakConfigContainerRoot(parent),
+					})
+				) {
 					warn(
 						`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
 					);

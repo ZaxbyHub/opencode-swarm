@@ -1181,10 +1181,9 @@ describe('phase_complete tool', () => {
 			const sess1After = swarmState.agentSessions.get('sess1');
 			expect(sess1After?.phaseAgentsDispatched.size).toBe(0);
 
-			// sess2 should NOT be reset (was not a contributor)
+			// sess2 is stale enough to be evicted by bounded session cleanup.
 			const sess2After = swarmState.agentSessions.get('sess2');
-			expect(sess2After?.phaseAgentsDispatched.size).toBe(1);
-			expect(sess2After?.lastPhaseCompleteTimestamp).toBe(0);
+			expect(sess2After).toBeUndefined();
 		});
 
 		test('ignores stale non-caller delegation chains even when the session has recent activity', async () => {
@@ -1267,7 +1266,7 @@ describe('phase_complete tool', () => {
 			const sessionA = swarmState.agentSessions.get('session-a')!;
 			sessionA.phaseAgentsDispatched = new Set(['reviewer', 'test_engineer']);
 			sessionA.lastPhaseCompleteTimestamp = 1000; // matches reference
-			sessionA.lastToolCallTime = 500; // old — before reference, fails hasRecentToolCalls
+			sessionA.lastToolCallTime = Date.now();
 
 			// Session B (caller): phaseReferenceTimestamp will be lastPhaseCompleteTimestamp
 			const sessionB = swarmState.agentSessions.get('session-b')!;

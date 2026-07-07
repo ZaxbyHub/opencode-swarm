@@ -178,6 +178,105 @@ const CAS_BACKOFF_CAP_MS = 250;
 const CAS_BACKOFF_JITTER = 0.25;
 const CAS_MAX_RETRIES = 3; // matches pre-existing maxRetries: 3 call sites
 
+function derivePhaseStatusesInPlace(plan: Plan): void {
+	for (const phase of plan.phases) {
+		const tasks = phase.tasks;
+		if (tasks.length > 0 && tasks.every((t) => t.status === 'completed')) {
+			phase.status = 'complete';
+		} else if (tasks.some((t) => t.status === 'in_progress')) {
+			phase.status = 'in_progress';
+		} else if (tasks.some((t) => t.status === 'blocked')) {
+			phase.status = 'blocked';
+		} else {
+			phase.status = 'pending';
+		}
+	}
+}
+
+// Status precedence for the projection merge (issue #1729 production bug #1).
+// Higher = more terminal. Used to decide whether a ledger-derived status
+// recovered by `replayFromLedger` should override the disk-truth status that
+// `validated` already carries (preserved via `preserveCompletedStatuses` in
+// savePlan, or `existingStatusMap` in the save_plan tool wrapper).
+//
+// Why a directional rank rather than "replay always wins": the previous code
+// unconditionally trusted the replayed ledger state and wrote IT to plan.json
+// (manager.ts ~L1513), which dropped a `completed` status that had been
+// written to plan.json WITHOUT a corresponding `task_status_changed` ledger
+// event — reverting completed work to a stale `in_progress`/`pending`. The
+// directional merge preserves BOTH directions:
+//   - Scenario A (concurrent writer's newer completion, recorded only in the
+//     ledger because plan.json update is the LAST step of savePlan): replayed
+//     `completed` outranks validated `pending` → take `completed`.
+//   - Scenario B (disk-truth completion the ledger doesn't know about):
+//     validated `completed` already outranks replayed `in_progress` → keep
+//     `completed` (do NOT override).
+// Verified by `manager-ledger-projection-regression.test.ts` (Scenario A)
+// and `save-plan-round-trip.test.ts` / `plan-status-preservation.test.ts`
+// (Scenario B).
+function statusRank(s: TaskStatus): number {
+	switch (s) {
+		case 'closed':
+			return 5;
+		case 'completed':
+			return 4;
+		case 'blocked':
+			return 3;
+		case 'in_progress':
+			return 2;
+		case 'pending':
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+function mergeStatusesTakingPrecedence(
+	validated: Plan,
+	replayed: Plan,
+	ledgerStatusTaskIds: ReadonlySet<string>,
+): Plan {
+	const projected = structuredClone(validated);
+	const replayedByTaskId = new Map<string, TaskStatus>();
+	for (const phase of replayed.phases) {
+		for (const task of phase.tasks) {
+			if (ledgerStatusTaskIds.has(task.id)) {
+				replayedByTaskId.set(task.id, task.status);
+			}
+		}
+	}
+	for (const phase of projected.phases) {
+		for (const task of phase.tasks) {
+			const replayedStatus = replayedByTaskId.get(task.id);
+			// ONLY override when the replayed status is strictly more terminal
+			// than the validated/disk-truth status. This is the key correctness
+			// fix: it preserves a disk-truth completion (Scenario B) while still
+			// recovering a concurrent writer's newer completion (Scenario A).
+			if (
+				replayedStatus &&
+				statusRank(replayedStatus) > statusRank(task.status)
+			) {
+				task.status = replayedStatus;
+			}
+		}
+	}
+	derivePhaseStatusesInPlace(projected);
+	return projected;
+}
+
+function collectLedgerStatusTaskIds(events: LedgerEvent[]): Set<string> {
+	const statusTaskIds = new Set<string>();
+	for (const event of events) {
+		if (
+			event.event_type === 'task_status_changed' &&
+			typeof event.task_id === 'string'
+		) {
+			statusTaskIds.add(event.task_id);
+		}
+	}
+	return statusTaskIds;
+}
+
 /**
  * Append a ledger event with exponential-backoff retry on stale-writer conflicts.
  *
@@ -1079,18 +1178,7 @@ export async function savePlan(
 
 	// Derive phase status from task statuses on every save (fixes remaining Issue #145):
 	// Ensures phase status is always consistent even when architect calls save_plan directly.
-	for (const phase of validated.phases) {
-		const tasks = phase.tasks;
-		if (tasks.length > 0 && tasks.every((t) => t.status === 'completed')) {
-			phase.status = 'complete';
-		} else if (tasks.some((t) => t.status === 'in_progress')) {
-			phase.status = 'in_progress';
-		} else if (tasks.some((t) => t.status === 'blocked')) {
-			phase.status = 'blocked';
-		} else {
-			phase.status = 'pending';
-		}
-	}
+	derivePhaseStatusesInPlace(validated);
 
 	// LEDGER-FIRST: Append task_updated events before writing projections.
 	// The ledger is the source of truth; plan.json is a projection.
@@ -1442,11 +1530,47 @@ export async function savePlan(
 		}
 	}
 
-	// After the ledger event loop, replay the authoritative ledger before writing
-	// derived projections. Concurrent writers may have appended valid events since
-	// the caller built `validated`; plan.json and plan.md must reflect the ledger,
-	// not a stale caller snapshot.
-	const projectedPlan = (await replayFromLedger(directory)) ?? validated;
+	const ledgerStatusTaskIds = collectLedgerStatusTaskIds(
+		await readLedgerEvents(directory),
+	);
+	const replayedBeforeProjection = await replayFromLedger(directory);
+	const projectionCandidate = replayedBeforeProjection
+		? mergeStatusesTakingPrecedence(
+				validated,
+				replayedBeforeProjection,
+				ledgerStatusTaskIds,
+			)
+		: validated;
+	if (
+		replayedBeforeProjection &&
+		computePlanHash(replayedBeforeProjection) !==
+			computePlanHash(projectionCandidate)
+	) {
+		await takeSnapshotEvent(directory, projectionCandidate, {
+			planHashAfter: computePlanHash(projectionCandidate),
+			source: 'savePlan_structural_projection',
+		});
+	}
+
+	// Write the merged projection. The previous code re-replayed the ledger
+	// here and wrote the replayed state to plan.json, which discarded the
+	// disk-truth completions preserved in `validated` (issue #1729 production
+	// bug #1): when a task's `completed` status had been written to plan.json
+	// WITHOUT a corresponding `task_status_changed` ledger event, the replay
+	// "didn't know" about the completion and reverted it to a stale
+	// `in_progress`/`pending`. The merged `projectionCandidate` already
+	// incorporates the authoritative ledger state via
+	// mergeStatusesTakingPrecedence (which only upgrades validated toward a
+	// more-terminal replayed status), so a second replay would only re-introduce
+	// the bug.
+	//
+	// Ordering dependency: this block runs AFTER the diff-append loop above
+	// (~L1438-1475), which appends `task_status_changed` events for the
+	// caller's own status changes BEFORE the replay. That is why a
+	// `reset_statuses: true` save correctly yields all-pending here: the diff
+	// loop records the reset transitions first, replay returns pending, the
+	// merge keeps pending. Do NOT move this block above the diff loop.
+	const projectedPlan = projectionCandidate;
 
 	// After the ledger event loop, check if we should take a snapshot
 	const SNAPSHOT_INTERVAL = 50;

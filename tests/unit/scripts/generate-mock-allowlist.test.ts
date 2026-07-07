@@ -38,14 +38,14 @@ function runGenerateAllowlist(checkMode = false): {
 	return {
 		stdout: result.stdout || '',
 		stderr: result.stderr || '',
-		exitCode: result.status || 1,
+		exitCode: result.status ?? 1,
 	};
 }
 
 describe('generate-mock-allowlist.sh', () => {
 	afterEach(() => {
 		// Restore the original allowlist after each test
-		spawnSync('git', ['checkout', ALLOWLIST_PATH], {
+		spawnSync('git', ['checkout', '--', 'scripts/mock-allowlist.txt'], {
 			cwd: REPO_ROOT,
 			stdio: 'pipe',
 		});
@@ -55,14 +55,16 @@ describe('generate-mock-allowlist.sh', () => {
 		if (isWindows) return;
 		// On the live repo the allowlist is already current
 		const result = runGenerateAllowlist(true);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 		expect(result.stderr).toContain('up-to-date');
 	});
 
 	test('should detect when allowlist is out of sync', () => {
 		if (isWindows) return;
+		// Wrap os.tmpdir() in realpathSync for canonical path on macOS
+		// (/var → /private/var symlink). Issue #1729.
 		const tempAllowlist = path.join(
-			os.tmpdir(),
+			fs.realpathSync(os.tmpdir()),
 			'mock-allowlist-drift-' + Date.now(),
 		);
 		fs.copyFileSync(ALLOWLIST_PATH, tempAllowlist);
@@ -87,9 +89,12 @@ describe('generate-mock-allowlist.sh', () => {
 		const result = runGenerateAllowlist(false);
 		expect(result.stderr).toContain('Scanning test files');
 		expect(result.stderr).toMatch(
-			/Updated scripts\/mock-allowlist\.txt with \d+ entries/,
+			// BSD wc (macOS) right-justifies the count in a field of spaces
+			// ("with      111 entries"); GNU wc does not. Allow flexible
+			// whitespace. Issue #1729.
+			/Updated scripts\/mock-allowlist\.txt with\s+\d+ entries/,
 		);
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
 
 	test('should produce valid allowlist format', () => {

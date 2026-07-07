@@ -38,6 +38,10 @@ import type {
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import {
+	INACTIVE_STATUSES,
+	isActiveStatus,
+} from '../../../src/hooks/knowledge-types.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 
 function makeSwarmEntry(
@@ -475,6 +479,37 @@ describe('knowledge-store', () => {
 			});
 			expect(entry.confirmed_by).toHaveLength(1);
 			expect(entry.phases_alive).toBe(12);
+		});
+	});
+
+	describe('G4 (#1716): canonical inactive-status helper parity', () => {
+		// The retrieval filter points (search-knowledge, knowledge-reader) and
+		// getArchivedKnowledgeIds must agree on what counts as "inactive". This
+		// test pins the canonical helper so future drift breaks the test rather
+		// than silently leaking an inactive status into retrieval.
+		it('INACTIVE_STATUSES contains exactly archived, quarantined, quarantined_unactionable', () => {
+			expect([...INACTIVE_STATUSES].sort()).toEqual([
+				'archived',
+				'quarantined',
+				'quarantined_unactionable',
+			]);
+		});
+
+		it('isActiveStatus returns false for the three inactive statuses and true for active + unknown', () => {
+			// The three known inactive statuses.
+			for (const s of INACTIVE_STATUSES) {
+				expect(isActiveStatus(s)).toBe(false);
+			}
+			// The three retrieval-active statuses.
+			expect(isActiveStatus('candidate')).toBe(true);
+			expect(isActiveStatus('established')).toBe(true);
+			expect(isActiveStatus('promoted')).toBe(true);
+			// #828 passthrough: undefined / null / unknown future statuses default
+			// to active (not silently dropped).
+			expect(isActiveStatus(undefined)).toBe(true);
+			expect(isActiveStatus(null)).toBe(true);
+			expect(isActiveStatus('some-future-status')).toBe(true);
+			expect(isActiveStatus('')).toBe(true);
 		});
 	});
 

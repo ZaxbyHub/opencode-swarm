@@ -134,10 +134,18 @@ describe('COMMAND_REGISTRY["deep-dive"] — handler type is async', () => {
 		const entry = COMMAND_REGISTRY[
 			'deep-dive' as RegisteredCommand
 		] as CommandEntry;
-		// Handler should be async: (ctx: CommandContext) => Promise<string>
+		// Handler should resolve to Promise<string>. Since
+		// fix(commands): bundle mode skills for portable commands (e1e6e0c1),
+		// mode-command handlers (deep-dive, loop, council, clarify, etc.) are
+		// registered as thin arrows that forward to the shared
+		// `handleModeCommandWithBundledSkills` wrapper — which is itself
+		// `async` and returns the Promise — rather than being declared
+		// `async` at the registration site. A literal `.toString()` match on
+		// the keyword "async" is brittle to that wiring and no longer holds;
+		// assert the registration wiring instead. Runtime Promise-returning
+		// behavior is covered by the next test.
 		const handlerStr = entry.handler.toString();
-		// Async functions contain "async" in their string representation
-		expect(handlerStr).toContain('async');
+		expect(handlerStr).toContain('handleModeCommandWithBundledSkills');
 	});
 
 	test('deep-dive handler when called returns a Promise', () => {

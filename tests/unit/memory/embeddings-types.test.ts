@@ -161,16 +161,10 @@ describe('embeddings/types.ts — no heavy runtime imports (Node-ESM-loadable in
 		// Should only have: EmbeddingProvider, EmbeddingVersion, EmbeddingCacheEntry,
 		// EmbeddingUnavailableError, EmbeddingVersionMismatchError
 		// (plus standard Error properties from the Error base class)
-		const runtimeExports = moduleKeys.filter(
-			(k) => typeof (globalThis as any)[k] !== 'undefined' && k !== 'prototype',
-		);
 		// This is a lightweight sanity check — actual dist validation happens via
 		// the bundle-portability test in CI.
-		expect(Object.keys(runtimeExports).sort()).toEqual([
-			'EmbeddingCacheEntry',
-			'EmbeddingProvider',
+		expect(moduleKeys.sort()).toEqual([
 			'EmbeddingUnavailableError',
-			'EmbeddingVersion',
 			'EmbeddingVersionMismatchError',
 		]);
 	});

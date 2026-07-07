@@ -19,7 +19,12 @@ function call(args: Record<string, unknown>): Promise<string> {
 }
 
 beforeEach(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-map-tool-'));
+	// realpathSync resolves the macOS /var → /private/var symlink (and Windows
+	// 8.3 short names) so the canonical workspace root matches what production
+	// code compares against. Issue #1729 macOS quarantine.
+	tmp = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'repo-map-tool-')),
+	);
 	fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
 	fs.writeFileSync(
 		path.join(tmp, 'src/util.ts'),
@@ -652,7 +657,14 @@ describe('repo_map: context_pack', () => {
 			delete node.exportRanges;
 		}
 		// Touch the file to update mtime so loadGraph re-reads it.
+		// Use utimesSync with a clearly-later timestamp rather than relying on
+		// writeFileSync's mtime: on Windows, two writes in the same millisecond
+		// can leave mtime unchanged at filesystem granularity, so loadGraph's
+		// mtime-based cache returns the stale 1.2.0 graph and schemaSupported
+		// wrongly reports true. Issue #1729 Windows quarantine.
 		fs.writeFileSync(graphPath, JSON.stringify(graph), 'utf-8');
+		const later = new Date(Date.now() + 5000);
+		fs.utimesSync(graphPath, later, later);
 
 		const out = await call({
 			action: 'context_pack',

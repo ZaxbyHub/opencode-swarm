@@ -1,167 +1,156 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { MemoryProvider } from '../../../src/memory/provider';
 import {
-	applyRecallRewardForCouncil,
-	resolveRewardRunIds,
-} from '../../../src/memory/reward';
+	computeMemoryContentHash,
+	createMemoryId,
+	type MemoryRecord,
+	SQLiteMemoryProvider,
+} from '../../../src/memory';
+import { DEFAULT_QLEARNING_CONFIG } from '../../../src/memory/config';
+import { applyCouncilReward } from '../../../src/memory/reward-capture';
 
-const roots: string[] = [];
+let root: string;
+
+beforeEach(() => {
+	root = mkdtempSync(path.join(os.tmpdir(), 'memory-reward-'));
+});
 
 afterEach(() => {
-	for (const root of roots.splice(0)) {
-		rmSync(root, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 50,
-		});
-	}
+	rmSync(root, {
+		recursive: true,
+		force: true,
+		maxRetries: 5,
+		retryDelay: 50,
+	});
 });
 
-function tempRoot(): string {
-	const root = mkdtempSync(path.join(os.tmpdir(), 'memory-reward-'));
-	roots.push(root);
-	return root;
+describe('applyCouncilReward', () => {
+	test('returns zero rewarded memories when the run has no recall usage', async () => {
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			const result = await applyCouncilReward(provider, {
+				runId: 'session-without-recalls',
+				unitId: '1.1',
+				reward: 1,
+				eta: DEFAULT_QLEARNING_CONFIG.learningRate,
+				initialQValue: DEFAULT_QLEARNING_CONFIG.initialQValue,
+				qLearning: DEFAULT_QLEARNING_CONFIG,
+				timestamp: new Date().toISOString(),
+				verdictLabel: 'APPROVE',
+			});
+
+			expect(result).toEqual({ memoriesRewarded: 0 });
+		} finally {
+			provider.close();
+		}
+	});
+
+	test('rewards every distinct memory recalled by the matching run and unit', async () => {
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			const record = await provider.upsert(
+				makeRecord('Use the shared reward capture path for council verdicts.'),
+			);
+			await provider.recordRecallUsage?.({
+				bundleId: 'bundle-1',
+				query: 'memory reward',
+				scopes: [{ type: 'repository', repoId: 'repo-a' }],
+				kinds: ['repo_convention'],
+				memoryIds: [record.id],
+				scores: [0.8],
+				tokenEstimate: 12,
+				agentRole: 'architect',
+				runId: 'session-arch',
+				unitId: '1.1',
+				timestamp: new Date().toISOString(),
+			});
+
+			const result = await applyCouncilReward(provider, {
+				runId: 'session-arch',
+				unitId: '1.1',
+				reward: 1,
+				eta: DEFAULT_QLEARNING_CONFIG.learningRate,
+				initialQValue: DEFAULT_QLEARNING_CONFIG.initialQValue,
+				qLearning: DEFAULT_QLEARNING_CONFIG,
+				timestamp: new Date().toISOString(),
+				verdictLabel: 'APPROVE',
+			});
+
+			const updated = await provider.get(record.id);
+			expect(result).toEqual({ memoriesRewarded: 1 });
+			expect(updated?.metadata.qValue).toBeCloseTo(0.55, 5);
+		} finally {
+			provider.close();
+		}
+	});
+
+	test('does not reward a sibling task bundle from the same session', async () => {
+		const provider = new SQLiteMemoryProvider(root, {
+			enabled: true,
+			provider: 'sqlite',
+		});
+		try {
+			const sibling = await provider.upsert(
+				makeRecord('Sibling task memory must not receive this reward.'),
+			);
+			await provider.recordRecallUsage?.({
+				bundleId: 'bundle-sibling',
+				query: 'memory reward',
+				scopes: [{ type: 'repository', repoId: 'repo-a' }],
+				kinds: ['repo_convention'],
+				memoryIds: [sibling.id],
+				scores: [0.8],
+				tokenEstimate: 12,
+				agentRole: 'architect',
+				runId: 'session-arch',
+				unitId: '2.1',
+				timestamp: new Date().toISOString(),
+			});
+
+			const result = await applyCouncilReward(provider, {
+				runId: 'session-arch',
+				unitId: '1.1',
+				reward: 1,
+				eta: DEFAULT_QLEARNING_CONFIG.learningRate,
+				initialQValue: DEFAULT_QLEARNING_CONFIG.initialQValue,
+				qLearning: DEFAULT_QLEARNING_CONFIG,
+				timestamp: new Date().toISOString(),
+				verdictLabel: 'APPROVE',
+			});
+
+			const unchanged = await provider.get(sibling.id);
+			expect(result).toEqual({ memoriesRewarded: 0 });
+			expect(unchanged?.metadata.qValue).toBeUndefined();
+		} finally {
+			provider.close();
+		}
+	});
+});
+
+function makeRecord(text: string): MemoryRecord {
+	const base = {
+		scope: { type: 'repository' as const, repoId: 'repo-a' },
+		kind: 'repo_convention' as const,
+		text,
+	};
+	return {
+		id: createMemoryId(base),
+		...base,
+		tags: ['memory'],
+		confidence: 0.9,
+		stability: 'durable',
+		source: { type: 'file', filePath: 'AGENTS.md' },
+		createdAt: '2026-07-02T00:00:00.000Z',
+		updatedAt: '2026-07-02T00:00:00.000Z',
+		contentHash: computeMemoryContentHash(base),
+		metadata: {},
+	};
 }
-
-describe('resolveRewardRunIds', () => {
-	test('always includes trusted session ids without validation', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: ['session-arch'],
-			untrustedSessionIds: [],
-			isKnownSession: () => false,
-		});
-		expect(ids).toEqual(['session-arch']);
-	});
-
-	test('drops an untrusted (caller-supplied) session id that does not resolve to a known session', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: ['session-arch'],
-			untrustedSessionIds: ['spoofed-or-guessed-id'],
-			isKnownSession: (id) => id === 'session-arch',
-		});
-		expect(ids).toEqual(['session-arch']);
-		expect(ids).not.toContain('spoofed-or-guessed-id');
-	});
-
-	test('includes an untrusted session id when it resolves to a known, tracked session', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: ['session-arch'],
-			untrustedSessionIds: ['session-critic-1'],
-			isKnownSession: (id) =>
-				id === 'session-arch' || id === 'session-critic-1',
-		});
-		expect(ids.sort()).toEqual(['session-arch', 'session-critic-1'].sort());
-	});
-
-	test('includes multiple validated per-verdict member session ids so sub-agent recalls are rewarded too', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: ['session-arch'],
-			untrustedSessionIds: [
-				'session-critic-1',
-				'session-reviewer-1',
-				'session-sme-1',
-			],
-			isKnownSession: (id) => id.startsWith('session-'),
-		});
-		expect(ids).toEqual([
-			'session-arch',
-			'session-critic-1',
-			'session-reviewer-1',
-			'session-sme-1',
-		]);
-	});
-
-	test('deduplicates ids that appear in both trusted and untrusted lists', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: ['session-arch'],
-			untrustedSessionIds: ['session-arch'],
-			isKnownSession: () => true,
-		});
-		expect(ids).toEqual(['session-arch']);
-	});
-
-	test('drops undefined/empty entries from both lists', () => {
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: [undefined, 'session-arch', ''],
-			untrustedSessionIds: [undefined, ''],
-			isKnownSession: () => true,
-		});
-		expect(ids).toEqual(['session-arch']);
-	});
-
-	test('never treats a swarmId-shaped string as a session id substitute', () => {
-		// Callers must never pass a bare swarmId into either list; this test
-		// documents that resolveRewardRunIds performs no swarmId-specific
-		// fallback of its own — the caller is solely responsible for keeping
-		// swarmId out of both lists (see convene-council.ts / submit-phase-
-		// council-verdicts.ts, which pass ctx.sessionID/provenanceSessionId/
-		// per-verdict sessionId only, never input.swarmId).
-		const ids = resolveRewardRunIds({
-			trustedSessionIds: [],
-			untrustedSessionIds: ['mega'],
-			isKnownSession: (id) => id === 'mega',
-		});
-		// Even if a swarmId happens to validate as a "known session" (it
-		// shouldn't in practice — swarmIds and sessionIds are different id
-		// spaces tracked in different registries), resolveRewardRunIds itself
-		// applies no special-casing; this is purely a documentation test for
-		// the calling convention.
-		expect(ids).toEqual(['mega']);
-	});
-});
-
-describe('applyRecallRewardForCouncil skip reasons', () => {
-	test('returns memory_disabled without constructing a provider when memory.enabled is false', async () => {
-		const result = await applyRecallRewardForCouncil(
-			tempRoot(),
-			{ enabled: false },
-			{
-				runIds: ['session-arch'],
-				verdict: 'APPROVE',
-				verdictPayload: { overallVerdict: 'APPROVE' },
-			},
-		);
-		expect(result.success).toBe(false);
-		expect(result.reason).toBe('memory_disabled');
-	});
-
-	test('returns no_recall_usage_for_run when no candidate session ids were resolved', async () => {
-		const result = await applyRecallRewardForCouncil(
-			tempRoot(),
-			{ enabled: true, provider: 'sqlite' },
-			{
-				runIds: [],
-				verdict: 'APPROVE',
-				verdictPayload: { overallVerdict: 'APPROVE' },
-			},
-		);
-		expect(result.success).toBe(false);
-		expect(result.reason).toBe('no_recall_usage_for_run');
-	});
-
-	test('returns provider_does_not_support_learning when the configured provider lacks applyRecallReward', async () => {
-		// Local-JSONL provider (the non-sqlite default) does not implement
-		// applyRecallReward — exercise the real skip path via config rather
-		// than a hand-rolled fake provider.
-		const result = await applyRecallRewardForCouncil(
-			tempRoot(),
-			{ enabled: true, provider: 'local-jsonl' },
-			{
-				runIds: ['session-arch'],
-				verdict: 'APPROVE',
-				verdictPayload: { overallVerdict: 'APPROVE' },
-			},
-		);
-		expect(result.success).toBe(false);
-		expect(result.reason).toBe('provider_does_not_support_learning');
-	});
-});
-
-// Compile-time check that the provider interface shape referenced above still
-// matches what applyRecallRewardForCouncil expects (`applyRecallReward` is
-// optional on MemoryProvider).
-type _AssertOptionalApplyRecallReward = MemoryProvider['applyRecallReward'];

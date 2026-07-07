@@ -176,6 +176,12 @@ Quarantined entries are hidden from queries but preserved:
 /swarm knowledge restore lesson-abc123
 ```
 
+`/swarm knowledge restore <id>` also restores **archived** entries: an
+`archived`-status entry is restored to its pre-archive lifecycle status (e.g.
+`established` or `promoted`), recording the prior status at archive time. This
+is useful for recovering an erroneously archived entry without losing its
+confirmations or standing.
+
 Quarantined, archived, and `quarantined_unactionable` entries are inactive for
 query injection, hive promotion, and hive encounter-score reinforcement. New
 near-duplicate evidence reinforces only active entries; inactive duplicates stay
@@ -299,7 +305,7 @@ This prevents one noisy project from dominating hive promotions.
 | `/swarm knowledge` | List active entries |
 | `/swarm knowledge migrate` | Import legacy `.swarm/context.md` |
 | `/swarm knowledge quarantine <id> [reason]` | Hide entry from queries |
-| `/swarm knowledge restore <id>` | Un-quarantine an entry |
+| `/swarm knowledge restore <id>` | Restore a quarantined or archived entry |
 | `/swarm promote <text>` | Write new hive entry |
 | `/swarm promote --from-swarm <id>` | Promote existing swarm entry |
 | `/swarm curate` | Run curator review, apply gated recommendations when session context exists, and review hive promotion candidates |

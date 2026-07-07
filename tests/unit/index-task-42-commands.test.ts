@@ -36,7 +36,7 @@ describe('Task 4.2 - Command Config Templates for acknowledge-spec-drift and doc
 	});
 
 	async function getCommands(): Promise<Record<string, CommandConfig>> {
-		const plugin = await OpenCodeSwarm(mockPluginInput);
+		const plugin = await OpenCodeSwarm.server(mockPluginInput);
 		const mockConfig: Record<string, unknown> = {};
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		await (plugin as any).config(mockConfig);

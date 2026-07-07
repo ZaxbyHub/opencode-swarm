@@ -119,7 +119,18 @@ describe('saveGraph — security regression', () => {
 		// attacker-controlled target.
 		const realTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'symlink-tgt-'));
 		try {
-			fs.symlinkSync(realTarget, path.join(tmp, '.swarm'));
+			try {
+				fs.symlinkSync(realTarget, path.join(tmp, '.swarm'));
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					'code' in error &&
+					(error as NodeJS.ErrnoException).code === 'EPERM'
+				) {
+					return;
+				}
+				throw error;
+			}
 			expect(() =>
 				saveGraph(tmp, {
 					version: REPO_GRAPH_SCHEMA_VERSION,

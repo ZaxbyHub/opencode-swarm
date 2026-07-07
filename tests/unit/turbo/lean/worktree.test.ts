@@ -7,6 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -171,10 +173,19 @@ describe('provisionWorktree', () => {
 		expect(p).toContain(fakeLaneId);
 	});
 
-	test('returns error when branch already exists', async () => {
-		// git show-ref --verify --quiet exits 0 → branch exists
+	test('returns error when branch already exists in an active worktree', async () => {
+		const branchName = 'swarm-lane/session-abc/lane-1';
+		const worktreeList = `worktree C:\\active-worktree
+HEAD abc123
+branch refs/heads/${branchName}
+`;
+
+		// git show-ref exits 0 and worktree list reports the branch as active.
 		_internals.bunSpawn = (args: string[]) => {
 			if (args.includes('show-ref')) return mockProc(0, '', '');
+			if (args.includes('worktree') && args.includes('list')) {
+				return mockProc(0, worktreeList, '');
+			}
 			return mockProc(0, '', '');
 		};
 
@@ -186,7 +197,8 @@ describe('provisionWorktree', () => {
 		);
 
 		expect(result).toEqual({
-			error: 'Branch already exists: swarm-lane/session-abc/lane-1',
+			error:
+				'Branch already exists and worktree is active: swarm-lane/session-abc/lane-1 (owned by another session)',
 		});
 	});
 
@@ -837,12 +849,17 @@ describe('shortenWorktreePath', () => {
 	});
 
 	test('returns correct path regardless of platform', () => {
-		_internals.osTmpdir = () => '/tmp';
+		// shortenWorktreePath now realpath-resolves osTmpdir() to canonicalize
+		// the 8.3 short name on Windows (issue #1729). Use the REAL os.tmpdir()
+		// so realpathSync resolves consistently on every platform; the test
+		// verifies the join structure, not a hardcoded path.
+		const realTmp = fs.realpathSync(os.tmpdir());
+		_internals.osTmpdir = () => realTmp;
 		_internals.platform = 'linux';
 
 		const result = shortenWorktreePath('/project', 'sess-1', 'lane-2');
 
-		expect(result).toBe(path.join('/tmp', 'swwt', 'sess-1', 'lane-2'));
+		expect(result).toBe(path.join(realTmp, 'swwt', 'sess-1', 'lane-2'));
 	});
 });
 

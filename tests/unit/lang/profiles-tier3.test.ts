@@ -1,7 +1,7 @@
 /**
  * Tier 3 Language Profiles Verification and Adversarial Tests
  *
- * Tests for Dart and Ruby language profiles in the Language Registry.
+ * Tests for Dart, Ruby, and PHP language profiles in the Language Registry.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -13,15 +13,15 @@ describe('Tier 3 Language Profiles - Verification', () => {
 		expect(tier3Profiles).toHaveLength(3);
 	});
 
-	it('2. LANGUAGE_REGISTRY.getAll() returns exactly 11 profiles total (4 Tier1 + 5 Tier2 + 2 Tier3)', () => {
+	it('2. LANGUAGE_REGISTRY.getAll() returns exactly 13 profiles total (5 Tier1 + 5 Tier2 + 3 Tier3)', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
-		expect(allProfiles).toHaveLength(12);
+		expect(allProfiles).toHaveLength(13);
 
 		const tier1Count = LANGUAGE_REGISTRY.getTier(1).length;
 		const tier2Count = LANGUAGE_REGISTRY.getTier(2).length;
 		const tier3Count = LANGUAGE_REGISTRY.getTier(3).length;
 
-		expect(tier1Count).toBe(4);
+		expect(tier1Count).toBe(5);
 		expect(tier2Count).toBe(5);
 		expect(tier3Count).toBe(3);
 	});
@@ -86,7 +86,7 @@ describe('Tier 3 Language Profiles - Verification', () => {
 		expect(rubyProfile?.sast.semgrepSupport).toBe('experimental');
 	});
 
-	it('13. All 11 profiles have >= 3 coderConstraints', () => {
+	it('13. All 13 profiles have >= 3 coderConstraints', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
 		for (const profile of allProfiles) {
 			expect(
@@ -96,7 +96,7 @@ describe('Tier 3 Language Profiles - Verification', () => {
 		}
 	});
 
-	it('14. All 11 profiles have >= 3 reviewerChecklist items', () => {
+	it('14. All 13 profiles have >= 3 reviewerChecklist items', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
 		for (const profile of allProfiles) {
 			expect(
@@ -106,7 +106,7 @@ describe('Tier 3 Language Profiles - Verification', () => {
 		}
 	});
 
-	it('15. Full extension set across all 11 profiles: confirm no collisions', () => {
+	it('15. Full extension set across all 13 profiles: confirm no collisions', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
 		const extensionSet = new Set<string>();
 		const extensionToProfiles = new Map<string, string[]>();

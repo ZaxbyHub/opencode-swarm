@@ -9,7 +9,7 @@
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
 #
-# Last updated: 2026-06-29 (normalization in scripts/lib/normalize-mock-target.sh)
+# Last updated: 2026-07-05 (normalization in scripts/lib/normalize-mock-target.sh)
 
 # --- Node builtins ---
 node:child_process
@@ -19,7 +19,6 @@ node:fs/promises
 node:path
 
 # --- src ---
-src/@opencode-ai/plugin
 src/agents/critic
 src/background/event-bus
 src/background/manager

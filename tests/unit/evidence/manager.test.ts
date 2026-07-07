@@ -807,6 +807,17 @@ describe('validateProjectRoot (Task 1.2)', () => {
 		);
 	});
 
+	it('rejects a subdirectory even when the subdirectory also has .swarm/', () => {
+		// A nested .swarm/ must not let a child directory bypass the real project
+		// root's .swarm/ containment guard.
+		writeFileSync(join(tempDir, 'package.json'), '{}');
+		mkdirSync(join(subDir, '.swarm'), { recursive: true });
+
+		expect(() => validateProjectRoot(subDir)).toThrow(
+			/Cannot write evidence.*already contains a \.swarm\//,
+		);
+	});
+
 	it('does not throw when directory is the project root (has .swarm/ directly)', () => {
 		// tempDir has .swarm/ in it, but tempDir itself IS the root — no parent has .swarm/
 		// Skip if tmpdir itself has a .swarm/ ancestor (guard would reject before checking

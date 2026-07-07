@@ -27,14 +27,14 @@ describe('Tier 2 Language Profile Registry - Verification Tests', () => {
 		expect(tier2Profiles).toHaveLength(5);
 	});
 
-	it('2. getTier(1) still returns exactly 4 profiles (Tier 1 unchanged)', () => {
+	it('2. getTier(1) returns exactly 5 profiles', () => {
 		const tier1Profiles = TEST_REGISTRY.getTier(1);
-		expect(tier1Profiles).toHaveLength(4);
+		expect(tier1Profiles).toHaveLength(5);
 	});
 
-	it('3. LANGUAGE_REGISTRY.getAll() returns exactly 9 profiles total', () => {
+	it('3. LANGUAGE_REGISTRY.getAll() returns exactly 13 profiles total', () => {
 		const allProfiles = TEST_REGISTRY.getAll();
-		expect(allProfiles).toHaveLength(12);
+		expect(allProfiles).toHaveLength(13);
 	});
 
 	it('4. getByExtension(".java") returns java profile', () => {

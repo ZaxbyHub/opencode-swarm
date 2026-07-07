@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLog = mock(() => {});
 const mockWarn = mock(() => {});
+const mockCriticalWarn = mock(() => {});
 const mockError = mock(() => {});
 
 // Mock ONLY the logger module — the barrel re-export picks up the mock
@@ -19,6 +20,7 @@ const mockError = mock(() => {});
 mock.module('../../../src/utils/logger', () => ({
 	log: mockLog,
 	warn: mockWarn,
+	criticalWarn: mockCriticalWarn,
 	error: mockError,
 }));
 
@@ -26,6 +28,7 @@ describe('log-level-reclassification', () => {
 	beforeEach(() => {
 		mockLog.mockClear();
 		mockWarn.mockClear();
+		mockCriticalWarn.mockClear();
 		mockError.mockClear();
 	});
 

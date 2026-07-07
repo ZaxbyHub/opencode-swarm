@@ -11,11 +11,25 @@ import { _internals } from '../../../src/session/worktree-link-suggestion.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 function git(cwd: string, args: string[]): void {
-	execFileSync('git', args, {
-		cwd,
-		stdio: 'ignore',
-		timeout: 10_000,
-	});
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			execFileSync('git', args, {
+				cwd,
+				stdio: 'ignore',
+				timeout: 30_000,
+			});
+			return;
+		} catch (error) {
+			lastError = error;
+			const code =
+				typeof error === 'object' && error !== null && 'code' in error
+					? String((error as { code?: unknown }).code)
+					: '';
+			if (!['ETIMEDOUT', 'EBUSY', 'EPERM'].includes(code)) break;
+		}
+	}
+	throw lastError;
 }
 
 describe('worktree-link-suggestion', () => {

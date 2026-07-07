@@ -48,7 +48,12 @@ describe('handleResetSessionCommand — EBUSY per-file reporting (FR-006 SC-010)
 		await mock.module('node:fs', () => ({
 			...fsSync,
 			existsSync: mock((_p: string) => true),
-			lstatSync: mock(() => ({ isFile: () => true }) as any),
+			// isSymbolicLink() is required by validateSwarmPath's symlink guard
+			// (src/hooks/utils.ts) — an incomplete stat mock without it throws
+			// a TypeError there, masking the EBUSY behavior this test targets.
+			lstatSync: mock(
+				() => ({ isFile: () => true, isSymbolicLink: () => false }) as any,
+			),
 			unlinkSync: mock((p: string) => {
 				if (p === file1) throw ebusiError;
 				// succeed silently for other files (avoid recursion via fsSync.unlinkSync)
@@ -83,7 +88,9 @@ describe('handleResetSessionCommand — EBUSY per-file reporting (FR-006 SC-010)
 		await mock.module('node:fs', () => ({
 			...fsSync,
 			existsSync: mock((_p: string) => true),
-			lstatSync: mock(() => ({ isFile: () => true }) as any),
+			lstatSync: mock(
+				() => ({ isFile: () => true, isSymbolicLink: () => false }) as any,
+			),
 			unlinkSync: mock(() => {
 				throw ebusiError;
 			}),
@@ -99,6 +106,42 @@ describe('handleResetSessionCommand — EBUSY per-file reporting (FR-006 SC-010)
 		expect(result).toContain('❌ Failed to delete file2.json');
 		// state.json is handled in a separate try/catch block
 		expect(result).toContain('❌ Failed to delete state.json');
+	});
+
+	it('validateSwarmPath failure while resolving state.json is reported without crashing the command', async () => {
+		// Regression test: handleResetSessionCommand used to call
+		// validateSwarmPath(directory, 'session/state.json') a second time
+		// (unguarded) to derive sessionDir. If validateSwarmPath threw for a
+		// genuine reason (e.g. EACCES while resolving the real path of
+		// .swarm), the first call's try/catch reported the failure
+		// gracefully, but the second unguarded call then threw again and
+		// crashed the whole best-effort cleanup instead of returning a
+		// report. This simulates that failure via a non-ENOENT lstatSync
+		// error (see src/hooks/utils.ts validateSwarmPath).
+		const sessionDir = path.join(testDir, '.swarm', 'session');
+		const otherFile = path.join(sessionDir, 'other.json');
+		writeFileSync(otherFile, 'other content');
+
+		const eaccesError = Object.assign(new Error('EACCES: permission denied'), {
+			code: 'EACCES',
+		});
+
+		await mock.module('node:fs', () => ({
+			...fsSync,
+			lstatSync: mock(() => {
+				throw eaccesError;
+			}),
+		}));
+
+		const { handleResetSessionCommand } = await import(
+			'../../../src/commands/reset-session.js'
+		);
+
+		// Must resolve (not throw/reject) and must report the failure.
+		const result = await handleResetSessionCommand(testDir, []);
+
+		expect(result).toContain('❌ Failed to delete state.json');
+		expect(result).toContain('## Session State Reset');
 	});
 
 	it('Session dir does not exist → no error reported (existsSync guard)', async () => {

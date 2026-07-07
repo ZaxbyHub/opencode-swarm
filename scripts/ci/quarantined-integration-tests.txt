@@ -1,0 +1,16 @@
+# Quarantined integration tests — CI's `integration` job skips these files.
+#
+# Format: one repo-relative test file path per line. Blank lines and lines
+# starting with # are ignored.
+#
+# STATUS: 2 active entries — integration tests that pass on a Windows host and
+# in isolated ubuntu worktree runs but fail on the ubuntu CI merge_group runner.
+# Root cause suspected to be test-ordering/shared-state contamination across
+# files in the same bun process (the integration job runs files sequentially
+# in a single `bun --smol test` process per file, but the failure signatures
+# suggest cross-test session-state leakage). Tracked as a follow-up to #1729.
+#
+# Do NOT un-quarantine without a merge_group `integration` validation run
+# confirming the fix.
+tests/integration/phase-complete-events.adversarial.test.ts
+tests/integration/unified-injection-budget.test.ts

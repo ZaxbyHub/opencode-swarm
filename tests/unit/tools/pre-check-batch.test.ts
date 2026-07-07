@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	type PreCheckBatchInput,
 	type PreCheckBatchResult,
 	pre_check_batch,
@@ -30,6 +31,24 @@ const mockRunSecretscan = mock(async () => ({
 		scan_time_ms: 0,
 	},
 }));
+const mockRunSecretscanOnFiles = mock(
+	async (files: string[], directory: string) => {
+		const findings: Array<{ type: string; path: string; line: number }> = [];
+		for (const file of files) {
+			const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
+			if (/api[_-]?key|sk-[a-z0-9]/i.test(content)) {
+				findings.push({ type: 'api_key', path: file, line: 1 });
+			}
+		}
+		return {
+			scan_dir: directory,
+			findings,
+			count: findings.length,
+			files_scanned: files.length,
+			skipped_files: 0,
+		};
+	},
+);
 const mockSastScan = mock(async () => ({
 	verdict: 'pass' as const,
 	findings: [],
@@ -75,14 +94,11 @@ mock.module('../../../src/tools/lint', () => ({
 
 mock.module('../../../src/tools/secretscan', () => ({
 	runSecretscan: mockRunSecretscan,
+	runSecretscanOnFiles: mockRunSecretscanOnFiles,
 }));
 
 mock.module('../../../src/tools/sast-scan', () => ({
 	sastScan: mockSastScan,
-}));
-
-mock.module('../../../src/tools/quality-budget', () => ({
-	qualityBudget: mockQualityBudget,
 }));
 
 mock.module('../../../src/utils', () => ({
@@ -101,6 +117,7 @@ function createTempDir(): string {
 describe('runPreCheckBatch', () => {
 	let tempDir: string;
 	let originalCwd: string;
+	const realQualityBudget = _internals.qualityBudget;
 
 	beforeEach(() => {
 		originalCwd = process.cwd();
@@ -124,10 +141,35 @@ describe('runPreCheckBatch', () => {
 		mockRunLint.mockClear();
 		mockRunSecretscan.mockClear();
 		mockSastScan.mockClear();
-		mockQualityBudget.mockClear();
+		mockQualityBudget.mockReset();
+		mockQualityBudget.mockImplementation(async () => ({
+			verdict: 'pass' as const,
+			metrics: {
+				complexity_delta: 0,
+				public_api_delta: 0,
+				duplication_ratio: 0,
+				test_to_code_ratio: 0,
+				thresholds: {
+					max_complexity_delta: 5,
+					max_public_api_delta: 10,
+					max_duplication_ratio: 0.05,
+					min_test_to_code_ratio: 0.3,
+				},
+			},
+			violations: [],
+			summary: {
+				files_analyzed: 0,
+				violations_count: 0,
+				errors_count: 0,
+				warnings_count: 0,
+			},
+		}));
+		_internals.qualityBudget =
+			mockQualityBudget as typeof _internals.qualityBudget;
 	});
 
 	afterEach(() => {
+		_internals.qualityBudget = realQualityBudget;
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});

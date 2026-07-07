@@ -3,10 +3,27 @@ import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { PluginConfig } from '../../../src/config';
 import { createCompactionCustomizerHook } from '../../../src/hooks/compaction-customizer';
 import { extractDecisions } from '../../../src/hooks/extractors';
 import { readSwarmFileAsync } from '../../../src/hooks/utils';
+
+async function rmTempDirWithRetry(directory: string): Promise<void> {
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			await rm(directory, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY') {
+				throw error;
+			}
+			await delay(25 * (attempt + 1));
+		}
+	}
+	await rm(directory, { recursive: true, force: true });
+}
 
 describe('extractDecisions', () => {
 	it('Returns null for empty string', () => {
@@ -956,7 +973,7 @@ describe('Post-compaction rehydration cache refresh', () => {
 	afterEach(async () => {
 		const { resetSwarmState } = await import('../../../src/state');
 		resetSwarmState();
-		await rm(tempDir, { recursive: true, force: true });
+		await rmTempDirWithRetry(tempDir);
 	});
 
 	it('buildRehydrationCache is called after compaction handler runs', async () => {

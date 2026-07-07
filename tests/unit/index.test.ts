@@ -32,23 +32,24 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		}
 	});
 
-	test('1. default export is a function (plugin factory)', () => {
-		expect(typeof OpenCodeSwarm).toBe('function');
+	test('1. default export uses OpenCode v1 plugin object shape', () => {
+		expect(OpenCodeSwarm.id).toBe('opencode-swarm');
+		expect(typeof OpenCodeSwarm.server).toBe('function');
 	});
 
-	test('2. plugin returns object with tool property when invoked with mock context', async () => {
-		const result = await OpenCodeSwarm(mockPluginInput);
+	test('2. plugin server returns object with tool property when invoked with mock context', async () => {
+		const result = await OpenCodeSwarm.server(mockPluginInput);
 		expect(result).toHaveProperty('tool');
 	});
 
 	test('3. tool property contains doc_scan and doc_extract entries', async () => {
-		const result = await OpenCodeSwarm(mockPluginInput);
+		const result = await OpenCodeSwarm.server(mockPluginInput);
 		expect(result.tool).toHaveProperty('doc_scan');
 		expect(result.tool).toHaveProperty('doc_extract');
 	});
 
 	test('4. doc_scan and doc_extract are defined tool objects (not undefined)', async () => {
-		const result = await OpenCodeSwarm(mockPluginInput);
+		const result = await OpenCodeSwarm.server(mockPluginInput);
 		// Tools created with createSwarmTool are objects with execute properties
 		expect(result.tool.doc_scan).toBeDefined();
 		expect(result.tool.doc_extract).toBeDefined();

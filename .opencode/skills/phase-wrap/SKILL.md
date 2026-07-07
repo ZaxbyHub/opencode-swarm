@@ -95,7 +95,12 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when .swarm/spec.md exists
    - `.swarm/evidence/{phase}/hallucination-guard.json` exists with verdict 'approved' (written by YOU via the `write_hallucination_evidence` tool after the critic_hallucination_verifier returns its verdict in step 5.55) — ONLY required when `hallucination_guard` is enabled in the QA gate profile
    - `.swarm/evidence/{phase}/mutation-gate.json` exists with verdict 'pass' or 'warn' (written by YOU via the `write_mutation_evidence` tool after step 5.56) — ONLY required when `mutation_test` is enabled in the QA gate profile
-   If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
+    - regression-test falsification evidence exists for at least one regression
+      test added or modified in this phase: fix removed/bypassed -> test fails
+      for the expected reason -> fix restored -> test passes. If the phase
+      changed no regression tests, record `not applicable` with the changed-file
+      evidence.
+    If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
    NOTE: Steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If `hallucination_guard` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call `write_hallucination_evidence`), phase_complete will be BLOCKED by the plugin. Similarly, if `mutation_test` is enabled and you skip step 5.56 (or fail to call `write_mutation_evidence`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
 5.65. **Phase Council (conditional on QA gate — `phase_council`)**: Check whether `phase_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled, skip silently and proceed to step 5.7.
    This gate is triggered by the `phase_council` QA gate, NOT by `council_mode`. (`council_mode` controls per-task Stage B replacement in MODE: EXECUTE; `phase_council` controls holistic phase-level review here in MODE: PHASE-WRAP.)

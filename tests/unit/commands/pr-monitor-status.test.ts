@@ -9,6 +9,17 @@ import {
 import { COMMAND_REGISTRY } from '../../../src/commands/registry.js';
 
 const { formatRelativeTime } = _internals;
+const fixedNow = 1_700_000_000_000;
+
+function withFixedNow<T>(callback: () => T): T {
+	const originalNow = Date.now;
+	Date.now = () => fixedNow;
+	try {
+		return callback();
+	} finally {
+		Date.now = originalNow;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Mock listActive via _internals DI seam — no mock.module needed
@@ -39,56 +50,65 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 describe('formatRelativeTime', () => {
 	test('returns "just now" for timestamps within the last 5 seconds', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now)).toBe('just now');
-		expect(formatRelativeTime(now - 1000)).toBe('just now');
-		expect(formatRelativeTime(now - 4999)).toBe('just now');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow)).toBe('just now');
+			expect(formatRelativeTime(fixedNow - 1000)).toBe('just now');
+			expect(formatRelativeTime(fixedNow - 4999)).toBe('just now');
+		});
 	});
 
 	test('returns "just now" for future timestamps', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now + 1000)).toBe('just now');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow + 1000)).toBe('just now');
+		});
 	});
 
 	test('returns seconds ago for timestamps under 60 seconds', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 5000)).toBe('5 seconds ago');
-		expect(formatRelativeTime(now - 30000)).toBe('30 seconds ago');
-		expect(formatRelativeTime(now - 59000)).toBe('59 seconds ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 5000)).toBe('5 seconds ago');
+			expect(formatRelativeTime(fixedNow - 30000)).toBe('30 seconds ago');
+			expect(formatRelativeTime(fixedNow - 59000)).toBe('59 seconds ago');
+		});
 	});
 
 	test('returns singular "minute" for 1 minute', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 60_000)).toBe('1 minute ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 60_000)).toBe('1 minute ago');
+		});
 	});
 
 	test('returns plural "minutes" for multiple minutes', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 120_000)).toBe('2 minutes ago');
-		expect(formatRelativeTime(now - 300_000)).toBe('5 minutes ago');
-		expect(formatRelativeTime(now - 3_599_000)).toBe('59 minutes ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 120_000)).toBe('2 minutes ago');
+			expect(formatRelativeTime(fixedNow - 300_000)).toBe('5 minutes ago');
+			expect(formatRelativeTime(fixedNow - 3_599_000)).toBe('59 minutes ago');
+		});
 	});
 
 	test('returns singular "hour" for 1 hour', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 3_600_000)).toBe('1 hour ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 3_600_000)).toBe('1 hour ago');
+		});
 	});
 
 	test('returns plural "hours" for multiple hours', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 7_200_000)).toBe('2 hours ago');
-		expect(formatRelativeTime(now - 86_399_000)).toBe('23 hours ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 7_200_000)).toBe('2 hours ago');
+			expect(formatRelativeTime(fixedNow - 86_399_000)).toBe('23 hours ago');
+		});
 	});
 
 	test('returns singular "day" for 1 day', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 86_400_000)).toBe('1 day ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 86_400_000)).toBe('1 day ago');
+		});
 	});
 
 	test('returns plural "days" for multiple days', () => {
-		const now = Date.now();
-		expect(formatRelativeTime(now - 172_800_000)).toBe('2 days ago');
-		expect(formatRelativeTime(now - 604_800_000)).toBe('7 days ago');
+		withFixedNow(() => {
+			expect(formatRelativeTime(fixedNow - 172_800_000)).toBe('2 days ago');
+			expect(formatRelativeTime(fixedNow - 604_800_000)).toBe('7 days ago');
+		});
 	});
 });
 
