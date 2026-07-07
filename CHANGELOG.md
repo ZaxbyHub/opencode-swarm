@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.109.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.0...v7.109.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **gates:** mechanize plan critic and FR coverage ([5497f35](https://github.com/ZaxbyHub/opencode-swarm/commit/5497f35f45d7dec9abd3f250609dc51cc22a3577))
+* **guardrails:** scope-exempt git worktree remove --force for swarm-managed worktrees ([8ef0359](https://github.com/ZaxbyHub/opencode-swarm/commit/8ef0359554088d4ed4808d1a18da002e10d63752))
+
 ## [7.109.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.108.0...v7.109.0) (2026-07-07)
 
 
