@@ -255,7 +255,8 @@ A leading token that **is** shaped like a PR reference (bare number, `owner/repo
 2. **Build the feedback ledger** â€” collect every feedback surface (review threads, requested-changes reviews, CI failures, conflicts, stale-branch state, PR-body claims, pasted notes, and any `swarm-pr-review` handoff artifact) before editing
 3. **Verify each claim** â€” treat every item as a claim until source evidence proves it; classify as `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`
 4. **Fix confirmed items** â€” patch only confirmed items plus the tests/docs they require, preserve prior review IDs/provenance from the handoff artifact, and do not run a fresh broad review
-5. **Closure ledger** â€” report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
+5. **Mandatory gates** â€” Stage A (structural pre-checks: build, typecheck, lint/format, `git diff --check`, reproduce the failing CI/test command) and Stage B (independent `reviewer` + `test_engineer`) must pass on the current diff, followed by the separate reviewer + critic closeout gate. No fix lands and no closure ledger row is marked FIXED until all three gates pass
+6. **Closure ledger** â€” report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
 
 **No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
 
@@ -601,9 +602,7 @@ Move a knowledge entry to quarantine. Quarantined entries are excluded from agen
 
 ### `/swarm knowledge restore <entry-id>`
 
-Restore a quarantined or archived entry back to active knowledge. Dispatches by
-current status: an `archived` entry is restored to its pre-archive status; a
-`quarantined` entry is restored from the quarantine sidecar.
+Restore a quarantined entry back to active knowledge.
 
 ### `/swarm memory`
 
