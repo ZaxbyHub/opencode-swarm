@@ -132,9 +132,12 @@ source-level checks:
 
 5. **Value validation vs key validation**: Bots may suggest validating env var
    *values* for shell injection characters. Check whether the value is passed
-   through a sandbox executor that escapes arguments (e.g., `wrapCommand` with
-   array-form spawn). Value validation would break legitimate env vars (PATH
-   with `;`, URLs with `$`); escaping is the sandbox's job.
+   through a sandbox executor that escapes arguments (e.g., `wrapCommand`
+   which returns a shell-quoted / `psStringEscape`-escaped string for the
+   `bunSpawn` array-form argv to consume). Value validation would break
+   legitimate env vars (PATH with `;`, URLs with `$`); escaping is the
+   sandbox's job — see `engineering-conventions` § "Sandbox env overrides"
+   for the full escape contract.
 
 6. **Deduplication for independent resources**: Bots may suggest deduplicating
    cache redirects or env var entries. Check whether the entries map to
