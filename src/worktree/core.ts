@@ -10,9 +10,11 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { bunSpawn } from '../utils/bun-compat';
+import { log } from '../utils';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
 // to allow DI for tests without mock.module leakage. The top-level import is intentionally
 // omitted; the seam default performs a dynamic import on first use.
@@ -52,6 +54,7 @@ export const _internals: {
 	/** Test seam for filesystem ops used by deps_strategy copy/link (DI to avoid mock.module leaks). */
 	fs: {
 		existsSync: typeof fs.existsSync;
+		cp: typeof fsPromises.cp;
 		cpSync: typeof fs.cpSync;
 		symlinkSync: typeof fs.symlinkSync;
 	};
@@ -99,6 +102,7 @@ export const _internals: {
 	},
 	fs: {
 		existsSync: fs.existsSync,
+		cp: fsPromises.cp,
 		cpSync: fs.cpSync,
 		symlinkSync: fs.symlinkSync,
 	},
@@ -163,6 +167,11 @@ export async function writeLaneProfileToDiskReal(
 		if (value === null) continue;
 		// Basic safety: skip keys that would be shell-injection vectors
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+		// Skip values containing newlines — they would corrupt the KEY=VAL file format
+		if (value.includes('\n') || value.includes('\r')) {
+			log('writeLaneProfileToDisk: skipping env var with newline in value', { key });
+			continue;
+		}
 		lines.push(`${key}=${value}`);
 	}
 
@@ -608,7 +617,7 @@ export async function provisionWorktree(
 		if (_internals.fs.existsSync(hostDepDir)) {
 			try {
 				if (strategy === 'copy') {
-					_internals.fs.cpSync(hostDepDir, laneDepDir, {
+					await _internals.fs.cp(hostDepDir, laneDepDir, {
 						recursive: true,
 						force: true,
 					});
