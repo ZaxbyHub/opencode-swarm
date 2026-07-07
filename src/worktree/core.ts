@@ -13,8 +13,8 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { bunSpawn } from '../utils/bun-compat';
 import { log } from '../utils';
+import { bunSpawn } from '../utils/bun-compat';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
 // to allow DI for tests without mock.module leakage. The top-level import is intentionally
 // omitted; the seam default performs a dynamic import on first use.
@@ -169,7 +169,9 @@ export async function writeLaneProfileToDiskReal(
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
 		// Skip values containing newlines — they would corrupt the KEY=VAL file format
 		if (value.includes('\n') || value.includes('\r')) {
-			log('writeLaneProfileToDisk: skipping env var with newline in value', { key });
+			log('writeLaneProfileToDisk: skipping env var with newline in value', {
+				key,
+			});
 			continue;
 		}
 		lines.push(`${key}=${value}`);
