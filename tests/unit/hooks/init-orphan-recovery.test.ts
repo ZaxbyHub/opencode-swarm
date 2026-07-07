@@ -428,7 +428,21 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 		}));
 
 		try {
-			await runInitOrphanRecovery(activeDir);
+			const result = await runInitOrphanRecovery(activeDir);
+			console.error(
+				'[DIAG SC-109] result:',
+				JSON.stringify({
+					attempted: result.attempted,
+					crossProcessLockHeld: result.crossProcessLockHeld,
+					removedWorktrees: result.removedWorktrees,
+					orphanedBranches: result.orphanedBranches,
+					warnings: result.warnings,
+				}),
+			);
+			console.error(
+				'[DIAG SC-109] activeSessionIds:',
+				Array.from(swarmState.agentSessions.keys()),
+			);
 
 			// The active session's branch should still exist
 			const listResult = await runGit(activeDir, [
@@ -441,6 +455,8 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 				.split('\n')
 				.map((b) => b.trim())
 				.filter((b) => b.length > 0);
+
+			console.error('[DIAG SC-109] remaining branches:', remaining);
 
 			// Active session branch should be preserved
 			expect(remaining.some((b) => b.includes(activeSessionId))).toBe(true);
