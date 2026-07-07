@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.108.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.6...v7.108.0) (2026-07-07)
+
+
+### Features
+
+* **worktree:** per-lane runtime isolation on top of worktree lane isolation ([cafb000](https://github.com/ZaxbyHub/opencode-swarm/commit/cafb000a5653cb9e1aa729067a15cf6c5e4af978))
+
+
+### Bug Fixes
+
+* correct orphanedBranches field, add port_base schema bound, add runtime_isolation release fragment ([4a772ea](https://github.com/ZaxbyHub/opencode-swarm/commit/4a772eae1099e6ad81ddd8302e68342ed21c8226)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+* initGitRepo order (git init before config) + targeted diagnostics ([3ab0dba](https://github.com/ZaxbyHub/opencode-swarm/commit/3ab0dba529176f71c79c244a05372a57e2ed0054))
+* listLaneBranches uses portable branch listing (no --list glob) ([18621e5](https://github.com/ZaxbyHub/opencode-swarm/commit/18621e577a6c7ba655c7b44569f3aeec6cda6949))
+* mock tryAcquireLock in init-orphan-recovery tests, use process.execPath in url-security test ([08e5bbe](https://github.com/ZaxbyHub/opencode-swarm/commit/08e5bbeb775707507dff053d4788d22cf3ba8736))
+* quarantine pre-existing integration-worktree failure + remove diagnostics ([3f3151b](https://github.com/ZaxbyHub/opencode-swarm/commit/3f3151b69bab292c0db2e701e014e85b01d21490))
+* **review-hardening:** TOCTOU lock acquisition, serialization bypass guard, eviction gap, shallow copy deep-clone ([11be156](https://github.com/ZaxbyHub/opencode-swarm/commit/11be156cd52dcfee85f3fd56171bfa00e08f8966)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+* **worktree:** replace blocking cpSync with async fs.promises.cp + validate newlines in env values ([702806d](https://github.com/ZaxbyHub/opencode-swarm/commit/702806d6952459f7986294d16f54bddfed6402cd)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+
 ## [7.107.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.5...v7.107.6) (2026-07-06)
 
 
