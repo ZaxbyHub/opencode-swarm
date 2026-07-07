@@ -225,6 +225,10 @@ function hasInFlightStandardWorktreeDispatch(parentSessionID: string): boolean {
 	for (const dispatch of standardWorktreeByCallID.values()) {
 		if (dispatch.parentSessionID === parentSessionID) return true;
 	}
+	// Also check awaiting merge-backs — a session with pending merges is still "in-flight"
+	for (const record of awaitingMergeByCallID.values()) {
+		if (record.parentSessionID === parentSessionID) return true;
+	}
 	return false;
 }
 
@@ -262,7 +266,19 @@ function serializeStandardWorktreeDispatches(
 	sessionID: string,
 	message: string,
 ): void {
-	rememberStandardWorktreeSerializationSession(sessionID);
+	const added = rememberStandardWorktreeSerializationSession(sessionID);
+	if (!added) {
+		// Serialization tracking at capacity — cannot safely serialize because
+		// the release mechanism (checkStandardWorktreeSerializationRelease) needs
+		// the tracking entry. Let the session continue in normal parallel mode.
+		const session = ensureAgentSession(sessionID);
+		session.pendingAdvisoryMessages ??= [];
+		session.pendingAdvisoryMessages.push(
+			`${message} Serialization tracking is at capacity (256 sessions active); ` +
+				`continuing in normal parallel mode.`,
+		);
+		return;
+	}
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = 1;
 	session.pendingAdvisoryMessages ??= [];
@@ -326,7 +342,9 @@ export function checkStandardWorktreeSerializationRelease(
  * If ALL 256 entries are in-flight, refuses the new entry and logs a warning
  * rather than silently breaking isolation.
  */
-function rememberStandardWorktreeSerializationSession(sessionID: string): void {
+function rememberStandardWorktreeSerializationSession(
+	sessionID: string,
+): boolean {
 	if (
 		standardWorktreeSerializationSessions.size >=
 		MAX_TRACKED_STANDARD_WORKTREE_CALLS
@@ -346,7 +364,7 @@ function rememberStandardWorktreeSerializationSession(sessionID: string): void {
 			console.warn(
 				`[worktree-isolation] serialization set at cap with all sessions active; refusing eviction for ${sessionID}`,
 			);
-			return;
+			return false;
 		}
 	}
 	standardWorktreeSerializationSessions.add(sessionID);
@@ -357,6 +375,7 @@ function rememberStandardWorktreeSerializationSession(sessionID: string): void {
 			successfulDispatchesSince: 0,
 		});
 	}
+	return true;
 }
 
 export function sanitizeWorktreeTaskId(raw: string): string {

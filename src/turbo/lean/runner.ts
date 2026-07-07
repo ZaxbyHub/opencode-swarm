@@ -944,7 +944,9 @@ export class LeanTurboRunner {
 	 */
 	private _getLeanConfig(config?: LeanTurboConfig): LeanTurboConfig {
 		if (config) {
-			return { ...DEFAULT_LEAN_TURBO_CONFIG, ...config };
+			// Deep clone the merged config to prevent shared-reference mutations
+			// to nested runtime_isolation (env_overrides, cache_redirects).
+			return structuredClone({ ...DEFAULT_LEAN_TURBO_CONFIG, ...config });
 		}
 		return { ...DEFAULT_LEAN_TURBO_CONFIG };
 	}

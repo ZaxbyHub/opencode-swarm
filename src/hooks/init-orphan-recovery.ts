@@ -307,61 +307,114 @@ export async function runInitOrphanRecovery(
 			return result;
 		}
 
-		// Step 1: Enumerate and remove orphaned worktree directories
-		const orphanedWorktreeDirs = await withTimeout(
-			enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
-			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-			new Error(
-				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
-			),
+		// Acquire the advisory lock to prevent TOCTOU: another process could start
+		// between our isCrossProcessLockHeld check and the destructive operations below.
+		const lockAcquireResult = await _internals.tryAcquireLock(
+			directory,
+			ORPHAN_RECOVERY_LOCK_FILE,
+			'init-orphan-recovery',
+			'init',
 		);
 
-		const removedWorktrees: string[] = [];
-		const worktreeWarnings: string[] = [];
+		if (!lockAcquireResult.acquired) {
+			// Lost the race — another process acquired the lock between our check and here.
+			// Treat same as lockHeld: advisory mode only, skip destructive cleanup.
+			const orphanedWorktreeDirs = await withTimeout(
+				enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
+				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+				new Error(
+					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
+				),
+			);
 
-		for (const worktreePath of orphanedWorktreeDirs) {
-			const error = await removeOrphanedWorktreeDir(worktreePath, directory);
-			if (error) {
-				worktreeWarnings.push(
-					`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
-				);
-			} else {
-				removedWorktrees.push(worktreePath);
-			}
+			result = {
+				attempted: true,
+				crossProcessLockHeld: true,
+				warnings: [
+					`Cross-process lock acquired by another process during init — ` +
+						`skipping destructive cleanup to preserve its worktrees/branches. ` +
+						`Detected ${orphanedWorktreeDirs.length} orphaned worktree dir(s).`,
+				],
+				orphanedBranches: [],
+				removedWorktrees: [],
+				prunedWorktrees: false,
+			};
+
+			await writeAdvisoryFile(
+				directory,
+				{ removed: [], skipped: [], errors: [] },
+				result.warnings,
+				false,
+				[],
+			);
+
+			return result;
 		}
 
-		// Step 2: Clean up orphaned branches (remaining after worktree removal)
-		const cleanupResult = await withTimeout(
-			cleanupOrphanedBranches(directory, activeSessionIds),
-			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-			new Error(
-				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during branch cleanup; continuing without orphan reclamation`,
-			),
-		);
+		try {
+			// Step 1: Enumerate and remove orphaned worktree directories
+			const orphanedWorktreeDirs = await withTimeout(
+				enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
+				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+				new Error(
+					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
+				),
+			);
 
-		const branchWarnings = cleanupResult.errors.map(
-			(e) => `Could not delete orphaned branch "${e.branch}": ${e.error}`,
-		);
+			const removedWorktrees: string[] = [];
+			const worktreeWarnings: string[] = [];
 
-		const allWarnings = [...worktreeWarnings, ...branchWarnings];
+			for (const worktreePath of orphanedWorktreeDirs) {
+				const error = await removeOrphanedWorktreeDir(worktreePath, directory);
+				if (error) {
+					worktreeWarnings.push(
+						`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
+					);
+				} else {
+					removedWorktrees.push(worktreePath);
+				}
+			}
 
-		result = {
-			attempted: true,
-			crossProcessLockHeld: false,
-			warnings: allWarnings,
-			orphanedBranches: cleanupResult.skipped, // session-less = all skipped at init are orphans actually removed
-			removedWorktrees,
-			prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
-		};
+			// Step 2: Clean up orphaned branches (remaining after worktree removal)
+			const cleanupResult = await withTimeout(
+				cleanupOrphanedBranches(directory, activeSessionIds),
+				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+				new Error(
+					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during branch cleanup; continuing without orphan reclamation`,
+				),
+			);
 
-		// Write advisory file (best-effort) so session-start can surface warnings
-		await writeAdvisoryFile(
-			directory,
-			cleanupResult,
-			allWarnings,
-			true,
-			removedWorktrees,
-		);
+			const branchWarnings = cleanupResult.errors.map(
+				(e) => `Could not delete orphaned branch "${e.branch}": ${e.error}`,
+			);
+
+			const allWarnings = [...worktreeWarnings, ...branchWarnings];
+
+			result = {
+				attempted: true,
+				crossProcessLockHeld: false,
+				warnings: allWarnings,
+				orphanedBranches: cleanupResult.skipped, // session-less = all skipped at init are orphans actually removed
+				removedWorktrees,
+				prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
+			};
+
+			// Write advisory file (best-effort) so session-start can surface warnings
+			await writeAdvisoryFile(
+				directory,
+				cleanupResult,
+				allWarnings,
+				true,
+				removedWorktrees,
+			);
+		} finally {
+			// Release the advisory lock — best-effort, never throws
+			try {
+				await lockAcquireResult.lock._release?.();
+			} catch {
+				// Best-effort release; lock has a stale timeout fallback
+			}
+		}
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
 		log('initOrphanRecovery timed out or failed (non-fatal)', { error: msg });
