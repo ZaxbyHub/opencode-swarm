@@ -14,6 +14,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -40,7 +41,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options: {
 		tasks?: Array<{
@@ -51,7 +52,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -83,6 +84,7 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	await recordPlanCriticApproval(dir, plan);
 }
 
 async function callToolBefore(
@@ -100,10 +102,10 @@ async function callToolBefore(
 describe('delegation-gate: state machine adversarial — invalid transitions', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-adv-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },
@@ -213,10 +215,10 @@ describe('delegation-gate: state machine adversarial — invalid transitions', (
 describe('delegation-gate: state machine adversarial — concurrent operations', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-concurrent-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },

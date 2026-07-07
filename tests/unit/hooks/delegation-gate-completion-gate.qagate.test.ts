@@ -15,6 +15,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function derivePlanId(plan: { swarm: string; title: string }): string {
 	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
@@ -75,7 +76,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options: {
 		tasks?: Array<{
@@ -86,7 +87,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -118,6 +119,7 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	await recordPlanCriticApproval(dir, plan);
 }
 
 async function callToolBefore(
@@ -135,10 +137,10 @@ async function callToolBefore(
 describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-qagate-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },
@@ -224,10 +226,10 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 describe('delegation-gate: update_task_status from tests_run state', () => {
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('delegation-gate-updatestatus-');
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },

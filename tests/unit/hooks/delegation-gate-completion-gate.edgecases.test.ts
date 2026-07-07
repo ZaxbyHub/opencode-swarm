@@ -14,6 +14,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -40,7 +41,7 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+async function writePlanJson(
 	dir: string,
 	options: {
 		tasks?: Array<{
@@ -51,7 +52,7 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -83,6 +84,7 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	await recordPlanCriticApproval(dir, plan);
 }
 
 async function callToolBefore(
@@ -117,7 +119,7 @@ describe('delegation-gate: completion gate — phase boundary and multi-session'
 	describe('phase boundary behavior', () => {
 		it('should not enforce completion gate across phase boundaries', async () => {
 			// Phase 1 tasks
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				phase: 1,
 				tasks: [
 					{ id: '1.1', status: 'completed' },
@@ -126,7 +128,7 @@ describe('delegation-gate: completion gate — phase boundary and multi-session'
 			});
 
 			// Phase 2 tasks (new phase, new start)
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				phase: 2,
 				currentPhase: 2,
 				tasks: [
@@ -159,7 +161,7 @@ describe('delegation-gate: completion gate — phase boundary and multi-session'
 
 	describe('multi-session isolation', () => {
 		it('should not share completion gate state across sessions', async () => {
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				tasks: [
 					{ id: '1.1', status: 'pending' },
 					{ id: '1.2', status: 'pending' },
@@ -190,7 +192,7 @@ describe('delegation-gate: completion gate — phase boundary and multi-session'
 		});
 
 		it('should block same task in same session when in tests_run', async () => {
-			writePlanJson(tempDir, {
+			await writePlanJson(tempDir, {
 				tasks: [{ id: '1.1', status: 'pending' }],
 			});
 
@@ -249,6 +251,7 @@ describe('delegation-gate: completion gate — edge cases', () => {
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(plan, null, 2),
 		);
+		await recordPlanCriticApproval(tempDir, plan);
 
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
@@ -268,7 +271,7 @@ describe('delegation-gate: completion gate — edge cases', () => {
 	});
 
 	it('should not throw when taskWorkflowStates has stale entries from previous phases', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [{ id: '1.1', status: 'pending' }],
 		});
 
@@ -292,7 +295,7 @@ describe('delegation-gate: completion gate — edge cases', () => {
 	});
 
 	it('should handle concurrent delegation attempts correctly', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			tasks: [
 				{ id: '1.1', status: 'pending' },
 				{ id: '1.2', status: 'pending' },
