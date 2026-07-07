@@ -29,6 +29,10 @@ import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
+// Type-only import: erased at runtime, so it does NOT create a dependency that
+// would break the test-mocking pattern (see comment at L247 below). The runtime
+// import of knowledge-store is dynamic, inside applyKnowledgeVerdictFeedback.
+import type { ConfidenceFloorOptions } from './knowledge-store.js';
 import type {
 	KnowledgeApplicationRecord,
 	RetrievalOutcome,
@@ -936,6 +940,34 @@ export async function countEntryViolationsInWindow(
 }
 
 /**
+ * G3 (#1715): count `contradicted` events for an entry within a window, reading
+ * from the RAW event log (NOT the rollup cache — `recomputeCounters` is mtime-
+ * keyed and can be stale immediately after an append, mirroring the
+ * `countEntryViolationsInWindow` discipline above). No legacy-record fold:
+ * contradicted has no legacy counterpart (unlike violated). Fail-open: returns 0.
+ */
+export async function countEntryContradictionsInWindow(
+	directory: string,
+	entryId: string,
+	windowDays: number,
+	now: Date = new Date(),
+): Promise<number> {
+	try {
+		const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+		const events = await readKnowledgeEvents(directory);
+		let count = 0;
+		for (const e of events) {
+			if (e.type !== 'contradicted' || e.knowledge_id !== entryId) continue;
+			const t = Date.parse(e.timestamp);
+			if (!Number.isNaN(t) && t >= cutoff) count += 1;
+		}
+		return count;
+	} catch {
+		return 0;
+	}
+}
+
+/**
  * Fail-open rollup reader for hot paths. Search and promotion use this instead
  * of stale persisted counters so `knowledge_receipt` feedback affects ranking
  * and safety gates immediately.
@@ -1030,7 +1062,12 @@ const VERDICT_CONFIDENCE_DECAY = 0.05;
  */
 export async function applyKnowledgeVerdictFeedback(
 	directory: string,
-	options?: { sinceTimestamp?: string; sinceEventId?: string },
+	options?: {
+		sinceTimestamp?: string;
+		sinceEventId?: string;
+		/** G2: forwarded to bumpKnowledgeConfidenceBatch. */
+		floorOptions?: ConfidenceFloorOptions;
+	},
 ): Promise<{
 	processed: number;
 	bumps: number;
@@ -1120,7 +1157,11 @@ export async function applyKnowledgeVerdictFeedback(
 			const { bumpKnowledgeConfidenceBatch } = await import(
 				'./knowledge-store.js'
 			);
-			await bumpKnowledgeConfidenceBatch(directory, deltas);
+			await bumpKnowledgeConfidenceBatch(
+				directory,
+				deltas,
+				options?.floorOptions,
+			);
 		}
 
 		return {

@@ -376,6 +376,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockIsCommandAvailable.mockImplementation((cmd: string) => {
 				return cmd === 'gradlew'; // gradlew is checked via existsSync, not isCommandAvailable
 			});
+			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -387,6 +388,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 				return path.includes('build.gradle') || path.includes('gradlew');
 			});
 			mockIsCommandAvailable.mockImplementation(() => false);
+			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -417,9 +419,14 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 		it('should detect with both pom.xml and build.gradle, mvn and gradle both available', () => {
 			mockExistsSync.mockImplementation((path: string) => {
-				return path.includes('pom.xml') || path.includes('build.gradle');
+				return (
+					path.includes('pom.xml') ||
+					(path.includes('build.gradle') && !path.includes('.kts'))
+				);
 			});
 			mockIsCommandAvailable.mockImplementation(() => true);
+			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
+			mockReaddirSync.mockImplementation(() => []);
 
 			const result = detectAdditionalLinter('/test/path');
 

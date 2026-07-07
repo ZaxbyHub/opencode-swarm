@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.107.3",
+	"version": "7.107.6",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -52,6 +52,7 @@
 		".opencode/skills/deep-dive",
 		".opencode/skills/deep-research",
 		".opencode/skills/codebase-review-swarm",
+		".opencode/skills/swarm-implement",
 		".opencode/skills/design-docs",
 		".opencode/skills/swarm-pr-review",
 		".opencode/skills/swarm-pr-feedback",

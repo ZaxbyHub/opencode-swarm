@@ -1219,10 +1219,10 @@ export const COMMAND_REGISTRY = {
 	},
 	'knowledge restore': {
 		handler: (ctx) => handleKnowledgeRestoreCommand(ctx.directory, ctx.args),
-		description: 'Restore a quarantined knowledge entry <id>',
+		description: 'Restore a quarantined or archived knowledge entry <id>',
 		subcommandOf: 'knowledge',
 		details:
-			'Restores a quarantined knowledge entry back to the active knowledge store by ID. Validates entry ID format (1-64 alphanumeric/hyphen/underscore). Entry must currently be in quarantine state.',
+			"Restores a quarantined or archived knowledge entry back to the active knowledge store by ID. Dispatches by current status: an 'archived' entry is restored to its pre-archive status; a 'quarantined' entry is restored from the quarantine sidecar. Validates entry ID format (1-64 alphanumeric/hyphen/underscore).",
 		args: '<entry-id>',
 		category: 'utility',
 	},

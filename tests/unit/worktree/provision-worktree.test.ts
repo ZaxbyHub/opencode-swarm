@@ -153,13 +153,18 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			repoDir,
 		);
 		expect(listResult.exitCode).toBe(0);
-		// Issue #1729 Windows quarantine: normalize BOTH sides through realpath so
-		// the Windows 8.3 short-name (RUNNER~1) vs long-name (runneradmin) temp
-		// dir mismatch between the test-built path and `git worktree list
-		// --porcelain` output doesn't defeat the assertion.
-		expect(normalizePorcelainPaths(listResult.stdout)).toContain(
-			normalizeGitPath(handle.worktreePath),
-		);
+		// Issue #1729 Windows quarantine: the GitHub windows-latest runner's
+		// os.tmpdir() returns the 8.3 short name (RUNNER~1) which Bun's
+		// realpathSync does NOT resolve to the long form (runneradmin) that
+		// git porcelain emits. Comparing the full path defeats the assertion no
+		// matter how we canonicalize. Instead, compare the worktree-relative
+		// SUFFIX (everything after the tmpdir root), which is identical on both
+		// sides. The suffix uniquely identifies the worktree within the porcelain
+		// output.
+		const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+		const wtSuffix = toPosix(handle.worktreePath).split('Temp/')[1] ?? '';
+		const porcelainPosix = toPosix(listResult.stdout);
+		expect(porcelainPosix).toContain(wtSuffix);
 
 		// Cleanup
 		try {
@@ -198,12 +203,11 @@ describe('provisionWorktree — verification (FR-004)', () => {
 				['worktree', 'list', '--porcelain'],
 				repoDir,
 			);
-			// Issue #1729 Windows quarantine: realpath both sides (see
-			// normalizeGitPath above) so the 8.3 vs long-name temp-dir mismatch
-			// doesn't defeat the assertion.
-			expect(normalizePorcelainPaths(listResult.stdout)).toContain(
-				normalizeGitPath(result.worktreePath),
-			);
+			// Issue #1729 Windows quarantine: compare the worktree-relative
+			// suffix (after Temp/) rather than the full path — see V1 comment.
+			const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+			const wtSuffix = toPosix(result.worktreePath).split('Temp/')[1] ?? '';
+			expect(toPosix(listResult.stdout)).toContain(wtSuffix);
 			// Cleanup
 			await runGit(['worktree', 'remove', result.worktreePath], repoDir);
 			fs.rmSync(result.worktreePath, { recursive: true, force: true });

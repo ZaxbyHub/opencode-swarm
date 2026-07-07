@@ -580,6 +580,13 @@ Rules:
 - The leading comment in the body explains the **prior buggy behavior** in concrete terms — what the code did before, not what it does now.
 - One regression test per finding. Do not pile unrelated assertions into a single regression block.
 
+Regression tests must be falsifiable. Before marking regression coverage
+complete, temporarily remove or bypass the fix, run the regression test and
+confirm it fails for the expected reason, restore the fix, then rerun the test
+and confirm it passes. Record both commands/results in the task evidence. If the
+fix cannot be safely reverted, document the exact reason and use the smallest
+equivalent mutation that would reintroduce the bug.
+
 Examples in-tree: `tests/unit/graph/graph-query.test.ts`, `tests/unit/graph/import-extractor.test.ts`, `tests/unit/graph/graph-store.test.ts`.
 
 ### Guardrail Authority Tests

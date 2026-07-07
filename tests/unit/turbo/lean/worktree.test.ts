@@ -7,6 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -845,12 +847,17 @@ describe('shortenWorktreePath', () => {
 	});
 
 	test('returns correct path regardless of platform', () => {
-		_internals.osTmpdir = () => '/tmp';
+		// shortenWorktreePath now realpath-resolves osTmpdir() to canonicalize
+		// the 8.3 short name on Windows (issue #1729). Use the REAL os.tmpdir()
+		// so realpathSync resolves consistently on every platform; the test
+		// verifies the join structure, not a hardcoded path.
+		const realTmp = fs.realpathSync(os.tmpdir());
+		_internals.osTmpdir = () => realTmp;
 		_internals.platform = 'linux';
 
 		const result = shortenWorktreePath('/project', 'sess-1', 'lane-2');
 
-		expect(result).toBe(path.join('/tmp', 'swwt', 'sess-1', 'lane-2'));
+		expect(result).toBe(path.join(realTmp, 'swwt', 'sess-1', 'lane-2'));
 	});
 });
 

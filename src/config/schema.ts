@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
 import { type AgentName, ALL_AGENT_NAMES } from './constants';
 
 /**
@@ -1099,6 +1100,49 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** G2 (#1715): action when a knowledge entry sits at the confidence floor
+	 * (0.1) with a net-negative outcome signal. Previously confidence bumps
+	 * dead-ended with no consequence; this closes the loop.
+	 * - `demote` (default): strip retrieval `statusBoost` via the
+	 *   `confidence_floor_demoted` flag — reversible.
+	 * - `quarantine`: route through `quarantineEntry` (disruptive).
+	 * - `none`: legacy dead-end behavior. */
+	confidence_floor_action: z
+		.enum(['none', 'demote', 'quarantine'])
+		.default('demote'),
+	/** G2: minimum total outcome-evidence count required before acting on a
+	 * floor entry (avoids demoting brand-new entries with one stray negative). */
+	confidence_floor_min_outcomes: z.number().int().min(0).default(3),
+	/** G2: outcome-signal threshold below which a floor entry is acted on
+	 * (`computeOutcomeSignal` returns (-1, 1); net-negative is `< 0`). */
+	confidence_floor_signal_threshold: z.number().min(-1).max(1).default(0),
+	/** G3 (#1715): action when a knowledge entry's contradicted count crosses
+	 * the threshold within the window. `tag_only` preserves legacy behavior
+	 * (curator tags, no event/count action); `quarantine` auto-quarantines. */
+	contradiction_threshold_action: z
+		.enum(['tag_only', 'quarantine'])
+		.default('quarantine'),
+	/** G3: number of `contradicted` events within the window required to fire
+	 * the contradiction-threshold action. */
+	contradiction_quarantine_threshold: z.number().int().positive().default(3),
+	/** G3: window (in days) for counting `contradicted` events toward the
+	 * threshold. */
+	contradiction_quarantine_window_days: z.number().int().positive().default(30),
+	/** G7 (#1716): minimum consecutive net-negative phase evaluations
+	 * required to demote a `promoted` entry to `established`. Each phase
+	 * evaluation where the entry's outcome signal is at or below
+	 * `promoted_demotion_signal_threshold` increments the counter; a
+	 * non-negative phase resets it to 0. */
+	promoted_demotion_min_negative_phases: z.number().int().positive().default(3),
+	/** G7 (#1716): outcome-signal threshold at or below which a promoted
+	 * entry's `recent_negative_phase_count` increments for the current phase.
+	 * Defaults to `OUTCOME_BLOCK_THRESHOLD` (-0.3) — the same value that
+	 * blocks promotion — so promotion and demotion share one threshold. */
+	promoted_demotion_signal_threshold: z
+		.number()
+		.min(-1)
+		.max(1)
+		.default(OUTCOME_BLOCK_THRESHOLD),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({

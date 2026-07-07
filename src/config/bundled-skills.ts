@@ -15,6 +15,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'deep-dive',
 	'deep-research',
 	'codebase-review-swarm',
+	'swarm-implement',
 	'design-docs',
 	'swarm-pr-review',
 	'swarm-pr-feedback',

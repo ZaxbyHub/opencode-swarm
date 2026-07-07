@@ -286,7 +286,7 @@ When `curator.skill_generation_enabled: true` (default), the curator can emit `s
 | `/swarm knowledge` | List active entries |
 | `/swarm knowledge migrate` | Import legacy `.swarm/context.md` |
 | `/swarm knowledge quarantine <id> [reason]` | Hide entry (preserved) |
-| `/swarm knowledge restore <id>` | Un-quarantine |
+| `/swarm knowledge restore <id>` | Restore a quarantined or archived entry |
 | `/swarm promote <text>` | Create new hive entry |
 | `/swarm promote --from-swarm <id>` | Promote existing swarm entry |
 | `/swarm curate` | Run curator review + hive promotion pass |

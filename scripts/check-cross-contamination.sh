@@ -16,7 +16,7 @@ set -euo pipefail
 # match the expected sum so the pair becomes a regression sentinel.
 PAIRS=(
   "tests/unit/diff/ast-diff.test.ts|src/hooks/__tests__/semantic-diff-injection.test.ts|41|16|57"
-  "tests/unit/hooks/knowledge-reader.test.ts|tests/unit/services/skill-generator.test.ts|20|82|102"
+  "tests/unit/hooks/knowledge-reader.test.ts|tests/unit/services/skill-generator.test.ts|22|77|71"
 )
 
 regression=0

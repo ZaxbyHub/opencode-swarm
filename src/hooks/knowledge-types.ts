@@ -149,10 +149,84 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	auto_generated?: boolean; // true if created without human review
 	phases_alive?: number; // monotonic phase counter, incremented at phase-wrap (excluding promoted & archived)
 	max_phases?: number; // per-entry TTL in phases, falls back to KnowledgeConfig.default_max_phases
+	/** G2 (#1715): set when the confidence-floor action fired (demote).
+	 * Suppresses `statusBoost` in retrieval so a floor-clamped entry sinks to
+	 * the bottom of ranking without introducing a new retrieval-leaking status.
+	 * Cleared if confidence recovers above the floor. */
+	confidence_floor_demoted?: boolean;
+	/** G6 (#1716): recorded at archive time so `unarchiveEntry` can restore the
+	 * entry to its prior status. Set by all three archive producers (tool,
+	 * curator recommendation, TTL sweep). Absent on entries archived before
+	 * this field existed; `unarchiveEntry` falls back to `'candidate'`. */
+	archived_from?: KnowledgeEntryBase['status'];
+	/** G6 (#1716): ISO 8601 timestamp of archival. */
+	archived_at?: string;
+	/** G7 (#1716): consecutive-net-negative-phase counter, incremented by
+	 * `runAutoDemotion` when a promoted entry's outcome signal is at/below
+	 * `promoted_demotion_signal_threshold`. Reset on a non-negative phase and on
+	 * demotion. Used with `last_demotion_phase` to demote at
+	 * `promoted_demotion_min_negative_phases` consecutive net-negative phases. */
+	recent_negative_phase_count?: number;
+	/** G7 (#1716): the `phase_number` of the most recent `runAutoDemotion`
+	 * counter update. Prevents double-counting when `curateAndStoreSwarm` runs
+	 * multiple times in the same logical phase (e.g. phase-complete + close). */
+	last_demotion_phase?: number;
 }
 
 /** v2 schema marker. v1 entries are still parseable and normalized in-memory by knowledge-store.normalizeEntry. */
 export const KNOWLEDGE_SCHEMA_VERSION = 2;
+
+/**
+ * The single canonical set of inactive (non-retrieval) knowledge statuses.
+ * Every retrieval/filter consumer MUST go through {@link isActiveStatus} rather
+ * than re-deriving its own literal list — the G4 drift (issue #1716) was caused
+ * by exactly that pattern.
+ *
+ * Note: `archived`, `quarantined`, and `quarantined_unactionable` are all
+ * considered inactive. The remaining statuses (`candidate`, `established`,
+ * `promoted`) plus the "unknown" cases (`undefined`/`null`/any future string)
+ * are considered active — the unknown-status case is intentional and preserves
+ * the #828 regression-guard behavior (entries with missing status after
+ * migration are not silently dropped from retrieval).
+ */
+export const INACTIVE_STATUSES: ReadonlySet<string> = new Set([
+	'archived',
+	'quarantined',
+	'quarantined_unactionable',
+]);
+
+/**
+ * Outcome-signal threshold at or below which a knowledge entry is considered to
+ * have a clearly negative track record (negatives clearly outweigh positives,
+ * with enough corroborating evidence to act on). Tuned against
+ * `computeOutcomeSignal`'s Laplace smoothing so a lone ignore/contradiction
+ * does not trip it.
+ *
+ * G7 (#1716): the canonical home for this value. Previously a module-local
+ * const in `knowledge-curator.ts`; lifted here so the config default
+ * (`promoted_demotion_signal_threshold`) can reference the same value without
+ * a schema→curator import cycle. Both the promotion block and the demotion
+ * threshold share this single source of truth.
+ */
+export const OUTCOME_BLOCK_THRESHOLD = -0.3;
+
+/**
+ * Returns `true` for retrieval-active statuses. Returns `true` for
+ * `undefined`/`null`/unknown strings (preserves the #828 deny-list intent:
+ * entries with unexpected status values are not silently dropped). Returns
+ * `false` only for the three known inactive statuses.
+ *
+ * PRR-009 / design note: issue #1716's G4 section literally requested an
+ * allow-list ("future statuses default to excluded"). We deliberately use a
+ * deny-list here to preserve the #828 regression-guard intent (entries with
+ * missing/unknown status after migration are not silently dropped from
+ * retrieval). The known-inactive leak the issue cares about (the 3 statuses
+ * above) is closed; the hypothetical-future-status robustness is the tradeoff.
+ * Switching to an allow-list would re-introduce #828.
+ */
+export function isActiveStatus(status: string | undefined | null): boolean {
+	return !INACTIVE_STATUSES.has(status ?? '');
+}
 
 export interface SwarmKnowledgeEntry extends KnowledgeEntryBase {
 	tier: 'swarm';
@@ -235,6 +309,26 @@ export interface KnowledgeConfig {
 	todo_max_phases: number;
 	/** Enable age-based sweep of knowledge entries. Default: true */
 	sweep_enabled: boolean;
+	/** G2 (#1715): action when an entry sits at the confidence floor with a
+	 * net-negative outcome signal. Default: 'demote'. */
+	confidence_floor_action: 'none' | 'demote' | 'quarantine';
+	/** G2: minimum total outcome-evidence count required before acting. Default: 3. */
+	confidence_floor_min_outcomes: number;
+	/** G2: outcome-signal threshold below which a floor entry is acted on. Default: 0. */
+	confidence_floor_signal_threshold: number;
+	/** G3 (#1715): action when contradicted count crosses the threshold. Default: 'quarantine'. */
+	contradiction_threshold_action: 'tag_only' | 'quarantine';
+	/** G3: contradicted-event count in window to trigger the action. Default: 3. */
+	contradiction_quarantine_threshold: number;
+	/** G3: window in days for counting contradicted events. Default: 30. */
+	contradiction_quarantine_window_days: number;
+	/** G7 (#1716): consecutive net-negative phase evaluations required to demote
+	 * a `promoted` entry to `established`. Default: 3. */
+	promoted_demotion_min_negative_phases: number;
+	/** G7 (#1716): outcome-signal threshold at or below which a promoted entry's
+	 * demotion counter increments for the current phase. Default: -0.3 (matches
+	 * `OUTCOME_BLOCK_THRESHOLD`). */
+	promoted_demotion_signal_threshold: number;
 	/** Change 5: retrieval-upgrade tuning (MMR / cold-start / synonyms). */
 	retrieval?: {
 		mmr_lambda?: number;

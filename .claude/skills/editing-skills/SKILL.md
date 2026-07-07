@@ -22,18 +22,23 @@ Look the slug up in `src/config/skill-mirrors.ts`:
 
 - **MIRRORED_ARCHITECT_MODE_SKILLS** (brainstorm, specify, clarify-spec,
   resume, clarify, discover, consult, pre-phase-briefing, council, deep-dive,
-  deep-research, issue-ingest, plan, critic-gate, execute, phase-wrap,
-  design-docs): `.opencode` and `.claude` copies must stay **byte-identical**.
+  deep-research, issue-ingest, plan, critic-gate, design-docs): `.opencode`
+  and `.claude` copies must stay **byte-identical**.
   Any edit is a dual-tree edit — apply the identical change to both files.
-- **ADAPTER** (swarm-pr-review, swarm-pr-feedback): `.opencode` is canonical;
-  `.claude` and `.agents` are thin shims that must keep the exact relative
-  reference `../../../.opencode/skills/<slug>/SKILL.md` (drift-check verifies
-  the string).
+- **ADAPTER** (execute, phase-wrap, swarm-pr-review, swarm-pr-feedback):
+  `.opencode` is canonical; `.claude` and `.agents` where present are thin
+  shims that must keep the exact relative reference
+  `../../../.opencode/skills/<slug>/SKILL.md` (drift-check verifies the
+  string). `swarm-implement` follows the same operational adapter pattern, but
+  is currently classified as an additional divergent contract because the
+  additional-contract registry does not yet model non-architect adapter shims.
 - **DIVERGENT**: both trees exist, content intentionally differs — a
   single-tree edit is fine. `codebase-review-swarm` is in
-  `DIVERGENT_ARCHITECT_MODE_SKILLS`; `engineering-conventions` and
-  `writing-tests` are `divergent` entries in
-  `ADDITIONAL_SKILL_MIRROR_CONTRACTS`.
+  `DIVERGENT_ARCHITECT_MODE_SKILLS`; `engineering-conventions` is a divergent
+  entry in `ADDITIONAL_SKILL_MIRROR_CONTRACTS`. `swarm-implement` and
+  `writing-tests` are classified divergent only because the additional-contract
+  model does not yet have an adapter kind; operationally, `.opencode` is
+  canonical and `.claude` delegates to it.
 - **OPENCODE-ONLY**: `loop` (`OPENCODE_ONLY_ARCHITECT_MODE_SKILLS`) and
   `running-tests` (an `opencode-only` ADDITIONAL contract) — do **not**
   create `.claude` mirrors (a `.claude/skills/loop` would shadow Claude
@@ -43,8 +48,8 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   mirror any edit to `.opencode` byte-for-byte). It also has discovery shims
   in `.agents/skills/commit-pr/` and `.github/skills/commit-pr/` that point
   at the `.claude` file as canonical.
-- **No skill-mirrors.ts entry** (qa-sweep, research-first, swarm,
-  swarm-implement, unswarm, tech-debt-ci-review, issue-tracer,
+- **No skill-mirrors.ts entry** (qa-sweep, research-first, swarm, unswarm,
+  tech-debt-ci-review, issue-tracer,
   rust-crate-ci, orchestrating-subagents, durable-session-state,
   editing-skills, …): the `.claude` file is the source protocol and there is
   no `.opencode` copy, no CI gate, and no npm shipment. **But most are not

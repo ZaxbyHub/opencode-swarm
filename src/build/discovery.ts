@@ -12,7 +12,7 @@ export interface BuildCommand {
 	ecosystem: string;
 	command: string;
 	cwd: string;
-	priority: number; // Lower = higher priority
+	priority: number; // Higher = higher priority
 }
 
 export interface BuildDiscoveryResult {
@@ -41,9 +41,9 @@ const ECOSYSTEMS: EcosystemConfig[] = [
 		buildFiles: ['package.json'],
 		toolchainCommands: ['npm', 'yarn', 'pnpm'],
 		commands: [
-			{ command: 'npm run build', priority: 1 },
-			{ command: 'npm run typecheck', priority: 2 },
-			{ command: 'npm run check', priority: 3 },
+			{ command: 'npm run build', priority: 30 },
+			{ command: 'npm run typecheck', priority: 20 },
+			{ command: 'npm run check', priority: 10 },
 		],
 		repoDefinedScripts: ['build', 'typecheck', 'check', 'compile'],
 	},
@@ -52,30 +52,30 @@ const ECOSYSTEMS: EcosystemConfig[] = [
 		buildFiles: ['Cargo.toml'],
 		toolchainCommands: ['cargo'],
 		commands: [
-			{ command: 'cargo build', priority: 1 },
-			{ command: 'cargo check', priority: 2 },
+			{ command: 'cargo build', priority: 20 },
+			{ command: 'cargo check', priority: 10 },
 		],
 	},
 	{
 		ecosystem: 'go',
 		buildFiles: ['go.mod'],
 		toolchainCommands: ['go'],
-		commands: [{ command: 'go build ./...', priority: 1 }],
+		commands: [{ command: 'go build ./...', priority: 10 }],
 	},
 	{
 		ecosystem: 'python',
 		buildFiles: ['pyproject.toml', 'setup.py', 'setup.cfg'],
 		toolchainCommands: ['python', 'python3', 'py'],
 		commands: [
-			{ command: 'python -m py_compile', priority: 1 },
-			{ command: 'python -m build', priority: 2 },
+			{ command: 'python -m build', priority: 20 },
+			{ command: 'python -m py_compile', priority: 10 },
 		],
 	},
 	{
 		ecosystem: 'java-maven',
 		buildFiles: ['pom.xml'],
 		toolchainCommands: ['mvn'],
-		commands: [{ command: 'mvn compile', priority: 1 }],
+		commands: [{ command: 'mvn compile', priority: 10 }],
 	},
 	{
 		ecosystem: 'java-gradle',
@@ -87,30 +87,30 @@ const ECOSYSTEMS: EcosystemConfig[] = [
 					process.platform === 'win32'
 						? 'gradlew.bat build'
 						: './gradlew build',
-				priority: 1,
+				priority: 20,
 			},
-			{ command: 'gradle build', priority: 2 },
+			{ command: 'gradle build', priority: 10 },
 		],
 	},
 	{
 		ecosystem: 'dotnet',
 		buildFiles: ['*.csproj', '*.fsproj', '*.vbproj'],
 		toolchainCommands: ['dotnet'],
-		commands: [{ command: 'dotnet build', priority: 1 }],
+		commands: [{ command: 'dotnet build', priority: 10 }],
 	},
 	{
 		ecosystem: 'swift',
 		buildFiles: ['Package.swift'],
 		toolchainCommands: ['swift'],
-		commands: [{ command: 'swift build', priority: 1 }],
+		commands: [{ command: 'swift build', priority: 10 }],
 	},
 	{
 		ecosystem: 'dart',
 		buildFiles: ['pubspec.yaml', 'pubspec.lock'],
 		toolchainCommands: ['dart', 'flutter'],
 		commands: [
-			{ command: 'dart analyze', priority: 1 },
-			{ command: 'dart compile', priority: 2 },
+			{ command: 'dart compile', priority: 20 },
+			{ command: 'dart analyze', priority: 10 },
 		],
 	},
 	{
@@ -118,8 +118,8 @@ const ECOSYSTEMS: EcosystemConfig[] = [
 		buildFiles: ['Makefile', 'CMakeLists.txt'],
 		toolchainCommands: ['make', 'cmake'],
 		commands: [
-			{ command: 'make', priority: 1 },
-			{ command: 'cmake -B build && cmake --build build', priority: 2 },
+			{ command: 'make', priority: 20 },
+			{ command: 'cmake -B build && cmake --build build', priority: 10 },
 		],
 	},
 	{
@@ -129,7 +129,7 @@ const ECOSYSTEMS: EcosystemConfig[] = [
 		commands: [
 			{
 				command: 'composer install --no-interaction --prefer-dist',
-				priority: 1,
+				priority: 10,
 			},
 		],
 	},
@@ -271,7 +271,7 @@ function getRepoDefinedScripts(
 			if (pkg.scripts[scriptName]) {
 				found.push({
 					script: `npm run ${scriptName}`,
-					priority: 0, // Repo-defined scripts have highest priority
+					priority: 100, // Repo-defined scripts have highest priority
 				});
 			}
 		}
@@ -404,9 +404,9 @@ export async function discoverBuildCommandsFromProfiles(
 			continue;
 		}
 
-		// Sort commands by priority (lower = higher priority)
+		// Sort commands by priority (higher = higher priority)
 		const sortedCommands = [...fullProfile.build.commands].sort(
-			(a, b) => a.priority - b.priority,
+			(a, b) => b.priority - a.priority,
 		);
 
 		// Find first available binary
@@ -548,8 +548,8 @@ export async function discoverBuildCommands(
 		}
 	}
 
-	// Sort by priority (lower = higher priority)
-	commands.sort((a, b) => a.priority - b.priority);
+	// Sort by priority (higher = higher priority)
+	commands.sort((a, b) => b.priority - a.priority);
 
 	return { commands, skipped };
 }

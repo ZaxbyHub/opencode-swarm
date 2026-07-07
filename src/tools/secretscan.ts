@@ -1071,13 +1071,94 @@ export async function runSecretscan(
 }
 
 /**
+ * Run secretscan over an explicit, already-selected file set.
+ * Used by pre_check_batch so changed-file hard gates share the same detector
+ * registry and entropy logic as the standalone scanner.
+ */
+export async function runSecretscanOnFiles(
+	files: string[],
+	directory: string,
+): Promise<SecretscanResult | SecretscanErrorResult> {
+	try {
+		const findings: SecretFinding[] = [];
+		let filesScanned = 0;
+		let skippedFiles = 0;
+
+		for (const file of files) {
+			if (typeof file !== 'string') {
+				skippedFiles++;
+				continue;
+			}
+
+			const resolvedPath = path.isAbsolute(file)
+				? path.resolve(file)
+				: path.resolve(directory, file);
+
+			if (!isPathWithinScope(resolvedPath, directory)) {
+				skippedFiles++;
+				continue;
+			}
+
+			const ext = path.extname(resolvedPath).toLowerCase();
+			if (DEFAULT_EXCLUDE_EXTENSIONS.has(ext)) {
+				skippedFiles++;
+				continue;
+			}
+
+			if (!fs.existsSync(resolvedPath)) {
+				skippedFiles++;
+				continue;
+			}
+
+			const fileFindings = scanFileForSecrets(resolvedPath);
+			filesScanned++;
+			findings.push(...fileFindings);
+			if (findings.length >= MAX_FINDINGS) {
+				findings.length = MAX_FINDINGS;
+				break;
+			}
+		}
+
+		findings.sort((a, b) => {
+			if (a.path < b.path) return -1;
+			if (a.path > b.path) return 1;
+			return a.line - b.line;
+		});
+
+		return {
+			scan_dir: directory,
+			findings,
+			count: findings.length,
+			files_scanned: filesScanned,
+			skipped_files: skippedFiles,
+		};
+	} catch (e) {
+		return {
+			error:
+				e instanceof Error
+					? `scan failed: ${e.message}`
+					: 'scan failed: unknown error',
+			scan_dir: directory,
+			findings: [],
+			count: 0,
+			files_scanned: 0,
+			skipped_files: 0,
+		};
+	}
+}
+
+/**
  * DI seam for testability. Contains all test-mocked exports.
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
 export const _internals: {
 	secretscan: typeof secretscan;
 	runSecretscan: typeof runSecretscan;
+	runSecretscanOnFiles: typeof runSecretscanOnFiles;
+	SECRET_PATTERNS: typeof SECRET_PATTERNS;
 } = {
 	secretscan,
 	runSecretscan,
+	runSecretscanOnFiles,
+	SECRET_PATTERNS,
 } as const;

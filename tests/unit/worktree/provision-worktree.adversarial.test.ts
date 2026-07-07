@@ -174,12 +174,14 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 			['worktree', 'list', '--porcelain'],
 			repoDir,
 		);
-		// Issue #1729 Windows quarantine: realpath both sides (see
-		// normalizeGitPath above) so the 8.3 vs long-name temp-dir mismatch
-		// doesn't defeat the assertion.
-		expect(normalizePorcelainPaths(listResult.stdout)).toContain(
-			normalizeGitPath(firstPath),
-		);
+		// Issue #1729 Windows quarantine: compare the worktree-relative suffix
+		// (after Temp/) rather than the full path. The GitHub windows-latest
+		// runner's os.tmpdir() returns the 8.3 short name (RUNNER~1) which
+		// Bun's realpathSync does NOT resolve to the long form (runneradmin)
+		// that git porcelain emits. The suffix is identical on both sides.
+		const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+		const firstSuffix = toPosix(firstPath).split('Temp/')[1] ?? '';
+		expect(toPosix(listResult.stdout)).toContain(firstSuffix);
 		expect(listResult.stdout).toContain(branchName);
 
 		// Now call provisionWorktree for the SAME branch — should ERROR
@@ -336,12 +338,11 @@ branch refs/heads/main
 				['worktree', 'list', '--porcelain'],
 				repoDir,
 			);
-			// Issue #1729 Windows quarantine: realpath both sides (see
-			// normalizeGitPath above) so the 8.3 vs long-name temp-dir mismatch
-			// doesn't defeat the assertion.
-			expect(normalizePorcelainPaths(listResult.stdout)).toContain(
-				normalizeGitPath(result.worktreePath),
-			);
+			// Issue #1729 Windows quarantine: compare the worktree-relative
+			// suffix (after Temp/) rather than the full path — see A1 comment.
+			const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+			const wtSuffix = toPosix(result.worktreePath).split('Temp/')[1] ?? '';
+			expect(toPosix(listResult.stdout)).toContain(wtSuffix);
 			// Cleanup
 			await runGit(['worktree', 'remove', result.worktreePath], repoDir);
 			fs.rmSync(result.worktreePath, { recursive: true, force: true });

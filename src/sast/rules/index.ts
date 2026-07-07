@@ -56,6 +56,7 @@ import { javaRules } from './java';
 import { javascriptRules } from './javascript';
 import { phpRules } from './php';
 import { pythonRules } from './python';
+import { rustRules } from './rust';
 
 /**
  * All registered SAST rules
@@ -64,6 +65,7 @@ const allRules: SastRule[] = [
 	...javascriptRules,
 	...pythonRules,
 	...goRules,
+	...rustRules,
 	...javaRules,
 	...phpRules,
 	...cRules,
