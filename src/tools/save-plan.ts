@@ -182,10 +182,10 @@ function evaluateRequirementCoverage(
 
 	for (const requirement of requirements) {
 		const mappedTaskIds: string[] = [];
+		const idPattern = new RegExp(`\\b${requirement.id}\\b`, 'i');
 		for (const phase of args.phases) {
 			for (const task of phase.tasks) {
 				const taskText = `${task.description}\n${task.acceptance ?? ''}`;
-				const idPattern = new RegExp(`\\b${requirement.id}\\b`, 'i');
 				if (idPattern.test(taskText)) {
 					mappedTaskIds.push(task.id);
 				}

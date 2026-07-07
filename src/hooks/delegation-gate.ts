@@ -17,8 +17,8 @@ import {
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
 import {
-	computePlanHash,
-	loadLastApprovedPlan,
+	computePlanStructureHash,
+	loadLastPlanCriticApprovedSnapshot,
 	takeSnapshotEvent,
 } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
@@ -489,12 +489,26 @@ function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
 		.join('\n')
 		.toLowerCase();
 	if (!text) return false;
-	return (
-		text.includes('mode: critic-gate') ||
-		(text.includes('review plan') && text.includes('execute')) ||
-		(text.includes('plan critic') && text.includes('plan'))
-	);
+	// Broad-recall-biased on purpose: the caller already narrows to
+	// `subagent_type === 'critic'` (a target the trusted architect controls), so
+	// a false positive is low-risk, while a false negative silently blocks ALL
+	// EXECUTE-phase coder work with no auto-recovery. Any single signal below —
+	// drawn from the phrasings the critic-gate/plan skills tell the architect to
+	// send — is therefore sufficient; no AND-pairing.
+	return PLAN_CRITIC_TASK_SIGNALS.some((signal) => text.includes(signal));
 }
+
+// Substrings that, in a dispatch to `subagent_type: 'critic'`, mark it as a
+// plan critic-gate review. Kept lowercase (text is lowercased before matching).
+const PLAN_CRITIC_TASK_SIGNALS = [
+	'critic-gate', // "MODE: CRITIC-GATE", "critic-gate protocol/review"
+	'plan critic',
+	'review plan',
+	'review the plan',
+	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
+	'approve the plan',
+	'plan approval',
+] as const;
 
 async function assertPlanCriticApprovedForExecution(
 	directory: string,
@@ -503,7 +517,12 @@ async function assertPlanCriticApprovedForExecution(
 	if (!plan) return;
 
 	const planId = derivePlanId(plan);
-	const approved = await loadLastApprovedPlan(directory, planId);
+	// Use the plan-critic-scoped loader (not the general loadLastApprovedPlan):
+	// it looks PAST unrelated `critic_approved` snapshots (e.g. per-phase
+	// drift-verification snapshots from write-drift-evidence.ts) to find the
+	// snapshot carrying the `plan_critic_gate` approval marker. Otherwise a later
+	// drift snapshot would shadow a still-valid plan-critic approval (bug F-A2).
+	const approved = await loadLastPlanCriticApprovedSnapshot(directory, planId);
 	if (!approved) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
@@ -511,6 +530,9 @@ async function assertPlanCriticApprovedForExecution(
 		);
 	}
 
+	// Verdict is still load-bearing: the loader filters on the plan_critic_gate
+	// marker but not on the verdict value, so a (malformed) non-APPROVED
+	// plan-critic snapshot must still be rejected here.
 	if (
 		approved.approval?.verdict !== 'APPROVED' ||
 		approved.approval?.source !== 'plan_critic_gate'
@@ -521,7 +543,14 @@ async function assertPlanCriticApprovedForExecution(
 		);
 	}
 
-	if (approved.payloadHash !== computePlanHash(plan)) {
+	// Compare STRUCTURAL hashes (excluding phase/task status). The plan-critic
+	// snapshot is taken while all tasks are `pending`, but the EXECUTE skill
+	// mandates flipping the current task to `in_progress` (a status-only
+	// mutation, dual-written into plan.json) BEFORE delegating its coder. A
+	// status-inclusive comparison would therefore fire on the first conforming
+	// coder dispatch of every run (bug F-A1). An actual structural change
+	// (description, files, dependencies, ...) still trips this staleness check.
+	if (approved.payloadHash !== computePlanStructureHash(plan)) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
 				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
@@ -546,6 +575,11 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	const plan = await loadPlanJsonOnly(directory);
 	if (!plan) return;
 
+	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
+	// so `assertPlanCriticApprovedForExecution` can match this approval after the
+	// architect flips the current task to `in_progress` before delegating its
+	// coder. This MUST be the same hash function the gate compares against
+	// (`computePlanStructureHash`), or the staleness check would never match.
 	await takeSnapshotEvent(directory, plan, {
 		source: 'critic_approved',
 		approvalMetadata: {
@@ -555,6 +589,7 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 			call_id: input.callID,
 			approved_at: new Date().toISOString(),
 		},
+		payloadHashOverride: computePlanStructureHash(plan),
 	});
 }
 
@@ -968,6 +1003,7 @@ export const _internals = {
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
 	resetStandardWorktreeIsolationState,
+	PLAN_CRITIC_TASK_SIGNALS,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},

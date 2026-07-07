@@ -11,6 +11,7 @@ This protocol is loaded on demand by the architect stub in src/agents/architect.
 ### MODE: CRITIC-GATE
 Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
 - Send the full plan.md content and codebase context summary
+- Explicitly reference "plan.md" or "critic-gate" in the dispatch prompt text. This lets the mechanical approval-recording gate reliably detect the review and record the critic's APPROVED verdict, which the EXECUTE-phase coder gate then requires.
 - **APPROVED** → Proceed to MODE: EXECUTE
 - **NEEDS_REVISION** → Revise the plan based on critic feedback, then resubmit (max 2 cycles)
 - **REJECTED** → Inform the user of fundamental issues and ask for guidance before proceeding
@@ -26,6 +27,7 @@ You MUST NOT proceed to MODE: EXECUTE without printing this checklist with fille
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
 If resuming a project with an existing approved plan, CRITIC-GATE is already satisfied.
+Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged approval snapshot (e.g. a plan approved before this mechanical gate existed, or one where the recording heuristic didn't fire) — in that case the first coder dispatch will fail with `PLAN_CRITIC_GATE_VIOLATION`. If that happens, do not assume CRITIC-GATE is satisfied; re-run it and get a fresh APPROVED verdict.
 
 6j. SPEC-GATE (Execute BEFORE any save_plan call):
 - The save_plan tool will REJECT if .swarm/spec.md does not exist (enforced at the tool level via SWARM_SKIP_SPEC_GATE env var bypass).
