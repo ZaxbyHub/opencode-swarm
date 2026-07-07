@@ -6,7 +6,7 @@
  * Uses the _internals DI seam pattern — no mock.module without spreading real exports.
  */
 
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -72,6 +72,8 @@ async function initGitRepo(repoDir: string): Promise<void> {
 	writeFileSync(path.join(repoDir, 'README.md'), '# test\n');
 	await runGit(repoDir, ['add', '.']);
 	await runGit(repoDir, ['commit', '-m', 'initial commit']);
+	// Ensure branch is named 'main' regardless of git's default (master on some systems)
+	await runGit(repoDir, ['branch', '-m', 'main']);
 }
 
 /**
@@ -104,6 +106,34 @@ async function createSwarmLaneBranch(
 function createActiveSession(sessionId: string): void {
 	ensureAgentSession(sessionId);
 }
+
+// Mock tryAcquireLock for all tests — real proper-lockfile fails on Ubuntu CI.
+// Tests that test the "lock held" path return before tryAcquireLock is called.
+const realTryAcquireLock = InitOrphanRecoveryInternals.tryAcquireLock;
+beforeEach(() => {
+	// Clean up shared .swarm-worktrees/ to prevent state leak between tests
+	const sharedWorktreeRoot = path.join(tmpdir(), '.swarm-worktrees');
+	try {
+		rmSync(sharedWorktreeRoot, { recursive: true, force: true });
+	} catch {
+		/* best-effort */
+	}
+
+	InitOrphanRecoveryInternals.tryAcquireLock = mock(async () => ({
+		acquired: true as const,
+		lock: {
+			filePath: '.swarm/locks/init-orphan-recovery.lock',
+			agent: 'init-orphan-recovery',
+			taskId: 'init',
+			timestamp: new Date().toISOString(),
+			expiresAt: Date.now() + 300000,
+			_release: async () => {},
+		},
+	}));
+});
+afterEach(() => {
+	InitOrphanRecoveryInternals.tryAcquireLock = realTryAcquireLock;
+});
 
 // ---------------------------------------------------------------------------
 // Cross-process interference: second process must not delete first process worktrees

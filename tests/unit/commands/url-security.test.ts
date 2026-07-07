@@ -260,13 +260,18 @@ describe('_internals.spawnSync envOverrides', () => {
 		envOverrides?: Record<string, string | null>,
 	): string {
 		const js = `process.stdout.write(process.env.${TEST_KEY} ?? 'undefined')`;
-		const res = urlSecurityInternals.spawnSync('node', ['-e', js], {
+		const res = urlSecurityInternals.spawnSync(process.execPath, ['-e', js], {
 			encoding: 'utf-8',
 			stdio: ['ignore', 'pipe', 'pipe'],
 			timeout: 5000,
 			env: { [TEST_KEY]: 'child_value' },
 			envOverrides,
 		});
+		if (!res) {
+			throw new Error(
+				'spawnSync returned null — process.execPath not found in PATH',
+			);
+		}
 		return (res.stdout as string).trim();
 	}
 

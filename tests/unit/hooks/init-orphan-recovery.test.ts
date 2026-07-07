@@ -100,6 +100,8 @@ async function initGitRepo(repoDir: string): Promise<void> {
 	writeFileSync(path.join(repoDir, 'README.md'), '# test\n');
 	await runGit(repoDir, ['add', '.']);
 	await runGit(repoDir, ['commit', '-m', 'initial commit']);
+	// Ensure branch is named 'main' regardless of git's default (master on some systems)
+	await runGit(repoDir, ['branch', '-m', 'main']);
 }
 
 /**
@@ -411,6 +413,20 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 			},
 		);
 
+		// Mock tryAcquireLock — real proper-lockfile fails on Ubuntu CI
+		const realTryAcquireLock = InitOrphanRecoveryInternals.tryAcquireLock;
+		InitOrphanRecoveryInternals.tryAcquireLock = mock(async () => ({
+			acquired: true as const,
+			lock: {
+				filePath: '.swarm/locks/init-orphan-recovery.lock',
+				agent: 'init-orphan-recovery',
+				taskId: 'init',
+				timestamp: new Date().toISOString(),
+				expiresAt: Date.now() + 300000,
+				_release: async () => {},
+			},
+		}));
+
 		try {
 			await runInitOrphanRecovery(activeDir);
 
@@ -429,6 +445,7 @@ describe('SC-109: active session worktrees are not touched during init recovery'
 			// Active session branch should be preserved
 			expect(remaining.some((b) => b.includes(activeSessionId))).toBe(true);
 		} finally {
+			InitOrphanRecoveryInternals.tryAcquireLock = realTryAcquireLock;
 			MergeInternals.cleanupOrphanedBranches = realCleanup;
 			rmSync(activeDir, { recursive: true, force: true });
 		}
