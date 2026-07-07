@@ -149,12 +149,62 @@ describe('drift-check: docs numeric claim detection', () => {
 		);
 
 		const findings = detectDocsClaimDrift(root);
+		expect(findings).toHaveLength(1);
 		const hit = findings.find(
 			(f) =>
 				f.category === 'docs-claim' &&
 				f.file === 'docs/planning.md' &&
 				f.message.includes('says 12') &&
 				f.message.includes('QA_GATE_PIPELINE_STEPS has 15'),
+		);
+		expect(hit).toBeDefined();
+	});
+
+	test('detects a missing claimed file as an error', () => {
+		const root = makeTempRoot();
+		// Write only swarm-briefing.md — do NOT write docs/planning.md
+		writeFile(
+			root,
+			'docs/swarm-briefing.md',
+			[
+				'After every task a 15-step QA gate verifies quality.',
+				'',
+				'## Pipeline (15 Steps)',
+			].join('\n'),
+		);
+
+		const findings = detectDocsClaimDrift(root);
+		const hit = findings.find(
+			(f) =>
+				f.severity === 'error' &&
+				f.category === 'docs-claim' &&
+				f.file === 'docs/planning.md' &&
+				f.message.toLowerCase().includes('missing'),
+		);
+		expect(hit).toBeDefined();
+	});
+
+	test('detects a file whose content does not match the expected numeric regex as a warning', () => {
+		const root = makeTempRoot();
+		// planning.md exists but does NOT contain the /full\s+(\d+)-step\s+QA gate/i pattern
+		writeFile(root, 'docs/planning.md', 'No steps here in the planning doc.\n');
+		writeFile(
+			root,
+			'docs/swarm-briefing.md',
+			[
+				'After every task a 15-step QA gate verifies quality.',
+				'',
+				'## Pipeline (15 Steps)',
+			].join('\n'),
+		);
+
+		const findings = detectDocsClaimDrift(root);
+		const hit = findings.find(
+			(f) =>
+				f.severity === 'warning' &&
+				f.category === 'docs-claim' &&
+				f.file === 'docs/planning.md' &&
+				f.message.toLowerCase().includes('missing numeric claim'),
 		);
 		expect(hit).toBeDefined();
 	});
