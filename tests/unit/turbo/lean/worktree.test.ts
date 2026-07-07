@@ -978,6 +978,9 @@ describe('provisionWorktree deps_strategy', () => {
 				existsCalls.push(p);
 				return false;
 			},
+			cp: async () => {
+				throw new Error('cp should not be called for skip');
+			},
 			cpSync: () => {
 				throw new Error('cpSync should not be called for skip');
 			},
@@ -995,14 +998,14 @@ describe('provisionWorktree deps_strategy', () => {
 		// The key is we did not throw from the guards above.
 	});
 
-	test('deps_strategy: copy calls cpSync when host node_modules exists (via lean config shape)', async () => {
+	test('deps_strategy: copy calls cp when host node_modules exists (via lean config shape)', async () => {
 		let cpCalled = false;
 		let cpSrc = '';
 		let cpDst = '';
 		_internals.fs = {
 			...realFs,
 			existsSync: (p: string) => p.endsWith('node_modules'),
-			cpSync: (src: string, dst: string) => {
+			cp: async (src: string, dst: string) => {
 				cpCalled = true;
 				cpSrc = src;
 				cpDst = dst;
@@ -1031,6 +1034,9 @@ describe('provisionWorktree deps_strategy', () => {
 		_internals.fs = {
 			...realFs,
 			existsSync: (p: string) => p.endsWith('node_modules'),
+			cp: async () => {
+				throw new Error('cp should not be called for link');
+			},
 			cpSync: () => {
 				throw new Error('cpSync should not be called for link');
 			},
@@ -1052,12 +1058,12 @@ describe('provisionWorktree deps_strategy', () => {
 	});
 
 	// Regression for SC-103: copy/link with missing host node_modules must error (no silent no-op)
-	test('deps_strategy: copy with missing host node_modules returns WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING error and does not call cpSync', async () => {
+	test('deps_strategy: copy with missing host node_modules returns WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING error and does not call cp', async () => {
 		let cpCalled = false;
 		_internals.fs = {
 			...realFs,
 			existsSync: (p: string) => false, // host node_modules absent
-			cpSync: () => {
+			cp: async () => {
 				cpCalled = true;
 			},
 			symlinkSync: () => {
@@ -1082,8 +1088,8 @@ describe('provisionWorktree deps_strategy', () => {
 		_internals.fs = {
 			...realFs,
 			existsSync: (p: string) => false,
-			cpSync: () => {
-				throw new Error('cpSync should not be called');
+			cp: async () => {
+				throw new Error('cp should not be called');
 			},
 			symlinkSync: () => {
 				linkCalled = true;
