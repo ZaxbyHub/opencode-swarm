@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.109.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.108.0...v7.109.0) (2026-07-07)
+
+
+### Features
+
+* **sdd:** make mode skills effective-spec aware ([2edb943](https://github.com/ZaxbyHub/opencode-swarm/commit/2edb943cc09c0d03b56a03d673d87f8f2bdb7a21))
+* **sdd:** make mode skills effective-spec aware ([e5782f3](https://github.com/ZaxbyHub/opencode-swarm/commit/e5782f3afd3fdf8a89a28efc6308c126ef7b488c))
+
 ## [7.108.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.6...v7.108.0) (2026-07-07)
 
 
