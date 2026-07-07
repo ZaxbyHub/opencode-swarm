@@ -1140,30 +1140,6 @@ describe('AC-8: guardrails safety — git worktree remove --force blocked at run
 });
 
 describe('AC-8: supplemental static source checks — no --force in worktree source', () => {
-	test('worktree.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/worktree.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
-	test('runner.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/runner.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
-	test('merge-back.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/merge-back.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
 	test('removeWorktree escalates to --force only under opt-in + containment guard (#1708)', () => {
 		// Implementation moved to src/worktree/core.ts; lean/worktree.ts is a thin re-export.
 		// Issue #1708 changed the old "never --force" invariant: removeWorktree now

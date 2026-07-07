@@ -3,8 +3,13 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
+import { pendingCoderScopeByTaskId } from '../../../src/hooks/delegation-gate';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
-import { resetSwarmState, startAgentSession } from '../../../src/state';
+import {
+	resetSwarmState,
+	startAgentSession,
+	swarmState,
+} from '../../../src/state';
 
 const TEST_DIR = realpathSync(
 	mkdtempSync(join(tmpdir(), 'guardrail-swarm-path-')),
@@ -866,6 +871,60 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				[base],
 			);
 			const cmd = `git worktree remove "--force" ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		// ─────────────────────────────────────────────────────────────
+		// F-002: declaredScope exemption branch (branch 1 of issue #1708)
+		// The scope-exemption at tool-before.ts:511-513 has TWO branches:
+		//   branch 1: isInDeclaredScope(target, declaredScope, cwd)
+		//   branch 2: isPathUnderSwarmWorktreeBase(target, cwd, worktreeBaseDirOverrides)
+		// This test exercises branch 1 by seeding declaredScope via pendingCoderScopeByTaskId
+		// and passing an EMPTY worktreeBaseDirOverrides so only branch 1 can succeed.
+		// ─────────────────────────────────────────────────────────────
+		test('git worktree remove --force via declaredScope exemption (no worktreeBaseDirOverrides) → ALLOWED', async () => {
+			// Create a worktree that is NOT under any worktree base directory
+			const { worktreePath } = makeWorktreeFixture();
+			// Verify it is NOT inside TEST_DIR/.swarm/worktrees (makeWorktreeFixture uses tmpdir)
+			// Seed declaredScope via pendingCoderScopeByTaskId so branch 1 fires
+			const session = swarmState.agentSessions.get('test-session')!;
+			session.currentTaskId = '1.1';
+			pendingCoderScopeByTaskId.set('1.1', [worktreePath]);
+			const config = defaultConfig();
+			// EMPTY worktreeBaseDirOverrides → branch 2 CANNOT trigger
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[],
+			);
+			const cmd = `git worktree remove --force ${worktreePath}`;
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// Cleanup: unset currentTaskId so it doesn't bleed into other tests
+			session.currentTaskId = null;
+			pendingCoderScopeByTaskId.delete('1.1');
+		});
+
+		// ─────────────────────────────────────────────────────────────
+		// F-009: single-quote symmetry for inside-base ALLOW
+		// Sibling to the double-quoted test above; both quote styles must behave identically.
+		// ─────────────────────────────────────────────────────────────
+		test("single-quoted '--force' on path INSIDE base → ALLOWED (not blocked unconditionally)", async () => {
+			const { base, worktreePath } = makeWorktreeFixture();
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(
+				TEST_DIR,
+				undefined,
+				config,
+				undefined,
+				[base],
+			);
+			const cmd = `git worktree remove '--force' ${worktreePath}`;
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();

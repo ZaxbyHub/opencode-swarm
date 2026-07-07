@@ -3,9 +3,10 @@
  *
  * Verifies three safety properties:
  * 1. git worktree remove --force is blocked by the destructive-command guardrails.
- * 2. removeWorktree never passes --force to its git subprocess.
+ * 2. removeWorktree never passes --force to its git subprocess (unless
+ *    opt-in force fallback is requested — issue #1708).
  * 3. removeWorktree uses bounded retry on Windows EBUSY/EPERM (DD-10) and
- *    abandons (never falls back to --force).
+ *    falls back to --force only when explicitly requested for a trusted path.
  *
  * Uses the _internals DI seam pattern — no mock.module calls.
  */
@@ -19,7 +20,7 @@ import {
 	mock,
 	test,
 } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { GuardrailsConfig } from '../../../../src/config/schema';
@@ -181,7 +182,7 @@ describe('guardrails: git worktree remove --force blocked', () => {
 // Test 2: removeWorktree never uses --force
 // ===========================================================================
 
-describe('removeWorktree: never uses --force flag', () => {
+describe('removeWorktree: --force opt-in fallback (#1708)', () => {
 	const fakeWorktreePath = join('C:', 'worktrees', 'session-abc', 'lane-1');
 	const fakeProjectRoot = join('C:', 'project-root');
 
@@ -224,6 +225,57 @@ describe('removeWorktree: never uses --force flag', () => {
 		// Verify retry attempts actually happened
 		const worktreeCalls = allSpawnArgs.filter((a) => a[1] === 'worktree');
 		expect(worktreeCalls.length).toBe(4); // initial + 3 retries
+	});
+
+	test('removeWorktree uses --force when opt-in force fallback is requested for trusted path', async () => {
+		const spawnCalls: string[][] = [];
+		let callCount = 0;
+
+		_internals.bunSpawn = (args: string[]) => {
+			spawnCalls.push(args);
+			callCount++;
+			// First non-force call: non-retryable error.
+			// Force call: success.
+			if (callCount === 1) {
+				return mockProc(
+					1,
+					'',
+					'contains modified or untracked files, use --force to delete it',
+				);
+			}
+			return mockProc(0, '', '');
+		};
+
+		// Build a real temp base and a worktree subdirectory so
+		// isPathUnderSwarmWorktreeBase() resolves successfully.
+		const base = realpathSync(mkdtempSync(join(tmpdir(), 'guardrails-force-')));
+		const worktreePath = join(base, 'lane-x');
+		mkdirSync(worktreePath, { recursive: true });
+
+		const result = await removeWorktree(worktreePath, base, {
+			force: true,
+			worktreeDir: base,
+		});
+
+		expect(result).toEqual({ success: true });
+
+		const forceCalls = spawnCalls.filter((args) => args.includes('--force'));
+		expect(forceCalls.length).toBeGreaterThan(0);
+
+		const forceArgv = spawnCalls.find(
+			(args) =>
+				args[0] === 'git' &&
+				args[1] === 'worktree' &&
+				args[2] === 'remove' &&
+				args[3] === '--force',
+		);
+		expect(forceArgv).toEqual([
+			'git',
+			'worktree',
+			'remove',
+			'--force',
+			worktreePath,
+		]);
 	});
 });
 

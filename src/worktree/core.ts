@@ -481,6 +481,7 @@ export function makeWorktreeBranchName(
  * @param options   - Worktree purpose, branch naming, and path options.
  * @returns A worktree handle on success, or `{ error: string }` on failure.
  */
+
 /**
  * Resolves the swarm-managed worktree base directory: `directory/worktreeDir`
  * when an override is configured, otherwise the DD-6 default

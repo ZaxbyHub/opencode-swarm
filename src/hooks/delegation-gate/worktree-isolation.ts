@@ -385,28 +385,8 @@ export function sanitizeWorktreeTaskId(raw: string): string {
 	return sanitized || 'task';
 }
 
-export function resolveWorktreeIsolationConfig(
-	config: PluginConfig,
-): WorktreeIsolationConfig {
-	if (config.worktree) {
-		return { ...DEFAULT_WORKTREE_ISOLATION_CONFIG, ...config.worktree };
-	}
-	const lean =
-		config.turbo?.strategy === 'lean' ? config.turbo.lean : undefined;
-	if (lean?.worktree_isolation) {
-		return {
-			...DEFAULT_WORKTREE_ISOLATION_CONFIG,
-			policy: 'auto',
-			merge_strategy: lean.merge_strategy ?? 'merge',
-			worktree_dir: lean.worktree_dir,
-			deps_strategy: lean.deps_strategy ?? 'skip',
-			runtime_isolation:
-				lean.runtime_isolation ??
-				DEFAULT_WORKTREE_ISOLATION_CONFIG.runtime_isolation,
-		};
-	}
-	return DEFAULT_WORKTREE_ISOLATION_CONFIG;
-}
+import { resolveWorktreeIsolationConfig } from '../../config/worktree-isolation-config';
+export { resolveWorktreeIsolationConfig };
 
 export async function precreateStandardWorktreeSession(args: {
 	config: PluginConfig;

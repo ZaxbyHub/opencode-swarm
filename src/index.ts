@@ -25,6 +25,7 @@ import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
 import { loadPluginConfigWithMetaAsync } from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
+import { resolveWorktreeIsolationConfig } from './config/index.js';
 import {
 	writeProjectConfigIfNew,
 	writeSwarmConfigExampleIfNew,
@@ -80,7 +81,6 @@ import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.j
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { collectDelegateAcksAfter } from './hooks/delegate-ack-collector.js';
 import { injectDelegateDirectivesBefore } from './hooks/delegate-directive-injection.js';
-import { resolveWorktreeIsolationConfig } from './hooks/delegation-gate/worktree-isolation.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
