@@ -372,21 +372,7 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 		const branchListBefore = await runGit(freshDir, [
 			'branch',
 			'--format=%(refname:short)',
-			'--list',
-			'swarm-lane/*',
 		]);
-		console.error(
-			'[DIAG SC-107] branchListBefore.stdout:',
-			JSON.stringify(branchListBefore.stdout),
-		);
-		console.error(
-			'[DIAG SC-107] branchListBefore.stderr:',
-			JSON.stringify(branchListBefore.stderr),
-		);
-		console.error(
-			'[DIAG SC-107] branchListBefore.exitCode:',
-			branchListBefore.exitCode,
-		);
 
 		expect(branchListBefore.stdout).toContain(
 			'swarm-lane/' + crashedSession + '/lane-1',
@@ -394,15 +380,6 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 
 		// Run orphan recovery
 		const result = await runInitOrphanRecovery(freshDir);
-		console.error(
-			'[DIAG SC-107] result:',
-			JSON.stringify({
-				attempted: result.attempted,
-				removedWorktrees: result.removedWorktrees,
-				orphanedBranches: result.orphanedBranches,
-				warnings: result.warnings,
-			}),
-		);
 
 		expect(result.attempted).toBe(true);
 		expect(result.removedWorktrees.length).toBeGreaterThan(0);
@@ -453,14 +430,6 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 		}
 
 		const result = await runInitOrphanRecovery(freshDir);
-		console.error(
-			'[DIAG MULTI] result:',
-			JSON.stringify({
-				attempted: result.attempted,
-				removedWorktrees: result.removedWorktrees,
-				warnings: result.warnings,
-			}),
-		);
 
 		expect(result.attempted).toBe(true);
 		// All three should be in removedWorktrees
@@ -495,15 +464,6 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 
 		// Run orphan recovery
 		const result = await runInitOrphanRecovery(freshDir);
-		console.error(
-			'[DIAG SC-109-CROSS] result:',
-			JSON.stringify({
-				attempted: result.attempted,
-				removedWorktrees: result.removedWorktrees,
-				orphanedBranches: result.orphanedBranches,
-				warnings: result.warnings,
-			}),
-		);
 
 		expect(result.attempted).toBe(true);
 
@@ -511,16 +471,11 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 		const listResult = await runGit(freshDir, [
 			'branch',
 			'--format=%(refname:short)',
-			'--list',
-			'swarm-lane/*',
 		]);
 		const remaining = listResult.stdout
 			.split('\n')
 			.map((b) => b.trim())
-			.filter((b) => b.length > 0);
-
-		console.error('[DIAG SC-109-CROSS] remaining:', remaining);
-		console.error('[DIAG SC-109-CROSS] activeSessionId:', activeSessionId);
+			.filter((b) => b.startsWith('swarm-lane/'));
 
 		// Active session branch should be preserved
 		expect(remaining.some((b) => b.includes(activeSessionId))).toBe(true);
