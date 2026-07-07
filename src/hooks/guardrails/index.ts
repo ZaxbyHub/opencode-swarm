@@ -401,6 +401,7 @@ export function createGuardrailsHooks(
 	directoryOrConfig?: string | GuardrailsConfig,
 	config?: GuardrailsConfig,
 	authorityConfig?: AuthorityConfig,
+	worktreeBaseDirOverrides?: string[],
 ): {
 	toolBefore: (
 		input: { tool: string; sessionID: string; callID: string },
@@ -518,6 +519,7 @@ export function createGuardrailsHooks(
 		interpreterAllowedAgents,
 		authorityConfig,
 		consecutiveNoToolTurns,
+		worktreeBaseDirOverrides,
 	});
 
 	// Create messagesTransform handler via factory

@@ -827,6 +827,7 @@ export class LeanTurboRunner {
 					await LeanTurboRunner._internals.removeWorktree(
 						lane.worktreePath,
 						this._directory,
+						{ force: true, worktreeDir: this._leanConfig?.worktree_dir },
 					);
 				} catch {
 					// Best-effort cleanup
@@ -1451,6 +1452,7 @@ export class LeanTurboRunner {
 				await LeanTurboRunner._internals.removeWorktree(
 					laneInState.worktreePath,
 					this._directory,
+					{ force: true, worktreeDir: leanConfig.worktree_dir },
 				);
 			} catch {
 				// Best-effort cleanup

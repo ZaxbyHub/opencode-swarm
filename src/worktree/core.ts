@@ -481,6 +481,79 @@ export function makeWorktreeBranchName(
  * @param options   - Worktree purpose, branch naming, and path options.
  * @returns A worktree handle on success, or `{ error: string }` on failure.
  */
+
+/**
+ * Resolves the swarm-managed worktree base directory: `directory/worktreeDir`
+ * when an override is configured, otherwise the DD-6 default
+ * `<project-parent>/.swarm-worktrees`. Shared by `provisionWorktree` (path
+ * construction) and the destructive-command guard / removeWorktree force
+ * fallback (containment checks) so both sides agree on what counts as
+ * "swarm-managed".
+ *
+ * @param directory   - Project root (an absolute path to the git working tree).
+ * @param worktreeDir - Optional worktree-dir override (relative to `directory`
+ *                      or absolute). When absent, the DD-6 default base is used.
+ * @returns The absolute worktree base directory.
+ */
+export function resolveWorktreeBaseDir(
+	directory: string,
+	worktreeDir?: string,
+): string {
+	return worktreeDir
+		? path.resolve(directory, worktreeDir)
+		: path.resolve(path.dirname(directory), '.swarm-worktrees');
+}
+
+/**
+ * Checks whether `targetPath` is contained within the swarm-managed worktree
+ * base directory (default base, plus any `worktreeDirOverrides`), using
+ * `fs.realpathSync` on both sides to resolve symlinks/junctions before the
+ * containment comparison — this both establishes containment AND defeats a
+ * symlink/junction escape in one step. Fails closed (returns false) if the
+ * target cannot be resolved (e.g. does not exist, or a permission error).
+ * Case-insensitive comparison on Windows, matching `isInDeclaredScope` in
+ * `src/hooks/guardrails/helpers.ts`.
+ *
+ * @param targetPath           - Path to check (relative to `directory` or absolute).
+ * @param directory            - Project root, used to resolve relative targets
+ *                               and the default base.
+ * @param worktreeDirOverrides - Additional configured worktree-dir overrides
+ *                               whose resolved bases are also treated as trusted.
+ * @returns `true` when the resolved target is inside a trusted base, else `false`.
+ */
+export function isPathUnderSwarmWorktreeBase(
+	targetPath: string,
+	directory: string,
+	worktreeDirOverrides: string[] = [],
+): boolean {
+	const caseInsensitive = process.platform === 'win32';
+	let realTarget: string;
+	try {
+		realTarget = fs.realpathSync(path.resolve(directory, targetPath));
+	} catch {
+		return false;
+	}
+	const bases = [
+		resolveWorktreeBaseDir(directory),
+		...worktreeDirOverrides.map((d) => resolveWorktreeBaseDir(directory, d)),
+	];
+	const cmpTarget = caseInsensitive ? realTarget.toLowerCase() : realTarget;
+	return bases.some((base) => {
+		let realBase: string;
+		try {
+			realBase = fs.realpathSync(base);
+		} catch {
+			// Base may not exist yet (e.g. no worktrees created) — fall back to
+			// the literal resolved path.
+			realBase = path.resolve(base);
+		}
+		const cmpBase = caseInsensitive ? realBase.toLowerCase() : realBase;
+		if (cmpTarget === cmpBase) return true;
+		const rel = path.relative(cmpBase, cmpTarget);
+		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+	});
+}
+
 export async function provisionWorktree(
 	directory: string,
 	id: string,
@@ -490,9 +563,11 @@ export async function provisionWorktree(
 	const branchName = makeWorktreeBranchName(sessionId, id, options);
 
 	// Resolve worktree path: explicit config or DD-6 default
-	let worktreePath = options.worktreeDir
-		? path.resolve(directory, options.worktreeDir, sessionId, id)
-		: path.resolve(path.dirname(directory), '.swarm-worktrees', sessionId, id);
+	let worktreePath = path.resolve(
+		resolveWorktreeBaseDir(directory, options.worktreeDir),
+		sessionId,
+		id,
+	);
 
 	// Windows path budget check (DD-8)
 	const budgetResult = await checkPathBudget(worktreePath, directory);
@@ -727,23 +802,40 @@ export async function provisionWorktree(
 }
 
 /**
- * Removes a git worktree **without** `--force`.
+ * Removes a git worktree, **without** `--force` by default.
  *
  * On Windows (`process.platform === 'win32'`), retries up to 3 times with a
  * 2-second delay when the error contains `EBUSY` or `EPERM` (DD-10). After
  * exhausting retries the worktree is abandoned — the function returns an
  * error but does NOT throw.
  *
- * @param worktreePath - Absolute path to the worktree directory to remove.
- * @param projectRoot  - Absolute path to the project root (a git repository)
- *                       used as `cwd` for the `git worktree remove` command.
- *                       Required because the worktree's parent directory may
- *                       not itself be a git repository.
+ * When `options.force` is set, the removal is escalated (issue #1708): if the
+ * default non-forced removal gives up (either a non-retryable error such as the
+ * "contains modified or untracked files, use --force" message on the first
+ * attempt, or EBUSY/EPERM retries exhausted on Windows), a single
+ * `git worktree remove --force` is attempted — but ONLY when `worktreePath`
+ * resolves inside the swarm-managed worktree base directory
+ * (`isPathUnderSwarmWorktreeBase`). A path outside that trusted base is NEVER
+ * force-removed even if `force` is requested. When `force` is not set, behavior
+ * is unchanged (non-force only; returns an error, does not throw, on exhaustion).
+ *
+ * @param worktreePath        - Absolute path to the worktree directory to remove.
+ * @param projectRoot         - Absolute path to the project root (a git repository)
+ *                              used as `cwd` for the `git worktree remove` command.
+ *                              Required because the worktree's parent directory may
+ *                              not itself be a git repository.
+ * @param options             - Optional escalation controls.
+ * @param options.force       - When true, opt into the forced-fallback removal
+ *                              described above (scoped to the trusted base).
+ * @param options.worktreeDir - The configured worktree-dir override, if any, so
+ *                              the containment check trusts the same base
+ *                              `provisionWorktree` used.
  * @returns `{ success: true }` on success or `{ error: string }` on failure.
  */
 export async function removeWorktree(
 	worktreePath: string,
 	projectRoot: string,
+	options?: { force?: boolean; worktreeDir?: string },
 ): Promise<RemoveSuccess | RemoveFailure> {
 	const isWindows = _internals.platform === 'win32';
 	const MAX_RETRIES = 4;
@@ -773,7 +865,31 @@ export async function removeWorktree(
 			continue;
 		}
 
-		// Non-retryable error or final attempt exhausted
+		// Non-retryable error or final attempt exhausted. This is the single
+		// reachable give-up point (the post-loop return below is unreachable
+		// because attempt 3 hits `attempt < MAX_RETRIES - 1` === false and
+		// returns here). Opt-in force fallback (issue #1708): escalate to a
+		// single `--force` removal, but ONLY when the target resolves inside the
+		// trusted swarm worktree base. Never force-remove a path outside it.
+		if (
+			options?.force &&
+			isPathUnderSwarmWorktreeBase(
+				worktreePath,
+				projectRoot,
+				options.worktreeDir ? [options.worktreeDir] : [],
+			)
+		) {
+			const forced = await runGit(
+				['worktree', 'remove', '--force', worktreePath],
+				projectRoot,
+			);
+			if (forced.exitCode === 0) {
+				return { success: true };
+			}
+			// Surface the force attempt's own failure, not the stale lastError.
+			return { error: forced.stderr.trim() || forced.stdout.trim() };
+		}
+
 		return { error: lastError };
 	}
 

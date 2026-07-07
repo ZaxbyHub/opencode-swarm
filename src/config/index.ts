@@ -137,3 +137,7 @@ export {
 	SwarmSpecSchema,
 	validateSpecContent,
 } from './spec-schema';
+
+// Worktree-isolation config resolver — lives in this leaf module (no heavy
+// worktree runtime imports) so the plugin entry can call it during init.
+export { resolveWorktreeIsolationConfig } from './worktree-isolation-config';

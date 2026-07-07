@@ -155,6 +155,8 @@ export interface StandardWorktreeDispatch {
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	/** FR-201: 0-based lane index for runtime profile derivation. */
 	laneIndex: number;
+	/** Configured worktree-dir override, so cleanup trusts the same base. */
+	worktree_dir?: string;
 }
 
 export interface AwaitingMergeRecord {
@@ -383,28 +385,8 @@ export function sanitizeWorktreeTaskId(raw: string): string {
 	return sanitized || 'task';
 }
 
-export function resolveWorktreeIsolationConfig(
-	config: PluginConfig,
-): WorktreeIsolationConfig {
-	if (config.worktree) {
-		return { ...DEFAULT_WORKTREE_ISOLATION_CONFIG, ...config.worktree };
-	}
-	const lean =
-		config.turbo?.strategy === 'lean' ? config.turbo.lean : undefined;
-	if (lean?.worktree_isolation) {
-		return {
-			...DEFAULT_WORKTREE_ISOLATION_CONFIG,
-			policy: 'auto',
-			merge_strategy: lean.merge_strategy ?? 'merge',
-			worktree_dir: lean.worktree_dir,
-			deps_strategy: lean.deps_strategy ?? 'skip',
-			runtime_isolation:
-				lean.runtime_isolation ??
-				DEFAULT_WORKTREE_ISOLATION_CONFIG.runtime_isolation,
-		};
-	}
-	return DEFAULT_WORKTREE_ISOLATION_CONFIG;
-}
+import { resolveWorktreeIsolationConfig } from '../../config/worktree-isolation-config';
+export { resolveWorktreeIsolationConfig };
 
 export async function precreateStandardWorktreeSession(args: {
 	config: PluginConfig;
@@ -564,7 +546,10 @@ export async function precreateStandardWorktreeSession(args: {
 	});
 	if (!createResult.data?.id) {
 		await _internals
-			.removeWorktree(provisionResult.worktreePath, args.directory)
+			.removeWorktree(provisionResult.worktreePath, args.directory, {
+				force: true,
+				worktreeDir: worktreeConfig.worktree_dir,
+			})
 			.catch(() => {});
 		const createError = (createResult as { error?: unknown }).error;
 		const detail =
@@ -589,6 +574,7 @@ export async function precreateStandardWorktreeSession(args: {
 		handle: provisionResult,
 		mergeStrategy: worktreeConfig.merge_strategy,
 		laneIndex,
+		worktree_dir: worktreeConfig.worktree_dir,
 	});
 }
 
@@ -642,7 +628,10 @@ export async function finishStandardWorktreeDispatch(
 			}
 
 			await _internals
-				.removeWorktree(dispatch.handle.worktreePath, directory)
+				.removeWorktree(dispatch.handle.worktreePath, directory, {
+					force: true,
+					worktreeDir: dispatch.worktree_dir,
+				})
 				.catch(() => {});
 			await _internals
 				.postMergeCleanup(directory, dispatch.handle.branchName)

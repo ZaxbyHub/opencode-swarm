@@ -25,6 +25,7 @@ import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
 import { loadPluginConfigWithMetaAsync } from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
+import { resolveWorktreeIsolationConfig } from './config/index.js';
 import {
 	writeProjectConfigIfNew,
 	writeSwarmConfigExampleIfNew,
@@ -737,11 +738,17 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		guardrailsConfig.enabled,
 	);
 	const authorityConfig = AuthorityConfigSchema.parse(config.authority ?? {});
+	const worktreeDirOverride =
+		resolveWorktreeIsolationConfig(config).worktree_dir;
+	const worktreeBaseDirOverrides = worktreeDirOverride
+		? [worktreeDirOverride]
+		: [];
 	const guardrailsHooks = createGuardrailsHooks(
 		ctx.directory,
 		undefined,
 		guardrailsConfig,
 		authorityConfig,
+		worktreeBaseDirOverrides,
 	);
 
 	// Full-auto intercept: autonomous oversight when full-auto mode is active
