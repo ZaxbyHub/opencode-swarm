@@ -32,11 +32,17 @@ export const _internals: {
 	platform: string;
 	/** Test seam for sleep — allows tests to skip real delays. */
 	sleep: (ms: number) => Promise<void>;
+	/** Test seam for cleanupOrphanedBranches — allows tests to intercept the cleanup call. */
+	cleanupOrphanedBranches: typeof cleanupOrphanedBranches;
+	/** Test seam for startupOrphanRecovery — allows tests to intercept the recovery call. */
+	startupOrphanRecovery: typeof startupOrphanRecovery;
 } = {
 	bunSpawn,
 	platform: process.platform,
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
+	cleanupOrphanedBranches,
+	startupOrphanRecovery,
 };
 
 // ---------------------------------------------------------------------------
@@ -524,15 +530,23 @@ function extractSessionId(branchName: string): string | null {
 
 async function listLaneBranches(directory: string): Promise<string[]> {
 	const branches = new Set<string>();
-	for (const pattern of ['swarm-lane/*', 'swarm/lane/*']) {
-		const result = await runGit(
-			['branch', '--format=%(refname:short)', '--list', pattern],
-			directory,
-		);
-		if (result.exitCode !== 0) continue;
+	// List all branches without a --list pattern. Using `--list 'swarm-lane/*'`
+	// is unreliable cross-platform: git's wildmatch uses WM_PATHNAME on Linux,
+	// where `*` does not match `/`, missing nested branches like
+	// `swarm-lane/session/lane`. Filtering in code is portable.
+	const result = await runGit(
+		['branch', '--format=%(refname:short)'],
+		directory,
+	);
+	if (result.exitCode === 0) {
 		for (const line of result.stdout.split('\n')) {
 			const branch = line.trim();
-			if (branch.length > 0) branches.add(branch);
+			if (
+				branch.length > 0 &&
+				(branch.startsWith('swarm-lane/') || branch.startsWith('swarm/lane/'))
+			) {
+				branches.add(branch);
+			}
 		}
 	}
 	return [...branches];
@@ -541,7 +555,7 @@ async function listLaneBranches(directory: string): Promise<string[]> {
 /**
  * Cleans up orphaned swarm-lane branches that do not belong to any active session.
  *
- * Lists all branches matching `swarm-lane/*`, identifies orphans (branches whose
+ * Lists all swarm-lane/ and swarm/lane/ branches, identifies orphans (branches whose
  * session ID is not in `activeSessionIds`), force-deletes them, and prunes stale
  * worktree metadata.
  *

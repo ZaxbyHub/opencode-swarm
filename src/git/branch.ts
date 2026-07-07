@@ -1,5 +1,8 @@
 import * as child_process from 'node:child_process';
+import * as fsSync from 'node:fs';
 import path from 'node:path';
+import { isValidEnvKey } from '../sandbox/executor';
+import { mergeEnvForChild } from '../utils/bun-compat';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
@@ -55,6 +58,50 @@ function isNotGitRepositoryMessage(message: string): boolean {
 }
 
 /**
+ * File-scoped indirection seam for spawnSync.
+ * Supports envOverrides so lane runtime profiles can inject env.
+ */
+/**
+ * Get child_process.spawnSync at call time (not captured at module load).
+ * This allows tests to mock child_process.spawnSync before gitExec runs.
+ */
+function getChildProcessSpawnSync() {
+	return child_process.spawnSync;
+}
+
+/**
+ * Seam that calls child_process.spawnSync dynamically.
+ * Uses getChildProcessSpawnSync() to resolve at call time, allowing
+ * tests to mock child_process.spawnSync before gitExec runs.
+ */
+const __spawnSyncSeam = {
+	spawnSync: (
+		cmd: string,
+		args: string[],
+		options?: {
+			cwd?: string;
+			encoding?: BufferEncoding;
+			timeout?: number;
+			maxBuffer?: number;
+			windowsHide?: boolean;
+			stdio?:
+				| 'pipe'
+				| 'ignore'
+				| 'inherit'
+				| Array<'pipe' | 'ignore' | 'inherit'>;
+			env?: Record<string, string | undefined>;
+			envOverrides?: Record<string, string | null>;
+		},
+	): child_process.SpawnSyncReturns<string | Buffer> => {
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		return getChildProcessSpawnSync()(cmd, args, {
+			...options,
+			env: mergedEnv as NodeJS.ProcessEnv | undefined,
+		});
+	},
+};
+
+/**
  * Execute git command safely.
  *
  * Non-interactive enforcement (AGENTS.md #3): three defenses ensure git
@@ -82,8 +129,61 @@ function isNotGitRepositoryMessage(message: string): boolean {
  * with exponential backoff up to MAX_TRANSIENT_RETRIES before throwing.
  * Permanent errors — non-zero exit, missing git binary, non-transient
  * spawn errors — throw immediately with no retry.
+ *
+ * Lane env fallback (FR-201): when `laneEnv` is not provided but `laneIndex`
+ * is, reads the lane env file from disk synchronously.
  */
-function gitExec(args: string[], cwd: string): string {
+
+/**
+ * Synchronously read and parse a lane runtime profile from disk.
+ * Mirrors the logic of `readLaneEnvFileFromDisk` but uses sync fs.
+ * Returns an empty record when the file does not exist or cannot be read.
+ */
+export function readLaneEnvFileFromDiskSync(
+	worktreePath: string,
+	laneIndex: number,
+): Record<string, string> {
+	const envPath = path.join(
+		worktreePath,
+		'.swarm',
+		'lanes',
+		`${laneIndex}.env`,
+	);
+	let content: string;
+	try {
+		content = fsSync.readFileSync(envPath, 'utf-8');
+	} catch {
+		// ENOENT / ENOTDIR — file absent; return empty
+		return {};
+	}
+
+	const result: Record<string, string> = {};
+	for (const rawLine of content.split('\n')) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith('#')) continue;
+		const eqIdx = line.indexOf('=');
+		if (eqIdx < 0) continue;
+		const k = line.slice(0, eqIdx);
+		const v = line.slice(eqIdx + 1);
+		if (!isValidEnvKey(k)) continue; // reject shell-injection vectors
+		result[k] = v;
+	}
+	return result;
+}
+
+function gitExec(
+	args: string[],
+	cwd: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): string {
+	// FR-201: fall back to sync disk read if laneEnv not provided but laneIndex is.
+	const resolvedLaneEnv =
+		laneEnv ??
+		(laneIndex !== undefined
+			? readLaneEnvFileFromDiskSync(cwd, laneIndex)
+			: undefined);
+
 	let missingGitError: unknown;
 
 	// Scope the `gpgsign=false` overrides to the only subcommands they
@@ -100,7 +200,7 @@ function gitExec(args: string[], cwd: string): string {
 
 	for (const command of windowsGitCandidates()) {
 		for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-			const result = child_process.spawnSync(command, hardenedArgs, {
+			const result = _internals.spawnSync(command, hardenedArgs, {
 				cwd,
 				encoding: 'utf-8',
 				timeout: GIT_TIMEOUT_MS,
@@ -108,10 +208,11 @@ function gitExec(args: string[], cwd: string): string {
 				maxBuffer: GIT_MAX_BUFFER_BYTES,
 				stdio: ['ignore', 'pipe', 'pipe'],
 				env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+				envOverrides: resolvedLaneEnv,
 			});
 
 			if (!result.error && result.status === 0) {
-				return result.stdout;
+				return result.stdout as string;
 			}
 
 			if (result.error) {
@@ -133,7 +234,9 @@ function gitExec(args: string[], cwd: string): string {
 
 			if (result.status !== 0) {
 				throw new Error(
-					result.stderr || result.stdout || `git exited with ${result.status}`,
+					(result.stderr as string) ||
+						(result.stdout as string) ||
+						`git exited with ${result.status}`,
 				);
 			}
 		}
@@ -177,9 +280,21 @@ export function isGitRepo(cwd: string): boolean {
 
 /**
  * Get current branch name
+ * @param cwd - Working directory
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function getCurrentBranch(cwd: string): string {
-	const output = gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+export function getCurrentBranch(
+	cwd: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): string {
+	const output = gitExec(
+		['rev-parse', '--abbrev-ref', 'HEAD'],
+		cwd,
+		laneEnv,
+		laneIndex,
+	);
 	return output.trim();
 }
 
@@ -188,27 +303,41 @@ export function getCurrentBranch(cwd: string): string {
  * @param cwd - Working directory
  * @param branchName - Name of the branch to create
  * @param remote - Remote name (default: 'origin')
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
 export function createBranch(
 	cwd: string,
 	branchName: string,
 	remote: string = 'origin',
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
 ): void {
 	// Check if branch already exists
 	try {
-		gitExec(['rev-parse', '--verify', `${remote}/${branchName}`], cwd);
+		gitExec(
+			['rev-parse', '--verify', `${remote}/${branchName}`],
+			cwd,
+			laneEnv,
+			laneIndex,
+		);
 		// Branch exists remotely, check if we have it locally
 		try {
-			gitExec(['rev-parse', '--verify', branchName], cwd);
+			gitExec(['rev-parse', '--verify', branchName], cwd, laneEnv, laneIndex);
 			// Already exists locally, just checkout
-			gitExec(['checkout', branchName], cwd);
+			gitExec(['checkout', branchName], cwd, laneEnv, laneIndex);
 		} catch {
 			// Checkout from remote
-			gitExec(['checkout', '-b', branchName, `${remote}/${branchName}`], cwd);
+			gitExec(
+				['checkout', '-b', branchName, `${remote}/${branchName}`],
+				cwd,
+				laneEnv,
+				laneIndex,
+			);
 		}
 	} catch {
 		// Branch doesn't exist, create new
-		gitExec(['checkout', '-b', branchName], cwd);
+		gitExec(['checkout', '-b', branchName], cwd, laneEnv, laneIndex);
 	}
 }
 
@@ -269,30 +398,60 @@ export function stageFiles(cwd: string, files: string[]): void {
 /**
  * Stage all files in the working directory
  * @param cwd - Working directory
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function stageAll(cwd: string): void {
-	gitExec(['add', '.'], cwd);
+export function stageAll(
+	cwd: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): void {
+	gitExec(['add', '.'], cwd, laneEnv, laneIndex);
 }
 
 /**
  * Commit changes
+ * @param cwd - Working directory
+ * @param message - Commit message
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function commitChanges(cwd: string, message: string): void {
-	gitExec(['commit', '-m', message], cwd);
+export function commitChanges(
+	cwd: string,
+	message: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): void {
+	gitExec(['commit', '-m', message], cwd, laneEnv, laneIndex);
 }
 
 /**
  * Get current commit SHA
+ * @param cwd - Working directory
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function getCurrentSha(cwd: string): string {
-	return gitExec(['rev-parse', 'HEAD'], cwd).trim();
+export function getCurrentSha(
+	cwd: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): string {
+	const output = gitExec(['rev-parse', 'HEAD'], cwd, laneEnv, laneIndex);
+	return output.trim();
 }
 
 /**
  * Check if there are uncommitted changes
+ * @param cwd - Working directory
+ * @param laneEnv - Optional lane env overrides for git spawn
+ * @param laneIndex - Optional lane index; if laneEnv not provided, reads env file from disk
  */
-export function hasUncommittedChanges(cwd: string): boolean {
-	const status = gitExec(['status', '--porcelain'], cwd);
+export function hasUncommittedChanges(
+	cwd: string,
+	laneEnv?: Record<string, string>,
+	laneIndex?: number,
+): boolean {
+	const status = gitExec(['status', '--porcelain'], cwd, laneEnv, laneIndex);
 	return status.trim().length > 0;
 }
 
@@ -678,7 +837,7 @@ export async function resetToMainAfterMerge(
 			// On non-default branch — the primary post-merge scenario.
 			// The feature branch typically has commits not on origin/main (the merge
 			// happened remotely). Don't block on unpushed commits — we're about to
-			// delete this branch. Only block if it's a local-only branch that diverges
+			// delete this branch. Only block if it's a local-only branch that diverged
 			// from the default (could be unpushed work the user still needs).
 			try {
 				_internals.gitExec(
@@ -914,6 +1073,8 @@ export const _internals: {
 	getGitRepositoryStatus: typeof getGitRepositoryStatus;
 	resetToRemoteBranch: typeof resetToRemoteBranch;
 	resetToMainAfterMerge: typeof resetToMainAfterMerge;
+	spawnSync: typeof __spawnSyncSeam.spawnSync;
+	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
 } = {
 	gitExec,
 	detectDefaultRemoteBranch,
@@ -921,4 +1082,6 @@ export const _internals: {
 	getGitRepositoryStatus,
 	resetToRemoteBranch,
 	resetToMainAfterMerge,
+	spawnSync: __spawnSyncSeam.spawnSync,
+	readLaneEnvFileFromDiskSync,
 } as const;

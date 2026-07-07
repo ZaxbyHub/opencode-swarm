@@ -105,9 +105,17 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
 	),
 	...buildErrnoPatternPair('EPIPE', 'pipe|stream|write|socket|stdout|stderr'),
 	/\bbroken pipe\b/i,
+	...buildErrnoPatternPair(
+		'EADDRINUSE',
+		'bind|listen|listen tcp|socket|port|server|address',
+	),
+	/\baddress already in use\b/i,
 	/\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*137\b/i,
 	/\bsig(?:segv|abrt|bus)\b/i,
 	/\bsegmentation fault(?:\s*\(core dumped\))?\b/i,
+	/\b(?:file|resource|lock) lock timeout\b/i,
+	/\block acquisition timeout\b/i,
+	/\bfailed to acquire lock\b/i,
 ];
 
 function isInfrastructureFailure(currentResult: TestRunRecord): boolean {

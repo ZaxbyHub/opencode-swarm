@@ -38,9 +38,12 @@ import type {
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
 import {
+	awaitingMergeByCallID,
+	checkStandardWorktreeSerializationRelease,
 	finishStandardWorktreeDispatch,
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
+	resolveWorktreeIsolationConfig,
 	sanitizeWorktreeTaskId,
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
@@ -1165,15 +1168,32 @@ export function createDelegationGateHook(
 		}
 
 		if (standardWorktreeSerializationSessions.has(input.sessionID)) {
-			throw new Error(
-				'STANDARD_WORKTREE_ISOLATION_SERIALIZED: prior standard worktree isolation setup failed in this session; wait for the active coder task to finish before dispatching another coder.',
+			// FR-104 SC-111/SC-112: Before rejecting, check if the serialized session
+			// should be released due to TTL expiry or dispatch-count threshold.
+			// This makes the release check reachable through the public gating path
+			// (not just via precreateStandardWorktreeSession directly).
+			checkStandardWorktreeSerializationRelease(
+				input.sessionID,
+				resolveWorktreeIsolationConfig(config),
 			);
+			// After release check, re-evaluate — if TTL/count released it, allow through
+			if (standardWorktreeSerializationSessions.has(input.sessionID)) {
+				throw new Error(
+					'STANDARD_WORKTREE_ISOLATION_SERIALIZED: prior standard worktree isolation setup failed in this session; wait for the active coder task to finish before dispatching another coder.',
+				);
+			}
 		}
 
 		if (!plan) return;
 		if (!parallelModeActive) return;
 
 		const resolvedTaskId = incomingCoderTaskId;
+		// FR-102: pass declared scope (from pending map populated by FILE: extraction
+		// or prior declare_scope) so provisionWorktree can materialize it into the
+		// lane's .swarm/scopes/ for durability across plugin restart.
+		const laneScope = resolvedTaskId
+			? (pendingCoderScopeByTaskId.get(resolvedTaskId) ?? null)
+			: null;
 		await precreateStandardWorktreeSession({
 			config,
 			directory,
@@ -1184,6 +1204,10 @@ export function createDelegationGateHook(
 			description:
 				typeof args.description === 'string' ? args.description : undefined,
 			outputArgs: args,
+			scope:
+				laneScope && laneScope.length > 0 && resolvedTaskId
+					? { taskId: resolvedTaskId, files: laneScope }
+					: undefined,
 		});
 	};
 
@@ -1531,34 +1555,58 @@ export function createDelegationGateHook(
 			}
 
 			if (standardDispatch) {
+				// SC-115: Move from active → awaiting-merge BEFORE calling merge-back.
+				// The dispatch is removed from standardWorktreeByCallID here and
+				// added to awaitingMergeByCallID so /swarm lanes can show the real state.
+				// finishStandardWorktreeDispatch removes it from awaitingMergeByCallID
+				// after the merge completes (merged/partial/failed); the .catch() below
+				// handles the thrown-rejection path.
 				standardWorktreeByCallID.delete(input.callID);
-				await finishStandardWorktreeDispatch(directory, standardDispatch).catch(
-					(err) => {
-						const reason = err instanceof Error ? err.message : String(err);
-						logger.warn(
-							`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
-						);
-						// A thrown merge-back is a hard failure: the task's work
-						// did not land. Record it so Epic Rule 2 skips the
-						// completion marker (same contract as the partial/failed
-						// returns inside finishStandardWorktreeDispatch).
-						recordWorktreeMergeFailure(
-							standardDispatch.planTaskId ?? standardDispatch.taskId,
-							{
-								outcome: 'failed',
-								stage: 'merge-back',
-								message: reason,
-							},
-						);
-						const dispatchSession = ensureAgentSession(
-							standardDispatch.parentSessionID,
-						);
-						dispatchSession.pendingAdvisoryMessages ??= [];
-						dispatchSession.pendingAdvisoryMessages.push(
-							`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
-						);
-					},
-				);
+				awaitingMergeByCallID.set(input.callID, {
+					callID: input.callID,
+					parentSessionID: standardDispatch.parentSessionID,
+					taskId: standardDispatch.taskId,
+					planTaskId: standardDispatch.planTaskId,
+					branch: standardDispatch.handle.branchName,
+					worktreePath: standardDispatch.handle.worktreePath,
+					mergeStrategy: standardDispatch.mergeStrategy,
+					queuedAt: Date.now(),
+				});
+				await finishStandardWorktreeDispatch(
+					directory,
+					standardDispatch,
+					config,
+					input.callID,
+				).catch((err) => {
+					const reason = err instanceof Error ? err.message : String(err);
+					logger.warn(
+						`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
+					);
+					// A thrown merge-back is a hard failure: the task's work
+					// did not land. Record it so Epic Rule 2 skips the
+					// completion marker (same contract as the partial/failed
+					// returns inside finishStandardWorktreeDispatch).
+					recordWorktreeMergeFailure(
+						standardDispatch.planTaskId ?? standardDispatch.taskId,
+						{
+							outcome: 'failed',
+							stage: 'merge-back',
+							message: reason,
+							worktreePath: standardDispatch.handle.worktreePath,
+							branch: standardDispatch.handle.branchName,
+							completedAt: Date.now(),
+						},
+					);
+					const dispatchSession = ensureAgentSession(
+						standardDispatch.parentSessionID,
+					);
+					dispatchSession.pendingAdvisoryMessages ??= [];
+					dispatchSession.pendingAdvisoryMessages.push(
+						`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
+					);
+					// SC-115: Remove from awaiting-merge registry after recording failure.
+					awaitingMergeByCallID.delete(input.callID);
+				});
 			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args

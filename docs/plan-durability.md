@@ -271,6 +271,31 @@ once pre-check succeeds.
 | Handoff data | ✅ In `HandoffData.execution_profile` |
 | Export data | ✅ In `ExportData.execution_profile` |
 
+## Scope Materialization at Worktree Paths (FR-102)
+
+When Lean Turbo provisions a lane worktree, the task's declared scope is materialized at:
+
+```
+<worktreePath>/.swarm/scopes/scope-{taskId}.json
+```
+
+This enables:
+- **Restart recovery**: If a lane session is interrupted, the scope file survives on disk and can be recovered when the lane resumes or when orphan recovery cleans up.
+- **Gitignore inheritance**: The worktree's `.gitignore` is set to include `.swarm/` paths from the host, preventing scope files from being committed to the lane branch.
+- **Cross-lane scope verification**: The scope file is readable by tooling that needs to verify task scope containment without accessing the primary session state.
+
+The scope file schema is the same as the primary `.swarm/scopes/scope-{taskId}.json`:
+```json
+{
+  "taskId": "1.1",
+  "files": ["src/auth.ts", "src/auth.test.ts"],
+  "whitelist": [],
+  "createdAt": "ISO8601",
+  "expiresAt": "ISO8601",
+  "schemaVersion": "1.0"
+}
+```
+
 ## Quick Reference
 
 | Operation | Command / Trigger |
@@ -282,3 +307,5 @@ once pre-check succeeds.
 | View ledger | `cat .swarm/plan-ledger.jsonl` |
 | Set execution profile | `save_plan` with `execution_profile` field |
 | Lock execution profile | `save_plan` with `execution_profile.locked: true` |
+| View worktree lanes | `/swarm lanes [--json]` |
+| Recover orphaned worktrees | Automatic on session start (see [Recovery Runbook](troubleshooting/recovery-guide.md)) |

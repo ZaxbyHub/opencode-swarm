@@ -22,7 +22,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../../utils/logger';
 import type { SandboxExecutor } from '../executor';
-import { SandboxError } from '../executor';
+import { isValidEnvKey, SandboxError } from '../executor';
 import { detectPowerShellEscape } from './edge-cases';
 
 /**
@@ -259,6 +259,7 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 	 *   - Sets scoped temp directory (%TEMP%, %TMP%)
 	 *   - Restricts PATH to safe system paths only
 	 *   - Removes dangerous environment variables that could be used to bypass restrictions
+	 *   - Applies per-call envOverrides (set or unset)
 	 *   - Executes PowerShell-native cmdlets (filesystem cmdlets only) via Invoke-Expression,
 	 *     and all other commands via cmd /c inside a PowerShell script
 	 *
@@ -272,12 +273,19 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 	 * @param command   - Raw shell command to execute inside the sandbox
 	 * @param scopePaths - Additional scope paths to allow (merged with constructor scope)
 	 * @param tempDir   - Optional temp directory override
+	 * @param envOverrides - Optional per-call env overrides: string sets the var, null unsets it.
+	 *                      When omitted, no per-call env override is applied.
 	 * @returns A PowerShell-wrapped command string ready for shell execution,
 	 *          or the raw command string when the sandbox is unavailable (passthrough mode)
 	 * @throws {SandboxError} UNSAFE_PS_COMMAND when a PowerShell-native command body
 	 *         contains characters that enable command injection via Invoke-Expression
 	 */
-	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
+	wrapCommand(
+		command: string,
+		scopePaths: string[],
+		tempDir?: string,
+		envOverrides?: Record<string, string | null>,
+	): string {
 		// Throw when disabled or unavailable
 		if (!this.isAvailable()) {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
@@ -331,6 +339,31 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 		const escapedTemp = psStringEscape(temp);
 		const escapedCommand = psStringEscape(command);
 
+		// Build per-call env override commands for the PowerShell script.
+		// String values: $env:KEY = 'VALUE'; (single-quoted, embedded in PS string)
+		// Null values: Remove-Item Env:KEY -Force -ErrorAction SilentlyContinue;
+		// Single quotes in values are escaped by doubling them ('').
+		// Keys are validated to prevent PowerShell variable-name injection.
+		const envOverrideLines: string[] = [];
+		if (envOverrides) {
+			for (const [key, value] of Object.entries(envOverrides)) {
+				// Reject invalid env var names silently — they cannot be safely
+				// interpolated into PowerShell variable syntax.
+				if (!isValidEnvKey(key)) {
+					continue;
+				}
+				if (value === null) {
+					envOverrideLines.push(
+						`Remove-Item Env:${key} -Force -ErrorAction SilentlyContinue;`,
+					);
+				} else {
+					// Escape single quotes for embedding in a PowerShell single-quoted string
+					const psEscaped = value.replace(/'/g, "''");
+					envOverrideLines.push(`$env:${key} = '${psEscaped}';`);
+				}
+			}
+		}
+
 		// Choose execution strategy: PowerShell-native cmdlets must run directly inside
 		// the PS script; other commands are wrapped with cmd /c for standard shell behaviour.
 		const commandExec = isPowerShellNativeCommand(command)
@@ -340,6 +373,8 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 		// PowerShell script that sets up the restricted environment and runs the command
 		// Uses -NoProfile to skip loading PowerShell profile scripts for faster startup
 		// Uses -WindowStyle Hidden to suppress the PowerShell window
+		const envOverrideBlock =
+			envOverrideLines.length > 0 ? `\n  ${envOverrideLines.join('\n  ')}` : '';
 		const psScript = `
 $ErrorActionPreference = 'Stop';
 try {
@@ -365,6 +400,7 @@ try {
       Remove-Item Env:$v -Force -ErrorAction SilentlyContinue;
     }
   }
+  ${envOverrideBlock}
 
   # Execute the command — PS-native cmdlets via Invoke-Expression, others via the standard command interpreter
   ${commandExec};

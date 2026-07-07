@@ -651,9 +651,14 @@ export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
 	phase_critic: true,
 	integrated_diff_required: true,
 	allow_docs_only_without_reviewer: false,
-	worktree_isolation: false,
+	worktree_isolation: true,
 	merge_strategy: 'merge' as const,
 	worktree_dir: undefined,
+	deps_strategy: 'skip' as const,
+	runtime_isolation: {
+		enabled: false,
+		port_stride: 1,
+	},
 };
 
 export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
@@ -661,6 +666,12 @@ export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
 	merge_strategy: 'merge',
 	worktree_dir: undefined,
 	deps_strategy: 'skip',
+	serialization_release_after_dispatches: 5,
+	serialization_release_after_ms: 60_000,
+	runtime_isolation: {
+		enabled: false,
+		port_stride: 1,
+	},
 };
 
 export const LEAN_TURBO_BANNER = `## 🛤️ LEAN TURBO ACTIVE

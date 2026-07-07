@@ -227,3 +227,73 @@ describe('copySqliteSafe via runArchiveStage (FR-007 SC-012)', () => {
 		}
 	});
 });
+
+describe('_internals.spawnSync envOverrides', () => {
+	it('spawnSync with envOverrides: null deletes an inherited var from child env', async () => {
+		await mock.module('node:child_process', () => ({
+			...realChildProcess,
+			spawnSync: spawnMock,
+		}));
+		const { _internals: ci } = await import('../../../src/commands/close.js');
+		const key = 'CLOSE_SPAWN_TEST_DELETE';
+		process.env[key] = 'parent_value';
+		spawnMock.mockReturnValue({ status: 0, stdout: '0|0|0\n', stderr: '' });
+
+		ci.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testDir,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: null },
+		});
+
+		const lastCall = spawnMock.mock.calls[spawnMock.mock.calls.length - 1];
+		const envArg = lastCall?.[2]?.env as Record<string, string> | undefined;
+		expect(envArg?.[key]).toBeUndefined();
+		delete process.env[key];
+	});
+
+	it('spawnSync with envOverrides sets a new var in child env', async () => {
+		await mock.module('node:child_process', () => ({
+			...realChildProcess,
+			spawnSync: spawnMock,
+		}));
+		const { _internals: ci } = await import('../../../src/commands/close.js');
+		const key = 'CLOSE_SPAWN_TEST_NEW';
+		spawnMock.mockReturnValue({ status: 0, stdout: '0|0|0\n', stderr: '' });
+
+		ci.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testDir,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: 'new_value' },
+		});
+
+		const lastCall = spawnMock.mock.calls[spawnMock.mock.calls.length - 1];
+		const envArg = lastCall?.[2]?.env as Record<string, string> | undefined;
+		expect(envArg?.[key]).toBe('new_value');
+	});
+
+	it('process.env is NOT mutated after the call', async () => {
+		await mock.module('node:child_process', () => ({
+			...realChildProcess,
+			spawnSync: spawnMock,
+		}));
+		const { _internals: ci } = await import('../../../src/commands/close.js');
+		const key = 'CLOSE_SPAWN_TEST_MUTATION';
+		process.env[key] = 'original_value';
+		spawnMock.mockReturnValue({ status: 0, stdout: '0|0|0\n', stderr: '' });
+
+		ci.spawnSync('node', ['-e', 'process.exit(0)'], {
+			cwd: testDir,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: { [key]: 'overridden' },
+		});
+
+		expect(process.env[key]).toBe('original_value');
+		delete process.env[key];
+	});
+});

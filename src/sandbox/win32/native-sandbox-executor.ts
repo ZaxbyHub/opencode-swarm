@@ -16,7 +16,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../../utils/logger';
 import type { SandboxExecutor } from '../executor';
-import { SandboxError } from '../executor';
+import { isValidEnvKey, SandboxError } from '../executor';
 import { WindowsSandboxExecutor as EnvironmentExecutor } from './restricted-environment-executor';
 import {
 	buildDefaultPolicy,
@@ -92,22 +92,33 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 	 *
 	 * When the runner is unavailable, falls back to the PowerShell wrapper.
 	 */
-	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
+	wrapCommand(
+		command: string,
+		scopePaths: string[],
+		tempDir?: string,
+		envOverrides?: Record<string, string | null>,
+	): string {
 		if (!this.isAvailable()) {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		if (this._strength === 'strong') {
-			return this._wrapWithRunner(command, scopePaths, tempDir);
+			return this._wrapWithRunner(command, scopePaths, tempDir, envOverrides);
 		}
 
-		return this._fallbackExecutor.wrapCommand(command, scopePaths, tempDir);
+		return this._fallbackExecutor.wrapCommand(
+			command,
+			scopePaths,
+			tempDir,
+			envOverrides,
+		);
 	}
 
 	private _wrapWithRunner(
 		command: string,
 		scopePaths: string[],
 		tempDir?: string,
+		_envOverrides?: Record<string, string | null>,
 	): string {
 		const binary = runnerInternals.findRunnerBinary();
 		if (!binary) {
@@ -125,6 +136,19 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		policy.workspace_roots =
 			scopePaths.length > 0 ? scopePaths : [workspaceRoot];
 		policy.writable_roots = policy.workspace_roots;
+
+		// Apply per-call env overrides to the runner policy.
+		// String values are set via env_overrides; null values are skipped since
+		// the native runner does not support unsetting env vars via the policy.
+		if (_envOverrides) {
+			for (const [key, value] of Object.entries(_envOverrides)) {
+				if (!isValidEnvKey(key)) continue;
+				if (typeof value === 'string') {
+					policy.env_overrides[key] = value;
+				}
+				// null values: runner policy has no unset mechanism — skip
+			}
+		}
 
 		const policyJson = JSON.stringify(policy);
 

@@ -460,7 +460,7 @@ Lean Turbo is configured via `turbo` and `turbo.lean` in `.opencode/opencode-swa
       "phase_critic": true,
       "integrated_diff_required": true,
       "allow_docs_only_without_reviewer": false,
-      "worktree_isolation": false
+      "worktree_isolation": true
     }
   }
 }
@@ -477,11 +477,146 @@ Lean Turbo is configured via `turbo` and `turbo.lean` in `.opencode/opencode-swa
 | `phase_critic` | `true` | Dispatch phase critic at `phase_complete` (read-only boundary review) |
 | `integrated_diff_required` | `true` | Require integrated diff for lane evidence |
 | `allow_docs_only_without_reviewer` | `false` | Allow docs-only phases when reviewer is not available |
-| `worktree_isolation` | `false` | Use worktree isolation for parallel coders |
+| `worktree_isolation` | `true` | Use worktree isolation for parallel coders |
+
+> ⚠️ **Behavior change (FR-107 / SC-121):** `worktree_isolation` now defaults to `true`. Lean Turbo phases provision per-lane worktrees by default. To retain the previous behavior, set `turbo.lean.worktree_isolation: false` explicitly.
 
 ### Tests
 
 111 tests covering: lane partitioning, conflict detection, parent/child path resolution, global file classification, protected path matching, cycle detection, cross-lane dependencies, scope resolution priority, Windows path normalization, and degradation summaries.
+
+---
+
+## Runtime Isolation (FR-201 – FR-206)
+
+Per-lane environment isolation that prevents port collisions, cache contamination, and temp-directory conflicts when Lean Turbo lanes run concurrently.
+
+### What is the Lane Runtime Profile
+
+Each lane can receive a **lane runtime profile** — a set of derived environment variables written to `.swarm/lanes/{laneIndex}.env` (KEY=VAL format) inside the worktree root. Any child process spawned inside the lane can source this file to get lane-specific overrides.
+
+The profile is produced by `computeLaneRuntimeProfile()` (`src/turbo/lean/worktree.ts` and `src/hooks/delegation-gate/worktree-isolation.ts`) from the resolved `runtime_isolation` config.
+
+**Precedence (last write wins):**
+
+1. **Derived PORT** — `PORT = port_base + laneIndex * port_stride` when `port_base` is explicitly set (no default)
+2. **env_overrides** — explicit caller values win over derived PORT
+3. **cache_redirects** — explicit cache redirect wins (last write wins)
+
+`cache_redirects` keys must be valid env var names; values have `/lane-{laneIndex}` appended as a suffix to the configured base path using **platform-native path separators** (Windows: `\`, POSIX: `/`). The `.swarm/lanes/{n}.env` file itself always uses `KEY=VAL\n` format consumed by cross-platform tools. (e.g. `XDG_CACHE_HOME=/home/user/.cache → /home/user/.cache/lane-1` on POSIX; `TEMP=C:\Users\test\Temp\cache → C:\Users\test\Temp\cache\lane-1` on Windows)
+
+### Default Behavior (Disabled by Default)
+
+`runtime_isolation.enabled` defaults to `false` in both `turbo.lean` and `worktree` config blocks. When disabled, no profile is written and no environment changes are injected — **zero behavior change** for existing setups.
+
+SC-129 / SC-130 encode this off-by-default guarantee: the integration test `cross-process-port-binding.test.ts` verifies that a disabled `runtime_isolation` produces no `PORT` injection.
+
+### When to Enable
+
+Enable `runtime_isolation` when:
+
+- **Parallel lanes run port-binding servers** — each lane gets an isolated `PORT` to prevent collision (SC-122).
+- **Integration test suites** need lane-scoped `TEST_DATABASE_URL`, `TMPDIR`, or `XDG_CACHE_HOME`.
+- **Dev servers** run per-lane and need isolated temp directories that are auto-cleaned on teardown.
+- **Cache isolation** is required — redirect `~/.cache` or similar to per-lane directories.
+
+### Cross-Platform Parity
+
+| Platform | Sandbox mechanism | Soft-fail behavior |
+|----------|-----------------|-------------------|
+| Linux | `bwrap` (bubblewrap) | If `bwrap` is unavailable, falls back to env var + port injection only |
+| macOS | `sandbox-exec` | If `sandbox-exec` is unavailable, falls back to env var + port injection only |
+| Windows | Windows native-runner ({mode}: restricted-token / app-container) with `powershell wrapper` fallback | If sandbox preparation fails, falls back to env var + port injection only |
+
+All three platforms **soft-fail** — if the OS-level sandbox envelope cannot be prepared, the lane still starts with env/port isolation only. A lane is never hard-failed due to sandbox unavailability (SC-132).
+
+The executor mechanism is detected at runtime and reported by `/swarm diagnose` under the Sandbox health-check line.
+
+### Common Scenarios
+
+#### Two lanes running port-binding test servers
+
+Lane 0 gets `PORT=41000`, lane 1 gets `PORT=41010` (with `port_base=41000, port_stride=10`). Both test servers start without a collision. `port_base` must be explicitly set — there is no default; if omitted, no `PORT` is injected.
+
+```
+// turbo.lean or worktree.runtime_isolation config:
+{
+  "runtime_isolation": {
+    "enabled": true,
+    "port_base": 41000,
+    "port_stride": 10
+  }
+}
+```
+
+#### Lane-scoped environment variables
+
+Override `TEST_DATABASE_URL`, `TMPDIR`, or `XDG_CACHE_HOME` per lane:
+
+```json
+{
+  "runtime_isolation": {
+    "enabled": true,
+    "env_overrides": {
+      "TEST_DATABASE_URL": "postgresql://localhost:5432/test_lane_A",
+      "TMPDIR": "/lane-tmp/lane-A",
+      "XDG_CACHE_HOME": "/lane-cache/lane-A"
+    }
+  }
+}
+```
+
+> **Note:** Values are copied verbatim — no `${LANE_INDEX}` template substitution is performed. To get unique values per lane, inject them via the dispatch layer before the lane is provisioned.
+
+#### Lane-scoped cache and temp directories
+
+Redirect cache paths to per-lane directories. The env file (`.swarm/lanes/{laneIndex}.env`) is removed at teardown, but the cache/temp directories referenced by `cache_redirects` are **not automatically deleted** unless they are inside the worktree that gets removed. External paths (e.g. `/lane-cache`) persist after teardown and must be cleaned up by the caller.
+
+```json
+{
+  "runtime_isolation": {
+    "enabled": true,
+    "cache_redirects": {
+      "XDG_CACHE_HOME": "/lane-cache",
+      "TMPDIR": "/lane-tmp"
+    }
+  }
+}
+```
+
+### Configuration
+
+```json
+{
+  "turbo": {
+    "strategy": "lean",
+    "lean": {
+      "runtime_isolation": {
+        "enabled": true,
+        "port_base": 41000,
+        "port_stride": 10,
+        "env_overrides": {},
+        "cache_redirects": {}
+      }
+    }
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Master switch — off by default for zero behavior change |
+| `port_base` | _(none — no PORT injection)_ | Base port for lane 0; each subsequent lane gets `port_base + laneIndex * port_stride`. Must be explicitly set to enable PORT injection. |
+| `port_stride` | `1` | Port increment between lanes |
+| `env_overrides` | `{}` | Environment variable overrides applied to every lane |
+| `cache_redirects` | `{}` | Cache path redirects for lane isolation |
+
+The same fields are also available under `worktree.runtime_isolation` with identical semantics.
+
+### See also
+
+- [Configuration — `runtime_isolation`](configuration.md#turbolean-runtime_isolation--per-lane-runtime-isolation-settings)
+- [`/swarm lanes` — Runtime profile state](commands.md#swarm-lanes---runtime-profile-state)
 
 ---
 

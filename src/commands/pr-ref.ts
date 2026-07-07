@@ -96,7 +96,7 @@ export function parsePrRef(input: string, cwd?: string): ParsedPr | null {
 	const bareMatch = input.match(/^(\d+)$/);
 	if (bareMatch) {
 		const prNumber = parseInt(bareMatch[1], 10);
-		const remoteUrl = detectGitRemote(cwd);
+		const remoteUrl = detectGitRemote(cwd, undefined);
 		if (!remoteUrl) {
 			return null;
 		}

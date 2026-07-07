@@ -1,9 +1,32 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { runPRWorkflow } from '../../../src/git/index.js';
 
-// Mock the git functions
+// Track createBranch calls for verification
+const createBranchCalls: Array<{
+	cwd: string;
+	branchName: string;
+	remote: string;
+	laneEnv?: Record<string, string>;
+	laneIndex?: number;
+}> = [];
+
 mock.module('../../../src/git/branch.js', () => ({
 	isGitRepo: mock(),
+	createBranch: (
+		cwd: string,
+		branchName: string,
+		remote?: string,
+		laneEnv?: Record<string, string>,
+		laneIndex?: number,
+	) => {
+		createBranchCalls.push({
+			cwd,
+			branchName,
+			remote: remote ?? 'origin',
+			laneEnv,
+			laneIndex,
+		});
+	},
 }));
 
 mock.module('../../../src/git/pr.js', () => ({
@@ -27,6 +50,7 @@ describe('Task 7.3: Git workflow integration', () => {
 
 	beforeEach(() => {
 		mock.restore();
+		createBranchCalls.length = 0;
 	});
 
 	describe('runPRWorkflow checks git repo', () => {
@@ -52,6 +76,90 @@ describe('Task 7.3: Git workflow integration', () => {
 			const result = await runPRWorkflow(mockCwd, { title: 'Test PR' });
 
 			expect(result.success).toBe(true);
+		});
+	});
+
+	describe('runPRWorkflow createBranch lane parameters', () => {
+		it('passes laneEnv and laneIndex to createBranch when provided', async () => {
+			(isGitRepo as ReturnType<typeof mock>).mockReturnValue(true);
+			(isGhAvailable as ReturnType<typeof mock>).mockReturnValue(true);
+			(isAuthenticated as ReturnType<typeof mock>).mockReturnValue(true);
+			(commitAndPush as ReturnType<typeof mock>).mockResolvedValue(undefined);
+			(createPullRequest as ReturnType<typeof mock>).mockResolvedValue({
+				url: 'https://github.com/test/repo/pull/1',
+				number: 1,
+			});
+
+			const laneEnv = { LANE_VAR: 'lane_value' };
+			const result = await runPRWorkflow(mockCwd, {
+				title: 'Test PR',
+				branch: 'feature/test',
+				laneEnv,
+				laneIndex: 3,
+			});
+
+			expect(result.success).toBe(true);
+			expect(createBranchCalls).toHaveLength(1);
+			expect(createBranchCalls[0]).toEqual({
+				cwd: mockCwd,
+				branchName: 'feature/test',
+				remote: 'origin',
+				laneEnv,
+				laneIndex: 3,
+			});
+		});
+
+		it('passes only laneIndex to createBranch when laneEnv not provided', async () => {
+			(isGitRepo as ReturnType<typeof mock>).mockReturnValue(true);
+			(isGhAvailable as ReturnType<typeof mock>).mockReturnValue(true);
+			(isAuthenticated as ReturnType<typeof mock>).mockReturnValue(true);
+			(commitAndPush as ReturnType<typeof mock>).mockResolvedValue(undefined);
+			(createPullRequest as ReturnType<typeof mock>).mockResolvedValue({
+				url: 'https://github.com/test/repo/pull/1',
+				number: 1,
+			});
+
+			const result = await runPRWorkflow(mockCwd, {
+				title: 'Test PR',
+				branch: 'feature/test',
+				laneIndex: 5,
+			});
+
+			expect(result.success).toBe(true);
+			expect(createBranchCalls).toHaveLength(1);
+			expect(createBranchCalls[0]).toEqual({
+				cwd: mockCwd,
+				branchName: 'feature/test',
+				remote: 'origin',
+				laneEnv: undefined,
+				laneIndex: 5,
+			});
+		});
+
+		it('does not pass lane parameters when neither provided', async () => {
+			(isGitRepo as ReturnType<typeof mock>).mockReturnValue(true);
+			(isGhAvailable as ReturnType<typeof mock>).mockReturnValue(true);
+			(isAuthenticated as ReturnType<typeof mock>).mockReturnValue(true);
+			(commitAndPush as ReturnType<typeof mock>).mockResolvedValue(undefined);
+			(createPullRequest as ReturnType<typeof mock>).mockResolvedValue({
+				url: 'https://github.com/test/repo/pull/1',
+				number: 1,
+			});
+
+			const result = await runPRWorkflow(mockCwd, {
+				title: 'Test PR',
+				branch: 'feature/test',
+			});
+
+			expect(result.success).toBe(true);
+			expect(createBranchCalls).toHaveLength(1);
+			expect(createBranchCalls[0]).toEqual({
+				cwd: mockCwd,
+				branchName: 'feature/test',
+				remote: 'origin',
+				laneEnv: undefined,
+				laneIndex: undefined,
+			});
 		});
 	});
 

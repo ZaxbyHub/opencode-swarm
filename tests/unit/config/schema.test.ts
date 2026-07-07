@@ -1497,7 +1497,7 @@ describe('LeanTurboConfigSchema', () => {
 		expect(result.success).toBe(true);
 		if (result.success) {
 			expect(result.data.max_parallel_coders).toBe(4);
-			expect(result.data.worktree_isolation).toBe(false);
+			expect(result.data.worktree_isolation).toBe(true);
 			expect(result.data.integrated_diff_required).toBe(true);
 			expect(result.data.phase_reviewer).toBe(true);
 			expect(result.data.phase_critic).toBe(true);
