@@ -48,8 +48,26 @@ const PLUGIN_INIT_DIR = realpathSync(
 );
 
 afterAll(() => {
-	rmSync(TEST_DIR, { recursive: true, force: true });
-	rmSync(PLUGIN_INIT_DIR, { recursive: true, force: true });
+	try {
+		rmSync(TEST_DIR, { recursive: true, force: true });
+	} catch (err: unknown) {
+		if (
+			!(err instanceof Error) ||
+			(err['code'] !== 'EBUSY' && err['code'] !== 'ENOTEMPTY')
+		) {
+			throw err;
+		}
+	}
+	try {
+		rmSync(PLUGIN_INIT_DIR, { recursive: true, force: true });
+	} catch (err: unknown) {
+		if (
+			!(err instanceof Error) ||
+			(err['code'] !== 'EBUSY' && err['code'] !== 'ENOTEMPTY')
+		) {
+			throw err;
+		}
+	}
 });
 
 // ---------------------------------------------------------------------------
