@@ -41,9 +41,16 @@ export async function handleResetSessionCommand(
 ): Promise<string> {
 	const results: string[] = [];
 
-	// Delete session state file
+	// Resolve the state.json path once and reuse it below. Previously this
+	// path was validated a second time (unguarded) to derive sessionDir,
+	// which meant a validateSwarmPath failure (e.g. .swarm resolving via a
+	// symlink, or a permission/EACCES error while resolving the real path)
+	// was reported gracefully here but then thrown again uncaught below,
+	// crashing the whole best-effort cleanup. Reusing statePath keeps the
+	// "report and continue" contract consistent for both steps.
+	let statePath: string | undefined;
 	try {
-		const statePath = validateSwarmPath(directory, 'session/state.json');
+		statePath = validateSwarmPath(directory, 'session/state.json');
 		if (fs.existsSync(statePath)) {
 			fs.unlinkSync(statePath);
 			results.push('✅ Deleted .swarm/session/state.json');
@@ -52,17 +59,20 @@ export async function handleResetSessionCommand(
 		}
 	} catch {
 		// Justification: best-effort session cleanup — state.json may be
-		// locked by an active session or concurrently removed. The report
-		// records the failure; reset-session continues to clean remaining files.
+		// locked by an active session, path validation may fail, or the
+		// file may be concurrently removed. The report records the
+		// failure; reset-session continues to clean remaining files when
+		// a safe sessionDir could still be resolved above.
 		results.push('❌ Failed to delete state.json');
 	}
 
-	// Clean all files in .swarm/session/ except state.json
-	const sessionDir = path.dirname(
-		validateSwarmPath(directory, 'session/state.json'),
-	);
+	// Clean all files in .swarm/session/ except state.json.
+	// Only proceed if statePath was resolved successfully above — if
+	// validateSwarmPath threw, there is no validated sessionDir to clean,
+	// so skip this step instead of re-validating (and re-throwing).
+	const sessionDir = statePath ? path.dirname(statePath) : undefined;
 	let sessionFiles: string[] = [];
-	if (fs.existsSync(sessionDir)) {
+	if (sessionDir && fs.existsSync(sessionDir)) {
 		try {
 			sessionFiles = fs.readdirSync(sessionDir);
 		} catch (err) {
@@ -73,7 +83,7 @@ export async function handleResetSessionCommand(
 
 	for (const file of sessionFiles) {
 		if (file === 'state.json') continue; // handled separately
-		const filePath = path.join(sessionDir, file);
+		const filePath = path.join(sessionDir as string, file);
 		try {
 			if (!fs.existsSync(filePath)) continue;
 			if (!fs.lstatSync(filePath).isFile()) continue;

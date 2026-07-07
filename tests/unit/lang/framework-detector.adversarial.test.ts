@@ -294,7 +294,12 @@ describe('Laravel Framework Detection — Adversarial', () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'laravel-detect-'));
 		const realFile = path.join(tempDir, 'real-artisan');
 		fs.writeFileSync(realFile, '#!/usr/bin/env php\n');
-		fs.symlinkSync(realFile, path.join(tempDir, 'artisan'));
+		try {
+			fs.symlinkSync(realFile, path.join(tempDir, 'artisan'));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+			throw error;
+		}
 		fs.writeFileSync(
 			path.join(tempDir, 'composer.json'),
 			JSON.stringify({
@@ -312,7 +317,12 @@ describe('Laravel Framework Detection — Adversarial', () => {
 		// Create a self-referential symlink
 		const subdir = path.join(tempDir, 'subdir');
 		fs.mkdirSync(subdir);
-		fs.symlinkSync(subdir, path.join(subdir, 'loop'));
+		try {
+			fs.symlinkSync(subdir, path.join(subdir, 'loop'));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+			throw error;
+		}
 		// This should not hang — sync calls don't follow symlinks into infinite loops
 		expect(() => detectLaravelProject(subdir)).not.toThrow();
 		expect(detectLaravelProject(subdir)).toBe(false);

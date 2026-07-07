@@ -106,7 +106,10 @@ mock.module('../../../src/plan/manager.js', () => ({
 }));
 
 // ── Import under test ─────────────────────────────────────────────────────────
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const { handleCloseCommand, _internals: closeInternals } = await import(
+	'../../../src/commands/close.js'
+);
+const realClosePlanTerminalState = closeInternals.closePlanTerminalState;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -159,6 +162,16 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 		);
 		// Create .swarm directory (handleCloseCommand reads plan.json from it)
 		mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		// close.ts's call site (L824) goes through
+		// _internals.closePlanTerminalState(...), which is a plain object
+		// property snapshotted the FIRST time close.js is evaluated in the
+		// process. In a combined multi-file bun test run, this file's own
+		// mock.module('.../plan/manager.js', ...) registration above has no
+		// effect on that already-captured reference if close.js was evaluated
+		// earlier by another test file. Overriding the property on _internals
+		// directly (not via mock.module) makes this file's tests immune to
+		// cross-file execution-order effects.
+		closeInternals.closePlanTerminalState = mockClosePlanTerminalState;
 	});
 
 	afterEach(() => {
@@ -167,6 +180,10 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 		} catch {
 			// Ignore cleanup errors
 		}
+		// Restore the original reference so it doesn't leak into other test
+		// files (e.g. close-retro-scope.test.ts) that may run after this file
+		// in a combined bun test invocation.
+		closeInternals.closePlanTerminalState = realClosePlanTerminalState;
 		mock.restore();
 	});
 

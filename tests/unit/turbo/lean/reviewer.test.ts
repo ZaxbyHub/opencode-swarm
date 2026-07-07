@@ -16,7 +16,12 @@ import {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function mkdtemp(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-reviewer-test-'));
+	// Wrap in realpathSync: macOS symlinks /var → /private/var (issue #1729),
+	// and Windows 8.3 short names can mismatch; realpath canonicalizes the path
+	// so .swarm containment guards / repo-graph boundary checks match production.
+	const dir = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'lean-reviewer-test-')),
+	);
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
 		recursive: true,
 	});
@@ -183,6 +188,54 @@ describe('dispatchPhaseReviewer', () => {
 		expect(pkg.testResults.totalLanes).toBe(2);
 		expect(pkg.testResults.completedLanes).toBe(2);
 		expect(pkg.testResults.failedLanes).toBe(0);
+	});
+
+	test('compileReviewPackage includes raw validation artifacts from phase evidence', async () => {
+		writeLaneEvidence(dir, 1, {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: ['src/a.ts'],
+			status: 'completed',
+			sessionId: 'test-session',
+		});
+		writePhaseEvidence(dir, 1, {
+			phase: 1,
+			planId: 'test-plan',
+			lanes: [],
+			degradedTasks: [],
+			startedAt: new Date().toISOString(),
+			status: 'completed',
+			validationArtifacts: {
+				build: {
+					status: 'passed',
+					command: 'bun run build',
+					stdoutTail: 'build ok',
+					stderrTail: '',
+				},
+				test: {
+					status: 'failed',
+					command: 'bun test',
+					stdoutTail: '1 fail',
+					stderrTail: 'expected true',
+				},
+				lint: {
+					status: 'passed',
+					command: 'bun run lint',
+					stdoutTail: 'lint ok',
+				},
+			},
+		});
+
+		const pkg = await _internals.compileReviewPackage(
+			dir,
+			1,
+			'test-session',
+			false,
+		);
+
+		expect(pkg.validationArtifacts?.build?.stdoutTail).toBe('build ok');
+		expect(pkg.validationArtifacts?.test?.stderrTail).toBe('expected true');
+		expect(pkg.validationArtifacts?.lint?.command).toBe('bun run lint');
 	});
 
 	// ─── Test 2: Reviewer dispatch uses correct agent name ───────────────────

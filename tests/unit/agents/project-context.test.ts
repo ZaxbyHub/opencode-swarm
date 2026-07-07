@@ -59,7 +59,7 @@ describe('buildProjectContext', () => {
 		);
 		const ctx = await buildProjectContext(tempDir);
 		expect(ctx).not.toBeNull();
-		expect(ctx!.PROJECT_LANGUAGE).toBe('TypeScript / JavaScript');
+		expect(ctx!.PROJECT_LANGUAGE).toBe('TypeScript');
 		// vitest is detected via devDependencies; TEST_CMD reflects whatever
 		// the typescript profile declares for the `vitest` framework's `cmd`
 		// (currently `bun test`). Just assert it resolved away from the
@@ -83,14 +83,14 @@ describe('buildProjectContext', () => {
 		expect(ctx!.REVIEWER_CHECKLIST).not.toContain(UNRESOLVED);
 	});
 
-	test('Single-language project: PROJECT_CONTEXT_SECONDARY_LANGUAGES is empty', async () => {
+	test('package.json project: JavaScript is listed as a secondary language', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'x' }),
 		);
 		const ctx = await buildProjectContext(tempDir);
 		expect(ctx).not.toBeNull();
-		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toBe('');
+		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toBe('javascript');
 	});
 
 	test('PROJECT_FRAMEWORK populated from package.json dependencies', async () => {

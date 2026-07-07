@@ -64,6 +64,21 @@ Use these baselines unless repository policy explicitly requires stricter or old
 7. Write `review-report.md` only after coverage closure and final critic PASS.
 8. Final response reports only the run path, selected tracks, counts summary, highest-risk items, coverage limitations, and confirmation that no source files were modified.
 
+## Pre-flight: PR Branch Checkout Before Explorer Dispatch
+
+When the review target is a PR branch or commit range, complete this before any
+explorer or candidate-generation dispatch:
+
+1. Verify the working tree is clean with `git status --porcelain`. If
+   uncommitted changes exist, stash them or abort the checkout to prevent data
+   loss.
+2. Fetch and check out the PR head branch locally. Explorer agents read the
+   working-tree filesystem (`Read`/`Glob`/`Grep`), not git history, so reviewing
+   a PR while the base branch is checked out produces invalid candidates.
+3. Record the exact commit range (`base_ref..head_ref`) in the source-of-truth
+   packet and pass that range in every explorer/candidate-generation delegation
+   so agents have revision context for targeted `git show` inspection.
+
 ## Async advisory lanes
 
 When selected-track inventory or candidate generation decomposes into independent read-only units, launch those units with `dispatch_lanes_async` when available. Record each returned `batch_id`, then continue architect-owned deterministic work that does not depend on lane output: update the coverage ledger shell, run safe local tools, prepare validation shards, and document unresolved coverage units. Do not mark coverage `REVIEWED`, promote candidates to findings, or write the final report from running lanes.

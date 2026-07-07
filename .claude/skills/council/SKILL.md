@@ -83,6 +83,16 @@ RESEARCH CONTEXT
 ...
 ```
 
+#### Read-before-cite discipline
+
+When citing source code, API behavior, CLI flags, file paths, or line ranges, the synthesizing agent MUST read the actual file or tool output first. Search snippets, file globs, conversation history, and prior-round memory are not sufficient evidence. Specific anti-patterns to refuse in synthesized output:
+
+- Quoting a line range (e.g. `src/foo.ts:123-145`) without reading those lines in the current revision.
+- Restating an API signature, error message, or option flag from prior context after the source has been edited.
+- Citing `bunSpawnSync` / `child_process.spawnSync` behavior from documentation that pre-dates the current version.
+
+The synthesized answer's `sources` array should reference URLs and tool outputs the agent actually retrieved during the current session, not sources inherited from prior rounds. Mark `confidence: LOW` for any claim the agent could not verify against current source this round.
+
 #### Round 1 - Parallel Independent Analysis
 
 3. Dispatch `the active swarm's council_generalist agent`,

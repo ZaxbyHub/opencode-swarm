@@ -171,13 +171,13 @@ function patchDbForVecWrite(provider: SQLiteMemoryProvider) {
 			}
 			if (prop === 'run') {
 				return (sql: string, ...runArgs: unknown[]) => {
-					// memory_items_vec writes would throw (vec table doesn't exist in tests)
-					// Use db.prepare().run() to execute without the chaining return value
+					// memory_items_vec writes would throw because the vec virtual table
+					// does not exist in tests; simulate a successful write while allowing
+					// the rebuild path to advance to embedding_config updates.
 					if (
 						sql.includes('memory_items_vec') &&
 						sql.includes('INSERT OR REPLACE')
 					) {
-						target.prepare(sql).run(...runArgs);
 						return { changes: 0 } as unknown as Database;
 					}
 					// embedding_config writes must execute for real

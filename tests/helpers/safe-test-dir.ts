@@ -15,11 +15,24 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 	cleanup: () => void;
 } {
 	const base = os.tmpdir();
-	const dir = fs.mkdtempSync(path.join(base, prefix));
+	const rawDir = fs.mkdtempSync(path.join(base, prefix));
+	// Resolve through realpathSync so the returned dir matches the canonical
+	// path that production code (which canonicalizes via path.resolve/realpath)
+	// will compare against. On macOS, os.tmpdir() returns /var/folders/... (a
+	// symlink to /private/var/folders/...); without realpath, fixtures built
+	// under the symlinked path trip .swarm containment guards and repo-graph
+	// boundary checks that canonicalize ("resolves outside the working
+	// directory"). Also fixes the Windows 8.3 short-name mismatch
+	// (C:\Users\RUNNER~1 vs C:\Users\runneradmin). AGENTS.md invariant 7
+	// requires this wrap when the result is chdir'd; doing it unconditionally
+	// is safe and makes the shared helper the single correct precedent.
+	const dir = fs.realpathSync(rawDir);
 
-	// Safety assertion: verify it's actually under tmpdir
+	// Safety assertion: verify it's actually under tmpdir (compare against the
+	// resolved base too, so the symlinked /var vs real /private/var case is
+	// caught).
 	const resolvedDir = path.resolve(dir);
-	const resolvedBase = path.resolve(base);
+	const resolvedBase = path.resolve(fs.realpathSync(base));
 	if (
 		!resolvedDir.startsWith(resolvedBase + path.sep) &&
 		resolvedDir !== resolvedBase
@@ -45,14 +58,25 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	const lexicalTarget = path.resolve(targetPath);
-	const lexicalBase = path.resolve(os.tmpdir());
+	// Compute the base BOTH lexically and via realpath so the containment
+	// guards below work regardless of which form the caller passed in.
+	// createSafeTestDir now returns a realpath-resolved dir (issue #1729 macOS
+	// /var -> /private/var symlink fix), so lexicalTarget may be the resolved
+	// /private/var/... form while os.tmpdir() returns the /var/... symlink.
+	// Comparing resolved-target against resolved-base keeps the lexical guard
+	// consistent with how createSafeTestDir canonicalizes its return value.
 	const realBase = fs.realpathSync(os.tmpdir());
-	if (lexicalTarget === lexicalBase) {
+	const lexicalBase = path.resolve(os.tmpdir());
+	const resolvedBase = path.resolve(realBase);
+	if (lexicalTarget === lexicalBase || lexicalTarget === resolvedBase) {
 		throw new Error('safeRmRecursive: refusing to remove os.tmpdir() itself');
 	}
-	if (!lexicalTarget.startsWith(lexicalBase + path.sep)) {
+	if (
+		!lexicalTarget.startsWith(lexicalBase + path.sep) &&
+		!lexicalTarget.startsWith(resolvedBase + path.sep)
+	) {
 		throw new Error(
-			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase}`,
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase} (resolved ${resolvedBase})`,
 		);
 	}
 

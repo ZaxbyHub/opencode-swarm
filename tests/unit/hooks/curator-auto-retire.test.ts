@@ -202,6 +202,9 @@ describe('autoRetireSkills', () => {
 			}),
 		);
 		const mockReadSkillUsageEntries = makeMockFn(() => []);
+		const mockRetireOrMarkStale = makeMockFn(() =>
+			Promise.resolve({ action: 'retire' as const }),
+		);
 		const mockParseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: ['src1', 'src2'],
 		}));
@@ -209,6 +212,10 @@ describe('autoRetireSkills', () => {
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.retireOrMarkStale = mockRetireOrMarkStale;
+		_internals.getArchivedKnowledgeIds = makeMockFn(() =>
+			Promise.resolve(new Set(['src1', 'src2'])),
+		);
 		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
 		// Use call-count-based mock: first call = swarm, subsequent = hive (empty).
 		// This avoids duplicate entries when both swarm and hive knowledge are read.
@@ -270,12 +277,8 @@ describe('autoRetireSkills', () => {
 		expect(observations).toHaveLength(1);
 		expect(observations[0]).toContain('archived-skill');
 		expect(observations[0]).toContain('archived');
-		expect(mockRetireSkill.calls).toHaveLength(1);
-		expect(mockRetireSkill.calls[0]).toEqual([
-			directory,
-			'archived-skill',
-			'auto-retire: all source knowledge entries archived',
-		]);
+		expect(mockRetireSkill.calls).toHaveLength(0);
+		expect(mockRetireOrMarkStale.calls).toHaveLength(1);
 	});
 
 	// -----------------------------------------------------------------------
@@ -472,19 +475,24 @@ describe('autoRetireSkills', () => {
 				complianceVerdict: 'ok' as const,
 			},
 		]);
-		// First skill (violation-skill): no source IDs
-		// Second skill (archived-skill): has source IDs pointing to archived entries
-		let parseCallCount = 0;
-		const mockParseDraftFrontmatter = makeMockFn(() => {
-			parseCallCount++;
-			if (parseCallCount === 1) return { sourceKnowledgeIds: [] };
-			return { sourceKnowledgeIds: ['src1'] };
-		});
-
+		const mockRetireOrMarkStale = makeMockFn(
+			(_directory: string, skillDir: string) => {
+				if (skillDir.replace(/\\/g, '/').endsWith('/archived-skill')) {
+					return Promise.resolve({ action: 'retire' as const });
+				}
+				return Promise.resolve({ action: 'none' as const });
+			},
+		);
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
-		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
+		_internals.retireOrMarkStale = mockRetireOrMarkStale;
+		_internals.getArchivedKnowledgeIds = makeMockFn(() =>
+			Promise.resolve(new Set(['src1'])),
+		);
+		_internals.parseDraftFrontmatter = makeMockFn(
+			originalInternals.parseDraftFrontmatter,
+		);
 		// Use call-count-based mock: first call = swarm, subsequent = hive (empty).
 		// This avoids duplicate entries when both swarm and hive knowledge are read.
 		let readCallCount = 0;
@@ -515,8 +523,12 @@ describe('autoRetireSkills', () => {
 			// Subsequent calls (hive) return empty
 			return Promise.resolve([]);
 		});
-		_internals.readFileAsync = makeMockFn(() =>
-			Promise.resolve('---\nsourceKnowledgeIds:\n  - src1\n---\n'),
+		_internals.readFileAsync = makeMockFn((filePath: string) =>
+			Promise.resolve(
+				filePath.includes('archived-skill')
+					? '---\nsource_knowledge_ids:\n  - src1\n---\n'
+					: '---\nsource_knowledge_ids: []\n---\n',
+			),
 		);
 
 		const observations = await _internals.autoRetireSkills(
@@ -527,7 +539,8 @@ describe('autoRetireSkills', () => {
 		expect(observations).toHaveLength(2);
 		expect(observations.some((o) => o.includes('violation-skill'))).toBe(true);
 		expect(observations.some((o) => o.includes('archived-skill'))).toBe(true);
-		expect(mockRetireSkill.calls).toHaveLength(2);
+		expect(mockRetireSkill.calls).toHaveLength(1);
+		expect(mockRetireOrMarkStale.calls).toHaveLength(1);
 	});
 
 	// -----------------------------------------------------------------------

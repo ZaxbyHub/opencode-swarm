@@ -174,16 +174,16 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// Mock Bun.write to block on first call, then release
 			const originalWrite = Bun.write;
 			let writeCount = 0;
-			const writeSpy = vi
-				.spyOn(Bun, 'write')
-				.mockImplementation(async (path: string, data: string | BunFile) => {
+			const writeSpy = spyOn(Bun, 'write').mockImplementation(
+				async (path: string, data: string | BunFile) => {
 					writeCount++;
 					if (writeCount === 1) {
 						// Block first write to create race condition
 						await writeBlocker;
 					}
 					return originalWrite(path, data);
-				});
+				},
+			);
 
 			// Start first flush (will block)
 			const flush1 = _flushForTesting(tempDir);

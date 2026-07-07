@@ -86,15 +86,24 @@ describe('createArchitectAgent strips DESIGN_DOCS when disabled (opt-in)', () =>
 describe('phase-wrap keeps docs_design out of the standard docs auto-dispatch', () => {
 	for (const tree of ['.opencode', '.claude']) {
 		test(`${tree}/skills/phase-wrap/SKILL.md guards step 2`, () => {
-			const skill = readFileSync(
-				join(process.cwd(), tree, 'skills/phase-wrap/SKILL.md'),
-				'utf-8',
-			);
+			const skillPath = join(process.cwd(), tree, 'skills/phase-wrap/SKILL.md');
+			const skill = readFileSync(skillPath, 'utf-8');
+
+			// .claude is a thin adapter that delegates to .opencode; resolve to canonical.
+			const isAdapter =
+				tree === '.claude' &&
+				(skill.includes('canonical workflow') ||
+					skill.includes('.opencode/skills/phase-wrap/SKILL.md'));
+			const canonicalPath = isAdapter
+				? join(process.cwd(), '.opencode/skills/phase-wrap/SKILL.md')
+				: skillPath;
+			const content = readFileSync(canonicalPath, 'utf-8');
+
 			// Step 2 explicitly excludes docs_design from the standard auto-dispatch...
-			expect(skill).toContain('NOT `docs_design`');
+			expect(content).toContain('NOT `docs_design`');
 			// ...and the dedicated design-doc sync step exists and is conditional.
-			expect(skill).toContain('5.58');
-			expect(skill).toContain('design_docs.enabled');
+			expect(content).toContain('5.58');
+			expect(content).toContain('design_docs.enabled');
 		});
 	}
 });

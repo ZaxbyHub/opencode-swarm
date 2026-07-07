@@ -38,18 +38,20 @@ describe('/swarm memory value-log', () => {
 			enabled: true,
 			provider: 'sqlite',
 		});
-		const promoted = makeRecord('Frequently approved memory.', { qValue: 0.9 });
-		const suppressed = makeRecord('Rejected memory.', { qValue: 0.1 });
+		const promoted = makeRecord('Frequently approved memory.', {
+			metadata: { qValue: 0.9 },
+		});
+		const suppressed = makeRecord('Rejected memory.', {
+			metadata: { qValue: 0.1 },
+		});
 		try {
 			await provider.upsert(promoted);
 			await provider.upsert(suppressed);
-			for (let i = 0; i < 6; i++) {
-				await provider.recordRecallUsage?.(
-					recallEvent(`run-${i}`, [promoted.id]),
-				);
-			}
-			await provider.recordRecallUsage?.(
-				recallEvent('run-low', [suppressed.id]),
+			await provider.appendRewardEvent?.(
+				rewardEvent(promoted.id, 'run-promoted', 0.8, 0.7, 0.9),
+			);
+			await provider.appendRewardEvent?.(
+				rewardEvent(suppressed.id, 'run-suppressed', -0.8, 0.3, 0.1),
 			);
 		} finally {
 			provider.close();
@@ -58,8 +60,10 @@ describe('/swarm memory value-log', () => {
 		const output = await handleMemoryValueLogCommand(tmpDir, ['--limit', '10']);
 
 		expect(output).toContain('## Swarm Memory Value Log');
-		expect(output).toContain('Promotion candidates shown: `1`');
-		expect(output).toContain('Suppression candidates shown: `1`');
+		expect(output).toContain('Reward events scanned: `2`');
+		expect(output).toContain('Memories with reward history shown: `2`');
+		expect(output).toContain('[promotion candidate]');
+		expect(output).toContain('[suppressed (low learned-utility)]');
 		expect(output).toContain(promoted.id);
 		expect(output).toContain(suppressed.id);
 	});
@@ -93,17 +97,20 @@ function makeRecord(
 	};
 }
 
-function recallEvent(runId: string, memoryIds: string[]) {
+function rewardEvent(
+	memoryId: string,
+	runId: string,
+	reward: number,
+	qBefore: number,
+	qAfter: number,
+) {
 	return {
-		bundleId: `bundle-${runId}`,
-		query: 'memory value',
-		scopes: [{ type: 'repository' as const, repoId: 'repo-a' }],
-		kinds: ['repo_convention' as const],
-		memoryIds,
-		scores: memoryIds.map(() => 0.8),
-		tokenEstimate: 12,
-		agentRole: 'architect',
+		memoryId,
 		runId,
+		verdict: reward > 0 ? 'APPROVE' : 'REJECT',
+		reward,
+		qBefore,
+		qAfter,
 		timestamp: new Date().toISOString(),
 	};
 }

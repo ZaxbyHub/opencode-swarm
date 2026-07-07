@@ -13,7 +13,13 @@
  * filesystem-only (no subprocess), so they are safe on the session-init path.
  */
 
-import type { FrameworkSelection, LanguageBackend } from '../backend';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type {
+	FrameworkSelection,
+	LanguageBackend,
+	TestFrameworkSelection,
+} from '../backend';
 import { defaultBackendFor } from '../default-backend';
 import { detectLaravelProject } from '../framework-detector';
 import { LANGUAGE_REGISTRY } from '../profiles';
@@ -37,6 +43,52 @@ async function selectFramework(
 	return null;
 }
 
+async function selectTestFramework(
+	dir: string,
+): Promise<TestFrameworkSelection | null> {
+	if (detectLaravelProject(dir)) {
+		return {
+			name: 'php-artisan',
+			cmd: ['php', 'artisan', 'test'],
+			cwd: dir,
+			detectedVia: 'Laravel signals (artisan / composer.json / config/app.php)',
+		};
+	}
+	if (fs.existsSync(path.join(dir, 'Pest.php'))) {
+		return {
+			name: 'pest',
+			cmd: [phpVendorBin('pest')],
+			cwd: dir,
+			detectedVia: 'Pest.php',
+		};
+	}
+	if (fs.existsSync(path.join(dir, 'phpunit.xml'))) {
+		return {
+			name: 'phpunit',
+			cmd: [phpVendorBin('phpunit')],
+			cwd: dir,
+			detectedVia: 'phpunit.xml',
+		};
+	}
+	if (fs.existsSync(path.join(dir, 'phpunit.xml.dist'))) {
+		return {
+			name: 'phpunit',
+			cmd: [phpVendorBin('phpunit')],
+			cwd: dir,
+			detectedVia: 'phpunit.xml.dist',
+		};
+	}
+	return null;
+}
+
+function phpVendorBin(name: string): string {
+	return path.join(
+		'vendor',
+		'bin',
+		process.platform === 'win32' ? `${name}.bat` : name,
+	);
+}
+
 /**
  * Build the PHP backend from the registered profile.
  */
@@ -51,5 +103,6 @@ export function buildPhpBackend(): LanguageBackend {
 	return {
 		...defaultBackendFor(profile),
 		selectFramework,
+		selectTestFramework,
 	};
 }

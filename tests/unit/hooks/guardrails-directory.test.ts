@@ -148,7 +148,7 @@ describe('guardrails directory parameter injection', () => {
 
 			// Call toolBefore with a file path inside .swarm/ (not blockedExact for architect)
 			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: '.swarm/evidence/test.json' });
+			const output = makeOutput({ filePath: '.swarm/outputs/test.txt' });
 
 			// Should not throw - file is inside .swarm/ (recognised via injected directory)
 			await hooks.toolBefore(input, output);

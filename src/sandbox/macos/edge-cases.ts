@@ -37,7 +37,9 @@ export function detectDyldInjection(
 	];
 
 	for (const varName of dyldVars) {
-		if (env[varName] !== undefined) {
+		// Treat undefined and empty string as not-set; only a non-empty value
+		// can inject code into a sandboxed process.
+		if (env[varName]) {
 			return true;
 		}
 	}

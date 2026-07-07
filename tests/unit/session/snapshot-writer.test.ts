@@ -640,6 +640,8 @@ describe('writeSnapshot', () => {
 			qaSkipTaskIds: [],
 			taskWorkflowStates: {},
 			turboMode: false,
+			leanTurboActive: false,
+			epicModeActive: false,
 			pendingAdvisoryMessages: [],
 			model_fallback_index: 0,
 			modelFallbackExhausted: false,

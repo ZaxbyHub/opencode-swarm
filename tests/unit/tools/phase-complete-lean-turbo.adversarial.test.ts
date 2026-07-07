@@ -224,6 +224,20 @@ function writeLaneEvidence(dir: string, phase: number, laneId: string): void {
 	);
 }
 
+function writeLeanPhaseEvidence(dir: string, phase: number): void {
+	const evidenceDir = path.join(dir, '.swarm', 'evidence', String(phase));
+	fs.mkdirSync(evidenceDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(evidenceDir, 'lean-turbo-phase.json'),
+		JSON.stringify({
+			phase,
+			status: 'completed',
+			integratedDiffSummary: 'Integrated lane diff summary.',
+			timestamp: new Date().toISOString(),
+		}),
+	);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -244,6 +258,7 @@ describe('phase_complete — Lean Turbo adversarial', () => {
 		setupSwarmDir(tempDir);
 		writeRetroBundle(tempDir, 1);
 		writeDriftEvidence(tempDir, 1);
+		writeLeanPhaseEvidence(tempDir, 1);
 
 		ensureAgentSession('sess1');
 		recordPhaseAgentDispatch('sess1', 'coder');

@@ -65,6 +65,7 @@ import type {
 	KnowledgeRecommendation,
 	PhaseDigestEntry,
 } from './curator-types.js';
+import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
 	getArchivedKnowledgeIds,
@@ -210,22 +211,38 @@ async function autoRetireSkills(
 				continue;
 			}
 
-			// Delegate archive-based retirement/stale decision to retireOrMarkStale
-			const result = await _internals.retireOrMarkStale(
-				directory,
-				path.dirname(active.path),
-				allArchivedIds,
-			);
-			if (result.action === 'retire') {
-				observations.push(
-					`Skill '${active.slug}' auto-retired: all source knowledge entries archived`,
+			let archivedSourceMatched = false;
+			if (allArchivedIds.size > 0) {
+				try {
+					const content = await _internals.readFileAsync(active.path, 'utf-8');
+					const sourceIds =
+						_internals.parseDraftFrontmatter(content)?.sourceKnowledgeIds ?? [];
+					archivedSourceMatched = sourceIds.some((id) =>
+						allArchivedIds.has(id),
+					);
+				} catch {
+					archivedSourceMatched = false;
+				}
+			}
+
+			if (archivedSourceMatched) {
+				// Delegate archive-based retirement/stale decision to retireOrMarkStale
+				const result = await _internals.retireOrMarkStale(
+					directory,
+					path.dirname(active.path),
+					allArchivedIds,
 				);
-				logger.warn(`[curator] ${observations[observations.length - 1]}`);
-			} else if (result.action === 'stale') {
-				observations.push(
-					`Skill '${active.slug}' marked stale: some source knowledge entries archived`,
-				);
-				logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				if (result.action === 'retire') {
+					observations.push(
+						`Skill '${active.slug}' auto-retired: all source knowledge entries archived`,
+					);
+					logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				} else if (result.action === 'stale') {
+					observations.push(
+						`Skill '${active.slug}' marked stale: some source knowledge entries archived`,
+					);
+					logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				}
 			}
 		}
 	} catch (autoRetireErr) {
@@ -275,6 +292,31 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 			// Match "- entry <uuid> (observable): text" or "- entry <uuid> (observable, directive hint): text"
 			const match = trimmed.match(/^-\s+entry\s+(\S+)\s+\(([^)]+)\):\s+(.+)$/i);
 			if (!match) {
+				const newCandidate = trimmed.match(/^-\s+new candidate:\s+(.+)$/i);
+				if (newCandidate) {
+					const text = newCandidate[1].trim().replace(/\s+\([^)]+\)$/, '');
+					recommendations.push({
+						action: 'promote',
+						entry_id: undefined,
+						lesson: text,
+						reason: text,
+					});
+					continue;
+				}
+				const staleEntry = trimmed.match(
+					/^-\s+entry\s+(\S+)\s+appears stale:\s+(.+)$/i,
+				);
+				if (staleEntry) {
+					const uuid = staleEntry[1];
+					const text = staleEntry[2].trim().replace(/\s+\([^)]+\)$/, '');
+					recommendations.push({
+						action: 'archive',
+						entry_id: UUID_V4.test(uuid) ? uuid : undefined,
+						lesson: text,
+						reason: text,
+					});
+					continue;
+				}
 				diagnostics.push({
 					section: 'OBSERVATIONS',
 					line: trimmed,
@@ -1612,6 +1654,11 @@ export async function applyCuratorKnowledgeUpdates(
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
 	const foundIds = new Set<string>();
+	// G3 (#1715): collect (id, reason) for flag_contradiction actions so we can
+	// emit `contradicted` events post-transaction. Emitting inline inside the
+	// transactKnowledge callback would risk a directory-lock deadlock (the
+	// events file lives in the same `.swarm/` dir the transaction locks).
+	const contradictedEntries: Array<{ id: string; reason: string }> = [];
 
 	// Atomically read, mutate, and rewrite existing entries under a directory lock
 	// (CF-2 TOCTOU fix: concurrent appendKnowledge calls between an unlocked read
@@ -1620,6 +1667,7 @@ export async function applyCuratorKnowledgeUpdates(
 		// Reset closure state on each call (in case of future retry semantics).
 		appliedIds.clear();
 		foundIds.clear();
+		contradictedEntries.length = 0;
 		let txApplied = 0;
 		let modified = false;
 
@@ -1640,19 +1688,37 @@ export async function applyCuratorKnowledgeUpdates(
 						confidence: Math.min(1.0, (entry.confidence ?? 0) + 0.1),
 						updated_at: new Date().toISOString(),
 					};
-				case 'archive':
+				case 'archive': {
+					// PRR-015: guard against re-archiving an already-archived entry.
+					// A duplicate/late recommendation targeting an archived entry
+					// would otherwise record `archived_from: 'archived'`
+					// (self-referential), breaking unarchive's status recovery.
+					// Preserve the existing archived_from and skip the rewrite.
+					if (entry.status === 'archived') {
+						return entry;
+					}
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
 					return {
 						...entry,
 						status: 'archived' as const,
+						// G6 (#1716): record prior status so `unarchiveEntry` can
+						// restore the entry to its pre-archive lifecycle position.
+						archived_from: entry.status,
+						archived_at: new Date().toISOString(),
 						updated_at: new Date().toISOString(),
 					};
+				}
 				case 'flag_contradiction':
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
+					// G3 (#1715): capture for post-transaction event emission.
+					contradictedEntries.push({
+						id: entry.id,
+						reason: (rec.reason ?? '').slice(0, 200),
+					});
 					return {
 						...entry,
 						tags: [
@@ -1702,6 +1768,53 @@ export async function applyCuratorKnowledgeUpdates(
 		applied += txApplied;
 		return modified ? updatedEntries : null;
 	});
+
+	// G3 (#1715): emit `contradicted` events for flag_contradiction actions,
+	// AFTER the transaction commits. This unifies the two previously-disconnected
+	// contradiction signals: `contradicted_count` (incremented only via
+	// knowledge_receipt) and the curator's tag-only `flag_contradiction`. Now
+	// both paths feed the same event-sourced counter. The curator-attributed
+	// context (agent: 'curator') makes these events distinguishable from
+	// delegate/reviewer ones for audit.
+	for (const { id, reason } of contradictedEntries) {
+		try {
+			await recordKnowledgeEvent(directory, {
+				type: 'contradicted' as const,
+				knowledge_id: id,
+				trace_id: `curator-${randomUUID()}`,
+				session_id: 'curator',
+				agent: 'curator',
+				reason: `flag_contradiction: ${reason}`,
+				evidence: { summary: reason },
+			});
+		} catch {
+			// best-effort — never fail the curator on event emission
+		}
+	}
+
+	// G3: after emitting, check the threshold and quarantine if configured +
+	// crossed. `tag_only` preserves legacy behavior; `quarantine` (default)
+	// auto-quarantines entries whose in-window contradicted count crossed.
+	if (
+		contradictedEntries.length > 0 &&
+		knowledgeConfig.contradiction_threshold_action === 'quarantine'
+	) {
+		const { maybeQuarantineOnContradiction } = await import(
+			'./knowledge-escalator.js'
+		);
+		for (const { id } of contradictedEntries) {
+			try {
+				await maybeQuarantineOnContradiction(
+					directory,
+					id,
+					knowledgeConfig.contradiction_quarantine_threshold,
+					knowledgeConfig.contradiction_quarantine_window_days,
+				);
+			} catch {
+				// best-effort
+			}
+		}
+	}
 
 	// Count skipped: recommendations that were not applied to existing entries
 	for (const rec of validRecommendations) {

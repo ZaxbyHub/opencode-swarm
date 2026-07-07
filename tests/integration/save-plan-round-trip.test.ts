@@ -81,7 +81,7 @@ describe('save_plan + update_task_status round-trip integration', () => {
 
 		// Step 4: Re-save plan with revised descriptions (merge mode)
 		const revisedPlan: SavePlanArgs = {
-			title: 'Round Trip Test v2',
+			title: 'Round Trip Test',
 			swarm_id: 'integration',
 			phases: [
 				{
@@ -195,6 +195,6 @@ describe('save_plan + update_task_status round-trip integration', () => {
 			),
 		);
 		expect(evidence.taskId).toBe('1.1');
-		expect(evidence.required_gates).toEqual(['reviewer', 'test_engineer']);
+		expect(evidence.required_gates).toEqual([]);
 	});
 });

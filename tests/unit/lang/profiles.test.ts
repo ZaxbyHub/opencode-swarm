@@ -1,20 +1,20 @@
 /**
  * Comprehensive unit tests for LanguageRegistry
- * Tests cover the full registry with all 11 profiles across all tiers
+ * Tests cover the full registry with all 13 profiles across all tiers
  */
 
 import { describe, expect, it } from 'bun:test';
 import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 
 describe('LanguageRegistry - Registry Completeness', () => {
-	it('getAll() returns exactly 11 profiles', () => {
+	it('getAll() returns exactly 13 profiles', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
-		expect(allProfiles).toHaveLength(12);
+		expect(allProfiles).toHaveLength(13);
 	});
 
-	it('getTier(1) returns exactly 4 profiles', () => {
+	it('getTier(1) returns exactly 5 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
-		expect(tier1Profiles).toHaveLength(4);
+		expect(tier1Profiles).toHaveLength(5);
 	});
 
 	it('getTier(2) returns exactly 5 profiles', () => {
@@ -27,19 +27,20 @@ describe('LanguageRegistry - Registry Completeness', () => {
 		expect(tier3Profiles).toHaveLength(3);
 	});
 
-	it('sum of all tiers equals 11 profiles', () => {
+	it('sum of all tiers equals 13 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
 		const tier2Profiles = LANGUAGE_REGISTRY.getTier(2);
 		const tier3Profiles = LANGUAGE_REGISTRY.getTier(3);
 		const total =
 			tier1Profiles.length + tier2Profiles.length + tier3Profiles.length;
-		expect(total).toBe(12);
+		expect(total).toBe(13);
 	});
 });
 
 describe('LanguageRegistry - Profile Lookup by ID', () => {
 	const profileIds = [
 		'typescript',
+		'javascript',
 		'python',
 		'rust',
 		'go',
@@ -50,6 +51,7 @@ describe('LanguageRegistry - Profile Lookup by ID', () => {
 		'swift',
 		'dart',
 		'ruby',
+		'php',
 	];
 
 	profileIds.forEach((id) => {
@@ -70,10 +72,10 @@ describe('LanguageRegistry - Extension Lookup', () => {
 	const extensionMappings: [string, string][] = [
 		['.ts', 'typescript'],
 		['.tsx', 'typescript'],
-		['.js', 'typescript'],
-		['.jsx', 'typescript'],
-		['.mjs', 'typescript'],
-		['.cjs', 'typescript'],
+		['.js', 'javascript'],
+		['.jsx', 'javascript'],
+		['.mjs', 'javascript'],
+		['.cjs', 'javascript'],
 		['.py', 'python'],
 		['.pyw', 'python'],
 		['.rs', 'rust'],
@@ -161,7 +163,7 @@ describe('LanguageRegistry - No Extension Collision', () => {
 });
 
 describe('LanguageRegistry - Tier 1 Audit Configuration', () => {
-	const tier1Profiles = ['typescript', 'python', 'rust', 'go'];
+	const tier1Profiles = ['typescript', 'javascript', 'python', 'rust', 'go'];
 
 	tier1Profiles.forEach((profileId) => {
 		it(`${profileId} has non-null audit.command`, () => {
@@ -236,11 +238,13 @@ describe('LanguageRegistry - All Profiles Have Required Fields', () => {
 describe('LanguageRegistry - SAST Configuration', () => {
 	const nativeRuleSetProfiles = [
 		'typescript',
+		'javascript',
 		'python',
 		'rust',
 		'java',
 		'csharp',
 		'cpp',
+		'php',
 	];
 
 	nativeRuleSetProfiles.forEach((profileId) => {

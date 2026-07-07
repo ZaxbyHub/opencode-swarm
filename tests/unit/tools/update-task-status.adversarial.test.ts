@@ -563,6 +563,9 @@ describe('update-task-status adversarial tests', () => {
 					status,
 					working_directory: tempDir,
 				};
+				if (status === 'in_progress') {
+					args.force = true;
+				}
 
 				const result = await executeUpdateTaskStatus(args);
 				expect(result.success).toBe(true);

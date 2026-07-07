@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'bun:test';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
@@ -14,7 +15,12 @@ import {
 } from '../../../src/state';
 import * as utilsModule from '../../../src/utils';
 
-const TEST_DIR = os.tmpdir();
+// Resolve through realpathSync so the test cwd matches the canonical path
+// production code compares against. On macOS, os.tmpdir() returns
+// /var/folders/... (symlinked to /private/var/folders/...); without realpath,
+// the .swarm containment guards and repo-graph boundary checks reject the
+// fixture ("resolves outside the working directory"). Issue #1729 macOS.
+const TEST_DIR = fs.realpathSync(os.tmpdir());
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -2386,6 +2392,8 @@ describe('guardrails circuit breaker', () => {
 
 	describe('Task 1.2: apply_patch path extraction', () => {
 		beforeEach(() => {
+			vi.restoreAllMocks();
+			vi.clearAllMocks();
 			resetSwarmState();
 		});
 
@@ -2416,9 +2424,9 @@ describe('guardrails circuit breaker', () => {
 				// Verify: architectWriteCount increments to 1
 				expect(session?.architectWriteCount).toBe(1);
 
-				// Verify: "Architect direct code edit detected via apply_patch" warning fires
+				// Verify: patch tool warning fires
 				expect(warnSpy).toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.objectContaining({
 						tool: 'apply_patch',
 						sessionID: 'test-session',
@@ -2455,7 +2463,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Verify: Warning fires
 				expect(warnSpy).toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.objectContaining({
 						targetPath: 'src/bar.ts',
 					}),
@@ -2491,7 +2499,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Verify: Warning contains correct path (src/index.ts)
 				expect(warnSpy).toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.objectContaining({
 						targetPath: 'src/index.ts',
 					}),
@@ -2524,7 +2532,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Verify: No warning fired
 				expect(warnSpy).not.toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.any(Object),
 				);
 
@@ -2567,7 +2575,7 @@ describe('guardrails circuit breaker', () => {
 				// Verify: Only one warning fired (break after first match)
 				const warningCalls = warnSpy.mock.calls.filter(
 					(call) =>
-						call[0] === 'Architect direct code edit detected via apply_patch',
+						call[0] === 'Architect direct code edit detected via patch tool',
 				);
 				expect(warningCalls.length).toBe(1);
 
@@ -2594,9 +2602,9 @@ describe('guardrails circuit breaker', () => {
 				// Verify: architectWriteCount increments
 				expect(session?.architectWriteCount).toBe(1);
 
-				// Verify: Warning fires with "detected via apply_patch" (or similar patch identifier)
+				// Verify: Warning fires with the patch-tool identifier.
 				expect(warnSpy).toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.objectContaining({
 						tool: 'patch',
 						targetPath: 'src/test.ts',
@@ -2636,7 +2644,7 @@ describe('guardrails circuit breaker', () => {
 				);
 				// Verify it's NOT the apply_patch warning
 				expect(warnSpy).not.toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.any(Object),
 				);
 
@@ -2671,7 +2679,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Expected: No warning fired
 				expect(warnSpy).not.toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.any(Object),
 				);
 
@@ -2700,7 +2708,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Expected: No warning
 				expect(warnSpy).not.toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.any(Object),
 				);
 
@@ -2744,7 +2752,7 @@ describe('guardrails circuit breaker', () => {
 
 					// Expected: Warning for /dev/null (actual implementation behavior)
 					expect(warnSpy).toHaveBeenCalledWith(
-						'Architect direct code edit detected via apply_patch',
+						'Architect direct code edit detected via patch tool',
 						expect.objectContaining({
 							targetPath: '/dev/null',
 						}),
@@ -2780,7 +2788,7 @@ describe('guardrails circuit breaker', () => {
 
 				// Expected: No warning (guard only applies to architect sessions)
 				expect(warnSpy).not.toHaveBeenCalledWith(
-					'Architect direct code edit detected via apply_patch',
+					'Architect direct code edit detected via patch tool',
 					expect.any(Object),
 				);
 
@@ -2823,7 +2831,7 @@ describe('guardrails circuit breaker', () => {
 				// Verify warning is for dev/null (not src/real.ts which comes later)
 				const applyPatchWarnings = warnSpy.mock.calls.filter(
 					(call) =>
-						call[0] === 'Architect direct code edit detected via apply_patch',
+						call[0] === 'Architect direct code edit detected via patch tool',
 				);
 				expect(applyPatchWarnings.length).toBe(1);
 				expect(applyPatchWarnings[0][1]).toMatchObject({

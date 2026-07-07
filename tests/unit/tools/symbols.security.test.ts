@@ -85,20 +85,23 @@ __all__ = ['public_function', 'PublicClass']`,
 	describe('MALFORMED INPUTS', () => {
 		it('should reject null/undefined input', async () => {
 			const result = await runSymbols(null);
-			// Tool converts null to "null" string which becomes invalid path
-			expect(result.error).toMatch(/Invalid arguments|outside workspace|path/i);
+			expect(result.error).toMatch(
+				/file parameter is required|Invalid arguments|outside workspace|path/i,
+			);
 		});
 
 		it('should reject undefined input', async () => {
 			const result = await runSymbols(undefined);
-			// Tool converts undefined to "undefined" string which becomes invalid path
-			expect(result.error).toMatch(/Invalid arguments|outside workspace|path/i);
+			expect(result.error).toMatch(
+				/file parameter is required|Invalid arguments|outside workspace|path/i,
+			);
 		});
 
 		it('should reject object input for file parameter', async () => {
 			const result = await runSymbols({ path: 'test.ts' });
-			// Object becomes "[object Object]" which is invalid
-			expect(result.error).toMatch(/Invalid arguments|outside workspace|path/i);
+			expect(result.error).toMatch(
+				/file parameter is required|Invalid arguments|outside workspace|path/i,
+			);
 		});
 
 		it('should reject array input for file parameter', async () => {

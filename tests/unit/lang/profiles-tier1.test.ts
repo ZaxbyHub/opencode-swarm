@@ -6,16 +6,16 @@ import { describe, expect, it } from 'bun:test';
 import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 
 describe('Tier 1 Language Profile Registry', () => {
-	// Test 1: LANGUAGE_REGISTRY has exactly 4 profiles registered after importing profiles.ts
-	it('should have exactly 4 profiles registered', () => {
+	// Test 1: LANGUAGE_REGISTRY has all profiles registered after importing profiles.ts
+	it('should have exactly 13 profiles registered', () => {
 		const allProfiles = LANGUAGE_REGISTRY.getAll();
-		expect(allProfiles).toHaveLength(12);
+		expect(allProfiles).toHaveLength(13);
 	});
 
-	// Test 2: getTier(1) returns exactly 4 profiles
-	it('should return exactly 4 Tier 1 profiles', () => {
+	// Test 2: getTier(1) returns exactly 5 profiles
+	it('should return exactly 5 Tier 1 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
-		expect(tier1Profiles).toHaveLength(4);
+		expect(tier1Profiles).toHaveLength(5);
 	});
 
 	// Test 3: getTier(2) returns 0 profiles (Tier 2 not registered yet)
@@ -59,7 +59,7 @@ describe('Tier 1 Language Profile Registry', () => {
 		expect(profile?.id).toBe('typescript');
 	});
 
-	// Test 9: All 4 Tier 1 profiles have non-null audit.command
+	// Test 9: All 5 Tier 1 profiles have non-null audit.command
 	it('should have non-null audit.command for all Tier 1 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
 		for (const profile of tier1Profiles) {
@@ -68,7 +68,7 @@ describe('Tier 1 Language Profile Registry', () => {
 		}
 	});
 
-	// Test 10: All 4 Tier 1 profiles have >= 3 coderConstraints
+	// Test 10: All 5 Tier 1 profiles have >= 3 coderConstraints
 	it('should have at least 3 coderConstraints for all Tier 1 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
 		for (const profile of tier1Profiles) {
@@ -76,7 +76,7 @@ describe('Tier 1 Language Profile Registry', () => {
 		}
 	});
 
-	// Test 11: All 4 Tier 1 profiles have >= 3 reviewerChecklist items
+	// Test 11: All 5 Tier 1 profiles have >= 3 reviewerChecklist items
 	it('should have at least 3 reviewerChecklist items for all Tier 1 profiles', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
 		for (const profile of tier1Profiles) {
@@ -113,6 +113,12 @@ describe('Tier 1 Language Profile Registry', () => {
 	it('should have correct Tier 1 profile IDs', () => {
 		const tier1Profiles = LANGUAGE_REGISTRY.getTier(1);
 		const tier1Ids = tier1Profiles.map((p) => p.id).sort();
-		expect(tier1Ids).toEqual(['go', 'python', 'rust', 'typescript']);
+		expect(tier1Ids).toEqual([
+			'go',
+			'javascript',
+			'python',
+			'rust',
+			'typescript',
+		]);
 	});
 });

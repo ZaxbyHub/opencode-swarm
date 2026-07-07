@@ -87,8 +87,8 @@ describe('resolveCommand() — deprecation warning', () => {
 			expect(result!.warning).toBeUndefined();
 		});
 
-		test('"plan" has no warning', () => {
-			const result = resolveCommand(['plan']);
+		test('"show-plan" (canonical) has no warning', () => {
+			const result = resolveCommand(['show-plan']);
 			expect(result).not.toBeNull();
 			expect(result!.warning).toBeUndefined();
 		});

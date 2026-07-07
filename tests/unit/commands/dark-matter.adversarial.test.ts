@@ -51,7 +51,13 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 
 describe('handleDarkMatterCommand (adversarial)', () => {
 	beforeEach(() => {
-		mock.restore();
+		// NOTE: mock.restore() (not clearAllMocks) would revert the module-level
+		// `console.warn` spy to the *real* console.warn (losing its no-op
+		// mockImplementation) and would never re-arm it, since nothing here calls
+		// `.mockImplementation()` again. clearAllMocks() resets call history/
+		// results without tearing down spy implementations, so the warn spy stays
+		// silent and trackable across every test in this file.
+		mock.clearAllMocks();
 		mockDetectDarkMatter.mockResolvedValue([]);
 		mockFormatDarkMatterOutput.mockReturnValue(
 			'## Dark Matter: Hidden Couplings\n\nNo hidden couplings detected.',
@@ -325,7 +331,12 @@ describe('handleDarkMatterCommand (adversarial)', () => {
 
 describe('Knowledge persistence adversarial tests', () => {
 	beforeEach(() => {
-		mock.restore();
+		// See the comment in the sibling describe block above: use
+		// clearAllMocks() (not restore()) so the module-level console.warn spy
+		// keeps its no-op implementation (and stays call-trackable) instead of
+		// reverting to the real console.warn, and so plain mock() call counts
+		// (e.g. mockAppendKnowledge) don't leak call history across tests.
+		mock.clearAllMocks();
 		mockDetectDarkMatter.mockResolvedValue([]);
 		mockFormatDarkMatterOutput.mockReturnValue(
 			'## Dark Matter: Hidden Couplings\n\nNo hidden couplings detected.',

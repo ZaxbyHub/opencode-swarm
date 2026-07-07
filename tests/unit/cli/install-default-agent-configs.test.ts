@@ -12,15 +12,19 @@ import { loadPluginConfig } from '../../../src/config/loader';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
-// On Windows, bun.cmd must be used instead of 'bun'
-const BUN_BINARY = process.platform === 'win32' ? 'bun.cmd' : 'bun';
-
+// Use process.execPath (the currently-running bun/node binary) instead of
+// resolving a bare 'bun'/'bun.cmd' from PATH. On the GitHub Windows runner,
+// Bun.spawn(['bun.cmd', ...]) without shell:true fails with ENOENT because
+// the kernel cannot execute a .cmd batch file directly and PATHEXT is not
+// consulted. process.execPath is the absolute path to the real executable
+// (e.g. C:\...\.bun\bin\bun.exe), which spawns correctly on every platform.
+// Matches the portable pattern in tests/unit/cli/update-command.test.ts.
 async function runCLI(
 	args: string[],
 	env: Record<string, string> = {},
 	cwd?: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	const proc = Bun.spawn([BUN_BINARY, 'run', CLI_PATH, ...args], {
+	const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, ...args], {
 		env: { ...process.env, ...env },
 		cwd: cwd,
 		stdout: 'pipe',
@@ -59,8 +63,10 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			'test_engineer',
 			'explorer',
 			'sme',
+			'researcher',
 			'critic',
 			'docs',
+			'docs_design',
 			'designer',
 			'critic_sounding_board',
 			'critic_drift_verifier',
@@ -69,16 +75,20 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			'critic_oversight',
 			'curator_init',
 			'curator_phase',
+			'curator_postmortem',
+			'curator_consolidation',
 			'skill_improver',
 			'spec_writer',
 		]);
 
-		test('contains all expected pipeline/QA/support agents (17 entries)', () => {
+		test('contains all expected pipeline/QA/support agents', () => {
 			const actualKeys = new Set(Object.keys(DEFAULT_AGENT_CONFIGS));
 			for (const agent of EXPECTED_AGENTS) {
 				expect(actualKeys).toContain(agent);
 			}
-			expect(Object.keys(DEFAULT_AGENT_CONFIGS)).toHaveLength(17);
+			expect(Object.keys(DEFAULT_AGENT_CONFIGS)).toHaveLength(
+				EXPECTED_AGENTS.size,
+			);
 		});
 
 		test('does NOT contain architect (orchestrator has no DEFAULT_AGENT_CONFIGS entry)', () => {

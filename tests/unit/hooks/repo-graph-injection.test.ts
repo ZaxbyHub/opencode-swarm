@@ -17,7 +17,10 @@ let tmp: string;
 
 beforeEach(() => {
 	resetGraphInjectionCache();
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rgi-'));
+	// realpathSync resolves the macOS /var → /private/var symlink (and Windows
+	// 8.3 short names) so the canonical workspace root matches what production
+	// code compares against. Issue #1729 macOS quarantine.
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rgi-')));
 	fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
 	fs.writeFileSync(
 		path.join(tmp, 'src/util.ts'),

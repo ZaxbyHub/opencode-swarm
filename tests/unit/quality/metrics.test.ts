@@ -336,21 +336,28 @@ describe('computeQualityMetrics', () => {
 		createTestFile(
 			'src/dup.ts',
 			`
-			function common() {
-				const x = 1;
-				const y = 2;
-				return x + y;
-			}
-			function common2() {
-				const x = 1;
-				const y = 2;
-				return x + y;
-			}
-			function common3() {
-				const x = 1;
-				const y = 2;
-				return x + y;
-			}
+			const block1 = [
+				'a',
+				'b',
+				'c',
+				'd',
+				'e',
+				'f',
+				'g',
+				'h',
+				'i',
+			];
+			const block1 = [
+				'a',
+				'b',
+				'c',
+				'd',
+				'e',
+				'f',
+				'g',
+				'h',
+				'i',
+			];
 		`,
 		);
 
@@ -573,19 +580,22 @@ describe('computeQualityMetrics', () => {
 	});
 
 	it('should detect duplication violation when ratio exceeded', async () => {
+		const copiedBlock = `
+			const alpha = 1;
+			const beta = 2;
+			const gamma = alpha + beta;
+			if (gamma > 1) {
+				console.log(gamma);
+			}
+			for (const item of [alpha, beta]) {
+				console.log(item);
+			}
+			export const done = true;
+		`;
 		createTestFile(
 			'src/heavy-dup.ts',
-			`
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
-			function duplicated() { const x = 1; const y = 2; return x + y; }
+			`${copiedBlock}
+			${copiedBlock}
 			function unique() { return 'unique'; }
 		`,
 		);

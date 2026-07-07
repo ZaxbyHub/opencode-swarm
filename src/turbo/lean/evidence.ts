@@ -27,9 +27,26 @@ export interface LaneEvidence {
 	error?: string;
 	agent?: string;
 	sessionId?: string;
+	mergeBackFailure?: {
+		laneId: string;
+		branchName?: string;
+		worktreePath: string;
+		status: 'failed' | 'partial' | 'conflict';
+		reason: string;
+		committedHash?: string;
+		conflictFiles?: string[];
+	};
 }
 
 import type { LeanTurboConfig } from '../../config/schema';
+
+export interface ValidationArtifact {
+	status: 'unknown' | 'passed' | 'failed';
+	command?: string;
+	stdoutTail?: string;
+	stderrTail?: string;
+	summary?: string;
+}
 
 /**
  * Aggregated evidence for an entire Lean Turbo phase.
@@ -54,6 +71,12 @@ export interface PhaseEvidence {
 		| 'NEEDS_REVISION'
 		| 'REJECTED'
 		| 'ESCALATE_TO_HUMAN';
+	/** Bounded raw validation artifacts for reviewer/critic evidence packages */
+	validationArtifacts?: {
+		build?: ValidationArtifact;
+		test?: ValidationArtifact;
+		lint?: ValidationArtifact;
+	};
 	/** Snapshot of lean turbo config used for this phase */
 	configSnapshot?: LeanTurboConfig;
 	/** ISO timestamp when phase evidence was written (distinct from startedAt/completedAt) */
@@ -309,6 +332,11 @@ export async function listLaneEvidence(
 		}
 		throw error;
 	}
+	// fs.readdir returns entries in filesystem-dependent order (ext4 vs APFS
+	// differ), which made laneSummaries[0].laneId nondeterministic across OSes
+	// (issue #1729 merge_group: macOS returned lane-2 before lane-1). Sort for
+	// deterministic cross-platform lane ordering.
+	entries.sort();
 
 	const lanes: LaneEvidence[] = [];
 

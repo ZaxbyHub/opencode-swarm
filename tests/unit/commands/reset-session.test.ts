@@ -101,9 +101,17 @@ describe('handleResetSessionCommand', () => {
 		// Other session files should also be deleted
 		expect(existsSync(cacheFile)).toBe(false);
 		expect(existsSync(tempFile)).toBe(false);
-		// Current implementation uses per-file deletion messages
+		// Each additional file is reported individually (✓ Deleted <file>)
+		// rather than as a single "Cleaned N additional session file(s)"
+		// summary — see src/commands/reset-session.ts, which switched to
+		// per-file reporting so a single EBUSY/locked file doesn't hide the
+		// status of the others (FR-006 SC-010).
 		expect(result).toContain('✓ Deleted delegation-cache.json');
 		expect(result).toContain('✓ Deleted temp-session.tmp');
+		const deletedOtherFiles = result
+			.split('\n')
+			.filter((line) => line.startsWith('✓ Deleted'));
+		expect(deletedOtherFiles).toHaveLength(2);
 	});
 
 	it('reports zero additional files when session dir is empty or only has state.json', async () => {
@@ -114,8 +122,13 @@ describe('handleResetSessionCommand', () => {
 		const result = await handleResetSessionCommand(testDir, []);
 
 		expect(existsSync(stateFile)).toBe(false);
-		// No per-file deletion messages when there are no extra files
-		expect(result).not.toContain('✓ Deleted');
+		// No additional files means no per-file "✓ Deleted <file>" lines are
+		// emitted at all (see src/commands/reset-session.ts — the summary
+		// count line was replaced with per-file reporting).
+		const deletedOtherFiles = result
+			.split('\n')
+			.filter((line) => line.startsWith('✓ Deleted'));
+		expect(deletedOtherFiles).toHaveLength(0);
 	});
 
 	// ─────────────────────────────────────────────────────────────────────

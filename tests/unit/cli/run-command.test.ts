@@ -512,13 +512,13 @@ describe('run() - CLI entry point', () => {
 	});
 
 	// Additional edge cases
-	it('doctor standalone → unknown command (only accessible as "config doctor"), returns 1', async () => {
+	it('doctor standalone → deprecated alias for "config doctor", returns 0', async () => {
 		const result = await run(['doctor', '--verbose']);
-		expect(result).toBe(1);
-		expect(mockHandleDoctorCommand).not.toHaveBeenCalled();
-		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: doctor'),
-		);
+		expect(result).toBe(0);
+		expect(mockHandleDoctorCommand).toHaveBeenCalledWith(expect.any(String), [
+			'--verbose',
+		]);
+		expect(mockConsoleLog).toHaveBeenCalledWith('doctor mock output');
 	});
 
 	it('knowledge migrate with extra args → passes extra args correctly', async () => {

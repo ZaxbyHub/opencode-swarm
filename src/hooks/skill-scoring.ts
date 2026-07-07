@@ -193,6 +193,10 @@ function normalizeTriggerList(values: string[]): string[] {
 	return out;
 }
 
+function finiteRankValue(value: number): number {
+	return Number.isFinite(value) ? value : 0;
+}
+
 function parseInlineStringList(rawValue: string): string[] {
 	const trimmed = rawValue.trim();
 	if (!trimmed) return [];
@@ -603,16 +607,19 @@ export function rankSkillsForContext(
 
 		results.push({
 			skillPath,
-			score,
+			score: finiteRankValue(score),
 			usageCount: skillEntries.length,
 			complianceRate,
 		});
 	}
 
-	// Sort by score descending; break ties by usage count descending
+	// Sort by score descending; break ties by usage count and stable path order.
 	results.sort((a, b) => {
-		if (b.score !== a.score) return b.score - a.score;
-		return b.usageCount - a.usageCount;
+		const scoreDelta = finiteRankValue(b.score) - finiteRankValue(a.score);
+		if (scoreDelta !== 0) return scoreDelta;
+		const usageDelta = b.usageCount - a.usageCount;
+		if (usageDelta !== 0) return usageDelta;
+		return a.skillPath.localeCompare(b.skillPath);
 	});
 
 	return results;

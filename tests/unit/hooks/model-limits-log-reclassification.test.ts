@@ -8,11 +8,13 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLog = mock(() => {});
 const mockWarn = mock(() => {});
+const mockCriticalWarn = mock(() => {});
 const mockError = mock(() => {});
 
 mock.module('../../../src/utils/logger', () => ({
 	log: mockLog,
 	warn: mockWarn,
+	criticalWarn: mockCriticalWarn,
 	error: mockError,
 }));
 

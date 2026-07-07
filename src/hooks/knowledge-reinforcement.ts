@@ -3,6 +3,7 @@ import type {
 	PhaseConfirmationRecord,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 export type ReinforcementReason =
 	| 'reinforced'
@@ -15,16 +16,10 @@ export interface ReinforcementResult {
 	reason: ReinforcementReason;
 }
 
-const INACTIVE_STATUSES = new Set([
-	'archived',
-	'quarantined',
-	'quarantined_unactionable',
-]);
-
 export function isActiveSwarmKnowledgeEntry(
 	entry: SwarmKnowledgeEntry,
 ): boolean {
-	return !INACTIVE_STATUSES.has(entry.status);
+	return isActiveStatus(entry.status);
 }
 
 export function findActiveSwarmNearDuplicate(

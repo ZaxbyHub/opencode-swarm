@@ -64,6 +64,23 @@ function extractArchitectPrompt(): string {
 
 const ARCHITECT_PROMPT = extractArchitectPrompt();
 
+// PR #1060 extracted the ISSUE_INGEST mode's phase-by-phase protocol out of
+// the inline ARCHITECT_PROMPT and into a loaded skill file — the architect
+// prompt now only contains the MODE header + ACTION: Load skill file:... line
+// (see src/agents/architect.ts, "### MODE: ISSUE_INGEST"). The phase names,
+// scoring weights, and flag descriptions this suite checks live in that
+// skill file, so read it directly rather than the prompt string.
+function readIssueIngestSkill(): string {
+	const workspaceRoot = findWorkspaceRoot();
+	const filePath = resolve(
+		workspaceRoot,
+		'.opencode/skills/issue-ingest/SKILL.md',
+	);
+	return readFileSync(filePath, 'utf-8');
+}
+
+const ISSUE_INGEST_SKILL = readIssueIngestSkill();
+
 describe('Task 5.2 — Registry Registration', () => {
 	describe('COMMAND_REGISTRY structure', () => {
 		test('1. COMMAND_REGISTRY has an "issue" key', () => {
@@ -125,41 +142,41 @@ describe('Task 5.3 — Architect Prompt Text', () => {
 		expect(ARCHITECT_PROMPT).toContain('MODE: ISSUE_INGEST');
 	});
 
-	test('10. ARCHITECT_PROMPT contains "Phase 1: INTAKE"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Phase 1: INTAKE');
+	test('10. issue-ingest SKILL.md contains "Phase 1: INTAKE"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Phase 1: INTAKE');
 	});
 
-	test('11. ARCHITECT_PROMPT contains "Phase 2: LOCALIZATION"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Phase 2: LOCALIZATION');
+	test('11. issue-ingest SKILL.md contains "Phase 2: LOCALIZATION"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Phase 2: LOCALIZATION');
 	});
 
-	test('12. ARCHITECT_PROMPT contains "Phase 3: SPEC GENERATION"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Phase 3: SPEC GENERATION');
+	test('12. issue-ingest SKILL.md contains "Phase 3: SPEC GENERATION"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Phase 3: SPEC GENERATION');
 	});
 
-	test('13. ARCHITECT_PROMPT contains "Phase 4: TRANSITION"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Phase 4: TRANSITION');
+	test('13. issue-ingest SKILL.md contains "Phase 4: TRANSITION"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Phase 4: TRANSITION');
 	});
 
-	test('14. ARCHITECT_PROMPT contains "Root Cause"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Root Cause');
+	test('14. issue-ingest SKILL.md contains "Root Cause"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Root Cause');
 	});
 
-	test('15. ARCHITECT_PROMPT contains "Fix Strategy"', () => {
-		expect(ARCHITECT_PROMPT).toContain('Fix Strategy');
+	test('15. issue-ingest SKILL.md contains "Fix Strategy"', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('Fix Strategy');
 	});
 
-	test('16. ARCHITECT_PROMPT contains composite scoring weights (0.4, 0.25, 0.2, 0.15)', () => {
-		expect(ARCHITECT_PROMPT).toContain('0.4');
-		expect(ARCHITECT_PROMPT).toContain('0.25');
-		expect(ARCHITECT_PROMPT).toContain('0.2');
-		expect(ARCHITECT_PROMPT).toContain('0.15');
+	test('16. issue-ingest SKILL.md contains composite scoring weights (0.4, 0.25, 0.2, 0.15)', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('0.4');
+		expect(ISSUE_INGEST_SKILL).toContain('0.25');
+		expect(ISSUE_INGEST_SKILL).toContain('0.2');
+		expect(ISSUE_INGEST_SKILL).toContain('0.15');
 	});
 
-	test('17. ARCHITECT_PROMPT contains flag descriptions for plan=true, trace=true, and noRepro=true', () => {
-		expect(ARCHITECT_PROMPT).toContain('plan=true');
-		expect(ARCHITECT_PROMPT).toContain('trace=true');
-		expect(ARCHITECT_PROMPT).toContain('noRepro=true');
+	test('17. issue-ingest SKILL.md contains flag descriptions for plan=true, trace=true, and noRepro=true', () => {
+		expect(ISSUE_INGEST_SKILL).toContain('plan=true');
+		expect(ISSUE_INGEST_SKILL).toContain('trace=true');
+		expect(ISSUE_INGEST_SKILL).toContain('noRepro=true');
 	});
 
 	test('18. MODE: ISSUE_INGEST section appears between MODE: COUNCIL and MODE: PLAN sections', () => {

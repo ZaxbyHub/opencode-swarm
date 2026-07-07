@@ -40,6 +40,7 @@ import type {
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { OUTCOME_BLOCK_THRESHOLD } from './knowledge-types.js';
 import {
 	appendUnactionable,
 	quarantineEntry,
@@ -1264,6 +1265,19 @@ export async function curateAndStoreSwarm(
 	// effect of this write (issue #893).
 	if (!options?.skipAutoPromotion) {
 		await _internals.runAutoPromotion(directory, config);
+		// G7 (#1716): run the demotion pass alongside promotion. Gated on
+		// `phaseInfo.phase_number > 0` because `close.ts` hardcodes
+		// `phase_number: 0` (close-time curation may span phases unclearly and
+		// would otherwise double-count or count a phantom phase 0); only
+		// phase-complete passes a real phase number. The `> 0` gate ensures
+		// demotion runs once per real phase, in lockstep with promotion.
+		if (phaseInfo.phase_number > 0) {
+			await _internals.runAutoDemotion(
+				directory,
+				config,
+				phaseInfo.phase_number,
+			);
+		}
 	}
 
 	return { stored, reinforced, skipped, rejected, quarantined };
@@ -1271,9 +1285,11 @@ export async function curateAndStoreSwarm(
 
 // A track-record signal at or below this (negatives clearly outweighing positives,
 // with enough corroborating evidence) blocks auto-promotion regardless of phase
-// confirmations or age. Tuned against computeOutcomeSignal's Laplace smoothing so a
-// lone ignore/contradiction does not block a well-confirmed entry.
-const OUTCOME_PROMOTION_BLOCK = -0.3;
+// confirmations or age. G7 (#1716): lifted to `OUTCOME_BLOCK_THRESHOLD` in
+// `knowledge-types.ts` so the config default (`promoted_demotion_signal_threshold`)
+// can reference the same value. Both the promotion block and the demotion
+// threshold share this single source of truth.
+const OUTCOME_PROMOTION_BLOCK = OUTCOME_BLOCK_THRESHOLD;
 
 /**
  * Auto-promote swarm entries based on phase confirmations and age.
@@ -1336,6 +1352,105 @@ export async function runAutoPromotion(
 	}
 
 	// Rewrite if any changes were made
+	if (changed) {
+		await rewriteKnowledge(knowledgePath, entries);
+	}
+}
+
+/**
+ * G7 (#1716): Auto-demote swarm entries that have sustained a net-negative
+ * outcome signal over consecutive phase EVALUATIONS (i.e. consecutive
+ * `runAutoDemotion` invocations with distinct phase numbers — a skipped phase
+ * in between still counts, matching the issue's "≥3 consecutive" intent as
+ * implemented against evaluation cadence, not wall-clock phase contiguity).
+ *
+ * Companion to {@link runAutoPromotion}. For each `promoted` entry:
+ *  1. Dedupe by phase: if `entry.last_demotion_phase === phaseNumber`, this
+ *     entry has already been processed for this phase (handles the case where
+ *     `curateAndStoreSwarm` is invoked multiple times in the same logical
+ *     phase — e.g. phase-complete + close). Skip the counter update.
+ *  2. Otherwise compute the outcome signal. If at/below
+ *     `config.promoted_demotion_signal_threshold`, increment
+ *     `recent_negative_phase_count`; else reset it to 0.
+ *  3. Set `entry.last_demotion_phase = phaseNumber`.
+ *  4. If `recent_negative_phase_count >= config.promoted_demotion_min_negative_phases`,
+ *     demote to `established`: clear `hive_eligible`, clear the G2
+ *     `confidence_floor_demoted` flag (the demotion is the stronger signal),
+ *     and reset the counter.
+ *
+ * Only `promoted` entries are touched. The `phaseInfo.phase_number > 0` gate
+ * at the call site ensures this runs only at phase-complete (not close-time
+ * curation, which hardcodes `phase_number: 0`).
+ */
+export async function runAutoDemotion(
+	directory: string,
+	config: KnowledgeConfig,
+	phaseNumber: number,
+): Promise<void> {
+	const knowledgePath = resolveSwarmKnowledgePath(directory);
+	const entries =
+		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
+	const counterRollups = await readKnowledgeCounterRollups(directory);
+
+	let changed = false;
+
+	for (const entry of entries) {
+		if (entry.status !== 'promoted') continue;
+
+		// Phase-keyed dedupe: only one counter update per real phase. This
+		// prevents double-counting when `curateAndStoreSwarm` is called from
+		// multiple sites in the same logical phase.
+		if (entry.last_demotion_phase === phaseNumber) continue;
+
+		const signal = computeOutcomeSignal(
+			effectiveRetrievalOutcomes(
+				entry.retrieval_outcomes,
+				counterRollups.get(entry.id),
+			),
+		);
+
+		const threshold = config.promoted_demotion_signal_threshold;
+		const minPhases = config.promoted_demotion_min_negative_phases;
+		const prevCount = entry.recent_negative_phase_count ?? 0;
+		const next = signal <= threshold ? prevCount + 1 : 0;
+
+		// PRR-016: avoid phantom `updated_at` churn + file rewrites when nothing
+		// changed. Three real state transitions: counter increments, counter
+		// resets from a non-zero value (the entry "recovered" this phase), or
+		// demotion fires. A consistently-positive entry that stays at 0 between
+		// phases is a no-op — its `last_demotion_phase` update is the only
+		// change and isn't worth a rewrite (the dedupe gate keys off it but a
+		// missing update is harmless: the next phase just re-evaluates).
+		const counterChanged = next !== prevCount;
+		const willDemote = next >= minPhases;
+		if (!counterChanged && !willDemote) {
+			// Still record the phase marker so the dedupe gate works for this
+			// phase; this is a pure in-memory mutation that only persists if
+			// some OTHER entry in the loop sets `changed`.
+			entry.last_demotion_phase = phaseNumber;
+			continue;
+		}
+
+		entry.recent_negative_phase_count = next;
+		entry.last_demotion_phase = phaseNumber;
+
+		if (willDemote) {
+			// Demote: promoted → established. The boost-table raise (G7.2) means
+			// an `established` entry (+0.10) outranks a `candidate` (+0.0) but
+			// is outranked by a still-`promoted` entry (+0.15) — satisfying the
+			// issue's intent that demoted entries no longer get the promoted boost.
+			entry.status = 'established';
+			entry.hive_eligible = false;
+			// G2 disambiguation: the G2 `confidence_floor_demoted` flag is now
+			// stale (it was set when the entry was promoted and below the floor).
+			// The status demotion is the stronger signal and wins; clear the flag.
+			entry.confidence_floor_demoted = false;
+			entry.recent_negative_phase_count = 0;
+		}
+		entry.updated_at = new Date().toISOString();
+		changed = true;
+	}
+
 	if (changed) {
 		await rewriteKnowledge(knowledgePath, entries);
 	}
@@ -1496,6 +1611,7 @@ export const _internals: {
 	isWriteToEvidenceFile: typeof isWriteToEvidenceFile;
 	curateAndStoreSwarm: typeof curateAndStoreSwarm;
 	runAutoPromotion: typeof runAutoPromotion;
+	runAutoDemotion: typeof runAutoDemotion;
 	createKnowledgeCuratorHook: typeof createKnowledgeCuratorHook;
 	seenRetroSections: typeof seenRetroSections;
 	recordSeenRetroSection: typeof recordSeenRetroSection;
@@ -1506,6 +1622,7 @@ export const _internals: {
 	isWriteToEvidenceFile,
 	curateAndStoreSwarm,
 	runAutoPromotion,
+	runAutoDemotion,
 	createKnowledgeCuratorHook,
 	seenRetroSections,
 	recordSeenRetroSection,

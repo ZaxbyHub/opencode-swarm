@@ -35,8 +35,12 @@ const architectSource = readFileSync(
  * They legitimately have no `### MODE:` section.
  */
 const NON_COMMAND_SKILLS = new Set([
+	'commit-pr',
 	'engineering-conventions',
 	'running-tests',
+	'swarm-pr-subscribe',
+	'swarm-implement',
+	'swarm-pr-subscribe',
 	'writing-tests',
 	'generated',
 ]);

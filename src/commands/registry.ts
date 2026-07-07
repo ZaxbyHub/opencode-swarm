@@ -1109,10 +1109,10 @@ export const COMMAND_REGISTRY = {
 	},
 	rollback: {
 		handler: (ctx) => handleRollbackCommand(ctx.directory, ctx.args),
-		description: 'Restore swarm state to a checkpoint <phase>',
+		description: 'Restore swarm state or project files to a checkpoint',
 		details:
-			'Restores .swarm/ state by directly overwriting files from a checkpoint directory (checkpoints/phase-<N>). Writes rollback event to events.jsonl. Without phase argument, lists available checkpoints. Partial failures are reported but processing continues.',
-		args: '<phase-number>',
+			'Restores legacy .swarm/ phase checkpoints from checkpoints/phase-<N> when present. Otherwise restores named git checkpoints from .swarm/checkpoints.json by label or list number. Writes rollback event to events.jsonl. Without an argument, lists available checkpoints.',
+		args: '<phase-number|label|list-number>',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
@@ -1126,7 +1126,8 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 	},
 	handoff: {
-		handler: (ctx) => handleHandoffCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleHandoffCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Prepare state for clean model switch (new session)',
 		args: '',
 		details:
@@ -1218,10 +1219,10 @@ export const COMMAND_REGISTRY = {
 	},
 	'knowledge restore': {
 		handler: (ctx) => handleKnowledgeRestoreCommand(ctx.directory, ctx.args),
-		description: 'Restore a quarantined knowledge entry <id>',
+		description: 'Restore a quarantined or archived knowledge entry <id>',
 		subcommandOf: 'knowledge',
 		details:
-			'Restores a quarantined knowledge entry back to the active knowledge store by ID. Validates entry ID format (1-64 alphanumeric/hyphen/underscore). Entry must currently be in quarantine state.',
+			"Restores a quarantined or archived knowledge entry back to the active knowledge store by ID. Dispatches by current status: an 'archived' entry is restored to its pre-archive status; a 'quarantined' entry is restored from the quarantine sidecar. Validates entry ID format (1-64 alphanumeric/hyphen/underscore).",
 		args: '<entry-id>',
 		category: 'utility',
 	},
@@ -1382,7 +1383,7 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Manage project checkpoints [save|restore|delete|list] <label>',
 		details:
-			'save: creates named snapshot of current .swarm/ state. restore: soft-resets to checkpoint by overwriting current .swarm/ files. delete: removes named checkpoint. list: shows all checkpoints with timestamps. All subcommands require a label except list.',
+			'save: creates named git checkpoint. restore: hard-resets tracked files to the checkpoint. delete: removes named checkpoint metadata. list: shows all checkpoints with timestamps. All subcommands require a label except list.',
 		args: '<save|restore|delete|list> <label>',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/checkpoint',

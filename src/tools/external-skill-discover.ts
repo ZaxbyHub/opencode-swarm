@@ -30,16 +30,14 @@ export const _internals = {
 		_url: string,
 		_timeoutMs: number,
 	): Promise<{ content: string; finalUrl: string }> => {
-		const parsed = new URL(_url);
-		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-			throw new Error('Only http: and https: protocols are allowed');
-		}
+		assertSafeFetchUrl(_url);
 		const response = await fetch(_url, {
 			signal: AbortSignal.timeout(_timeoutMs),
 		});
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 		}
+		assertSafeFetchUrl(response.url);
 		const content = await response.text();
 		return { content, finalUrl: response.url };
 	},
@@ -59,6 +57,98 @@ const SOURCE_TRUST_LEVELS: Record<string, 'low' | 'medium' | 'high'> = {
 	collection: 'low',
 	manual_import: 'medium',
 };
+
+function normalizeHostname(hostname: string): string {
+	return hostname
+		.toLowerCase()
+		.replace(/^\[/, '')
+		.replace(/\]$/, '')
+		.replace(/\.$/, '');
+}
+
+function isUnsafeIpv4(hostname: string): boolean {
+	const parts = hostname.split('.');
+	if (parts.length !== 4) return false;
+	const octets = parts.map((part) => {
+		if (!/^\d+$/.test(part)) return Number.NaN;
+		const value = Number(part);
+		return value >= 0 && value <= 255 ? value : Number.NaN;
+	});
+	if (octets.some((value) => Number.isNaN(value))) return false;
+	const [a, b] = octets;
+	return (
+		a === 0 ||
+		a === 10 ||
+		a === 127 ||
+		(a === 100 && b >= 64 && b <= 127) ||
+		(a === 169 && b === 254) ||
+		(a === 172 && b >= 16 && b <= 31) ||
+		(a === 192 && b === 168)
+	);
+}
+
+/** Convert two 4-hex-char groups to dotted-decimal IPv4 */
+function hexGroupsToDotted(group1: string, group2: string): string | null {
+	const g1 = group1.padStart(4, '0');
+	const g2 = group2.padStart(4, '0');
+	if (!/^[0-9a-f]{4}$/.test(g1) || !/^[0-9a-f]{4}$/.test(g2)) return null;
+	return `${parseInt(g1.slice(0, 2), 16)}.${parseInt(g1.slice(2, 4), 16)}.${parseInt(g2.slice(0, 2), 16)}.${parseInt(g2.slice(2, 4), 16)}`;
+}
+
+function isUnsafeIpv6(hostname: string): boolean {
+	const host = normalizeHostname(hostname);
+	if (
+		host === '::' ||
+		host === '::1' ||
+		host.startsWith('fc') ||
+		host.startsWith('fd') ||
+		host.startsWith('fe80:')
+	) {
+		return true;
+	}
+	// IPv4-mapped IPv6: ::ffff:a.b.c.d → ::ffff:hex:hex
+	if (host.startsWith('::ffff:')) {
+		const embedded = host.slice(7);
+		// Dotted-decimal form: ::ffff:192.168.1.1
+		if (isUnsafeIpv4(embedded)) return true;
+		// Hex form: extract the last two hex groups regardless of any
+		// intermediate zero groups (covers IPv4-mapped, IPv4-translated,
+		// and other ::ffff-prefixed forms that resolve to an embedded IPv4).
+		const groups = embedded.split(':');
+		if (groups.length >= 2) {
+			const high = groups[groups.length - 2];
+			const low = groups[groups.length - 1];
+			const dotted = hexGroupsToDotted(high, low);
+			if (dotted && isUnsafeIpv4(dotted)) return true;
+		}
+	}
+	// IPv4-compatible: ::hex:hex (not ::ffff:)
+	if (host.startsWith('::') && !host.startsWith('::ffff:')) {
+		const embedded = host.slice(2);
+		const groups = embedded.split(':');
+		if (groups.length === 2) {
+			const dotted = hexGroupsToDotted(groups[0], groups[1]);
+			if (dotted && isUnsafeIpv4(dotted)) return true;
+		}
+	}
+	return false;
+}
+
+function assertSafeFetchUrl(rawUrl: string): void {
+	const parsed = new URL(rawUrl);
+	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+		throw new Error('Only http: and https: protocols are allowed');
+	}
+	const hostname = normalizeHostname(parsed.hostname);
+	if (
+		hostname === 'localhost' ||
+		hostname.endsWith('.localhost') ||
+		isUnsafeIpv4(hostname) ||
+		isUnsafeIpv6(hostname)
+	) {
+		throw new Error(`Unsafe external skill fetch host: ${parsed.hostname}`);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Source matching (FR-011)
@@ -426,3 +516,14 @@ export const external_skill_discover: ReturnType<typeof createSwarmTool> =
 			});
 		},
 	});
+
+// ---------------------------------------------------------------------------
+// Test exports — direct unit testing via _test_exports (Tier 0 DI seam)
+// ---------------------------------------------------------------------------
+
+export const _test_exports = {
+	isUnsafeIpv4,
+	isUnsafeIpv6,
+	assertSafeFetchUrl,
+	normalizeHostname,
+};

@@ -16,7 +16,12 @@ import {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function mkdtemp(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-critic-test-'));
+	// Wrap in realpathSync: macOS symlinks /var → /private/var (issue #1729),
+	// and Windows 8.3 short names can mismatch; realpath canonicalizes the path
+	// so .swarm containment guards / repo-graph boundary checks match production.
+	const dir = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'lean-critic-test-')),
+	);
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
 		recursive: true,
 	});
@@ -212,6 +217,43 @@ describe('dispatchPhaseCritic', () => {
 		expect(pkg.testResults.totalLanes).toBe(2);
 		expect(pkg.testResults.completedLanes).toBe(2);
 		expect(pkg.testResults.failedLanes).toBe(0);
+	});
+
+	test('compileCriticPackage includes raw validation artifacts from phase evidence', async () => {
+		writeLaneEvidence(dir, 1, {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: ['src/a.ts'],
+			status: 'completed',
+			sessionId: 'test-session',
+		});
+		writePhaseEvidence(dir, 1, {
+			phase: 1,
+			planId: 'test-plan',
+			lanes: [],
+			degradedTasks: [],
+			startedAt: new Date().toISOString(),
+			status: 'completed',
+			validationArtifacts: {
+				build: {
+					status: 'failed',
+					command: 'bun run build',
+					stdoutTail: 'build failed',
+					stderrTail: 'ts error',
+				},
+				test: {
+					status: 'passed',
+					command: 'bun test',
+					stdoutTail: 'all pass',
+				},
+			},
+		});
+		writeReviewerEvidence(dir, 1, 'APPROVED', 'review ok');
+
+		const pkg = await _internals.compileCriticPackage(dir, 1, 'test-session');
+
+		expect(pkg.validationArtifacts?.build?.stderrTail).toBe('ts error');
+		expect(pkg.validationArtifacts?.test?.stdoutTail).toBe('all pass');
 	});
 
 	test('compileCriticPackage notes missing reviewer evidence as safety concern', async () => {

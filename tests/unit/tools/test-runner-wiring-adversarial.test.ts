@@ -425,6 +425,11 @@ describe('detectTestFramework - Adversarial Security Tests', () => {
 					'gradlew',
 					'gradlew.bat',
 					'spec',
+					'composer.json',
+					'phpunit.xml',
+					'artisan',
+					'Pest.php',
+					'pest.php',
 				];
 				const isFrameworkMarker = frameworkMarkers.some((marker) =>
 					pathStr.endsWith(marker),

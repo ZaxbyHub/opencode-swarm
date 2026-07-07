@@ -88,13 +88,17 @@ describe('steering-consumed adversarial security tests', () => {
 
 		it('should reject directory with absolute Windows path', () => {
 			const maliciousDir = 'C:\\Windows\\System32';
+			const outsidePath = 'C:\\Windows\\System32\\.swarm\\events.jsonl';
+			const before = fs.existsSync(outsidePath)
+				? fs.readFileSync(outsidePath, 'utf-8')
+				: null;
 
 			recordSteeringConsumed(maliciousDir, 'test-id');
 
-			// Should not create file in system32
-			expect(() =>
-				fs.accessSync('C:\\Windows\\System32\\.swarm\\events.jsonl'),
-			).toThrow();
+			const after = fs.existsSync(outsidePath)
+				? fs.readFileSync(outsidePath, 'utf-8')
+				: null;
+			expect(after).toBe(before);
 		});
 	});
 

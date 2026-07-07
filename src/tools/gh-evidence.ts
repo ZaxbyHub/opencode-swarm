@@ -5,6 +5,7 @@ import {
 	runExternalTool,
 } from '../utils/external-tool-runner';
 import { containsControlChars } from '../utils/path-security';
+import { neutralizeUntrustedMarkdown } from '../utils/untrusted-markdown';
 import { createSwarmTool } from './create-tool';
 
 const GH_TIMEOUT_MS = 20_000;
@@ -144,14 +145,18 @@ function sanitizeParsedJson(value: unknown): unknown {
 	if (value && typeof value === 'object') {
 		const out: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
-			if (
-				typeof entry === 'string' &&
-				(entry.length > 20_000 || key === 'body')
-			) {
-				out[key] = `${entry.slice(0, 20_000)}... [truncated]`;
-			} else {
-				out[key] = sanitizeParsedJson(entry);
+			if (typeof entry === 'string') {
+				const bounded =
+					entry.length > 20_000
+						? `${entry.slice(0, 20_000)}... [truncated]`
+						: entry;
+				out[key] =
+					key === 'body'
+						? neutralizeUntrustedMarkdown(bounded, 'GitHub body')
+						: bounded;
+				continue;
 			}
+			out[key] = sanitizeParsedJson(entry);
 		}
 		return out;
 	}

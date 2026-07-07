@@ -28,6 +28,7 @@ import * as path from 'node:path';
 // Import the module under test
 const testRunnerModule = await import('../../../src/tools/test-runner');
 const { test_runner, detectTestFramework, runTests } = testRunnerModule;
+const REPO_ROOT = path.resolve(import.meta.dir, '../../..');
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
@@ -746,7 +747,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			// Read the source to verify no path.resolve() is called on workingDir
 			// This is a documentation test, not a runtime test
 			const sourceCode = fs.readFileSync(
-				path.join(process.cwd(), 'src/tools/create-tool.ts'),
+				path.join(REPO_ROOT, 'src/tools/create-tool.ts'),
 				'utf-8',
 			);
 

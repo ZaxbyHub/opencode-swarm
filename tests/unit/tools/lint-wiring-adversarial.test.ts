@@ -93,7 +93,7 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 			// Simulate gradlew.bat exists on Windows
 			return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 		});
-		mockIsCommandAvailable.mockImplementation(false);
+		mockIsCommandAvailable.mockImplementation(() => false);
 
 		const result = getAdditionalLinterCommand(
 			'checkstyle',
@@ -131,8 +131,8 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 		// Need about 500 - ' checkstyleMain' = 487 chars minimum for the gradlew path
 		const longSegment = 'a'.repeat(120);
 		const longCwd = `/${longSegment}/${longSegment}/${longSegment}/${longSegment}`;
-		mockExistsSync.mockImplementation(true);
-		mockIsCommandAvailable.mockImplementation(false);
+		mockExistsSync.mockImplementation(() => true);
+		mockIsCommandAvailable.mockImplementation(() => false);
 
 		const result = getAdditionalLinterCommand('checkstyle', 'check', longCwd);
 		expect(result).toBeDefined();
@@ -168,7 +168,7 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 describe('getAdditionalLinterCommand — Gradlew path edge cases', () => {
 	beforeEach(() => {
 		mock.restore();
-		mockIsCommandAvailable.mockImplementation(false);
+		mockIsCommandAvailable.mockImplementation(() => false);
 	});
 
 	it('should return null gradlew and fall back to gradle when gradlew exists but gradlew.bat does not (on Windows)', () => {
@@ -295,8 +295,8 @@ describe('runAdditionalLint — resource and error attacks', () => {
 
 	beforeEach(() => {
 		mock.restore();
-		mockIsCommandAvailable.mockImplementation(false);
-		mockExistsSync.mockImplementation(false);
+		mockIsCommandAvailable.mockImplementation(() => false);
+		mockExistsSync.mockImplementation(() => false);
 		originalSpawn = Bun.spawn;
 	});
 
@@ -358,8 +358,8 @@ describe('runAdditionalLint — resource and error attacks', () => {
 		// Need about 500 - ' checkstyleMain' = 487 chars minimum for the gradlew path
 		const longSegment = 'a'.repeat(120);
 		const longCwd = `/${longSegment}/${longSegment}/${longSegment}/${longSegment}`;
-		mockExistsSync.mockImplementation(true);
-		mockIsCommandAvailable.mockImplementation(false);
+		mockExistsSync.mockImplementation(() => true);
+		mockIsCommandAvailable.mockImplementation(() => false);
 
 		const command = getAdditionalLinterCommand('checkstyle', 'check', longCwd);
 		const commandStr = command.join(' ');

@@ -26,6 +26,8 @@ import { TOOL_MANIFEST } from '../../../src/tools/manifest';
 import { buildPluginToolObject } from '../../../src/tools/plugin-registration';
 import { TOOL_NAMES, type ToolName } from '../../../src/tools/tool-names';
 
+const REPO_ROOT = path.resolve(import.meta.dir, '../../..');
+
 // The real plugin tool object derived from the manifest (swarm_command's DI
 // instance is not needed to enumerate keys).
 const PLUGIN_TOOLS = buildPluginToolObject({});
@@ -95,7 +97,7 @@ describe('Adversarial: Tool Registration Security', () => {
 		});
 
 		test('no import should shadow built-in or external modules', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
+			const indexPath = path.resolve(REPO_ROOT, 'src', 'index.ts');
 			const indexContent = fs.readFileSync(indexPath, 'utf-8');
 
 			const dangerousShadows = [
@@ -252,12 +254,7 @@ describe('Adversarial: Tool Registration Security', () => {
 	// ========================================================================
 	describe('5. Phantom Import Detection (Barrel Export Alignment)', () => {
 		test('barrel exports should contain all 3 newly registered tools', () => {
-			const barrelPath = path.resolve(
-				process.cwd(),
-				'src',
-				'tools',
-				'index.ts',
-			);
+			const barrelPath = path.resolve(REPO_ROOT, 'src', 'tools', 'index.ts');
 			const barrelContent = fs.readFileSync(barrelPath, 'utf-8');
 
 			expect(barrelContent).toContain('diff_summary');
@@ -275,12 +272,7 @@ describe('Adversarial: Tool Registration Security', () => {
 		});
 
 		test('barrel re-exports should not have syntax errors', () => {
-			const barrelPath = path.resolve(
-				process.cwd(),
-				'src',
-				'tools',
-				'index.ts',
-			);
+			const barrelPath = path.resolve(REPO_ROOT, 'src', 'tools', 'index.ts');
 			const barrelContent = fs.readFileSync(barrelPath, 'utf-8');
 
 			const exportCount = (barrelContent.match(/export\s*\{/g) || []).length;

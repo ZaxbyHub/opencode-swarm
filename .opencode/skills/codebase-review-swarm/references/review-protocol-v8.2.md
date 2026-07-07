@@ -190,6 +190,21 @@ The source-of-truth packet must include repo identity, tech stack, commands, pub
 
 The repository-context packet must be concise and global: architectural style, key modules and responsibilities, primary data flows, trust boundaries, notable tech decisions, and cross-cutting patterns visible from quoted Phase 0 inventory.
 
+### 0J-bis - PR branch checkout pre-flight
+
+If the review target is a PR branch or commit range, complete this before Phase 1
+candidate-generation dispatch:
+
+1. Verify the working tree is clean with `git status --porcelain`. If
+   uncommitted changes exist, stash them or abort the checkout to prevent data
+   loss.
+2. Fetch and check out the PR head branch locally. Explorer agents read the
+   working-tree filesystem (`Read`/`Glob`/`Grep`), not git history; without the
+   checkout, they inspect the base branch and produce invalid candidates.
+3. Record `base_ref..head_ref` in `source-of-truth-packet.md` and pass that
+   commit range in every explorer/candidate-generation delegation so lanes can
+   use `git show` for revision-specific inspection.
+
 ### 0K — User review mode gate
 
 Stop and present the ten review choices unless the user’s original request already selected tracks and explicitly authorized continuing. If the user selects a focused review, do not run unrelated tracks; record omitted tracks in coverage notes.
