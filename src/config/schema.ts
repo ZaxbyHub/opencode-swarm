@@ -1961,7 +1961,7 @@ export const WorktreeIsolationConfigSchema = z.object({
 			 * Base port for lane 0. Lanes get PORT = port_base + laneIndex * port_stride.
 			 * If omitted, no PORT variable is set.
 			 */
-			port_base: z.number().int().nonnegative().optional(),
+			port_base: z.number().int().nonnegative().max(65535).optional(),
 			/** Stride between lane ports. Default 1. */
 			port_stride: z.number().int().positive().default(1),
 			/**
@@ -2023,7 +2023,7 @@ export const LeanTurboConfigSchema = z.object({
 	runtime_isolation: z
 		.object({
 			enabled: z.boolean().default(false),
-			port_base: z.number().int().nonnegative().optional(),
+			port_base: z.number().int().nonnegative().max(65535).optional(),
 			port_stride: z.number().int().positive().default(1),
 			env_overrides: z.record(z.string(), z.string()).optional(),
 			cache_redirects: z.record(z.string(), z.string()).optional(),

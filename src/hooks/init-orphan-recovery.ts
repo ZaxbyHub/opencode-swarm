@@ -394,7 +394,7 @@ export async function runInitOrphanRecovery(
 				attempted: true,
 				crossProcessLockHeld: false,
 				warnings: allWarnings,
-				orphanedBranches: cleanupResult.skipped, // session-less = all skipped at init are orphans actually removed
+				orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
 				removedWorktrees,
 				prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
 			};
