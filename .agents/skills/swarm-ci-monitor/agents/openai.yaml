@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swarm CI Monitor"
+  short_description: "Monitor CI, fix failures, and merge an approved PR"
+  default_prompt: "Use $swarm-ci-monitor to monitor this already-approved PR's CI, fix any failures, and merge it once green."
