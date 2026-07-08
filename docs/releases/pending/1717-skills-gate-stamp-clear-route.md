@@ -53,9 +53,12 @@ patches that close each gap without unwired functionality or hidden regressions.
 - Generated skills now ship with an auto-derived eval stub, so the activation
   gate can validate them against their source directives instead of
   fail-opening to `unevaluated`.
-- The interactive `skill_apply` tool now blocks unevaluated activation by
-  default; pass `confirm_unevaluated: true` to opt in (preserves the old
-  behavior when explicitly desired).
+- The interactive `skill_apply` tool now blocks unevaluated activation
+  whenever the caller requests evaluation (`evaluate: true`); pass
+  `confirm_unevaluated: true` to opt in (preserves the old behavior when
+  explicitly desired). `evaluate` itself still defaults to `false`
+  (unchanged, pre-existing) — a bare `skill_apply({slug})` call still
+  activates without evaluation, exactly as before this change.
 - Curator-archived knowledge no longer silently orphans its generated skills;
   the same audit tombstone + retire/stale invalidation that the
   `knowledge_archive` tool uses now fires for curator recommendations too.
@@ -69,16 +72,22 @@ patches that close each gap without unwired functionality or hidden regressions.
   optional — no migration, no break to existing entries.
 - Existing call sites of `activateProposal` that did not pass
   `confirmUnevaluated` continue to work; only the interactive `skill_apply`
-  tool's default behavior changes (now blocks unevaluated unless
-  `confirm_unevaluated: true`).
+  tool's behavior changes when the caller also passes `evaluate: true` (now
+  blocks unevaluated unless `confirm_unevaluated: true`).
 - The shared invalidator preserves `knowledge_remove`'s historical
   no-tombstone behavior via `skipTombstone: true`.
 
 ## Breaking changes
 
 - The interactive `skill_apply` tool now defaults `confirm_unevaluated` to
-  false, so activating a proposal with no eval set (and no auto-stub) returns
-  `{ activated: false, reason: 'unevaluated: ...' }` instead of activating
-  silently. Pass `confirm_unevaluated: true` to restore the old behavior.
-  Generated directive-backed skills are unaffected (their auto-stub makes the
-  gate return `passed` or `rejected`, not `unevaluated`).
+  false, so activating a proposal with `evaluate: true` and no eval set (and
+  no auto-stub) returns `{ activated: false, reason: 'unevaluated: ...' }`
+  instead of activating silently. Pass `confirm_unevaluated: true` to
+  restore the old behavior. This gate only applies when the caller passes
+  `evaluate: true`; `evaluate` still defaults to `false`, so a default
+  `skill_apply({slug})` call is unaffected by this change.
+  Generated skills whose source directives include `required_actions` or
+  `verification_checks` get an auto-derived eval stub, so their gate returns
+  `passed` or `rejected`, not `unevaluated`. A cluster whose only directive
+  content is `forbidden_actions` (no `required_actions`/`verification_checks`)
+  produces no stub and will still surface `unevaluated` when evaluated.

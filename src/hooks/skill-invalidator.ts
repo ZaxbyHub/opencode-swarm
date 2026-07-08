@@ -18,16 +18,16 @@
 
 import * as path from 'node:path';
 import {
-	recordHiveKnowledgeEvent,
-	recordKnowledgeEvent,
-} from './knowledge-events.js';
-import { getArchivedKnowledgeIds } from './knowledge-store.js';
-import {
 	findSkillsBySourceKnowledgeId,
 	findStaleSkillsBySourceKnowledgeId,
 	retireOrMarkStale,
 } from '../services/skill-generator.js';
 import { warn } from '../utils/logger.js';
+import {
+	recordHiveKnowledgeEvent,
+	recordKnowledgeEvent,
+} from './knowledge-events.js';
+import { getArchivedKnowledgeIds } from './knowledge-store.js';
 
 export interface ArchiveInvalidationContext {
 	directory: string;

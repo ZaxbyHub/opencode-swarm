@@ -25,7 +25,7 @@ import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -709,11 +709,7 @@ export async function generateSkills(
 		let content = renderSkillMarkdown(cluster, req.mode);
 		// G8 (issue #1717): write an auto-derived eval stub so the gate has
 		// something to check. Fail-open. Runs in both modes.
-		await writeEvalStub(
-			req.directory,
-			cluster.slug,
-			generateEvalStub(cluster),
-		);
+		await writeEvalStub(req.directory, cluster.slug, generateEvalStub(cluster));
 		if (await isRejectedSkillContent(req.directory, cluster.slug, content)) {
 			result.skipped.push({
 				slug: cluster.slug,
@@ -893,11 +889,8 @@ async function stampSourceEntries(
 	mode: 'active' | 'draft' = 'active',
 ): Promise<{ stamped: string[]; missing: string[] }> {
 	if (!ids || ids.length === 0) return { stamped: [], missing: [] };
-	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 	const idSet = new Set(ids);
 	const stamped: string[] = [];
-	const missing: string[] = [];
 	const found = new Set<string>();
 	// G10 (issue #1717): draft mode stamps draft_generated_skill_*; active
 	// mode stamps generated_skill_* AND clears any prior draft marker.
@@ -917,31 +910,41 @@ async function stampSourceEntries(
 		}
 		e.updated_at = new Date().toISOString();
 	};
-	for (const e of swarm) {
-		if (!idSet.has(e.id)) continue;
-		found.add(e.id);
-		applyStamp(e as KnowledgeEntryBase);
-	}
-	if (found.size > 0) await rewriteKnowledge(swarmPath, swarm);
+
+	// PR #1731 review F-002: route through transactKnowledge (lock-before-read)
+	// instead of unlocked readKnowledge + rewriteKnowledge, so a concurrent
+	// knowledge-store commit landing between read and write can't be silently
+	// clobbered by this read-modify-write.
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+		let changed = false;
+		for (const e of entries) {
+			if (!idSet.has(e.id)) continue;
+			found.add(e.id);
+			applyStamp(e as KnowledgeEntryBase);
+			changed = true;
+		}
+		return changed ? entries : null;
+	});
 	stamped.push(...found);
 
 	const hivePath = resolveHiveKnowledgePath();
-	if (!existsSync(hivePath)) {
-		for (const id of ids) {
-			if (!found.has(id)) missing.push(id);
-		}
-		return { stamped, missing };
-	}
-	const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
 	const foundHive = new Set<string>();
-	for (const e of hive) {
-		if (!idSet.has(e.id)) continue;
-		foundHive.add(e.id);
-		applyStamp(e as KnowledgeEntryBase);
+	if (existsSync(hivePath)) {
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
+			let changed = false;
+			for (const e of entries) {
+				if (!idSet.has(e.id)) continue;
+				foundHive.add(e.id);
+				applyStamp(e as KnowledgeEntryBase);
+				changed = true;
+			}
+			return changed ? entries : null;
+		});
+		stamped.push(...foundHive);
 	}
-	if (foundHive.size > 0) await rewriteKnowledge(hivePath, hive);
-	stamped.push(...foundHive);
 	const allFound = new Set([...found, ...foundHive]);
+	const missing: string[] = [];
 	for (const id of ids) {
 		if (!allFound.has(id)) missing.push(id);
 	}
@@ -1493,13 +1496,17 @@ export async function autoApplyProposals(
 				// is still on disk (and will be re-evaluated next cadence), so it is
 				// reported as `skipped` to keep the result faithful to disk state.
 				// G10 (issue #1717): clear the draft stamp generateSkills wrote so
-				// the cluster can be recompiled on a future phase.
+				// the cluster can be recompiled on a future phase. This MUST run
+				// before unlink: clearDraftSkillLinks reads sourceKnowledgeIds from
+				// the proposal file's own frontmatter, so the file must still exist
+				// on disk when it runs (PR #1731 review L1-002 — an ordering swap
+				// was tried and reverted because it made the read happen after the
+				// file was already deleted, silently no-oping the clear; the
+				// reviewer separately assessed this ordering's residual risk as
+				// low/overstated since a rejected proposal recompiling into a fresh
+				// draft is the designed G10 recovery path, not corruption).
 				try {
-					await clearDraftSkillLinks(
-						directory,
-						proposal.path,
-						proposal.slug,
-					);
+					await clearDraftSkillLinks(directory, proposal.path, proposal.slug);
 				} catch (clearErr) {
 					warn(
 						`[skill-generator] failed to clear draft links for rejected proposal ${proposal.slug}: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`,
@@ -1739,7 +1746,14 @@ async function clearSkillLinks(
 	let content: string;
 	try {
 		content = await readFile(skillFilePath, 'utf-8');
-	} catch {
+	} catch (err) {
+		// PR #1731 review L1-001: this used to swallow all read errors silently
+		// (indistinguishable from "no source IDs to clear"). Log so a transient
+		// read failure at least leaves a diagnostic trail instead of silently
+		// stranding the source entry's generated_skill_slug/draft marker.
+		warn(
+			`[skill-generator] clearSkillLinks: failed to read '${skillFilePath}' for slug '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+		);
 		return [];
 	}
 	const fm = parseDraftFrontmatter(content);
@@ -1772,30 +1786,36 @@ async function clearSkillLinks(
 		return true;
 	};
 
+	// PR #1731 review F-002: route through transactKnowledge (lock-before-read)
+	// instead of unlocked readKnowledge + rewriteKnowledge — the prior shape
+	// could clobber a concurrent knowledge-store commit (e.g. a knowledge_add
+	// append) landing between this function's read and its write.
 	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
-	let swarmChanged = false;
-	for (const e of swarm) {
-		if (!idSet.has(e.id)) continue;
-		if (clearOnEntry(e as KnowledgeEntryBase)) {
-			cleared.push(e.id);
-			swarmChanged = true;
-		}
-	}
-	if (swarmChanged) await rewriteKnowledge(swarmPath, swarm);
-
-	const hivePath = resolveHiveKnowledgePath();
-	if (existsSync(hivePath)) {
-		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-		let hiveChanged = false;
-		for (const e of hive) {
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+		let changed = false;
+		for (const e of entries) {
 			if (!idSet.has(e.id)) continue;
 			if (clearOnEntry(e as KnowledgeEntryBase)) {
 				cleared.push(e.id);
-				hiveChanged = true;
+				changed = true;
 			}
 		}
-		if (hiveChanged) await rewriteKnowledge(hivePath, hive);
+		return changed ? entries : null;
+	});
+
+	const hivePath = resolveHiveKnowledgePath();
+	if (existsSync(hivePath)) {
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
+			let changed = false;
+			for (const e of entries) {
+				if (!idSet.has(e.id)) continue;
+				if (clearOnEntry(e as KnowledgeEntryBase)) {
+					cleared.push(e.id);
+					changed = true;
+				}
+			}
+			return changed ? entries : null;
+		});
 	}
 
 	return cleared;

@@ -73,7 +73,6 @@ import {
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from './knowledge-store.js';
-import { writeArchiveTombstoneAndInvalidateSkills } from './skill-invalidator.js';
 import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
@@ -83,6 +82,7 @@ import {
 	validateActionability,
 	validateLesson,
 } from './knowledge-validator.js';
+import { writeArchiveTombstoneAndInvalidateSkills } from './skill-invalidator.js';
 import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 

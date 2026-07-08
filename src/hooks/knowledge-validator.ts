@@ -464,6 +464,11 @@ export function validateLesson(
 export const ACTIONABLE_STRING_MAX = 200;
 /** Maximum number of items in any actionable list (triggers, required_actions, etc.). */
 export const ACTIONABLE_LIST_MAX = 20;
+/**
+ * Maximum retired_skill_history entries. Must match the FIFO cap in
+ * src/services/skill-generator.ts's clearSkillLinks (`if (history.length > 50)`).
+ */
+export const RETIRED_SKILL_HISTORY_MAX = 50;
 /** Allowed agent / tool name shape (snake_case, alnum/underscore, bounded). */
 const NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 /** Allowed source ref shape: prevents path traversal and control characters. */
@@ -650,13 +655,24 @@ export function validateActionableFields(
 	if (fields.retired_skill_history !== undefined) {
 		if (!Array.isArray(fields.retired_skill_history)) {
 			errors.push('retired_skill_history must be an array of slugs');
-		} else if (
-			!fields.retired_skill_history.every(
-				(s: unknown) =>
-					typeof s === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(s),
-			)
-		) {
-			errors.push('retired_skill_history entries must be kebab-case slugs');
+		} else {
+			// PR #1731 review M1-001: match the producer's own FIFO cap
+			// (src/services/skill-generator.ts clearSkillLinks) so a tampered or
+			// malformed entry can't carry an unbounded history array through
+			// validation. Not ACTIONABLE_LIST_MAX (20) — retired_skill_history is
+			// intentionally capped at 50 by its only writer.
+			if (fields.retired_skill_history.length > RETIRED_SKILL_HISTORY_MAX) {
+				errors.push(
+					`retired_skill_history exceeds ${RETIRED_SKILL_HISTORY_MAX} items`,
+				);
+			} else if (
+				!fields.retired_skill_history.every(
+					(s: unknown) =>
+						typeof s === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(s),
+				)
+			) {
+				errors.push('retired_skill_history entries must be kebab-case slugs');
+			}
 		}
 	}
 
