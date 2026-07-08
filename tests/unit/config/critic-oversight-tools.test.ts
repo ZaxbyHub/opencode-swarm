@@ -19,13 +19,11 @@ const REQUIRED_READONLY_TOOLS = [
 	'secretscan',
 	'sast_scan',
 	'repo_map',
-	'retrieve_summary',
 	'knowledge_recall',
-	'symbols',
 	'batch_symbols',
 	'search',
-	'imports',
 	'complexity_hotspots',
+	'detect_domains',
 ] as const;
 
 const FORBIDDEN_WRITE_TOOLS = [
@@ -52,6 +50,7 @@ const FORBIDDEN_WRITE_TOOLS = [
 	'declare_council_criteria',
 	'declare_scope',
 	'knowledge_add',
+	'knowledge_receipt',
 	'knowledge_remove',
 	'curator_analyze',
 ] as const;

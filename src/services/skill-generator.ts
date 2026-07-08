@@ -32,6 +32,7 @@ import type {
 	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
+import { isActiveStatus } from '../hooks/knowledge-types.js';
 import {
 	ALLOWED_SKILL_PATH_PREFIXES,
 	validateSkillPath,
@@ -384,7 +385,7 @@ export function clusterEntries(
 	return result;
 }
 
-function buildKnowledgeCluster(
+export function buildKnowledgeCluster(
 	entries: KnowledgeEntryBase[],
 ): KnowledgeCluster {
 	const triggers = uniqueStrings(entries.flatMap((e) => e.triggers ?? []));
@@ -649,7 +650,7 @@ export async function generateSkills(
 		// counters. Defensive consistency for issue #1477's outcome accrual.
 		const rollups = await readKnowledgeCounterRollups(req.directory);
 		pool = [...swarm, ...hive]
-			.filter((e) => idSet.has(e.id) && e.status !== 'archived')
+			.filter((e) => idSet.has(e.id) && isActiveStatus(e.status))
 			.sort((a, b) => (idOrder.get(a.id) ?? 0) - (idOrder.get(b.id) ?? 0))
 			.map((e) => ({
 				...e,
@@ -2032,22 +2033,24 @@ export async function regenerateSkill(
 		}
 	}
 
-	// Filter out archived entries — only regenerate from active knowledge.
+	// Filter out inactive entries — only regenerate from active knowledge.
 	// The early-retirement check above handles the exact case where every
 	// source ID matched and all were archived.  This filter handles the
 	// partial case: some source IDs missing from the store, or a mix of
-	// archived and active entries.
+	// inactive and active entries.
 	if (matchedEntries.length > 0) {
-		const activeEntries = matchedEntries.filter((e) => e.status !== 'archived');
+		const activeEntries = matchedEntries.filter((e) =>
+			isActiveStatus(e.status),
+		);
 		if (activeEntries.length === 0) {
-			// All matched entries were archived — retire the skill.
+			// All matched entries were inactive — retire the skill.
 			// (Reached when some source IDs had no matching entry, so the
 			// early-retirement check above did not fire.)
 			try {
 				await _internals.retireSkill(
 					directory,
 					cleanSlug,
-					'auto-retire: all matched source knowledge entries archived at regeneration time',
+					'auto-retire: all matched source knowledge entries inactive at regeneration time',
 				);
 			} catch {
 				/* best effort */
@@ -2056,7 +2059,7 @@ export async function regenerateSkill(
 				regenerated: false,
 				path: skillPath,
 				entryCount: 0,
-				reason: 'all matched source knowledge archived — skill retired',
+				reason: 'all matched source knowledge inactive — skill retired',
 				retired: true,
 			};
 		}

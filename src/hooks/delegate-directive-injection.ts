@@ -21,7 +21,7 @@
 
 import {
 	buildDirectiveComplianceBlock,
-	DIRECTIVES_TO_VERIFY_TAG,
+	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { loadPlan } from '../plan/manager.js';
@@ -29,10 +29,10 @@ import { log, warn } from '../utils/logger.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
 import {
 	buildDelegateDirectiveBlock,
-	DELEGATE_DIRECTIVE_BLOCK_TAG,
 	defaultExpectedToolsForAgent,
 	injectForDelegate,
 	isDelegatedAgent,
+	parseDelegateDirectiveBlock,
 } from './knowledge-injector.js';
 import type { KnowledgeConfig } from './knowledge-types.js';
 import { readPhaseDirectivesToVerify } from './phase-directives.js';
@@ -48,6 +48,14 @@ export interface DelegateInjectionInput {
 /** True for the Task delegation tool (case-insensitive variants). */
 function isTaskTool(tool: unknown): boolean {
 	return tool === 'Task' || tool === 'task';
+}
+
+function hasDelegateDirectiveBlock(text: string): boolean {
+	return parseDelegateDirectiveBlock(text).length > 0;
+}
+
+function hasDirectiveComplianceBlock(text: string): boolean {
+	return parseDirectivesToVerifyBlock(text).length > 0;
 }
 
 /**
@@ -76,10 +84,7 @@ export async function injectDelegateDirectivesBefore(
 
 		const callerAgent = typeof input.agent === 'string' ? input.agent : '';
 		const callerRole = stripKnownSwarmPrefix(callerAgent).toLowerCase();
-		if (
-			!callerAgent ||
-			(callerRole !== 'architect' && !isDelegatedAgent(callerRole))
-		) {
+		if (!callerAgent || callerRole !== 'architect') {
 			return debugSkip('caller_not_allowed', { caller_role: callerRole });
 		}
 
@@ -102,8 +107,8 @@ export async function injectDelegateDirectivesBefore(
 
 		// Idempotency: never inject a second directive or compliance block.
 		if (
-			promptRaw.includes(DELEGATE_DIRECTIVE_BLOCK_TAG) ||
-			promptRaw.includes(DIRECTIVES_TO_VERIFY_TAG)
+			hasDelegateDirectiveBlock(promptRaw) ||
+			hasDirectiveComplianceBlock(promptRaw)
 		) {
 			return debugSkip('already_injected', { target_agent: targetAgent });
 		}

@@ -133,7 +133,7 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 			expect(prompt).toContain('Implement the feature');
 		});
 
-		it('allows prefixed coder-originated Task calls to receive delegate directives', async () => {
+		it('does not inject for prefixed coder-originated Task calls', async () => {
 			const config = makeConfig();
 
 			const ki = await import('../../../src/hooks/knowledge-injector.js');
@@ -162,11 +162,10 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 				config,
 			);
 
-			expect(count).toBe(1);
+			expect(count).toBe(0);
 			const prompt = (input.args as Record<string, unknown>).prompt as string;
-			expect(prompt).toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
-			expect(prompt).toContain('coder-originated');
-			expect(prompt).toContain('Review the coder-originated follow-up');
+			expect(prompt).not.toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
+			expect(prompt).toBe('Review the coder-originated follow-up');
 		});
 
 		it('injects for reviewer agent including compliance block', async () => {

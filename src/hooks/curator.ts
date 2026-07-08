@@ -77,6 +77,7 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 import {
 	appendUnactionable,
 	validateActionability,
@@ -144,7 +145,7 @@ const UUID_V4 =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX_ID_PREFIX = /^[0-9a-f]{8,}$/i;
 
-function normalizeRecommendationEntryIdToken(
+export function normalizeRecommendationEntryIdToken(
 	token: string,
 ): string | undefined {
 	const trimmed = token.trim();
@@ -154,19 +155,27 @@ function normalizeRecommendationEntryIdToken(
 
 function resolveKnowledgeRecommendationIds(
 	recommendations: KnowledgeRecommendation[],
-	entries: Pick<SwarmKnowledgeEntry, 'id'>[],
+	entries: Pick<SwarmKnowledgeEntry, 'id' | 'status'>[],
 ): {
 	recommendations: KnowledgeRecommendation[];
 	diagnostics: RecommendationParseDiagnostic[];
 } {
 	const diagnostics: RecommendationParseDiagnostic[] = [];
+	const activeEntries = entries.filter((entry) => isActiveStatus(entry.status));
 	const resolved = recommendations
 		.map((recommendation) => {
-			const entryId = recommendation.entry_id?.trim();
+			const entryId =
+				typeof recommendation.entry_id === 'string'
+					? normalizeRecommendationEntryIdToken(recommendation.entry_id)
+					: undefined;
 			if (!entryId) return recommendation;
-			if (entries.some((entry) => entry.id === entryId)) return recommendation;
+			if (activeEntries.some((entry) => entry.id === entryId)) {
+				return { ...recommendation, entry_id: entryId };
+			}
 
-			const matches = entries.filter((entry) => entry.id.startsWith(entryId));
+			const matches = activeEntries.filter((entry) =>
+				entry.id.startsWith(entryId),
+			);
 			if (matches.length === 1) {
 				return { ...recommendation, entry_id: matches[0].id };
 			}

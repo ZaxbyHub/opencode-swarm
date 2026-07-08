@@ -333,6 +333,32 @@ describe('generateSkills draft mode', () => {
 		expect(content).toContain('run the focused regression tests');
 		expect(content).toContain('update the package lockfile');
 	});
+
+	it('skips quarantined explicit source_knowledge_ids when building a requested draft cluster', async () => {
+		await seed([
+			makeEntry('active-entry', {
+				lesson: 'Use focused validation before merge',
+				required_actions: ['run focused validation'],
+			}),
+			makeEntry('quarantined-entry', {
+				status: 'quarantined',
+				lesson: 'This quarantined lesson must not compile into a skill',
+			}),
+		]);
+
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			slug: 'active-only-cluster',
+			sourceKnowledgeIds: ['active-entry', 'quarantined-entry'],
+		});
+
+		expect(result.written).toHaveLength(1);
+		expect(result.written[0].sourceKnowledgeIds).toEqual(['active-entry']);
+		const content = readFileSync(result.written[0].path, 'utf-8');
+		expect(content).toContain('  - active-entry');
+		expect(content).not.toContain('quarantined-entry');
+	});
 });
 
 describe('generateSkills active mode', () => {

@@ -123,12 +123,13 @@ describe('AGENT_TOOL_MAP', () => {
 		}
 	});
 
-	it('agents that can recall knowledge can also file knowledge receipts', () => {
-		for (const tools of Object.values(AGENT_TOOL_MAP)) {
-			if (tools.includes('knowledge_recall')) {
-				expect(tools).toContain('knowledge_receipt');
-			}
+	it('agents that explicitly audit recall usage retain knowledge_receipt', () => {
+		for (const agent of ['architect', 'reviewer', 'coder', 'test_engineer']) {
+			expect(AGENT_TOOL_MAP[agent]).toContain('knowledge_recall');
+			expect(AGENT_TOOL_MAP[agent]).toContain('knowledge_receipt');
 		}
+		expect(AGENT_TOOL_MAP.explorer).not.toContain('knowledge_receipt');
+		expect(AGENT_TOOL_MAP.critic_oversight).not.toContain('knowledge_receipt');
 	});
 
 	it('memory tools are not in the default agent map', () => {

@@ -18,7 +18,10 @@ import { atomicWriteFile } from '../evidence/task-file.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
-import type { CuratorLLMDelegate } from './curator.js';
+import {
+	type CuratorLLMDelegate,
+	normalizeRecommendationEntryIdToken,
+} from './curator.js';
 import type { KnowledgeRecommendation } from './curator-types.js';
 import { readKnowledgeEvents } from './knowledge-events.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
@@ -29,6 +32,7 @@ import type {
 	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 const MAX_INPUT_TEXT_CHARS = 500;
@@ -270,8 +274,8 @@ function parseStructuredPostMortemActions(
 				parsed.recommendations.push({
 					action,
 					entry_id:
-						typeof rec.entry_id === 'string' && rec.entry_id.trim()
-							? rec.entry_id.trim()
+						typeof rec.entry_id === 'string'
+							? normalizeRecommendationEntryIdToken(rec.entry_id)
 							: undefined,
 					lesson: (lesson || reason).slice(0, 280),
 					reason: reason.slice(0, 280),
@@ -515,8 +519,14 @@ async function verifyPostMortemKnowledgeActions(
 ): Promise<KnowledgeActionVerification[]> {
 	if (recommendations.length === 0) return [];
 	const entries = await _internals.readSwarmKnowledge(directory);
+	const activeEntries = entries.filter((entry) => isActiveStatus(entry.status));
+	const exactIds = new Set(activeEntries.map((entry) => entry.id));
+	const prefixMatches = new Map<string, SwarmKnowledgeEntry[]>();
 	return recommendations.map((rec) => {
-		const inputId = rec.entry_id?.trim() || null;
+		const inputId =
+			typeof rec.entry_id === 'string'
+				? (normalizeRecommendationEntryIdToken(rec.entry_id) ?? null)
+				: null;
 		if (!inputId) {
 			const isNewPromote = rec.action === 'promote';
 			return {
@@ -530,7 +540,7 @@ async function verifyPostMortemKnowledgeActions(
 			};
 		}
 
-		if (entries.some((entry) => entry.id === inputId)) {
+		if (exactIds.has(inputId)) {
 			return {
 				action: rec.action,
 				input_entry_id: inputId,
@@ -540,7 +550,11 @@ async function verifyPostMortemKnowledgeActions(
 			};
 		}
 
-		const matches = entries.filter((entry) => entry.id.startsWith(inputId));
+		let matches = prefixMatches.get(inputId);
+		if (!matches) {
+			matches = activeEntries.filter((entry) => entry.id.startsWith(inputId));
+			prefixMatches.set(inputId, matches);
+		}
 		if (matches.length === 1) {
 			return {
 				action: rec.action,

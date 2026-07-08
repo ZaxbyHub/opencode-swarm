@@ -201,6 +201,71 @@ describe('curator post-mortem executable actions', () => {
 		expect(report).toContain('promote: new [new_entry]');
 	});
 
+	test('ignores quarantined entries when resolving shortened recommendation ids', async () => {
+		const swarmDir = join(dir, '.swarm');
+		writeFileSync(
+			join(swarmDir, 'knowledge.jsonl'),
+			[
+				JSON.stringify({
+					id: ENTRY_ID,
+					tier: 'swarm',
+					lesson: 'Active lesson survives.',
+					category: 'process',
+					status: 'active',
+					confidence: 0.7,
+					tags: [],
+					scope: 'global',
+					confirmed_by: [],
+					project_name: 'test',
+					created_at: '2026-07-03T00:00:00.000Z',
+					updated_at: '2026-07-03T00:00:00.000Z',
+				}),
+				JSON.stringify({
+					id: `${ENTRY_ID.slice(0, 8)}-0000-4000-8000-000000000000`,
+					tier: 'swarm',
+					lesson: 'Quarantined prefix collision.',
+					category: 'process',
+					status: 'quarantined',
+					confidence: 0.1,
+					tags: [],
+					scope: 'global',
+					confirmed_by: [],
+					project_name: 'test',
+					created_at: '2026-07-03T00:00:00.000Z',
+					updated_at: '2026-07-03T00:00:00.000Z',
+				}),
+			].join('\n') + '\n',
+		);
+
+		const result = await runCuratorPostMortem(dir, {
+			force: true,
+			llmDelegate: async () =>
+				[
+					'```json postmortem_actions',
+					JSON.stringify({
+						summary: 'Shortened id should resolve to the active entry only.',
+						curation_recommendations: [
+							{
+								action: 'promote',
+								entry_id: ENTRY_ID.slice(0, 8),
+								lesson: 'Active lesson survives.',
+								reason: 'Prefix should ignore quarantined entries.',
+							},
+						],
+						queue_triage: [],
+					}),
+					'```',
+				].join('\n'),
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.actions?.knowledge_applied).toBe(1);
+		const report = readFileSync(result.reportPath!, 'utf-8');
+		expect(report).toContain(
+			`promote: ${ENTRY_ID.slice(0, 8)} => ${ENTRY_ID} [prefix_match]`,
+		);
+	});
+
 	test('data-only report labels planless runs and records freshness state', async () => {
 		rmSync(join(dir, '.swarm', 'plan.json'), { force: true });
 
