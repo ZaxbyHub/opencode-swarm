@@ -278,6 +278,29 @@ export function upsertReleaseNotesBlock(body, combined) {
 	return `${block}\n\n${original}`;
 }
 
+/**
+ * Merge two arrays of PR candidate numbers into a single deduplicated array,
+ * preserving first-seen order across both sources.
+ *
+ * `direct` entries come first (they are more reliable — explicit PR-number
+ * references in the release body). Entries from `shaResolved` are appended
+ * only if they haven't already appeared in `direct`.
+ *
+ * Exported for unit tests. Pure — no I/O, no side effects.
+ */
+export function mergeCandidateLists(direct, shaResolved) {
+	if (!Array.isArray(direct) && !Array.isArray(shaResolved)) return [];
+	const seen = new Set(Array.isArray(direct) ? direct : []);
+	const out = Array.isArray(direct) ? [...direct] : [];
+	for (const n of (Array.isArray(shaResolved) ? shaResolved : [])) {
+		if (!seen.has(n)) {
+			seen.add(n);
+			out.push(n);
+		}
+	}
+	return out;
+}
+
 // -----------------------------------------------------------------------------
 // gh CLI shim — wrapped so update modes can be exercised at integration time
 // while pure helpers stay testable without network access.
@@ -367,7 +390,12 @@ function resolveCommitShasToPrNumbers(shas, log) {
 			log(`SHA ${sha.slice(0, 7)} — resolves to ${prs.length} PRs: ${prs.map((p) => `#${p.number}`).join(', ')}`);
 		}
 		for (const pr of prs) {
-			if (typeof pr.number === 'number' && pr.number > 0 && !seen.has(pr.number)) {
+			if (
+				Number.isFinite(pr.number) &&
+				pr.number > 0 &&
+				pr.number < 10 ** MAX_PR_DIGITS &&
+				!seen.has(pr.number)
+			) {
 				seen.add(pr.number);
 				out.push(pr.number);
 			}
@@ -469,14 +497,7 @@ async function modeUpdatePr(log) {
 	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
 
 	// Merge both sets, preserving first-seen order and deduplicating.
-	const seenCandidates = new Set(directCandidates);
-	const allCandidates = [...directCandidates];
-	for (const n of shaResolved) {
-		if (!seenCandidates.has(n)) {
-			seenCandidates.add(n);
-			allCandidates.push(n);
-		}
-	}
+	const allCandidates = mergeCandidateLists(directCandidates, shaResolved);
 
 	if (allCandidates.length === 0) {
 		log('Release PR body has no PR references (direct or via commit SHAs) — exiting 0');
@@ -540,14 +561,7 @@ async function modeUpdateRelease(log) {
 	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
 
 	// Merge both sets, preserving first-seen order and deduplicating.
-	const seenCandidates = new Set(directCandidates);
-	const allCandidates = [...directCandidates];
-	for (const n of shaResolved) {
-		if (!seenCandidates.has(n)) {
-			seenCandidates.add(n);
-			allCandidates.push(n);
-		}
-	}
+	const allCandidates = mergeCandidateLists(directCandidates, shaResolved);
 
 	if (allCandidates.length === 0) {
 		log('Release body has no PR references (direct or via commit SHAs) — exiting 0');
