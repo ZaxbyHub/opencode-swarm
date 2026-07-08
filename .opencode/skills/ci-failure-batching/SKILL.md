@@ -19,8 +19,8 @@ When ANY CI check fails on the PR (pr-monitor surfaces `pr.ci.failed`).
    - For each: `gh run view <run-id> --log-failed`
    - Build a complete failure ledger
 4. **Fix ALL failures in one changeset:** Cluster by root cause, fix each cluster, verify locally
-5. **Push ONCE:** Amend + force-push a single commit with all fixes
-6. **Only re-push if NEW failures surface** not in the original batch
+5. **Push the fixes in one cycle.** Amend the commit and push. NOTE: `git push --force` / `--force-with-lease` is deny-pattern-blocked by the guardrail in guarded sessions (no orchestrator exemption). If force-push is blocked, push a normal new fix commit instead — the batching goal is ONE push cycle (collect all → fix all → push once), not literally one commit. A single new commit containing all batched fixes satisfies the goal.
+6. **Only re-push if NEW failures surface** that were not in the original batch.
 
 ## Why this matters
 Without batching, N failures produce N push cycles. With batching, N failures produce 1 push cycle.

@@ -14,7 +14,7 @@ Each playbook is a focused protocol referenced by mode skills via short trigger 
 These playbooks address the highest-impact friction points observed across the session: worktree provisioning failures (~15 interventions), stale test assertions (~5 CI failure cycles), merge-queue kick-outs (~3), gate ceremony overhead (~10 extra dispatches), and serial CI fix cycles (~8 pushes reduced to ~3).
 
 ## How to use
-The playbooks auto-trigger from the architect's skill system when the relevant condition is met (re-dispatching a coder with an existing lane, editing a SKILL.md, preparing for merge queue, etc.). No user action needed.
+The playbooks are eligible to be loaded and scored by the skill system when the relevant condition is detected (re-dispatching a coder with an existing lane, editing a SKILL.md, preparing for merge queue, etc.); the hook then injects the matching playbook into the relevant delegation. No user action needed.
 
 ## Migration
 No migration required. The playbooks are additive — they don't change existing skill behavior, only add new focused protocols.

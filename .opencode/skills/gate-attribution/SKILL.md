@@ -28,4 +28,4 @@ taskId: X.Y
 ```
 
 ## Why this exists
-The gate tracker (`src/hooks/delegation-gate.ts`) keys delegation chains by taskId. Multi-taskId prompts don't create separate chains. Tracked in issue #1746 item 6.
+The gate tracker (`src/hooks/delegation-gate.ts`) keys delegation chains by `sessionID`, and task attribution resolves exactly ONE taskId per dispatch (`args.task_id ?? args.taskId`). Ambiguous multi-task prompts fail closed (resolve to null) rather than attributing to any task — so a set-dispatch covering multiple tasks does not count per-task even with per-task verdicts. Tracked in issue #1746 item 6.

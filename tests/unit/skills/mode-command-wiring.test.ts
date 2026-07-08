@@ -43,6 +43,11 @@ const NON_COMMAND_SKILLS = new Set([
 	'swarm-pr-subscribe',
 	'writing-tests',
 	'generated',
+	'worktree-retry-cleanup',
+	'skill-edit-validation',
+	'merge-queue-readiness',
+	'gate-attribution',
+	'ci-failure-batching',
 ]);
 
 /**
