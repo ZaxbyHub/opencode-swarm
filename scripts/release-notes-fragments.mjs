@@ -365,7 +365,7 @@ function verifyPr(num) {
  */
 export function isValidPrNumber(n) {
 	return (
-		Number.isFinite(n) &&
+		Number.isInteger(n) &&
 		n > 0 &&
 		n < 10 ** MAX_PR_DIGITS
 	);

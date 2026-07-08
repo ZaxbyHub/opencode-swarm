@@ -37,14 +37,16 @@
 - **`tests/unit/scripts/release-notes-fragments.test.ts`** and
   **`tests/unit/scripts/release-notes-fragments-sha.test.ts`**: The test suite
   was split across two files (both under 500 lines per FR-006). The new SHA
-  helpers are tested in 26 tests: 10 for `extractCommitShasFromBody` (normal
+  helpers are tested in 32 tests: 10 for `extractCommitShasFromBody` (normal
   extraction, case normalisation, empty input, short-SHA non-extraction,
   deduplication, multiple SHAs, invalid-length strings, non-hex characters,
   real-world release-please format, and `/compare/` URL rejection), 8 for
   `mergeCandidateLists` (dedup, ordering, empty inputs, non-array handling),
-  and 8 for the extracted `isValidPrNumber` guard helper (positive integers,
-  zero, negative, NaN, Infinity, non-number types, digit-cap boundary). A
-  rerun-defence test proves that commit SHAs cited inside a previously-injected
+  6 for `stripCustomReleaseNotesBlock` (strip, no-markers, empty, rerun
+  defense for PR refs and SHAs, nested markers), and 8 for the extracted
+  `isValidPrNumber` guard helper (positive integers, zero, negative, NaN,
+  Infinity, non-number types, digit-cap boundary). Two rerun-defence tests
+  prove that both PR refs and commit SHAs cited inside a previously-injected
   custom block are stripped before scanning.
 
 ## Why
