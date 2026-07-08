@@ -278,4 +278,38 @@ describe('codebase-review command dispatch bundled skill sync', () => {
 		).toBe('deep dive skill\n');
 		expect(warnSpy).not.toHaveBeenCalled();
 	});
+
+	it('sync failure (copy bounds exceeded) does not write raw stderr under quiet=true', async () => {
+		// Inject a failure into the sync path: add a file in the packageRoot
+		// skill directory whose size exceeds MAX_SKILL_BYTES (512 KB).
+		// collectBundledSkillFilesBoundedAsync throws
+		// 'bundled skill package exceeds copy bounds', which the catch block
+		// in syncBundledProjectSkillsIfMissingAsync routes to advisoryWarn
+		// (buffered for /swarm diagnose) when quiet=true — NOT console.warn.
+		const skillDir = path.join(
+			packageRoot,
+			'.opencode',
+			'skills',
+			'codebase-review-swarm',
+		);
+		fs.writeFileSync(
+			path.join(skillDir, 'oversized-resource.dat'),
+			Buffer.alloc(520_000, 0x41),
+		);
+
+		const result = await executeSwarmCommand({
+			directory: projectDir,
+			agents: {},
+			sessionID: 's1',
+			tokens: ['codebase-review'],
+			packageRoot,
+		});
+
+		// Fail-open: command dispatch proceeds despite the sync failure
+		expect(result.text).toBe(
+			'[MODE: CODEBASE_REVIEW mode=phase0 output=markdown update_main=true allow_dirty=false tracks="" continue_run=""] scope="repository root"',
+		);
+		// The failure was routed to advisoryWarn (buffered), not console.warn
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
 });

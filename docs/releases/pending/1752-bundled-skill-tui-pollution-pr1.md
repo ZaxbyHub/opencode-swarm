@@ -1,4 +1,4 @@
-# Bundled-skill TUI pollution fix + advisory helper + noConsole lint
+# Bundled-skill TUI pollution fix + advisoryWarn helper
 
 ## What
 

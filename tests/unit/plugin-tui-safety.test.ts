@@ -54,7 +54,7 @@ function readScope(file: string): string {
 }
 
 /**
- * Asserts that every `console.warn(` line in `src` is preceded (within 5 lines)
+ * Asserts that every `console.warn(` line in `src` is preceded (within 8 lines)
  * by a quiet-guard. A guard is recognized in EITHER of two forms (both are used
  * in this codebase):
  *   - negated guard: a `!config.quiet` / `!quiet` token in the preceding context
@@ -62,6 +62,11 @@ function readScope(file: string): string {
  *     preceding context (the `if (config.quiet) ... else console.warn(...)` form
  *     used by scheduleVersionCheck and the bundled-skill failure path).
  * Any `console.warn` lacking either form is collected as unguarded.
+ *
+ * Limitation: the `hasElseBranch` check matches a `} else` and a quiet token
+ * anywhere in the 8-line window without verifying they belong to the same
+ * if-statement; this is adequate for the owned files (which have clean guard
+ * patterns) but is not AST-accurate for arbitrary dense control flow.
  */
 function findUnguardedWarns(
 	src: string,
@@ -137,6 +142,10 @@ describe('Plugin TUI safety', () => {
 		const src = readScope('src/commands/registry.ts');
 		const unguarded = findUnguardedWarns(src, ['!config.quiet', '!quiet']);
 		expect(unguarded).toEqual([]);
+		expect(
+			(src.match(/console\.warn\(/g) || []).length,
+			'registry.ts command path must contain zero console.warn calls (mid-turn stderr corrupts the TUI)',
+		).toBe(0);
 	});
 
 	test('TUI_SAFETY_SCOPES files all exist and are non-empty', () => {
