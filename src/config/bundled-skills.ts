@@ -21,6 +21,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'swarm',
 	'swarm-pr-feedback',
 	'swarm-pr-subscribe',
+	'swarm-ci-monitor',
 	'issue-ingest',
 	'plan',
 	'critic-gate',
