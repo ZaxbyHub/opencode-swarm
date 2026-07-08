@@ -501,9 +501,9 @@ status: active
 	});
 
 	// ------------------------------------------------------------------
-	// Test: All archived but partial match — retires after filtering
+	// Test: All inactive but partial match — retires after filtering
 	// ------------------------------------------------------------------
-	it('retires skill when all matched entries are archived but not all source IDs matched', async () => {
+	it('retires skill when all matched entries are inactive but not all source IDs matched', async () => {
 		const archivedEntry = makeEntry('partial-archived-1', {
 			lesson: 'obsolete rule about caching',
 			tags: ['caching', 'obsolete'],
@@ -523,7 +523,7 @@ status: active
 		expect(result.regenerated).toBe(false);
 		expect(result.retired).toBe(true);
 		expect(result.entryCount).toBe(0);
-		expect(result.reason).toContain('archived');
+		expect(result.reason).toContain('inactive');
 	});
 
 	// ------------------------------------------------------------------
