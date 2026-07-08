@@ -591,13 +591,21 @@ describe('skill_regenerate tool', () => {
 	});
 
 	it('passes evaluate=true through to regeneration service', async () => {
+		// PR #1731: regenerateSkill now writes a real auto-derived eval stub
+		// (G8) whenever a cluster carries required_actions/verification_checks
+		// — makeEntry's default required_actions would otherwise trigger a real
+		// evaluation instead of the fail-open unevaluated path this test
+		// exercises. Override to [] so the stub is empty (no directive fields to
+		// check) and the test still verifies pure evaluate-flag propagation.
 		const entry1 = makeEntry('tool-eval-entry-1', {
 			tags: ['scope'],
 			lesson: 'tool evaluate test lesson',
+			required_actions: [],
 		});
 		const entry2 = makeEntry('tool-eval-entry-2', {
 			tags: ['scope'],
 			lesson: 'tool evaluate test second lesson',
+			required_actions: [],
 		});
 		await seed([entry1, entry2]);
 
