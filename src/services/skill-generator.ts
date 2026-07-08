@@ -25,7 +25,7 @@ import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -42,6 +42,7 @@ import {
 	appendRejectedSkillEdit,
 	evaluateSkillChange,
 	isRejectedSkillContent,
+	type SkillEvalCase,
 	type SkillEvaluationResult,
 } from './skill-evaluator.js';
 
@@ -80,6 +81,88 @@ export function activePath(directory: string, slug: string): string {
 /** Repo-relative path used inside SKILLS: file: references and entry metadata. */
 export function activeRepoRelativePath(slug: string): string {
 	return `.opencode/skills/generated/${slug}/SKILL.md`;
+}
+
+/** G10 (issue #1717): repo-relative path of a draft proposal. */
+export function proposalRepoRelativePath(slug: string): string {
+	return `.swarm/skills/proposals/${slug}.md`;
+}
+
+// ============================================================================
+// G8 (issue #1717): auto-derived eval stubs
+// ============================================================================
+
+/**
+ * G8 (issue #1717): derive an eval case from a cluster's directive fields.
+ * The stub verifies the generated SKILL.md actually contains the required
+ * procedure and omits the forbidden shortcuts it was compiled from. Returns
+ * [] when the cluster has no directive fields.
+ *
+ * Phrase truncation aligns with skill-evaluator.ts MAX_PHRASE_LENGTH=160: the
+ * evaluator's normalizePhrase re-truncates to 160 on load, so capping here at
+ * 160 guarantees the stub phrase is a prefix of the rendered directive (which
+ * escapeMarkdown truncates to 280). includesPhrase does case-insensitive
+ * substring matching, so a 160-char stub phrase always matches the first 160
+ * chars of the 280-char rendered directive — no false reject on long directives.
+ */
+export function generateEvalStub(cluster: KnowledgeCluster): SkillEvalCase[] {
+	const required = uniqueStrings([
+		...cluster.required_actions,
+		...cluster.verification_checks,
+	]).slice(0, 40);
+	if (required.length === 0) return [];
+	// Note: we deliberately do NOT map forbidden_actions to forbidden_phrases.
+	// The renderer (renderSkillMarkdown) emits forbidden shortcuts verbatim
+	// under a "## Forbidden Shortcuts" documentation heading, so any
+	// forbidden_phrase would always be present in the candidate content and
+	// the gate would always reject. The stub's fidelity value is verifying the
+	// required procedure (and verification checks) actually survived rendering
+	// — that catches real renderer bugs (e.g. truncation, escaping, dropped
+	// directives) without false-rejecting valid skills.
+	return [
+		{
+			id: 'auto-stub',
+			task: `auto-generated from source directives for ${cluster.slug}`,
+			required_phrases: required.map((p) => p.slice(0, 160)),
+		},
+	];
+}
+
+/**
+ * G8 (issue #1717): write an auto-derived eval stub to
+ * .swarm/skills/evals/<slug>/auto-stub.json. Idempotent (overwrites the prior
+ * stub). Never touches a human-authored fixture. Fail-open.
+ */
+export async function writeEvalStub(
+	directory: string,
+	slug: string,
+	cases: SkillEvalCase[],
+): Promise<{ written: boolean; path: string; reason?: string }> {
+	const stubPath = path.join(
+		directory,
+		'.swarm',
+		'skills',
+		'evals',
+		slug,
+		'auto-stub.json',
+	);
+	if (cases.length === 0) {
+		return { written: false, path: stubPath, reason: 'no directive fields' };
+	}
+	try {
+		await mkdir(path.dirname(stubPath), { recursive: true });
+		await atomicWrite(stubPath, `${JSON.stringify({ cases })}\n`);
+		return { written: true, path: stubPath };
+	} catch (err) {
+		warn(
+			`[skill-generator] eval stub write failed for '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return {
+			written: false,
+			path: stubPath,
+			reason: err instanceof Error ? err.message : String(err),
+		};
+	}
 }
 
 // ============================================================================
@@ -134,7 +217,8 @@ export async function selectCandidateEntries(
 	for (const e of all) {
 		if (e.status === 'archived') continue;
 		// Already-compiled entries are not re-selected unless caller forces.
-		if (e.generated_skill_slug) continue;
+		// G10 (issue #1717): honor the draft marker too.
+		if (e.generated_skill_slug || e.draft_generated_skill_slug) continue;
 		const outcomes = effectiveRetrievalOutcomes(
 			e.retrieval_outcomes,
 			counterRollups.get(e.id),
@@ -623,6 +707,9 @@ export async function generateSkills(
 		}
 
 		let content = renderSkillMarkdown(cluster, req.mode);
+		// G8 (issue #1717): write an auto-derived eval stub so the gate has
+		// something to check. Fail-open. Runs in both modes.
+		await writeEvalStub(req.directory, cluster.slug, generateEvalStub(cluster));
 		if (await isRejectedSkillContent(req.directory, cluster.slug, content)) {
 			result.skipped.push({
 				slug: cluster.slug,
@@ -688,6 +775,18 @@ export async function generateSkills(
 			if (missingSourceIds.length > 0) {
 				content = injectMissingIdsIntoFrontmatter(content, missingSourceIds);
 			}
+		} else if (req.mode === 'draft') {
+			// G10 (issue #1717): stamp draft markers so selectCandidateEntries
+			// dedups on the next phase.
+			const idsToStamp = req.sourceKnowledgeIds?.length
+				? req.sourceKnowledgeIds
+				: cluster.entries.map((e) => e.id);
+			await stampSourceEntries(
+				req.directory,
+				cluster.slug,
+				idsToStamp,
+				'draft',
+			);
 		}
 
 		await atomicWrite(targetPath, content);
@@ -787,44 +886,65 @@ async function stampSourceEntries(
 	directory: string,
 	slug: string,
 	ids: string[],
+	mode: 'active' | 'draft' = 'active',
 ): Promise<{ stamped: string[]; missing: string[] }> {
 	if (!ids || ids.length === 0) return { stamped: [], missing: [] };
-	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 	const idSet = new Set(ids);
 	const stamped: string[] = [];
-	const missing: string[] = [];
 	const found = new Set<string>();
-	const repoRel = activeRepoRelativePath(slug);
-	for (const e of swarm) {
-		if (!idSet.has(e.id)) continue;
-		found.add(e.id);
-		(e as KnowledgeEntryBase).generated_skill_slug = slug;
-		(e as KnowledgeEntryBase).generated_skill_path = repoRel;
+	// G10 (issue #1717): draft mode stamps draft_generated_skill_*; active
+	// mode stamps generated_skill_* AND clears any prior draft marker.
+	const repoRel =
+		mode === 'draft'
+			? proposalRepoRelativePath(slug)
+			: activeRepoRelativePath(slug);
+	const applyStamp = (e: KnowledgeEntryBase) => {
+		if (mode === 'draft') {
+			e.draft_generated_skill_slug = slug;
+			e.draft_generated_skill_path = repoRel;
+		} else {
+			e.generated_skill_slug = slug;
+			e.generated_skill_path = repoRel;
+			e.draft_generated_skill_slug = undefined;
+			e.draft_generated_skill_path = undefined;
+		}
 		e.updated_at = new Date().toISOString();
-	}
-	if (found.size > 0) await rewriteKnowledge(swarmPath, swarm);
+	};
+
+	// PR #1731 review F-002: route through transactKnowledge (lock-before-read)
+	// instead of unlocked readKnowledge + rewriteKnowledge, so a concurrent
+	// knowledge-store commit landing between read and write can't be silently
+	// clobbered by this read-modify-write.
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+		let changed = false;
+		for (const e of entries) {
+			if (!idSet.has(e.id)) continue;
+			found.add(e.id);
+			applyStamp(e as KnowledgeEntryBase);
+			changed = true;
+		}
+		return changed ? entries : null;
+	});
 	stamped.push(...found);
 
 	const hivePath = resolveHiveKnowledgePath();
-	if (!existsSync(hivePath)) {
-		for (const id of ids) {
-			if (!found.has(id)) missing.push(id);
-		}
-		return { stamped, missing };
-	}
-	const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
 	const foundHive = new Set<string>();
-	for (const e of hive) {
-		if (!idSet.has(e.id)) continue;
-		foundHive.add(e.id);
-		(e as KnowledgeEntryBase).generated_skill_slug = slug;
-		(e as KnowledgeEntryBase).generated_skill_path = repoRel;
-		e.updated_at = new Date().toISOString();
+	if (existsSync(hivePath)) {
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
+			let changed = false;
+			for (const e of entries) {
+				if (!idSet.has(e.id)) continue;
+				foundHive.add(e.id);
+				applyStamp(e as KnowledgeEntryBase);
+				changed = true;
+			}
+			return changed ? entries : null;
+		});
+		stamped.push(...foundHive);
 	}
-	if (foundHive.size > 0) await rewriteKnowledge(hivePath, hive);
-	stamped.push(...foundHive);
 	const allFound = new Set([...found, ...foundHive]);
+	const missing: string[] = [];
 	for (const id of ids) {
 		if (!allFound.has(id)) missing.push(id);
 	}
@@ -993,7 +1113,11 @@ export async function activateProposal(
 	directory: string,
 	slug: string,
 	force = false,
-	options: { evaluate?: boolean; operation?: string } = {},
+	options: {
+		evaluate?: boolean;
+		operation?: string;
+		confirmUnevaluated?: boolean;
+	} = {},
 ): Promise<{
 	activated: boolean;
 	from: string;
@@ -1077,6 +1201,22 @@ export async function activateProposal(
 			incumbentContent,
 			operation: options.operation ?? 'skill_apply',
 		});
+		// G8 (issue #1717): surface 'unevaluated' and require explicit
+		// confirmation. The evaluator fail-opens to passed:true when no eval
+		// set exists; without this gate every skill with no hand-authored
+		// fixtures activates as "validated." The full-auto paths opt in via
+		// confirmUnevaluated:true; the interactive skill_apply tool defaults
+		// to false so a human must explicitly confirm.
+		if (evaluation.status === 'unevaluated' && !options.confirmUnevaluated) {
+			return {
+				activated: false,
+				from,
+				to,
+				reason:
+					'unevaluated: no eval set exists; pass confirmUnevaluated:true to activate anyway',
+				evaluation,
+			};
+		}
 		if (!evaluation.passed) {
 			await appendRejectedSkillEdit(
 				{
@@ -1338,6 +1478,11 @@ export async function autoApplyProposals(
 					{
 						evaluate: true,
 						operation: 'skill_auto_apply',
+						// G8 (issue #1717): full-auto path opts in to unevaluated
+						// activation to preserve its headless semantics. The
+						// surface-and-confirm gate is enforced for the interactive
+						// skill_apply tool only.
+						confirmUnevaluated: true,
 					},
 				);
 				if (activation.activated) {
@@ -1350,6 +1495,23 @@ export async function autoApplyProposals(
 				// ONLY when the file is actually gone; if unlink fails the proposal
 				// is still on disk (and will be re-evaluated next cadence), so it is
 				// reported as `skipped` to keep the result faithful to disk state.
+				// G10 (issue #1717): clear the draft stamp generateSkills wrote so
+				// the cluster can be recompiled on a future phase. This MUST run
+				// before unlink: clearDraftSkillLinks reads sourceKnowledgeIds from
+				// the proposal file's own frontmatter, so the file must still exist
+				// on disk when it runs (PR #1731 review L1-002 — an ordering swap
+				// was tried and reverted because it made the read happen after the
+				// file was already deleted, silently no-oping the clear; the
+				// reviewer separately assessed this ordering's residual risk as
+				// low/overstated since a rejected proposal recompiling into a fresh
+				// draft is the designed G10 recovery path, not corruption).
+				try {
+					await clearDraftSkillLinks(directory, proposal.path, proposal.slug);
+				} catch (clearErr) {
+					warn(
+						`[skill-generator] failed to clear draft links for rejected proposal ${proposal.slug}: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`,
+					);
+				}
 				try {
 					_internals.unlinkSync(proposal.path);
 					warn(
@@ -1477,6 +1639,7 @@ export async function retireSkill(
 	path: string;
 	markerPath: string;
 	reason?: string;
+	clearedLinks?: string[];
 }> {
 	const cleanSlug = sanitizeSlug(slug);
 	if (!isValidSlug(cleanSlug)) {
@@ -1524,12 +1687,138 @@ export async function retireSkill(
 	});
 	await mkdir(markerDir, { recursive: true });
 	await writeFile(markerPath, markerContent, 'utf-8');
+	// G12 (issue #1717): clear the bi-directional link on source knowledge
+	// entries so they don't keep pointing at the now-retired skill (and so
+	// restoreEntry can't round-trip a stale pointer). Best-effort.
+	let clearedLinks: string[] = [];
+	try {
+		clearedLinks = await clearRetiredSkillLinks(
+			directory,
+			skillPath,
+			cleanSlug,
+		);
+	} catch (err) {
+		warn(
+			`[skill-generator] retireSkill link-clear failed for '${cleanSlug}': ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 	return {
 		retired: true,
 		path: skillPath,
 		markerPath,
 		reason,
+		clearedLinks,
 	};
+}
+
+/**
+ * G10 (issue #1717): clear draft_generated_skill_* on source entries pointing
+ * at a draft proposal. Used by autoApplyProposals REJECT so the cluster can be
+ * recompiled. Best-effort; never touches the active generated_skill_* stamp.
+ */
+export async function clearDraftSkillLinks(
+	directory: string,
+	proposalFilePath: string,
+	slug: string,
+): Promise<string[]> {
+	return clearSkillLinks(directory, proposalFilePath, slug, 'draft');
+}
+
+/**
+ * G12 (issue #1717): clear generated_skill_* on source entries pointing at a
+ * retired skill, and record the slug in retired_skill_history (capped at 50).
+ * Called from retireSkill so all retire callers benefit. Best-effort.
+ */
+export async function clearRetiredSkillLinks(
+	directory: string,
+	skillFilePath: string,
+	slug: string,
+): Promise<string[]> {
+	return clearSkillLinks(directory, skillFilePath, slug, 'retire');
+}
+
+async function clearSkillLinks(
+	directory: string,
+	skillFilePath: string,
+	slug: string,
+	mode: 'draft' | 'retire',
+): Promise<string[]> {
+	let content: string;
+	try {
+		content = await readFile(skillFilePath, 'utf-8');
+	} catch (err) {
+		// PR #1731 review L1-001: this used to swallow all read errors silently
+		// (indistinguishable from "no source IDs to clear"). Log so a transient
+		// read failure at least leaves a diagnostic trail instead of silently
+		// stranding the source entry's generated_skill_slug/draft marker.
+		warn(
+			`[skill-generator] clearSkillLinks: failed to read '${skillFilePath}' for slug '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return [];
+	}
+	const fm = parseDraftFrontmatter(content);
+	const sourceIds = fm?.sourceKnowledgeIds ?? [];
+	if (sourceIds.length === 0) return [];
+	const idSet = new Set(sourceIds);
+	const cleared: string[] = [];
+	const now = new Date().toISOString();
+
+	const clearOnEntry = (e: KnowledgeEntryBase): boolean => {
+		if (mode === 'draft') {
+			if (e.draft_generated_skill_slug !== slug) return false;
+			e.draft_generated_skill_slug = undefined;
+			e.draft_generated_skill_path = undefined;
+			e.updated_at = now;
+			return true;
+		}
+		if (e.generated_skill_slug !== slug) return false;
+		e.generated_skill_slug = undefined;
+		e.generated_skill_path = undefined;
+		const history = Array.isArray(e.retired_skill_history)
+			? e.retired_skill_history.filter((s) => s !== slug)
+			: [];
+		history.push(slug);
+		if (history.length > 50) {
+			history.splice(0, history.length - 50);
+		}
+		e.retired_skill_history = history;
+		e.updated_at = now;
+		return true;
+	};
+
+	// PR #1731 review F-002: route through transactKnowledge (lock-before-read)
+	// instead of unlocked readKnowledge + rewriteKnowledge — the prior shape
+	// could clobber a concurrent knowledge-store commit (e.g. a knowledge_add
+	// append) landing between this function's read and its write.
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+		let changed = false;
+		for (const e of entries) {
+			if (!idSet.has(e.id)) continue;
+			if (clearOnEntry(e as KnowledgeEntryBase)) {
+				cleared.push(e.id);
+				changed = true;
+			}
+		}
+		return changed ? entries : null;
+	});
+
+	const hivePath = resolveHiveKnowledgePath();
+	if (existsSync(hivePath)) {
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
+			let changed = false;
+			for (const e of entries) {
+				if (!idSet.has(e.id)) continue;
+				if (clearOnEntry(e as KnowledgeEntryBase)) {
+					cleared.push(e.id);
+					changed = true;
+				}
+			}
+			return changed ? entries : null;
+		});
+	}
+
+	return cleared;
 }
 
 /**
@@ -1842,6 +2131,9 @@ export async function regenerateSkill(
 				? origin
 				: 'generated',
 	});
+	// G8 (issue #1717): refresh the auto-derived eval stub so the gate
+	// reflects the regenerated directives.
+	await writeEvalStub(directory, cleanSlug, generateEvalStub(cluster));
 	let evaluation: SkillEvaluationResult | undefined;
 	if (options.evaluate) {
 		evaluation = await evaluateSkillChange({
@@ -1935,6 +2227,12 @@ export const _internals = {
 	clearSkillStale,
 	autoApplyProposals,
 	unlinkSync,
+	// G8/G10/G12 (issue #1717): exposed for DI in tests.
+	proposalRepoRelativePath,
+	generateEvalStub,
+	writeEvalStub,
+	clearDraftSkillLinks,
+	clearRetiredSkillLinks,
 };
 
 void warn; // reserved for future error reporting

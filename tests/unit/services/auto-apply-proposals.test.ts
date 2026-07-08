@@ -95,6 +95,51 @@ describe('autoApplyProposals', () => {
 		expect(fs.existsSync(proposalPath)).toBe(false);
 	});
 
+	// G10 (issue #1717) wiring: the REJECT branch must clear the
+	// draft_generated_skill_slug stamp generateSkills wrote on the source
+	// entry, so the cluster can be recompiled on a future phase.
+	it('G10 wiring: REJECT clears draft_generated_skill_slug on source entry', async () => {
+		// Seed swarm knowledge with a source entry that carries the draft stamp
+		// (the way generateSkills draft mode would have set it).
+		const swarmPath = path.join(dir, '.swarm', 'knowledge.jsonl');
+		const stampedEntry = {
+			id: 'KN-001',
+			tier: 'swarm',
+			lesson: 'source lesson for rejected draft',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.85,
+			status: 'established',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: '2026-01-01T00:00:00Z',
+			updated_at: '2026-01-01T00:00:00Z',
+			project_name: 'auto-apply-test',
+			draft_generated_skill_slug: 'test-rejected',
+			draft_generated_skill_path: '.swarm/skills/proposals/test-rejected.md',
+		};
+		fs.writeFileSync(swarmPath, `${JSON.stringify(stampedEntry)}\n`, 'utf-8');
+
+		writeProposal(dir, 'test-rejected', PROPOSAL_CONTENT);
+		const delegate = async () => 'REJECT';
+		const result = await autoApplyProposals(dir, delegate);
+		expect(result.rejected).toContain('test-rejected');
+
+		// The draft stamp must be cleared so selectCandidateEntries can pick
+		// the cluster up again next phase.
+		const updated = JSON.parse(
+			fs.readFileSync(swarmPath, 'utf-8').split('\n').filter(Boolean)[0],
+		);
+		expect(updated.draft_generated_skill_slug).toBeUndefined();
+		expect(updated.draft_generated_skill_path).toBeUndefined();
+	});
+
 	it('skips proposals whose slug already exists as active', async () => {
 		writeProposal(dir, 'already-active', PROPOSAL_CONTENT);
 		writeActiveSkill(dir, 'already-active');

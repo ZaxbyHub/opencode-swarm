@@ -82,6 +82,7 @@ import {
 	validateActionability,
 	validateLesson,
 } from './knowledge-validator.js';
+import { writeArchiveTombstoneAndInvalidateSkills } from './skill-invalidator.js';
 import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
@@ -1654,6 +1655,9 @@ export async function applyCuratorKnowledgeUpdates(
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
 	const foundIds = new Set<string>();
+	// G11 (issue #1717): capture the pre-mutation status of each archived
+	// entry so the shared invalidator's tombstone records the real prior status.
+	const archivedPrevStatus = new Map<string, string>();
 	// G3 (#1715): collect (id, reason) for flag_contradiction actions so we can
 	// emit `contradicted` events post-transaction. Emitting inline inside the
 	// transactKnowledge callback would risk a directory-lock deadlock (the
@@ -1667,6 +1671,7 @@ export async function applyCuratorKnowledgeUpdates(
 		// Reset closure state on each call (in case of future retry semantics).
 		appliedIds.clear();
 		foundIds.clear();
+		archivedPrevStatus.clear();
 		contradictedEntries.length = 0;
 		let txApplied = 0;
 		let modified = false;
@@ -1698,6 +1703,9 @@ export async function applyCuratorKnowledgeUpdates(
 						return entry;
 					}
 					appliedIds.add(entry.id);
+					// G11 (issue #1717): capture BEFORE mutation so the
+					// tombstone records the real prior status.
+					archivedPrevStatus.set(entry.id, entry.status);
 					txApplied++;
 					modified = true;
 					return {
@@ -1825,6 +1833,41 @@ export async function applyCuratorKnowledgeUpdates(
 				);
 			}
 			skipped++;
+		}
+	}
+
+	// G11 (issue #1717): route curator-archive recommendations through the
+	// same tombstone + retire/stale invalidation path as the knowledge_archive
+	// tool. Before this, curator-archived knowledge silently orphaned its
+	// generated skills. Fail-open per-call.
+	const archivedRecs = validRecommendations.filter(
+		(r) => r.action === 'archive' && r.entry_id && appliedIds.has(r.entry_id),
+	);
+	// Batch the archived-ID scan once for the whole recommendation set instead
+	// of once per entry (matches the sibling autoRetireSkills batching
+	// pattern at the top of this file) — avoids O(K) full swarm+hive JSONL
+	// re-scans when a single curator phase archives multiple entries.
+	const precomputedArchivedIds =
+		archivedRecs.length > 0
+			? await getArchivedKnowledgeIds(directory)
+			: undefined;
+	for (const rec of archivedRecs) {
+		try {
+			await writeArchiveTombstoneAndInvalidateSkills({
+				directory,
+				entryId: rec.entry_id!,
+				tier: 'swarm',
+				actor: 'curator',
+				reason: rec.reason ?? 'curator archive recommendation',
+				mode: 'archive',
+				previousStatus: archivedPrevStatus.get(rec.entry_id!),
+				sourceLabel: 'curator',
+				precomputedArchivedIds,
+			});
+		} catch (err) {
+			logger.warn(
+				`[curator] archive invalidation for entry '${rec.entry_id}' failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 

@@ -28,18 +28,29 @@ export const skill_apply: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.describe(
 				'Validate the proposal against .swarm/skills/evals/<slug> before activation. Default false.',
 			),
+		confirm_unevaluated: z
+			.boolean()
+			.optional()
+			.default(false)
+			.describe(
+				'Allow activation when evaluateSkillChange returns status "unevaluated" (no eval set exists). Default false — the activation is blocked with a surfaced reason so the caller can confirm. Generated skills auto-derive an eval stub from their source directives, so this only applies to non-directive skills with no stub.',
+			),
 	},
 	execute: async (args: unknown, directory): Promise<string> => {
 		const a = (args ?? {}) as {
 			slug?: string;
 			force?: boolean;
 			evaluate?: boolean;
+			confirm_unevaluated?: boolean;
 		};
 		if (!a.slug || typeof a.slug !== 'string') {
 			return JSON.stringify({ activated: false, reason: 'slug required' });
 		}
 		const result = await activateProposal(directory, a.slug, a.force ?? false, {
 			evaluate: a.evaluate ?? false,
+			// G8 (issue #1717): surface-and-confirm gate — interactive tool
+			// defaults to false so unevaluated activation requires explicit opt-in.
+			confirmUnevaluated: a.confirm_unevaluated ?? false,
 		});
 		return JSON.stringify(result, null, 2);
 	},

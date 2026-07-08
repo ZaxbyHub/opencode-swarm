@@ -124,6 +124,65 @@ describe('validateActionableFields', () => {
 		});
 		expect(r.valid).toBe(true);
 	});
+
+	// PR #1731 review L5-005 / FB-010: the draft_generated_skill_* and
+	// retired_skill_history fields (issue #1717 G10/G12) had zero negative-path
+	// coverage at the validator level.
+	it('rejects draft_generated_skill_slug that is not kebab-case', () => {
+		const r = validateActionableFields({
+			draft_generated_skill_slug: 'Not_Kebab_Case',
+		});
+		expect(r.valid).toBe(false);
+	});
+
+	it('accepts a valid draft_generated_skill_slug', () => {
+		const r = validateActionableFields({
+			draft_generated_skill_slug: 'scope-discipline',
+		});
+		expect(r.valid).toBe(true);
+	});
+
+	it('rejects draft_generated_skill_path outside allowed prefixes', () => {
+		const r = validateActionableFields({
+			draft_generated_skill_path: 'src/agents/secret/SKILL.md',
+		});
+		expect(r.valid).toBe(false);
+	});
+
+	it('accepts repo-local draft_generated_skill_path under allowed prefix', () => {
+		const r = validateActionableFields({
+			draft_generated_skill_path: '.swarm/skills/proposals/scope-discipline.md',
+		});
+		expect(r.valid).toBe(true);
+	});
+
+	it('rejects a non-array retired_skill_history', () => {
+		const r = validateActionableFields({
+			retired_skill_history: 'not-an-array' as unknown as string[],
+		});
+		expect(r.valid).toBe(false);
+	});
+
+	it('rejects retired_skill_history entries that are not kebab-case slugs', () => {
+		const r = validateActionableFields({
+			retired_skill_history: ['Not Kebab', 'valid-slug'],
+		});
+		expect(r.valid).toBe(false);
+	});
+
+	it('rejects retired_skill_history longer than the 50-item FIFO cap', () => {
+		const r = validateActionableFields({
+			retired_skill_history: Array.from({ length: 51 }, (_, i) => `slug-${i}`),
+		});
+		expect(r.valid).toBe(false);
+	});
+
+	it('accepts retired_skill_history at exactly the 50-item cap', () => {
+		const r = validateActionableFields({
+			retired_skill_history: Array.from({ length: 50 }, (_, i) => `slug-${i}`),
+		});
+		expect(r.valid).toBe(true);
+	});
 });
 
 describe('validateSkillPath', () => {

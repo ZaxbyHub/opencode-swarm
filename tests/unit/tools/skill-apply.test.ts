@@ -102,7 +102,8 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				false,
-				{ evaluate: false },
+				// G8 (issue #1717): confirmUnevaluated defaults to false.
+				{ evaluate: false, confirmUnevaluated: false },
 			);
 		});
 
@@ -112,7 +113,7 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				true,
-				{ evaluate: false },
+				{ evaluate: false, confirmUnevaluated: false },
 			);
 		});
 
@@ -122,7 +123,7 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				false,
-				{ evaluate: false },
+				{ evaluate: false, confirmUnevaluated: false },
 			);
 		});
 
@@ -132,7 +133,21 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				false,
-				{ evaluate: true },
+				{ evaluate: true, confirmUnevaluated: false },
+			);
+		});
+
+		// G8 (issue #1717): the new confirm_unevaluated arg must pass through.
+		it('passes confirm_unevaluated=true to activateProposal', async () => {
+			await skill_apply.execute(
+				{ slug: 'test-skill', confirm_unevaluated: true },
+				tmp,
+			);
+			expect(mockActivateProposal).toHaveBeenCalledWith(
+				tmp,
+				'test-skill',
+				false,
+				{ evaluate: false, confirmUnevaluated: true },
 			);
 		});
 	});

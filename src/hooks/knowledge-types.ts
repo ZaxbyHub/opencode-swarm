@@ -107,6 +107,12 @@ export interface ActionableDirectiveFields {
 	generated_skill_slug?: string;
 	/** Repo-local path to generated SKILL.md. */
 	generated_skill_path?: string;
+	/** G10 (issue #1717): slug of a draft proposal compiled from this entry. */
+	draft_generated_skill_slug?: string;
+	/** G10 (issue #1717): repo-local path to the draft proposal. */
+	draft_generated_skill_path?: string;
+	/** G12 (issue #1717): retired skill slugs previously generated from this entry. */
+	retired_skill_history?: string[];
 	/** Directive priority for ranking/enforcement. */
 	directive_priority?: DirectivePriority;
 	/**
