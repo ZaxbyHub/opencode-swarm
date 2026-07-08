@@ -171,6 +171,15 @@ export const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
 		expectedCanonicalRef:
 			'../../../.opencode/skills/swarm-pr-subscribe/SKILL.md',
 	},
+	{
+		slug: 'swarm-ci-monitor',
+		canonicalPath: '.opencode/skills/swarm-ci-monitor/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-ci-monitor/SKILL.md',
+			'.agents/skills/swarm-ci-monitor/SKILL.md',
+		],
+		expectedCanonicalRef: '../../../.opencode/skills/swarm-ci-monitor/SKILL.md',
+	},
 ];
 
 /**

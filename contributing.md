@@ -87,7 +87,9 @@ EOF
 )" --base main
 ```
 
-The PR title **is** the squash merge commit message. It must follow the conventional commit format exactly (see below). The `pr-standards` CI check enforces this.
+The PR title is preserved in the merge commit and is what release-please
+reads. It must follow the conventional commit format exactly (see below). The
+`pr-standards` CI check enforces this.
 
 ### 6. Wait for CI
 
@@ -95,7 +97,7 @@ All checks must be green before merging. See the "CI checks" section below for t
 
 ### 7. Merge the PR
 
-Use squash merge (GitHub default). The PR title becomes the commit message that release-please reads.
+`main` requires a GitHub merge queue (repository ruleset, `merge_method: MERGE`) — once required checks and review are green, add the PR to the merge queue rather than merging directly; GitHub re-validates and merges it as a two-parent merge commit, not a squash. The PR title is preserved as the merge commit's body (GitHub's default merge-commit template: `Merge pull request #N from <branch>` subject, PR title as body), which is what release-please reads — do not assume a squash-commit history when working with `git log`.
 
 ### 8. What happens automatically after merge
 
@@ -206,7 +208,7 @@ feature: new thing            ← not an allowed type
 
 ## PR title requirement
 
-The PR title is used by release-please as the squash merge commit message. **It must follow the same conventional commit format as individual commits.** The `pr-standards` CI check will block merging if the title is invalid.
+The PR title is used by release-please as the merge commit message (see "Merge the PR" above — `main` uses a required merge queue, not a squash merge). **It must follow the same conventional commit format as individual commits.** The `pr-standards` CI check will block merging if the title is invalid.
 
 Choose the type that matches the **primary change** in the PR:
 - New capability → `feat`

@@ -25,12 +25,12 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   deep-research, issue-ingest, plan, critic-gate, design-docs): `.opencode`
   and `.claude` copies must stay **byte-identical**.
   Any edit is a dual-tree edit — apply the identical change to both files.
-- **ADAPTER** (execute, phase-wrap, swarm-pr-review, swarm-pr-feedback):
-  `.opencode` is canonical; `.claude` and `.agents` where present are thin
-  shims that must keep the exact relative reference
-  `../../../.opencode/skills/<slug>/SKILL.md` (drift-check verifies the
-  string). `swarm-implement` follows the same operational adapter pattern, but
-  is currently classified as an additional divergent contract because the
+- **ADAPTER** (execute, phase-wrap, swarm-pr-review, swarm-pr-feedback,
+  swarm-pr-subscribe, swarm-ci-monitor): `.opencode` is canonical; `.claude`
+  and `.agents` where present are thin shims that must keep the exact relative
+  reference `../../../.opencode/skills/<slug>/SKILL.md` (drift-check verifies
+  the string). `swarm-implement` follows the same operational adapter pattern,
+  but is currently classified as an additional divergent contract because the
   additional-contract registry does not yet model non-architect adapter shims.
 - **DIVERGENT**: both trees exist, content intentionally differs — a
   single-tree edit is fine. `codebase-review-swarm` is in

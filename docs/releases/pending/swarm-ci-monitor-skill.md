@@ -2,16 +2,19 @@
 
 ## What changed
 
-- Added a `swarm-ci-monitor` skill (`.claude/skills/` canonical, no
-  `.opencode` counterpart — same non-bundled, repo-internal-only class as
-  `tech-debt-ci-review` and `qa-sweep`) that drives an already-reviewed,
-  approved PR to a merged state: monitor CI, exhaustively research every
-  failure, fix end-to-end, iterate until all required checks are green (max 5
-  fix cycles), then merge — with no hardcoded merge strategy, so it works
-  whether or not the base branch requires a GitHub merge queue.
-- Added a Codex/GitHub-MCP adapter that delegates to the Claude canonical and
-  translates the `gh` CLI surface to `mcp__github__*` tools, with a bash
-  fallback for the merge step.
+- Added a `swarm-ci-monitor` skill, `.opencode/skills/` canonical (same
+  first-class, npm-shipped class as `swarm-pr-review` / `swarm-pr-feedback` /
+  `swarm-pr-subscribe` — registered in `skill-mirrors.ts`,
+  `BUNDLED_PROJECT_SKILLS`, and `package.json#files`) with thin `.claude` and
+  `.agents` adapter shims, that drives an already-reviewed, approved PR to a
+  merged state: monitor CI, exhaustively research every failure, fix
+  end-to-end, iterate until all required checks are green (max 5 fix cycles),
+  then merge — with no hardcoded merge strategy, so it works whether or not
+  the base branch requires a GitHub merge queue.
+- The Claude Code and Codex/GitHub-MCP adapters both delegate to the
+  `.opencode` canonical; the Codex adapter additionally translates the `gh`
+  CLI surface to `mcp__github__*` tools, with a bash fallback for the merge
+  step.
 - The skill composes the existing `ci-fix-monitor` (failure classification +
   per-type fix recipes) and `commit-pr` (commit/push discipline) rather than
   re-deriving them.

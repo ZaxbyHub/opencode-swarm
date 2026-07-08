@@ -30,6 +30,7 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'swarm-pr-review',
 	'swarm-pr-feedback',
 	'swarm-pr-subscribe',
+	'swarm-ci-monitor',
 	'issue-ingest',
 	'plan',
 	'critic-gate',
