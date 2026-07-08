@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.109.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.1...v7.109.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **docs:** align qa gate count claims ([6fb2dbb](https://github.com/ZaxbyHub/opencode-swarm/commit/6fb2dbb7c6bec0ff9accb8d6dfa4d58475beb6de))
+* **docs:** align qa gate count claims ([874d261](https://github.com/ZaxbyHub/opencode-swarm/commit/874d2616c68d7f7b8b864149f64ebb813be97430))
+* **test:** tolerate EBUSY/ENOTEMPTY in init-safety afterAll cleanup on Windows ([7df5d8a](https://github.com/ZaxbyHub/opencode-swarm/commit/7df5d8a57b2eef23e22ad05bcf461fc80dbd277c))
+* **test:** tolerate EBUSY/ENOTEMPTY in init-safety afterAll cleanup on Windows ([7db67c0](https://github.com/ZaxbyHub/opencode-swarm/commit/7db67c011b786b508d10bb7bcc0e5e1fccc6a63a))
+
 ## [7.109.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.0...v7.109.1) (2026-07-07)
 
 
