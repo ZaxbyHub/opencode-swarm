@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import {
 	combineFragments,
 	extractCandidatePrNumbers,
+	extractCommitShasFromBody,
 	filterPendingFragmentPaths,
 	MARKER_END,
 	MARKER_START,
@@ -49,6 +50,65 @@ describe('extractCandidatePrNumbers', () => {
 	test('ignores numbers that are part of larger paths (not really PR refs)', () => {
 		// `/notes/123` — no leading `#`, no `pull/`, no parens/brackets → not extracted
 		expect(extractCandidatePrNumbers('see /notes/123')).toEqual([]);
+	});
+});
+
+describe('extractCommitShasFromBody', () => {
+	const sha40 = 'ba948b40159e1641d158d2efbd815abac1f94ad2';
+	const sha40b = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+	test('extracts a full 40-char SHA from a GitHub commit URL', () => {
+		const body = `* feat: something ([ba948b4](https://github.com/owner/repo/commit/${sha40}))`;
+		expect(extractCommitShasFromBody(body)).toEqual([sha40]);
+	});
+	test('is case-insensitive for hex digits and normalises to lowercase', () => {
+		const mixed = sha40.toUpperCase();
+		expect(extractCommitShasFromBody(`/commit/${mixed}`)).toEqual([sha40]);
+	});
+	test('returns empty for empty/non-string input', () => {
+		expect(extractCommitShasFromBody('')).toEqual([]);
+		expect(extractCommitShasFromBody(null as unknown as string)).toEqual([]);
+		expect(extractCommitShasFromBody(undefined as unknown as string)).toEqual([]);
+	});
+	test('does NOT extract short (7-char) SHA labels in link text', () => {
+		// The link text `ba948b4` is only 7 chars; only the URL target (40 chars) counts.
+		const body = `* change ([ba948b4](https://github.com/owner/repo/commit/${sha40}))`;
+		const result = extractCommitShasFromBody(body);
+		expect(result).toEqual([sha40]);
+		expect(result).not.toContain('ba948b4'); // short label not extracted
+	});
+	test('deduplicates identical SHAs appearing multiple times', () => {
+		const body = `/commit/${sha40} and again /commit/${sha40}`;
+		expect(extractCommitShasFromBody(body)).toEqual([sha40]);
+	});
+	test('extracts multiple distinct SHAs in first-seen order', () => {
+		const body = `/commit/${sha40} then /commit/${sha40b}`;
+		expect(extractCommitShasFromBody(body)).toEqual([sha40, sha40b]);
+	});
+	test('does NOT extract 39-char or 41-char hex strings', () => {
+		const short = 'a'.repeat(39);
+		const long = 'b'.repeat(41);
+		expect(extractCommitShasFromBody(`/commit/${short}`)).toEqual([]);
+		expect(extractCommitShasFromBody(`/commit/${long}`)).toEqual([]);
+	});
+	test('does NOT extract non-hex characters embedded in a 40-char string', () => {
+		expect(extractCommitShasFromBody('/commit/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz')).toEqual([]);
+	});
+	test('extracts a release-please-style body with commit links and no PR refs', () => {
+		// This matches the actual format observed in the wild that broke the
+		// original PR-number-only extractor.
+		const body = [
+			':robot: I have created a release *beep* *boop*',
+			'',
+			'## [7.110.0](https://github.com/owner/repo/compare/v7.109.4...v7.110.0) (2026-07-08)',
+			'',
+			'### Features',
+			`* **skills:** add swarm-ci-monitor skill ([ba948b4](https://github.com/owner/repo/commit/${sha40}))`,
+		].join('\n');
+		expect(extractCommitShasFromBody(body)).toEqual([sha40]);
+		// Confirm PR-number extractor finds nothing (proving the gap the new
+		// function closes).
+		expect(extractCandidatePrNumbers(body)).toEqual([]);
 	});
 });
 
@@ -399,6 +459,28 @@ describe('stripCustomReleaseNotesBlock + re-scan defense', () => {
 		expect(candidates).toEqual([896]);
 		expect(candidates).not.toContain(885);
 		expect(candidates).not.toContain(890);
+	});
+	test('commit SHA extraction on a body with previously-injected notes does NOT re-scan SHAs inside the marker block', () => {
+		// A prior run injected a fragment whose prose cites an older commit
+		// SHA (e.g. "fixes regression introduced in abc123..."). On re-run,
+		// the strip-first strategy must prevent that injected SHA from being
+		// treated as a new source commit and spuriously re-resolving to a PR.
+		const injectedSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+		const realSha = 'ba948b40159e1641d158d2efbd815abac1f94ad2';
+		const body = [
+			':robot: release-please created a release',
+			'## [7.110.0]',
+			'### Features',
+			`* feat: add skill ([ba948b4](https://github.com/owner/repo/commit/${realSha}))`,
+			'',
+			`${MARKER_START}`,
+			`Previously fixed by https://github.com/owner/repo/commit/${injectedSha}`,
+			`${MARKER_END}`,
+		].join('\n');
+		const stripped = stripCustomReleaseNotesBlock(body);
+		const shas = extractCommitShasFromBody(stripped);
+		expect(shas).toEqual([realSha]);
+		expect(shas).not.toContain(injectedSha);
 	});
 	test('absorbs nested markers (matches upsertReleaseNotesBlock semantics)', () => {
 		const body = [
