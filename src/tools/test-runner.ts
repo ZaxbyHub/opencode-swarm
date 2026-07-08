@@ -84,6 +84,9 @@ export const SUPPORTED_FRAMEWORKS = [
 	'dart-test',
 	'rspec',
 	'minitest',
+	'pest',
+	'phpunit',
+	'php-artisan',
 ] as const;
 
 export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
@@ -379,11 +382,16 @@ export const DISPATCH_FRAMEWORK_MAP: Record<string, TestFramework> = {
 	'dart-test': 'dart-test',
 	rspec: 'rspec',
 	minitest: 'minitest',
+	pest: 'pest',
+	phpunit: 'phpunit',
+	'php-artisan': 'php-artisan',
 	// Genuine aliases (many profile names → one union framework).
 	'bun:test': 'bun',
 	'xcodebuild-test': 'swift-test',
 	'flutter test': 'dart-test',
 	'dart test': 'dart-test',
+	Pest: 'pest',
+	PHPUnit: 'phpunit',
 };
 
 export async function detectTestFrameworkViaDispatch(
@@ -582,6 +590,8 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 	}
 
 	// Profile-driven detection for additional languages (soft warning on missing binary)
+	const phpFramework = detectPhpTest(baseDir);
+	if (phpFramework) return phpFramework;
 	if (detectGoTest(baseDir)) return 'go-test';
 	if (detectJavaMaven(baseDir)) return 'maven';
 	if (detectGradle(baseDir)) return 'gradle';
@@ -593,6 +603,23 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 	if (detectMinitest(baseDir)) return 'minitest';
 
 	return 'none';
+}
+
+function detectPhpTest(cwd: string): TestFramework | null {
+	if (
+		fs.existsSync(path.join(cwd, 'artisan')) &&
+		fs.existsSync(path.join(cwd, 'composer.json'))
+	) {
+		return 'php-artisan';
+	}
+	if (fs.existsSync(path.join(cwd, 'Pest.php'))) return 'pest';
+	if (
+		fs.existsSync(path.join(cwd, 'phpunit.xml')) ||
+		fs.existsSync(path.join(cwd, 'phpunit.xml.dist'))
+	) {
+		return 'phpunit';
+	}
+	return null;
 }
 
 // ============ Test File Mapping (Convention Scope) ============
@@ -680,6 +707,12 @@ function buildLanguageSpecificTestNames(
 				`${nameWithoutExt}Test.kt`,
 				`${nameWithoutExt}Tests.kt`,
 				`Test${nameWithoutExt}.kt`,
+			];
+		case '.php':
+			return [
+				`${nameWithoutExt}Test.php`,
+				`${nameWithoutExt}Tests.php`,
+				`Test${nameWithoutExt}.php`,
 			];
 		case '.ps1':
 			return [`${nameWithoutExt}.Tests.ps1`, `${nameWithoutExt}.tests.ps1`];
@@ -789,6 +822,14 @@ export function isLanguageSpecificTestFile(basename: string): boolean {
 		(/^Test[A-Z]/.test(basename) ||
 			lower.endsWith('test.kt') ||
 			lower.endsWith('tests.kt'))
+	)
+		return true;
+	// PHP
+	if (
+		lower.endsWith('.php') &&
+		(/^Test[A-Z]/.test(basename) ||
+			basename.endsWith('Test.php') ||
+			basename.endsWith('Tests.php'))
 	)
 		return true;
 	// PowerShell
@@ -1256,9 +1297,32 @@ function buildTestCommand(
 				'-e',
 				'Dir.glob("test/**/*_test.rb").sort.each { |f| require_relative f }',
 			];
+		case 'pest': {
+			const args: string[] = [phpVendorBin('pest')];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
+		case 'phpunit': {
+			const args: string[] = [phpVendorBin('phpunit')];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
+		case 'php-artisan': {
+			const args: string[] = ['php', 'artisan', 'test'];
+			if (scope !== 'all' && files.length > 0) args.push(...files);
+			return args;
+		}
 		default:
 			return null;
 	}
+}
+
+function phpVendorBin(name: string): string {
+	return path.join(
+		'vendor',
+		'bin',
+		process.platform === 'win32' ? `${name}.bat` : name,
+	);
 }
 
 function mapFrameworkStatusToResult(
@@ -1673,6 +1737,26 @@ function parseTestOutput(
 			}
 			break;
 		}
+		case 'pest':
+		case 'phpunit':
+		case 'php-artisan': {
+			const phpunitMatch = output.match(
+				/Tests:\s*(\d+),\s*Assertions:\s*\d+(?:,\s*Failures:\s*(\d+))?(?:,\s*Errors:\s*(\d+))?(?:,\s*Skipped:\s*(\d+))?/,
+			);
+			const okMatch = output.match(/OK\s*\((\d+)\s+tests?/);
+			if (phpunitMatch) {
+				totals.total = parseInt(phpunitMatch[1], 10);
+				const failures = phpunitMatch[2] ? parseInt(phpunitMatch[2], 10) : 0;
+				const errors = phpunitMatch[3] ? parseInt(phpunitMatch[3], 10) : 0;
+				totals.skipped = phpunitMatch[4] ? parseInt(phpunitMatch[4], 10) : 0;
+				totals.failed = failures + errors;
+				totals.passed = totals.total - totals.failed - totals.skipped;
+			} else if (okMatch) {
+				totals.total = parseInt(okMatch[1], 10);
+				totals.passed = totals.total;
+			}
+			break;
+		}
 		default:
 			break;
 	}
@@ -1992,6 +2076,7 @@ const SOURCE_EXTENSIONS = new Set([
 	'.hpp',
 	'.cc',
 	'.cxx',
+	'.php',
 	'.swift',
 	'.dart',
 	'.rb',

@@ -904,9 +904,33 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
 | `phase_critic` | boolean | `true` | Dispatch an additive phase-level critic gate at `phase_complete`. This is in addition to per-task Stage B review — it does NOT skip Stage B. |
 | `integrated_diff_required` | boolean | `true` | Require an integrated diff before accepting changes from a lane. Ensures cross-lane file changes are coherent. |
 | `allow_docs_only_without_reviewer` | boolean | `false` | Allow docs-only phases to complete when the reviewer agent is not available. |
-| `worktree_isolation` | boolean | `false` | Use git worktree isolation for parallel coders to enable true file-system-level parallelism. |
+| `worktree_isolation` | boolean | `true` | Use git worktree isolation for parallel coders to enable true file-system-level parallelism. When `true`, each lane gets its own worktree. |
 | `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. Controls how completed lane branches are merged back into the main branch. |
 | `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `.swarm-worktrees/<sessionId>/<laneId>`. Accepts absolute and relative paths (relative paths are resolved against the project root). |
+| `deps_strategy` | `"skip" \| "copy" \| "link"` | `"skip"` | How to handle `node_modules` when provisioning a lane worktree. `"skip"` (default) does not copy dependencies — the lane runs without access to host packages. `"copy"` uses `cpSync` to duplicate `node_modules`. `"link"` creates symlinks/junctions. Only applies when `worktree_isolation: true`. See `worktree` config section for per-lane overrides. |
+| `runtime_isolation` | object | _(see below)_ | Per-lane environment isolation configuration. Controls port allocation, environment variable overrides, and cache redirection for sandboxed lane execution. |
+
+#### `turbo.lean.runtime_isolation` — Per-lane runtime isolation settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable per-lane runtime isolation. When enabled, each lane receives isolated port allocations and optional environment overrides. **Off by default — zero behavior change when omitted.** |
+| `port_base` | number | _(none — no PORT injection)_ | Base port number for lane-specific port allocations. Each lane gets `port_base + laneIndex * port_stride`. Must be explicitly set to enable PORT injection. |
+| `port_stride` | number | `1` | Port increment between consecutive lanes. |
+| `env_overrides` | `Record<string, string>` | `{}` | Environment variable overrides applied to each lane's execution environment. Keys are variable names; values are the override values. Values are copied verbatim — no template substitution. |
+| `cache_redirects` | `Record<string, string>` | `{}` | Cache directory redirects for lane isolation. Keys must be valid env var names (e.g. `XDG_CACHE_HOME`, `TMPDIR`); values are redirected base paths. Useful for sandboxing cache access per lane. (The implementation appends `/lane-{laneIndex}` to each value as a per-lane suffix.) |
+
+**Cross-platform sandbox mechanism:**
+
+| Platform | Sandbox | Soft-fail |
+|----------|---------|-----------|
+| Linux | `bubblewrap` | Falls back to env+port only if `bwrap` is unavailable |
+| macOS | `sandbox-exec` | Falls back to env+port only if `sandbox-exec` is unavailable |
+| Windows | `native-runner/{mode}` with `PowerShell wrapper` fallback | Falls back to env+port only if sandbox preparation fails |
+
+A lane **never hard-fails** due to sandbox unavailability — env var and port injection always work regardless of whether the OS-level sandbox envelope was successfully prepared (SC-132).
+
+**When to enable:** parallel coders running port-binding test servers, integration suites that need per-lane database or cache isolation, or dev servers requiring isolated temp directories.
 
 **Example** — Enable Lean Turbo with worktree isolation and rebase strategy:
 
@@ -927,6 +951,62 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
       "merge_strategy": "rebase",
       "worktree_dir": ".worktrees"
     }
+  }
+}
+```
+
+### `worktree` — Worktree Isolation Settings
+
+Extended worktree isolation configuration. These settings apply to all worktree operations regardless of the `turbo.strategy` setting.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `policy` | `"auto" \| "required" \| "disabled"` | `"auto"` | Worktree isolation policy. `"auto"` uses isolated worktrees for eligible parallel coders and blocks additional parallel dispatches if isolation cannot be prepared. `"required"` always requires isolation and blocks if it cannot be prepared. `"disabled"` preserves shared-tree behavior (no worktree isolation). |
+| `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. |
+| `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `.swarm-worktrees/<sessionId>/<laneId>`. |
+| `deps_strategy` | `"skip" \| "copy" \| "link"` | `"skip"` | How to handle `node_modules` when provisioning a lane worktree. `"skip"` (default) does not copy — the lane runs without host packages. `"copy"` uses `cpSync` to duplicate `node_modules`. `"link"` creates symlinks (POSIX) or junctions (Windows). |
+| `serialization_release_after_dispatches` | number | `5` | Release a serialized session after this many successful dispatches have completed and merged back from that session. Only applies when serialization mode is active. |
+| `serialization_release_after_ms` | number | `60000` | Release a serialized session after this many milliseconds have elapsed since the session was first serialized (even if zero dispatches have succeeded). Acts as a TTL ceiling on serialized sessions. |
+
+**`deps_strategy` behavior:**
+
+| Value | Behavior | Use case |
+|-------|----------|----------|
+| `"skip"` (default) | No `node_modules` copy. Lane has no access to host packages. | Lightweight tasks with no external dependencies, or tasks that bundle dependencies. |
+| `"copy"` | `cpSync` duplicates the entire `node_modules` directory. | Tasks that require exact package versions and cannot tolerate symlink issues. |
+| `"link"` | Creates symlinks (POSIX) or directory junctions (Windows). | Projects with many packages where copying is slow; requires filesystem support for symlinks. |
+
+> **Advisory for `deps_strategy: "skip"`:** When a task's gates include test/build commands and the lane was provisioned with `deps_strategy: "skip"`, the system emits a `WORKTREE_DEPS_SKIP` advisory suggesting to set `deps_strategy` to `"copy"` or `"link"` if the task requires host dependencies.
+
+#### `worktree.runtime_isolation` — Per-lane runtime isolation settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable per-lane runtime isolation. **Off by default — zero behavior change when omitted.** |
+| `port_base` | number | _(none — no PORT injection)_ | Base port number for lane-specific port allocations. Each lane gets `port_base + laneIndex * port_stride`. Must be explicitly set to enable PORT injection. |
+| `port_stride` | number | `1` | Port increment between consecutive lanes. |
+| `env_overrides` | `Record<string, string>` | `{}` | Environment variable overrides applied to each lane's execution environment. Keys are variable names; values are the override values. Values are copied verbatim — no template substitution. |
+| `cache_redirects` | `Record<string, string>` | `{}` | Cache directory redirects for lane isolation. Keys must be valid env var names (e.g. `XDG_CACHE_HOME`, `TMPDIR`); values are redirected base paths. Useful for sandboxing cache access per lane. (The implementation appends `/lane-{laneIndex}` to each value as a per-lane suffix.) |
+
+**Cross-platform sandbox mechanism:**
+
+| Platform | Sandbox | Soft-fail |
+|----------|---------|-----------|
+| Linux | `bwrap` (bubblewrap) | Falls back to env+port only if `bwrap` is unavailable |
+| macOS | `sandbox-exec` | Falls back to env+port only if `sandbox-exec` is unavailable |
+| Windows | `native-runner/{mode}` with `powershell wrapper` fallback | Falls back to env+port only if sandbox preparation fails |
+
+Same cross-platform behavior as `turbo.lean.runtime_isolation` — a lane never hard-fails due to sandbox unavailability.
+
+**Example** — Configure worktree isolation with `deps_strategy: "copy"` and faster serialization release:
+
+```json
+{
+  "worktree": {
+    "policy": "auto",
+    "deps_strategy": "copy",
+    "serialization_release_after_dispatches": 3,
+    "serialization_release_after_ms": 30000
   }
 }
 ```
@@ -1020,6 +1100,6 @@ All gates are **ratchet-tighter** — once enabled they cannot be disabled until
 | `council_mode` | OFF | Replaces per-task Stage B (reviewer + test_engineer) with full 5-member council per task (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code) |
 | `hallucination_guard` | OFF | Mandatory per-phase API/signature/claim/citation verification at PHASE-WRAP; blocks `phase_complete` until evidence is APPROVED |
 | `mutation_test` | OFF | Runs mutation testing on source files touched this phase at PHASE-WRAP; FAIL blocks `phase_complete`, WARN is non-blocking |
-| `drift_check` | ON | Mandatory per-phase drift verification at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks `phase_complete` when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists |
+| `drift_check` | ON | Mandatory per-phase drift verification at PHASE-WRAP; compares implemented changes against effective spec intent; hard-blocks `phase_complete` when an effective spec exists and drift evidence is missing or REJECTED; advisory-only when no effective spec exists |
 | `phase_council` | OFF | Full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates. |
 | `final_council` | OFF | Full 5-member council (NOT General Council) reviews the entire project at the last phase. Requires approved `.swarm/evidence/final-council.json`. |

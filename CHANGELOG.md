@@ -1,5 +1,91 @@
 # Changelog
 
+## [7.109.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.1...v7.109.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **docs:** align qa gate count claims ([6fb2dbb](https://github.com/ZaxbyHub/opencode-swarm/commit/6fb2dbb7c6bec0ff9accb8d6dfa4d58475beb6de))
+* **docs:** align qa gate count claims ([874d261](https://github.com/ZaxbyHub/opencode-swarm/commit/874d2616c68d7f7b8b864149f64ebb813be97430))
+* **test:** tolerate EBUSY/ENOTEMPTY in init-safety afterAll cleanup on Windows ([7df5d8a](https://github.com/ZaxbyHub/opencode-swarm/commit/7df5d8a57b2eef23e22ad05bcf461fc80dbd277c))
+* **test:** tolerate EBUSY/ENOTEMPTY in init-safety afterAll cleanup on Windows ([7db67c0](https://github.com/ZaxbyHub/opencode-swarm/commit/7db67c011b786b508d10bb7bcc0e5e1fccc6a63a))
+
+## [7.109.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.0...v7.109.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **gates:** mechanize plan critic and FR coverage ([5497f35](https://github.com/ZaxbyHub/opencode-swarm/commit/5497f35f45d7dec9abd3f250609dc51cc22a3577))
+* **guardrails:** scope-exempt git worktree remove --force for swarm-managed worktrees ([8ef0359](https://github.com/ZaxbyHub/opencode-swarm/commit/8ef0359554088d4ed4808d1a18da002e10d63752))
+
+## [7.109.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.108.0...v7.109.0) (2026-07-07)
+
+
+### Features
+
+* **sdd:** make mode skills effective-spec aware ([2edb943](https://github.com/ZaxbyHub/opencode-swarm/commit/2edb943cc09c0d03b56a03d673d87f8f2bdb7a21))
+* **sdd:** make mode skills effective-spec aware ([e5782f3](https://github.com/ZaxbyHub/opencode-swarm/commit/e5782f3afd3fdf8a89a28efc6308c126ef7b488c))
+
+## [7.108.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.6...v7.108.0) (2026-07-07)
+
+
+### Features
+
+* **worktree:** per-lane runtime isolation on top of worktree lane isolation ([cafb000](https://github.com/ZaxbyHub/opencode-swarm/commit/cafb000a5653cb9e1aa729067a15cf6c5e4af978))
+
+
+### Bug Fixes
+
+* correct orphanedBranches field, add port_base schema bound, add runtime_isolation release fragment ([4a772ea](https://github.com/ZaxbyHub/opencode-swarm/commit/4a772eae1099e6ad81ddd8302e68342ed21c8226)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+* initGitRepo order (git init before config) + targeted diagnostics ([3ab0dba](https://github.com/ZaxbyHub/opencode-swarm/commit/3ab0dba529176f71c79c244a05372a57e2ed0054))
+* listLaneBranches uses portable branch listing (no --list glob) ([18621e5](https://github.com/ZaxbyHub/opencode-swarm/commit/18621e577a6c7ba655c7b44569f3aeec6cda6949))
+* mock tryAcquireLock in init-orphan-recovery tests, use process.execPath in url-security test ([08e5bbe](https://github.com/ZaxbyHub/opencode-swarm/commit/08e5bbeb775707507dff053d4788d22cf3ba8736))
+* quarantine pre-existing integration-worktree failure + remove diagnostics ([3f3151b](https://github.com/ZaxbyHub/opencode-swarm/commit/3f3151b69bab292c0db2e701e014e85b01d21490))
+* **review-hardening:** TOCTOU lock acquisition, serialization bypass guard, eviction gap, shallow copy deep-clone ([11be156](https://github.com/ZaxbyHub/opencode-swarm/commit/11be156cd52dcfee85f3fd56171bfa00e08f8966)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+* **worktree:** replace blocking cpSync with async fs.promises.cp + validate newlines in env values ([702806d](https://github.com/ZaxbyHub/opencode-swarm/commit/702806d6952459f7986294d16f54bddfed6402cd)), closes [#1226](https://github.com/ZaxbyHub/opencode-swarm/issues/1226)
+
+## [7.107.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.5...v7.107.6) (2026-07-06)
+
+
+### Bug Fixes
+
+* biome format — wrap long line in process-improvements test ([2e24ed7](https://github.com/ZaxbyHub/opencode-swarm/commit/2e24ed74eafd950a22890cafa4c2309d0f2f5432))
+* resolve .claude adapter in phase-wrap design-docs test ([0161dcf](https://github.com/ZaxbyHub/opencode-swarm/commit/0161dcf86272241e008ba1469083b19ddee66e43))
+* resolve swarm-pr-review findings + merge conflict fixes ([4704882](https://github.com/ZaxbyHub/opencode-swarm/commit/4704882420df41c9de1394a1884ddcb5d7b0a3f4))
+* **skills:** codify retrospective process guidance ([e0ce947](https://github.com/ZaxbyHub/opencode-swarm/commit/e0ce9476571143e3146a9b071fc145d2088980c5))
+* **skills:** codify retrospective process guidance ([01f6ccd](https://github.com/ZaxbyHub/opencode-swarm/commit/01f6ccd121bd450a6f8a9f3d4577503b808799b6))
+
+## [7.107.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.4...v7.107.5) (2026-07-06)
+
+
+### Bug Fixes
+
+* **ci:** pay down test quarantine debt ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([fce4c64](https://github.com/ZaxbyHub/opencode-swarm/commit/fce4c64eaa6696bc352e9d4d225deb251bbf037d))
+* **ci:** re-quarantine 2 integration tests with ubuntu CI-only failures ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([2a73d49](https://github.com/ZaxbyHub/opencode-swarm/commit/2a73d4959edd4de746c191323436d9bcd941e884))
+* **ci:** resolve merge_group failures across macOS + Windows ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([980e4a7](https://github.com/ZaxbyHub/opencode-swarm/commit/980e4a724fea78991144ea88aa543f64bc5f15e8))
+* **ci:** skip coverage when unit fails + fix Windows worktree tmpdir + re-quarantine macOS lean worktree tests ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([a8d9c34](https://github.com/ZaxbyHub/opencode-swarm/commit/a8d9c34c20db3263d9bd89bd77c8d199012e4b9a))
+* **test:** bump pre-check-batch-sast test timeout to 90s for Windows CI ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([8813555](https://github.com/ZaxbyHub/opencode-swarm/commit/88135552cfa4fb67655b1190afed7e09c2bf620f))
+* **worktree:** realpath-resolve tmpdir in shortenWorktreePath ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([6733e8b](https://github.com/ZaxbyHub/opencode-swarm/commit/6733e8b3d49bb13a0dde468ae8ed41d1bb51a8ed))
+* **worktree:** use suffix-based path comparison for Windows 8.3 portability ([#1729](https://github.com/ZaxbyHub/opencode-swarm/issues/1729)) ([409d1fc](https://github.com/ZaxbyHub/opencode-swarm/commit/409d1fcf5f136cb9319c54f66bb63b154081c86b))
+
+## [7.107.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.3...v7.107.4) (2026-07-06)
+
+
+### Bug Fixes
+
+* **ci:** quarantine 4 pre-existing failing test files ([f491360](https://github.com/ZaxbyHub/opencode-swarm/commit/f491360adb6d7e4d529dc19bf2e6c583b997f088))
+* **ci:** quarantine knowledge-floor-action.test.ts for CI flake ([a5879cc](https://github.com/ZaxbyHub/opencode-swarm/commit/a5879ccb38a30a182ca58a31f20f58c7e3fa007f))
+* **knowledge:** address review findings for PR [#1727](https://github.com/ZaxbyHub/opencode-swarm/issues/1727) (round 2) ([54d66f9](https://github.com/ZaxbyHub/opencode-swarm/commit/54d66f985faf37ea364e141481cf4f7ec906c431))
+* **knowledge:** lifecycle/retrieval consistency ([#1716](https://github.com/ZaxbyHub/opencode-swarm/issues/1716)) ([4238102](https://github.com/ZaxbyHub/opencode-swarm/commit/42381025532e3208d79680df9639f73c293836c2))
+* **quality-gates:** address pr-review findings F-001..F-007 ([a593a5b](https://github.com/ZaxbyHub/opencode-swarm/commit/a593a5b1239600f11551f7eab3655068604e786a))
+* **quality-gates:** close pr-review findings FB-001..FB-003 ([a3df077](https://github.com/ZaxbyHub/opencode-swarm/commit/a3df077e73eb618b3282b4a94452d04d5302a861))
+* **quality-gates:** wire missing language coverage ([50e26ed](https://github.com/ZaxbyHub/opencode-swarm/commit/50e26edea2d744033042515cdf962c19c3e76677))
+* **quality-gates:** wire missing language coverage ([b1115f4](https://github.com/ZaxbyHub/opencode-swarm/commit/b1115f48cd873bd17ea6df2d3bad2c5db5a34ac2))
+* **test:** add src/evidence/task-file to mock.module allowlist ([f2478d5](https://github.com/ZaxbyHub/opencode-swarm/commit/f2478d5365bd0b07d88085af983e649c7c1f10e4))
+* **test:** align pre-existing migrate assertions with actual messages ([fcc131a](https://github.com/ZaxbyHub/opencode-swarm/commit/fcc131a796b638404e781c49a7dcdba4cc3f179e))
+* **test:** include G7 promoted_demotion keys in schema-defaults tests ([9631e4d](https://github.com/ZaxbyHub/opencode-swarm/commit/9631e4dae89e1150a1d264ec3456b302a2a48898))
+* **test:** revert F-005 over-mocking; align cross-contamination baseline ([28ff00a](https://github.com/ZaxbyHub/opencode-swarm/commit/28ff00a68a325f2ba214b57dd806ae7500fc4ab1))
+
 ## [7.107.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.107.2...v7.107.3) (2026-07-05)
 
 

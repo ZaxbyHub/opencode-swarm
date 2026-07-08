@@ -30,7 +30,7 @@ Paste the [opencode-swarm README](https://github.com/zaxbysauce/opencode-swarm) 
 
 Each model needs to know:
 - The Architect delegates all coding to the Coder — it never writes code itself
-- Each task runs through a full 12-step QA gate
+- Each task runs through a full 15-step QA gate
 - Tasks must be atomic: one file, one concern, one logical change
 - Tasks need `FILE`, `TASK`, `CONSTRAINT`, and `ACCEPTANCE CRITERIA` fields
 - The Critic reviews the plan before implementation starts
@@ -226,13 +226,13 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 If you already have a plan (e.g. from a prior tool or another session), you can use `/swarm specify` with the plan pasted in — the architect will reverse-engineer a spec from it, validate the plan's format, and surface any gaps.
 
 **Using OpenSpec-compatible artifacts:**
-Keep current requirements in `openspec/specs/**/spec.md` and pending deltas in `openspec/changes/*/specs/**/spec.md`. When `.swarm/spec.md` is absent, planning, spec hashing, drift checks, linting, and requirement coverage use an effective Swarm spec projected from those artifacts. Run `/swarm sdd validate` before planning and `/swarm sdd project` when you want to materialize the projection into `.swarm/spec.md`.
+Keep current requirements in `openspec/specs/**/spec.md` and pending deltas in `openspec/changes/*/specs/**/spec.md`. When `.swarm/spec.md` is absent, planning, spec hashing, drift checks, linting, and requirement coverage use an effective Swarm spec projected from those artifacts. Run `/swarm sdd validate` before planning and `/swarm sdd project --overwrite` when you want to materialize the projection into `.swarm/spec.md` (first projection omits `--overwrite`; re-projecting an existing file requires it). The projected `.swarm/spec.md` includes a scaffold `## Success Criteria` section — fill in the `SC-###` placeholders with concrete success criteria before planning.
 
 **Using Spec-Kit artifacts:**
 When your repository has a `.specify/` marker directory and `specs/<feature-dir>/spec.md` files, `/swarm sdd project` auto-detects the Spec-Kit layout and projects the feature into `.swarm/spec.md`. Use `--feature <id>` when multiple feature directories exist; see _Spec-Kit SDD support_ below for detection rules, feature selection, source precedence, and validation details.
 
 **Without a spec:**
-Planning works fine without a spec. When you enter PLAN mode without a spec.md, the architect offers to create one first or skip straight to planning. If you skip, planning behavior is identical to prior versions — no behavioral change.
+When you enter PLAN mode without an effective spec (confirmed via `/swarm sdd status`), the architect offers to create one first or skip. If you skip the offer, `save_plan` will reject with `SPEC_REQUIRED` — PLAN will diagnose the situation via `/swarm sdd status`, guide you through materializing an effective spec with explicit consent steps, and stop if you decline. To bypass the spec gate entirely, set `SWARM_SKIP_SPEC_GATE=1` in your environment (tests and CI only).
 
 **Using General Council before planning:**
 When `council.general.enabled` is true and a Tavily or Brave search API key is configured, MODE: PLAN asks whether to use the three-agent General Council before `save_plan`. If accepted, the architect gathers current external context, records the council consensus/disagreements in `.swarm/context.md`, and uses that input before writing the plan and before critic pre-plan review.
@@ -255,14 +255,15 @@ A repository that has a `specs/` directory but no `.specify/` marker is **not** 
 `/swarm sdd project` projects a single Spec-Kit feature into `.swarm/spec.md`:
 
 ```
-/swarm sdd project                                             # auto-detect; single feature only
-/swarm sdd project --feature 001-my-feature                   # required when multiple features exist
+/swarm sdd project                                              # auto-detect; single feature only
+/swarm sdd project --feature 001-my-feature                  # required when multiple features exist
 /swarm sdd project --source speckit --feature 001-my-feature  # explicit when both layouts are present
+/swarm sdd project --overwrite                                # overwrite existing .swarm/spec.md
 ```
 
 `--feature <id>` takes the full feature directory name (e.g. `001-my-feature`). It is required when more than one `specs/<dir>` exists and produces an error when used with `--source openspec` or `--source swarm`.
 
-Original `FR-###` identifiers in the feature's `spec.md` are preserved unchanged. When a requirement carries no explicit identifier, a stable one is synthesized — re-running the same source produces an identical projection. The resulting `.swarm/spec.md` is treated identically to an OpenSpec projection by all downstream tools: drift verification, lint, and requirement coverage apply with no source-specific handling.
+Original `FR-###` identifiers in the feature's `spec.md` are preserved unchanged. When a requirement carries no explicit identifier, a stable one is synthesized — re-running the same source produces an identical projection. The resulting `.swarm/spec.md` is treated identically to an OpenSpec projection by all downstream tools: drift verification, lint, and requirement coverage apply with no source-specific handling. The projected spec also includes a scaffold `## Success Criteria` section with placeholder `SC-###` identifiers and `[NEEDS CLARIFICATION]` markers — fill these in with concrete success criteria before planning.
 
 #### Source precedence
 

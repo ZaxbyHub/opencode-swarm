@@ -71,7 +71,7 @@ A 3-line learning summary is automatically injected into the curator phase diges
 
 Run a health check on `.swarm/` files, plan structure, and evidence completeness. Reports missing files, schema mismatches, and recovery steps.
 
-A **Sandbox** health-check line is also reported, showing the detected executor mechanism (bubblewrap / sandbox-exec / windows-runner / none), availability, and whether commands are actually being sandboxed (sandboxing / silent pass-through / none). This is advisory only — absence of a sandbox executor never causes a hard failure.
+A **Sandbox** health-check line is also reported, showing the detected executor mechanism (bubblewrap / sandbox-exec / native-runner/{mode} with PowerShell wrapper fallback / none), availability, and whether commands are actually being sandboxed (sandboxing / silent pass-through / none). This is advisory only — absence of a sandbox executor never causes a hard failure.
 
 ### `/swarm history`
 
@@ -168,15 +168,17 @@ Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful be
 
 ### `/swarm sdd ...`
 
-Inspect and project OpenSpec-compatible spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files.
+Inspect and project OpenSpec-compatible and Spec-Kit spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files (or from Spec-Kit `specs/<feature>/spec.md` files when `.specify/` is present). The projected `.swarm/spec.md` includes a scaffold `## Success Criteria` section with placeholder `SC-###` identifiers and `[NEEDS CLARIFICATION]` markers — fill these in with concrete success criteria before planning.
 
 ```text
-/swarm sdd status             # show .swarm/spec.md plus openspec/ artifact status
+/swarm sdd status             # show .swarm/spec.md plus SDD artifact status
 /swarm sdd status --json      # machine-readable status
-/swarm sdd validate           # validate the OpenSpec projection
+/swarm sdd validate           # validate the effective spec projection
 /swarm sdd validate --change add-login
 /swarm sdd project --dry-run  # preview .swarm/spec.md materialization
-/swarm sdd project            # write .swarm/spec.md from OpenSpec artifacts
+/swarm sdd project            # write .swarm/spec.md (first projection)
+/swarm sdd project --overwrite # overwrite existing .swarm/spec.md (requires --overwrite)
+/swarm sdd project --source speckit --feature 001-my-feature  # Spec-Kit projection
 ```
 
 `openspec/changes/*/tasks.md` is proposal input only. Execution state still lives in `.swarm/plan-ledger.jsonl`; never hand-edit `.swarm/plan.json` or `.swarm/plan.md`.
@@ -601,7 +603,9 @@ Move a knowledge entry to quarantine. Quarantined entries are excluded from agen
 
 ### `/swarm knowledge restore <entry-id>`
 
-Restore a quarantined entry back to active knowledge.
+Restore a quarantined or archived entry back to active knowledge. Dispatches by
+current status: an `archived` entry is restored to its pre-archive status; a
+`quarantined` entry is restored from the quarantine sidecar.
 
 ### `/swarm memory`
 
@@ -683,6 +687,107 @@ Manage the session-scoped runtime concurrency override for plan execution. This 
 /swarm concurrency status
 /swarm concurrency reset
 ```
+
+---
+
+### `/swarm lanes [--json]`
+
+Show the current worktree lane state: active lanes (running), awaiting-merge lanes (completed but not yet merged back), and conflicted lanes (merge failures).
+
+```text
+/swarm lanes
+```
+
+**Output (human-readable):**
+```
+## active (1)
+  - lane-1 task=1.1 branch=swarm-lane/session-abc/lane-1
+    worktree=<project-root>/.swarm-worktrees/session-abc/lane-1
+
+## awaiting-merge (1)
+  - lane-2 task=1.2 branch=swarm-lane/session-def/lane-2 [partial @ commit]
+    worktree=<project-root>/.swarm-worktrees/session-def/lane-2
+    hint: Merge-back in progress; check `/swarm status` for the latest.
+
+## conflicted (1)
+  - lane-3 task=1.3 branch=swarm-lane/session-ghi/lane-3
+    worktree=<project-root>/.swarm-worktrees/session-ghi/lane-3
+    hint: Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge.
+
+Total: 3 lanes
+```
+
+**Output (`--json`):**
+```json
+{
+  "lanes": [
+    {
+      "state": "active",
+      "laneId": "lane-1",
+      "branch": "swarm-lane/session-abc/lane-1",
+      "worktreePath": "<project-root>/.swarm-worktrees/session-abc/lane-1",
+      "taskId": "1.1",
+      "planTaskId": "1.1.1",
+      "parentSessionID": "session-abc",
+      "mergeStrategy": "rebase",
+      "recoveryHint": ""
+    },
+    {
+      "state": "awaiting-merge",
+      "laneId": "lane-2",
+      "branch": "swarm-lane/session-def/lane-2",
+      "worktreePath": "<project-root>/.swarm-worktrees/session-def/lane-2",
+      "taskId": "1.2",
+      "planTaskId": "1.2.1",
+      "parentSessionID": "session-def",
+      "mergeStrategy": "merge",
+      "recoveryHint": "Merge-back in progress; check `/swarm status` for the latest."
+    },
+    {
+      "state": "conflicted",
+      "laneId": "lane-3",
+      "branch": "swarm-lane/session-ghi/lane-3",
+      "worktreePath": "<project-root>/.swarm-worktrees/session-ghi/lane-3",
+      "taskId": "1.3",
+      "parentSessionID": "",
+      "mergeStrategy": "merge",
+      "mergeOutcome": {
+        "outcome": "partial",
+        "stage": "commit",
+        "message": "merge-back committed with conflicts"
+      },
+      "recoveryHint": "Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge."
+    }
+  ],
+  "totalCount": 3
+}
+```
+
+**Lane lifecycle:**
+
+| State | Meaning |
+|-------|---------|
+| Active | Lane is currently running with an active session |
+| Awaiting merge | Lane work is complete but the branch has not yet been merged back into the main branch |
+| Conflicted | Merge-back was attempted but encountered conflicts; the worktree and branch are preserved for recovery |
+
+#### Runtime profile state
+
+When `runtime_isolation` is enabled (FR-201), each active lane has a **lane runtime profile** — a set of derived environment variables written to `.swarm/lanes/{laneIndex}.env` (KEY=VAL format) in the worktree root. Any child process spawned inside the lane can source this file to get lane-specific overrides. Only selected git spawns consume the file via `readLaneEnvFileFromDiskSync`; callers must explicitly read it and pass the values to spawn calls via `envOverrides`.
+
+The profile contains:
+
+- `PORT` — derived from `port_base + laneIndex * port_stride`
+- `env_overrides` — custom variable overrides from the config
+- `cache_redirects` — redirected cache paths (e.g. `XDG_CACHE_HOME`)
+
+When `runtime_isolation.enabled` is `false` (the default), no profile is written and no environment changes are injected — zero behavior change for existing setups.
+
+The `/swarm diagnose` command reports the detected sandbox mechanism (Linux: `bubblewrap`; macOS: `sandbox-exec`; Windows: `native-runner/{mode}` with `powershell wrapper` fallback) and whether sandboxing is actually active or silently degraded to env+port only.
+
+See [Runtime Isolation](modes.md#runtime-isolation-fr-201--fr-206) for the full description, cross-platform parity notes, and configuration examples.
+
+See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery steps when lanes are stuck in conflicted state.
 
 ---
 

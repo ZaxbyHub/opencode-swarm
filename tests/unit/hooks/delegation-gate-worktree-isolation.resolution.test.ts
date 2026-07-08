@@ -12,7 +12,24 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	_internals as isolationInternals,
+	precreateStandardWorktreeSession,
+	resetStandardWorktreeIsolationState,
+	standardWorktreeByCallID,
+} from '../../../src/hooks/delegation-gate/worktree-isolation';
+import { resolveScopeWithFallbacks } from '../../../src/scope/scope-persistence';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
+import {
+	attemptMergeBackFromDirty,
+	postMergeCleanup,
+	provisionWorktree,
+	removeWorktree,
+} from '../../../src/worktree';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -112,6 +129,11 @@ describe('delegation-gate: worktree isolation', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		// Restore isolation _internals to real implementations (AGENTS.md invariant 7)
+		isolationInternals.provisionWorktree = provisionWorktree;
+		isolationInternals.removeWorktree = removeWorktree;
+		isolationInternals.attemptMergeBackFromDirty = attemptMergeBackFromDirty;
+		isolationInternals.postMergeCleanup = postMergeCleanup;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -223,5 +245,296 @@ describe('delegation-gate: worktree isolation', () => {
 		}
 
 		expect(threw).toBe(true);
+	});
+
+	// SC-104: executable test for pendingAdvisoryMessages emission on skip + test/build gates
+	it('SC-104: precreateStandardWorktreeSession with deps_strategy skip and test-containing description emits WORKTREE_DEPS_SKIP advisory', async () => {
+		// Fabricate a client so precreate does not hit the UNAVAILABLE path
+		const createdDirs: string[] = [];
+		swarmState.opencodeClient = {
+			session: {
+				create: async (opts: any) => {
+					createdDirs.push(opts.query.directory);
+					return { data: { id: 'sess-lane-123' } };
+				},
+			},
+		} as any;
+
+		// Stub provisionWorktree to succeed (we only care about the advisory path after it)
+		const origProvision = isolationInternals.provisionWorktree;
+		isolationInternals.provisionWorktree = async () => ({
+			worktreePath: path.join(tempDir, '.swarm-worktrees', 'sess', 't1'),
+			branchName: 'swarm/lane/sess/t1',
+			purpose: 'lane',
+			id: 't1',
+			sessionId: 'sess',
+		});
+
+		try {
+			const session = ensureAgentSession('sc104-session');
+			session.pendingAdvisoryMessages = [];
+
+			await precreateStandardWorktreeSession({
+				config: {
+					worktree: {
+						policy: 'auto',
+						merge_strategy: 'merge',
+						deps_strategy: 'skip',
+					},
+				} as any,
+				directory: tempDir,
+				parentSessionID: 'sc104-session',
+				callID: 'call-sc104',
+				taskId: 'task-sc104',
+				description: 'run tests and build the feature',
+				outputArgs: {},
+			});
+
+			expect(session.pendingAdvisoryMessages).toBeDefined();
+			expect(session.pendingAdvisoryMessages!.length).toBeGreaterThan(0);
+			const advisory = session.pendingAdvisoryMessages!.find((m) =>
+				m.includes('WORKTREE_DEPS_SKIP'),
+			);
+			expect(advisory).toBeDefined();
+			expect(advisory).toContain('task-sc104');
+			expect(advisory).toContain("deps_strategy: 'skip'");
+		} finally {
+			isolationInternals.provisionWorktree = origProvision;
+			swarmState.opencodeClient = undefined;
+		}
+	});
+
+	// SC-104 negative: skip + non-test/build/lint/check task → NO advisory
+	it('SC-104: precreateStandardWorktreeSession with deps_strategy skip and NON-test-build description does NOT emit WORKTREE_DEPS_SKIP advisory', async () => {
+		const createdDirs: string[] = [];
+		swarmState.opencodeClient = {
+			session: {
+				create: async (opts: any) => {
+					createdDirs.push(opts.query.directory);
+					return { data: { id: 'sess-lane-456' } };
+				},
+			},
+		} as any;
+
+		const origProvision = isolationInternals.provisionWorktree;
+		isolationInternals.provisionWorktree = async () => ({
+			worktreePath: path.join(tempDir, '.swarm-worktrees', 'sess', 't2'),
+			branchName: 'swarm/lane/sess/t2',
+			purpose: 'lane',
+			id: 't2',
+			sessionId: 'sess',
+		});
+
+		try {
+			const session = ensureAgentSession('sc104-neg-session');
+			session.pendingAdvisoryMessages = [];
+
+			await precreateStandardWorktreeSession({
+				config: {
+					worktree: {
+						policy: 'auto',
+						merge_strategy: 'merge',
+						deps_strategy: 'skip',
+					},
+				} as any,
+				directory: tempDir,
+				parentSessionID: 'sc104-neg-session',
+				callID: 'call-sc104-neg',
+				taskId: 'task-sc104-neg',
+				// Description has NO test/build/lint/check keywords
+				description: 'refactor the authentication module',
+				outputArgs: {},
+			});
+
+			// Verify: pendingAdvisoryMessages must NOT contain a WORKTREE_DEPS_SKIP advisory
+			expect(session.pendingAdvisoryMessages).toBeDefined();
+			const depsSkipAdvisory = session.pendingAdvisoryMessages!.find((m) =>
+				m.includes('WORKTREE_DEPS_SKIP'),
+			);
+			expect(depsSkipAdvisory).toBeUndefined();
+		} finally {
+			isolationInternals.provisionWorktree = origProvision;
+			swarmState.opencodeClient = undefined;
+		}
+	});
+
+	// SC-105 regression: precreateStandardWorktreeSession must forward scope to provisionWorktree
+	it('SC-105: precreateStandardWorktreeSession forwards scope to _internals.provisionWorktree', async () => {
+		const captured: any[] = [];
+		const origProvision = isolationInternals.provisionWorktree;
+		isolationInternals.provisionWorktree = async (...args: any[]) => {
+			captured.push(args);
+			return {
+				worktreePath: path.join(
+					tempDir,
+					'.swarm-worktrees',
+					'sess',
+					'scopefwd',
+				),
+				branchName: 'swarm/lane/sess/scopefwd',
+				purpose: 'lane' as const,
+				id: 'scopefwd',
+				sessionId: 'sess',
+			};
+		};
+
+		swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'sess-scopefwd' } }),
+			},
+		} as any;
+
+		try {
+			const testScope = { taskId: 'X', files: ['src/a.ts', 'tests/a.test.ts'] };
+			await precreateStandardWorktreeSession({
+				config: { worktree: { policy: 'auto' } } as any,
+				directory: tempDir,
+				parentSessionID: 'scopefwd-session',
+				callID: 'call-scopefwd',
+				taskId: 'task-scopefwd',
+				outputArgs: {},
+				scope: testScope,
+			});
+
+			expect(captured.length).toBe(1);
+			const optionsArg = captured[0][3];
+			expect(optionsArg).toBeDefined();
+			expect(optionsArg.scope).toEqual(testScope);
+		} finally {
+			isolationInternals.provisionWorktree = origProvision;
+			swarmState.opencodeClient = undefined;
+		}
+	});
+
+	// SC-105/SC-106 end-to-end: real provision path materializes scope and resolveScopeWithFallbacks recovers it
+	it('SC-105/SC-106: precreateStandardWorktreeSession with real provisionWorktree materializes scope file; resolveScopeWithFallbacks recovers from lane disk', async () => {
+		// This test requires a real git repo because provisionWorktree does git worktree add
+		const gitDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'delegation-gate-scope-e2e-'),
+		);
+		const realGitDir = fs.realpathSync(gitDir);
+		try {
+			// Init minimal git repo (required for worktree add)
+			const { spawnSync } = require('node:child_process');
+			spawnSync('git', ['init', '-q'], { cwd: realGitDir, stdio: 'pipe' });
+			spawnSync('git', ['config', 'user.email', 'test@test.com'], {
+				cwd: realGitDir,
+				stdio: 'pipe',
+			});
+			spawnSync('git', ['config', 'user.name', 'Test'], {
+				cwd: realGitDir,
+				stdio: 'pipe',
+			});
+			spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'initial'], {
+				cwd: realGitDir,
+				stdio: 'pipe',
+			});
+			fs.mkdirSync(path.join(realGitDir, '.swarm'), { recursive: true });
+
+			// Ensure .swarm/ is gitignored (as in real repos)
+			const giPath = path.join(realGitDir, '.gitignore');
+			fs.writeFileSync(giPath, '.swarm/\n');
+			spawnSync('git', ['add', '.gitignore'], {
+				cwd: realGitDir,
+				stdio: 'pipe',
+			});
+			spawnSync('git', ['commit', '-q', '-m', 'gitignore'], {
+				cwd: realGitDir,
+				stdio: 'pipe',
+			});
+
+			// Fabricate client so precreate proceeds past the client check
+			swarmState.opencodeClient = {
+				session: {
+					create: async (opts: any) => {
+						return { data: { id: 'sess-e2e-scope' } };
+					},
+				},
+			} as any;
+
+			const testScope = {
+				taskId: 'e2e-1.2',
+				files: ['src/feature.ts', 'tests/feature.test.ts'],
+			};
+
+			// Capture the real provision call to verify scope was passed
+			const origProvision = isolationInternals.provisionWorktree;
+			let capturedOptions: any = null;
+			isolationInternals.provisionWorktree = async (
+				dir: string,
+				id: string,
+				sess: string,
+				opts: any,
+			) => {
+				capturedOptions = opts;
+				// Call the REAL implementation (seam-respecting)
+				return origProvision(dir, id, sess, opts);
+			};
+
+			try {
+				await precreateStandardWorktreeSession({
+					config: { worktree: { policy: 'auto' } } as any,
+					directory: realGitDir,
+					parentSessionID: 'e2e-scope-session',
+					callID: 'call-e2e-scope',
+					taskId: 'e2e-1.2',
+					outputArgs: {},
+					scope: testScope,
+				});
+
+				// 1. Verify the handoff passed scope through
+				expect(capturedOptions).toBeDefined();
+				expect(capturedOptions.scope).toEqual(testScope);
+
+				// 2. Find the lane that was created (standardWorktreeByCallID tracks it)
+				const dispatch = standardWorktreeByCallID.get('call-e2e-scope');
+				expect(dispatch).toBeDefined();
+				const lanePath = dispatch!.handle.worktreePath;
+
+				// 3. SC-106: simulate restart (null in-memory + pending map) and recover from disk
+				const recovered = resolveScopeWithFallbacks({
+					directory: lanePath,
+					taskId: 'e2e-1.2',
+					inMemoryScope: null,
+					pendingMapScope: null,
+				});
+				expect(recovered).toEqual(testScope.files);
+
+				// 4. Also assert the file physically exists under the lane
+				const scopeFile = path.join(
+					lanePath,
+					'.swarm',
+					'scopes',
+					'scope-e2e-1.2.json',
+				);
+				expect(fs.existsSync(scopeFile)).toBe(true);
+			} finally {
+				isolationInternals.provisionWorktree = origProvision;
+				swarmState.opencodeClient = undefined;
+				// Best-effort cleanup of any created worktree
+				try {
+					const dispatch = standardWorktreeByCallID.get('call-e2e-scope');
+					if (dispatch?.handle?.worktreePath) {
+						spawnSync(
+							'git',
+							['worktree', 'remove', '--force', dispatch.handle.worktreePath],
+							{
+								cwd: realGitDir,
+								stdio: 'pipe',
+							},
+						);
+					}
+				} catch {
+					/* ignore */
+				}
+				resetStandardWorktreeIsolationState();
+			}
+		} finally {
+			try {
+				fs.rmSync(realGitDir, { recursive: true, force: true });
+			} catch {
+				/* best-effort */
+			}
+		}
 	});
 });

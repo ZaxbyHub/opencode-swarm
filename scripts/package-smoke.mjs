@@ -25,6 +25,7 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'deep-dive',
 	'deep-research',
 	'codebase-review-swarm',
+	'swarm-implement',
 	'design-docs',
 	'swarm-pr-review',
 	'swarm-pr-feedback',

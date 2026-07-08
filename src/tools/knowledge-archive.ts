@@ -7,8 +7,12 @@
  * and previous status.
  *
  * Modes:
- *  - 'archive'    (default): set status='archived' — TTL-exempt, hidden from recall.
- *  - 'quarantine':           set status='quarantined' — suspected-bad, hidden from recall.
+ *  - 'archive'    (default): set status='archived' — hidden from recall, records
+ *                            `archived_from` so it can be unarchived (G6 #1716).
+ *  - 'quarantine':           route through `quarantineEntry` (G5 #1716) — moves
+ *                            the entry to `knowledge-quarantined.jsonl`, records
+ *                            `original_status`, restorable via `/swarm knowledge restore`.
+ *                            Swarm-only; hive+quarantine returns a clear error.
  *  - 'purge':                hard-delete the JSONL line. Requires allow_purge:true.
  *
  * Tiers:
@@ -18,11 +22,13 @@
 
 import { z } from 'zod';
 import {
+	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import { quarantineEntry } from '../hooks/knowledge-validator.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
@@ -97,6 +103,67 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
+			// G5 (#1716): route `mode:'quarantine'` through the canonical
+			// `quarantineEntry`, which (unlike the legacy in-place flip) moves the
+			// entry to `knowledge-quarantined.jsonl`, records `original_status` +
+			// `quarantine_reason` + `quarantined_at`, and is restorable via
+			// `restoreEntry`. The legacy in-place flip produced an unrestorable
+			// orphan that was invisible to `restoreEntry`.
+			//
+			// `quarantineEntry` is swarm-only (it reads `resolveSwarmKnowledgePath`).
+			// Hive-tier quarantine via this tool is rejected with a clear error — the
+			// old behavior silently flipped status in place and was already broken
+			// (unrestorable). Users who need hive-tier quarantine should use the
+			// `/swarm knowledge quarantine` command (also swarm-only today) or wait
+			// for hive-quarantine to be added as a separate feature.
+			if (mode === 'quarantine') {
+				if (tier === 'hive') {
+					return JSON.stringify({
+						success: false,
+						error:
+							"quarantine via the archive tool is swarm-only; use tier:'swarm' or the /swarm knowledge quarantine command",
+					});
+				}
+				try {
+					// PRR-003: verify the entry exists before calling quarantineEntry.
+					// quarantineEntry silently returns void on not-found (it only
+					// warns), so without this check the tool would report
+					// `success:true` for a missing id — diverging from the archive
+					// mode which returns `{success:false, message:'entry not found'}`.
+					const swarmEntries = await readKnowledge<KnowledgeEntryBase>(
+						resolveSwarmKnowledgePath(directory),
+					);
+					if (!swarmEntries.some((e) => e.id === id)) {
+						return JSON.stringify({
+							success: false,
+							message: 'entry not found',
+						});
+					}
+					const reportedBy: 'architect' | 'user' | 'auto' =
+						ctx?.agent === 'architect' ? 'architect' : 'user';
+					await quarantineEntry(directory, id, reason, reportedBy);
+				} catch (err) {
+					return JSON.stringify({
+						success: false,
+						error:
+							err instanceof Error
+								? err.message
+								: 'Unknown error during quarantine',
+					});
+				}
+				// Short-circuit BEFORE the events tombstone + queueMicrotask below:
+				// those side-effects are archive/purge-only. `quarantineEntry`
+				// already wrote its own audit trail (rejected-file tombstone), and
+				// skill-retirement is irreversible (wrong for a reversible quarantine).
+				return JSON.stringify({
+					success: true,
+					id,
+					tier,
+					mode,
+					status: 'quarantined',
+				});
+			}
+
 			const knowledgePath =
 				tier === 'hive'
 					? resolveHiveKnowledgePath()
@@ -128,11 +195,29 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 							return entries.filter((e) => e.id !== id);
 						}
 
-						const newStatus =
-							mode === 'quarantine' ? 'quarantined' : 'archived';
-						resultStatus = newStatus;
+						// PRR-015 / G6 (#1716): guard against re-archiving an already-
+						// archived entry. A duplicate/late archive call would otherwise
+						// record `archived_from: 'archived'` (self-referential), breaking
+						// unarchive's status recovery. Preserve the existing archived_from
+						// and skip the rewrite. Matches curator path (curator.ts:1692-1699).
+						if (target.status === 'archived') {
+							resultStatus = 'archived';
+							return entries;
+						}
+						// G6 (#1716): record `archived_from` so `unarchiveEntry` can
+						// restore the prior status. Only the `archive` mode reaches here
+						// (quarantine was short-circuited above; purge returns early).
+						resultStatus = 'archived';
 						return entries.map((e) =>
-							e.id === id ? { ...e, status: newStatus, updated_at: now } : e,
+							e.id === id
+								? {
+										...e,
+										status: 'archived' as const,
+										archived_from: target.status,
+										archived_at: now,
+										updated_at: now,
+									}
+								: e,
 						);
 					},
 				);

@@ -709,8 +709,8 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 		test('memory-migrate (dash) is blocked', async () => {
 			await expectBlocked('bunx opencode-swarm run memory-migrate');
 		});
-		test('sdd-project (dash) is blocked', async () => {
-			await expectBlocked('bunx opencode-swarm run sdd-project');
+		test('sdd-project (dash) is allowed — canonical target is now agent-invocable (FR-004)', async () => {
+			await expectAllowed('bunx opencode-swarm run sdd-project');
 		});
 		// `pr subscribe` / `pr unsubscribe` moved to agent toolPolicy
 		// (first-class swarm-pr-subscribe), so their dash aliases no longer
@@ -724,10 +724,12 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 		test('clear (alias of restricted reset-session) is blocked', async () => {
 			await expectBlocked('bunx opencode-swarm run clear');
 		});
-		test('agent-policy dash aliases stay allowed (pr-status, memory-status, sdd-status)', async () => {
+		test('agent-policy dash aliases stay allowed (pr-status, memory-status, sdd-status, sdd-project)', async () => {
 			await expectAllowed('bunx opencode-swarm run pr-status');
 			await expectAllowed('bunx opencode-swarm run memory-status');
 			await expectAllowed('bunx opencode-swarm run sdd-status');
+			// FR-004: sdd-project now allowed (canonical target sdd project is agent-invocable)
+			await expectAllowed('bunx opencode-swarm run sdd-project');
 		});
 	});
 });

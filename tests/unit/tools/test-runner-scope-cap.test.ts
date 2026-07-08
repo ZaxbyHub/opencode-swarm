@@ -86,7 +86,14 @@ describe('two-layer pre-resolution guard', () => {
 	let execute: ReturnType<typeof getExecute>;
 
 	beforeEach(async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-cap-'));
+		// Wrap mkdtempSync in realpathSync so the canonical path matches what
+		// production code compares against. On macOS, os.tmpdir() returns
+		// /var/folders/... (symlinked to /private/var/folders/...); without
+		// realpath, the result (which is process.chdir'd below) would mismatch
+		// the .swarm containment guards. Issue #1729 macOS quarantine.
+		tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-cap-')),
+		);
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 		execute = getExecute();

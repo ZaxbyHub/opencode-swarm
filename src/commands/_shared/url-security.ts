@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import * as child_process from 'node:child_process';
+import { mergeEnvForChild } from '../../utils/bun-compat';
 
 export const MAX_URL_LEN = 2048;
 const IPV4_PRIVATE = /^10\./;
@@ -14,8 +15,32 @@ export type ValidationResult = { sanitized: string } | { error: string };
 
 /**
  * File-scoped indirection seam for git remote lookups.
+ * Supports envOverrides so lane runtime profiles can inject env.
  */
-export const _internals = { spawnSync };
+export const _internals = {
+	spawnSync: (
+		cmd: string,
+		args: string[],
+		options?: {
+			cwd?: string;
+			encoding?: BufferEncoding;
+			timeout?: number;
+			env?: Record<string, string | undefined>;
+			envOverrides?: Record<string, string | null>;
+			stdio?:
+				| 'pipe'
+				| 'ignore'
+				| 'inherit'
+				| Array<'pipe' | 'ignore' | 'inherit'>;
+		},
+	) => {
+		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
+		return child_process.spawnSync(cmd, args, {
+			...options,
+			env: mergedEnv as NodeJS.ProcessEnv | undefined,
+		});
+	},
+};
 
 /**
  * Strip query strings, fragments, injected MODE headers, and credentials from
@@ -204,8 +229,13 @@ export function validateAndSanitizeGithubUrl(
 
 /**
  * Detect the `origin` remote URL from git config.
+ * @param cwd - Optional working directory
+ * @param laneEnv - Optional lane env overrides for git spawn
  */
-export function detectGitRemote(cwd?: string): string | null {
+export function detectGitRemote(
+	cwd?: string,
+	laneEnv?: Record<string, string>,
+): string | null {
 	try {
 		const result = _internals.spawnSync(
 			'git',
@@ -215,6 +245,7 @@ export function detectGitRemote(cwd?: string): string | null {
 				stdio: ['ignore', 'pipe', 'pipe'],
 				timeout: 5000,
 				...(cwd ? { cwd } : {}),
+				envOverrides: laneEnv,
 			},
 		);
 
@@ -222,7 +253,7 @@ export function detectGitRemote(cwd?: string): string | null {
 			return null;
 		}
 
-		const remoteUrl = (result.stdout ?? '').trim();
+		const remoteUrl = ((result.stdout as string) ?? '').trim();
 
 		return remoteUrl || null;
 	} catch {

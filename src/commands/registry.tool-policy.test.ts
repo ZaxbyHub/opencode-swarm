@@ -50,6 +50,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'sdd',
 		'sdd status',
 		'sdd validate',
+		// FR-004: sdd project moved from human-only to agent (overwrite gated)
+		'sdd project',
 		'sync-plan',
 		'export',
 		'auto-proceed',
@@ -72,7 +74,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory compact',
 		'memory import',
 		'memory migrate',
-		'sdd project',
+		// FR-004: sdd project moved to agent
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([
@@ -133,14 +135,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 4 commands", () => {
+	test("'human-only' bucket contains exactly the expected 3 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(4);
+		expect(actual.size).toBe(3);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -513,15 +515,11 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 		// These are human-only but NOT restricted — they are in SWARM_COMMAND_TOOL_ALLOWLIST
 		// so classifySwarmCommandToolUse falls through to them via the SWARM_COMMAND_TOOL_ALLOWLIST check
 		// and they are NOT in the allowlist but ARE in HUMAN_ONLY_SWARM_COMMANDS
-		// Actually: human-only commands (memory compact, memory import, memory migrate, sdd project)
+		// Actually: human-only commands (memory compact, memory import, memory migrate)
 		// are in SWARM_COMMAND_TOOL_COMMANDS but NOT in SWARM_COMMAND_TOOL_ALLOWLIST
 		// They should return allowed: false with the human-only message.
-		const humanOnly = [
-			'memory compact',
-			'memory import',
-			'memory migrate',
-			'sdd project',
-		];
+		// FR-004: sdd project is now agent-invocable (removed from this list)
+		const humanOnly = ['memory compact', 'memory import', 'memory migrate'];
 		for (const name of humanOnly) {
 			const tokens = name.includes(' ') ? name.split(' ') : [name];
 			const resolved = _internals.resolveCommand(tokens);

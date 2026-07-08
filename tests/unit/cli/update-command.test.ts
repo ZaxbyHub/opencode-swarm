@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -51,7 +51,11 @@ describe('CLI update command', () => {
 	let xdgCacheNodeModulesPluginPath: string;
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-update-'));
+		// Wrap mkdtemp in realpath for canonical path on macOS
+		// (/var → /private/var symlink). Issue #1729.
+		tempDir = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-swarm-update-')),
+		);
 		xdgCacheHome = join(tempDir, 'cache');
 		xdgConfigHome = join(tempDir, 'config');
 		xdgCachePluginPath = join(
@@ -291,7 +295,9 @@ describe('evictLockFiles', () => {
 	const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-lock-'));
+		tempDir = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-swarm-lock-')),
+		);
 		xdgCacheHome = join(tempDir, 'cache');
 		xdgConfigHome = join(tempDir, 'config');
 		process.env.XDG_CACHE_HOME = xdgCacheHome;
@@ -451,7 +457,9 @@ describe('isSafeLockFilePath', () => {
 
 	test('accepts <tmpDir>/.cache/opencode/bun.lock when path is deep enough', async () => {
 		// Use a real tmpDir (which is on Linux CI deep enough: /tmp/xxx/.cache/opencode/bun.lock).
-		const tmp = await mkdtemp(join(tmpdir(), 'opencode-lock-safe-'));
+		const tmp = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-lock-safe-')),
+		);
 		try {
 			const lockPath = join(tmp, '.cache', 'opencode', 'bun.lock');
 			expect(isSafeLockFilePath(lockPath)).toBe(true);

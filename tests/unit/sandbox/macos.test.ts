@@ -50,30 +50,40 @@ describe('MacOSSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
 
 	describe('constructor', () => {
-		test('accepts scopePaths array when implemented (Phase 3)', () => {
-			// The placeholder throws on construction.
-			// Once implemented, constructor should accept scopePaths.
-			// const executor = new MacOSSandboxExecutor(['/Users/user/scope']);
-			// expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		// MacOSSandboxExecutor is implemented (issue #1729 macOS quarantine:
+		// the previous "throws on construction" placeholders were stale). On
+		// non-darwin the constructor throws 'MacOSSandboxExecutor not yet
+		// implemented'; on darwin it constructs and self-disables when
+		// sandbox-exec is unavailable. The tests below exercise the new
+		// contract on each platform.
+
+		test.skipIf(!isMac)('accepts scopePaths array on darwin', () => {
+			const executor = new MacOSSandboxExecutor(['/Users/user/scope']);
+			expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
+			expect(executor.mechanism).toBe('sandbox-exec');
 		});
 
-		test('accepts scopePaths and tempDir when implemented (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor(
-			//   ['/Users/user/scope'],
-			//   '/tmp/custom-tmp',
-			// );
-			// expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		test.skipIf(!isMac)('accepts scopePaths and tempDir on darwin', () => {
+			const executor = new MacOSSandboxExecutor(
+				['/Users/user/scope'],
+				'/tmp/custom-tmp',
+			);
+			expect(executor).toBeInstanceOf(MacOSSandboxExecutor);
 		});
 
-		test('mechanism property is SandboxExec when implemented (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.mechanism).toBe('SandboxExec');
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 3 implements
+		test.skipIf(!isMac)('mechanism property is sandbox-exec on darwin', () => {
+			const executor = new MacOSSandboxExecutor([]);
+			expect(executor.mechanism).toBe('sandbox-exec');
 		});
+
+		test.skipIf(isMac)(
+			'throws MacOSSandboxExecutor not yet implemented on non-darwin',
+			() => {
+				expect(() => new MacOSSandboxExecutor([])).toThrow(
+					'MacOSSandboxExecutor not yet implemented',
+				);
+			},
+		);
 	});
 
 	// -----------------------------------------------------------------------
@@ -170,7 +180,111 @@ describe('MacOSSandboxExecutor', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// 4. getEnvOverrides()
+	// 4. wrapCommand() envOverrides (macOS only — Phase 3)
+	// -----------------------------------------------------------------------
+
+	describe('wrapCommand() envOverrides (macOS only)', () => {
+		test.skipIf(!isMac)(
+			'omitted envOverrides produces no setenv/unenv SBPL primitives',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand(
+					'echo hello',
+					[],
+					undefined,
+					undefined,
+				);
+				expect(result).not.toContain('(setenv');
+				expect(result).not.toContain('(unsetenv');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'empty envOverrides {} produces no setenv/unsetenv SBPL primitives',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand('echo hello', [], undefined, {});
+				expect(result).not.toContain('(setenv');
+				expect(result).not.toContain('(unsetenv');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'string value produces sandbox-exec wrapped command (profile contains env)',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand('echo hello', [], undefined, {
+					MY_VAR: 'my_value',
+				});
+				// The result should be a sandbox-exec -f <profile> bash -c '...' command
+				expect(result).toContain('sandbox-exec');
+				expect(result).toContain('-f');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'null value produces sandbox-exec wrapped command with unsetenv in profile',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand('echo hello', [], undefined, {
+					MY_VAR: null,
+				});
+				expect(result).toContain('sandbox-exec');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'multiple env overrides are all present in profile',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand('echo hello', [], undefined, {
+					VAR_A: 'value_a',
+					VAR_B: null,
+				});
+				expect(result).toContain('sandbox-exec');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'value with double quotes has backslash-escaped quotes in SBPL string',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				const result = executor.wrapCommand('echo hello', [], undefined, {
+					FOO: 'a"b',
+				});
+				// Double quote in value should be escaped as \" in SBPL double-quoted string
+				expect(result).toContain('\\"');
+				// Should NOT contain the raw unescaped double quote in the profile section
+				// The SBPL string "(setenv FOO \"a\"b\")" would break syntax
+				expect(result).not.toContain('(setenv FOO "a"b")');
+			},
+		);
+
+		test.skipIf(!isMac)(
+			'invalid env var key is rejected silently (no setenv/unsetenv emitted)',
+			() => {
+				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+				if (!executor.isAvailable()) return;
+				// Key with parens is invalid per POSIX: [a-zA-Z_][a-zA-Z0-9_]*
+				const result = executor.wrapCommand('echo hello', [], undefined, {
+					'FOO(BAR)': 'value',
+				});
+				// Invalid key must not appear in SBPL primitives
+				expect(result).not.toContain('FOO(BAR)');
+				expect(result).not.toContain('(setenv');
+				expect(result).not.toContain('(unsetenv');
+			},
+		);
+	});
+
+	// -----------------------------------------------------------------------
+	// 5. getEnvOverrides()
 	// -----------------------------------------------------------------------
 
 	describe('getEnvOverrides()', () => {

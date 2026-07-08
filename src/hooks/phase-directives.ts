@@ -22,6 +22,7 @@ import {
 	resolveSwarmKnowledgePath,
 } from './knowledge-store.js';
 import type { KnowledgeEntryBase } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 
 /** Collect the directive IDs surfaced by `retrieved` events in the phase window. */
 export async function collectPhaseDirectiveIds(
@@ -73,7 +74,10 @@ export async function readPhaseDirectivesToVerify(
 		for (const id of ids) {
 			const e = entries.get(id);
 			if (!e) continue;
-			if (e.status === 'archived' || e.status === 'quarantined') continue;
+			// G4 (#1716): use the canonical helper so the inactive set has a single
+			// source of truth — also excludes `quarantined_unactionable` (failed
+			// the actionability gate; should not be re-injected as a directive).
+			if (!isActiveStatus(e.status)) continue;
 			out.push({
 				id,
 				priority: e.directive_priority ?? 'medium',

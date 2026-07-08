@@ -32,8 +32,16 @@ import {
 	DEFAULT_AGENT_AUTHORITY_RULES,
 } from '../../../src/hooks/guardrails';
 
-// Test cwd - use a project-like structure
-const TEST_CWD = path.join(os.tmpdir(), 'architect-config-zone-test');
+// Test cwd - use a project-like structure.
+// realpathSync(os.tmpdir()) resolves the macOS /var → /private/var symlink
+// (and Windows 8.3 short names) so the canonical base dir matches what
+// production code compares against; the logical 'architect-config-zone-test'
+// subdir is never created on disk, so we realpathSync the tmp base and join
+// afterwards. Issue #1729 macOS quarantine.
+const TEST_CWD = path.join(
+	fsSync.realpathSync(os.tmpdir()),
+	'architect-config-zone-test',
+);
 
 function isDenied(
 	result: ReturnType<typeof checkFileAuthority>,
@@ -152,7 +160,10 @@ describe('architect config zone protection — adversarial (#894)', () => {
 		let linkPath: string;
 
 		beforeEach(async () => {
-			tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'symlink-test-'));
+			// realpath resolves the macOS /var → /private/var symlink (issue #1729).
+			tempDir = await fs.realpath(
+				await fs.mkdtemp(path.join(os.tmpdir(), 'symlink-test-')),
+			);
 			realConfigDir = path.join(tempDir, 'config');
 			await fs.mkdir(realConfigDir, { recursive: true });
 			await fs.writeFile(path.join(realConfigDir, 'biome.json'), '{}', 'utf-8');

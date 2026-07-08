@@ -86,16 +86,6 @@ export const MIRRORED_ARCHITECT_MODE_SKILLS = [
 		'.claude/skills/critic-gate/SKILL.md',
 	],
 	[
-		'execute',
-		'.opencode/skills/execute/SKILL.md',
-		'.claude/skills/execute/SKILL.md',
-	],
-	[
-		'phase-wrap',
-		'.opencode/skills/phase-wrap/SKILL.md',
-		'.claude/skills/phase-wrap/SKILL.md',
-	],
-	[
 		'design-docs',
 		'.opencode/skills/design-docs/SKILL.md',
 		'.claude/skills/design-docs/SKILL.md',
@@ -140,6 +130,18 @@ export const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
 	adapterPaths: string[];
 	expectedCanonicalRef: string;
 }> = [
+	{
+		slug: 'execute',
+		canonicalPath: '.opencode/skills/execute/SKILL.md',
+		adapterPaths: ['.claude/skills/execute/SKILL.md'],
+		expectedCanonicalRef: '../../../.opencode/skills/execute/SKILL.md',
+	},
+	{
+		slug: 'phase-wrap',
+		canonicalPath: '.opencode/skills/phase-wrap/SKILL.md',
+		adapterPaths: ['.claude/skills/phase-wrap/SKILL.md'],
+		expectedCanonicalRef: '../../../.opencode/skills/phase-wrap/SKILL.md',
+	},
 	{
 		slug: 'swarm-pr-review',
 		canonicalPath: '.opencode/skills/swarm-pr-review/SKILL.md',
@@ -224,10 +226,16 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source.',
 	},
 	{
+		slug: 'swarm-implement',
+		kind: 'divergent',
+		reason:
+			'.opencode is the canonical implementation workflow; .claude and .agents are thin adapters that delegate to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
+	},
+	{
 		slug: 'writing-tests',
 		kind: 'divergent',
 		reason:
-			'PENDING MAINTAINER CONFIRMATION (#1497): shared intro but the .opencode variant is substantially longer. Classified divergent (non-failing) until the intended contract is confirmed; promote to `identical` if they should match.',
+			'.opencode is the canonical published test-authoring protocol; .claude is a thin adapter that delegates to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
 	},
 	{
 		slug: 'running-tests',

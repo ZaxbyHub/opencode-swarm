@@ -33,6 +33,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils';
+import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { pendingCoderScopeByTaskId } from '../delegation-gate.js';
 import { detectLoop } from '../loop-detector';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -87,6 +88,11 @@ export interface ToolBeforeContext {
 	authorityConfig: AuthorityConfig | undefined;
 	/** Shared consecutiveNoToolTurns Map (also used by messagesTransform) */
 	consecutiveNoToolTurns: Map<string, number>;
+	/**
+	 * Configured swarm worktree-dir override(s), if any. Treated as additional
+	 * trusted roots when exempting `git worktree remove --force` (issue #1708).
+	 */
+	worktreeBaseDirOverrides?: string[];
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -119,6 +125,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		interpreterAllowedAgents,
 		authorityConfig,
 		consecutiveNoToolTurns,
+		worktreeBaseDirOverrides,
 	} = ctx;
 
 	/**
@@ -453,10 +460,68 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					`BLOCKED: "git clean -fd" detected — permanently deletes untracked files and directories`,
 				);
 			}
-			if (/^git\s+worktree\s+remove\s+.*--force\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "git worktree remove --force" detected — can delete working tree contents`,
+			// git worktree remove --force: scope-exempt when the target resolves inside
+			// the swarm-managed worktree base directory or a coder's declared scope.
+			// Mirrors the rsync --delete scopeExempt pattern below. Unlike rsync, this
+			// call path often runs with no declared coder scope (orchestrator/cleanup),
+			// so the swarm worktree base directory is also a trusted root — see
+			// isPathUnderSwarmWorktreeBase in src/worktree/core.ts.
+			const worktreeRemoveMatch = /^git\s+worktree\s+remove\s+(.+)$/i.exec(seg);
+			if (worktreeRemoveMatch) {
+				const rawArgs = worktreeRemoveMatch[1]
+					.trim()
+					.split(/\s+/)
+					.filter(Boolean);
+				// Strip a single surrounding quote pair from every token BEFORE the
+				// force check. A real shell strips these quotes before git ever sees
+				// the args, so `git worktree remove "--force" <path>` is executed by
+				// git exactly as `--force`. dcNormalizeCommand only collapses *doubled*
+				// quotes, not a single surrounding pair, so `"--force"`/`'--force'`
+				// reach us with quotes attached. Without this normalization the exact
+				// force check below fails and the entire containment guard is skipped —
+				// a bypass. (Mirrors the quote-stripping already done on the path arg.)
+				const normalizedArgs = rawArgs.map((a) =>
+					a.replace(/^["']|["']$/g, ''),
 				);
+				// Recognize the force flag spellings git actually honors, so no
+				// abbreviation slips past the containment check:
+				//   - short form: -f and stacked repeats (-ff, -fff, …) → /^-f+$/
+				//   - long form: any non-empty prefix of --force that is longer than
+				//     the bare "--" end-of-options marker (--f, --fo, --for, --forc,
+				//     --force) → length > 2 && '--force'.startsWith(token)
+				// Case-insensitive to preserve the prior /i regex's behavior (an
+				// uppercase "--FORCE" evasion attempt is still treated as force intent).
+				const isForceToken = (a: string): boolean => {
+					const lower = a.toLowerCase();
+					return (
+						/^-f+$/.test(lower) ||
+						(lower.length > 2 && '--force'.startsWith(lower))
+					);
+				};
+				const hasForce = normalizedArgs.some(isForceToken);
+				if (hasForce) {
+					// Every force spelling (isForceToken) begins with '-', so the
+					// leading-dash filter already excludes them along with any other
+					// flag; positional path args are what remain.
+					const pathArgs = normalizedArgs.filter((a) => !a.startsWith('-'));
+					const target = pathArgs.length === 1 ? pathArgs[0].trim() : null;
+					const scopeExempt =
+						target != null &&
+						target.length > 0 &&
+						((declaredScope != null &&
+							declaredScope.length > 0 &&
+							isInDeclaredScope(target, declaredScope, cwd)) ||
+							isPathUnderSwarmWorktreeBase(
+								target,
+								cwd,
+								worktreeBaseDirOverrides ?? [],
+							));
+					if (!scopeExempt) {
+						throw new Error(
+							`BLOCKED: "git worktree remove --force" detected — can delete working tree contents`,
+						);
+					}
+				}
 			}
 
 			// rsync mirror / sync with delete

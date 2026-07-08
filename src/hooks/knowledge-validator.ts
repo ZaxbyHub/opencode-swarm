@@ -1059,14 +1059,134 @@ export async function restoreEntry(
 }
 
 // ============================================================================
-// DI Seam — _internals
+// Unarchive Entry (G6 #1716) — restore an archived entry to its prior status
 // ============================================================================
+
+export interface UnarchiveResult {
+	restored: boolean;
+	restored_to?: string;
+	reason?: 'not_found' | 'not_archived' | 'invalid_lesson';
+}
+
+/**
+ * G6 (#1716): restore an `archived`-status entry from `knowledge.jsonl` to its
+ * pre-archive status (`archived_from` if recorded, else `'candidate'`). Swarm-only
+ * — matches `quarantineEntry`'s scope. Uses the same lock + atomicWrite pattern
+ * as `restoreEntry`. Also resets G7 demotion counters so a restored entry
+ * (especially one restored to `promoted`) is not demoted almost immediately
+ * under the new demotion window.
+ */
+export async function unarchiveEntry(
+	directory: string,
+	entryId: string,
+): Promise<UnarchiveResult> {
+	// Guard against path traversal
+	if (!directory || directory.includes('..')) {
+		warn(
+			'[knowledge-validator] unarchiveEntry: directory traversal attempt blocked',
+		);
+		return { restored: false, reason: 'not_found' };
+	}
+
+	if (!entryId || entryId.includes('\0') || entryId.includes('\n')) {
+		warn('[knowledge-validator] unarchiveEntry: invalid entryId rejected');
+		return { restored: false, reason: 'not_found' };
+	}
+
+	const storeDir = resolveKnowledgeStoreDir(directory);
+	const knowledgePath = resolveSwarmKnowledgePath(directory);
+	const swarmDir = storeDir;
+
+	await mkdir(swarmDir, { recursive: true });
+
+	let release: (() => Promise<void>) | undefined;
+	try {
+		release = await lockfile.lock(swarmDir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+
+		const entries = await readKnowledge<KnowledgeEntryBase>(knowledgePath);
+		const target = entries.find((e) => e.id === entryId);
+		if (!target) {
+			return { restored: false, reason: 'not_found' };
+		}
+		if (target.status !== 'archived') {
+			return { restored: false, reason: 'not_archived' };
+		}
+
+		// Re-validate before restoring — an archived entry may have been blocked
+		// for safety reasons and must pass content checks before being reactivated.
+		const validation = validateLesson(target.lesson, [], {
+			category: target.category,
+			scope: target.scope,
+			confidence: target.confidence,
+		});
+		if (!validation.valid) {
+			warn(
+				`[knowledge-validator] unarchiveEntry: entry ${entryId} failed re-validation: ${validation.reason}`,
+			);
+			return { restored: false, reason: 'invalid_lesson' };
+		}
+
+		const restoredStatus: KnowledgeEntryBase['status'] =
+			target.archived_from ?? 'candidate';
+
+		// PRR-019: defense-in-depth — re-validate that archived_from is one of
+		// the retrieval-ACTIVE statuses. An archived entry should restore to
+		// candidate/established/promoted; if the store was corrupted to set
+		// archived_from to an inactive status (or garbage), restoring to it
+		// would silently leave the entry inactive. Fall back to 'candidate'.
+		const validRestoreTargets: ReadonlySet<string> = new Set([
+			'candidate',
+			'established',
+			'promoted',
+		]);
+		const finalStatus: KnowledgeEntryBase['status'] = validRestoreTargets.has(
+			restoredStatus,
+		)
+			? restoredStatus
+			: 'candidate';
+
+		// Strip archive metadata, restore status, and reset G7 demotion counters
+		// so a restored-promoted entry gets a fresh window rather than inheriting
+		// stale negativity from before archival.
+		const {
+			archived_from: _af,
+			archived_at: _at,
+			recent_negative_phase_count: _rnpc,
+			last_demotion_phase: _ldp,
+			...rest
+		} = target;
+		const restored: KnowledgeEntryBase = {
+			...rest,
+			status: finalStatus,
+			updated_at: new Date().toISOString(),
+			recent_negative_phase_count: 0,
+			last_demotion_phase: undefined,
+		};
+
+		const next = entries.map((e) => (e.id === entryId ? restored : e));
+		const jsonlContent =
+			next.length > 0
+				? `${next.map((e) => JSON.stringify(e)).join('\n')}\n`
+				: '';
+		await atomicWriteFile(knowledgePath, jsonlContent);
+
+		return { restored: true, restored_to: finalStatus };
+	} finally {
+		if (release) {
+			await release();
+		}
+	}
+}
 
 export const _internals: {
 	validateLesson: typeof validateLesson;
 	auditEntryHealth: typeof auditEntryHealth;
 	quarantineEntry: typeof quarantineEntry;
 	restoreEntry: typeof restoreEntry;
+	unarchiveEntry: typeof unarchiveEntry;
 	extractContextWords: typeof extractContextWords;
 	hasSignificantOverlap: typeof hasSignificantOverlap;
 } = {
@@ -1074,6 +1194,7 @@ export const _internals: {
 	auditEntryHealth,
 	quarantineEntry,
 	restoreEntry,
+	unarchiveEntry,
 	extractContextWords,
 	hasSignificantOverlap,
 };

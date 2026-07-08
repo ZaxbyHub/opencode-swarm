@@ -14,7 +14,7 @@ describe('Soft Spec Gate — integration (v6.15 Task 7.6)', () => {
 
 	describe('Gate completeness (both branches present)', () => {
 		it('SPEC GATE presents exactly two branches: spec absent and spec present', () => {
-			const hasNoSpecBranch = planSection.includes('does NOT exist');
+			const hasNoSpecBranch = planSection.includes('NO effective spec');
 			const hasSpecExistsBranch = planSection.includes('EXISTS');
 			expect(hasNoSpecBranch).toBe(true);
 			expect(hasSpecExistsBranch).toBe(true);

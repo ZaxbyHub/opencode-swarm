@@ -40,6 +40,12 @@ export interface ArchiveInvalidationContext {
 	previousStatus?: string;
 	skipTombstone?: boolean;
 	sourceLabel?: string;
+	/**
+	 * Pre-computed archived-ID set for callers invalidating multiple entries
+	 * in one batch (e.g. curator processing several archive recommendations).
+	 * Skips this call's own `getArchivedKnowledgeIds` scan when provided.
+	 */
+	precomputedArchivedIds?: Set<string>;
 }
 
 export async function writeArchiveTombstoneAndInvalidateSkills(
@@ -65,7 +71,9 @@ export async function writeArchiveTombstoneAndInvalidateSkills(
 		}
 	}
 
-	const allArchivedIds = await getArchivedKnowledgeIds(ctx.directory);
+	const allArchivedIds = ctx.precomputedArchivedIds
+		? new Set(ctx.precomputedArchivedIds)
+		: await getArchivedKnowledgeIds(ctx.directory);
 	allArchivedIds.add(ctx.entryId);
 
 	queueMicrotask(async () => {

@@ -132,6 +132,10 @@ describe('sweepAgedEntries', () => {
 		expect(result2.archived).toBe(1);
 		const entries2 = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
 		expect(entries2[0].status).toBe('archived');
+		// PRR-002: producer-side archived_from assertion — verify the TTL sweep
+		// records the prior status so unarchiveEntry can restore it.
+		expect(entries2[0].archived_from).toBe('candidate');
+		expect(entries2[0].archived_at).toBeTruthy();
 	});
 
 	test('uses defaultMaxPhases when max_phases is not set', async () => {

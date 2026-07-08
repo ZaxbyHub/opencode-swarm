@@ -16,7 +16,12 @@ import {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function mkdtemp(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-reviewer-test-'));
+	// Wrap in realpathSync: macOS symlinks /var → /private/var (issue #1729),
+	// and Windows 8.3 short names can mismatch; realpath canonicalizes the path
+	// so .swarm containment guards / repo-graph boundary checks match production.
+	const dir = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'lean-reviewer-test-')),
+	);
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
 		recursive: true,
 	});

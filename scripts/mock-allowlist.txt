@@ -59,6 +59,7 @@ src/config/schema
 src/config/schema.ts
 src/db/qa-gate-profile
 src/evidence/manager
+src/evidence/task-file
 src/git/branch
 src/git/pr
 src/hooks/curator

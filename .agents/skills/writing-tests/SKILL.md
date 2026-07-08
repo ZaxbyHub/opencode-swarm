@@ -22,3 +22,7 @@ Codex-specific execution notes:
 - Preserve unrelated user changes in the worktree.
 
 Carry forward the source skill's core rules: `bun:test` only, dependency injection or `_internals` over `mock.module` where possible, real module spreading when mocking Node built-ins, `os.tmpdir()` plus `path.join(...)` for temp paths, and per-file isolation for mock-heavy directories.
+
+Regression tests must also be falsifiable: remove or bypass the fix, confirm the
+test fails for the expected reason, restore the fix, and confirm the test passes;
+record the evidence or document why an equivalent mutation was required.

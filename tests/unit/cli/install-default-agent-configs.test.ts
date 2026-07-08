@@ -12,15 +12,19 @@ import { loadPluginConfig } from '../../../src/config/loader';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
-// On Windows, bun.cmd must be used instead of 'bun'
-const BUN_BINARY = process.platform === 'win32' ? 'bun.cmd' : 'bun';
-
+// Use process.execPath (the currently-running bun/node binary) instead of
+// resolving a bare 'bun'/'bun.cmd' from PATH. On the GitHub Windows runner,
+// Bun.spawn(['bun.cmd', ...]) without shell:true fails with ENOENT because
+// the kernel cannot execute a .cmd batch file directly and PATHEXT is not
+// consulted. process.execPath is the absolute path to the real executable
+// (e.g. C:\...\.bun\bin\bun.exe), which spawns correctly on every platform.
+// Matches the portable pattern in tests/unit/cli/update-command.test.ts.
 async function runCLI(
 	args: string[],
 	env: Record<string, string> = {},
 	cwd?: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	const proc = Bun.spawn([BUN_BINARY, 'run', CLI_PATH, ...args], {
+	const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, ...args], {
 		env: { ...process.env, ...env },
 		cwd: cwd,
 		stdout: 'pipe',

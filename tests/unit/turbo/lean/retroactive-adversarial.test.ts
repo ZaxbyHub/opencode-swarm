@@ -499,7 +499,12 @@ describe('ATTACK VECTOR 3 — integrated_diff_required=false skips diff summary'
 		const { _internals } = await import('../../../../src/turbo/lean/reviewer');
 
 		// Create temp dir with phase evidence that HAS a diff summary
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-review-adv-'));
+		// Wrap in realpathSync: macOS symlinks /var → /private/var (issue #1729),
+		// and Windows 8.3 short names can mismatch; realpath canonicalizes the path
+		// so .swarm containment guards / repo-graph boundary checks match production.
+		const dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'lean-review-adv-')),
+		);
 		try {
 			fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
 				recursive: true,
@@ -565,7 +570,9 @@ describe('ATTACK VECTOR 3 — integrated_diff_required=false skips diff summary'
 		// Verify that when config has integrated_diff_required=false,
 		// the reviewer is dispatched with requireDiffSummary=false
 		// This is the documented behavior — verify it's respected
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-review-cfg-'));
+		const dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'lean-review-cfg-')),
+		);
 		try {
 			fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
 				recursive: true,
@@ -684,7 +691,7 @@ describe('ATTACK VECTOR 4 — worktree_isolation coercion from non-boolean value
 		}
 	});
 
-	test('schema: undefined worktree_isolation uses default (false)', () => {
+	test('schema: undefined worktree_isolation uses default (true after FR-107 alignment)', () => {
 		const result = LeanTurboConfigSchema.safeParse({
 			max_parallel_coders: 4,
 			// worktree_isolation not specified
@@ -692,7 +699,7 @@ describe('ATTACK VECTOR 4 — worktree_isolation coercion from non-boolean value
 
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.data.worktree_isolation).toBe(false); // default
+			expect(result.data.worktree_isolation).toBe(true); // FR-107: aligned with general surface policy 'auto'
 		}
 	});
 
@@ -804,7 +811,9 @@ describe('ATTACK VECTOR 5 — max_parallel_coders=0 via type coercion', () => {
 
 describe('ATTACK VECTOR 6 — serialized task set to non-existent task ID', () => {
 	test('verifyLeanTurboTaskCompletion rejects when task ID does not exist in plan', () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-ser-adversary-'));
+		const dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'lean-ser-adversary-')),
+		);
 		try {
 			fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
 
@@ -904,7 +913,9 @@ describe('ATTACK VECTOR 6 — serialized task set to non-existent task ID', () =
 	test('runners serializedTasks with non-existent task ID does not corrupt state', async () => {
 		// This tests the code path where serializedTasks contains non-existent IDs
 		// The runner should not throw when processing such state
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-ser-state-'));
+		const dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'lean-ser-state-')),
+		);
 		try {
 			fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 

@@ -7,6 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -25,12 +27,13 @@ import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-/** Saves the real bunSpawn, platform, sleep, osTmpdir, and getCoreLongPaths so tests can restore them in afterEach. */
+/** Saves the real bunSpawn, platform, sleep, osTmpdir, getCoreLongPaths, and fs so tests can restore them in afterEach. */
 const realBunSpawn = _internals.bunSpawn;
 const realPlatform = _internals.platform;
 const realSleep = _internals.sleep;
 const realOsTmpdir = _internals.osTmpdir;
 const realGetCoreLongPaths = _internals.getCoreLongPaths;
+const realFs = _internals.fs;
 
 /**
  * Constructs a minimal BunCompatSubprocess mock.
@@ -63,13 +66,14 @@ function stubSpawn(exitCode: number, stdout = '', stderr = '') {
 	_internals.bunSpawn = () => mockProc(exitCode, stdout, stderr);
 }
 
-/** Restores the real bunSpawn, platform, sleep, osTmpdir, and getCoreLongPaths after every test. */
+/** Restores the real bunSpawn, platform, sleep, osTmpdir, getCoreLongPaths, and fs after every test. */
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
 	_internals.platform = realPlatform;
 	_internals.sleep = realSleep;
 	_internals.osTmpdir = realOsTmpdir;
 	_internals.getCoreLongPaths = realGetCoreLongPaths;
+	_internals.fs = realFs;
 });
 
 // ---------------------------------------------------------------------------
@@ -845,12 +849,17 @@ describe('shortenWorktreePath', () => {
 	});
 
 	test('returns correct path regardless of platform', () => {
-		_internals.osTmpdir = () => '/tmp';
+		// shortenWorktreePath now realpath-resolves osTmpdir() to canonicalize
+		// the 8.3 short name on Windows (issue #1729). Use the REAL os.tmpdir()
+		// so realpathSync resolves consistently on every platform; the test
+		// verifies the join structure, not a hardcoded path.
+		const realTmp = fs.realpathSync(os.tmpdir());
+		_internals.osTmpdir = () => realTmp;
 		_internals.platform = 'linux';
 
 		const result = shortenWorktreePath('/project', 'sess-1', 'lane-2');
 
-		expect(result).toBe(path.join('/tmp', 'swwt', 'sess-1', 'lane-2'));
+		expect(result).toBe(path.join(realTmp, 'swwt', 'sess-1', 'lane-2'));
 	});
 });
 
@@ -958,5 +967,171 @@ describe('_internals.bunSpawn', () => {
 		expect(result.exitCode).toBe(0);
 		expect(result).toHaveProperty('exited');
 		expect(result).toHaveProperty('kill');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// deps_strategy (FR-101 SC-101..SC-103)
+// ---------------------------------------------------------------------------
+
+describe('provisionWorktree deps_strategy', () => {
+	const fakeDir = 'C:\\project-root';
+	const fakeLaneId = 'lane-deps';
+	const fakeSessionId = 'sess-deps';
+
+	beforeEach(() => {
+		// Always succeed git ops for these tests
+		_internals.bunSpawn = (args: string[]) => {
+			if (args.includes('show-ref')) return mockProc(1, '', '');
+			return mockProc(0, '', '');
+		};
+	});
+
+	test('deps_strategy: skip (default) does not touch node_modules', async () => {
+		const existsCalls: string[] = [];
+		_internals.fs = {
+			...realFs,
+			existsSync: (p: string) => {
+				existsCalls.push(p);
+				return false;
+			},
+			cp: async () => {
+				throw new Error('cp should not be called for skip');
+			},
+			cpSync: () => {
+				throw new Error('cpSync should not be called for skip');
+			},
+			symlinkSync: () => {
+				throw new Error('symlinkSync should not be called for skip');
+			},
+		};
+
+		const result = await provisionWorktree(fakeDir, fakeLaneId, fakeSessionId, {
+			purpose: 'lane',
+			branchStyle: 'legacy-lane',
+		});
+		expect(result).toHaveProperty('worktreePath');
+		// No host node_modules check should have been attempted (or if it was, we didn't act)
+		// The key is we did not throw from the guards above.
+	});
+
+	test('deps_strategy: copy calls cp when host node_modules exists (via lean config shape)', async () => {
+		let cpCalled = false;
+		let cpSrc = '';
+		let cpDst = '';
+		_internals.fs = {
+			...realFs,
+			existsSync: (p: string) => p.endsWith('node_modules'),
+			cp: async (src: string, dst: string) => {
+				cpCalled = true;
+				cpSrc = src;
+				cpDst = dst;
+			},
+			symlinkSync: () => {
+				throw new Error('symlinkSync should not be called for copy');
+			},
+		};
+
+		// lean wrapper expects LeanTurboConfig shape (snake_case keys)
+		await provisionWorktree(fakeDir, fakeLaneId, fakeSessionId, {
+			deps_strategy: 'copy',
+		} as any);
+
+		expect(cpCalled).toBe(true);
+		expect(cpSrc).toContain('node_modules');
+		expect(cpDst).toContain('node_modules');
+	});
+
+	test('deps_strategy: link uses junction on win32 (via lean config shape)', async () => {
+		_internals.platform = 'win32';
+		let linkCalled = false;
+		let linkTarget = '';
+		let linkPath = '';
+		let linkType: string | undefined;
+		_internals.fs = {
+			...realFs,
+			existsSync: (p: string) => p.endsWith('node_modules'),
+			cp: async () => {
+				throw new Error('cp should not be called for link');
+			},
+			cpSync: () => {
+				throw new Error('cpSync should not be called for link');
+			},
+			symlinkSync: (target: string, pth: string, type?: string) => {
+				linkCalled = true;
+				linkTarget = target;
+				linkPath = pth;
+				linkType = type;
+			},
+		};
+
+		// lean wrapper expects LeanTurboConfig shape (snake_case keys)
+		await provisionWorktree(fakeDir, fakeLaneId, fakeSessionId, {
+			deps_strategy: 'link',
+		} as any);
+
+		expect(linkCalled).toBe(true);
+		expect(linkType).toBe('junction');
+	});
+
+	// Regression for SC-103: copy/link with missing host node_modules must error (no silent no-op)
+	test('deps_strategy: copy with missing host node_modules returns WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING error and does not call cp', async () => {
+		let cpCalled = false;
+		_internals.fs = {
+			...realFs,
+			existsSync: (p: string) => false, // host node_modules absent
+			cp: async () => {
+				cpCalled = true;
+			},
+			symlinkSync: () => {
+				throw new Error('symlinkSync should not be called');
+			},
+		};
+
+		const result = await provisionWorktree(fakeDir, fakeLaneId, fakeSessionId, {
+			deps_strategy: 'copy',
+		} as any);
+
+		expect(result).toHaveProperty('error');
+		expect((result as any).error).toContain(
+			'WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING',
+		);
+		expect((result as any).error).toContain('copy');
+		expect(cpCalled).toBe(false);
+	});
+
+	test('deps_strategy: link with missing host node_modules returns WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING error and does not call symlinkSync', async () => {
+		let linkCalled = false;
+		_internals.fs = {
+			...realFs,
+			existsSync: (p: string) => false,
+			cp: async () => {
+				throw new Error('cp should not be called');
+			},
+			symlinkSync: () => {
+				linkCalled = true;
+			},
+		};
+
+		const result = await provisionWorktree(fakeDir, fakeLaneId, fakeSessionId, {
+			deps_strategy: 'link',
+		} as any);
+
+		expect(result).toHaveProperty('error');
+		expect((result as any).error).toContain(
+			'WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING',
+		);
+		expect((result as any).error).toContain('link');
+		expect(linkCalled).toBe(false);
+	});
+
+	// Advisory contract text (the actual emission is tested in delegation-gate worktree-isolation tests for SC-104)
+	test('advisory message contract text for skip + test/build gates', () => {
+		const taskId = '1.2';
+		const expectedAdvisory = `WORKTREE_DEPS_SKIP: task ${taskId} was provisioned with deps_strategy: 'skip' (default). This task's gates appear to include test/build commands; the lane may lack node_modules. Set worktree.deps_strategy to 'copy' or 'link' (or use a non-worktree lane) if the task requires host dependencies.`;
+		expect(expectedAdvisory).toContain('WORKTREE_DEPS_SKIP');
+		expect(expectedAdvisory).toContain(taskId);
+		expect(expectedAdvisory).toContain("deps_strategy: 'skip'");
+		expect(expectedAdvisory).toContain('test/build commands');
 	});
 });

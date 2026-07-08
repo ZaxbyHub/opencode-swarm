@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { QA_GATE_PIPELINE_STEPS } from '../../../src/config/qa-gate-pipeline.ts';
 
 const SKILL_PATH = join(process.cwd(), '.opencode/skills/execute/SKILL.md');
 const skillContent = readFileSync(SKILL_PATH, 'utf-8');
@@ -50,6 +51,12 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 				'todo-scan',
 			]) {
 				expect(skillContent).toContain(gate);
+			}
+		});
+
+		it('keeps every docs-visible QA gate registry token in the runtime protocol', () => {
+			for (const step of QA_GATE_PIPELINE_STEPS) {
+				expect(skillContent).toContain(step.protocolToken);
 			}
 		});
 

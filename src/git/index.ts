@@ -11,6 +11,10 @@ export interface PRWorkflowOptions {
 	title: string;
 	body?: string;
 	branch?: string;
+	/** Optional lane env overrides for git spawns. */
+	laneEnv?: Record<string, string>;
+	/** Optional lane index; used to read env file from disk if laneEnv not provided. */
+	laneIndex?: number;
 }
 
 export interface PRWorkflowResult {
@@ -28,7 +32,7 @@ export async function runPRWorkflow(
 	options: PRWorkflowOptions,
 ): Promise<PRWorkflowResult> {
 	// Check prerequisites
-	if (!isGitRepo(cwd)) {
+	if (!(await isGitRepo(cwd))) {
 		return { success: false, error: 'Not a git repository' };
 	}
 
@@ -45,12 +49,18 @@ export async function runPRWorkflow(
 
 	// Create branch if specified
 	if (options.branch) {
-		createBranch(cwd, options.branch);
+		await createBranch(
+			cwd,
+			options.branch,
+			'origin',
+			options.laneEnv,
+			options.laneIndex,
+		);
 	}
 
 	// Commit changes
 	try {
-		commitAndPush(cwd, options.title);
+		await commitAndPush(cwd, options.title, options.laneEnv, options.laneIndex);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.includes('No changes to commit')) {
@@ -77,7 +87,7 @@ export async function runPRWorkflow(
 /**
  * Generate evidence summary without creating PR
  */
-export function prepareEvidence(cwd: string): string {
+export async function prepareEvidence(cwd: string): Promise<string> {
 	return generateEvidenceMd(cwd);
 }
 

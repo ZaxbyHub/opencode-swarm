@@ -16,7 +16,13 @@ import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import {
+	computePlanStructureHash,
+	loadLastPlanCriticApprovedSnapshot,
+	takeSnapshotEvent,
+} from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
@@ -38,9 +44,12 @@ import type {
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
 import {
+	awaitingMergeByCallID,
+	checkStandardWorktreeSerializationRelease,
 	finishStandardWorktreeDispatch,
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
+	resolveWorktreeIsolationConfig,
 	sanitizeWorktreeTaskId,
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
@@ -434,6 +443,157 @@ function extractPlanTaskId(text: string): string | null {
 	}
 
 	return null;
+}
+
+function outputText(output: unknown): string {
+	if (typeof output === 'string') return output;
+	if (typeof output === 'number' || typeof output === 'boolean') {
+		return String(output);
+	}
+	if (Array.isArray(output)) {
+		return output.map(outputText).filter(Boolean).join('\n');
+	}
+	if (output && typeof output === 'object') {
+		const record = output as Record<string, unknown>;
+		const preferred = ['output', 'text', 'content', 'message', 'result'];
+		const parts: string[] = [];
+		for (const key of preferred) {
+			if (key in record) parts.push(outputText(record[key]));
+		}
+		if (parts.length > 0) return parts.filter(Boolean).join('\n');
+		try {
+			return JSON.stringify(output);
+		} catch {
+			return '';
+		}
+	}
+	return '';
+}
+
+function extractPlanCriticVerdict(
+	output: unknown,
+): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
+	const match = /^\s*VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+		outputText(output),
+	);
+	if (!match) return null;
+	return match[1].toUpperCase() as 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED';
+}
+
+function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
+	const text = [
+		args.prompt,
+		args.task,
+		args.description,
+		args.message,
+		args.input,
+	]
+		.filter((value): value is string => typeof value === 'string')
+		.join('\n')
+		.toLowerCase();
+	if (!text) return false;
+	// Broad-recall-biased on purpose: the caller already narrows to
+	// `subagent_type === 'critic'` (a target the trusted architect controls), so
+	// a false positive is low-risk, while a false negative silently blocks ALL
+	// EXECUTE-phase coder work with no auto-recovery. Any single signal below —
+	// drawn from the phrasings the critic-gate/plan skills tell the architect to
+	// send — is therefore sufficient; no AND-pairing.
+	return PLAN_CRITIC_TASK_SIGNALS.some((signal) => text.includes(signal));
+}
+
+// Substrings that, in a dispatch to `subagent_type: 'critic'`, mark it as a
+// plan critic-gate review. Kept lowercase (text is lowercased before matching).
+const PLAN_CRITIC_TASK_SIGNALS = [
+	'critic-gate', // "MODE: CRITIC-GATE", "critic-gate protocol/review"
+	'plan critic',
+	'review plan',
+	'review the plan',
+	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
+	'approve the plan',
+	'plan approval',
+] as const;
+
+async function assertPlanCriticApprovedForExecution(
+	directory: string,
+	plan: Plan | null,
+): Promise<void> {
+	if (!plan) return;
+
+	const planId = derivePlanId(plan);
+	// Use the plan-critic-scoped loader (not the general loadLastApprovedPlan):
+	// it looks PAST unrelated `critic_approved` snapshots (e.g. per-phase
+	// drift-verification snapshots from write-drift-evidence.ts) to find the
+	// snapshot carrying the `plan_critic_gate` approval marker. Otherwise a later
+	// drift snapshot would shadow a still-valid plan-critic approval (bug F-A2).
+	const approved = await loadLastPlanCriticApprovedSnapshot(directory, planId);
+	if (!approved) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
+				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE.',
+		);
+	}
+
+	// Verdict is still load-bearing: the loader filters on the plan_critic_gate
+	// marker but not on the verdict value, so a (malformed) non-APPROVED
+	// plan-critic snapshot must still be rejected here.
+	if (
+		approved.approval?.verdict !== 'APPROVED' ||
+		approved.approval?.source !== 'plan_critic_gate'
+	) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Latest approved-plan snapshot does not contain plan critic VERDICT: APPROVED evidence. ' +
+				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution.',
+		);
+	}
+
+	// Compare STRUCTURAL hashes (excluding phase/task status). The plan-critic
+	// snapshot is taken while all tasks are `pending`, but the EXECUTE skill
+	// mandates flipping the current task to `in_progress` (a status-only
+	// mutation, dual-written into plan.json) BEFORE delegating its coder. A
+	// status-inclusive comparison would therefore fire on the first conforming
+	// coder dispatch of every run (bug F-A1). An actual structural change
+	// (description, files, dependencies, ...) still trips this staleness check.
+	if (approved.payloadHash !== computePlanStructureHash(plan)) {
+		throw new Error(
+			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
+				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
+		);
+	}
+}
+
+async function recordPlanCriticApprovalSnapshotIfApplicable(
+	directory: string,
+	input: { sessionID: string; callID: string },
+	args: Record<string, unknown>,
+	output: unknown,
+): Promise<void> {
+	const targetAgent =
+		typeof args.subagent_type === 'string'
+			? stripKnownSwarmPrefix(args.subagent_type)
+			: null;
+	if (targetAgent !== 'critic') return;
+	if (!taskLooksLikePlanCritic(args)) return;
+	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) return;
+
+	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
+	// so `assertPlanCriticApprovedForExecution` can match this approval after the
+	// architect flips the current task to `in_progress` before delegating its
+	// coder. This MUST be the same hash function the gate compares against
+	// (`computePlanStructureHash`), or the staleness check would never match.
+	await takeSnapshotEvent(directory, plan, {
+		source: 'critic_approved',
+		approvalMetadata: {
+			verdict: 'APPROVED',
+			source: 'plan_critic_gate',
+			session_id: input.sessionID,
+			call_id: input.callID,
+			approved_at: new Date().toISOString(),
+		},
+		payloadHashOverride: computePlanStructureHash(plan),
+	});
 }
 
 /**
@@ -846,6 +1006,7 @@ export const _internals = {
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
 	resetStandardWorktreeIsolationState,
+	PLAN_CRITIC_TASK_SIGNALS,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},
@@ -1084,6 +1245,8 @@ export function createDelegationGateHook(
 			: new Set<string>();
 		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
 
+		await assertPlanCriticApprovedForExecution(directory, plan);
+
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
 		// review. In parallel mode (parallelization_enabled), dispatching a coder
 		// for a DIFFERENT dependency-ready task is legitimate, so a coder_delegated
@@ -1165,15 +1328,32 @@ export function createDelegationGateHook(
 		}
 
 		if (standardWorktreeSerializationSessions.has(input.sessionID)) {
-			throw new Error(
-				'STANDARD_WORKTREE_ISOLATION_SERIALIZED: prior standard worktree isolation setup failed in this session; wait for the active coder task to finish before dispatching another coder.',
+			// FR-104 SC-111/SC-112: Before rejecting, check if the serialized session
+			// should be released due to TTL expiry or dispatch-count threshold.
+			// This makes the release check reachable through the public gating path
+			// (not just via precreateStandardWorktreeSession directly).
+			checkStandardWorktreeSerializationRelease(
+				input.sessionID,
+				resolveWorktreeIsolationConfig(config),
 			);
+			// After release check, re-evaluate — if TTL/count released it, allow through
+			if (standardWorktreeSerializationSessions.has(input.sessionID)) {
+				throw new Error(
+					'STANDARD_WORKTREE_ISOLATION_SERIALIZED: prior standard worktree isolation setup failed in this session; wait for the active coder task to finish before dispatching another coder.',
+				);
+			}
 		}
 
 		if (!plan) return;
 		if (!parallelModeActive) return;
 
 		const resolvedTaskId = incomingCoderTaskId;
+		// FR-102: pass declared scope (from pending map populated by FILE: extraction
+		// or prior declare_scope) so provisionWorktree can materialize it into the
+		// lane's .swarm/scopes/ for durability across plugin restart.
+		const laneScope = resolvedTaskId
+			? (pendingCoderScopeByTaskId.get(resolvedTaskId) ?? null)
+			: null;
 		await precreateStandardWorktreeSession({
 			config,
 			directory,
@@ -1184,6 +1364,10 @@ export function createDelegationGateHook(
 			description:
 				typeof args.description === 'string' ? args.description : undefined,
 			outputArgs: args,
+			scope:
+				laneScope && laneScope.length > 0 && resolvedTaskId
+					? { taskId: resolvedTaskId, files: laneScope }
+					: undefined,
 		});
 	};
 
@@ -1530,35 +1714,75 @@ export function createDelegationGateHook(
 				return;
 			}
 
+			if (typeof subagentType === 'string') {
+				try {
+					const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+					await recordPlanCriticApprovalSnapshotIfApplicable(
+						directory,
+						input,
+						mergedArgs,
+						_output,
+					);
+				} catch (err) {
+					logger.warn(
+						`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+
 			if (standardDispatch) {
+				// SC-115: Move from active → awaiting-merge BEFORE calling merge-back.
+				// The dispatch is removed from standardWorktreeByCallID here and
+				// added to awaitingMergeByCallID so /swarm lanes can show the real state.
+				// finishStandardWorktreeDispatch removes it from awaitingMergeByCallID
+				// after the merge completes (merged/partial/failed); the .catch() below
+				// handles the thrown-rejection path.
 				standardWorktreeByCallID.delete(input.callID);
-				await finishStandardWorktreeDispatch(directory, standardDispatch).catch(
-					(err) => {
-						const reason = err instanceof Error ? err.message : String(err);
-						logger.warn(
-							`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
-						);
-						// A thrown merge-back is a hard failure: the task's work
-						// did not land. Record it so Epic Rule 2 skips the
-						// completion marker (same contract as the partial/failed
-						// returns inside finishStandardWorktreeDispatch).
-						recordWorktreeMergeFailure(
-							standardDispatch.planTaskId ?? standardDispatch.taskId,
-							{
-								outcome: 'failed',
-								stage: 'merge-back',
-								message: reason,
-							},
-						);
-						const dispatchSession = ensureAgentSession(
-							standardDispatch.parentSessionID,
-						);
-						dispatchSession.pendingAdvisoryMessages ??= [];
-						dispatchSession.pendingAdvisoryMessages.push(
-							`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
-						);
-					},
-				);
+				awaitingMergeByCallID.set(input.callID, {
+					callID: input.callID,
+					parentSessionID: standardDispatch.parentSessionID,
+					taskId: standardDispatch.taskId,
+					planTaskId: standardDispatch.planTaskId,
+					branch: standardDispatch.handle.branchName,
+					worktreePath: standardDispatch.handle.worktreePath,
+					mergeStrategy: standardDispatch.mergeStrategy,
+					queuedAt: Date.now(),
+				});
+				await finishStandardWorktreeDispatch(
+					directory,
+					standardDispatch,
+					config,
+					input.callID,
+				).catch((err) => {
+					const reason = err instanceof Error ? err.message : String(err);
+					logger.warn(
+						`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
+					);
+					// A thrown merge-back is a hard failure: the task's work
+					// did not land. Record it so Epic Rule 2 skips the
+					// completion marker (same contract as the partial/failed
+					// returns inside finishStandardWorktreeDispatch).
+					recordWorktreeMergeFailure(
+						standardDispatch.planTaskId ?? standardDispatch.taskId,
+						{
+							outcome: 'failed',
+							stage: 'merge-back',
+							message: reason,
+							worktreePath: standardDispatch.handle.worktreePath,
+							branch: standardDispatch.handle.branchName,
+							completedAt: Date.now(),
+						},
+					);
+					const dispatchSession = ensureAgentSession(
+						standardDispatch.parentSessionID,
+					);
+					dispatchSession.pendingAdvisoryMessages ??= [];
+					dispatchSession.pendingAdvisoryMessages.push(
+						`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
+					);
+					// SC-115: Remove from awaiting-merge registry after recording failure.
+					awaitingMergeByCallID.delete(input.callID);
+				});
 			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args

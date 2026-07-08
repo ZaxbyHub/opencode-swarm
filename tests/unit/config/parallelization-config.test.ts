@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	LeanTurboConfigSchema,
 	ParallelizationConfigSchema,
 	PluginConfigSchema,
 	WorktreeIsolationConfigSchema,
@@ -122,5 +123,100 @@ describe('PluginConfigSchema — worktree isolation field', () => {
 		expect(result.worktree?.policy).toBe('required');
 		expect(result.worktree?.merge_strategy).toBe('cherry-pick');
 		expect(result.worktree?.deps_strategy).toBe('copy');
+	});
+
+	test('worktree.deps_strategy accepts link and defaults to skip', () => {
+		const withLink = WorktreeIsolationConfigSchema.parse({
+			deps_strategy: 'link',
+		});
+		expect(withLink.deps_strategy).toBe('link');
+		const def = WorktreeIsolationConfigSchema.parse({});
+		expect(def.deps_strategy).toBe('skip');
+	});
+});
+
+describe('LeanTurboConfigSchema — deps_strategy', () => {
+	test('lean config accepts deps_strategy and defaults to undefined (falls back to skip)', () => {
+		const withCopy = LeanTurboConfigSchema.parse({ deps_strategy: 'copy' });
+		expect(withCopy.deps_strategy).toBe('copy');
+		const def = LeanTurboConfigSchema.parse({});
+		expect(def.deps_strategy).toBeUndefined();
+	});
+});
+
+describe('WorktreeIsolationConfigSchema — FR-104 serialization release fields', () => {
+	test('SC-111: serialization_release_after_dispatches defaults to 5', () => {
+		const result = WorktreeIsolationConfigSchema.parse({});
+		expect(result.serialization_release_after_dispatches).toBe(5);
+	});
+
+	test('SC-111: accepts explicit serialization_release_after_dispatches value', () => {
+		const result = WorktreeIsolationConfigSchema.parse({
+			serialization_release_after_dispatches: 3,
+		});
+		expect(result.serialization_release_after_dispatches).toBe(3);
+	});
+
+	test('SC-111: rejects non-positive serialization_release_after_dispatches', () => {
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_dispatches: 0,
+			}),
+		).toThrow();
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_dispatches: -1,
+			}),
+		).toThrow();
+	});
+
+	test('SC-111: rejects non-integer serialization_release_after_dispatches', () => {
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_dispatches: 2.5,
+			}),
+		).toThrow();
+	});
+
+	test('SC-112: serialization_release_after_ms defaults to 60000', () => {
+		const result = WorktreeIsolationConfigSchema.parse({});
+		expect(result.serialization_release_after_ms).toBe(60_000);
+	});
+
+	test('SC-112: accepts explicit serialization_release_after_ms value', () => {
+		const result = WorktreeIsolationConfigSchema.parse({
+			serialization_release_after_ms: 30_000,
+		});
+		expect(result.serialization_release_after_ms).toBe(30_000);
+	});
+
+	test('SC-112: rejects non-positive serialization_release_after_ms', () => {
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_ms: 0,
+			}),
+		).toThrow();
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_ms: -5000,
+			}),
+		).toThrow();
+	});
+
+	test('SC-112: rejects non-integer serialization_release_after_ms', () => {
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({
+				serialization_release_after_ms: 1000.5,
+			}),
+		).toThrow();
+	});
+
+	test('accepts both release fields together', () => {
+		const result = WorktreeIsolationConfigSchema.parse({
+			serialization_release_after_dispatches: 10,
+			serialization_release_after_ms: 120_000,
+		});
+		expect(result.serialization_release_after_dispatches).toBe(10);
+		expect(result.serialization_release_after_ms).toBe(120_000);
 	});
 });

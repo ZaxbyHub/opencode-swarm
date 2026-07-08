@@ -19,6 +19,17 @@ export class SandboxError extends Error {
 }
 
 /**
+ * Validate that a string is a valid POSIX environment variable name.
+ * POSIX env var names: [a-zA-Z_][a-zA-Z0-9_]*
+ *
+ * Used to prevent shell-injection when env var keys are interpolated into
+ * sandbox command syntax on any platform.
+ */
+export function isValidEnvKey(key: string): boolean {
+	return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key);
+}
+
+/**
  * Interface for platform-specific sandbox executors.
  */
 export interface SandboxExecutor {
@@ -33,10 +44,17 @@ export interface SandboxExecutor {
 	 * @param command - The raw shell command string to execute
 	 * @param scopePaths - Absolute paths the coder is allowed to write to
 	 * @param tempDir - Optional temporary directory path (platform default if omitted)
+	 * @param envOverrides - Optional per-call env overrides: string value sets the var, null unsets it.
+	 *                       When omitted (undefined), no per-call env override is applied (default: undefined).
 	 * @returns The wrapped command string with sandbox prefix
 	 * @throws SandboxError if sandbox cannot wrap the command
 	 */
-	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string;
+	wrapCommand(
+		command: string,
+		scopePaths: string[],
+		tempDir?: string,
+		envOverrides?: Record<string, string | null>,
+	): string;
 
 	/**
 	 * Get the environment variable overrides for this sandbox.

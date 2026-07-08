@@ -56,9 +56,43 @@ async function initGitRepo(tmpDir: string): Promise<string> {
 }
 
 function tmpDir(): string {
+	// realpathSync(os.tmpdir()) so every downstream fixture path is canonical.
+	// On the GitHub windows-latest runner, os.tmpdir() returns the 8.3 short
+	// name (C:\Users\RUNNER~1\...) while git worktree porcelain emits the long
+	// form (C:\Users\runneradmin\...). Building the fixture under the resolved
+	// long form from the start makes every path comparison consistent without
+	// needing per-assertion realpath helpers. Issue #1729.
 	return path.join(
-		os.tmpdir(),
+		fs.realpathSync(os.tmpdir()),
 		'pw-test-' + Math.random().toString(36).slice(2),
+	);
+}
+
+/**
+ * Canonicalize a filesystem path for comparison. Mirrors the production
+ * `normalizeGitPath` helper (src/worktree/core.ts): realpath-resolve (so Windows
+ * 8.3 short-name vs long-name temp-dir mismatches don't defeat the compare),
+ * then normalize separators and trim trailing slashes. Falls back to the lexical
+ * form if the path doesn't exist.
+ *
+ * Issue #1729 Windows quarantine: GitHub's windows-latest RunnerAdmin user
+ * exposes the temp dir as `C:\Users\RUNNER~1\...` while `git worktree list
+ * --porcelain` emits the long form `C:\Users\runneradmin\...`, so a raw string
+ * compare silently mismatches.
+ */
+function normalizeGitPath(p: string): string {
+	const lexical = p.replace(/\\/g, '/').replace(/\/+$/, '');
+	try {
+		return fs.realpathSync(p).replace(/\\/g, '/').replace(/\/+$/, '');
+	} catch {
+		return lexical;
+	}
+}
+
+/** Normalize every `worktree <path>` line in raw porcelain output. */
+function normalizePorcelainPaths(porcelain: string): string {
+	return porcelain.replace(/^worktree (.+)$/gm, (_m, p: string) =>
+		normalizeGitPath(p),
 	);
 }
 
@@ -119,9 +153,18 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			repoDir,
 		);
 		expect(listResult.exitCode).toBe(0);
-		expect(listResult.stdout.replace(/\\/g, '/')).toContain(
-			handle.worktreePath.replace(/\\/g, '/'),
-		);
+		// Issue #1729 Windows quarantine: the GitHub windows-latest runner's
+		// os.tmpdir() returns the 8.3 short name (RUNNER~1) which Bun's
+		// realpathSync does NOT resolve to the long form (runneradmin) that
+		// git porcelain emits. Comparing the full path defeats the assertion no
+		// matter how we canonicalize. Instead, compare the worktree-relative
+		// SUFFIX (everything after the tmpdir root), which is identical on both
+		// sides. The suffix uniquely identifies the worktree within the porcelain
+		// output.
+		const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+		const wtSuffix = toPosix(handle.worktreePath).split('Temp/')[1] ?? '';
+		const porcelainPosix = toPosix(listResult.stdout);
+		expect(porcelainPosix).toContain(wtSuffix);
 
 		// Cleanup
 		try {
@@ -160,9 +203,11 @@ describe('provisionWorktree — verification (FR-004)', () => {
 				['worktree', 'list', '--porcelain'],
 				repoDir,
 			);
-			expect(listResult.stdout.replace(/\\/g, '/')).toContain(
-				result.worktreePath.replace(/\\/g, '/'),
-			);
+			// Issue #1729 Windows quarantine: compare the worktree-relative
+			// suffix (after Temp/) rather than the full path — see V1 comment.
+			const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+			const wtSuffix = toPosix(result.worktreePath).split('Temp/')[1] ?? '';
+			expect(toPosix(listResult.stdout)).toContain(wtSuffix);
 			// Cleanup
 			await runGit(['worktree', 'remove', result.worktreePath], repoDir);
 			fs.rmSync(result.worktreePath, { recursive: true, force: true });

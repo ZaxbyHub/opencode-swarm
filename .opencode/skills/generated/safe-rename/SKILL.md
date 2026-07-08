@@ -130,6 +130,39 @@ Before considering the rename complete:
      why they remain.
    - Documentation/history — leave as-is.
 
+### Circular dependency warning: type extraction from sibling files
+
+When consolidating types from sibling files (e.g., extracting a shared type
+from `evidence.ts` and `runner.ts` into a new `types.ts` in the same
+directory), verify import direction **before** creating the shared module.
+If the new module imports anything from either sibling, you create a circular
+dependency that silently breaks the module graph.
+
+**Example of the trap:**
+
+```typescript
+// types.ts — imports from a sibling
+import { SomeClass } from './runner'; // ← runner.ts will import from types.ts
+export interface MyType { handler: SomeClass }; // circular!
+```
+
+**Verification steps:**
+
+1. Before creating the shared module, use `repo_map` (action: `dependencies`)
+   on each sibling file to understand what it imports.
+2. After extraction, run `repo_map` (action: `importers`) on the new shared
+   module to verify it has no import edges pointing back to the siblings.
+3. Run `build_check` (mode: `typecheck`) to confirm no circular dependency
+   errors.
+4. If a circular dependency is detected, move the shared type to a module that
+   neither sibling imports from (e.g., a new `_types.ts` that has no imports
+   from the directory).
+
+**Why this matters:** During PR #1702, consolidating types from sibling files
+in `src/turbo/lean/` created a circular dependency between `evidence.ts`,
+`runner.ts`, and the extracted types module. The typecheck caught it, but the
+fix required restructuring the extraction.
+
 ## Limitations
 
 This workflow has the following known gaps:

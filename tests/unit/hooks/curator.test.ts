@@ -1979,6 +1979,18 @@ invalid json here
 			expect(result.applied + result.skipped).toBe(recommendations.length);
 			expect(result.applied).toBe(2);
 			expect(result.skipped).toBe(2);
+
+			// PRR-002: producer-side archived_from assertion — verify the
+			// curator's archive recommendation records the prior status so
+			// unarchiveEntry can restore it (E2 was 'candidate').
+			const afterPath = path.join(tempDir, '.swarm', 'knowledge.jsonl');
+			const after = fs.readFileSync(afterPath, 'utf-8').trim().split('\n');
+			const e2 = after
+				.map((l) => JSON.parse(l) as SwarmKnowledgeEntry)
+				.find((e) => e.id === 'E2');
+			expect(e2?.status).toBe('archived');
+			expect(e2?.archived_from).toBe('candidate');
+			expect(e2?.archived_at).toBeTruthy();
 		});
 
 		it('handles null entry.confidence (sets to 0.1 not NaN)', async () => {

@@ -9,10 +9,17 @@
  * @module worktree
  */
 
+import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
+// Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
+// to allow DI for tests without mock.module leakage. The top-level import is intentionally
+// omitted; the seam default performs a dynamic import on first use.
 import type {
+	DependencyPreparationStrategy,
 	WorktreeHandle,
 	WorktreeOptions,
 	WorktreeProvisionResult,
@@ -44,6 +51,41 @@ export const _internals: {
 	 * Production implementation runs `git config core.longpaths` via runGit.
 	 */
 	getCoreLongPaths: (directory: string) => Promise<string | undefined>;
+	/** Test seam for filesystem ops used by deps_strategy copy/link (DI to avoid mock.module leaks). */
+	fs: {
+		existsSync: typeof fs.existsSync;
+		cp: typeof fsPromises.cp;
+		cpSync: typeof fs.cpSync;
+		symlinkSync: typeof fs.symlinkSync;
+	};
+	/**
+	 * Test seam for scope materialization into worktree lanes (FR-102).
+	 * Allows tests to inject a spy without mock.module on node:fs or scope-persistence.
+	 */
+	writeScopeToDisk: (
+		directory: string,
+		taskId: string,
+		files: string[],
+	) => Promise<void>;
+	/**
+	 * Test seam for lane runtime profile materialization into worktree lanes (FR-201).
+	 * Allows tests to inject a spy without mock.module on node:fs.
+	 */
+	writeLaneProfileToDisk: (
+		worktreePath: string,
+		laneIndex: number,
+		envOverrides: Record<string, string>,
+	) => Promise<void>;
+	/**
+	 * Test seam for lane profile removal at teardown (FR-205 SC-134).
+	 * Allows tests to inject a spy without mock.module on node:fs.
+	 */
+	removeLaneProfileFromDisk: (
+		worktreePath: string,
+		laneIndex: number,
+	) => Promise<void>;
+	/** Test seam for removeWorktree — allows tests to intercept worktree removal calls. */
+	removeWorktree: typeof removeWorktree;
 } = {
 	bunSpawn,
 	platform: process.platform,
@@ -58,11 +100,128 @@ export const _internals: {
 		const value = result.stdout.trim().toLowerCase();
 		return value === '' ? undefined : value;
 	},
+	fs: {
+		existsSync: fs.existsSync,
+		cp: fsPromises.cp,
+		cpSync: fs.cpSync,
+		symlinkSync: fs.symlinkSync,
+	},
+	writeScopeToDisk: async (
+		directory: string,
+		taskId: string,
+		files: string[],
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		const { writeScopeToDisk: realWrite } = await import(
+			'../scope/scope-persistence'
+		);
+		return realWrite(directory, taskId, files);
+	},
+	writeLaneProfileToDisk: async (
+		_worktreePath: string,
+		_laneIndex: number,
+		_envOverrides: Record<string, string>,
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		return writeLaneProfileToDiskReal(_worktreePath, _laneIndex, _envOverrides);
+	},
+	removeLaneProfileFromDisk: async (
+		_worktreePath: string,
+		_laneIndex: number,
+	) => {
+		// Default delegates to the real implementation.
+		// Tests replace this to spy or no-op.
+		return removeLaneProfileFromDiskReal(_worktreePath, _laneIndex);
+	},
+	removeWorktree,
 };
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * FR-201 SC-124: Writes the lane runtime profile as `.swarm/lanes/{laneIndex}.env`.
+ *
+ * The file is written in KEY=VAL format (one entry per line) so it can be
+ * sourced by shell scripts or parsed by Node.js.
+ *
+ * Defense-in-depth: failures are non-fatal. The lane can still function without
+ * the env file if the write fails (e.g. permissions), as long as the child
+ * processes get the env vars through other means.
+ *
+ * @param worktreePath - Absolute path to the lane worktree root.
+ * @param laneIndex    - 0-based lane index used for filename derivation.
+ * @param envOverrides - Map of env var names to values (set) or null (unset).
+ */
+export async function writeLaneProfileToDiskReal(
+	worktreePath: string,
+	laneIndex: number,
+	envOverrides: Record<string, string>,
+): Promise<void> {
+	// Build KEY=VAL lines; skip null values (unset)
+	const lines: string[] = [];
+	for (const [key, value] of Object.entries(envOverrides)) {
+		if (value === null) continue;
+		// Basic safety: skip keys that would be shell-injection vectors
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+		// Skip values containing newlines — they would corrupt the KEY=VAL file format
+		if (value.includes('\n') || value.includes('\r')) {
+			log('writeLaneProfileToDisk: skipping env var with newline in value', {
+				key,
+			});
+			continue;
+		}
+		lines.push(`${key}=${value}`);
+	}
+
+	if (lines.length === 0) return;
+
+	// Create .swarm/lanes/ directory
+	const lanesDir = path.join(worktreePath, '.swarm', 'lanes');
+	await fs.promises.mkdir(lanesDir, { recursive: true });
+
+	// Write {laneIndex}.env
+	const envPath = path.join(lanesDir, `${laneIndex}.env`);
+	await fs.promises.writeFile(envPath, `${lines.join('\n')}\n`, 'utf-8');
+}
+
+/**
+ * FR-205 SC-134: Removes the lane runtime profile `.swarm/lanes/{laneIndex}.env`.
+ *
+ * Called at lane teardown to clean up the materialization created by
+ * `writeLaneProfileToDiskReal`. Removing this file prevents stale lane data
+ * from accumulating in `.swarm/lanes/` across phases.
+ *
+ * Defense-in-depth: failures are non-fatal. The lane teardown can still
+ * complete even if the env file removal fails (e.g. permissions).
+ *
+ * @param worktreePath - Absolute path to the lane worktree root.
+ * @param laneIndex   - 0-based lane index used for filename derivation.
+ */
+export async function removeLaneProfileFromDiskReal(
+	worktreePath: string,
+	laneIndex: number,
+): Promise<void> {
+	const envPath = path.join(
+		worktreePath,
+		'.swarm',
+		'lanes',
+		`${laneIndex}.env`,
+	);
+	try {
+		await fs.promises.unlink(envPath);
+	} catch (err) {
+		// ENOENT means the file was already absent — this is fine.
+		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+			console.warn(
+				`[worktree] Failed to remove lane profile ${envPath}: ${(err as Error).message}`,
+			);
+		}
+	}
+}
 
 interface GitResult {
 	exitCode: number;
@@ -234,7 +393,21 @@ export function shortenWorktreePath(
 	sessionId: string,
 	laneId: string,
 ): string {
-	return path.join(_internals.osTmpdir(), 'swwt', sessionId, laneId);
+	// Resolve os.tmpdir() through realpathSync so the shortened worktree path
+	// is canonical. On the GitHub windows-latest runner, os.tmpdir() returns
+	// the 8.3 short name (C:\Users\RUNNER~1\...) while git worktree porcelain
+	// emits the long form (C:\Users\runneradmin\...). Building the shortened
+	// fallback path from the resolved long form keeps it consistent with the
+	// porcelain output and with the realpath-resolved fixtures in the tests
+	// (issue #1729 Windows quarantine).
+	let tmp = _internals.osTmpdir();
+	try {
+		tmp = fs.realpathSync(tmp);
+	} catch {
+		// Best-effort: if tmpdir itself doesn't resolve (shouldn't happen in
+		// practice), fall through with the lexical form.
+	}
+	return path.join(tmp, 'swwt', sessionId, laneId);
 }
 
 export interface ProvisionSuccess extends WorktreeHandle {}
@@ -308,6 +481,79 @@ export function makeWorktreeBranchName(
  * @param options   - Worktree purpose, branch naming, and path options.
  * @returns A worktree handle on success, or `{ error: string }` on failure.
  */
+
+/**
+ * Resolves the swarm-managed worktree base directory: `directory/worktreeDir`
+ * when an override is configured, otherwise the DD-6 default
+ * `<project-parent>/.swarm-worktrees`. Shared by `provisionWorktree` (path
+ * construction) and the destructive-command guard / removeWorktree force
+ * fallback (containment checks) so both sides agree on what counts as
+ * "swarm-managed".
+ *
+ * @param directory   - Project root (an absolute path to the git working tree).
+ * @param worktreeDir - Optional worktree-dir override (relative to `directory`
+ *                      or absolute). When absent, the DD-6 default base is used.
+ * @returns The absolute worktree base directory.
+ */
+export function resolveWorktreeBaseDir(
+	directory: string,
+	worktreeDir?: string,
+): string {
+	return worktreeDir
+		? path.resolve(directory, worktreeDir)
+		: path.resolve(path.dirname(directory), '.swarm-worktrees');
+}
+
+/**
+ * Checks whether `targetPath` is contained within the swarm-managed worktree
+ * base directory (default base, plus any `worktreeDirOverrides`), using
+ * `fs.realpathSync` on both sides to resolve symlinks/junctions before the
+ * containment comparison — this both establishes containment AND defeats a
+ * symlink/junction escape in one step. Fails closed (returns false) if the
+ * target cannot be resolved (e.g. does not exist, or a permission error).
+ * Case-insensitive comparison on Windows, matching `isInDeclaredScope` in
+ * `src/hooks/guardrails/helpers.ts`.
+ *
+ * @param targetPath           - Path to check (relative to `directory` or absolute).
+ * @param directory            - Project root, used to resolve relative targets
+ *                               and the default base.
+ * @param worktreeDirOverrides - Additional configured worktree-dir overrides
+ *                               whose resolved bases are also treated as trusted.
+ * @returns `true` when the resolved target is inside a trusted base, else `false`.
+ */
+export function isPathUnderSwarmWorktreeBase(
+	targetPath: string,
+	directory: string,
+	worktreeDirOverrides: string[] = [],
+): boolean {
+	const caseInsensitive = process.platform === 'win32';
+	let realTarget: string;
+	try {
+		realTarget = fs.realpathSync(path.resolve(directory, targetPath));
+	} catch {
+		return false;
+	}
+	const bases = [
+		resolveWorktreeBaseDir(directory),
+		...worktreeDirOverrides.map((d) => resolveWorktreeBaseDir(directory, d)),
+	];
+	const cmpTarget = caseInsensitive ? realTarget.toLowerCase() : realTarget;
+	return bases.some((base) => {
+		let realBase: string;
+		try {
+			realBase = fs.realpathSync(base);
+		} catch {
+			// Base may not exist yet (e.g. no worktrees created) — fall back to
+			// the literal resolved path.
+			realBase = path.resolve(base);
+		}
+		const cmpBase = caseInsensitive ? realBase.toLowerCase() : realBase;
+		if (cmpTarget === cmpBase) return true;
+		const rel = path.relative(cmpBase, cmpTarget);
+		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+	});
+}
+
 export async function provisionWorktree(
 	directory: string,
 	id: string,
@@ -317,9 +563,11 @@ export async function provisionWorktree(
 	const branchName = makeWorktreeBranchName(sessionId, id, options);
 
 	// Resolve worktree path: explicit config or DD-6 default
-	let worktreePath = options.worktreeDir
-		? path.resolve(directory, options.worktreeDir, sessionId, id)
-		: path.resolve(path.dirname(directory), '.swarm-worktrees', sessionId, id);
+	let worktreePath = path.resolve(
+		resolveWorktreeBaseDir(directory, options.worktreeDir),
+		sessionId,
+		id,
+	);
 
 	// Windows path budget check (DD-8)
 	const budgetResult = await checkPathBudget(worktreePath, directory);
@@ -359,8 +607,27 @@ export async function provisionWorktree(
 			directory,
 		);
 
-		const normalizeGitPath = (p: string) =>
-			p.replace(/\\/g, '/').replace(/\/+$/, '');
+		// Normalize a filesystem path for equality comparison against git
+		// porcelain output. Beyond the trailing-slash/backslash normalization,
+		// realpath-canonicalize so that Windows 8.3 short-name vs long-name
+		// mismatches don't defeat the comparison (issue #1729 Windows quarantine:
+		// GitHub's windows-latest RunnerAdmin user exposes the temp dir as
+		// C:\Users\RUNNER~1\... while `git worktree list --porcelain` emits the
+		// long form C:\Users\runneradmin\..., so a pure string compare silently
+		// mismatches and the active-collision check at line ~409 fires
+		// incorrectly — or, conversely, fails to detect a real collision).
+		// realpathSync resolves both sides to the canonical underlying path.
+		// Best-effort: if the path doesn't exist (e.g. a worktree whose
+		// directory was removed but is still registered), fall back to the
+		// lexical normalized form so porcelain parsing still works.
+		const normalizeGitPath = (p: string): string => {
+			const lexical = p.replace(/\\/g, '/').replace(/\/+$/, '');
+			try {
+				return fs.realpathSync(p).replace(/\\/g, '/').replace(/\/+$/, '');
+			} catch {
+				return lexical;
+			}
+		};
 		const expectedPath = normalizeGitPath(worktreePath);
 
 		// Parse all worktree entries from porcelain output.
@@ -448,6 +715,83 @@ export async function provisionWorktree(
 		};
 	}
 
+	// Dependency preparation per depsStrategy (FR-101 / SC-101..SC-103)
+	// 'skip' (default): no preparation — caller may emit advisory if task gates include test/build.
+	// 'copy': recursive copy of host node_modules into lane (real files, not symlink).
+	// 'link': platform-appropriate symlink/junction so lane resolves host's dependency entries at same paths.
+	const strategy: DependencyPreparationStrategy =
+		options.depsStrategy ?? 'skip';
+	if (strategy !== 'skip') {
+		const hostDepDir = path.join(directory, 'node_modules');
+		const laneDepDir = path.join(worktreePath, 'node_modules');
+		if (_internals.fs.existsSync(hostDepDir)) {
+			try {
+				if (strategy === 'copy') {
+					await _internals.fs.cp(hostDepDir, laneDepDir, {
+						recursive: true,
+						force: true,
+					});
+				} else if (strategy === 'link') {
+					const isWindows = _internals.platform === 'win32';
+					// 'junction' on Windows for directory symlinks (no admin required for local targets);
+					// 'dir' on POSIX.
+					_internals.fs.symlinkSync(
+						hostDepDir,
+						laneDepDir,
+						isWindows ? 'junction' : 'dir',
+					);
+				}
+			} catch (e) {
+				// Non-fatal: the lane may still function for tasks that do not require the deps,
+				// or the subsequent commands will surface the real missing-dep error.
+				console.warn(
+					`[swarm] deps_strategy '${strategy}' preparation failed for ${id}: ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
+		} else {
+			// SC-103: no silent no-op for copy/link when host node_modules is absent.
+			// Return error so callers can fail-fast or surface loudly instead of provisioning a lane
+			// that will immediately fail on any test/build command.
+			return {
+				error: `WORKTREE_DEPS_STRATEGY_HOST_DIR_MISSING: deps_strategy ${strategy} requires node_modules at ${hostDepDir} but it does not exist`,
+			};
+		}
+	}
+
+	// FR-102 / SC-105: Materialize declared scope into the lane's .swarm/scopes/
+	// so that resolveScopeWithFallbacks({ directory: worktreePath, ... }) recovers
+	// the narrow scope after a plugin restart (in-memory state is lost).
+	// This makes the lane self-sufficient; the scope file is written under the
+	// worktree root which inherits the primary .gitignore (excludes .swarm/).
+	// Write is best-effort (defense-in-depth); failure is non-fatal.
+	if (options.scope?.taskId && Array.isArray(options.scope.files)) {
+		try {
+			await _internals.writeScopeToDisk(
+				worktreePath,
+				options.scope.taskId,
+				options.scope.files,
+			);
+		} catch {
+			/* non-fatal — scope persistence is defense-in-depth */
+		}
+	}
+
+	// FR-201 SC-124: Materialize lane runtime profile as `.swarm/lanes/{laneIndex}.env`.
+	// This file allows child processes spawned inside the lane to source lane-specific
+	// env vars (PORT, TMPDIR, cache redirects, etc.) by reading this file.
+	// Write is best-effort (defense-in-depth); failure is non-fatal.
+	if (options.laneProfile) {
+		try {
+			await _internals.writeLaneProfileToDisk(
+				worktreePath,
+				options.laneProfile.laneIndex,
+				options.laneProfile.envOverrides,
+			);
+		} catch {
+			/* non-fatal — profile materialization is defense-in-depth */
+		}
+	}
+
 	return {
 		worktreePath,
 		branchName,
@@ -458,23 +802,40 @@ export async function provisionWorktree(
 }
 
 /**
- * Removes a git worktree **without** `--force`.
+ * Removes a git worktree, **without** `--force` by default.
  *
  * On Windows (`process.platform === 'win32'`), retries up to 3 times with a
  * 2-second delay when the error contains `EBUSY` or `EPERM` (DD-10). After
  * exhausting retries the worktree is abandoned — the function returns an
  * error but does NOT throw.
  *
- * @param worktreePath - Absolute path to the worktree directory to remove.
- * @param projectRoot  - Absolute path to the project root (a git repository)
- *                       used as `cwd` for the `git worktree remove` command.
- *                       Required because the worktree's parent directory may
- *                       not itself be a git repository.
+ * When `options.force` is set, the removal is escalated (issue #1708): if the
+ * default non-forced removal gives up (either a non-retryable error such as the
+ * "contains modified or untracked files, use --force" message on the first
+ * attempt, or EBUSY/EPERM retries exhausted on Windows), a single
+ * `git worktree remove --force` is attempted — but ONLY when `worktreePath`
+ * resolves inside the swarm-managed worktree base directory
+ * (`isPathUnderSwarmWorktreeBase`). A path outside that trusted base is NEVER
+ * force-removed even if `force` is requested. When `force` is not set, behavior
+ * is unchanged (non-force only; returns an error, does not throw, on exhaustion).
+ *
+ * @param worktreePath        - Absolute path to the worktree directory to remove.
+ * @param projectRoot         - Absolute path to the project root (a git repository)
+ *                              used as `cwd` for the `git worktree remove` command.
+ *                              Required because the worktree's parent directory may
+ *                              not itself be a git repository.
+ * @param options             - Optional escalation controls.
+ * @param options.force       - When true, opt into the forced-fallback removal
+ *                              described above (scoped to the trusted base).
+ * @param options.worktreeDir - The configured worktree-dir override, if any, so
+ *                              the containment check trusts the same base
+ *                              `provisionWorktree` used.
  * @returns `{ success: true }` on success or `{ error: string }` on failure.
  */
 export async function removeWorktree(
 	worktreePath: string,
 	projectRoot: string,
+	options?: { force?: boolean; worktreeDir?: string },
 ): Promise<RemoveSuccess | RemoveFailure> {
 	const isWindows = _internals.platform === 'win32';
 	const MAX_RETRIES = 4;
@@ -504,7 +865,31 @@ export async function removeWorktree(
 			continue;
 		}
 
-		// Non-retryable error or final attempt exhausted
+		// Non-retryable error or final attempt exhausted. This is the single
+		// reachable give-up point (the post-loop return below is unreachable
+		// because attempt 3 hits `attempt < MAX_RETRIES - 1` === false and
+		// returns here). Opt-in force fallback (issue #1708): escalate to a
+		// single `--force` removal, but ONLY when the target resolves inside the
+		// trusted swarm worktree base. Never force-remove a path outside it.
+		if (
+			options?.force &&
+			isPathUnderSwarmWorktreeBase(
+				worktreePath,
+				projectRoot,
+				options.worktreeDir ? [options.worktreeDir] : [],
+			)
+		) {
+			const forced = await runGit(
+				['worktree', 'remove', '--force', worktreePath],
+				projectRoot,
+			);
+			if (forced.exitCode === 0) {
+				return { success: true };
+			}
+			// Surface the force attempt's own failure, not the stale lastError.
+			return { error: forced.stderr.trim() || forced.stdout.trim() };
+		}
+
 		return { error: lastError };
 	}
 

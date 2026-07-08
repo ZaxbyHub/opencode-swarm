@@ -233,6 +233,9 @@ function listLaneEvidenceSync(directory: string, phase: number): string[] {
 		// Directory doesn't exist — no evidence files
 		return [];
 	}
+	// Sort for deterministic cross-platform ordering (ext4 vs APFS readdir
+	// order differs — issue #1729).
+	entries.sort();
 
 	const laneIds: string[] = [];
 	for (const entry of entries) {

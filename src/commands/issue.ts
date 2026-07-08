@@ -123,7 +123,7 @@ function parseIssueRef(input: string, directory: string): ParsedIssue | null {
 	const bareMatch = input.match(/^(\d+)$/);
 	if (bareMatch) {
 		const issueNumber = parseInt(bareMatch[1], 10);
-		const remoteUrl = detectGitRemote(directory);
+		const remoteUrl = detectGitRemote(directory, undefined);
 		if (!remoteUrl) {
 			return null;
 		}

@@ -48,8 +48,26 @@ const PLUGIN_INIT_DIR = realpathSync(
 );
 
 afterAll(() => {
-	rmSync(TEST_DIR, { recursive: true, force: true });
-	rmSync(PLUGIN_INIT_DIR, { recursive: true, force: true });
+	try {
+		rmSync(TEST_DIR, { recursive: true, force: true });
+	} catch (err: unknown) {
+		if (
+			!(err instanceof Error) ||
+			(err['code'] !== 'EBUSY' && err['code'] !== 'ENOTEMPTY')
+		) {
+			throw err;
+		}
+	}
+	try {
+		rmSync(PLUGIN_INIT_DIR, { recursive: true, force: true });
+	} catch (err: unknown) {
+		if (
+			!(err instanceof Error) ||
+			(err['code'] !== 'EBUSY' && err['code'] !== 'ENOTEMPTY')
+		) {
+			throw err;
+		}
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -333,7 +351,7 @@ describe('init safety: startupOrphanRecovery runs at runPhase, not construction'
 		expect(mockStartupOrphanRecovery).not.toHaveBeenCalled();
 	});
 
-	test('runPhase without lean config (defaults) does NOT call startupOrphanRecovery', async () => {
+	test('runPhase with worktree_isolation: false does NOT call startupOrphanRecovery', async () => {
 		writePlanWithWorktreeIsolation(1, false);
 		LeanTurboRunner._internals.startupOrphanRecovery =
 			mockStartupOrphanRecovery;
@@ -341,7 +359,10 @@ describe('init safety: startupOrphanRecovery runs at runPhase, not construction'
 		const runner = new LeanTurboRunner({
 			directory: TEST_DIR,
 			sessionID: 'sess-init-safety-defaults',
-			// No leanConfig — uses defaults, worktree_isolation defaults to false
+			leanConfig: {
+				...DEFAULT_LEAN_TURBO_CONFIG,
+				worktree_isolation: false,
+			},
 		});
 
 		await runner.runPhase(1);

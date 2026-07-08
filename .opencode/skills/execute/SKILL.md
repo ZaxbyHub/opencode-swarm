@@ -53,7 +53,9 @@ All other gates: failure → return to coder. No self-fixes. No workarounds.
     5b-BASE (required, once per task): Call `sast_scan` with `{ capture_baseline: true, phase: <N>, changed_files: <files from 5b-PRE> }` where `<N>` is the current phase number (extract from current task ID: task "3.2" → phase 3, task "1.5" → phase 1). The tool maintains `.swarm/evidence/{phase}/sast-baseline.json` as a phase-scoped, incrementally merged baseline of pre-existing SAST findings. Calling twice for the same files is safe (idempotent merge). Do NOT re-capture mid-task.
     → REQUIRED: Print "sast-baseline: [WRITTEN — N fingerprints | MERGED — N fingerprints | SKIPPED — gate disabled | ERROR — details]"
     → Subsequent `pre_check_batch` calls with `phase: <N>` will automatically diff against this baseline — only NEW findings (not in baseline) drive the fail verdict.
+    -> PREFLIGHT CHECKLIST: Before first coder delegation, answer "SAST baseline captured before first coder delegation? yes/no/disabled/error". If the answer is no, do not delegate to coder; run 5b-BASE first. If disabled or error, record the exact tool result.
 5b. the active swarm's coder agent - Implement (if designer scaffold produced, include it as INPUT).
+    → If this dispatch fails with `PLAN_CRITIC_GATE_VIOLATION`: the plan has no current critic-approved snapshot (commonly a plan approved before this mechanical gate existed). Do NOT retry the coder dispatch as-is — re-run MODE: CRITIC-GATE to get a fresh critic `APPROVED` verdict, then retry this step.
 5b-bis. **CODER OUTPUT VERIFICATION**: After the coder reports completion, do NOT accept the self-report alone. Run `diff` (step 5c) and inspect at least one of the modified files yourself to confirm the change exists. The coder may report DONE without having produced any diff. A 30-second read of the changed file(s) catches this failure mode. This is NOT a separate explorer dispatch — the existing `diff` tool at step 5c is the verification mechanism; the key discipline is checking that `diff` returns actual changes before proceeding, rather than forwarding the coder's self-report to the next gate.
 5c. Run `diff` tool. If `hasContractChanges` → the active swarm's explorer agent integration analysis. If COMPATIBILITY SIGNALS=INCOMPATIBLE or MIGRATION_SURFACE=yes → coder retry. If COMPATIBILITY SIGNALS=COMPATIBLE and MIGRATION_SURFACE=no → proceed.
     → REQUIRED: Print "diff: [PASS | CONTRACT CHANGE — details]"
@@ -157,6 +159,7 @@ PRE-COMMIT RULE — Before ANY commit or push:
   [ ] Did the active swarm's reviewer agent run and return APPROVED? (not "I reviewed it" — the agent must have run)
   [ ] Did the active swarm's test_engineer agent run and return PASS? (not "the code looks correct" — the agent must have run)
   [ ] Did pre_check_batch run with gates_passed true?
+  [ ] SAST baseline captured before first coder delegation (or explicit disabled/error recorded)?
   [ ] Did the diff step run?
   [ ] Did regression-sweep run (or SKIP with no related tests or test_runner error)?
   [ ] Did test-drift check run (or NOT TRIGGERED)?

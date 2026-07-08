@@ -17,7 +17,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../../utils/logger';
-import { SandboxError, type SandboxExecutor } from '../executor';
+import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
 
 /**
  * Error codes from spawnSync that indicate sandbox-exec is unavailable.
@@ -105,9 +105,13 @@ function sbplEscapePath(path: string): string {
 }
 
 /**
- * Build a sandbox-exec profile string for the given scope paths and temp dir.
+ * Build a sandbox-exec profile string for the given scope paths, temp dir, and optional env overrides.
  */
-function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
+function buildSandboxProfile(
+	scopePaths: string[],
+	tempDir: string,
+	envOverrides?: Record<string, string | null>,
+): string {
 	// Collect unique paths to allow read-write
 	const rwPaths = [...scopePaths];
 	if (tempDir) {
@@ -120,6 +124,28 @@ function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
 		.map((p) => `(allow file-write* (subpath "${sbplEscapePath(p)}"))`)
 		.join('\n');
 
+	// Build SBPL env override primitives.
+	// (setenv KEY "VALUE") sets a var; (unsetenv KEY) removes it.
+	// Keys are validated to prevent SBPL syntax injection (parentheses, etc.).
+	// Values are embedded inside a double-quoted SBPL string, so escape double quotes.
+	const envLines: string[] = [];
+	if (envOverrides) {
+		for (const [key, value] of Object.entries(envOverrides)) {
+			// Reject invalid env var names silently — invalid keys cannot be safely
+			// interpolated into SBPL syntax.
+			if (!isValidEnvKey(key)) {
+				continue;
+			}
+			if (value === null) {
+				envLines.push(`(unsetenv ${key})`);
+			} else {
+				// Escape double quotes and backslashes for SBPL double-quoted string
+				const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				envLines.push(`(setenv ${key} "${escaped}")`);
+			}
+		}
+	}
+
 	// Core profile: allow non-file ops (network, IPC, process creation) via (allow default),
 	// allow system ro paths, deny file-writes outside the declared scope paths
 	const profile = `(version 1)
@@ -130,6 +156,7 @@ function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
 (allow file-read* (subpath "/lib"))
 (allow file-read* (subpath "/lib64"))
 ${rwAllowLines}
+${envLines.join('\n')}
 (deny file-write*)`;
 
 	return profile;
@@ -205,10 +232,17 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	 * @param command   - Raw shell command to execute inside the sandbox
 	 * @param scopePaths - Additional scope paths to bind (merged with constructor scope)
 	 * @param tempDir   - Optional temp directory override
+	 * @param envOverrides - Optional per-call env overrides: string sets the var, null unsets it.
+	 *                      When omitted, no per-call env override is applied.
 	 * @returns A sandbox-exec wrapped command string ready for shell execution,
 	 *          or the raw command string when the sandbox is unavailable (passthrough mode)
 	 */
-	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
+	wrapCommand(
+		command: string,
+		scopePaths: string[],
+		tempDir?: string,
+		envOverrides?: Record<string, string | null>,
+	): string {
 		// Re-check availability before each wrap
 		if (!this._available) {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
@@ -226,7 +260,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		const temp = tempDir ?? this._tempDir ?? os.tmpdir();
 		const allScopes = [...this._scopePaths, ...scopePaths];
 
-		const profile = buildSandboxProfile(allScopes, temp);
+		const profile = buildSandboxProfile(allScopes, temp, envOverrides);
 
 		// Write profile to a dedicated temp directory (mkdtempSync ensures a unique dir per call)
 		let profilePath: string;

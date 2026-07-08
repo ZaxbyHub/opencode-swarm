@@ -421,6 +421,9 @@ mock.module('node:fs', () => ({
 | **`src/hooks/delegate-ack-collector.ts`** | **delegate ack internals** | **FR-011 delegate-ack-collector hook tests** |
 | **`src/hooks/delegate-directive-injection.ts`** | **delegate directive injection internals** | **FR-011 delegate-directive-injection hook tests** |
 | **`src/hooks/knowledge-reinforcement.ts`** | **knowledge-reinforcement internals** | **FR-011 knowledge-reinforcement hook tests** |
+| **`src/utils/bun-compat.ts`** | **`mergeEnvForChild`** | **FR-202 spawn env-override helper** |
+| **`src/sandbox/executor.ts`** | **`isValidEnvKey`** | **FR-203 sandbox key validation** |
+| **`src/worktree/core.ts`** | **`removeLaneProfileFromDisk`, `writeLaneProfileToDisk`** | **FR-201 + FR-205 lane profile materialization + teardown** |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 
@@ -484,6 +487,7 @@ The repo maintains several "canonical source + mirror" and "source + registry" s
 
 - **Skills:** `.opencode/skills/<name>/SKILL.md` (operative, loaded by the OpenCode plugin / architect MODE stubs) and `.claude/skills/<name>/SKILL.md` (Claude-side), plus `.agents/` adapter shims.
 - **Bundled skills:** `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`), `package.json#files`, and the `package-smoke` allowlist must all match each other **and** the actual `.opencode/skills/` directory.
+- **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol.
 - **Tools / commands / agents:** implementation, registries, and per-agent maps (invariant 11).
 
 Two failures motivated the automated check:
@@ -502,6 +506,7 @@ Two failures motivated the automated check:
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |
+| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry | `src/config/qa-gate-pipeline.ts` |
 
 ### Rules
 

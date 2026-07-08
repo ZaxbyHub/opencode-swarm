@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
 import { type AgentName, ALL_AGENT_NAMES } from './constants';
 
 /**
@@ -1099,6 +1100,49 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** G2 (#1715): action when a knowledge entry sits at the confidence floor
+	 * (0.1) with a net-negative outcome signal. Previously confidence bumps
+	 * dead-ended with no consequence; this closes the loop.
+	 * - `demote` (default): strip retrieval `statusBoost` via the
+	 *   `confidence_floor_demoted` flag — reversible.
+	 * - `quarantine`: route through `quarantineEntry` (disruptive).
+	 * - `none`: legacy dead-end behavior. */
+	confidence_floor_action: z
+		.enum(['none', 'demote', 'quarantine'])
+		.default('demote'),
+	/** G2: minimum total outcome-evidence count required before acting on a
+	 * floor entry (avoids demoting brand-new entries with one stray negative). */
+	confidence_floor_min_outcomes: z.number().int().min(0).default(3),
+	/** G2: outcome-signal threshold below which a floor entry is acted on
+	 * (`computeOutcomeSignal` returns (-1, 1); net-negative is `< 0`). */
+	confidence_floor_signal_threshold: z.number().min(-1).max(1).default(0),
+	/** G3 (#1715): action when a knowledge entry's contradicted count crosses
+	 * the threshold within the window. `tag_only` preserves legacy behavior
+	 * (curator tags, no event/count action); `quarantine` auto-quarantines. */
+	contradiction_threshold_action: z
+		.enum(['tag_only', 'quarantine'])
+		.default('quarantine'),
+	/** G3: number of `contradicted` events within the window required to fire
+	 * the contradiction-threshold action. */
+	contradiction_quarantine_threshold: z.number().int().positive().default(3),
+	/** G3: window (in days) for counting `contradicted` events toward the
+	 * threshold. */
+	contradiction_quarantine_window_days: z.number().int().positive().default(30),
+	/** G7 (#1716): minimum consecutive net-negative phase evaluations
+	 * required to demote a `promoted` entry to `established`. Each phase
+	 * evaluation where the entry's outcome signal is at or below
+	 * `promoted_demotion_signal_threshold` increments the counter; a
+	 * non-negative phase resets it to 0. */
+	promoted_demotion_min_negative_phases: z.number().int().positive().default(3),
+	/** G7 (#1716): outcome-signal threshold at or below which a promoted
+	 * entry's `recent_negative_phase_count` increments for the current phase.
+	 * Defaults to `OUTCOME_BLOCK_THRESHOLD` (-0.3) — the same value that
+	 * blocks promotion — so promotion and demotion share one threshold. */
+	promoted_demotion_signal_threshold: z
+		.number()
+		.min(-1)
+		.max(1)
+		.default(OUTCOME_BLOCK_THRESHOLD),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({
@@ -1932,6 +1976,53 @@ export const WorktreeIsolationConfigSchema = z.object({
 	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
 	worktree_dir: z.string().optional(),
 	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+	/**
+	 * FR-104 SC-111: Release a serialized session after this many successful
+	 * dispatches have completed and merged back from that session.
+	 */
+	serialization_release_after_dispatches: z
+		.number()
+		.int()
+		.positive()
+		.default(5),
+	/**
+	 * FR-104 SC-112: Release a serialized session after this many milliseconds
+	 * have elapsed since the session was first serialized (even if zero
+	 * dispatches have succeeded).
+	 */
+	serialization_release_after_ms: z.number().int().positive().default(60_000),
+	/**
+	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
+	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride,
+	 * plus any custom env_overrides and cache_redirects merged in.
+	 * Disabled by default — zero behavior change when off.
+	 */
+	runtime_isolation: z
+		.object({
+			/** Master gate — must be true for any profile injection to occur. */
+			enabled: z.boolean().default(false),
+			/**
+			 * Base port for lane 0. Lanes get PORT = port_base + laneIndex * port_stride.
+			 * If omitted, no PORT variable is set.
+			 */
+			port_base: z.number().int().nonnegative().max(65535).optional(),
+			/** Stride between lane ports. Default 1. */
+			port_stride: z.number().int().positive().default(1),
+			/**
+			 * Custom env var overrides applied to every lane.
+			 * Values are set verbatim; null values unset the variable.
+			 * Merged after the PORT assignment so lanes can override it.
+			 */
+			env_overrides: z.record(z.string(), z.string()).optional(),
+			/**
+			 * Cache directory redirections: map of base path → lane-suffixed path.
+			 * For each entry, the lane gets the redirected path as an env var
+			 * named after the key (e.g. `{ "XDG_CACHE_HOME": "/path/to/base" }` →
+			 * lane gets `XDG_CACHE_HOME=/lane/cache/path`).
+			 */
+			cache_redirects: z.record(z.string(), z.string()).optional(),
+		})
+		.optional(),
 });
 
 export type WorktreeIsolationConfig = z.infer<
@@ -1957,7 +2048,7 @@ export const LeanTurboConfigSchema = z.object({
 	/** Allow docs-only phases when reviewer is not available. */
 	allow_docs_only_without_reviewer: z.boolean().default(false),
 	/** Use worktree isolation for parallel coders. When true, each lane gets its own worktree. */
-	worktree_isolation: z.boolean().default(false),
+	worktree_isolation: z.boolean().default(true),
 	/** Branch merge strategy after lane worktree completion. */
 	merge_strategy: z
 		.enum(['merge', 'rebase', 'cherry-pick'])
@@ -1965,6 +2056,23 @@ export const LeanTurboConfigSchema = z.object({
 		.optional(),
 	/** Optional user-specified worktree directory override. */
 	worktree_dir: z.string().optional(),
+	/** Dependency preparation strategy for lanes when worktree_isolation is enabled. */
+	deps_strategy: z.enum(['skip', 'copy', 'link']).optional(),
+	/**
+	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
+	 * Mirrors WorktreeIsolationConfigSchema.runtime_isolation for Lean Turbo lanes.
+	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride.
+	 * Disabled by default — zero behavior change when off.
+	 */
+	runtime_isolation: z
+		.object({
+			enabled: z.boolean().default(false),
+			port_base: z.number().int().nonnegative().max(65535).optional(),
+			port_stride: z.number().int().positive().default(1),
+			env_overrides: z.record(z.string(), z.string()).optional(),
+			cache_redirects: z.record(z.string(), z.string()).optional(),
+		})
+		.optional(),
 });
 
 export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;

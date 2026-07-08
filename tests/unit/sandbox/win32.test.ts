@@ -12,6 +12,8 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const isWin = process.platform === 'win32';
 
@@ -179,6 +181,176 @@ describe('NativeWindowsSandboxExecutor', () => {
 			const executor = new NativeWindowsSandboxExecutor([]);
 			expect(() => executor.wrapCommand('echo hello', [])).toThrow();
 		});
+	});
+
+	// -----------------------------------------------------------------------
+	// 3b. wrapCommand() envOverrides forwarding
+	// -----------------------------------------------------------------------
+
+	describe('wrapCommand() envOverrides forwarding', () => {
+		test.skipIf(!isWin)(
+			'forwards envOverrides to PowerShell fallback when runner unavailable',
+			() => {
+				(
+					runnerInternals as { findRunnerBinary: () => string | null }
+				).findRunnerBinary = () => null;
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable()) return;
+				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+					MY_VAR: 'my_value',
+				});
+				// Should forward to PowerShell fallback which sets $env:MY_VAR
+				expect(wrapped.toLowerCase()).toContain('powershell');
+				expect(wrapped).toContain("$env:MY_VAR = 'my_value';");
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'forwards envOverrides to strong path (runner binary) when runner available',
+			() => {
+				// Keep runner available (use real findRunnerBinary)
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable() || !executor.hasNativeRunner) return;
+				// The strong path pipes policy JSON to the runner binary
+				// envOverrides are forwarded as the 4th parameter
+				const wrapped = executor.wrapCommand(
+					'echo hello',
+					['/scope'],
+					undefined,
+					{ MY_VAR: 'runner_value' },
+				);
+				// Should use the runner binary path (cmd /c ... | runner ...)
+				expect(wrapped).toContain('runner');
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'applies envOverrides to policy JSON on strong path (runner binary)',
+			() => {
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable() || !executor.hasNativeRunner) return;
+
+				const wrapped = executor.wrapCommand(
+					'echo hello',
+					[process.cwd()],
+					undefined,
+					{ MY_VAR: 'runner_value' },
+				);
+
+				// Extract the policy file path from the wrapped command.
+				// The command format is: cmd /c "type <policyFile> | <binary> ..."
+				const policyFileMatch = wrapped.match(/type (.+?) \|/);
+				expect(policyFileMatch).not.toBeNull();
+				const policyFile = policyFileMatch![1];
+
+				// Read the policy JSON and verify the env override is present.
+				const policyContent = fs.readFileSync(policyFile, 'utf-8');
+				const policy = JSON.parse(policyContent);
+				expect(policy.env_overrides).toBeDefined();
+				expect(policy.env_overrides.MY_VAR).toBe('runner_value');
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'skips null envOverrides values on strong path (no unset mechanism in runner)',
+			() => {
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable() || !executor.hasNativeRunner) return;
+
+				const wrapped = executor.wrapCommand(
+					'echo hello',
+					[process.cwd()],
+					undefined,
+					{ MY_VAR_TO_UNSET: null },
+				);
+
+				// Extract and read the policy file
+				const policyFileMatch = wrapped.match(/type (.+?) \|/);
+				expect(policyFileMatch).not.toBeNull();
+				const policyFile = policyFileMatch![1];
+
+				const policyContent = fs.readFileSync(policyFile, 'utf-8');
+				const policy = JSON.parse(policyContent);
+				// null values should not be set in env_overrides (runner has no unset)
+				expect(policy.env_overrides.MY_VAR_TO_UNSET).toBeUndefined();
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'invalid env var key is silently skipped on strong path',
+			() => {
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable() || !executor.hasNativeRunner) return;
+
+				const wrapped = executor.wrapCommand(
+					'echo hello',
+					[process.cwd()],
+					undefined,
+					{ 'FOO:BAR': 'value' },
+				);
+
+				// Extract and read the policy file
+				const policyFileMatch = wrapped.match(/type (.+?) \|/);
+				expect(policyFileMatch).not.toBeNull();
+				const policyFile = policyFileMatch![1];
+
+				const policyContent = fs.readFileSync(policyFile, 'utf-8');
+				const policy = JSON.parse(policyContent);
+				// Invalid key must not appear in env_overrides
+				expect(policy.env_overrides['FOO:BAR']).toBeUndefined();
+				expect(
+					Object.keys(policy.env_overrides).some((k) => k.includes('FOO')),
+				).toBe(false);
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'value with single quotes doubles them in PowerShell fallback',
+			() => {
+				(
+					runnerInternals as { findRunnerBinary: () => string | null }
+				).findRunnerBinary = () => null;
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable()) return;
+				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+					MY_VAR: "it's",
+				});
+				// Single quotes in PowerShell single-quoted strings are escaped by doubling
+				expect(wrapped).toContain("$env:MY_VAR = 'it''s';");
+			},
+		);
+
+		test.skipIf(!isWin)(
+			'invalid env var key is rejected silently in PowerShell fallback',
+			() => {
+				(
+					runnerInternals as { findRunnerBinary: () => string | null }
+				).findRunnerBinary = () => null;
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				if (!executor.isAvailable()) return;
+				// Key with colon is invalid per POSIX: [a-zA-Z_][a-zA-Z0-9_]*
+				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+					'FOO:BAR': 'value',
+				});
+				// Invalid key must not appear in the wrapped command
+				expect(wrapped).not.toContain('FOO:BAR');
+				expect(wrapped).not.toContain('$env:FOO');
+			},
+		);
 	});
 
 	// -----------------------------------------------------------------------
@@ -784,6 +956,89 @@ describe('WindowsSandboxExecutor', () => {
 			expect(executor.isAvailable()).toBe(true); // Fail loud if mock did not apply
 			const wrapped = executor.wrapCommand('Copy-Item src.txt dest.txt', []);
 			expect(wrapped.toLowerCase()).toContain('invoke-expression');
+		});
+	});
+
+	describe('wrapCommand() envOverrides', () => {
+		test('omitted envOverrides produces no per-call env variable commands', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', []);
+			// Should NOT have any user-defined per-call env vars (only system vars like TEMP, PATH)
+			expect(wrapped).not.toContain('$env:MY_VAR');
+			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+		});
+
+		test('undefined envOverrides produces no per-call env variable commands', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand(
+				'echo hello',
+				[],
+				undefined,
+				undefined,
+			);
+			expect(wrapped).not.toContain('$env:MY_VAR');
+			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+		});
+
+		test('empty envOverrides {} produces no per-call env variable commands', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {});
+			expect(wrapped).not.toContain('$env:MY_VAR');
+			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+		});
+
+		test('string value emits $env:KEY = VALUE in the PowerShell script', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+				MY_VAR: 'my_value',
+			});
+			// Should have $env:MY_VAR = 'my_value';
+			expect(wrapped).toContain("$env:MY_VAR = 'my_value';");
+		});
+
+		test('null value emits Remove-Item Env:KEY in the PowerShell script', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+				MY_VAR: null,
+			});
+			// Should have Remove-Item Env:MY_VAR
+			expect(wrapped).toContain('Remove-Item Env:MY_VAR');
+		});
+
+		test('multiple env overrides are all present', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+				VAR_A: 'value_a',
+				VAR_B: null,
+			});
+			expect(wrapped).toContain("$env:VAR_A = 'value_a';");
+			expect(wrapped).toContain('Remove-Item Env:VAR_B');
+		});
+
+		test('value with spaces is preserved in single-quoted PowerShell string', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+				MY_VAR: 'hello world',
+			});
+			// PowerShell single-quoted strings preserve content verbatim
+			expect(wrapped).toContain("$env:MY_VAR = 'hello world';");
+		});
+
+		test('value with single quotes doubles them for PS string escaping', () => {
+			mockProbeAvailable();
+			const executor = new WindowsSandboxExecutor([]);
+			const wrapped = executor.wrapCommand('echo hello', [], undefined, {
+				MY_VAR: "o'clock",
+			});
+			// Single quotes in PS single-quoted strings are escaped by doubling
+			expect(wrapped).toContain("$env:MY_VAR = 'o''clock';");
 		});
 	});
 });

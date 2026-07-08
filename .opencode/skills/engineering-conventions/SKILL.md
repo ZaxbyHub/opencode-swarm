@@ -102,7 +102,7 @@ The `commit-pr` skill Tier 1 - quality section pins the biome command to the pac
 The cross-tree skill mirror contract is the authoritative registry at `src/config/skill-mirrors.ts`. If your PR modifies `.opencode/skills/<X>/SKILL.md` or `.claude/skills/<X>/SKILL.md`, consult that file to determine the contract kind for skill `<X>`:
 
 - **`identical`:** `.opencode` and `.claude` SKILL.md must be byte-identical (the `canonical` field records which side wins when they drift). Update both trees byte-for-byte in the same commit. Verify with `bun run drift:check`. PR #1512 (lane-dispatch) introduced drift in council/deep-dive by only updating `.opencode` — a contract violation.
-- **`divergent`:** both must exist but content intentionally differs per runtime. Examples: `engineering-conventions` is divergent (different frontmatter, different conventions per Claude Code vs OpenCode); `writing-tests` is divergent pending maintainer confirmation (#1497).
+- **`divergent`:** both must exist but content intentionally differs per runtime. Examples: `engineering-conventions` is divergent (different frontmatter, different conventions per Claude Code vs OpenCode). `writing-tests` is classified divergent because the additional-contract model does not yet have an adapter kind, but operationally `.opencode/skills/writing-tests/SKILL.md` is canonical and `.claude/skills/writing-tests/SKILL.md` delegates to it.
 - **`opencode-only`:** `.opencode` exists; no `.claude` mirror expected. Examples: `loop` (would shadow Claude Code's built-in `/loop`), `running-tests` (OpenCode-runtime guidance).
 - **Adapter shim pattern:** for architect MODE skills like `swarm-pr-review` and `swarm-pr-feedback`, the `.claude` and `.agents` files are thin adapter shims that delegate to the canonical `.opencode` file via `expectedCanonicalRef`. When updating these, the canonical content goes in `.opencode`; the adapter shim typically needs no change unless the cross-tree delegation interface changes.
 
@@ -127,3 +127,48 @@ When a sandbox executor (`src/sandbox/{linux,macos,win32}/*.ts`) interpolates en
 - Scope-materialization for lane-scoped resources.
 
 A divergence between primary and fallback that is not exercised by a parity test is a regression. The existing per-OS test files `tests/unit/sandbox/{linux,macos,win32}.test.ts` must continue to cover both the primary and fallback paths after every env-affecting change — extend these tests rather than relying on dedicated sandbox-envoverride test files that may or may not exist in your branch.
+
+## SAST baseline capturing (differential scanning)
+
+The `sast_scan` tool supports `capture_baseline: true` with a `phase` parameter
+to snapshot pre-existing findings. Subsequent scans with the same `phase` value
+perform differential checking — they only fail on **new** findings, not
+pre-existing ones.
+
+### When to capture a baseline
+
+- **Before Phase 1 code changes.** The baseline must reflect the state of the
+  codebase *before* any new work is done. This ensures the differential scan
+  catches findings introduced by the current session's changes.
+
+### Critical safety guard
+
+**NEVER capture a baseline after code changes have been made in a phase.**
+A baseline captured post-edit silently encodes the very bugs the scan is meant
+to catch as "pre-existing," suppressing them indefinitely. This turns the SAST
+gate into theater.
+
+### How to use it
+
+1. Identify the files to scan. In a phase, use the union of declared task-scope
+   files plus files the coder is expected to touch. Derive the list from
+   `declare_scope` outputs, `git diff --name-only`, or the phase's task specs.
+2. Before any coder delegation in Phase 1, capture the baseline:
+   ```
+   sast_scan(directory, changed_files=[...], capture_baseline=true, phase=1)
+   ```
+3. After coder work, scan the same file set:
+   ```
+   sast_scan(directory, changed_files=[...], phase=1)
+   ```
+   This returns only NEW findings (absent from the baseline).
+4. If a pre-existing finding is legitimately fixed, the baseline can be
+   re-captured at the start of the next phase with the updated file list.
+
+### Why this matters
+
+During PR #1704 review, SAST flagged `RegExp.prototype.exec()` as
+"command injection via child_process.exec()" — a false positive that blocked
+the gate. With a baseline captured before the phase, this pre-existing false
+positive would have been suppressed, and only genuinely new findings would
+surface.

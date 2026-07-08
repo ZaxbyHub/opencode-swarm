@@ -352,8 +352,8 @@ describe('AC-1: config acceptance — worktree_isolation triggers worktree mode'
 		expect(mocks.provisionCalls.length).toBe(0);
 	});
 
-	test('DEFAULT_LEAN_TURBO_CONFIG has worktree_isolation false', () => {
-		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(false);
+	test('DEFAULT_LEAN_TURBO_CONFIG has worktree_isolation true', () => {
+		expect(DEFAULT_LEAN_TURBO_CONFIG.worktree_isolation).toBe(true);
 	});
 
 	test('config schema accepts worktree_isolation boolean', () => {
@@ -1140,38 +1140,23 @@ describe('AC-8: guardrails safety — git worktree remove --force blocked at run
 });
 
 describe('AC-8: supplemental static source checks — no --force in worktree source', () => {
-	test('worktree.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/worktree.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
-	test('runner.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/runner.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
-	test('merge-back.ts source does not contain "worktree remove --force"', () => {
-		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/merge-back.ts'),
-			'utf-8',
-		);
-		expect(source).not.toContain('worktree remove --force');
-	});
-
-	test('removeWorktree function calls git worktree remove WITHOUT --force flag', () => {
+	test('removeWorktree escalates to --force only under opt-in + containment guard (#1708)', () => {
 		// Implementation moved to src/worktree/core.ts; lean/worktree.ts is a thin re-export.
+		// Issue #1708 changed the old "never --force" invariant: removeWorktree now
+		// offers an opt-in forced fallback, but ONLY when the target resolves inside
+		// the trusted swarm worktree base. Assert both the escalation exists AND its
+		// guards are present, rather than the (now obsolete) blanket "no --force".
 		const source = fs.readFileSync(
 			path.resolve(__dirname, '../../../../src/worktree/core.ts'),
 			'utf-8',
 		);
-		expect(source).toContain("'worktree', 'remove'");
-		expect(source).not.toMatch(/'worktree',\s*'remove'.*--force/);
+		// Default non-force removal path is still present.
+		expect(source).toContain("['worktree', 'remove', worktreePath]");
+		// The forced-fallback removal exists (issue #1708).
+		expect(source).toMatch(/'worktree',\s*'remove',\s*'--force'/);
+		// ...but is gated behind the opt-in flag AND the trusted-base containment check.
+		expect(source).toContain('options?.force');
+		expect(source).toContain('isPathUnderSwarmWorktreeBase(');
 	});
 });
 
