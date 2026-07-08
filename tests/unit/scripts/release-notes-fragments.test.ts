@@ -13,6 +13,7 @@ import {
 	filterPendingFragmentPaths,
 	MARKER_END,
 	MARKER_START,
+	mergeCandidateLists,
 	stripCustomReleaseNotesBlock,
 	upsertReleaseNotesBlock,
 } from '../../../scripts/release-notes-fragments.mjs';
@@ -109,6 +110,43 @@ describe('extractCommitShasFromBody', () => {
 		// Confirm PR-number extractor finds nothing (proving the gap the new
 		// function closes).
 		expect(extractCandidatePrNumbers(body)).toEqual([]);
+	});
+	test('does NOT extract SHAs from /compare/ URLs (changelog section headers)', () => {
+		// CHANGELOG.md lines like:
+		//   ## [7.109.4](https://github.com/owner/repo/compare/v7.109.3...v7.109.4)
+		// contain 40-hex-like version strings after /compare/, but the URL
+		// path is /compare/ not /commit/, so they must NOT be extracted.
+		const body = [
+			'## [7.109.4](https://github.com/owner/repo/compare/v7.109.3...v7.109.4) (2026-07-08)',
+			`## also this [compare](https://github.com/owner/repo/compare/${sha40}...${sha40b})`,
+		].join('\n');
+		expect(extractCommitShasFromBody(body)).toEqual([]);
+	});
+});
+
+describe('mergeCandidateLists', () => {
+	test('returns direct candidates when shaResolved is empty', () => {
+		expect(mergeCandidateLists([1, 2, 3], [])).toEqual([1, 2, 3]);
+	});
+	test('appends non-overlapping shaResolved entries after direct', () => {
+		expect(mergeCandidateLists([1, 2, 3], [4, 5])).toEqual([1, 2, 3, 4, 5]);
+	});
+	test('deduplicates: shaResolved entries already in direct are dropped', () => {
+		expect(mergeCandidateLists([1, 2, 3], [2, 4])).toEqual([1, 2, 3, 4]);
+	});
+	test('preserves first-seen order from direct then shaResolved', () => {
+		expect(mergeCandidateLists([50, 10], [30, 10, 20])).toEqual([50, 10, 30, 20]);
+	});
+	test('returns shaResolved when direct is empty', () => {
+		expect(mergeCandidateLists([], [7, 8, 9])).toEqual([7, 8, 9]);
+	});
+	test('returns empty when both inputs are empty', () => {
+		expect(mergeCandidateLists([], [])).toEqual([]);
+	});
+	test('handles non-array inputs gracefully', () => {
+		expect(mergeCandidateLists(null as unknown as number[], [1, 2])).toEqual([1, 2]);
+		expect(mergeCandidateLists([1, 2], null as unknown as number[])).toEqual([1, 2]);
+		expect(mergeCandidateLists(null as unknown as number[], null as unknown as number[])).toEqual([]);
 	});
 });
 
