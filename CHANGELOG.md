@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.110.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.4...v7.110.0) (2026-07-08)
+
+
+### Features
+
+* **skills:** add swarm-ci-monitor skill for end-to-end CI monitoring and squash-merge closeout ([ba948b4](https://github.com/ZaxbyHub/opencode-swarm/commit/ba948b40159e1641d158d2efbd815abac1f94ad2))
+
 ## [7.109.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.3...v7.109.4) (2026-07-08)
 
 
