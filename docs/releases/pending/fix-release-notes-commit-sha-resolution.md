@@ -22,13 +22,30 @@
 - **`.github/workflows/release-and-publish.yml`**: Added `pull-requests: read`
   permission to the `update-release-notes` job so `gh api .../commits/{sha}/pulls`
   succeeds (the new commit→PR resolution needs to read PR metadata).
-- **`tests/unit/scripts/release-notes-fragments.test.ts`**: Added 9 new unit
-  tests for `extractCommitShasFromBody` covering normal extraction, case
-  normalisation, empty input, short-SHA non-extraction, deduplication, multiple
-  SHAs, invalid-length strings, non-hex characters, and a real-world
-  release-please body format. Also added a rerun-defence test proving that
-  commit SHAs cited inside a previously-injected custom block are stripped
-  before scanning, preventing spurious re-resolution on subsequent runs.
+  - Extracted `isValidPrNumber(n)` as a pure exported helper from the inline
+    guard in `resolveCommitShasToPrNumbers`, making the PR-number validation
+    logic independently testable.
+  - Extracted `resolveAllCandidates(strippedBody, log)` shared helper used by
+    both `modeUpdatePr` and `modeUpdateRelease`, eliminating the duplicated
+    direct-extraction + SHA-resolution + merge blocks.
+  - Added `--slurp` flag alongside `--paginate` in the `gh api` call so that
+    multi-page results are correctly wrapped in a single JSON array (without
+    `--slurp`, `--paginate` produces concatenated arrays that `JSON.parse()`
+    cannot handle).
+  - Added `stdin: 'ignore'` to the `ghJson` and `ghText` subprocess wrappers
+    per the bounded-subprocess invariant (AGENTS.md §3).
+- **`tests/unit/scripts/release-notes-fragments.test.ts`** and
+  **`tests/unit/scripts/release-notes-fragments-sha.test.ts`**: The test suite
+  was split across two files (both under 500 lines per FR-006). The new SHA
+  helpers are tested in 26 tests: 10 for `extractCommitShasFromBody` (normal
+  extraction, case normalisation, empty input, short-SHA non-extraction,
+  deduplication, multiple SHAs, invalid-length strings, non-hex characters,
+  real-world release-please format, and `/compare/` URL rejection), 8 for
+  `mergeCandidateLists` (dedup, ordering, empty inputs, non-array handling),
+  and 8 for the extracted `isValidPrNumber` guard helper (positive integers,
+  zero, negative, NaN, Infinity, non-number types, digit-cap boundary). A
+  rerun-defence test proves that commit SHAs cited inside a previously-injected
+  custom block are stripped before scanning.
 
 ## Why
 
