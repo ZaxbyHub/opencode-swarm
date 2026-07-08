@@ -65,6 +65,7 @@ mock.module('../../../src/config/schema.js', () => ({
 		}
 		return name;
 	}),
+	GATE_CONFIG_KNOWN_SECTION_KEYS: {},
 }));
 mock.module('../../../src/services/run-memory.js', () => ({
 	getRunMemorySummary: mock(async () => null),

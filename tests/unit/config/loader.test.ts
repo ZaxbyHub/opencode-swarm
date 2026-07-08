@@ -744,6 +744,7 @@ describe('config/loader', () => {
 				expect(
 					Array.isArray(result.gates?.placeholder_scan.deny_patterns),
 				).toBe(true);
+				expect(result.gates?.quality_budget.enabled).toBe(true);
 
 				const warnings = warnSpy.mock.calls.flat().join('\n');
 				expect(warnings).toContain('gates.placeholder_scan');
@@ -779,6 +780,7 @@ describe('config/loader', () => {
 
 				expect(result.max_iterations).toBe(6);
 				expect(result.gates?.syntax_check.enabled).toBe(false);
+				expect(result.gates?.quality_budget.enabled).toBe(true);
 
 				const warnings = warnSpy.mock.calls.flat().join('\n');
 				expect(warnings).toContain('gates.placeholder_scn');
@@ -817,12 +819,77 @@ describe('config/loader', () => {
 				expect(result.max_iterations).toBe(6);
 				expect(result.gates?.placeholder_scan.enabled).toBe(false);
 				expect(result.gates?.placeholder_scan.max_allowed_findings).toBe(0);
+				expect(result.gates?.quality_budget.enabled).toBe(true);
 
 				const warnings = warnSpy.mock.calls.flat().join('\n');
 				expect(warnings).toContain(
 					'gates.placeholder_scan.max_allowed_finding',
 				);
 				expect(warnings).toContain('Other config sections remain active');
+			} finally {
+				warnSpy.mockRestore();
+				fs.rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it('handles gates: null by removing gates and using defaults', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 5,
+					gates: null,
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			try {
+				const result = loadPluginConfig(projectDir);
+
+				expect(result.max_iterations).toBe(5);
+				// gates: null is stripped by sanitizeGatesConfig; gates becomes undefined
+				expect(result.gates).toBeUndefined();
+
+				const warnings = warnSpy.mock.calls.flat().join('\n');
+				expect(warnings).toContain('expected an object');
+			} finally {
+				warnSpy.mockRestore();
+				fs.rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it('handles gates: [] (empty array) by removing gates and using defaults', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					max_iterations: 5,
+					gates: [],
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			try {
+				const result = loadPluginConfig(projectDir);
+
+				expect(result.max_iterations).toBe(5);
+				// gates: [] is stripped by sanitizeGatesConfig; gates becomes undefined
+				expect(result.gates).toBeUndefined();
+
+				const warnings = warnSpy.mock.calls.flat().join('\n');
+				expect(warnings).toContain('expected an object');
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });

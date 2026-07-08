@@ -306,6 +306,34 @@ describe('Config Doctor Service', () => {
 			expect(typoFinding).toBeDefined();
 			expect(typoFinding!.description).toContain('ignored by the loader');
 		});
+
+		it('should surface unknown gates section name that the loader ignores', () => {
+			createTestConfig(tempDir, {
+				max_iterations: 5,
+				gates: {
+					syntax_check: { enabled: true },
+					unknown_gate_type: { enabled: true },
+				},
+			});
+			const config = createTestConfigObj({
+				max_iterations: 5,
+				gates: {
+					syntax_check: { enabled: true },
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			const unknownSectionFinding = result.findings.find(
+				(f) =>
+					f.id === 'unknown-gates-section' &&
+					f.path === 'gates.unknown_gate_type',
+			);
+			expect(unknownSectionFinding).toBeDefined();
+			expect(unknownSectionFinding!.description).toContain(
+				'ignored by the loader',
+			);
+		});
 	});
 
 	describe('Swarms validation — empty and path-traversal (AC-4 SC-004)', () => {
