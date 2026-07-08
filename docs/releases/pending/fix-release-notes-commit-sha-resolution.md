@@ -8,7 +8,7 @@
     full 40-char commit SHAs from GitHub `/commit/<sha>` URL patterns in the
     release body. Short 7-char labels in link text are not extracted — only the
     full SHA embedded in the URL target is used.
-  - Added `resolveCommitShasToNprNumbers(shas, log)`: for each SHA, calls
+  - Added `resolveCommitShasToPrNumbers(shas, log)`: for each SHA, calls
     `GET /repos/{owner}/{repo}/commits/{sha}/pulls` via `gh api` to find the
     PR(s) that introduced it, then collects their numbers for fragment lookup.
   - Updated `modeUpdatePr` and `modeUpdateRelease` to first try the existing
