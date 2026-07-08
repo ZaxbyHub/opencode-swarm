@@ -320,6 +320,8 @@ describe('resolveAllCandidates (no commit SHAs path)', () => {
 		const body = 'changes from (#10) and (#20)';
 		const result = resolveAllCandidates(body, log);
 		expect(result).toEqual([10, 20]);
-		expect(logs.some((m) => m.includes('resolved 0 PR number(s) from commit SHAs'))).toBe(true);
+		expect(
+			logs.some((m) => m.includes('resolved 0 PR number(s) from commit SHAs')),
+		).toBe(true);
 	});
 });
