@@ -5,6 +5,10 @@ import {
 	_test_exports,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../../../src/config/bundled-skills';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 // Mirrors tests/unit/config/bundled-skills.test.ts for the async, init-path
@@ -37,6 +41,11 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 
 	beforeEach(() => {
 		_test_exports.resetBundledProjectSkillSyncCache();
+		// The deferred-warning buffer is module-level (src/services/warning-buffer);
+		// clear it between tests so a prior test's advisoryWarn entry cannot leak
+		// into this one (AGENTS.md Invariant 7 — no cross-test pollution in the
+		// shared bun test-runner process).
+		clearDeferredWarnings();
 		({ dir: projectDir, cleanup: cleanupProject } = createSafeTestDir(
 			'swarm-bundled-skill-async-project-',
 		));
@@ -55,6 +64,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		clearDeferredWarnings();
 		cleanupProject();
 		cleanupPackage();
 	});
@@ -83,9 +93,10 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 				),
 			),
 		).toBe(true);
-		expect(
-			warnOutput.some((m) => m.includes('codebase-review-swarm/SKILL.md')),
-		).toBe(true);
+		// TUI safety (issue #1249 class, epic #1752): success is a routine,
+		// expected event and must NEVER write raw stderr — it now goes through
+		// the debug-gated logger only. Assert silence rather than narration.
+		expect(warnOutput).toEqual([]);
 	});
 
 	test('updates an existing bundled project skill from the package source', async () => {
@@ -190,8 +201,9 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 
 	test('suppresses the failure warning when quiet is true', async () => {
 		// Force a sync failure (a file where a directory is expected) AND pass
-		// quiet=true. The catch block only warns `if (!quiet)`, so this asserts
-		// the init-path quiet branch stays silent while still failing open.
+		// quiet=true. Under quiet the failure routes to advisoryWarn (buffered
+		// for /swarm diagnose, never raw stderr), so this asserts the init-path
+		// quiet branch stays silent on stderr while still failing open.
 		const destDir = path.join(
 			projectDir,
 			'.opencode',
@@ -205,6 +217,31 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 			syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot, true),
 		).resolves.toBeUndefined();
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
+		expect(warnOutput).toEqual([]);
+	});
+
+	test('routes the failure to the deferred-warning buffer when quiet is true (advisoryWarn)', async () => {
+		// Epic #1752: under quiet=true a recoverable sync failure must be
+		// surfaced in /swarm diagnose (via advisoryWarn → addDeferredWarning)
+		// rather than silently dropped or written to raw stderr. The verbatim
+		// error string is preserved so the operator can diagnose the cause.
+		const destDir = path.join(
+			projectDir,
+			'.opencode',
+			'skills',
+			'codebase-review-swarm',
+		);
+		fs.mkdirSync(destDir, { recursive: true });
+		fs.writeFileSync(path.join(destDir, 'references'), 'not a directory\n');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot, true);
+
+		const buffered = getDeferredWarnings();
+		expect(
+			buffered.some((m) =>
+				m.includes('Could not install bundled project skills'),
+			),
+		).toBe(true);
 		expect(warnOutput).toEqual([]);
 	});
 

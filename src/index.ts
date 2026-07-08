@@ -211,6 +211,11 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 		// cause is visible, then re-throw so the host still observes the rejection.
 		const stack =
 			err instanceof Error ? (err.stack ?? err.message) : String(err);
+		// Intentional FATAL surface: OpenCode's plugin loader silently drops a
+		// plugin whose entry rejects, leaving the user with no commands/agents
+		// and no visible error (issue #675). Raw stderr here is the one place it
+		// is justified. A biome-ignore(lint/suspicious/noConsole) comment will
+		// be added in PR5 of epic #1752 when noConsole is enabled globally.
 		console.error(
 			'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
 		);
