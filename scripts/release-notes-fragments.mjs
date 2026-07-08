@@ -71,6 +71,40 @@ export function stripCustomReleaseNotesBlock(body) {
 }
 
 /**
+ * Extract full (40-character) commit SHAs from GitHub commit URLs in a body.
+ *
+ * release-please with `changelog-notes-type: "github"` frequently generates
+ * changelog entries that link directly to the merge commit instead of the
+ * source PR, e.g.:
+ *
+ *   * description ([ba948b4](https://github.com/owner/repo/commit/ba948b40...))
+ *
+ * These commit URLs contain a 40-hex SHA that can be used to look up the
+ * associated PR(s) via the GitHub API. Short (7-char) SHA labels shown in
+ * the link text are NOT extracted — only the full 40-char SHA embedded in
+ * the URL is reliable.
+ *
+ * Returns deduplicated SHAs in first-seen order. Does not perform any I/O.
+ * Exported for unit tests.
+ */
+export function extractCommitShasFromBody(body) {
+	if (typeof body !== 'string' || body.length === 0) return [];
+	const seen = new Set();
+	const out = [];
+	// Match /commit/<40-hex> anywhere in the body. The word boundary \b after
+	// the SHA ensures we don't partially match a longer hex string.
+	const re = /\/commit\/([0-9a-f]{40})\b/gi;
+	for (const m of body.matchAll(re)) {
+		const sha = m[1].toLowerCase();
+		if (!seen.has(sha)) {
+			seen.add(sha);
+			out.push(sha);
+		}
+	}
+	return out;
+}
+
+/**
  * Extract candidate PR numbers from a release-please body string.
  *
  * release-please writes changelog entries that reference source PRs as
@@ -292,6 +326,57 @@ function verifyPr(num) {
 }
 
 /**
+ * Resolve a list of commit SHAs to PR numbers via the GitHub REST API.
+ *
+ * release-please with `changelog-notes-type: "github"` often emits commit
+ * SHA links rather than PR-number links. For each SHA we call
+ * `GET /repos/{repo}/commits/{sha}/pulls` to discover which PR(s) introduced
+ * that commit, then collect their numbers for fragment lookup.
+ *
+ * Edge cases handled:
+ * - A commit that maps to multiple PRs (e.g. cherry-picks): all PR numbers
+ *   are collected; each is logged. Fragment de-duplication in
+ *   `collectFragmentsForPrs` ensures a file is never included twice.
+ * - API failures for a given SHA are logged and skipped (non-fatal).
+ * - The GITHUB_REPOSITORY env var provides the repo slug (owner/repo).
+ *   Without it the lookup is skipped gracefully.
+ *
+ * Returns a deduplicated array of PR numbers in first-seen order.
+ */
+function resolveCommitShasToNprNumbers(shas, log) {
+	if (!Array.isArray(shas) || shas.length === 0) return [];
+	const repoSlug = process.env.GITHUB_REPOSITORY;
+	if (!repoSlug) {
+		log('GITHUB_REPOSITORY not set — cannot resolve commit SHAs to PR numbers');
+		return [];
+	}
+	const seen = new Set();
+	const out = [];
+	for (const sha of shas) {
+		const res = tryGhJson(['api', `repos/${repoSlug}/commits/${sha}/pulls`]);
+		if (!res.ok || !Array.isArray(res.value)) {
+			log(`skip SHA ${sha.slice(0, 7)} — API lookup failed`);
+			continue;
+		}
+		const prs = res.value;
+		if (prs.length === 0) {
+			log(`SHA ${sha.slice(0, 7)} — no associated PRs found`);
+			continue;
+		}
+		if (prs.length > 1) {
+			log(`SHA ${sha.slice(0, 7)} — resolves to ${prs.length} PRs: ${prs.map((p) => `#${p.number}`).join(', ')}`);
+		}
+		for (const pr of prs) {
+			if (typeof pr.number === 'number' && pr.number > 0 && !seen.has(pr.number)) {
+				seen.add(pr.number);
+				out.push(pr.number);
+			}
+		}
+	}
+	return out;
+}
+
+/**
  * Read a fragment from the workspace if it exists, otherwise null.
  * Paths are normalized to forward-slash form. The script always runs from
  * the repo root in CI; we resolve relative to the repo root computed from
@@ -364,17 +449,41 @@ async function modeUpdatePr(log) {
 		return 0;
 	}
 	const releasePr = prList.value[0];
-	// Exclude our previously-injected block before scanning, so PR
-	// references inside the injected fragments don't get re-treated as
-	// new source PRs on the next run.
-	const candidates = extractCandidatePrNumbers(
-		stripCustomReleaseNotesBlock(releasePr.body || ''),
-	);
-	if (candidates.length === 0) {
-		log('Release PR body has no PR references — exiting 0');
+	// Strip any previously-injected block before scanning, so PR/commit
+	// references inside the injected fragments are not re-treated as new
+	// source PRs on the next run.
+	const strippedBody = stripCustomReleaseNotesBlock(releasePr.body || '');
+
+	// Primary path: extract explicit PR-number references (e.g. `(#1234)`).
+	const directCandidates = extractCandidatePrNumbers(strippedBody);
+	log(`release PR #${releasePr.number}: found ${directCandidates.length} direct PR ref(s) in body`);
+
+	// Fallback path: release-please with changelog-notes-type "github" often
+	// emits commit SHA links instead of PR-number links. Resolve each SHA to
+	// its associated PR(s) via the GitHub API.
+	const commitShas = extractCommitShasFromBody(strippedBody);
+	log(`release PR #${releasePr.number}: found ${commitShas.length} commit SHA(s) in body`);
+	const shaResolved = commitShas.length > 0
+		? resolveCommitShasToNprNumbers(commitShas, log)
+		: [];
+	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
+
+	// Merge both sets, preserving first-seen order and deduplicating.
+	const seenCandidates = new Set(directCandidates);
+	const allCandidates = [...directCandidates];
+	for (const n of shaResolved) {
+		if (!seenCandidates.has(n)) {
+			seenCandidates.add(n);
+			allCandidates.push(n);
+		}
+	}
+
+	if (allCandidates.length === 0) {
+		log('Release PR body has no PR references (direct or via commit SHAs) — exiting 0');
 		return 0;
 	}
-	const entries = collectFragmentsForPrs(candidates, repoRoot, log);
+	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
 	if (entries.length === 0) {
 		log('No pending fragments found across referenced PRs — exiting 0');
 		return 0;
@@ -413,15 +522,39 @@ async function modeUpdateRelease(log) {
 		return 0;
 	}
 	const releaseBody = rel.value.body || '';
-	// Same exclusion as update-pr — see modeUpdatePr above.
-	const candidates = extractCandidatePrNumbers(
-		stripCustomReleaseNotesBlock(releaseBody),
-	);
-	if (candidates.length === 0) {
-		log('Release body has no PR references — exiting 0');
+	// Strip any previously-injected block before scanning — same defense as
+	// modeUpdatePr: prevents re-scanning our own injected content on re-runs.
+	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
+
+	// Primary path: explicit PR-number references.
+	const directCandidates = extractCandidatePrNumbers(strippedBody);
+	log(`release ${tagName}: found ${directCandidates.length} direct PR ref(s) in body`);
+
+	// Fallback path: commit SHA links produced by release-please's github
+	// changelog notes type.
+	const commitShas = extractCommitShasFromBody(strippedBody);
+	log(`release ${tagName}: found ${commitShas.length} commit SHA(s) in body`);
+	const shaResolved = commitShas.length > 0
+		? resolveCommitShasToNprNumbers(commitShas, log)
+		: [];
+	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
+
+	// Merge both sets, preserving first-seen order and deduplicating.
+	const seenCandidates = new Set(directCandidates);
+	const allCandidates = [...directCandidates];
+	for (const n of shaResolved) {
+		if (!seenCandidates.has(n)) {
+			seenCandidates.add(n);
+			allCandidates.push(n);
+		}
+	}
+
+	if (allCandidates.length === 0) {
+		log('Release body has no PR references (direct or via commit SHAs) — exiting 0');
 		return 0;
 	}
-	const entries = collectFragmentsForPrs(candidates, repoRoot, log);
+	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
 	if (entries.length === 0) {
 		log('No pending fragments found across referenced PRs — exiting 0');
 		return 0;
