@@ -7,16 +7,13 @@
 import { describe, expect, test } from 'bun:test';
 // @ts-expect-error — .mjs script with no .d.ts; runtime imports are fine.
 import {
-	combineFragments,
 	extractCandidatePrNumbers,
 	extractCommitShasFromBody,
-	filterPendingFragmentPaths,
 	isValidPrNumber,
 	MARKER_END,
 	MARKER_START,
 	mergeCandidateLists,
 	stripCustomReleaseNotesBlock,
-	upsertReleaseNotesBlock,
 } from '../../../scripts/release-notes-fragments.mjs';
 
 describe('extractCommitShasFromBody', () => {
