@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.109.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.3...v7.109.4) (2026-07-08)
+
+
+### Bug Fixes
+
+* **config:** preserve config around invalid gates entries ([bf4951b](https://github.com/ZaxbyHub/opencode-swarm/commit/bf4951b250169c09784ea70b972d6c1cceac52f6))
+* **config:** preserve config around invalid gates entries ([e305d75](https://github.com/ZaxbyHub/opencode-swarm/commit/e305d75308bccce16d58ef1cc665b89c210e8213))
+
 ## [7.109.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.2...v7.109.3) (2026-07-08)
 
 
