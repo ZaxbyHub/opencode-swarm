@@ -5,7 +5,7 @@ description: Codex adapter for enabling a higher-rigor swarm-like workflow in th
 
 # Swarm
 
-Read `.claude/skills/swarm/SKILL.md` for the source behavior model, then adapt it to Codex.
+Read `.opencode/skills/swarm/SKILL.md` for the source behavior model, then adapt it to Codex.
 
 Codex-specific execution notes:
 

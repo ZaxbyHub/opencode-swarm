@@ -30,6 +30,17 @@ canonical workflow.
   resolving feedback; degraded or incomplete lane outputs keep the affected
   items open as evidence gaps.
 - Do not resolve GitHub review threads unless the user explicitly instructs it.
+- **Mandatory gates — Stage A and Stage B (+ closeout).** Stage A (structural
+  pre-checks: build, typecheck, lint/format, `git diff --check`, reproduce the
+  failing CI/test command) and Stage B (independent `reviewer` + `test_engineer`
+  on the Stage-A-green diff) are MANDATORY for any change made as part of this
+  process, followed by the separate reviewer + critic closeout gate on the
+  Stage-B-approved diff. No fix lands, no closure ledger row is marked FIXED,
+  and no PR is published until all three gates pass on the current diff. See
+  the canonical "Mandatory Gates" section for the full protocol. Record both
+  closeout verdicts in `.claude/session/tasks/<slug>/gates.md` per
+  `durable-session-state` (`.swarm/` is plugin runtime state — do not write
+  task artifacts there).
 - Load `$writing-tests` before changing tests and `$commit-pr` before pushing or
   updating the PR.
 

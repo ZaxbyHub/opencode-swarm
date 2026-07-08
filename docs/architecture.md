@@ -119,7 +119,7 @@ Dispatch lane joins return bounded previews in `lane_results[].output` and durab
 
 #### PR_FEEDBACK Protocol
 Current contract: PR feedback ingests all known feedback sources plus any validated handoff artifact from `PR_REVIEW`, preserves prior IDs/provenance, and uses the broader closure statuses `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, and `NEEDS_USER_DECISION`.
-Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / PARTIAL / DISPROVED / PRE_EXISTING / NEEDS_MORE_EVIDENCE / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. GitHub review threads are resolved only on explicit user instruction.
+Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / PARTIAL / DISPROVED / PRE_EXISTING / NEEDS_MORE_EVIDENCE / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. Stage A (structural pre-checks) and Stage B (`reviewer` + `test_engineer`) gates and the reviewer + critic closeout gate are MANDATORY for any change made as part of this process. GitHub review threads are resolved only on explicit user instruction.
 
 ### Explorer: The Eyes
 

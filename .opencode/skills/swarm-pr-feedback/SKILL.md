@@ -6,7 +6,10 @@ description: >
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
   PR follow-up work that must close all known issues without dropping findings.
   Supports multi-round bot reviews (the repository's bot posts a new review
-  after every push) via the iterative pattern documented in the body.
+  after every push) via the iterative pattern documented in the body. Stage A
+  (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the
+  reviewer + critic closeout gate are MANDATORY for any change made as part of
+  this process.
 ---
 
 # Swarm PR Feedback
@@ -15,6 +18,12 @@ Use this skill to close known PR feedback. This is not a fresh broad PR review.
 `swarm-pr-review` discovers new findings; `swarm-pr-feedback` ingests existing
 feedback surfaces, verifies each claim, clusters related problems, fixes confirmed
 issues, validates the branch, and reports closure status for every item.
+
+**Mandatory gate contract.** Stage A (structural pre-checks) and Stage B
+(reviewer + test_engineer) gates and the reviewer + critic closeout gate are
+MANDATORY for any change made as part of this process. No fix lands, no closure
+ledger row is marked FIXED, and no PR is published until all three gates pass on
+the current diff. See "Mandatory Gates" below for the full protocol.
 
 When the work starts from a prior `swarm-pr-review` run, ingest the review's
 handoff artifact (for example
@@ -188,11 +197,11 @@ tree:
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the
   `base_ref..head_ref` range for diff-scoped inspection.
-- Pass the `base_ref..head_ref` commit range in every read-only verification or
-  explorer/advisory-lane delegation so lane agents can inspect specific revisions
-  with `git show` when needed.
+ - Pass the `base_ref..head_ref` commit range in every read-only verification or
+   explorer/advisory-lane delegation so lane agents can inspect specific revisions
+   with `git show` when needed.
 - If no PR reference was provided (a pasted-feedback session on the current branch),
-  confirm the current branch is the intended PR branch before editing.
+   confirm the current branch is the intended PR branch before editing.
 
 When a verification lane result includes `output_ref`, treat `output` as a
 preview and call `retrieve_lane_output` before using it to classify, resolve,
@@ -481,24 +490,84 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
   and let the merge queue perform final current-base validation. Still resolve real
   merge conflicts and SHA-dependent review threads before queuing.
 
-## Validation
+## Mandatory Gates
 
-Run targeted validation for every changed surface:
+**Stage A and Stage B gates and the reviewer + critic closeout gate are
+MANDATORY for any change made as part of the PR-feedback process.** No fix
+lands, no closure ledger row is marked FIXED, and no PR is published until all
+three gates pass on the current diff. This section uses the repository's
+established Stage A/B meaning: Stage A = `pre_check_batch`-equivalent structural
+pre-checks; Stage B = `reviewer` + `test_engineer` per-task gates (consistent
+with `execute`, `plan`, `specify`, `brainstorm`, `docs/swarm-briefing.md`, and
+`docs/council/README.md`).
 
-- exact failing CI/test command when reproducing a failure,
-- tests for changed behavior or newly covered gaps,
-- lint/format/typecheck/build where relevant,
-- `git diff --check`,
-- PR metadata checks after push: head SHA, check status, mergeability/conflicts,
-  and unresolved feedback state.
+If a gate failure is suspected pre-existing, prove it on the base branch or
+label it `UNVERIFIED`. Do not call the branch green while required checks are
+non-green.
+
+### Stage A — structural pre-checks (mandatory before Stage B)
+
+Run for every changed surface. No "where relevant" — every PR-feedback change
+runs these; if a surface is genuinely untouched, state that explicitly rather
+than skipping silently.
+
+- `bun run build` (or the repository's build command) — must succeed.
+- typecheck — must pass.
+- lint/format (e.g. `biome ci .`) — must pass.
+- `git diff --check` — no whitespace or merge-marker errors.
+- exact failing CI/test command reproduced locally when a ledger item is rooted
+  in a CI/test failure — the reproduction must fail on the pre-fix tree and pass
+  after the fix.
+
+### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
+
+Two independent agents on the Stage-A-green diff:
+
+- **reviewer** — independent (fresh context, not the implementer, not a continued
+  conversation). Validates each fix on the current diff against the feedback
+  item it closes. Verdict per item: APPROVE / NEEDS_REVISION / BLOCKED.
+- **test_engineer** — writes and runs the falsification probe or regression test
+  that proves each fix actually resolves its item (tests for changed behavior or
+  newly covered gaps). Verdict per item: PASS / FAIL / BLOCKED.
+
+Address every NEEDS_REVISION / BLOCKED / FAIL, then re-run the affected agent on
+the current diff.
+
+### Closeout gate — reviewer + critic (mandatory after Stage B)
+
+A *separate* reviewer + critic pair on the Stage-B-approved diff. This is the
+swarm closeout contract (see `../swarm/SKILL.md` "Mandatory implementation
+closeout gate"); because this skill edits code, docs, release notes, or skill files it applies in full — Stage B
+alone does not satisfy it.
+
+- **independent reviewer** (fresh context, separate from the Stage B reviewer)
+  → APPROVE / NEEDS_REVISION / BLOCKED per item.
+- **final critic** (separate fresh context, not a continued conversation with
+  the reviewer, dispatched after the reviewer returns APPROVE) → APPROVE /
+  NEEDS_REVISION / BLOCKED per item. The critic challenges: is every original
+  feedback item actually resolved? Any requirement drift, weak evidence, missing
+  sibling-file checks, stale approvals, anything unwired or silently deferred?
+
+Address every NEEDS_REVISION / BLOCKED item, re-review with the reviewer if the
+critic surfaces correctness issues, then re-critic. **Any edit after the
+reviewer's or critic's approval invalidates that approval** — re-run the
+affected gate on the current diff before publishing.
+
+Record both closeout verdicts (reviewer + critic, with HEAD/diff) in
+`.claude/session/tasks/<slug>/gates.md` per the `durable-session-state` skill
+(`.swarm/` is the plugin's runtime state — never write task artifacts there).
+
+### Post-publish verification (mandatory after the PR is pushed)
+
+These checks run after the fix lands on the remote — they are NOT Stage A
+pre-checks and must not be folded into Stage A.
+
+- PR metadata checks after push: head SHA, check status,
+  mergeability/conflicts, and unresolved feedback state.
 - After conflict fixes, verify remote mergeability is clean (`MERGEABLE` /
   `CLEAN`), not only that local conflict markers disappeared.
 - For current-head CI, prefer run-level details when PR checks look stale:
   `gh run view <run-id> --json headSha,status,conclusion,jobs,url`.
-
-If a validation failure is suspected pre-existing, prove it on the base branch or
-label it `UNVERIFIED`. Do not call the branch green while required checks are
-non-green.
 
 ## Publishing And Communication
 
