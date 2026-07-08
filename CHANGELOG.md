@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.109.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.2...v7.109.3) (2026-07-08)
+
+
+### Bug Fixes
+
+* **skills:** close TOCTOU race in clearSkillLinks, cap retired_skill_history, correct G8 gate docs ([c6f37b7](https://github.com/ZaxbyHub/opencode-swarm/commit/c6f37b75b35b2cae3ea601f503faab33957eacbb))
+* **skills:** gate activation on eval, stamp draft sources, route curator archive through shared invalidator, clear retire links ([3ddd7ee](https://github.com/ZaxbyHub/opencode-swarm/commit/3ddd7ee853b01ffa85762e98a15c7cd061903ce0))
+* **test:** unbreak skill-regenerate evaluate=true test after G8 auto-stub wiring ([3fe6757](https://github.com/ZaxbyHub/opencode-swarm/commit/3fe6757ce60009fee7ed1b9bdfd5db2c35bdbba9))
+
 ## [7.109.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.1...v7.109.2) (2026-07-07)
 
 
