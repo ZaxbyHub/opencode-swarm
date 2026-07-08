@@ -366,7 +366,7 @@ Append exactly one fenced JSON block after SUMMARY. This block is the executable
 {
   "summary": "3-line executive summary for architect briefing",
   "curation_recommendations": [
-    {"action": "promote", "entry_id": "<uuid or omit for new>", "lesson": "concise lesson text", "reason": "evidence-backed reason", "category": "process", "confidence": 0.8}
+    {"action": "promote", "entry_id": "<full uuid, unique 8+ hex prefix, or omit for new>", "lesson": "concise lesson text", "reason": "evidence-backed reason", "category": "process", "confidence": 0.8, "applies_to_agents": ["coder"], "required_actions": ["concrete required action"], "triggers": ["short trigger phrase"], "directive_priority": "medium"}
   ],
   "queue_triage": [
     {"proposal_id": "proposal-slug", "action": "apply", "reason": "one-line reason"}

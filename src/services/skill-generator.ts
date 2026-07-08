@@ -371,44 +371,7 @@ export function clusterEntries(
 		) {
 			continue;
 		}
-		const arr = c.members;
-		const triggers = uniqueStrings(arr.flatMap((e) => e.triggers ?? []));
-		const required = uniqueStrings(
-			arr.flatMap((e) => e.required_actions ?? []),
-		);
-		const forbidden = uniqueStrings(
-			arr.flatMap((e) => e.forbidden_actions ?? []),
-		);
-		const agents = uniqueStrings(arr.flatMap((e) => e.applies_to_agents ?? []));
-		const checks = uniqueStrings(
-			arr.flatMap((e) => e.verification_checks ?? []),
-		);
-		const avgConf =
-			arr.reduce((s, e) => s + e.confidence, 0) / Math.max(1, arr.length);
-		const slugSeed =
-			triggers[0] ??
-			required[0] ??
-			arr[0]?.tags?.[0] ??
-			arr[0]?.category ??
-			'lesson';
-		const slug = sanitizeSlug(slugSeed);
-		const title =
-			triggers[0] ??
-			required[0] ??
-			`Lessons: ${arr[0]?.category ?? 'general'} (${arr.length})`;
-		result.push({
-			slug: isValidSlug(slug)
-				? slug
-				: sanitizeSlug(`cluster-${slugSeed.slice(0, 12)}`),
-			title,
-			entries: arr,
-			triggers,
-			required_actions: required,
-			forbidden_actions: forbidden,
-			target_agents: agents,
-			verification_checks: checks,
-			avgConfidence: avgConf,
-		});
+		result.push(buildKnowledgeCluster(c.members));
 	}
 
 	// Stable order: largest, highest-confidence first
@@ -419,6 +382,51 @@ export function clusterEntries(
 			a.slug.localeCompare(b.slug),
 	);
 	return result;
+}
+
+function buildKnowledgeCluster(
+	entries: KnowledgeEntryBase[],
+): KnowledgeCluster {
+	const triggers = uniqueStrings(entries.flatMap((e) => e.triggers ?? []));
+	const required = uniqueStrings(
+		entries.flatMap((e) => e.required_actions ?? []),
+	);
+	const forbidden = uniqueStrings(
+		entries.flatMap((e) => e.forbidden_actions ?? []),
+	);
+	const agents = uniqueStrings(
+		entries.flatMap((e) => e.applies_to_agents ?? []),
+	);
+	const checks = uniqueStrings(
+		entries.flatMap((e) => e.verification_checks ?? []),
+	);
+	const avgConf =
+		entries.reduce((s, e) => s + e.confidence, 0) / Math.max(1, entries.length);
+	const slugSeed =
+		triggers[0] ??
+		required[0] ??
+		entries[0]?.tags?.[0] ??
+		entries[0]?.category ??
+		'lesson';
+	const slug = sanitizeSlug(slugSeed);
+	const title =
+		triggers[0] ??
+		required[0] ??
+		`Lessons: ${entries[0]?.category ?? 'general'} (${entries.length})`;
+
+	return {
+		slug: isValidSlug(slug)
+			? slug
+			: sanitizeSlug(`cluster-${slugSeed.slice(0, 12)}`),
+		title,
+		entries,
+		triggers,
+		required_actions: required,
+		forbidden_actions: forbidden,
+		target_agents: agents,
+		verification_checks: checks,
+		avgConfidence: avgConf,
+	};
 }
 
 function isSkillSingletonEligible(
@@ -621,8 +629,11 @@ export async function generateSkills(
 	});
 
 	let pool: KnowledgeEntryBase[];
+	let clusters: KnowledgeCluster[];
 	if (req.sourceKnowledgeIds && req.sourceKnowledgeIds.length > 0) {
-		const idSet = new Set(req.sourceKnowledgeIds);
+		const requestedIds = [...new Set(req.sourceKnowledgeIds)];
+		const idSet = new Set(requestedIds);
+		const idOrder = new Map(requestedIds.map((id, index) => [id, index]));
 		// In explicit-id mode we relax the maturity gates (caller has chosen)
 		// but still skip archived entries.
 		const swarm = await readKnowledge<SwarmKnowledgeEntry>(
@@ -639,6 +650,7 @@ export async function generateSkills(
 		const rollups = await readKnowledgeCounterRollups(req.directory);
 		pool = [...swarm, ...hive]
 			.filter((e) => idSet.has(e.id) && e.status !== 'archived')
+			.sort((a, b) => (idOrder.get(a.id) ?? 0) - (idOrder.get(b.id) ?? 0))
 			.map((e) => ({
 				...e,
 				retrieval_outcomes: effectiveRetrievalOutcomes(
@@ -646,11 +658,12 @@ export async function generateSkills(
 					rollups.get(e.id),
 				),
 			}));
+		clusters = pool.length > 0 ? [buildKnowledgeCluster(pool)] : [];
 	} else {
 		pool = candidates;
+		clusters = clusterEntries(pool);
 	}
 
-	const clusters = clusterEntries(pool);
 	const result: GenerateResult = { written: [], skipped: [] };
 
 	for (let i = 0; i < clusters.length; i++) {

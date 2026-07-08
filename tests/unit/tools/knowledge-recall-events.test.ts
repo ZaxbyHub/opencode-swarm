@@ -70,6 +70,12 @@ describe('knowledge_recall — retrieved event emission', () => {
 		const parsed = JSON.parse(raw);
 		expect(typeof parsed.trace_id).toBe('string');
 		expect(parsed.trace_id.length).toBeGreaterThan(0);
+		expect(parsed.results[0].score_breakdown.final_score).toBe(
+			parsed.results[0].score,
+		);
+		expect(typeof parsed.results[0].score_breakdown.metadata_score).toBe(
+			'number',
+		);
 
 		const retrieved = (await readKnowledgeEvents(dir)).filter(
 			(e): e is RetrievedEvent => e.type === 'retrieved',

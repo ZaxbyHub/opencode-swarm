@@ -36,10 +36,10 @@ describe('AGENT_TOOL_MAP', () => {
 		}
 	});
 
-	it('subagent tool counts are <= 22', () => {
+	it('subagent tool counts are <= 23', () => {
 		for (const agent of allAgentNames) {
 			if (agent === 'architect') continue;
-			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(22);
+			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(23);
 		}
 	});
 
@@ -120,6 +120,14 @@ describe('AGENT_TOOL_MAP', () => {
 	it('user-facing swarm agents can call swarm_command', () => {
 		for (const agent of allAgentNames) {
 			expect(AGENT_TOOL_MAP[agent]).toContain('swarm_command');
+		}
+	});
+
+	it('agents that can recall knowledge can also file knowledge receipts', () => {
+		for (const tools of Object.values(AGENT_TOOL_MAP)) {
+			if (tools.includes('knowledge_recall')) {
+				expect(tools).toContain('knowledge_receipt');
+			}
 		}
 	});
 

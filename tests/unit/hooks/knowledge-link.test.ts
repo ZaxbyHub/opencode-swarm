@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	getLinkedLocalKnowledgeStatus,
 	invalidateKnowledgeStoreDirCache,
 	isLinked,
 	type LinkPointer,
@@ -109,6 +110,53 @@ describe('knowledge-link', () => {
 				expect(resolveLinkDir('shared-proj')).toBe(
 					path.join(resolveLinkBaseDir(), 'shared-proj'),
 				);
+			} finally {
+				cleanup();
+			}
+		});
+
+		test('reports a regular local knowledge.jsonl as orphaned when linked', async () => {
+			const { dir, cleanup } = createSafeTestDir('knowledge-link-orphan-');
+			try {
+				await writeLinkPointer(dir, {
+					version: 1,
+					linkId: 'shared-proj',
+					createdAt: new Date().toISOString(),
+					source: 'manual',
+				});
+				fs.writeFileSync(
+					path.join(dir, '.swarm', 'knowledge.jsonl'),
+					`${JSON.stringify({ id: 'stale-local' })}\n`,
+				);
+
+				const status = getLinkedLocalKnowledgeStatus(dir);
+
+				expect(status.linked).toBe(true);
+				expect(status.orphaned).toBe(true);
+				expect(status.reason).toBe('local_regular_file');
+				expect(status.resolvedKnowledgePath).toBe(
+					path.join(resolveLinkDir('shared-proj'), 'knowledge.jsonl'),
+				);
+			} finally {
+				cleanup();
+			}
+		});
+
+		test('does not report an orphan when linked local knowledge.jsonl is absent', async () => {
+			const { dir, cleanup } = createSafeTestDir('knowledge-link-no-orphan-');
+			try {
+				await writeLinkPointer(dir, {
+					version: 1,
+					linkId: 'shared-proj',
+					createdAt: new Date().toISOString(),
+					source: 'manual',
+				});
+
+				const status = getLinkedLocalKnowledgeStatus(dir);
+
+				expect(status.linked).toBe(true);
+				expect(status.orphaned).toBe(false);
+				expect(status.reason).toBe('local_missing');
 			} finally {
 				cleanup();
 			}

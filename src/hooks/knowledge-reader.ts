@@ -49,6 +49,20 @@ export interface RankedEntry extends KnowledgeEntryBase {
 	};
 	finalScore: number;
 	coldStartBoost?: number;
+	score_breakdown?: {
+		text_score: number;
+		metadata_score: number;
+		directive_score: number;
+		confidence_boost: number;
+		generated_skill_boost: number;
+		outcome_boost: number;
+		cold_start_boost: number;
+		synonym_boost: number;
+		trigger_recall_boost: number;
+		status_boost: number;
+		final_score: number;
+		synonym_matches?: string[];
+	};
 }
 
 // ============================================================================

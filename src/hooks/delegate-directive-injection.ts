@@ -25,7 +25,7 @@ import {
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { loadPlan } from '../plan/manager.js';
-import { warn } from '../utils/logger.js';
+import { log, warn } from '../utils/logger.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
 import {
 	buildDelegateDirectiveBlock,
@@ -61,35 +61,51 @@ export async function injectDelegateDirectivesBefore(
 	config: KnowledgeConfig,
 ): Promise<number> {
 	try {
-		if (config.enabled === false) return 0;
-		if (!isTaskTool(input.tool)) return 0;
-
-		// Only the architect delegates. Restricting to architect callers prevents a
-		// subagent from triggering nested delegate injection.
-		const callerAgent = typeof input.agent === 'string' ? input.agent : '';
-		if (!callerAgent || stripKnownSwarmPrefix(callerAgent) !== 'architect') {
+		const debugSkip = (reason: string, data?: Record<string, unknown>) => {
+			log('[delegate-directive-injection] skipped', {
+				reason,
+				caller_agent: typeof input.agent === 'string' ? input.agent : undefined,
+				tool: input.tool,
+				...data,
+			});
 			return 0;
+		};
+
+		if (config.enabled === false) return debugSkip('knowledge_disabled');
+		if (!isTaskTool(input.tool)) return debugSkip('not_task_tool');
+
+		const callerAgent = typeof input.agent === 'string' ? input.agent : '';
+		const callerRole = stripKnownSwarmPrefix(callerAgent).toLowerCase();
+		if (
+			!callerAgent ||
+			(callerRole !== 'architect' && !isDelegatedAgent(callerRole))
+		) {
+			return debugSkip('caller_not_allowed', { caller_role: callerRole });
 		}
 
 		const argsRecord =
 			input.args && typeof input.args === 'object'
 				? (input.args as Record<string, unknown>)
 				: null;
-		if (!argsRecord) return 0;
+		if (!argsRecord) return debugSkip('missing_args');
 		const promptRaw = argsRecord.prompt;
-		if (typeof promptRaw !== 'string') return 0;
+		if (typeof promptRaw !== 'string') return debugSkip('missing_prompt');
 
 		const parsed = parseDelegationArgs(input.args);
-		if (!parsed) return 0;
+		if (!parsed) return debugSkip('unparseable_delegation_args');
 		const targetAgent = parsed.targetAgent;
-		if (!isDelegatedAgent(targetAgent)) return 0;
+		if (!isDelegatedAgent(targetAgent)) {
+			return debugSkip('target_not_delegated_agent', {
+				target_agent: targetAgent,
+			});
+		}
 
 		// Idempotency: never inject a second directive or compliance block.
 		if (
 			promptRaw.includes(DELEGATE_DIRECTIVE_BLOCK_TAG) ||
 			promptRaw.includes(DIRECTIVES_TO_VERIFY_TAG)
 		) {
-			return 0;
+			return debugSkip('already_injected', { target_agent: targetAgent });
 		}
 
 		const sessionId =
@@ -126,8 +142,19 @@ export async function injectDelegateDirectivesBefore(
 			if (complianceBlock) prefixParts.push(complianceBlock);
 		}
 
-		if (prefixParts.length === 0) return 0;
+		if (prefixParts.length === 0) {
+			return debugSkip('no_directives_to_inject', {
+				target_agent: targetAgent,
+			});
+		}
 		argsRecord.prompt = `${prefixParts.join('\n\n')}\n\n${promptRaw}`;
+		log('[delegate-directive-injection] injected', {
+			caller_agent: callerAgent,
+			caller_role: callerRole,
+			target_agent: targetAgent,
+			count: entries.length,
+			session_id: sessionId,
+		});
 		return entries.length;
 	} catch (err) {
 		warn(

@@ -496,6 +496,10 @@ export async function searchKnowledge(
 							: 0),
 				),
 			);
+			const statusScoreBoost =
+				hasQuery && !entry.confidence_floor_demoted
+					? statusBoost(entry.status)
+					: 0;
 
 			const isCritical =
 				entry.directive_priority === 'critical' &&
@@ -507,6 +511,22 @@ export async function searchKnowledge(
 				retrieval_outcomes: retrievalOutcomes,
 				finalScore,
 				coldStartBoost: coldStartBonus,
+				score_breakdown: {
+					text_score: textScore,
+					metadata_score: metaScore,
+					directive_score: ds.score,
+					confidence_boost: confBoost,
+					generated_skill_boost: generatedSkillBoost,
+					outcome_boost: outcomeBoost,
+					cold_start_boost: coldStartBonus,
+					synonym_boost: synonymBoost,
+					trigger_recall_boost: triggerRecallBoost,
+					status_boost: statusScoreBoost,
+					final_score: finalScore,
+					...(synonymTrace[entry.id]
+						? { synonym_matches: synonymTrace[entry.id] }
+						: {}),
+				},
 				__critical: isCritical,
 				__forceHive: isForceHive,
 			};

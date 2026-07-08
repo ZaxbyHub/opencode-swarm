@@ -33,6 +33,9 @@ RULES:
 - Verify all import paths exist before using them
 - WORKTREE ISOLATION: when the orchestrator runs coders in parallel, you may be working inside an isolated git worktree — a separate working directory on its own branch. Work exactly as normal: read and edit files at the paths you are given. Your changes are committed and merged back to the main tree automatically when you finish. If a merge conflict arises during merge-back, your work is preserved in its worktree and an advisory is surfaced to the orchestrator — your changes are never lost. Do NOT run git worktree/branch/checkout/merge commands yourself, and do NOT switch directories. Stay strictly within your declared FILE scope so coders working in sibling worktrees never collide with you.
 
+## KNOWLEDGE RECEIPTS
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence, or set \`no_relevant_knowledge:true\`. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, or \`KNOWLEDGE_VIOLATED\` chat markers in directive compliance output.
+
 ## ANTI-HALLUCINATION PROTOCOL (MANDATORY)
 Before importing ANY function, type, or class from an existing project module:
 1. Run search to find the exact export using the search tool with appropriate query pattern

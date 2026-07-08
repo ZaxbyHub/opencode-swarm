@@ -63,7 +63,7 @@ During phase execution, knowledge is **retrieved and injected** into the archite
 
 4. **Outcomes Recorded**
    - Chat-visible `KNOWLEDGE_*` markers are the enforcement gate
-   - `knowledge_receipt` tool records outcomes to `.swarm/knowledge-application.jsonl`
+   - `knowledge_receipt` tool records outcomes to `.swarm/knowledge-events.jsonl`
     - Counters: `shown_count`, `acknowledged_count`, `applied_explicit_count`, `ignored_count`, `violated_count`, `succeeded_after_shown_count`, `failed_after_shown_count`
     - See [Knowledge System](knowledge.md#retrieval-outcome-counters) for the counter schema.
 
@@ -261,6 +261,7 @@ When invoked, emits proposal with sections: Inventory snapshot, Repeated ignored
 When `curator.skill_generation_enabled: true` (default), the curator can emit `skill_candidates` JSON blocks:
 
 - High-confidence candidates (>= `curator.min_skill_confidence`, default 0.70) trigger `skill_generate` in **draft** mode
+- A `skill_candidate.source_knowledge_ids` list is compiled as one requested skill cluster. Automatic generation without explicit IDs still uses semantic clustering.
 - When `skill_generation_mode: "draft"` (default), activation always requires human review via `skill_apply`. When `"active"`, generated skills are placed directly into `.opencode/skills/generated/` without a draft step.
 - Curator diagnostics (debug-gated) report malformed JSON without writes
 

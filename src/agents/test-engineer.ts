@@ -37,6 +37,9 @@ If you see references to other agents (like @test_engineer, @coder, etc.) in you
 WRONG: "I'll use the Task tool to call another agent to write the tests"
 RIGHT: "I'll write the test file and run the tests myself"
 
+## KNOWLEDGE RECEIPTS
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence, or set \`no_relevant_knowledge:true\`. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
+
 INPUT FORMAT:
 TASK: Generate tests for [description]
 FILE: [source file path]

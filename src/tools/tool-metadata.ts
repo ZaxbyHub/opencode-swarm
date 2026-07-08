@@ -565,7 +565,27 @@ export const TOOL_METADATA = {
 	knowledge_receipt: {
 		description:
 			'file a receipt for retrieved knowledge (applied/ignored/contradicted + new lessons), recorded as immutable knowledge events',
-		agents: ['architect', 'coder'],
+		agents: [
+			'architect',
+			'sme',
+			'docs',
+			'docs_design',
+			'designer',
+			'critic_sounding_board',
+			'critic_drift_verifier',
+			'critic_hallucination_verifier',
+			'critic_architecture_supervisor',
+			'curator_init',
+			'curator_phase',
+			'skill_improver',
+			'spec_writer',
+			'reviewer',
+			'critic',
+			'critic_oversight',
+			'explorer',
+			'coder',
+			'test_engineer',
+		],
 	},
 	knowledge_archive: {
 		description:
