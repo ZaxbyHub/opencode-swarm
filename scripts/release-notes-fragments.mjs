@@ -290,8 +290,10 @@ export function upsertReleaseNotesBlock(body, combined) {
  */
 export function mergeCandidateLists(direct, shaResolved) {
 	if (!Array.isArray(direct) && !Array.isArray(shaResolved)) return [];
+	// Seed `seen` and `out` both from the Set so intra-list duplicates in
+	// `direct` are collapsed before any `shaResolved` entries are appended.
 	const seen = new Set(Array.isArray(direct) ? direct : []);
-	const out = Array.isArray(direct) ? [...direct] : [];
+	const out = Array.isArray(direct) ? [...seen] : [];
 	for (const n of (Array.isArray(shaResolved) ? shaResolved : [])) {
 		if (!seen.has(n)) {
 			seen.add(n);
@@ -363,6 +365,14 @@ function verifyPr(num) {
  * - API failures for a given SHA are logged and skipped (non-fatal).
  * - The GITHUB_REPOSITORY env var provides the repo slug (owner/repo).
  *   Without it the lookup is skipped gracefully.
+ * - `--paginate` is passed to `gh api` so that commits associated with more
+ *   than 30 PRs (e.g. heavily cherry-picked base commits) are not silently
+ *   truncated to the first page.
+ *
+ * Not exported: this function shells out to `gh` and therefore cannot be
+ * exercised in the pure unit-test suite. The per-SHA guard logic
+ * (`Number.isFinite`, digit-cap) mirrors `extractCandidatePrNumbers` and is
+ * relied on to prevent garbage PR numbers from reaching `collectFragmentsForPrs`.
  *
  * Returns a deduplicated array of PR numbers in first-seen order.
  */
@@ -376,7 +386,7 @@ function resolveCommitShasToPrNumbers(shas, log) {
 	const seen = new Set();
 	const out = [];
 	for (const sha of shas) {
-		const res = tryGhJson(['api', `repos/${repoSlug}/commits/${sha}/pulls`]);
+		const res = tryGhJson(['api', '--paginate', `repos/${repoSlug}/commits/${sha}/pulls`]);
 		if (!res.ok || !Array.isArray(res.value)) {
 			log(`skip SHA ${sha.slice(0, 7)} — API lookup failed`);
 			continue;

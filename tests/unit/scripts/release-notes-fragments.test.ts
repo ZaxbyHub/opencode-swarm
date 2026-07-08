@@ -143,6 +143,9 @@ describe('mergeCandidateLists', () => {
 	test('returns empty when both inputs are empty', () => {
 		expect(mergeCandidateLists([], [])).toEqual([]);
 	});
+	test('deduplicates within direct itself (intra-list dups)', () => {
+		expect(mergeCandidateLists([1, 1, 2], [3])).toEqual([1, 2, 3]);
+	});
 	test('handles non-array inputs gracefully', () => {
 		expect(mergeCandidateLists(null as unknown as number[], [1, 2])).toEqual([1, 2]);
 		expect(mergeCandidateLists([1, 2], null as unknown as number[])).toEqual([1, 2]);
