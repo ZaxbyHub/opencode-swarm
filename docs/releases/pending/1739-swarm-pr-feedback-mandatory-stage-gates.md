@@ -36,5 +36,19 @@ lands or any closure ledger row is marked FIXED.
 - `docs/commands.md` §pr-feedback and `docs/architecture.md` PR_FEEDBACK
   Protocol: parity sentences noting the mandatory gates.
 
-This is a documentation-only change; no code, tool registration, command
-wiring, or test behavior is affected.
+## swarm skill promoted to canonical
+
+The `swarm` skill (the cross-agent swarm-mode behavior model, including the
+mandatory implementation closeout gate) now has a canonical home at
+`.opencode/skills/swarm/SKILL.md`, with `.claude` (Claude Code `/swarm`
+command wiring) and `.agents` (Codex adapter) as thin adapters that delegate
+the behavior model to the canonical. Previously the full skill lived only in
+`.claude` and was not bundled. References like `../swarm/SKILL.md` from
+sibling skills now resolve.
+
+This PR is primarily documentation, but it also promotes the `swarm` skill to
+a canonical bundled skill under `.opencode/skills/swarm/` (previously it lived
+only in `.claude`/`.agents`), which adds a bundled-skill registration
+(BUNDLED_PROJECT_SKILLS, package.json#files, package-smoke allowlist) and a
+`divergent` mirror-contract classification in src/config/skill-mirrors.ts. No
+executable tool, command-handler, or test-behavior logic changed.

@@ -60,6 +60,8 @@ drift-report.md
 # Claude Code session artifacts (investigation traces, event logs, local settings)
 events.jsonl
 .claude/issue-traces/
+# Swarm durable-session-state task artifacts (review verdicts, gates.md) — runtime, never commit
+.claude/session/tasks/
 .codex/issue-traces/
 .Codex/issue-traces/
 

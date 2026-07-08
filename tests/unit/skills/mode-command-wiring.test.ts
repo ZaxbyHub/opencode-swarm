@@ -38,6 +38,7 @@ const NON_COMMAND_SKILLS = new Set([
 	'commit-pr',
 	'engineering-conventions',
 	'running-tests',
+	'swarm',
 	'swarm-pr-subscribe',
 	'swarm-implement',
 	'swarm-pr-subscribe',

@@ -232,6 +232,12 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 			'.opencode is the canonical implementation workflow; .claude and .agents are thin adapters that delegate to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
 	},
 	{
+		slug: 'swarm',
+		kind: 'divergent',
+		reason:
+			'.opencode is the canonical swarm behavior model (workflow posture, quality/speed policy, default triage model, mandatory implementation closeout gate); .claude holds the Claude Code /swarm command wiring and .agents is the Codex adapter, both delegating the behavior model to .opencode. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
+	},
+	{
 		slug: 'writing-tests',
 		kind: 'divergent',
 		reason:

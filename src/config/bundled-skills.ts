@@ -18,6 +18,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'swarm-implement',
 	'design-docs',
 	'swarm-pr-review',
+	'swarm',
 	'swarm-pr-feedback',
 	'swarm-pr-subscribe',
 	'issue-ingest',

@@ -1081,7 +1081,7 @@ v6.9.0 "Quality & Anti-Slop Tooling" adds 6 automated gates to the pre-reviewer 
 |------|---------|------------|
 | `syntax_check` | Tree-sitter parse validation across 20 languages | ✅ |
 | `placeholder_scan` | Anti-slop detection for TODO/FIXME/stubs | ✅ |
-| `sast_scan` | Static security analysis with 65 rules across 7 languages | ✅ |
+| `sast_scan` | Static security analysis with 68 rules across 8 languages | ✅ |
 | `sbom_generate` | CycloneDX SBOM generation for dependencies | ✅ |
 | `build_check` | Build/typecheck verification | ✅ |
 | `pre_check_batch` | Parallel verification batch (4x faster) | ✅ |
@@ -1403,7 +1403,7 @@ Six new automated gates enforce code quality before human review. All gates run 
 |------|----------|-------------|
 | `syntax_check` | Tree-sitter parse validation | Return to coder for fix |
 | `placeholder_scan` | Detect TODO/FIXME/stubs | Return to coder to complete |
-| `sast_scan` | Static security analysis (65 rules across 7 languages) | Return to coder for fix |
+| `sast_scan` | Static security analysis (68 rules across 8 languages) | Return to coder for fix |
 | `sbom_generate` | CycloneDX SBOM generation | Log for audit trail |
 | `build_check` | Build/typecheck verification | Return to coder for fix |
 | `pre_check_batch` | Parallel verification (v6.10.0) | Return to coder for fix |
@@ -1438,7 +1438,7 @@ Detects patterns indicating incomplete implementation:
 
 ### sast_scan - Static Security Analysis
 
-65 security rules across 7 languages covering:
+68 security rules across 8 languages covering:
 - SQL injection vectors (including Laravel-specific `DB::raw()` concatenation)
 - Path traversal patterns
 - Hardcoded secrets
