@@ -18,6 +18,7 @@ import {
 	type KnowledgeEventInput,
 	recordKnowledgeEvent,
 } from '../hooks/knowledge-events.js';
+import { log } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 import { knowledge_add } from './knowledge-add.js';
 
@@ -211,6 +212,17 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					newLessonResults.push({ success: false });
 				}
 			}
+			log('[knowledge_receipt] completed', {
+				agent,
+				session_id: sessionId,
+				trace_id: traceId,
+				applied: applied.length,
+				ignored: ignored.length,
+				contradicted: contradicted.length,
+				new_lessons: newLessonResults.length,
+				no_relevant_knowledge: noRelevant,
+				event_count: recordedEventIds.length,
+			});
 
 			return JSON.stringify({
 				recorded: true,

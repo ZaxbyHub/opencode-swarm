@@ -18,7 +18,10 @@ import { atomicWriteFile } from '../evidence/task-file.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
-import type { CuratorLLMDelegate } from './curator.js';
+import {
+	type CuratorLLMDelegate,
+	normalizeRecommendationEntryIdToken,
+} from './curator.js';
 import type { KnowledgeRecommendation } from './curator-types.js';
 import { readKnowledgeEvents } from './knowledge-events.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
@@ -29,6 +32,7 @@ import type {
 	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 const MAX_INPUT_TEXT_CHARS = 500;
@@ -79,6 +83,22 @@ interface ParsedPostMortemActions {
 		reason: string;
 	}>;
 	diagnostics: string[];
+}
+
+type KnowledgeActionVerificationStatus =
+	| 'new_entry'
+	| 'exact_match'
+	| 'prefix_match'
+	| 'not_found'
+	| 'ambiguous_prefix'
+	| 'missing_entry_id';
+
+interface KnowledgeActionVerification {
+	action: KnowledgeRecommendation['action'];
+	input_entry_id: string | null;
+	resolved_entry_id: string | null;
+	status: KnowledgeActionVerificationStatus;
+	reason: string;
 }
 
 export interface PostMortemActionResult {
@@ -228,6 +248,13 @@ function parseStructuredPostMortemActions(
 					reason?: unknown;
 					category?: unknown;
 					confidence?: unknown;
+					triggers?: unknown;
+					required_actions?: unknown;
+					forbidden_actions?: unknown;
+					applies_to_agents?: unknown;
+					applies_to_tools?: unknown;
+					verification_checks?: unknown;
+					directive_priority?: unknown;
 				};
 				const action = normalizeRecommendationAction(rec.action);
 				const lesson = String(rec.lesson ?? rec.reason ?? '').trim();
@@ -247,8 +274,8 @@ function parseStructuredPostMortemActions(
 				parsed.recommendations.push({
 					action,
 					entry_id:
-						typeof rec.entry_id === 'string' && rec.entry_id.trim()
-							? rec.entry_id.trim()
+						typeof rec.entry_id === 'string'
+							? normalizeRecommendationEntryIdToken(rec.entry_id)
 							: undefined,
 					lesson: (lesson || reason).slice(0, 280),
 					reason: reason.slice(0, 280),
@@ -258,6 +285,13 @@ function parseStructuredPostMortemActions(
 							: undefined,
 					confidence:
 						typeof rec.confidence === 'number' ? rec.confidence : undefined,
+					triggers: stringArray(rec.triggers),
+					required_actions: stringArray(rec.required_actions),
+					forbidden_actions: stringArray(rec.forbidden_actions),
+					applies_to_agents: stringArray(rec.applies_to_agents),
+					applies_to_tools: stringArray(rec.applies_to_tools),
+					verification_checks: stringArray(rec.verification_checks),
+					directive_priority: directivePriority(rec.directive_priority),
 				});
 			}
 		}
@@ -291,6 +325,29 @@ function parseStructuredPostMortemActions(
 		}
 	}
 	return parsed;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const strings = value
+		.filter((item): item is string => typeof item === 'string')
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+	return strings.length > 0 ? strings : undefined;
+}
+
+function directivePriority(
+	value: unknown,
+): KnowledgeRecommendation['directive_priority'] | undefined {
+	if (
+		value === 'low' ||
+		value === 'medium' ||
+		value === 'high' ||
+		value === 'critical'
+	) {
+		return value;
+	}
+	return undefined;
 }
 
 function parseLegacyPostMortemActions(
@@ -456,6 +513,117 @@ async function executePostMortemActions(
 	return { result, warnings };
 }
 
+async function verifyPostMortemKnowledgeActions(
+	directory: string,
+	recommendations: KnowledgeRecommendation[],
+): Promise<KnowledgeActionVerification[]> {
+	if (recommendations.length === 0) return [];
+	const entries = await _internals.readSwarmKnowledge(directory);
+	const activeEntries = entries.filter((entry) => isActiveStatus(entry.status));
+	const exactIds = new Set(activeEntries.map((entry) => entry.id));
+	const prefixMatches = new Map<string, SwarmKnowledgeEntry[]>();
+	return recommendations.map((rec) => {
+		const inputId =
+			typeof rec.entry_id === 'string'
+				? (normalizeRecommendationEntryIdToken(rec.entry_id) ?? null)
+				: null;
+		if (!inputId) {
+			const isNewPromote = rec.action === 'promote';
+			return {
+				action: rec.action,
+				input_entry_id: null,
+				resolved_entry_id: null,
+				status: isNewPromote ? 'new_entry' : 'missing_entry_id',
+				reason: isNewPromote
+					? 'promote without entry_id will create a new candidate if actionable'
+					: `${rec.action} requires an existing entry_id`,
+			};
+		}
+
+		if (exactIds.has(inputId)) {
+			return {
+				action: rec.action,
+				input_entry_id: inputId,
+				resolved_entry_id: inputId,
+				status: 'exact_match',
+				reason: 'entry_id matched an existing knowledge entry exactly',
+			};
+		}
+
+		let matches = prefixMatches.get(inputId);
+		if (!matches) {
+			matches = activeEntries.filter((entry) => entry.id.startsWith(inputId));
+			prefixMatches.set(inputId, matches);
+		}
+		if (matches.length === 1) {
+			return {
+				action: rec.action,
+				input_entry_id: inputId,
+				resolved_entry_id: matches[0].id,
+				status: 'prefix_match',
+				reason: 'entry_id prefix resolved to one existing knowledge entry',
+			};
+		}
+
+		return {
+			action: rec.action,
+			input_entry_id: inputId,
+			resolved_entry_id: null,
+			status: matches.length === 0 ? 'not_found' : 'ambiguous_prefix',
+			reason:
+				matches.length === 0
+					? 'entry_id did not match any existing knowledge entry'
+					: `entry_id prefix matched ${matches.length} knowledge entries`,
+		};
+	});
+}
+
+function buildStateFreshnessSection(args: {
+	planId: string;
+	scope: 'session' | 'project';
+	sessionID?: string;
+	planLoaded: boolean;
+	knowledgeSummary: KnowledgeEventSummary[];
+	proposals: Array<{ source: string; content: string }>;
+	unactionable: unknown[];
+	retrospectives: string[];
+	driftReports: string[];
+}): string {
+	const planContext = args.planLoaded
+		? `loaded (${args.planId})`
+		: 'unavailable (plan_id: unknown; project-level fallback)';
+	return [
+		'## Generated Against State',
+		`- Plan context: ${planContext}`,
+		`- Scope: ${args.scope}${args.sessionID ? ` (${args.sessionID})` : ''}`,
+		`- Knowledge entries summarized: ${args.knowledgeSummary.length}`,
+		`- Pending proposals summarized: ${args.proposals.length}`,
+		`- Unactionable entries summarized: ${args.unactionable.length}`,
+		`- Retrospectives summarized: ${args.retrospectives.length}`,
+		`- Drift reports summarized: ${args.driftReports.length}`,
+	].join('\n');
+}
+
+function buildActionVerificationSection(
+	verification: KnowledgeActionVerification[],
+): string {
+	const lines = ['## Post-Mortem Action Verification'];
+	if (verification.length === 0) {
+		lines.push('- Knowledge actions: none supplied.');
+		return lines.join('\n');
+	}
+	for (const item of verification) {
+		const input = item.input_entry_id ?? 'new';
+		const resolved = item.resolved_entry_id
+			? ` => ${item.resolved_entry_id}`
+			: '';
+		lines.push(
+			`- ${item.action}: ${input}${resolved} [${item.status}] ${item.reason}`,
+		);
+	}
+	return lines.join('\n');
+}
+
 async function repairPostMortemActions(
 	llmOutput: string,
 	diagnostics: string[],
@@ -472,6 +640,8 @@ async function repairPostMortemActions(
 			'{"summary":"...","curation_recommendations":[],"queue_triage":[]}',
 			'```',
 			'Allowed curation action values: promote, archive, rewrite, flag_contradiction.',
+			'For new promote recommendations, include at least one scope field (applies_to_agents or applies_to_tools) and at least one predicate field (required_actions, forbidden_actions, or verification_checks).',
+			'Existing entry_id values may be full UUIDs or unique 8+ character hex prefixes copied from KNOWLEDGE_ENTRIES.',
 			'Allowed queue_triage action values: apply, reject.',
 			'Do not include unsupported actions such as merge.',
 			'Diagnostics:',
@@ -637,12 +807,31 @@ function buildDataOnlyReport(
 	unactionable: unknown[],
 	retrospectives: string[],
 	driftReports: string[],
+	context?: {
+		scope: 'session' | 'project';
+		sessionID?: string;
+		planLoaded: boolean;
+	},
 ): string {
 	const now = new Date().toISOString();
 	const lines: string[] = [];
 
 	lines.push(`# Post-Mortem Report: ${planId}`);
 	lines.push(`Generated: ${now}`);
+	lines.push('');
+	lines.push(
+		buildStateFreshnessSection({
+			planId,
+			scope: context?.scope ?? 'project',
+			sessionID: context?.sessionID,
+			planLoaded: context?.planLoaded ?? planId !== 'unknown',
+			knowledgeSummary,
+			proposals,
+			unactionable,
+			retrospectives,
+			driftReports,
+		}),
+	);
 	lines.push('');
 
 	// Plan summary
@@ -831,9 +1020,11 @@ export async function runCuratorPostMortem(
 	// Load plan to derive the plan ID
 	let planId = 'unknown';
 	let planSummary = 'Plan data unavailable.';
+	let planLoaded = false;
 	try {
 		const plan = await loadPlanJsonOnly(directory);
 		if (plan) {
+			planLoaded = true;
 			planId = derivePlanId(plan);
 			const phaseCount = plan.phases?.length ?? 0;
 			const completedPhases =
@@ -1031,13 +1222,43 @@ export async function runCuratorPostMortem(
 				);
 				actionResult = executed.result;
 				warnings.push(...executed.warnings);
+				const knowledgeVerification =
+					await _internals.verifyPostMortemKnowledgeActions(
+						directory,
+						parsedActions.recommendations,
+					);
+				for (const item of knowledgeVerification) {
+					if (
+						item.status === 'not_found' ||
+						item.status === 'ambiguous_prefix' ||
+						item.status === 'missing_entry_id'
+					) {
+						warnings.push(
+							`Post-mortem knowledge action ${item.action} for '${item.input_entry_id ?? 'new'}' ${item.status}: ${item.reason}`,
+						);
+					}
+				}
+				const freshnessSummary = buildStateFreshnessSection({
+					planId: effectivePlanId,
+					scope,
+					sessionID: options.sessionID,
+					planLoaded,
+					knowledgeSummary,
+					proposals,
+					unactionable,
+					retrospectives,
+					driftReports,
+				});
+				const verificationSummary = buildActionVerificationSection(
+					knowledgeVerification,
+				);
 				const actionSummary = [
 					'## Executed Post-Mortem Actions',
 					`- Knowledge actions: ${actionResult.knowledge_applied} applied, ${actionResult.knowledge_skipped} skipped`,
 					`- Hive actions: ${actionResult.hive_promotions} new promotions, ${actionResult.hive_encounters_incremented} encounters incremented, ${actionResult.hive_advancements} advancements`,
 					`- Proposal actions: ${actionResult.proposals_approved} approved, ${actionResult.proposals_rejected} rejected, ${actionResult.proposals_skipped} skipped`,
 				].join('\n');
-				reportContent = `# Post-Mortem Report: ${effectivePlanId}\nGenerated: ${new Date().toISOString()}\nScope: ${scope}\n\n${llmOutput}\n\n${actionSummary}`;
+				reportContent = `# Post-Mortem Report: ${effectivePlanId}\nGenerated: ${new Date().toISOString()}\nScope: ${scope}\n\n${freshnessSummary}\n\n${llmOutput}\n\n${verificationSummary}\n\n${actionSummary}`;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				warnings.push(
@@ -1052,6 +1273,7 @@ export async function runCuratorPostMortem(
 					unactionable,
 					retrospectives,
 					driftReports,
+					{ scope, sessionID: options.sessionID, planLoaded },
 				);
 			}
 		} else {
@@ -1064,6 +1286,7 @@ export async function runCuratorPostMortem(
 				unactionable,
 				retrospectives,
 				driftReports,
+				{ scope, sessionID: options.sessionID, planLoaded },
 			);
 		}
 
@@ -1131,9 +1354,12 @@ export const _internals = {
 	readJsonlFile,
 	buildDataOnlyReport,
 	assembleLLMInput,
+	buildStateFreshnessSection,
+	buildActionVerificationSection,
 	isReportValid,
 	parsePostMortemActions,
 	executePostMortemActions,
+	verifyPostMortemKnowledgeActions,
 	repairPostMortemActions,
 	loadDefaultKnowledgeConfig: async (): Promise<KnowledgeConfig> => {
 		const { KnowledgeConfigSchema } = await import('../config/schema.js');

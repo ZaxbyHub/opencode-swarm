@@ -196,6 +196,32 @@ describe('injectDelegateDirectivesBefore — malformed payload edge cases', () =
 			expect(count).toBe(0);
 		});
 
+		it('does not treat a bare tag token as an already-injected directive block', async () => {
+			const config = makeConfig();
+
+			const ki = await import('../../../src/hooks/knowledge-injector.js');
+			ki._internals.searchKnowledge = mock(async () => ({
+				results: [makeEntry({ id: 'k-plain-tag', lesson: 'Inject me' })],
+				trace_id: 'plain-tag-trace',
+			}));
+
+			const input = makeInput({
+				args: {
+					subagent_type: 'coder',
+					prompt: 'Mention <delegate_knowledge_directives> in prose only.',
+				},
+			});
+
+			const count = await injectDelegateDirectivesBefore(
+				testDir,
+				input,
+				config,
+			);
+			expect(count).toBe(1);
+			const prompt = (input.args as Record<string, unknown>).prompt as string;
+			expect(prompt).toContain('k-plain-tag');
+		});
+
 		it('fail-open: continues with undefined phase when loadPlan throws', async () => {
 			const config = makeConfig();
 

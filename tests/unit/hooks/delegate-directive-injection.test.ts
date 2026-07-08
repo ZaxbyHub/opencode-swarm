@@ -133,6 +133,41 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 			expect(prompt).toContain('Implement the feature');
 		});
 
+		it('does not inject for prefixed coder-originated Task calls', async () => {
+			const config = makeConfig();
+
+			const ki = await import('../../../src/hooks/knowledge-injector.js');
+			ki._internals.searchKnowledge = mock(async () => ({
+				results: [
+					makeEntry({
+						id: 'coder-originated',
+						directive_priority: 'high',
+						lesson: 'Coder-originated delegations still receive directives',
+					}),
+				],
+				trace_id: 'coder-originated-trace',
+			}));
+
+			const input = makeInput({
+				agent: 'paid_coder',
+				args: {
+					subagent_type: 'reviewer',
+					prompt: 'Review the coder-originated follow-up',
+				},
+			});
+
+			const count = await injectDelegateDirectivesBefore(
+				testDir,
+				input,
+				config,
+			);
+
+			expect(count).toBe(0);
+			const prompt = (input.args as Record<string, unknown>).prompt as string;
+			expect(prompt).not.toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
+			expect(prompt).toBe('Review the coder-originated follow-up');
+		});
+
 		it('injects for reviewer agent including compliance block', async () => {
 			const config = makeConfig();
 

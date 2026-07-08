@@ -107,6 +107,10 @@ The following remain **per-worktree** (not redirected):
   over, so the shared store's confidence signal starts fresh.
 - **Close-stage behavior.** `/swarm close` skips archiving shared
   knowledge-family artifacts when linked, because peers may still be active.
+- **Orphaned local file diagnostic.** When linked, `.swarm/knowledge.jsonl` is
+  ignored unless it is the link-store symlink. If a regular local
+  `.swarm/knowledge.jsonl` remains beside `.swarm/link.json`, the link resolver
+  emits a debug warning and reports the shared-store path as authoritative.
 
 ---
 
@@ -390,6 +394,11 @@ Ranking rules:
   repetition.
 - Archived entries are excluded (also enforced by `knowledge_recall`).
 
+`knowledge_recall` returns each result with a `score_breakdown` object so
+agents and diagnostics can see how the final score was composed. The breakdown
+includes text, metadata, directive, confidence, generated-skill, outcome,
+cold-start, synonym, trigger-recall, status, and final-score components.
+
 Cache key: phase + tool + action + targetAgent + taskId + filePaths hash +
 SHA-1(ctx.lastUserMessage)[:16]. The phase-only cache from v1 has been
 retired. The user-message hash invalidates the cache between user turns
@@ -439,7 +448,7 @@ audit — including applied/ignored/contradicted outcomes and new-lesson persist
 Every outcome is appended as a JSONL line to:
 
 ```
-.swarm/knowledge-application.jsonl
+.swarm/knowledge-events.jsonl
 ```
 
 with `{timestamp, phase, taskId, action, tool, targetAgent, knowledgeId,
@@ -548,6 +557,11 @@ and reported through debug-gated curator diagnostics.
 High-confidence candidates (>= `curator.min_skill_confidence`) trigger
 `skill_generate` in **draft** mode; activation always requires a human or
 architect to call `skill_apply`.
+
+When a caller supplies explicit `source_knowledge_ids`, the IDs are treated as
+one requested thematic cluster and compiled into one skill. The semantic
+similarity clusterer is only used for automatic candidate discovery when no
+explicit source IDs are supplied.
 
 ### Real-time learning nudge
 

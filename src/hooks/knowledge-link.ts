@@ -26,10 +26,17 @@
  * module and without import cycles.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { warn } from '../utils/logger.js';
 
 // ============================================================================
 // Types
@@ -46,6 +53,18 @@ export interface LinkPointer {
 	createdAt: string;
 	/** How the link was established. */
 	source: 'manual' | 'auto';
+}
+
+export interface LinkedLocalKnowledgeStatus {
+	linked: boolean;
+	orphaned: boolean;
+	localKnowledgePath: string;
+	resolvedKnowledgePath: string;
+	reason?:
+		| 'not_linked'
+		| 'local_missing'
+		| 'local_symlink'
+		| 'local_regular_file';
 }
 
 // ============================================================================
@@ -198,6 +217,65 @@ export function readLinkPointer(directory: string): LinkPointer | null {
 	}
 }
 
+export function getLinkedLocalKnowledgeStatus(
+	directory: string,
+): LinkedLocalKnowledgeStatus {
+	const localKnowledgePath = path.join(directory, '.swarm', 'knowledge.jsonl');
+	const pointer = readLinkPointer(directory);
+	if (!pointer) {
+		return {
+			linked: false,
+			orphaned: false,
+			localKnowledgePath,
+			resolvedKnowledgePath: localKnowledgePath,
+			reason: 'not_linked',
+		};
+	}
+
+	const resolvedKnowledgePath = path.join(
+		path.resolve(resolveLinkDir(pointer.linkId)),
+		'knowledge.jsonl',
+	);
+	if (!existsSync(localKnowledgePath)) {
+		return {
+			linked: true,
+			orphaned: false,
+			localKnowledgePath,
+			resolvedKnowledgePath,
+			reason: 'local_missing',
+		};
+	}
+
+	try {
+		const stat = lstatSync(localKnowledgePath);
+		if (stat.isSymbolicLink()) {
+			return {
+				linked: true,
+				orphaned: false,
+				localKnowledgePath,
+				resolvedKnowledgePath,
+				reason: 'local_symlink',
+			};
+		}
+	} catch {
+		return {
+			linked: true,
+			orphaned: false,
+			localKnowledgePath,
+			resolvedKnowledgePath,
+			reason: 'local_missing',
+		};
+	}
+
+	return {
+		linked: true,
+		orphaned: true,
+		localKnowledgePath,
+		resolvedKnowledgePath,
+		reason: 'local_regular_file',
+	};
+}
+
 /** Write the link pointer atomically and invalidate the resolution cache. */
 export async function writeLinkPointer(
 	directory: string,
@@ -262,6 +340,16 @@ export function resolveKnowledgeStoreDir(directory: string): string {
 			// fs.realpathSync); traversal safety is enforced by sanitizeLinkId on the
 			// linkId, not by this call.
 			linkDir = path.resolve(resolveLinkDir(pointer.linkId));
+			const orphanStatus = getLinkedLocalKnowledgeStatus(directory);
+			if (orphanStatus.orphaned) {
+				warn(
+					'[knowledge-link] local knowledge file is orphaned by link store',
+					{
+						localKnowledgePath: orphanStatus.localKnowledgePath,
+						resolvedKnowledgePath: orphanStatus.resolvedKnowledgePath,
+					},
+				);
+			}
 		}
 	} catch {
 		linkDir = null;
@@ -303,6 +391,7 @@ export const _internals = {
 	readLinkPointer,
 	writeLinkPointer,
 	removeLinkPointer,
+	getLinkedLocalKnowledgeStatus,
 	invalidateKnowledgeStoreDirCache,
 	resolveLinkDir,
 	resolveLinkBaseDir,

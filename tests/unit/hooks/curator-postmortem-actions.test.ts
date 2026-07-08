@@ -62,6 +62,14 @@ function readKnowledgeEntry(dir: string): Record<string, unknown> {
 	);
 }
 
+function readKnowledgeEntries(dir: string): Record<string, unknown>[] {
+	return readFileSync(join(dir, '.swarm', 'knowledge.jsonl'), 'utf-8')
+		.trim()
+		.split('\n')
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line));
+}
+
 describe('curator post-mortem executable actions', () => {
 	let dir: string;
 	const originalCheckHivePromotions = _internals.checkHivePromotions;
@@ -136,6 +144,140 @@ describe('curator post-mortem executable actions', () => {
 		expect(result.actions?.proposals_approved).toBe(1);
 		expect(proposalIds).toEqual(['proposals/useful-skill.md']);
 		expect(readKnowledgeEntry(dir).hive_eligible).toBe(true);
+	});
+
+	test('executes shortened entry ids and actionable new recommendations from the JSON block', async () => {
+		const result = await runCuratorPostMortem(dir, {
+			force: true,
+			llmDelegate: async () =>
+				[
+					'```json postmortem_actions',
+					JSON.stringify({
+						summary: 'LLM synthesis with prefix and new directive.',
+						curation_recommendations: [
+							{
+								action: 'promote',
+								entry_id: ENTRY_ID.slice(0, 8),
+								lesson:
+									'Always verify postmortem curation actions after LLM synthesis.',
+								reason: 'The model copied the shortened entry id.',
+							},
+							{
+								action: 'promote',
+								lesson:
+									'Run focused verification before closing a knowledge-pipeline fix',
+								reason: 'Postmortem evidence showed the closeout gap.',
+								category: 'process',
+								applies_to_agents: ['architect'],
+								required_actions: [
+									'run focused verification before closing the issue',
+								],
+								triggers: ['knowledge pipeline fix'],
+								directive_priority: 'high',
+							},
+						],
+						queue_triage: [],
+					}),
+					'```',
+				].join('\n'),
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.actions?.knowledge_applied).toBe(2);
+		const entries = readKnowledgeEntries(dir);
+		expect(entries).toHaveLength(2);
+		expect(entries[0].hive_eligible).toBe(true);
+		expect(entries[1].applies_to_agents).toEqual(['architect']);
+		expect(entries[1].required_actions).toEqual([
+			'run focused verification before closing the issue',
+		]);
+		const report = readFileSync(result.reportPath!, 'utf-8');
+		expect(report).toContain('## Generated Against State');
+		expect(report).toContain('Plan context: loaded');
+		expect(report).toContain('## Post-Mortem Action Verification');
+		expect(report).toContain(
+			`promote: ${ENTRY_ID.slice(0, 8)} => ${ENTRY_ID} [prefix_match]`,
+		);
+		expect(report).toContain('promote: new [new_entry]');
+	});
+
+	test('ignores quarantined entries when resolving shortened recommendation ids', async () => {
+		const swarmDir = join(dir, '.swarm');
+		writeFileSync(
+			join(swarmDir, 'knowledge.jsonl'),
+			[
+				JSON.stringify({
+					id: ENTRY_ID,
+					tier: 'swarm',
+					lesson: 'Active lesson survives.',
+					category: 'process',
+					status: 'active',
+					confidence: 0.7,
+					tags: [],
+					scope: 'global',
+					confirmed_by: [],
+					project_name: 'test',
+					created_at: '2026-07-03T00:00:00.000Z',
+					updated_at: '2026-07-03T00:00:00.000Z',
+				}),
+				JSON.stringify({
+					id: `${ENTRY_ID.slice(0, 8)}-0000-4000-8000-000000000000`,
+					tier: 'swarm',
+					lesson: 'Quarantined prefix collision.',
+					category: 'process',
+					status: 'quarantined',
+					confidence: 0.1,
+					tags: [],
+					scope: 'global',
+					confirmed_by: [],
+					project_name: 'test',
+					created_at: '2026-07-03T00:00:00.000Z',
+					updated_at: '2026-07-03T00:00:00.000Z',
+				}),
+			].join('\n') + '\n',
+		);
+
+		const result = await runCuratorPostMortem(dir, {
+			force: true,
+			llmDelegate: async () =>
+				[
+					'```json postmortem_actions',
+					JSON.stringify({
+						summary: 'Shortened id should resolve to the active entry only.',
+						curation_recommendations: [
+							{
+								action: 'promote',
+								entry_id: ENTRY_ID.slice(0, 8),
+								lesson: 'Active lesson survives.',
+								reason: 'Prefix should ignore quarantined entries.',
+							},
+						],
+						queue_triage: [],
+					}),
+					'```',
+				].join('\n'),
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.actions?.knowledge_applied).toBe(1);
+		const report = readFileSync(result.reportPath!, 'utf-8');
+		expect(report).toContain(
+			`promote: ${ENTRY_ID.slice(0, 8)} => ${ENTRY_ID} [prefix_match]`,
+		);
+	});
+
+	test('data-only report labels planless runs and records freshness state', async () => {
+		rmSync(join(dir, '.swarm', 'plan.json'), { force: true });
+
+		const result = await runCuratorPostMortem(dir, { force: true });
+
+		expect(result.success).toBe(true);
+		expect(result.planId).toBe('unknown');
+		const report = readFileSync(result.reportPath!, 'utf-8');
+		expect(report).toContain(
+			'Plan context: unavailable (plan_id: unknown; project-level fallback)',
+		);
+		expect(report).toContain('- Knowledge entries summarized: 1');
 	});
 
 	test('malformed postmortem_actions JSON pushes diagnostics and triggers repair when llmDelegate present', async () => {

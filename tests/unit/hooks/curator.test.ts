@@ -2121,6 +2121,66 @@ invalid json here
 			expect(result.skipped).toBe(1);
 		});
 
+		it('resolves a unique 8-character entry_id prefix before applying', async () => {
+			const fullId = '12345678-1234-4abc-89ab-aaaaaaaaaaaa';
+			createKnowledgeFile(tempDir, [
+				{
+					...makeStoredEntry('Unique prefix target lesson'),
+					id: fullId,
+					hive_eligible: false,
+				},
+			]);
+
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				[
+					{
+						action: 'promote',
+						entry_id: '12345678',
+						lesson: 'Unique prefix target lesson',
+						reason: 'LLM copied the shortened id',
+					},
+				],
+				defaultKnowledgeConfig,
+			);
+
+			expect(result).toEqual({ applied: 1, skipped: 0 });
+			expect(readKnowledgeJsonl(tempDir)[0].hive_eligible).toBe(true);
+		});
+
+		it('skips an ambiguous entry_id prefix without applying either entry', async () => {
+			createKnowledgeFile(tempDir, [
+				{
+					...makeStoredEntry('Ambiguous prefix target one'),
+					id: 'abcdef12-1111-4abc-89ab-aaaaaaaaaaaa',
+					hive_eligible: false,
+				},
+				{
+					...makeStoredEntry('Ambiguous prefix target two'),
+					id: 'abcdef12-2222-4abc-89ab-bbbbbbbbbbbb',
+					hive_eligible: false,
+				},
+			]);
+
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				[
+					{
+						action: 'promote',
+						entry_id: 'abcdef12',
+						lesson: 'Ambiguous prefix target lesson',
+						reason: 'LLM copied an ambiguous shortened id',
+					},
+				],
+				defaultKnowledgeConfig,
+			);
+
+			expect(result).toEqual({ applied: 0, skipped: 1 });
+			expect(
+				readKnowledgeJsonl(tempDir).map((entry) => entry.hive_eligible),
+			).toEqual([false, false]);
+		});
+
 		it('applied + skipped === recommendations.length invariant across a mixed batch', async () => {
 			const entries: SwarmKnowledgeEntry[] = [
 				{
@@ -2775,6 +2835,42 @@ invalid json here
 			);
 			expect(queued[0].status).toBe('quarantined_unactionable');
 			expect(queued[0].auto_generated).toBe(true);
+		});
+
+		it('appends actionable promote-new recommendations to the active store', async () => {
+			const swarmDir = path.join(tempDir, '.swarm');
+			fs.mkdirSync(swarmDir, { recursive: true });
+			fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), '');
+
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				[
+					{
+						action: 'promote',
+						entry_id: undefined,
+						lesson:
+							'Run the focused regression test before declaring the fix complete',
+						reason: 'Observed missing verification in postmortem evidence',
+						category: 'testing',
+						applies_to_agents: ['coder'],
+						required_actions: [
+							'run the focused regression test before final output',
+						],
+						triggers: ['fix complete'],
+						directive_priority: 'high',
+					},
+				],
+				defaultKnowledgeConfig,
+			);
+
+			expect(result).toEqual({ applied: 1, skipped: 0 });
+			const entries = readKnowledgeJsonl(tempDir);
+			expect(entries).toHaveLength(1);
+			expect(entries[0].applies_to_agents).toEqual(['coder']);
+			expect(entries[0].required_actions).toEqual([
+				'run the focused regression test before final output',
+			]);
+			expect(readUnactionableJsonl(tempDir)).toHaveLength(0);
 		});
 
 		it('SC-001: skips new entry when lesson fails validation gate (validation_enabled=true)', async () => {

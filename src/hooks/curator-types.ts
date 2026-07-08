@@ -3,7 +3,10 @@
  * No runtime logic. Types only.
  */
 
-import type { KnowledgeCategory } from './knowledge-types.js';
+import type {
+	ActionableDirectiveFields,
+	KnowledgeCategory,
+} from './knowledge-types.js';
 
 /** Curator summary — anchored iterative format. Persisted to .swarm/curator-summary.json */
 export interface CuratorSummary {
@@ -45,7 +48,17 @@ export interface ComplianceObservation {
 	severity: 'info' | 'warning';
 }
 
-export interface KnowledgeRecommendation {
+export interface KnowledgeRecommendation
+	extends Pick<
+		ActionableDirectiveFields,
+		| 'triggers'
+		| 'required_actions'
+		| 'forbidden_actions'
+		| 'applies_to_agents'
+		| 'applies_to_tools'
+		| 'verification_checks'
+		| 'directive_priority'
+	> {
 	action: 'promote' | 'archive' | 'flag_contradiction' | 'rewrite';
 	entry_id?: string;
 	lesson: string;

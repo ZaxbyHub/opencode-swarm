@@ -77,6 +77,7 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isActiveStatus } from './knowledge-types.js';
 import {
 	appendUnactionable,
 	validateActionability,
@@ -135,9 +136,63 @@ export const _internals = {
 };
 
 export interface RecommendationParseDiagnostic {
-	section: 'OBSERVATIONS';
+	section: 'OBSERVATIONS' | 'RECOMMENDATION_ID';
 	line: string;
 	reason: string;
+}
+
+const UUID_V4 =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const HEX_ID_PREFIX = /^[0-9a-f]{8,}$/i;
+
+export function normalizeRecommendationEntryIdToken(
+	token: string,
+): string | undefined {
+	const trimmed = token.trim();
+	if (UUID_V4.test(trimmed) || HEX_ID_PREFIX.test(trimmed)) return trimmed;
+	return undefined;
+}
+
+function resolveKnowledgeRecommendationIds(
+	recommendations: KnowledgeRecommendation[],
+	entries: Pick<SwarmKnowledgeEntry, 'id' | 'status'>[],
+): {
+	recommendations: KnowledgeRecommendation[];
+	diagnostics: RecommendationParseDiagnostic[];
+} {
+	const diagnostics: RecommendationParseDiagnostic[] = [];
+	const activeEntries = entries.filter((entry) => isActiveStatus(entry.status));
+	const resolved = recommendations
+		.map((recommendation) => {
+			const entryId =
+				typeof recommendation.entry_id === 'string'
+					? normalizeRecommendationEntryIdToken(recommendation.entry_id)
+					: undefined;
+			if (!entryId) return recommendation;
+			if (activeEntries.some((entry) => entry.id === entryId)) {
+				return { ...recommendation, entry_id: entryId };
+			}
+
+			const matches = activeEntries.filter((entry) =>
+				entry.id.startsWith(entryId),
+			);
+			if (matches.length === 1) {
+				return { ...recommendation, entry_id: matches[0].id };
+			}
+
+			diagnostics.push({
+				section: 'RECOMMENDATION_ID',
+				line: entryId,
+				reason:
+					matches.length === 0
+						? 'entry_id not found'
+						: 'entry_id prefix is ambiguous',
+			});
+			return null;
+		})
+		.filter((rec): rec is KnowledgeRecommendation => rec !== null);
+
+	return { recommendations: resolved, diagnostics };
 }
 
 function capPhaseDigests(digests: PhaseDigestEntry[]): PhaseDigestEntry[] {
@@ -277,8 +332,6 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 } {
 	const recommendations: KnowledgeRecommendation[] = [];
 	const diagnostics: RecommendationParseDiagnostic[] = [];
-	const UUID_V4 =
-		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 	// Parse OBSERVATIONS: section (legacy format: "- entry <uuid> (parenthetical): text")
 	const obsSection = llmOutput.match(
@@ -312,7 +365,7 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 					const text = staleEntry[2].trim().replace(/\s+\([^)]+\)$/, '');
 					recommendations.push({
 						action: 'archive',
-						entry_id: UUID_V4.test(uuid) ? uuid : undefined,
+						entry_id: normalizeRecommendationEntryIdToken(uuid),
 						lesson: text,
 						reason: text,
 					});
@@ -330,8 +383,8 @@ export function parseKnowledgeRecommendationsWithDiagnostics(
 			const parenthetical = match[2];
 			const text = match[3].trim().replace(/\s+\([^)]+\)$/, '');
 
-			// Determine entryId: only treat as real UUID if UUID v4 format
-			const entryId = uuid === 'new' || !UUID_V4.test(uuid) ? undefined : uuid;
+			const entryId =
+				uuid === 'new' ? undefined : normalizeRecommendationEntryIdToken(uuid);
 
 			// Extract action hint from parenthetical content
 			let action: KnowledgeRecommendation['action'] = 'rewrite';
@@ -1266,25 +1319,26 @@ export async function runCuratorPhase(
 							...diagnostic,
 						});
 					}
-					knowledgeRecommendations = parsed.recommendations.filter(
-						(recommendation) => {
-							if (
-								!recommendation.entry_id ||
-								knownKnowledgeIds.has(recommendation.entry_id)
-							) {
-								return true;
-							}
-							logger.warn(
-								'[curator] skipped recommendation for unknown knowledge entry',
-								{
-									phase,
-									entry_id: recommendation.entry_id,
-									action: recommendation.action,
-								},
-							);
-							return false;
-						},
+					const resolvedRecommendations = resolveKnowledgeRecommendationIds(
+						parsed.recommendations,
+						allKnowledgeEntries,
 					);
+					for (const diagnostic of resolvedRecommendations.diagnostics) {
+						logger.warn(
+							'[curator] skipped recommendation for unknown knowledge entry',
+							{
+								phase,
+								entry_id: diagnostic.line,
+								reason: diagnostic.reason,
+							},
+						);
+					}
+					knowledgeRecommendations =
+						resolvedRecommendations.recommendations.filter(
+							(recommendation) =>
+								!recommendation.entry_id ||
+								knownKnowledgeIds.has(recommendation.entry_id),
+						);
 					const structured = parseStructuredCuratorBlocks(llmOutput);
 					for (const diagnostic of structured.diagnostics) {
 						logger.warn('[curator] skipped malformed structured block', {
@@ -1645,7 +1699,7 @@ export async function applyCuratorKnowledgeUpdates(
 	}
 
 	// Filter out null/undefined recommendation items before processing
-	const validRecommendations = recommendations.filter(
+	let validRecommendations = recommendations.filter(
 		(rec): rec is KnowledgeRecommendation => rec != null,
 	);
 
@@ -1655,6 +1709,7 @@ export async function applyCuratorKnowledgeUpdates(
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
 	const foundIds = new Set<string>();
+	let idResolutionSkipped = 0;
 	// G11 (issue #1717): capture the pre-mutation status of each archived
 	// entry so the shared invalidator's tombstone records the real prior status.
 	const archivedPrevStatus = new Map<string, string>();
@@ -1677,6 +1732,17 @@ export async function applyCuratorKnowledgeUpdates(
 		let modified = false;
 
 		for (const e of entries) foundIds.add(e.id);
+		const resolvedRecommendations = resolveKnowledgeRecommendationIds(
+			validRecommendations,
+			entries,
+		);
+		validRecommendations = resolvedRecommendations.recommendations;
+		idResolutionSkipped = resolvedRecommendations.diagnostics.length;
+		for (const diagnostic of resolvedRecommendations.diagnostics) {
+			logger.warn(
+				`[curator] applyCuratorKnowledgeUpdates: entry_id '${diagnostic.line}' ${diagnostic.reason} — skipping`,
+			);
+		}
 
 		const updatedEntries = entries.map((entry) => {
 			const rec = validRecommendations.find((r) => r.entry_id === entry.id);
@@ -1776,6 +1842,7 @@ export async function applyCuratorKnowledgeUpdates(
 		applied += txApplied;
 		return modified ? updatedEntries : null;
 	});
+	skipped += idResolutionSkipped;
 
 	// G3 (#1715): emit `contradicted` events for flag_contradiction actions,
 	// AFTER the transaction commits. This unifies the two previously-disconnected
@@ -1934,6 +2001,13 @@ export async function applyCuratorKnowledgeUpdates(
 			updated_at: now,
 			auto_generated: true,
 			project_name: path.basename(directory),
+			triggers: rec.triggers,
+			required_actions: rec.required_actions,
+			forbidden_actions: rec.forbidden_actions,
+			applies_to_agents: rec.applies_to_agents,
+			applies_to_tools: rec.applies_to_tools,
+			verification_checks: rec.verification_checks,
+			directive_priority: rec.directive_priority,
 		};
 		// Layer-5 actionability gate (Change 4): prose "new candidate"
 		// recommendations carry no predicate/scope fields, so they are routed to

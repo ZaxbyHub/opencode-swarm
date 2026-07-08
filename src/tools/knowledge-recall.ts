@@ -3,6 +3,7 @@ import { loadPluginConfigWithMeta } from '../config';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import { searchKnowledge } from '../hooks/search-knowledge.js';
 import { computeKnowledgeDebug } from '../services/knowledge-diagnostics.js';
+import { log } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 interface ScoredEntry {
@@ -11,6 +12,7 @@ interface ScoredEntry {
 	category: string;
 	lesson: string;
 	score: number;
+	score_breakdown?: Record<string, unknown>;
 }
 
 interface KnowledgeRecallResult {
@@ -118,7 +120,16 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				category: e.category,
 				lesson: e.lesson,
 				score: e.finalScore,
+				score_breakdown: e.score_breakdown,
 			}));
+			log('[knowledge_recall] completed', {
+				agent: ctx?.agent ?? 'unknown',
+				session_id: ctx?.sessionID ?? 'unknown',
+				query: queryInput,
+				tier,
+				result_count: scored.length,
+				trace_id,
+			});
 
 			const result: KnowledgeRecallResult = {
 				results: scored,

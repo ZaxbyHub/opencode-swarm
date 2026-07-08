@@ -292,6 +292,73 @@ describe('generateSkills draft mode', () => {
 		expect(result.written[0].sourceKnowledgeIds).toEqual([id]);
 		expect(existsSync(result.written[0].path)).toBe(true);
 	});
+
+	it('treats explicit source_knowledge_ids as one requested draft cluster', async () => {
+		await seed([
+			makeEntry('qa-entry', {
+				lesson: 'Run focused tests before declaring implementation complete',
+				category: 'testing',
+				tags: ['qa'],
+				triggers: ['completion gate'],
+				required_actions: ['run the focused regression tests'],
+				applies_to_agents: ['coder'],
+			}),
+			makeEntry('lock-entry', {
+				lesson: 'Update lockfiles whenever dependency manifests change',
+				category: 'tooling',
+				tags: ['dependency'],
+				triggers: ['dependency update'],
+				required_actions: ['update the package lockfile'],
+				applies_to_agents: ['architect'],
+			}),
+		]);
+
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			slug: 'qa-dependency-contract',
+			sourceKnowledgeIds: ['qa-entry', 'lock-entry'],
+		});
+
+		expect(result.written).toHaveLength(1);
+		expect(result.written[0].slug).toBe('qa-dependency-contract');
+		expect(result.written[0].sourceKnowledgeIds).toEqual([
+			'qa-entry',
+			'lock-entry',
+		]);
+
+		const content = readFileSync(result.written[0].path, 'utf-8');
+		expect(content).toContain('  - qa-entry');
+		expect(content).toContain('  - lock-entry');
+		expect(content).toContain('run the focused regression tests');
+		expect(content).toContain('update the package lockfile');
+	});
+
+	it('skips quarantined explicit source_knowledge_ids when building a requested draft cluster', async () => {
+		await seed([
+			makeEntry('active-entry', {
+				lesson: 'Use focused validation before merge',
+				required_actions: ['run focused validation'],
+			}),
+			makeEntry('quarantined-entry', {
+				status: 'quarantined',
+				lesson: 'This quarantined lesson must not compile into a skill',
+			}),
+		]);
+
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			slug: 'active-only-cluster',
+			sourceKnowledgeIds: ['active-entry', 'quarantined-entry'],
+		});
+
+		expect(result.written).toHaveLength(1);
+		expect(result.written[0].sourceKnowledgeIds).toEqual(['active-entry']);
+		const content = readFileSync(result.written[0].path, 'utf-8');
+		expect(content).toContain('  - active-entry');
+		expect(content).not.toContain('quarantined-entry');
+	});
 });
 
 describe('generateSkills active mode', () => {
@@ -347,6 +414,53 @@ describe('generateSkills active mode', () => {
 		).toBe(true);
 		const onDisk = readFileSync(path.join(targetDir, 'SKILL.md'), 'utf-8');
 		expect(onDisk).toContain('manual content');
+	});
+
+	it('treats explicit source_knowledge_ids as one requested active cluster and stamps all sources', async () => {
+		await seed([
+			makeEntry('active-qa', {
+				lesson: 'Run focused tests before declaring implementation complete',
+				category: 'testing',
+				tags: ['qa'],
+				triggers: ['completion gate'],
+				required_actions: ['run the focused regression tests'],
+			}),
+			makeEntry('active-lock', {
+				lesson: 'Update lockfiles whenever dependency manifests change',
+				category: 'tooling',
+				tags: ['dependency'],
+				triggers: ['dependency update'],
+				required_actions: ['update the package lockfile'],
+			}),
+		]);
+
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'active',
+			slug: 'qa-dependency-contract',
+			sourceKnowledgeIds: ['active-qa', 'active-lock'],
+		});
+
+		expect(result.written).toHaveLength(1);
+		expect(result.written[0].slug).toBe('qa-dependency-contract');
+		expect(result.written[0].sourceKnowledgeIds).toEqual([
+			'active-qa',
+			'active-lock',
+		]);
+
+		const content = readFileSync(result.written[0].path, 'utf-8');
+		expect(content).toContain('  - active-qa');
+		expect(content).toContain('  - active-lock');
+		const stamped = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n')
+			.map((l) => JSON.parse(l));
+		expect(
+			stamped.map(
+				(entry: { generated_skill_slug?: string }) =>
+					entry.generated_skill_slug,
+			),
+		).toEqual(['qa-dependency-contract', 'qa-dependency-contract']);
 	});
 });
 

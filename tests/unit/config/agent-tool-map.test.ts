@@ -36,10 +36,10 @@ describe('AGENT_TOOL_MAP', () => {
 		}
 	});
 
-	it('subagent tool counts are <= 22', () => {
+	it('subagent tool counts are <= 23', () => {
 		for (const agent of allAgentNames) {
 			if (agent === 'architect') continue;
-			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(22);
+			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(23);
 		}
 	});
 
@@ -121,6 +121,15 @@ describe('AGENT_TOOL_MAP', () => {
 		for (const agent of allAgentNames) {
 			expect(AGENT_TOOL_MAP[agent]).toContain('swarm_command');
 		}
+	});
+
+	it('agents that explicitly audit recall usage retain knowledge_receipt', () => {
+		for (const agent of ['architect', 'reviewer', 'coder', 'test_engineer']) {
+			expect(AGENT_TOOL_MAP[agent]).toContain('knowledge_recall');
+			expect(AGENT_TOOL_MAP[agent]).toContain('knowledge_receipt');
+		}
+		expect(AGENT_TOOL_MAP.explorer).not.toContain('knowledge_receipt');
+		expect(AGENT_TOOL_MAP.critic_oversight).not.toContain('knowledge_receipt');
 	});
 
 	it('memory tools are not in the default agent map', () => {
