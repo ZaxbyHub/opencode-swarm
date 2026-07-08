@@ -30,6 +30,11 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'running-tests',
 	'engineering-conventions',
 	'commit-pr',
+	'worktree-retry-cleanup',
+	'skill-edit-validation',
+	'merge-queue-readiness',
+	'gate-attribution',
+	'ci-failure-batching',
 ] as const;
 
 const MAX_SKILL_FILES = 64;
