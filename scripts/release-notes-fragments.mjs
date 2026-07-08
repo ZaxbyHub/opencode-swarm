@@ -343,7 +343,7 @@ function verifyPr(num) {
  *
  * Returns a deduplicated array of PR numbers in first-seen order.
  */
-function resolveCommitShasToNprNumbers(shas, log) {
+function resolveCommitShasToPrNumbers(shas, log) {
 	if (!Array.isArray(shas) || shas.length === 0) return [];
 	const repoSlug = process.env.GITHUB_REPOSITORY;
 	if (!repoSlug) {
@@ -464,7 +464,7 @@ async function modeUpdatePr(log) {
 	const commitShas = extractCommitShasFromBody(strippedBody);
 	log(`release PR #${releasePr.number}: found ${commitShas.length} commit SHA(s) in body`);
 	const shaResolved = commitShas.length > 0
-		? resolveCommitShasToNprNumbers(commitShas, log)
+		? resolveCommitShasToPrNumbers(commitShas, log)
 		: [];
 	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
 
@@ -535,7 +535,7 @@ async function modeUpdateRelease(log) {
 	const commitShas = extractCommitShasFromBody(strippedBody);
 	log(`release ${tagName}: found ${commitShas.length} commit SHA(s) in body`);
 	const shaResolved = commitShas.length > 0
-		? resolveCommitShasToNprNumbers(commitShas, log)
+		? resolveCommitShasToPrNumbers(commitShas, log)
 		: [];
 	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
 
