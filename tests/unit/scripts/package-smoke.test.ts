@@ -41,6 +41,11 @@ const requiredProjectSkillSlugs = [
 	'running-tests',
 	'engineering-conventions',
 	'commit-pr',
+	'worktree-retry-cleanup',
+	'skill-edit-validation',
+	'merge-queue-readiness',
+	'gate-attribution',
+	'ci-failure-batching',
 ];
 
 const expectedProjectSkillFiles = [

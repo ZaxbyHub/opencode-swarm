@@ -40,6 +40,11 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'running-tests',
 	'engineering-conventions',
 	'commit-pr',
+	'worktree-retry-cleanup',
+	'skill-edit-validation',
+	'merge-queue-readiness',
+	'gate-attribution',
+	'ci-failure-batching',
 ];
 
 const REQUIRED_PACKAGE_FILES = [
