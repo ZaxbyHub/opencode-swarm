@@ -6,6 +6,8 @@
  * Max 50 entries to prevent memory growth.
  * Access is restricted via getter to prevent unauthorized mutation.
  */
+import { log } from '../utils/logger.js';
+
 const deferredWarnings: string[] = [];
 const MAX_DEFERRED_WARNINGS = 50;
 
@@ -13,6 +15,35 @@ export function addDeferredWarning(warning: string): void {
 	if (deferredWarnings.length < MAX_DEFERRED_WARNINGS) {
 		deferredWarnings.push(warning);
 	}
+}
+
+/**
+ * Operational advisory: a non-fatal, operator-actionable condition reached on
+ * a path that can run while the host TUI owns the terminal (plugin init,
+ * /swarm command handlers, tool execution, chat/tool hooks). Routes the message
+ * to BOTH delivery channels:
+ *
+ * 1. `addDeferredWarning` — buffers it for `/swarm diagnose`, so the operator
+ *    can discover the condition without it polluting the live display.
+ * 2. `log` — the debug-gated logger, so it also shows under
+ *    `OPENCODE_SWARM_DEBUG=1` for live debugging.
+ *
+ * This NEVER writes raw stderr/stdout. It is the safe replacement for the raw
+ * `console.warn` calls that corrupt the bubbletea TUI (issue #1249 class, and
+ * the broader sweep in `.zcode/issue-traces/bundled-skill-tui-pollution/`).
+ *
+ * Discriminator vs plain `log()`: use `advisoryWarn` only when the operator
+ * could plausibly act on the message (fix a malformed config, pick a
+ * worktree, repair a broken skill sync). Use plain `log()` for purely
+ * diagnostic fail-open catches (skipped malformed lines, best-effort cleanup)
+ * that would flood `/swarm diagnose` if buffered.
+ *
+ * Per AGENTS.md Invariant 10: "Do not emit diagnostic noise into chat-visible
+ * streams."
+ */
+export function advisoryWarn(message: string, data?: unknown): void {
+	addDeferredWarning(message);
+	log(message, data);
 }
 
 /**

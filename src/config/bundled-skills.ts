@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
+import { log } from '../utils/logger.js';
 
 export const BUNDLED_PROJECT_SKILLS = [
 	'brainstorm',
@@ -44,11 +46,9 @@ interface BundledSkillFile {
 	relativePath: string;
 }
 
-function warnBundledSkillSyncFailure(err: unknown): void {
+function describeBundledSkillSyncFailure(err: unknown): string {
 	const message = err instanceof Error ? err.message : String(err);
-	console.warn(
-		`[opencode-swarm] Could not install bundled project skills; continuing without sync: ${message}`,
-	);
+	return `[opencode-swarm] Could not install bundled project skills; continuing without sync: ${message}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,15 +273,30 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 			if (!(await ensureNotSymlinkedDirectoryAsync(destDir))) continue;
 
 			await copyBundledDirectoryBoundedAsync(sourceDir, destDir);
-			if (!quiet) {
-				console.warn(
-					`[opencode-swarm] Synchronized bundled skill .opencode/skills/${slug}/SKILL.md for first-class /swarm command support`,
-				);
-			}
+			// Success is a routine, expected, non-advisory event (the sync is
+			// best-effort by design). Emit ONLY through the debug-gated logger so
+			// it never reaches raw stderr/stdout and corrupts the host TUI (issue
+			// #1249 class). `quiet` is intentionally not consulted here: a success
+			// narration is diagnostic noise under either quiet setting.
+			log('synchronized bundled skill', {
+				slug: `.opencode/skills/${slug}/SKILL.md`,
+			});
 		}
 	} catch (err) {
 		// Non-fatal: plugin init and command registration must remain fail-open.
-		if (!quiet) warnBundledSkillSyncFailure(err);
+		// The failure IS operator-actionable (the backstop broke): under
+		// quiet=true route it to advisoryWarn (buffered for /swarm diagnose +
+		// debug-gated, no raw stderr). The quiet=false branch keeps the legacy
+		// visible-warning for parity with other init advisories that still use
+		// the two-way `!config.quiet` routing. PR2-5 of epic #1752 collapses
+		// this to advisoryWarn once the broader surface is migrated.
+		// Per AGENTS.md Invariant 10.
+		const failureMsg = describeBundledSkillSyncFailure(err);
+		if (quiet) {
+			advisoryWarn(failureMsg);
+		} else {
+			console.warn(failureMsg);
+		}
 	}
 }
 

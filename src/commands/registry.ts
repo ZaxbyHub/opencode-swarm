@@ -262,9 +262,19 @@ async function handleModeCommandWithBundledSkills(
 		// Backstop for projects that predate init-time materialization (the
 		// primary sync now runs at plugin init; see src/index.ts). Missing-only
 		// and fail-open, so it self-heals legacy projects without regression.
+		//
+		// Pass quiet=true unconditionally: this runs inside an active chat turn
+		// (the user just invoked a /swarm command), so the host bubbletea TUI
+		// owns the terminal and any raw stderr write corrupts the display
+		// (issue #1249 class). CommandContext does not carry a quiet flag, and
+		// command-path emission must never reach stderr regardless of the user's
+		// config.quiet setting. Success is already debug-gated in the callee; a
+		// failure here is routed to the deferred-warning buffer (visible in
+		// /swarm diagnose) instead of stderr.
 		await syncBundledProjectSkillsIfMissingAsync(
 			ctx.directory,
 			ctx.packageRoot,
+			true,
 		);
 	}
 	return Promise.resolve(handler(ctx.directory, ctx.args));
