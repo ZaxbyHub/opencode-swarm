@@ -11,8 +11,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ALL_AGENT_NAMES } from '../config/constants';
 import type { PluginConfig } from '../config/schema';
-import { PluginConfigSchema, stripKnownSwarmPrefix } from '../config/schema';
+import {
+	GATE_CONFIG_KNOWN_SECTION_KEYS,
+	GateConfigSchema,
+	PluginConfigSchema,
+	stripKnownSwarmPrefix,
+} from '../config/schema';
 import { log } from '../utils';
+
+const CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES = 102_400;
 
 /**
  * Cached set of all top-level keys from PluginConfigSchema.
@@ -120,6 +127,96 @@ function emitObjectTypeMismatch(
 			autoFixable: false,
 		});
 	}
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function collectRawGatesConfigFindings(directory: string): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+			if (!isPlainObject(raw) || raw.gates === undefined) continue;
+
+			if (!isPlainObject(raw.gates)) {
+				findings.push({
+					id: 'invalid-gates-config',
+					title: 'Invalid gates config',
+					description: `"gates" in ${configPath} must be an object. The loader ignores that section and keeps other valid config sections active.`,
+					severity: 'error',
+					path: 'gates',
+					currentValue: raw.gates,
+					autoFixable: false,
+				});
+				continue;
+			}
+
+			for (const [sectionName, sectionValue] of Object.entries(raw.gates)) {
+				const schema =
+					GateConfigSchema.shape[
+						sectionName as keyof typeof GateConfigSchema.shape
+					];
+				if (!schema) {
+					findings.push({
+						id: 'unknown-gates-section',
+						title: 'Unknown gates config section',
+						description: `Unknown gates section "gates.${sectionName}" in ${configPath} is ignored by the loader.`,
+						severity: 'warn',
+						path: `gates.${sectionName}`,
+						currentValue: sectionValue,
+						autoFixable: false,
+					});
+					continue;
+				}
+
+				const knownFields =
+					GATE_CONFIG_KNOWN_SECTION_KEYS[
+						sectionName as keyof typeof GATE_CONFIG_KNOWN_SECTION_KEYS
+					];
+				if (knownFields && isPlainObject(sectionValue)) {
+					const knownFieldSet = new Set<string>(knownFields);
+					for (const fieldName of Object.keys(sectionValue)) {
+						if (!knownFieldSet.has(fieldName)) {
+							findings.push({
+								id: 'unknown-gates-key',
+								title: 'Unknown gates config key',
+								description: `Unknown gates key "gates.${sectionName}.${fieldName}" in ${configPath} is ignored by the loader.`,
+								severity: 'warn',
+								path: `gates.${sectionName}.${fieldName}`,
+								currentValue: sectionValue[fieldName],
+								autoFixable: false,
+							});
+						}
+					}
+				}
+
+				const sectionResult = schema.safeParse(sectionValue);
+				if (!sectionResult.success) {
+					findings.push({
+						id: 'invalid-gates-section',
+						title: 'Invalid gates config section',
+						description: `"gates.${sectionName}" in ${configPath} failed validation. The loader uses defaults for that gate section and keeps other valid config sections active.`,
+						severity: 'error',
+						path: `gates.${sectionName}`,
+						currentValue: sectionValue,
+						autoFixable: false,
+					});
+				}
+			}
+		} catch {
+			// Raw config load failures are already handled by the loader; the doctor
+			// should stay best-effort and non-blocking.
+		}
+	}
+
+	return findings;
 }
 
 function emitWorktreeIsolationLayeringAdvisory(
@@ -1348,6 +1445,7 @@ export function runConfigDoctor(
 
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', findings);
+	findings.push(...collectRawGatesConfigFindings(directory));
 	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity

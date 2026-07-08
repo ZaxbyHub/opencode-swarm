@@ -91,6 +91,7 @@ mock.module('../../../src/config/schema.js', () => ({
 		}
 		return name;
 	}),
+	GATE_CONFIG_KNOWN_SECTION_KEYS: {},
 }));
 mock.module('../../../src/hooks/curator-drift.js', () => ({
 	readPriorDriftReports: mock(async () => []),

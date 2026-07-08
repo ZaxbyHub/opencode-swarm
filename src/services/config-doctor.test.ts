@@ -245,6 +245,95 @@ describe('Config Doctor Service', () => {
 				`'swarms' must emit a finding when set to a non-object value (got string)`,
 			).toBeGreaterThan(0);
 		});
+
+		it('should surface invalid raw gates subsection after loader sanitization', () => {
+			createTestConfig(tempDir, {
+				max_iterations: 7,
+				gates: {
+					syntax_check: { enabled: false },
+					placeholder_scan: {
+						deny_patterns: 'TODO',
+					},
+				},
+			});
+			const config = createTestConfigObj({
+				max_iterations: 7,
+				gates: {
+					syntax_check: { enabled: false },
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			const gatesFinding = result.findings.find(
+				(f) =>
+					f.id === 'invalid-gates-section' &&
+					f.path === 'gates.placeholder_scan',
+			);
+			expect(gatesFinding).toBeDefined();
+			expect(gatesFinding!.description).toContain(
+				'keeps other valid config sections active',
+			);
+		});
+
+		it('should surface typoed raw gates keys that Zod would otherwise strip', () => {
+			createTestConfig(tempDir, {
+				max_iterations: 6,
+				gates: {
+					placeholder_scan: {
+						enabled: false,
+						max_allowed_finding: 2,
+					},
+				},
+			});
+			const config = createTestConfigObj({
+				max_iterations: 6,
+				gates: {
+					placeholder_scan: {
+						enabled: false,
+						max_allowed_findings: 0,
+					},
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			const typoFinding = result.findings.find(
+				(f) =>
+					f.id === 'unknown-gates-key' &&
+					f.path === 'gates.placeholder_scan.max_allowed_finding',
+			);
+			expect(typoFinding).toBeDefined();
+			expect(typoFinding!.description).toContain('ignored by the loader');
+		});
+
+		it('should surface unknown gates section name that the loader ignores', () => {
+			createTestConfig(tempDir, {
+				max_iterations: 5,
+				gates: {
+					syntax_check: { enabled: true },
+					unknown_gate_type: { enabled: true },
+				},
+			});
+			const config = createTestConfigObj({
+				max_iterations: 5,
+				gates: {
+					syntax_check: { enabled: true },
+				},
+			});
+
+			const result = runConfigDoctor(config, tempDir);
+
+			const unknownSectionFinding = result.findings.find(
+				(f) =>
+					f.id === 'unknown-gates-section' &&
+					f.path === 'gates.unknown_gate_type',
+			);
+			expect(unknownSectionFinding).toBeDefined();
+			expect(unknownSectionFinding!.description).toContain(
+				'ignored by the loader',
+			);
+		});
 	});
 
 	describe('Swarms validation — empty and path-traversal (AC-4 SC-004)', () => {

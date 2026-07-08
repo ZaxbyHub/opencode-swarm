@@ -208,6 +208,7 @@ mock.module('../../../src/config/schema.js', () => ({
 	UIReviewConfigSchema: zodStub,
 	WatchdogConfigSchema: zodStub,
 	WorktreeIsolationConfigSchema: zodStub,
+	GATE_CONFIG_KNOWN_SECTION_KEYS: {},
 	_internals: {},
 }));
 mock.module('../../../src/services/run-memory.js', () => ({
@@ -241,6 +242,7 @@ mock.module('../../../src/hooks/knowledge-events.js', () => ({
 	recomputeCounters: mock(() => ({})),
 	countViolationsInWindow: mock(() => 0),
 	countEntryViolationsInWindow: mock(async () => 0),
+	countEntryContradictionsInWindow: mock(async () => 0),
 	readKnowledgeCounterRollups: mock(async () => []),
 	applyKnowledgeVerdictFeedback: mock(async () => ({})),
 	_internals: {},

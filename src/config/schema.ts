@@ -374,6 +374,28 @@ export const QualityBudgetConfigSchema = GateFeatureSchema.extend({
 
 export type QualityBudgetConfig = z.infer<typeof QualityBudgetConfigSchema>;
 
+export const GATE_CONFIG_KNOWN_SECTION_KEYS = {
+	syntax_check: ['enabled'],
+	placeholder_scan: [
+		'enabled',
+		'deny_patterns',
+		'allow_globs',
+		'max_allowed_findings',
+	],
+	sast_scan: ['enabled'],
+	sbom_generate: ['enabled'],
+	build_check: ['enabled'],
+	quality_budget: [
+		'enabled',
+		'max_complexity_delta',
+		'max_public_api_delta',
+		'max_duplication_ratio',
+		'min_test_to_code_ratio',
+		'enforce_on_globs',
+		'exclude_globs',
+	],
+} as const;
+
 export const GateConfigSchema = z.object({
 	syntax_check: GateFeatureSchema.default({ enabled: true }),
 	placeholder_scan: PlaceholderScanConfigSchema.default({
@@ -402,7 +424,9 @@ export const GateConfigSchema = z.object({
 	sast_scan: GateFeatureSchema.default({ enabled: true }),
 	sbom_generate: GateFeatureSchema.default({ enabled: true }),
 	build_check: GateFeatureSchema.default({ enabled: true }),
-	quality_budget: QualityBudgetConfigSchema,
+	quality_budget: QualityBudgetConfigSchema.default(() =>
+		QualityBudgetConfigSchema.parse({}),
+	),
 });
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;

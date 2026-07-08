@@ -112,6 +112,7 @@ mock.module('../../../src/config/schema.ts', () => ({
 	TaskSchema: zodStub,
 	TaskSizeSchema: zodStub,
 	TaskStatusSchema: zodStub,
+	GATE_CONFIG_KNOWN_SECTION_KEYS: {},
 }));
 
 mock.module('../../../src/services/skill-improver.js', () => ({

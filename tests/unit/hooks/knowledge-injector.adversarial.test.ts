@@ -255,6 +255,7 @@ mock.module('../../../src/config/schema.js', () => ({
 	UIReviewConfigSchema: zodStub,
 	WatchdogConfigSchema: zodStub,
 	WorktreeIsolationConfigSchema: zodStub,
+	GATE_CONFIG_KNOWN_SECTION_KEYS: {},
 	_internals: {},
 }));
 mock.module('../../../src/services/run-memory.js', () => ({

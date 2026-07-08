@@ -4,6 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	ExternalSkillsConfigSchema,
+	GATE_CONFIG_KNOWN_SECTION_KEYS,
+	GateConfigSchema,
 	type PluginConfig,
 	PluginConfigSchema,
 	resolveExternalSkillsConfig,
@@ -170,6 +172,93 @@ function sanitizeExternalSkillsConfig(
 	return cleaned;
 }
 
+function sanitizeGatesConfig(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!('gates' in raw) || raw.gates === undefined) {
+		return raw;
+	}
+	if (
+		typeof raw.gates !== 'object' ||
+		raw.gates === null ||
+		Array.isArray(raw.gates)
+	) {
+		console.warn(
+			'[opencode-swarm] gates config validation failed: expected an object. Quality gates will use defaults; other config sections remain active.',
+		);
+		const cleaned = { ...raw };
+		delete cleaned.gates;
+		return cleaned;
+	}
+
+	const gateSchemas = GateConfigSchema.shape;
+	const cleanedGates = { ...(raw.gates as Record<string, unknown>) };
+	for (const [key, value] of Object.entries(cleanedGates)) {
+		const schema = gateSchemas[key as keyof typeof gateSchemas];
+		if (!schema) {
+			console.warn(
+				`[opencode-swarm] Unknown gates config section "gates.${key}" ignored. Other config sections remain active.`,
+			);
+			delete cleanedGates[key];
+			continue;
+		}
+		const knownFields =
+			GATE_CONFIG_KNOWN_SECTION_KEYS[
+				key as keyof typeof GATE_CONFIG_KNOWN_SECTION_KEYS
+			];
+		let sectionValue = value;
+		if (
+			knownFields &&
+			typeof value === 'object' &&
+			value !== null &&
+			!Array.isArray(value)
+		) {
+			const cleanedSection = { ...(value as Record<string, unknown>) };
+			const knownFieldSet = new Set<string>(knownFields);
+			for (const fieldName of Object.keys(cleanedSection)) {
+				if (!knownFieldSet.has(fieldName)) {
+					console.warn(
+						`[opencode-swarm] Unknown gates config key "gates.${key}.${fieldName}" ignored. Other config sections remain active.`,
+					);
+					delete cleanedSection[fieldName];
+				}
+			}
+			sectionValue = cleanedSection;
+			cleanedGates[key] = cleanedSection;
+		}
+		const sectionResult = schema.safeParse(sectionValue);
+		if (!sectionResult.success) {
+			console.warn(
+				`[opencode-swarm] gates.${key} config validation failed; that gate section will use defaults and other config sections remain active:`,
+			);
+			console.warn(sectionResult.error.format());
+			delete cleanedGates[key];
+		}
+	}
+
+	const gatesResult = GateConfigSchema.safeParse(cleanedGates);
+	if (gatesResult.success) {
+		return {
+			...raw,
+			gates: gatesResult.data,
+		};
+	}
+
+	console.warn(
+		'[opencode-swarm] gates config validation failed after section cleanup; quality gates will use defaults and other config sections remain active:',
+	);
+	console.warn(gatesResult.error.format());
+	const cleaned = { ...raw };
+	delete cleaned.gates;
+	return cleaned;
+}
+
+function sanitizeSectionConfigs(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
+	return sanitizeGatesConfig(sanitizeExternalSkillsConfig(raw));
+}
+
 /**
  * Load plugin configuration from user and project config files.
  *
@@ -242,8 +331,8 @@ export function loadPluginConfig(directory: string): PluginConfig {
 	// Migrate v6.12 presets format to v6.13+ agents format
 	mergedRaw = migratePresetsConfig(mergedRaw);
 
-	// Pre-validate external_skills so invalid config doesn't block plugin load
-	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
+	// Pre-validate section-local configs so one invalid section doesn't block plugin load.
+	mergedRaw = sanitizeSectionConfigs(mergedRaw);
 
 	// Validate merged config with Zod (applies defaults ONCE).
 	// Nested optional schemas (e.g. council.general) surface automatically
@@ -255,7 +344,7 @@ export function loadPluginConfig(directory: string): PluginConfig {
 		// (project config may have invalid values that should be ignored)
 		if (rawUserConfig) {
 			const userParseResult = PluginConfigSchema.safeParse(
-				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+				sanitizeSectionConfigs(rawUserConfig ?? {}),
 			);
 			if (userParseResult.success) {
 				console.warn(
@@ -399,12 +488,12 @@ function reduceParsedConfig(
 		>;
 	}
 	mergedRaw = migratePresetsConfig(mergedRaw);
-	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
+	mergedRaw = sanitizeSectionConfigs(mergedRaw);
 	const result = PluginConfigSchema.safeParse(mergedRaw);
 	if (!result.success) {
 		if (rawUserConfig) {
 			const userParseResult = PluginConfigSchema.safeParse(
-				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+				sanitizeSectionConfigs(rawUserConfig ?? {}),
 			);
 			if (userParseResult.success) {
 				console.warn(
