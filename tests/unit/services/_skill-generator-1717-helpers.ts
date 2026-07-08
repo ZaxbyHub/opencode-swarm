@@ -7,11 +7,11 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
+import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import type { KnowledgeCluster } from '../../../src/services/skill-generator';
 
 export const OLD_ENV = {

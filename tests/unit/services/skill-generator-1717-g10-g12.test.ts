@@ -10,12 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-	_internals as skillGenInternals,
 	clearDraftSkillLinks,
 	clearRetiredSkillLinks,
 	proposalRepoRelativePath,
 	retireSkill,
 	selectCandidateEntries,
+	_internals as skillGenInternals,
 } from '../../../src/services/skill-generator';
 import {
 	cleanupTmp,
@@ -170,13 +170,7 @@ describe('G12: retireSkill clears bi-directional link', () => {
 		slug: string,
 		sourceIds: string[] = ['src-1'],
 	): Promise<string> {
-		const skillDir = path.join(
-			tmp,
-			'.opencode',
-			'skills',
-			'generated',
-			slug,
-		);
+		const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
 		await mkdir(skillDir, { recursive: true });
 		const ids = sourceIds.map((id) => `  - ${id}`).join('\n');
 		await writeFile(
@@ -242,9 +236,15 @@ describe('G12: retireSkill clears bi-directional link', () => {
 	});
 
 	it('retired_skill_history caps at 50 entries (FIFO)', async () => {
-		// Pre-fill history with 49 entries, then retire one more → cap at 50.
+		// FB-009: pre-fill history with exactly 50 entries so retiring one more
+		// pushes the array to 51 — this is the ONLY way to actually trigger the
+		// eviction branch (`if (history.length > 50) { history.splice(...) }`
+		// in src/services/skill-generator.ts's clearSkillLinks). A 49-seed +
+		// 1-retire (=50 total) never crosses the `> 50` threshold, so that
+		// version of this test passed even if the splice/eviction logic were
+		// deleted entirely.
 		const history: string[] = [];
-		for (let i = 0; i < 49; i++) history.push(`old-skill-${i}`);
+		for (let i = 0; i < 50; i++) history.push(`old-skill-${i}`);
 		await writeSwarmKnowledge(tmp, [
 			makeEntry('src-1', {
 				generated_skill_slug: 'newest-retire',
@@ -254,10 +254,14 @@ describe('G12: retireSkill clears bi-directional link', () => {
 		await writeActiveSkill('newest-retire');
 		await retireSkill(tmp, 'newest-retire', 'cap test');
 		const entries = await readSwarmKnowledge(tmp);
+		// 50 seeded + 1 new = 51 → evicted (spliced) down to exactly 50.
 		expect(entries[0].retired_skill_history).toHaveLength(50);
-		// The newest is the last entry (FIFO — oldest dropped).
+		// FIFO: the newest retirement is appended at the end...
 		expect(entries[0].retired_skill_history?.[49]).toBe('newest-retire');
-		expect(entries[0].retired_skill_history?.[0]).toBe('old-skill-0');
+		// ...and the front of the array (the oldest entry, index 0 of the
+		// original 50-entry seed) was evicted to make room.
+		expect(entries[0].retired_skill_history).not.toContain('old-skill-0');
+		expect(entries[0].retired_skill_history?.[0]).toBe('old-skill-1');
 	});
 
 	it('retired_skill_history dedups the same slug on re-retire', async () => {

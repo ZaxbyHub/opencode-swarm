@@ -13,16 +13,22 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import {
-	writeArchiveTombstoneAndInvalidateSkills,
-	_internals,
-} from '../../../src/hooks/skill-invalidator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
 import { appendKnowledge } from '../../../src/hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
+import {
+	_internals,
+	writeArchiveTombstoneAndInvalidateSkills,
+} from '../../../src/hooks/skill-invalidator.js';
 
 let tmp: string;
 
@@ -34,7 +40,34 @@ afterEach(() => {
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-function makeEntry(id: string, status: SwarmKnowledgeEntry['status'] = 'candidate'): SwarmKnowledgeEntry {
+/**
+ * FB-008: poll-until-condition-or-deadline helper replacing the previous
+ * fixed `setTimeout(resolve, 100)` wait. The retire/stale invalidation runs
+ * inside a fire-and-forget `queueMicrotask` (src/hooks/skill-invalidator.ts)
+ * that the caller never awaits, so tests must observe the filesystem
+ * side-effect directly instead of guessing a fixed delay. Mirrors the
+ * backoff pattern in tests/unit/hooks/guardrail-capture.test.ts.
+ */
+async function waitForFileToExist(
+	filePath: string,
+	timeoutMs = 2000,
+): Promise<void> {
+	const start = Date.now();
+	let delayMs = 10;
+	while (Date.now() - start < timeoutMs) {
+		if (existsSync(filePath)) return;
+		await Bun.sleep(delayMs);
+		delayMs = Math.min(delayMs * 2, 100);
+	}
+	throw new Error(
+		`Timed out after ${timeoutMs}ms waiting for file to exist: ${filePath}`,
+	);
+}
+
+function makeEntry(
+	id: string,
+	status: SwarmKnowledgeEntry['status'] = 'candidate',
+): SwarmKnowledgeEntry {
 	return {
 		id,
 		tier: 'swarm',
@@ -75,8 +108,14 @@ describe('writeArchiveTombstoneAndInvalidateSkills', () => {
 		});
 		const events = await readKnowledgeEvents(tmp);
 		const tombs = events.filter(
-			(e: { type?: string }): e is { type: 'archived'; mode?: string; actor?: string; previous_status?: string } =>
-				e.type === 'archived',
+			(e: {
+				type?: string;
+			}): e is {
+				type: 'archived';
+				mode?: string;
+				actor?: string;
+				previous_status?: string;
+			} => e.type === 'archived',
 		);
 		expect(tombs).toHaveLength(1);
 		expect(tombs[0].mode).toBe('archive');
@@ -140,29 +179,58 @@ describe('writeArchiveTombstoneAndInvalidateSkills', () => {
 			mode: 'archive',
 		});
 
-		// Wait for the microtask to fire (SC-004 timing).
-		await new Promise<void>((resolve) => setTimeout(resolve, 100));
+		// Wait for the microtask to fire (SC-004 timing) — poll for the
+		// observable side effect instead of a fixed delay (FB-008).
+		await waitForFileToExist(path.join(skillDir, 'retired.marker'));
 
 		// With all sources archived, retireOrMarkStale retires the skill.
 		expect(existsSync(path.join(skillDir, 'retired.marker'))).toBe(true);
 	});
 
-	it('does not throw when getArchivedKnowledgeIds has no matching skill dirs', async () => {
+	// FB-007: previously titled "does not throw when getArchivedKnowledgeIds
+	// has no matching skill dirs" and asserted `resolves.toBeUndefined()` on
+	// the OUTER promise. That assertion is a tautology — the outer promise
+	// resolves before the fire-and-forget `queueMicrotask` (which contains the
+	// actual "no matching skill dirs" logic) ever runs, so the test passed
+	// regardless of what the microtask did. This version asserts on the two
+	// real observable outcomes: the awaited tombstone write (synchronous, safe
+	// to assert immediately) and the microtask's no-op behavior (asserted
+	// after a bounded wait — polling for absence of an event isn't possible,
+	// so a tight bounded sleep is used per the writing-tests SKILL.md
+	// allowance for negative fire-and-forget checks).
+	it('writes the tombstone synchronously and emits no skill-stale-batch event when no skill dirs match the archived entry', async () => {
 		await appendKnowledge(
 			path.join(tmp, '.swarm', 'knowledge.jsonl'),
 			makeEntry('orphan-entry', 'candidate'),
 		);
-		// No skill dir created → microtask finds nothing → returns cleanly.
-		await expect(
-			writeArchiveTombstoneAndInvalidateSkills({
-				directory: tmp,
-				entryId: 'orphan-entry',
-				tier: 'swarm',
-				actor: 'test',
-				reason: 'no linked skill',
-				mode: 'archive',
-			}),
-		).resolves.toBeUndefined();
+		// No skill dir created → microtask finds nothing → returns cleanly
+		// without writing a skill-stale-batch event or any marker file.
+		await writeArchiveTombstoneAndInvalidateSkills({
+			directory: tmp,
+			entryId: 'orphan-entry',
+			tier: 'swarm',
+			actor: 'test',
+			reason: 'no linked skill',
+			mode: 'archive',
+		});
+
+		// The awaited prefix (tombstone write) is synchronous relative to the
+		// caller and observable immediately after the await returns.
+		const eventsAfterAwait = await readKnowledgeEvents(tmp);
+		const tombs = eventsAfterAwait.filter((e) => e.type === 'archived');
+		expect(tombs).toHaveLength(1);
+		expect((tombs[0] as { entry_id?: string }).entry_id).toBe('orphan-entry');
+
+		// Give the fire-and-forget microtask a bounded window to run, then
+		// assert it produced NO skill-stale-batch event (no matching skill
+		// dirs → early return before the batch event is written).
+		await Bun.sleep(150);
+
+		const eventsAfterMicrotask = await readKnowledgeEvents(tmp);
+		const batchEvents = eventsAfterMicrotask.filter(
+			(e) => e.type === 'skill-stale-batch',
+		);
+		expect(batchEvents).toHaveLength(0);
 	});
 
 	it('exposes the helper via _internals for DI in tests', () => {
