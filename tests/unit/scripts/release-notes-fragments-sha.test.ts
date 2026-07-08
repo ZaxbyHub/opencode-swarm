@@ -13,6 +13,8 @@ import {
 	MARKER_END,
 	MARKER_START,
 	mergeCandidateLists,
+	resolveAllCandidates,
+	selectValidPrNumbers,
 	stripCustomReleaseNotesBlock,
 } from '../../../scripts/release-notes-fragments.mjs';
 
@@ -254,5 +256,70 @@ describe('isValidPrNumber', () => {
 	});
 	test('accepts boundary value 9_999_999 (just under cap)', () => {
 		expect(isValidPrNumber(9_999_999)).toBe(true);
+	});
+});
+
+describe('selectValidPrNumbers', () => {
+	test('returns [] for non-array inputs (null, undefined, object, string)', () => {
+		expect(selectValidPrNumbers(null as unknown as number[])).toEqual([]);
+		expect(selectValidPrNumbers(undefined as unknown as number[])).toEqual([]);
+		expect(selectValidPrNumbers({} as unknown as number[])).toEqual([]);
+		expect(selectValidPrNumbers('x' as unknown as number[])).toEqual([]);
+	});
+	test('skips null and undefined elements without throwing', () => {
+		const input = [null, { number: 123 }, undefined, { number: 456 }];
+		expect(selectValidPrNumbers(input as never[])).toEqual([123, 456]);
+	});
+	test('skips non-object elements (raw numbers, strings)', () => {
+		const input = [123, 'x', { number: 7 }];
+		expect(selectValidPrNumbers(input as never[])).toEqual([7]);
+	});
+	test('rejects objects whose number fails isValidPrNumber (0, negative, NaN, float, >1e7)', () => {
+		const input = [
+			{ number: 0 },
+			{ number: -1 },
+			{ number: NaN },
+			{ number: 1.5 },
+			{ number: 99_999_999 },
+			{ number: 123 },
+		];
+		expect(selectValidPrNumbers(input)).toEqual([123]);
+	});
+	test('deduplicates preserving first-seen order', () => {
+		const input = [{ number: 123 }, { number: 123 }, { number: 456 }];
+		expect(selectValidPrNumbers(input)).toEqual([123, 456]);
+	});
+	test('returns [] for an all-invalid array', () => {
+		const input = [null, { number: 0 }, 'x'];
+		expect(selectValidPrNumbers(input as never[])).toEqual([]);
+	});
+});
+
+describe('resolveAllCandidates (no commit SHAs path)', () => {
+	test('body with direct PR refs and no commit SHAs returns merged direct candidates', () => {
+		const logs: string[] = [];
+		const log = (m: string) => logs.push(m);
+		const body = 'some text (#123) more text /pull/456 trailing';
+		const result = resolveAllCandidates(body, log);
+		expect(result).toEqual([123, 456]);
+		expect(logs).toContain('found 2 direct PR ref(s) in body');
+		expect(logs).toContain('found 0 commit SHA(s) in body');
+	});
+	test('body with no refs and no SHAs returns []', () => {
+		const logs: string[] = [];
+		const log = (m: string) => logs.push(m);
+		const result = resolveAllCandidates('no references at all', log);
+		expect(result).toEqual([]);
+		expect(logs).toContain('found 0 direct PR ref(s) in body');
+		expect(logs).toContain('found 0 commit SHA(s) in body');
+	});
+	test('body with direct refs but no extractable commit SHAs returns just the direct list', () => {
+		const logs: string[] = [];
+		const log = (m: string) => logs.push(m);
+		// Only direct PR refs — no /commit/<sha> URLs, so SHA path is skipped entirely
+		const body = 'changes from (#10) and (#20)';
+		const result = resolveAllCandidates(body, log);
+		expect(result).toEqual([10, 20]);
+		expect(logs.some((m) => m.includes('resolved 0 PR number(s) from commit SHAs'))).toBe(true);
 	});
 });
