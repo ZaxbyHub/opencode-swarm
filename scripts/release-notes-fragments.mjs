@@ -372,6 +372,30 @@ export function isValidPrNumber(n) {
 }
 
 /**
+ * From a flat array of candidate PR objects (e.g. the .flat()-ed result of a
+ * `gh api --slurp` response), return the valid PR numbers in first-seen order,
+ * skipping null/non-object/invalid entries. Pure — no I/O. Exported for tests.
+ *
+ * Defense-in-depth: a malformed API response containing null or non-object
+ * slots must never throw here (which would crash the release-notes job and
+ * discard already-extracted direct candidates — see resolveAllCandidates).
+ * @param {unknown[]} prs
+ * @returns {number[]}
+ */
+export function selectValidPrNumbers(prs) {
+	if (!Array.isArray(prs)) return [];
+	const seen = new Set();
+	const out = [];
+	for (const pr of prs) {
+		if (pr && typeof pr === 'object' && isValidPrNumber(pr.number) && !seen.has(pr.number)) {
+			seen.add(pr.number);
+			out.push(pr.number);
+		}
+	}
+	return out;
+}
+
+/**
  * Resolve a list of commit SHAs to PR numbers via the GitHub REST API.
  *
  * release-please with `changelog-notes-type: "github"` often emits commit
@@ -388,9 +412,10 @@ export function isValidPrNumber(n) {
  *   Without it the lookup is skipped gracefully.
  * - `--paginate --slurp` is passed to `gh api` so that commits associated
  *   with more than 30 PRs (e.g. heavily cherry-picked base commits) are not
- *   silently truncated to the first page. `--slurp` returns a single JSON array
- *   of all pages flattened; without it `JSON.parse()` would fail on the
- *   multiple-array output from `--paginate`.
+ *   silently truncated to the first page. `--slurp` wraps each page into an
+ *   outer JSON array (`[[...page1],[...page2]]`), which `.flat()` unwraps into
+ *   a single PR-object array; without `--slurp`, `JSON.parse()` would fail
+ *   on the multiple-array output from `--paginate`.
  *
  * Returns a deduplicated array of PR numbers in first-seen order.
  */
@@ -416,13 +441,14 @@ function resolveCommitShasToPrNumbers(shas, log) {
 			log(`SHA ${sha.slice(0, 7)} — no associated PRs found`);
 			continue;
 		}
-		if (prs.length > 1) {
-			log(`SHA ${sha.slice(0, 7)} — resolves to ${prs.length} PRs: ${prs.map((p) => `#${p.number}`).join(', ')}`);
+		const validNums = selectValidPrNumbers(prs);
+		if (validNums.length > 1) {
+			log(`SHA ${sha.slice(0, 7)} — resolves to ${validNums.length} PRs: ${validNums.map((n) => `#${n}`).join(', ')}`);
 		}
-		for (const pr of prs) {
-			if (isValidPrNumber(pr.number) && !seen.has(pr.number)) {
-				seen.add(pr.number);
-				out.push(pr.number);
+		for (const n of validNums) {
+			if (!seen.has(n)) {
+				seen.add(n);
+				out.push(n);
 			}
 		}
 	}
@@ -449,9 +475,15 @@ export function resolveAllCandidates(strippedBody, log) {
 
 	const commitShas = extractCommitShasFromBody(strippedBody);
 	log(`found ${commitShas.length} commit SHA(s) in body`);
-	const shaResolved = commitShas.length > 0
-		? resolveCommitShasToPrNumbers(commitShas, log)
-		: [];
+	let shaResolved = [];
+	if (commitShas.length > 0) {
+		try {
+			shaResolved = resolveCommitShasToPrNumbers(commitShas, log);
+		} catch (err) {
+			log(`commit-SHA resolution failed unexpectedly — continuing with direct candidates only: ${err instanceof Error ? err.message : String(err)}`);
+			shaResolved = [];
+		}
+	}
 	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
 
 	return mergeCandidateLists(directCandidates, shaResolved);
