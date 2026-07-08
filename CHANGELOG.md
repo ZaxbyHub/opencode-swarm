@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.110.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.0...v7.110.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **bundled-skills:** stop raw console.warn polluting the TUI + add advisoryWarn helper ([a5f0cee](https://github.com/ZaxbyHub/opencode-swarm/commit/a5f0ceee6f92b3a5ef994311da41c4a3977c98b4))
+* **knowledge:** repair knowledge skill pipeline ([a59d542](https://github.com/ZaxbyHub/opencode-swarm/commit/a59d5422852724197f94c48cb6918c1f27da21ad))
+
 ## [7.110.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.109.4...v7.110.0) (2026-07-08)
 
 
