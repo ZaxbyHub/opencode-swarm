@@ -292,7 +292,7 @@ export function readScopeFromDisk(
 	if (typeof parsed.declaredAt !== 'number' || parsed.declaredAt > now) {
 		return null;
 	}
-	if (typeof parsed.expiresAt !== 'number' || now > parsed.expiresAt) {
+	if (typeof parsed.expiresAt !== 'number' || now >= parsed.expiresAt) {
 		return null;
 	}
 	if (!Array.isArray(parsed.files)) return null;
