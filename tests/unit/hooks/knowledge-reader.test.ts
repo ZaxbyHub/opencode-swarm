@@ -666,13 +666,15 @@ describe('readMergedKnowledge — ranking', () => {
 		expect(result[0].finalScore).toBeGreaterThan(result[1].finalScore);
 	});
 
-	// FR-E1: warn is called when recordLessonsShown fails
-	// NOTE: recordLessonsShown has internal try-catch that calls warn without re-throwing,
-	// so the .catch() at line 462-464 in readMergedKnowledge is unreachable.
-	// The warn IS called, but via recordLessonsShown' internal catch (line 286).
-	it('Test 9b: warn called when recordLessonsShown fails (FR-E1)', async () => {
+	// (#1768) readMergedKnowledge is now a PURE ranking function: the shown-set
+	// write (recordLessonsShown) was moved out to the injector layer, which knows
+	// the final rendered set. The old Test 9b asserted recordLessonsShown fired
+	// here on the widened pre-rerank pool — the shown-set-pollution root cause.
+	// This test now pins the new contract: readMergedKnowledge must NOT write the
+	// shown file at all.
+	it('Test 9b: readMergedKnowledge does NOT record shown lessons (pure ranking, #1768)', async () => {
 		const swarmEntry = makeSwarmEntry({
-			lesson: 'Test lesson that will fail to record',
+			lesson: 'Test lesson that should not be recorded here',
 			scope: 'global',
 		});
 
@@ -684,35 +686,35 @@ describe('readMergedKnowledge — ranking', () => {
 			},
 		);
 
-		// Make mkdir reject so recordLessonsShown (via transactShownFile) fails
-		(mkdir as unknown as ReturnType<typeof mock>).mockRejectedValue(
-			new Error('mkdir failed'),
-		);
-
 		const config = makeConfig();
 		const context: ProjectContext = {
 			projectName: 'test-project',
 			currentPhase: 'Phase 1',
 		};
 
-		// Call readMergedKnowledge - should not throw, but warn should be called
 		const result = await readMergedKnowledge('/proj', config, context);
 
-		// Should still return results despite recordLessonsShown failing
+		// Ranking still works.
 		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(swarmEntry.id);
 
-		// recordLessonsShown is fire-and-forget — the async chain now goes through
-		// transactShownFile → mkdir → error → warn. Give the microtask queue an
-		// extra tick to allow the error propagation and the warn call to settle.
+		// Drain any pending microtasks in case of a stray fire-and-forget.
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
-		// warn IS called when recordLessonsShown's mkdir fails - via internal catch
-		expect(mockWarn).toHaveBeenCalledWith(
+		// The shown file must NOT be written by readMergedKnowledge. atomicWriteFile
+		// may be called by other transactFile paths, so assert specifically that no
+		// write targeted the shown file path.
+		const atomicCalls = (atomicWriteFile as unknown as ReturnType<typeof mock>)
+			.mock.calls;
+		const shownFileWrite = atomicCalls.find((c) =>
+			String(c[0]).includes('.knowledge-shown.json'),
+		);
+		expect(shownFileWrite).toBeUndefined();
+
+		// And the recordLessonsShown warn must NOT fire from this path.
+		expect(mockWarn).not.toHaveBeenCalledWith(
 			'[swarm] Knowledge: failed to record shown lessons',
 		);
-
-		// Reset mkdir to default success behavior for other tests
-		(mkdir as unknown as ReturnType<typeof mock>).mockResolvedValue(undefined);
 	});
 });
 

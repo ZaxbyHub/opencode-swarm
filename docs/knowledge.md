@@ -159,6 +159,13 @@ present. Same-phase repeats are idempotent no-ops. A real new phase
 confirmation refreshes `updated_at`, resets `phases_alive` to `0`, and
 recomputes confidence from the distinct phase-confirmation count.
 
+Retrieval is also a confirmation signal (#1768): when the architect auto-
+injection path or a delegate injection surfaces an entry during a phase, that
+entry accrues a `confirmed_by` record for the phase (same dedup and confidence
+recompute as reinforcement). This lets multi-phase confirmation accumulate from
+normal loop activity, not only from near-duplicate re-adds. History is capped at
+`MAX_CONFIRMED_BY` (50) records per entry.
+
 ### Promotion (swarm → hive)
 
 Three routes in `checkHivePromotions()`:

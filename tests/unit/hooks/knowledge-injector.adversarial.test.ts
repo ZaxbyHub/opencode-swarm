@@ -75,6 +75,7 @@ mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	readMergedKnowledge: async () => [],
 	updateRetrievalOutcome: async () => {},
 	scoreDirectiveAgainstContext: () => 0,
+	recordLessonsShown: async () => {},
 	_internals: {},
 }));
 // The injector retrieves via searchKnowledge; delegate to the local retrieval
@@ -126,6 +127,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	getPlatformConfigDir: () => '/tmp',
 	computeOutcomeSignal: () => 0,
 	OUTCOME_SIGNAL_SMOOTHING: 0.5,
+	confirmEntriesPhase: async () => {},
 	_internals: {},
 }));
 mock.module('../../../src/plan/manager.js', () => ({

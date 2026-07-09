@@ -29,7 +29,8 @@ import {
 } from './knowledge-escalator.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import type { ProjectContext, RankedEntry } from './knowledge-reader.js';
-import { readRejectedLessons } from './knowledge-store.js';
+import { recordLessonsShown } from './knowledge-reader.js';
+import { confirmEntriesPhase, readRejectedLessons } from './knowledge-store.js';
 import type {
 	DirectivePriority,
 	KnowledgeConfig,
@@ -54,42 +55,64 @@ import { readSwarmFileAsync, safeHook } from './utils.js';
 const INJECTION_SENTINEL = `${String.fromCharCode(0x200c)}[[KNOWLEDGE-INJECTED]]`;
 const defaultSearchKnowledge = searchKnowledge;
 
-function getRenderedEntryIds(
-	entries: RankedEntry[],
-	renderedBlock: string | null,
-	cfg: KnowledgeConfig,
-	currentProject?: string,
-): string[] {
-	if (!renderedBlock) return [];
-	const maxDisplayChars = cfg.max_lesson_display_chars ?? 120;
-	const ids: string[] = [];
-	for (const entry of entries) {
-		if (renderedBlock.includes(`- id: ${entry.id}`)) {
-			ids.push(entry.id);
-			continue;
-		}
-		let lessonText = sanitizeLessonForContext(entry.lesson);
-		if (lessonText.length > maxDisplayChars) {
-			lessonText = `${lessonText.slice(0, maxDisplayChars)}…`;
-		}
-		const rawSource =
-			entry.tier === 'hive' && 'source_project' in entry
-				? ((entry as { source_project?: string }).source_project ?? null)
-				: null;
-		const source =
-			rawSource !== null && rawSource !== currentProject
-				? ` (from: ${sanitizeLessonForContext(rawSource)})`
-				: '';
-		if (renderedBlock.includes(`${lessonText}${source}`)) {
-			ids.push(entry.id);
-		}
-	}
-	return ids;
+/**
+ * Result of building a knowledge block: the rendered text AND the ids of the
+ * entries that survived the budget trim. Returning the surviving ids
+ * structurally (instead of reverse-parsing them out of the rendered text) makes
+ * `cachedShownIds` deterministic regardless of sanitization quirks. Issue #1768
+ * Change 2.
+ */
+interface BuiltBlock {
+	block: string | null;
+	renderedIds: string[];
+}
+
+/**
+ * Extract the integer phase number from a canonical `Phase N` label, or
+ * `undefined` if the string is not a canonical phase label. Used to feed
+ * {@link confirmEntriesPhase} / the `injection_skip` telemetry.
+ */
+function phaseNumberOf(label: string | undefined): number | undefined {
+	if (!label) return undefined;
+	const m = /^Phase\s+(\d+)/i.exec(label);
+	return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * Emits a structured `injection_skip` diagnostic event so the reason the
+ * architect auto-injection path went dark is recoverable from
+ * `.swarm/knowledge-events.jsonl` (issue #1768). Fire-and-forget + fail-open:
+ * telemetry must never break injection. Every silent early-return in the
+ * architect path calls this instead of (or alongside) a bare `warn`.
+ */
+function recordInjectionSkip(
+	directory: string,
+	reason: string,
+	detail?: {
+		agent?: string;
+		sessionId?: string;
+		phase?: number;
+		extra?: Record<string, unknown>;
+	},
+): void {
+	_internals
+		.recordKnowledgeEvent(directory, {
+			type: 'injection_skip',
+			reason,
+			agent: detail?.agent,
+			session_id: detail?.sessionId,
+			phase: detail?.phase,
+			detail: detail?.extra,
+		})
+		.catch(() => {
+			// swallow — diagnostic telemetry must never propagate
+		});
 }
 
 /**
  * Builds a compact knowledge block from ranked entries, respecting a character budget.
- * Returns the formatted block string, or null if entries is empty.
+ * Returns the formatted block string (or null if empty/fully trimmed) plus the ids
+ * of the entries that survived the budget trim.
  *
  * Compact format per entry: `[S] lesson text ✓✓`
  * - Tier: [S] for swarm, [H] for hive
@@ -103,12 +126,14 @@ function buildKnowledgeBlock(
 	charBudget: number,
 	cfg: KnowledgeConfig,
 	currentProject?: string,
-): string | null {
-	if (entries.length === 0) return null;
+): BuiltBlock {
+	if (entries.length === 0) return { block: null, renderedIds: [] };
 
 	const maxDisplayChars = cfg.max_lesson_display_chars ?? 120;
 
-	const lines: string[] = entries.map((entry) => {
+	// Zip each entry with its rendered line so the budget-trim loop can drop
+	// both together, preserving the id ↔ line association structurally.
+	const rendered: { id: string; line: string }[] = entries.map((entry) => {
 		const tier = entry.tier === 'hive' ? '[H]' : '[S]';
 		const confirmedBy = entry.confirmed_by?.length ?? 0;
 		const confirm = confirmedBy >= 3 ? ' ✓✓' : confirmedBy >= 1 ? ' ✓' : '';
@@ -128,19 +153,21 @@ function buildKnowledgeBlock(
 				? ` (from: ${sanitizeLessonForContext(rawSource)})`
 				: '';
 
-		return `${tier} ${lessonText}${source}${confirm}`;
+		return { id: entry.id, line: `${tier} ${lessonText}${source}${confirm}` };
 	});
 
 	const header = '📚 Lessons:\n';
 
 	// Trim whole entries from end if block exceeds charBudget
-	let block = `${header}\n${lines.join('\n')}`;
-	while (block.length > charBudget && lines.length > 0) {
-		lines.pop();
-		block = `${header}\n${lines.join('\n')}`;
+	let block = `${header}\n${rendered.map((r) => r.line).join('\n')}`;
+	while (block.length > charBudget && rendered.length > 0) {
+		rendered.pop();
+		block = `${header}\n${rendered.map((r) => r.line).join('\n')}`;
 	}
 
-	return lines.length > 0 ? block : null;
+	return rendered.length > 0
+		? { block, renderedIds: rendered.map((r) => r.id) }
+		: { block: null, renderedIds: [] };
 }
 
 /**
@@ -152,11 +179,12 @@ function buildDirectiveBlock(
 	entries: RankedEntry[],
 	charBudget: number,
 	cfg: KnowledgeConfig,
-): string | null {
-	if (entries.length === 0) return null;
+): BuiltBlock {
+	if (entries.length === 0) return { block: null, renderedIds: [] };
 	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
-	const lines: string[] = [];
-	lines.push('<swarm_knowledge_directives>');
+	// Build each directive as a self-contained record group so the budget-trim
+	// loop can drop whole records (and track their ids structurally).
+	const records: { id: string; lines: string[] }[] = [];
 	for (const e of entries) {
 		const trigger =
 			e.triggers && e.triggers.length > 0
@@ -183,34 +211,35 @@ function buildDirectiveBlock(
 		const priority = e.directive_priority ?? 'medium';
 		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
 		// Each directive is one record. Keep YAML-ish for parser-friendliness.
-		lines.push(`- id: ${e.id}`);
-		lines.push(`  confidence: ${Number(e.confidence).toFixed(2)}`);
-		lines.push(`  priority: ${priority}`);
-		lines.push(`  lesson: ${lesson}`);
-		if (trigger) lines.push(`  trigger: ${trigger}`);
-		if (required) lines.push(`  required: ${required}`);
-		if (forbidden) lines.push(`  forbidden: ${forbidden}`);
-		if (skillRef) lines.push(`  skill: ${skillRef}`);
-		if (verification) lines.push(`  verification: ${verification}`);
+		const rec: string[] = [];
+		rec.push(`- id: ${e.id}`);
+		rec.push(`  confidence: ${Number(e.confidence).toFixed(2)}`);
+		rec.push(`  priority: ${priority}`);
+		rec.push(`  lesson: ${lesson}`);
+		if (trigger) rec.push(`  trigger: ${trigger}`);
+		if (required) rec.push(`  required: ${required}`);
+		if (forbidden) rec.push(`  forbidden: ${forbidden}`);
+		if (skillRef) rec.push(`  skill: ${skillRef}`);
+		if (verification) rec.push(`  verification: ${verification}`);
+		records.push({ id: e.id, lines: rec });
 	}
-	lines.push('</swarm_knowledge_directives>');
-	let block = lines.join('\n');
-	while (block.length > charBudget && lines.length > 3) {
-		// Pop the last directive record (find the last '- id:' line)
-		let lastIdx = -1;
-		for (let i = lines.length - 2; i >= 0; i--) {
-			if (lines[i].startsWith('- id:')) {
-				lastIdx = i;
-				break;
-			}
-		}
-		if (lastIdx < 0) break;
-		lines.splice(lastIdx, lines.length - 1 - lastIdx);
-		block = lines.join('\n');
+	let block = [
+		'<swarm_knowledge_directives>',
+		...records.flatMap((r) => r.lines),
+		'</swarm_knowledge_directives>',
+	].join('\n');
+	// Trim whole records from the end if block exceeds charBudget.
+	while (block.length > charBudget && records.length > 0) {
+		records.pop();
+		block = [
+			'<swarm_knowledge_directives>',
+			...records.flatMap((r) => r.lines),
+			'</swarm_knowledge_directives>',
+		].join('\n');
 	}
-	// If we trimmed everything to header+footer, return null.
-	if (lines.length <= 2) return null;
-	return block;
+	// If we trimmed everything, return null.
+	if (records.length === 0) return { block: null, renderedIds: [] };
+	return { block, renderedIds: records.map((r) => r.id) };
 }
 
 /** Sanitizes lesson text to prevent prompt injection into LLM context. */
@@ -418,6 +447,37 @@ export async function injectForDelegate(
 				ranks,
 				scores,
 			});
+			// (#1768 Change 3c + Change 4) When the canonical `Phase N` label is
+			// available, record the delegate-shown set under that key (union-merged
+			// with any architect-shown set for the same phase) and bump shown_count,
+			// so delegate-shown knowledge receives outcome attribution at
+			// phase-complete and accumulates phase confirmation — previously the
+			// delegate path recorded only the retrieved event, under the raw task
+			// title, which updateRetrievalOutcome never matched.
+			if (params.phase) {
+				const shownIds = capped.map((e) => e.id);
+				_internals
+					.recordLessonsShown(directory, shownIds, params.phase)
+					.catch(() => {});
+				_internals
+					.recordKnowledgeShown(directory, shownIds, {
+						phase: params.phase,
+						targetAgent: agent,
+						sessionId,
+					})
+					.catch(() => {});
+				const phaseNum = phaseNumberOf(params.phase);
+				if (phaseNum !== undefined) {
+					// Resolve projectName for the confirmation record. The canonical
+					// caller passes params.phase from the plan; derive projectName
+					// from the same plan here to avoid widening the param interface.
+					const plan = await loadPlan(directory).catch(() => null);
+					const projectName = plan?.title ?? 'unknown';
+					_internals
+						.confirmEntriesPhase(directory, shownIds, phaseNum, projectName)
+						.catch(() => {});
+				}
+			}
 		}
 		return { entries: capped, trace_id: search.trace_id };
 	} catch {
@@ -466,12 +526,25 @@ async function injectForDelegateIntoMessages(
 		}
 	}
 
+	// (#1768 Change 3c) Resolve the canonical `Phase N` label from the plan
+	// so delegate-shown knowledge is recorded under the SAME key the architect
+	// path + updateRetrievalOutcome use — eliminating orphaned task-title keys
+	// that previously received no outcome attribution. Mirrors the
+	// delegate-directive-injection.ts tool.execute.before caller. loadPlan is
+	// bounded (cached; same call the architect path makes) and this is a
+	// runtime hook, so there is no init-path concern.
+	const plan = await loadPlan(directory).catch(() => null);
+	const phaseLabel = plan
+		? (extractCurrentPhaseFromPlan(plan) ?? `Phase ${plan.current_phase ?? 1}`)
+		: undefined;
+
 	const { entries } = await injectForDelegate({
 		directory,
 		agent: agentName,
 		expectedTools: defaultExpectedToolsForAgent(agentName),
 		taskTitle,
 		sessionId,
+		phase: phaseLabel,
 		config,
 	});
 	const block = buildDelegateDirectiveBlock(entries, config);
@@ -686,6 +759,17 @@ export function createKnowledgeInjectorHook(
 				warn(
 					`[knowledge-injector] Skipping: only ${headroomChars} chars of headroom remain (existing: ${existingChars}, limit: ${MODEL_LIMIT_CHARS})`,
 				);
+				// (#1768) structured skip telemetry — the headroom gate is a prime
+				// candidate for the dark-in-production symptom (a small/default model
+				// limit makes headroom negative permanently). Diagnose from .swarm.
+				recordInjectionSkip(directory, 'headroom_budget', {
+					extra: {
+						headroomChars,
+						existingChars,
+						modelLimitChars: MODEL_LIMIT_CHARS,
+						modelID,
+					},
+				});
 				return;
 			}
 
@@ -703,7 +787,13 @@ export function createKnowledgeInjectorHook(
 			// other (unrecognized) agents return early.
 			const systemMsg = output.messages.find((m) => m.info?.role === 'system');
 			const agentName = systemMsg?.info?.agent;
-			if (!agentName) return;
+			const sessionId = systemMsg?.info?.sessionID;
+			if (!agentName) {
+				// (#1768) the chat.messages.transform event carried no system agent
+				// label — a prime candidate for the dark-in-production symptom.
+				recordInjectionSkip(directory, 'no_agent_name', { sessionId });
+				return;
+			}
 
 			// FR-002: unified injection budget — draw from shared ceiling so
 			// system-enhancer + knowledge-injector combined stay within budget.
@@ -726,7 +816,16 @@ export function createKnowledgeInjectorHook(
 				);
 				return;
 			}
-			if (!isOrchestratorAgent(agentName)) return;
+			if (!isOrchestratorAgent(agentName)) {
+				// (#1768) an agent we recognize (so not the delegate path) but is
+				// not the architect. Emit only for the non-delegate, non-architect
+				// case to avoid noise from legitimate delegate traffic (handled above).
+				recordInjectionSkip(directory, 'not_architect', {
+					agent: agentName,
+					sessionId,
+				});
+				return;
+			}
 
 			// Build retrieval context: extend ProjectContext with v2 task/action signals.
 			const phaseDescription = plan
@@ -857,6 +956,15 @@ export function createKnowledgeInjectorHook(
 				}
 				cachedShownIds = [];
 				cachedCriticalIds = [];
+				// (#1768) the gate opened (architect + headroom OK) but search
+				// returned zero matching entries — the knowledge loop has nothing
+				// to feed it this turn. Diagnose from .swarm (cold store, role
+				// gating, or all-quarantined).
+				recordInjectionSkip(directory, 'no_matching_entries', {
+					agent: agentName,
+					sessionId: sessionID,
+					phase: currentPhase,
+				});
 				if (freshPreamble === null) return;
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
@@ -896,37 +1004,42 @@ export function createKnowledgeInjectorHook(
 					e.directive_priority === 'high' ||
 					e.generated_skill_path,
 			);
-			const directiveBlock = buildDirectiveBlock(
+			const directiveBuilt = buildDirectiveBlock(
 				directiveEntries,
 				directiveBudget,
 				config,
 			);
+			const directiveBlock = directiveBuilt.block;
 
-			const lessonBlock = buildKnowledgeBlock(
+			const lessonBuilt = buildKnowledgeBlock(
 				filteredEntries,
 				lessonBudget,
 				config,
 				projectName,
 			);
-			const renderedDirectiveIds = getRenderedEntryIds(
-				directiveEntries,
-				directiveBlock,
-				config,
-				projectName,
-			);
-			const renderedIdSet = new Set([
-				...renderedDirectiveIds,
-				...getRenderedEntryIds(
-					filteredEntries,
-					lessonBlock,
-					config,
-					projectName,
-				),
-			]);
-			const renderedDirectiveIdSet = new Set(renderedDirectiveIds);
-			cachedShownIds = filteredEntries
-				.map((entry) => entry.id)
-				.filter((id) => renderedIdSet.has(id));
+			const lessonBlock = lessonBuilt.block;
+
+			// (#1768 Change 2) cachedShownIds is now derived STRUCTURALLY from
+			// the ids each builder reported as surviving the budget trim — no
+			// more fragile reverse text-substring matching.
+			const renderedDirectiveIdSet = new Set(directiveBuilt.renderedIds);
+			cachedShownIds = [
+				...new Set([...directiveBuilt.renderedIds, ...lessonBuilt.renderedIds]),
+			];
+			// (#1768) entries existed but the budget trim dropped every one of
+			// them — nothing was actually rendered, so nothing can be recorded.
+			// Diagnostic for the rare tight-budget case.
+			if (cachedShownIds.length === 0) {
+				recordInjectionSkip(directory, 'rendered_id_match_failed', {
+					agent: agentName,
+					sessionId: systemMsg?.info?.sessionID,
+					phase: currentPhase,
+					extra: {
+						filteredCount: filteredEntries.length,
+						directiveCount: directiveEntries.length,
+					},
+				});
+			}
 
 			const parts: string[] = [];
 			let remaining = effectiveBudget;
@@ -1076,6 +1189,33 @@ export function createKnowledgeInjectorHook(
 					.catch(() => {
 						// swallow — non-critical telemetry
 					});
+				// (#1768 Change 3b) Record the FINAL rendered set under the
+				// canonical `Phase N` key so updateRetrievalOutcome attributes
+				// the phase outcome to exactly these entries (not the widened
+				// pre-rerank pool the old readMergedKnowledge side effect recorded).
+				// Union-merge inside recordLessonsShown makes this safe alongside
+				// concurrent delegate writes.
+				_internals
+					.recordLessonsShown(directory, cachedShownIds, phaseLabel)
+					.catch(() => {
+						// swallow — non-critical attribution telemetry
+					});
+				// (#1768 Change 4) Retrieval is a phase-confirmation signal:
+				// surfacing an entry in phase N counts as a confirmation, so
+				// multi-phase confirmation can accumulate from normal loop
+				// activity (previously only near-duplicate re-add confirmed).
+				// Batched + fail-open; reuses reinforceSwarmKnowledgeEntry so
+				// confidence stays consistent with confirmed_by.
+				_internals
+					.confirmEntriesPhase(
+						directory,
+						cachedShownIds,
+						currentPhase,
+						projectName,
+					)
+					.catch(() => {
+						// swallow — best-effort confirmation telemetry
+					});
 			}
 		},
 	);
@@ -1087,10 +1227,14 @@ export const _internals: {
 	recordKnowledgeShown: typeof recordKnowledgeShown;
 	readRecentEscalations: typeof readRecentEscalations;
 	buildEscalationBriefing: typeof buildEscalationBriefing;
+	recordLessonsShown: typeof recordLessonsShown;
+	confirmEntriesPhase: typeof confirmEntriesPhase;
 } = {
 	searchKnowledge,
 	recordKnowledgeEvent,
 	recordKnowledgeShown,
 	readRecentEscalations,
 	buildEscalationBriefing,
+	recordLessonsShown,
+	confirmEntriesPhase,
 };
