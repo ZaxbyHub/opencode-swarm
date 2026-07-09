@@ -76,6 +76,8 @@
 		".opencode/skills/swarm",
 		".opencode/skills/swarm-ci-monitor",
 		".opencode/skills/worktree-retry-cleanup",
+		".opencode/skills/test-file-split",
+		".opencode/skills/fork-pr-operations",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"
