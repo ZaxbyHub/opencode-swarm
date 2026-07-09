@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.110.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.1...v7.110.2) (2026-07-09)
+
+
+### Bug Fixes
+
+* **scope:** correct TTL=0 expiry boundary (&gt; -&gt; &gt;=) for merge-queue stability ([9ed5c35](https://github.com/ZaxbyHub/opencode-swarm/commit/9ed5c358b9d60fc9c5b056faa69d65871aa297f3))
+* **scope:** correct TTL=0 expiry boundary for merge-queue stability ([8ab3dc0](https://github.com/ZaxbyHub/opencode-swarm/commit/8ab3dc047e06080ecf58c0b929b4fa116ca2cb2e))
+
 ## [7.110.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.0...v7.110.1) (2026-07-08)
 
 
