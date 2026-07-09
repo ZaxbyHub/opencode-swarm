@@ -675,9 +675,21 @@ describe('end-to-end ranking accuracy via tail-read + scoring', () => {
 		const fixedNow = Date.now();
 		const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
 		try {
-			const score1 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
-			const score2 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
-			const score3 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
+			const score1 = computeSkillRelevanceScore(
+				skillPath,
+				taskDesc,
+				tailEntries,
+			);
+			const score2 = computeSkillRelevanceScore(
+				skillPath,
+				taskDesc,
+				tailEntries,
+			);
+			const score3 = computeSkillRelevanceScore(
+				skillPath,
+				taskDesc,
+				tailEntries,
+			);
 
 			expect(score1).toBe(score2);
 			expect(score2).toBe(score3);
