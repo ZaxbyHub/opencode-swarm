@@ -9,6 +9,7 @@ import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
+import { handleCiSimulateCommand } from './ci-simulate.js';
 import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
@@ -973,6 +974,16 @@ export const COMMAND_REGISTRY = {
 		description: 'Show PR monitor subscription status for the current session',
 		aliasOf: 'pr status',
 		deprecated: true,
+	},
+	'ci-simulate': {
+		handler: (ctx) => handleCiSimulateCommand(ctx.directory, ctx.args),
+		description:
+			'Create a temporary merge-result worktree and run CI before merge queue entry',
+		args: '[--base origin/main] [--head <ref>]',
+		details:
+			'Creates a detached temporary worktree under .swarm/ci-simulate from the base ref, merges the current worktree HEAD (or --head ref), runs fixed local CI gates (typecheck, Biome CI, build, unit/integration/security/smoke tests, drift check), then removes the worktree and prunes metadata. Intended as a pre-queue merge_group simulation helper.',
+		category: 'agent',
+		toolPolicy: 'agent',
 	},
 	'deep-dive': {
 		handler: (ctx) =>

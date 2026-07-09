@@ -405,7 +405,7 @@ describe('PrMonitorWorker — CI change detection', () => {
 		restoreInternals();
 	});
 
-	test('publishes pr.ci.failed when a check transitions to failure', async () => {
+	test('publishes one batched pr.ci.failed when checks complete with failures', async () => {
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'success' },
@@ -418,7 +418,7 @@ describe('PrMonitorWorker — CI change detection', () => {
 			makePRStatus({
 				statusCheckRollup: [
 					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
-					{ name: 'ci/test', status: 'completed', conclusion: 'success' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
 				],
 			}),
 		);
@@ -435,8 +435,96 @@ describe('PrMonitorWorker — CI change detection', () => {
 				prNumber: 42,
 				repoFullName: 'owner/repo',
 				checkName: 'ci/build',
+				failedChecks: [
+					expect.objectContaining({ name: 'ci/build' }),
+					expect.objectContaining({ name: 'ci/test' }),
+				],
 			}),
 			'pr-monitor-worker',
+		);
+	});
+
+	test('does not publish pr.ci.failed until the check set is complete', async () => {
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: null },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'in_progress', conclusion: null },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(0);
+	});
+
+	test('publishes batched pr.ci.failed when an earlier failure waits for remaining checks', async () => {
+		const initialSub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: null },
+			]),
+		});
+		const incompleteSub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'failure' },
+				{ n: 'ci/test', c: null },
+			]),
+		});
+
+		mockState.listActive
+			.mockResolvedValueOnce([initialSub])
+			.mockResolvedValueOnce([incompleteSub]);
+		mockState.getPRStatus
+			.mockResolvedValueOnce(
+				makePRStatus({
+					statusCheckRollup: [
+						{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+						{ name: 'ci/test', status: 'in_progress', conclusion: null },
+					],
+				}),
+			)
+			.mockResolvedValueOnce(
+				makePRStatus({
+					statusCheckRollup: [
+						{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+						{ name: 'ci/test', status: 'completed', conclusion: 'success' },
+					],
+				}),
+			);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(initialSub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+		expect(ciFailedCalls[0][1]).toEqual(
+			expect.objectContaining({
+				checkName: 'ci/build',
+				failedChecks: [expect.objectContaining({ name: 'ci/build' })],
+			}),
 		);
 	});
 

@@ -68,6 +68,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// toolPolicy: 'agent')
 		'guardrail explain',
 		'guardrail-log',
+		'lanes',
+		'ci-simulate',
 	]);
 
 	const EXPECTED_HUMAN_ONLY = new Set<string>([
@@ -338,6 +340,7 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 			'memory',
 			'memory status',
 			'memory export',
+			'lanes',
 		]);
 		const derived = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
@@ -384,6 +387,11 @@ describe('gap command classification', () => {
 
 	test('costs: toolPolicy === "agent"', () => {
 		expect(cmd('costs').toolPolicy).toBe('agent');
+	});
+
+	test('ci-simulate: toolPolicy === "agent" with fixed CI gate arguments only', () => {
+		expect(cmd('ci-simulate').toolPolicy).toBe('agent');
+		expect(cmd('ci-simulate').args).not.toContain('--cmd');
 	});
 });
 

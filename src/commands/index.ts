@@ -33,6 +33,7 @@ export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
+export { handleCiSimulateCommand } from './ci-simulate';
 export { handleClarifyCommand } from './clarify';
 export { handleCloseCommand } from './close';
 export { handleCodebaseReviewCommand } from './codebase-review';

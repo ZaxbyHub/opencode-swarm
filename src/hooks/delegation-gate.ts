@@ -686,6 +686,47 @@ function resolveDelegatedPlanTaskId(
 	return null;
 }
 
+function normalizeReviewedTaskId(raw: string): string | null {
+	const trimmed = raw.trim();
+	const taskPrefix = /^task-(\d+\.\d+(?:\.\d+)*)$/i.exec(trimmed);
+	const candidate = taskPrefix ? taskPrefix[1] : trimmed;
+	return isStrictTaskId(candidate) ? candidate : null;
+}
+
+function isPassingReviewedVerdict(raw: string): boolean {
+	const verdict = raw
+		.trim()
+		.toUpperCase()
+		.replace(/[\s-]+/g, '_');
+	return verdict === 'APPROVED' || verdict === 'PASS' || verdict === 'PASSED';
+}
+
+export function hasReviewedTaskRows(output: string): boolean {
+	for (const line of output.split(/\r?\n/)) {
+		const match = /^\s*\[REVIEWED\]\s*\|\s*([^|]+)\s*\|/i.exec(line);
+		if (!match) continue;
+		if (normalizeReviewedTaskId(match[1])) return true;
+	}
+	return false;
+}
+
+export function parseReviewedTaskIdsFromSetDispatchOutput(
+	output: string,
+): string[] {
+	const taskIds: string[] = [];
+	const seen = new Set<string>();
+	for (const line of output.split(/\r?\n/)) {
+		const match = /^\s*\[REVIEWED\]\s*\|\s*([^|]+)\s*\|\s*([^|]+)/i.exec(line);
+		if (!match) continue;
+		const taskId = normalizeReviewedTaskId(match[1]);
+		if (!isPassingReviewedVerdict(match[2])) continue;
+		if (!taskId || seen.has(taskId)) continue;
+		seen.add(taskId);
+		taskIds.push(taskId);
+	}
+	return taskIds;
+}
+
 async function findTaskAwaitingCompletion(
 	directory: string | undefined,
 	session: AgentSessionState,
@@ -1986,12 +2027,21 @@ export function createDelegationGateHook(
 			if (typeof subagentType === 'string') {
 				try {
 					const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-					const evidenceTaskId = await resolveEvidenceTaskId(
-						mergedArgs,
-						session,
-						directory,
-					);
-					if (evidenceTaskId) {
+					const outputText = String(_output ?? '');
+					const reviewedTaskIds =
+						parseReviewedTaskIdsFromSetDispatchOutput(outputText);
+					const hasReviewedRows = hasReviewedTaskRows(outputText);
+					const fallbackTaskId =
+						!hasReviewedRows && reviewedTaskIds.length === 0
+							? await resolveEvidenceTaskId(mergedArgs, session, directory)
+							: null;
+					const evidenceTaskIds =
+						reviewedTaskIds.length > 0
+							? reviewedTaskIds
+							: fallbackTaskId
+								? [fallbackTaskId]
+								: [];
+					if (evidenceTaskIds.length > 0) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						const gateAgents = [
 							'reviewer',
@@ -2005,21 +2055,25 @@ export function createDelegationGateHook(
 						const targetAgentForEvidence = stripKnownSwarmPrefix(subagentType);
 						if (gateAgents.includes(targetAgentForEvidence)) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								targetAgentForEvidence,
-								input.sessionID,
-								turbo,
-							);
+							for (const evidenceTaskId of evidenceTaskIds) {
+								await recordGateEvidence(
+									directory,
+									evidenceTaskId,
+									targetAgentForEvidence,
+									input.sessionID,
+									turbo,
+								);
+							}
 						} else {
 							const { recordAgentDispatch } = await import('../gate-evidence');
-							await recordAgentDispatch(
-								directory,
-								evidenceTaskId,
-								targetAgentForEvidence,
-								turbo,
-							);
+							for (const evidenceTaskId of evidenceTaskIds) {
+								await recordAgentDispatch(
+									directory,
+									evidenceTaskId,
+									targetAgentForEvidence,
+									turbo,
+								);
+							}
 						}
 					}
 				} catch (err) {
@@ -2197,32 +2251,45 @@ export function createDelegationGateHook(
 				// Record gate evidence for delegation-chain fallback path
 				// v6.33.7: Entire block wrapped in try-catch (same fix as stored-args path)
 				try {
-					const evidenceTaskId = await resolveEvidenceTaskId(
-						directArgs,
-						session,
-						directory,
-					);
-					if (evidenceTaskId) {
+					const outputText = String(_output ?? '');
+					const reviewedTaskIds =
+						parseReviewedTaskIdsFromSetDispatchOutput(outputText);
+					const hasReviewedRows = hasReviewedTaskRows(outputText);
+					const fallbackTaskId =
+						!hasReviewedRows && reviewedTaskIds.length === 0
+							? await resolveEvidenceTaskId(directArgs, session, directory)
+							: null;
+					const evidenceTaskIds =
+						reviewedTaskIds.length > 0
+							? reviewedTaskIds
+							: fallbackTaskId
+								? [fallbackTaskId]
+								: [];
+					if (evidenceTaskIds.length > 0) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						if (hasReviewer) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								'reviewer',
-								input.sessionID,
-								turbo,
-							);
+							for (const evidenceTaskId of evidenceTaskIds) {
+								await recordGateEvidence(
+									directory,
+									evidenceTaskId,
+									'reviewer',
+									input.sessionID,
+									turbo,
+								);
+							}
 						}
 						if (hasTestEngineer) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								'test_engineer',
-								input.sessionID,
-								turbo,
-							);
+							for (const evidenceTaskId of evidenceTaskIds) {
+								await recordGateEvidence(
+									directory,
+									evidenceTaskId,
+									'test_engineer',
+									input.sessionID,
+									turbo,
+								);
+							}
 						}
 					}
 				} catch (err) {

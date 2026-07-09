@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createArchitectAgent } from '../../src/agents/architect';
+import { expectSkillConcept } from '../helpers/skill-content-registry';
 
 describe('Soft Spec Gate — integration (v6.15 Task 7.6)', () => {
 	// Extract PLAN protocol text from the extracted plan skill.
@@ -14,48 +15,33 @@ describe('Soft Spec Gate — integration (v6.15 Task 7.6)', () => {
 
 	describe('Gate completeness (both branches present)', () => {
 		it('SPEC GATE presents exactly two branches: spec absent and spec present', () => {
-			const hasNoSpecBranch = planSection.includes('NO effective spec');
-			const hasSpecExistsBranch = planSection.includes('EXISTS');
-			expect(hasNoSpecBranch).toBe(true);
-			expect(hasSpecExistsBranch).toBe(true);
+			expectSkillConcept(planSection, 'softSpecGateBranches');
 		});
 
 		it('No-spec branch mentions spec creation option', () => {
-			expect(planSection).toContain('Create a spec first');
+			expectSkillConcept(planSection, 'softSpecGateNoSpecChoices');
 		});
 
 		it('No-spec branch mentions skip option', () => {
-			expect(planSection).toContain('Skip and plan directly');
+			expectSkillConcept(planSection, 'softSpecGateNoSpecChoices');
 		});
 
 		it('Spec-exists branch mentions FR-### cross-referencing', () => {
-			expect(planSection).toContain('FR-###');
+			expectSkillConcept(planSection, 'softSpecGateSpecAlignment');
 		});
 
 		it('Spec-exists branch flags gold-plating risk', () => {
-			expect(planSection).toContain('gold-plating');
+			expectSkillConcept(planSection, 'softSpecGateSpecAlignment');
 		});
 	});
 
 	describe('Gate coherence (non-contradictory)', () => {
 		it('Gate does not promise to block planning when spec is absent', () => {
-			const blockingPhrases = [
-				'cannot proceed',
-				'must have spec',
-				'planning is blocked',
-				'blocked until',
-			];
-			const planSectionLower = planSection.toLowerCase();
-			blockingPhrases.forEach((phrase) => {
-				expect(planSectionLower).not.toContain(phrase);
-			});
+			expectSkillConcept(planSection, 'softSpecGateNonBlocking');
 		});
 
 		it('Skip path preserves exact existing planning steps', () => {
-			const hasPreserveLanguage =
-				planSection.includes('proceed to the steps below exactly as before') ||
-				planSection.includes('do NOT modify any planning behavior');
-			expect(hasPreserveLanguage).toBe(true);
+			expectSkillConcept(planSection, 'softSpecGateNonBlocking');
 		});
 
 		it('Gate instructions appear BEFORE the main planning steps', () => {

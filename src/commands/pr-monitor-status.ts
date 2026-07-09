@@ -11,6 +11,20 @@
  */
 
 import { listActive } from '../background/pr-subscriptions.js';
+import { runExternalTool } from '../utils/external-tool-runner.js';
+
+const GH_RUN_LIST_TIMEOUT_MS = 10_000;
+const GH_RUN_LIST_MAX_BYTES = 20_000;
+
+type MergeGroupRun = {
+	databaseId: number;
+	headBranch: string;
+	status: string;
+	conclusion: string | null;
+	url: string;
+	displayTitle?: string;
+	name?: string;
+};
 
 /**
  * Format an epoch-ms timestamp as a human-friendly relative time string.
@@ -38,12 +52,90 @@ function formatRelativeTime(epochMs: number): string {
 	return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+function parseMergeGroupRuns(raw: string, prNumber: number): MergeGroupRun[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+
+	const prToken = `pr-${prNumber}-`;
+	const issueToken = `#${prNumber}`;
+	const runs: MergeGroupRun[] = [];
+	for (const item of parsed) {
+		if (!isObject(item)) continue;
+		const databaseId = Number(item.databaseId);
+		const headBranch = String(item.headBranch ?? '');
+		const displayTitle = String(item.displayTitle ?? '');
+		const name = String(item.name ?? '');
+		if (
+			!headBranch.includes(prToken) &&
+			!displayTitle.includes(issueToken) &&
+			!name.includes(issueToken)
+		) {
+			continue;
+		}
+		if (!Number.isFinite(databaseId) || databaseId <= 0) continue;
+		runs.push({
+			databaseId,
+			headBranch,
+			status: String(item.status ?? ''),
+			conclusion: typeof item.conclusion === 'string' ? item.conclusion : null,
+			url: String(item.url ?? ''),
+			displayTitle,
+			name,
+		});
+	}
+	return runs.slice(0, 3);
+}
+
+async function listMergeGroupRuns(
+	directory: string,
+	repoFullName: string,
+	prNumber: number,
+): Promise<{ runs: MergeGroupRun[]; error?: string }> {
+	const result = await runExternalTool({
+		executable: 'gh',
+		args: [
+			'run',
+			'list',
+			'--repo',
+			repoFullName,
+			'--event',
+			'merge_group',
+			'--limit',
+			'20',
+			'--json',
+			'databaseId,headBranch,conclusion,status,url,displayTitle,name',
+		],
+		cwd: directory,
+		timeoutMs: GH_RUN_LIST_TIMEOUT_MS,
+		maxStdoutBytes: GH_RUN_LIST_MAX_BYTES,
+		maxStderrBytes: GH_RUN_LIST_MAX_BYTES,
+	});
+	if (result.status !== 'completed' || result.exitCode !== 0) {
+		return {
+			runs: [],
+			error: result.stderr.trim() || result.message || result.status,
+		};
+	}
+	return { runs: parseMergeGroupRuns(result.stdout, prNumber) };
+}
+
 /**
  * Exposed for unit testing via _internals.
  */
 export const _internals = {
 	formatRelativeTime,
 	listActive,
+	listMergeGroupRuns,
+	parseMergeGroupRuns,
 };
 
 /**
@@ -97,6 +189,35 @@ export async function handlePrMonitorStatusCommand(
 		const index = i + 1;
 		lines.push(`  ${index}. ${sub.repoFullName}#${sub.prNumber}`);
 		lines.push(`     URL: ${sub.prUrl}`);
+		const mergeGroupRuns = await _internals.listMergeGroupRuns(
+			directory,
+			sub.repoFullName,
+			sub.prNumber,
+		);
+		if (mergeGroupRuns.runs.length > 0) {
+			lines.push('     Merge-group runs:');
+			for (const run of mergeGroupRuns.runs) {
+				const conclusion = run.conclusion ?? run.status;
+				lines.push(`       - ${run.databaseId}: ${conclusion} ${run.url}`);
+				if (run.conclusion && run.conclusion !== 'success') {
+					lines.push(
+						`         Failed logs: gh run view ${run.databaseId} --repo ${sub.repoFullName} --log-failed`,
+					);
+				}
+			}
+		} else if (mergeGroupRuns.error) {
+			lines.push(
+				`     Merge-group runs: unavailable (${mergeGroupRuns.error})`,
+			);
+		} else {
+			lines.push('     Merge-group runs: none found in recent runs');
+		}
+		lines.push(
+			`     Merge-group checks: gh pr checks ${sub.prNumber} --repo ${sub.repoFullName}`,
+		);
+		lines.push(
+			`     Failed logs: gh run view <run-id> --repo ${sub.repoFullName} --log-failed`,
+		);
 		// Disambiguate ownership only in the cross-session (CLI) listing.
 		if (allSessions) {
 			lines.push(`     Session: ${sub.sessionID}`);

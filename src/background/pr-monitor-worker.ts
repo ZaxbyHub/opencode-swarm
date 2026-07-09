@@ -631,27 +631,55 @@ export class PrMonitorWorker {
 	): void {
 		let allPassed = true;
 		const prevMap = new Map(prevChecks.map((c) => [c.name, c.conclusion]));
+		const allComplete =
+			currentChecks.length > 0 &&
+			currentChecks.every(
+				(check) =>
+					check.status === 'completed' ||
+					check.status === 'COMPLETED' ||
+					check.conclusion !== null,
+			);
+		const failedChecks = currentChecks.filter(
+			(check) =>
+				check.conclusion === 'failure' || check.conclusion === 'FAILURE',
+		);
 
 		for (const check of currentChecks) {
-			if (check.conclusion === 'failure' || check.conclusion === 'FAILURE') {
-				const prev = prevMap.get(check.name);
-				if (prev !== 'failure' && prev !== 'FAILURE') {
-					events.push({
-						type: 'pr.ci.failed',
-						payload: {
-							prNumber: sub.prNumber,
-							repoFullName: sub.repoFullName,
-							prUrl: sub.prUrl,
-							checkName: check.name,
-							checkUrl: null,
-							conclusion: check.conclusion,
-						},
-					});
-				}
-			}
-
 			if (check.conclusion !== 'success' && check.conclusion !== 'SUCCESS') {
 				allPassed = false;
+			}
+		}
+
+		if (allComplete && failedChecks.length > 0) {
+			const prevWasIncomplete = prevChecks.some(
+				(check) =>
+					check.conclusion !== 'success' &&
+					check.conclusion !== 'SUCCESS' &&
+					check.conclusion !== 'failure' &&
+					check.conclusion !== 'FAILURE',
+			);
+			const hasNewFailure = failedChecks.some((check) => {
+				const prev = prevMap.get(check.name);
+				return prev !== 'failure' && prev !== 'FAILURE';
+			});
+			if (hasNewFailure || prevWasIncomplete || prevChecks.length === 0) {
+				events.push({
+					type: 'pr.ci.failed',
+					payload: {
+						prNumber: sub.prNumber,
+						repoFullName: sub.repoFullName,
+						prUrl: sub.prUrl,
+						checkName: failedChecks[0]?.name,
+						checkUrl: null,
+						conclusion: failedChecks[0]?.conclusion,
+						failedChecks: failedChecks.map((check) => ({
+							name: check.name,
+							status: check.status,
+							conclusion: check.conclusion,
+							checkUrl: null,
+						})),
+					},
+				});
 			}
 		}
 

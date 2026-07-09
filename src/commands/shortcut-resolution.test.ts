@@ -77,6 +77,7 @@ describe('TUI shortcut resolution parity', () => {
 		'swarm-memory-export',
 		'swarm-memory-import',
 		'swarm-memory-migrate',
+		'swarm-ci-simulate',
 	];
 
 	for (const key of previouslyBroken) {

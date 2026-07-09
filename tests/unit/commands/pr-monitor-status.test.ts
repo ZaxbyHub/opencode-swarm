@@ -25,6 +25,7 @@ function withFixedNow<T>(callback: () => T): T {
 // Mock listActive via _internals DI seam — no mock.module needed
 // ---------------------------------------------------------------------------
 const mockListActive = mock(() => Promise.resolve([]));
+const mockListMergeGroupRuns = mock(() => Promise.resolve({ runs: [] }));
 
 // ---------------------------------------------------------------------------
 // Temp directory
@@ -36,13 +37,20 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'pr-status-test-'));
 	savedInternals = { ..._internals };
 	_internals.listActive = mockListActive;
+	_internals.listMergeGroupRuns = mockListMergeGroupRuns;
 	mockListActive.mockReset();
+	mockListMergeGroupRuns.mockReset();
+	mockListMergeGroupRuns.mockImplementation(() =>
+		Promise.resolve({ runs: [] }),
+	);
 });
 
 afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
 	mockListActive.mockReset();
+	mockListMergeGroupRuns.mockReset();
 	_internals.listActive = savedInternals.listActive;
+	_internals.listMergeGroupRuns = savedInternals.listMergeGroupRuns;
 });
 
 // ---------------------------------------------------------------------------
@@ -191,9 +199,64 @@ describe('handlePrMonitorStatusCommand', () => {
 			expect(result).toContain('Active subscriptions (1):');
 			expect(result).toContain('  1. owner/repo#42');
 			expect(result).toContain('URL: https://github.com/owner/repo/pull/42');
+			expect(result).toContain('Merge-group runs: none found in recent runs');
+			expect(result).toContain(
+				'Merge-group checks: gh pr checks 42 --repo owner/repo',
+			);
+			expect(result).toContain(
+				'Failed logs: gh run view <run-id> --repo owner/repo --log-failed',
+			);
 			expect(result).toContain('Last checked: 1 minute ago');
 			expect(result).toContain('Watching: yes');
 			expect(result).toContain('Errors: 0');
+		});
+
+		test('renders recent failed merge-group runs with log commands', async () => {
+			mockListActive.mockImplementation(() =>
+				Promise.resolve([
+					{
+						correlationId: 'session-1::owner/repo::42',
+						sessionID: 'session-1',
+						prNumber: 42,
+						repoFullName: 'owner/repo',
+						prUrl: 'https://github.com/owner/repo/pull/42',
+						lastCheckedAt: Date.now() - 90_000,
+						isWatching: true,
+						hasUnaddressedEvents: false,
+						status: 'active' as const,
+						createdAt: Date.now() - 300_000,
+						updatedAt: Date.now() - 90_000,
+						errorCount: 0,
+					},
+				]),
+			);
+			mockListMergeGroupRuns.mockImplementation(() =>
+				Promise.resolve({
+					runs: [
+						{
+							databaseId: 123,
+							headBranch: 'gh-readonly-queue/main/pr-42-abc',
+							status: 'completed',
+							conclusion: 'failure',
+							url: 'https://github.com/owner/repo/actions/runs/123',
+						},
+					],
+				}),
+			);
+
+			const result = await handlePrMonitorStatusCommand(
+				tempDir,
+				[],
+				'session-1',
+			);
+
+			expect(result).toContain('Merge-group runs:');
+			expect(result).toContain(
+				'123: failure https://github.com/owner/repo/actions/runs/123',
+			);
+			expect(result).toContain(
+				'Failed logs: gh run view 123 --repo owner/repo --log-failed',
+			);
 		});
 
 		test('shows "Watching: no" when isWatching is false', async () => {
@@ -324,11 +387,17 @@ describe('handlePrMonitorStatusCommand', () => {
 			expect(lines[1]).toBe('');
 			expect(lines[2]).toBe('Active subscriptions (1):');
 			expect(lines[3]).toBe('  1. owner/repo#1');
-			expect(lines[7]).toBe('     Errors: 0');
+			expect(lines).toContain(
+				'     Merge-group checks: gh pr checks 1 --repo owner/repo',
+			);
+			expect(lines).toContain(
+				'     Failed logs: gh run view <run-id> --repo owner/repo --log-failed',
+			);
+			expect(lines).toContain('     Errors: 0');
 			// Blank after last sub before total
-			expect(lines[8]).toBe('');
+			expect(lines[lines.indexOf('     Errors: 0') + 1]).toBe('');
 			// No total line shown when session count equals total (1 === 1)
-			expect(lines[9]).toBeUndefined();
+			expect(lines[lines.indexOf('     Errors: 0') + 2]).toBeUndefined();
 		});
 	});
 

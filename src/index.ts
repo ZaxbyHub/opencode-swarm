@@ -1589,6 +1589,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm pr status',
 					description: shortcutDescription('pr status'),
 				},
+				'swarm-ci-simulate': {
+					template: '/swarm ci-simulate $ARGUMENTS',
+					description: shortcutDescription('ci-simulate'),
+				},
 				'swarm-learning': {
 					template: '/swarm learning',
 					description: shortcutDescription('learning'),

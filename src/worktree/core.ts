@@ -666,42 +666,64 @@ export async function provisionWorktree(
 		// Case (b) active collision: branch is checked out in ANY registered
 		// worktree, OR the expected path is itself registered (regardless of
 		// on-disk presence).
-		const branchIsActiveSomewhere = entries.some(
-			(e) => e.branch === `refs/heads/${branchName}`,
-		);
 		const expectedPathIsRegistered = entries.some(
 			(e) => e.path === expectedPath,
 		);
+		const branchIsActiveAtExpectedPath = entries.some(
+			(e) => e.branch === `refs/heads/${branchName}` && e.path === expectedPath,
+		);
+		const branchIsActiveElsewhere = entries.some(
+			(e) => e.branch === `refs/heads/${branchName}` && e.path !== expectedPath,
+		);
 
-		if (branchIsActiveSomewhere || expectedPathIsRegistered) {
+		if (
+			branchIsActiveElsewhere ||
+			(expectedPathIsRegistered && !branchIsActiveAtExpectedPath)
+		) {
 			return {
 				error: `Branch already exists and worktree is active: ${branchName} (owned by another session)`,
 			};
 		}
 
-		// Case (a): branch exists but is NOT registered in any active worktree — adopt it
-		console.warn(
-			`[swarm] adopting existing branch ${branchName} (stale worktree)`,
-		);
-
-		// Adopt: check out the existing branch into the worktree path
-		const adoptResult = await runGit(
-			['worktree', 'add', '-f', worktreePath, branchName],
+		const aheadResult = await runGit(
+			['rev-list', '--count', `HEAD..${branchName}`],
 			directory,
 		);
-		if (adoptResult.exitCode !== 0) {
+		if (aheadResult.exitCode !== 0) {
 			return {
-				error: `Failed to adopt existing worktree: ${adoptResult.stderr.trim() || adoptResult.stdout.trim()}`,
+				error: `Failed to inspect stale worktree branch: ${aheadResult.stderr.trim() || aheadResult.stdout.trim()}`,
+			};
+		}
+		const aheadCount = Number.parseInt(aheadResult.stdout.trim(), 10);
+		if (!Number.isFinite(aheadCount) || aheadCount > 0) {
+			return {
+				error: `Branch already exists and has unmerged commits: ${branchName}`,
 			};
 		}
 
-		return {
-			worktreePath,
-			branchName,
-			purpose: options.purpose,
-			id,
-			sessionId,
-		};
+		if (branchIsActiveAtExpectedPath) {
+			const clean = await isCleanWorktree(worktreePath);
+			if (!clean) {
+				return {
+					error: `Branch already exists and expected worktree is dirty: ${branchName}`,
+				};
+			}
+			const removeResult = await removeWorktree(worktreePath, directory, {
+				force: true,
+				worktreeDir: options.worktreeDir,
+			});
+			if (!('success' in removeResult)) {
+				return { error: removeResult.error };
+			}
+		}
+
+		const deleteResult = await runGit(['branch', '-d', branchName], directory);
+		if (deleteResult.exitCode !== 0) {
+			return {
+				error: `Failed to delete stale worktree branch: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}`,
+			};
+		}
+		await runGit(['worktree', 'prune'], directory);
 	}
 
 	// Create the worktree: git worktree add -b <branch> <path> HEAD

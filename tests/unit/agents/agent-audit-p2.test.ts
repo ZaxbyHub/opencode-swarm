@@ -14,6 +14,7 @@ import { createExplorerAgent } from '../../../src/agents/explorer';
 import { createReviewerAgent } from '../../../src/agents/reviewer';
 import { createSMEAgent } from '../../../src/agents/sme';
 import { createTestEngineerAgent } from '../../../src/agents/test-engineer';
+import { expectSkillConcept } from '../../helpers/skill-content-registry';
 
 // ─── X3: Structured output enforcement ───────────────────────────────────────
 
@@ -507,28 +508,20 @@ describe('A3: Traceability check in MODE: PLAN', () => {
 	);
 
 	it('contains TRACEABILITY CHECK', () => {
-		expect(prompt).toContain('TRACEABILITY CHECK');
-		expect(planSkill).toContain('TRACEABILITY CHECK');
+		expectSkillConcept(prompt, 'planTraceabilityHeader');
+		expectSkillConcept(planSkill, 'planTraceability');
 	});
 
 	it('requires every FR-### to map to at least one task', () => {
-		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 1000);
-		expect(traceSection).toContain('FR-###');
+		expectSkillConcept(planSkill, 'planTraceability');
 	});
 
 	it('flags tasks with no FR as gold-plating risk', () => {
-		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 1000);
-		expect(traceSection).toContain('gold-plating');
+		expectSkillConcept(planSkill, 'planTraceability');
 	});
 
 	it('traceability check is skipped when no spec.md exists', () => {
-		const traceIdx = planSkill.indexOf('TRACEABILITY CHECK');
-		const traceSection = planSkill.substring(traceIdx, traceIdx + 2000);
-		expect(traceSection).toMatch(
-			/no effective spec.*skip|skip this check silently/i,
-		);
+		expectSkillConcept(planSkill, 'planTraceabilityNoSpecSkip');
 	});
 
 	it('TRACEABILITY CHECK appears after save_plan in MODE: PLAN', () => {

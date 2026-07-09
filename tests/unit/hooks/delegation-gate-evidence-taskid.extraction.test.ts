@@ -11,7 +11,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	createDelegationGateHook,
+	hasReviewedTaskRows,
+	parseReviewedTaskIdsFromSetDispatchOutput,
+} from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
@@ -166,5 +170,23 @@ describe('delegation-gate: evidence task ID extraction', () => {
 		}
 
 		expect(threw).toBe(true);
+	});
+});
+
+describe('delegation-gate: set-dispatch reviewed row parsing', () => {
+	it('extracts and normalizes passing per-task reviewed rows', () => {
+		const output = [
+			'[REVIEWED] | task-2.1 | APPROVED | source | none',
+			'[REVIEWED] | 2.2 | NEEDS_REVISION | source | issue',
+			'[REVIEWED] | task-2.3 | PASS | source | none',
+			'[REVIEWED] | ../escape | APPROVED | source | unsafe',
+			'[reviewed] | task-2.1 | APPROVED | duplicate | ignored',
+		].join('\n');
+
+		expect(parseReviewedTaskIdsFromSetDispatchOutput(output)).toEqual([
+			'2.1',
+			'2.3',
+		]);
+		expect(hasReviewedTaskRows(output)).toBe(true);
 	});
 });

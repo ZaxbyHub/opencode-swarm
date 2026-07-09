@@ -19,11 +19,18 @@ After editing ANY `.md` file under `.opencode/skills/`, `.claude/skills/`, or `.
    - Does the assertion still hold against the new content?
    - Is it checking a substring containing the old phrase?
    - Is it checking for the ABSENCE of a word the new wording introduces? (e.g., `not.toContain('skip')` catches "this check is skipped")
-4. **Update stale assertions in the same changeset.** Do NOT defer to CI.
-5. **Preserve behavioral intent:** When updating, preserve what the assertion TESTS (e.g., "the plan skill has a spec-absent branch"), not just the string match.
+4. **Prefer the semantic registry:** If the assertion is checking skill behavior
+   rather than an exact contract string, move it behind
+   `tests/helpers/skill-content-registry.ts` (or add a concept there) and assert
+   the named concept from the test.
+5. **Update stale assertions in the same changeset.** Do NOT defer to CI.
+6. **Preserve behavioral intent:** When updating, preserve what the assertion TESTS (e.g., "the plan skill has a spec-absent branch"), not just the string match.
 
 ## Constraint
 Do NOT rubber-stamp brittle assertions. If an assertion tests implementation detail rather than behavioral intent, flag it for refactoring to a semantic check.
 
 ## Root cause
-A skill-content test registry would auto-adjust (issue #1746 item 3). This playbook is the manual safety net.
+Skill-content tests should assert named semantic concepts where possible. The
+registry in `tests/helpers/skill-content-registry.ts` is the preferred safety
+net for recurring skill wording checks; use the manual grep sweep for exact
+contract strings and any tests not yet migrated.
