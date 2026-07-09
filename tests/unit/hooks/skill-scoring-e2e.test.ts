@@ -12,7 +12,7 @@
  *           gateBefore scoring block integration, end-to-end ranking accuracy.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -672,12 +672,18 @@ describe('end-to-end ranking accuracy via tail-read + scoring', () => {
 		const tailEntries = readSkillUsageEntriesTail(tempDir, { sessionID });
 		const taskDesc = 'write tests for hooks';
 
-		const score1 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
-		const score2 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
-		const score3 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
+		const fixedNow = Date.now();
+		const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
+		try {
+			const score1 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
+			const score2 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
+			const score3 = computeSkillRelevanceScore(skillPath, taskDesc, tailEntries);
 
-		expect(score1).toBe(score2);
-		expect(score2).toBe(score3);
+			expect(score1).toBe(score2);
+			expect(score2).toBe(score3);
+		} finally {
+			nowSpy.mockRestore();
+		}
 	});
 });
 
@@ -954,10 +960,16 @@ describe('scoring invariants — property tests', () => {
 		const skillPath = '.claude/skills/test/SKILL.md';
 		const taskDesc = 'testing idempotency';
 
-		const score1 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
-		const score2 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
+		const fixedNow = Date.now();
+		const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
+		try {
+			const score1 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
+			const score2 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
 
-		expect(score1).toBe(score2);
+			expect(score1).toBe(score2);
+		} finally {
+			nowSpy.mockRestore();
+		}
 	});
 
 	test('round-trip: append → tail-read → score produces consistent result', () => {
