@@ -45,16 +45,16 @@ function gitCheckout(dir: string, ref: string): void {
 	execSync(`git checkout ${ref}`, { cwd: dir });
 }
 
-  function gitAddFile(dir: string, filename: string, content: string): void {
-  	const filePath = path.join(dir, filename);
-  	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  	fs.writeFileSync(filePath, content);
-  	const { execSync } = require('child_process');
-  	// Use explicit path instead of `git add .` to avoid directory-scan race
-  	// in CI environments where the filesystem has not yet committed the
-  	// writeFileSync before git scans the working tree.
-  	execSync(`git add "${filename}"`, { cwd: dir });
-  }
+function gitAddFile(dir: string, filename: string, content: string): void {
+	const filePath = path.join(dir, filename);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content);
+	const { execSync } = require('child_process');
+	// Use explicit path instead of `git add .` to avoid directory-scan race
+	// in CI environments where the filesystem has not yet committed the
+	// writeFileSync before git scans the working tree.
+	execSync(`git add "${filename}"`, { cwd: dir });
+}
 
 function gitCommit(dir: string, msg: string): void {
 	const { execSync } = require('child_process');

@@ -738,53 +738,7 @@ export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
  * Plural variant of resolveDelegatedPlanTaskId that returns ALL discovered task IDs
  * rather than failing closed on ambiguity. Used when a single agent covers multiple tasks
  * (set-dispatch) and we need per-task attribution.
- *
- * @param args - Delegation arguments (prompt, description, task, input, etc.)
- * @param knownPlanTaskIds - Optional set of valid task IDs from the plan to filter against
- * @returns Array of discovered task IDs (may be empty, or contain one or more IDs)
  */
-function resolveDelegatedPlanTaskIds(
-	args: Record<string, unknown>,
-	knownPlanTaskIds?: ReadonlySet<string>,
-): string[] {
-	const candidateTextFields = [
-		args.prompt,
-		args.description,
-		args.task,
-		args.input,
-	];
-
-	// Strong signal: TASK: line takes priority
-	const taskLineMatches = new Set<string>();
-	for (const field of candidateTextFields) {
-		if (typeof field !== 'string') continue;
-		const taskLine = extractTaskLine(field);
-		if (!taskLine) continue;
-		for (const m of taskLine.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			const candidate = m[1];
-			if (!isStrictTaskId(candidate)) continue;
-			if (knownPlanTaskIds && !knownPlanTaskIds.has(candidate)) continue;
-			taskLineMatches.add(candidate);
-		}
-	}
-	if (taskLineMatches.size > 0) {
-		return Array.from(taskLineMatches);
-	}
-
-	// Fall back to collecting all distinct task IDs from text fields
-	const seen = new Set<string>();
-	for (const field of candidateTextFields) {
-		if (typeof field !== 'string') continue;
-		for (const m of field.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			const candidate = m[1];
-			if (!isStrictTaskId(candidate)) continue;
-			if (knownPlanTaskIds && !knownPlanTaskIds.has(candidate)) continue;
-			seen.add(candidate);
-		}
-	}
-	return Array.from(seen);
-}
-
 async function findTaskAwaitingCompletion(
 	directory: string | undefined,
 	session: AgentSessionState,
