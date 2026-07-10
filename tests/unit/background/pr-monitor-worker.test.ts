@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { _internals as subscriberInternals } from '../../../src/background/pr-event-subscribers';
 import {
 	PrMonitorWorker,
 	type PrMonitorWorkerOptions,
@@ -16,6 +17,7 @@ import {
 } from '../../../src/background/pr-monitor-worker';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 import type {
+	MergeGroupRunResult,
 	MergeStateResult,
 	PRCommentResult,
 	PRStatusResult,
@@ -115,6 +117,7 @@ interface MockState {
 	getPRStatus: ReturnType<typeof mock>;
 	getPRComments: ReturnType<typeof mock>;
 	getMergeState: ReturnType<typeof mock>;
+	getMergeGroupRun: ReturnType<typeof mock>;
 	getPRReviewState: ReturnType<typeof mock>;
 	updateSnapshot: ReturnType<typeof mock>;
 	unsubscribe: ReturnType<typeof mock>;
@@ -138,6 +141,7 @@ function setupMocks(): void {
 		getPRStatus: mock(() => Promise.resolve(makePRStatus())),
 		getPRComments: mock(() => Promise.resolve(makePRComments())),
 		getMergeState: mock(() => Promise.resolve(makeMergeState())),
+		getMergeGroupRun: mock(() => Promise.resolve(null)),
 		getPRReviewState: mock(() =>
 			Promise.resolve({ reviewDecision: '', reviewRequestCount: 0 }),
 		),
@@ -159,6 +163,8 @@ function setupMocks(): void {
 		mockState.getPRComments as typeof workerInternals.getPRComments;
 	workerInternals.getMergeState =
 		mockState.getMergeState as typeof workerInternals.getMergeState;
+	workerInternals.getMergeGroupRun =
+		mockState.getMergeGroupRun as typeof workerInternals.getMergeGroupRun;
 	workerInternals.getPRReviewState =
 		mockState.getPRReviewState as typeof workerInternals.getPRReviewState;
 	workerInternals.updateSnapshot =
@@ -177,6 +183,7 @@ function restoreInternals(): void {
 		workerInternals.getPRStatus = savedInternals.getPRStatus;
 		workerInternals.getPRComments = savedInternals.getPRComments;
 		workerInternals.getMergeState = savedInternals.getMergeState;
+		workerInternals.getMergeGroupRun = savedInternals.getMergeGroupRun;
 		workerInternals.getPRReviewState = savedInternals.getPRReviewState;
 		workerInternals.updateSnapshot = savedInternals.updateSnapshot;
 		workerInternals.unsubscribe = savedInternals.unsubscribe;
@@ -405,7 +412,7 @@ describe('PrMonitorWorker — CI change detection', () => {
 		restoreInternals();
 	});
 
-	test('publishes one batched pr.ci.failed when checks complete with failures', async () => {
+	test('publishes pr.ci.failed (batched) when a check transitions to failure', async () => {
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'success' },
@@ -418,7 +425,7 @@ describe('PrMonitorWorker — CI change detection', () => {
 			makePRStatus({
 				statusCheckRollup: [
 					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
-					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'success' },
 				],
 			}),
 		);
@@ -429,102 +436,15 @@ describe('PrMonitorWorker — CI change detection', () => {
 		const worker = createWorker();
 		await worker.pollCycle();
 
+		// FR-005a: single failure is still ONE batched event (with one entry)
 		expect(mockState.busInstance.publish).toHaveBeenCalledWith(
 			'pr.ci.failed',
 			expect.objectContaining({
 				prNumber: 42,
 				repoFullName: 'owner/repo',
-				checkName: 'ci/build',
-				failedChecks: [
-					expect.objectContaining({ name: 'ci/build' }),
-					expect.objectContaining({ name: 'ci/test' }),
-				],
+				failedChecks: [{ name: 'ci/build', conclusion: 'failure' }],
 			}),
 			'pr-monitor-worker',
-		);
-	});
-
-	test('does not publish pr.ci.failed until the check set is complete', async () => {
-		const sub = makeSubscription({
-			lastCheckRunSet: JSON.stringify([
-				{ n: 'ci/build', c: 'success' },
-				{ n: 'ci/test', c: null },
-			]),
-		});
-
-		mockState.listActive.mockResolvedValueOnce([sub]);
-		mockState.getPRStatus.mockResolvedValue(
-			makePRStatus({
-				statusCheckRollup: [
-					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
-					{ name: 'ci/test', status: 'in_progress', conclusion: null },
-				],
-			}),
-		);
-		mockState.getPRComments.mockResolvedValue(makePRComments());
-		mockState.getMergeState.mockResolvedValue(makeMergeState());
-		mockState.updateSnapshot.mockResolvedValue(sub);
-
-		const worker = createWorker();
-		await worker.pollCycle();
-
-		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
-			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
-		);
-		expect(ciFailedCalls).toHaveLength(0);
-	});
-
-	test('publishes batched pr.ci.failed when an earlier failure waits for remaining checks', async () => {
-		const initialSub = makeSubscription({
-			lastCheckRunSet: JSON.stringify([
-				{ n: 'ci/build', c: 'success' },
-				{ n: 'ci/test', c: null },
-			]),
-		});
-		const incompleteSub = makeSubscription({
-			lastCheckRunSet: JSON.stringify([
-				{ n: 'ci/build', c: 'failure' },
-				{ n: 'ci/test', c: null },
-			]),
-		});
-
-		mockState.listActive
-			.mockResolvedValueOnce([initialSub])
-			.mockResolvedValueOnce([incompleteSub]);
-		mockState.getPRStatus
-			.mockResolvedValueOnce(
-				makePRStatus({
-					statusCheckRollup: [
-						{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
-						{ name: 'ci/test', status: 'in_progress', conclusion: null },
-					],
-				}),
-			)
-			.mockResolvedValueOnce(
-				makePRStatus({
-					statusCheckRollup: [
-						{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
-						{ name: 'ci/test', status: 'completed', conclusion: 'success' },
-					],
-				}),
-			);
-		mockState.getPRComments.mockResolvedValue(makePRComments());
-		mockState.getMergeState.mockResolvedValue(makeMergeState());
-		mockState.updateSnapshot.mockResolvedValue(initialSub);
-
-		const worker = createWorker();
-		await worker.pollCycle();
-		await worker.pollCycle();
-
-		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
-			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
-		);
-		expect(ciFailedCalls).toHaveLength(1);
-		expect(ciFailedCalls[0][1]).toEqual(
-			expect.objectContaining({
-				checkName: 'ci/build',
-				failedChecks: [expect.objectContaining({ name: 'ci/build' })],
-			}),
 		);
 	});
 
@@ -1799,5 +1719,662 @@ describe('PrMonitorWorker — prUrl in all event payloads', () => {
 			'prUrl',
 			'https://github.com/owner/repo/pull/42',
 		);
+	});
+});
+
+describe('PrMonitorWorker — merge group run fetching', () => {
+	beforeEach(() => {
+		setupMocks();
+	});
+
+	afterEach(() => {
+		restoreInternals();
+	});
+
+	test('SC-014: fetches and stores merge group run info on poll', async () => {
+		const sub = makeSubscription();
+		const mergeGroupRun: MergeGroupRunResult = {
+			status: 'completed',
+			conclusion: 'failure',
+			htmlUrl: 'https://github.com/owner/repo/actions/runs/999',
+		};
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+					{
+						name: 'Merge pull request',
+						status: 'completed',
+						conclusion: 'failure',
+						detailsUrl: 'https://github.com/owner/repo/actions/runs/999',
+					},
+				],
+			}),
+		);
+		mockState.getMergeGroupRun.mockResolvedValueOnce(mergeGroupRun);
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// Verify getMergeGroupRun was called with the statusCheckRollup
+		expect(mockState.getMergeGroupRun).toHaveBeenCalledTimes(1);
+		expect(mockState.getMergeGroupRun).toHaveBeenCalledWith(
+			expect.arrayContaining([
+				expect.objectContaining({ name: 'Merge pull request' }),
+			]),
+			'owner/repo',
+			TEST_DIR,
+		);
+
+		// Verify updateSnapshot was called with merge group run fields
+		expect(mockState.updateSnapshot).toHaveBeenCalled();
+		const updateCall = mockState.updateSnapshot.mock.calls.find(
+			(c) => c[0] === TEST_DIR && c[1] === sub.correlationId,
+		);
+		expect(updateCall).toBeDefined();
+		expect(updateCall![2]).toMatchObject({
+			mergeGroupRunStatus: 'completed',
+			mergeGroupRunConclusion: 'failure',
+			mergeGroupRunHtmlUrl: 'https://github.com/owner/repo/actions/runs/999',
+		});
+	});
+
+	test('does not crash when getMergeGroupRun throws', async () => {
+		const sub = makeSubscription();
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(makePRStatus());
+		mockState.getMergeGroupRun.mockRejectedValueOnce(
+			new Error('gh run view failed'),
+		);
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		// Should not throw
+		await worker.pollCycle();
+
+		// Snapshot should still be updated (without merge group run info)
+		expect(mockState.updateSnapshot).toHaveBeenCalled();
+	});
+
+	test('preserves prior mergeGroupRun snapshot fields when getMergeGroupRun throws (transient failure)', async () => {
+		// Seed subscription with known merge group run state
+		const sub = makeSubscription({
+			mergeGroupRunStatus: 'failure',
+			mergeGroupRunConclusion: 'failure',
+			mergeGroupRunHtmlUrl: 'https://github.com/owner/repo/actions/runs/999',
+		});
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(makePRStatus());
+		mockState.getMergeGroupRun.mockRejectedValueOnce(
+			new Error('gh run view failed'),
+		);
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// Verify pollCycle did not throw
+		expect(mockState.updateSnapshot).toHaveBeenCalled();
+
+		// There are two updateSnapshot calls:
+		// 1. applyChanges -> snapshotUpdates (from computeChanges)
+		// 2. Success path -> { errorCount: 0, lastCheckedAt }
+		// We need to check call #1 has no mergeGroupRun* fields
+		const snapshotUpdateCalls = mockState.updateSnapshot.mock.calls.filter(
+			(c) =>
+				c[0] === TEST_DIR &&
+				c[1] === sub.correlationId &&
+				c[2] && // non-null updates
+				!('errorCount' in c[2] && Object.keys(c[2]).length === 2), // not the success {errorCount, lastCheckedAt} call
+		);
+
+		expect(snapshotUpdateCalls).toHaveLength(1);
+
+		// mergeGroupRun* fields must NOT be present in snapshotUpdates on transient failure
+		// so the prior snapshot state is preserved by the merge in updateSnapshot
+		expect(snapshotUpdateCalls[0][2]).not.toHaveProperty('mergeGroupRunStatus');
+		expect(snapshotUpdateCalls[0][2]).not.toHaveProperty(
+			'mergeGroupRunConclusion',
+		);
+		expect(snapshotUpdateCalls[0][2]).not.toHaveProperty(
+			'mergeGroupRunHtmlUrl',
+		);
+	});
+
+	test('stores null merge group run fields when no merge group check exists', async () => {
+		const sub = makeSubscription();
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+				],
+			}),
+		);
+		mockState.getMergeGroupRun.mockResolvedValueOnce(null);
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// Verify updateSnapshot was called with undefined merge group fields
+		const updateCall = mockState.updateSnapshot.mock.calls.find(
+			(c) => c[0] === TEST_DIR && c[1] === sub.correlationId,
+		);
+		expect(updateCall).toBeDefined();
+		expect(updateCall![2]).toMatchObject({
+			mergeGroupRunStatus: undefined,
+			mergeGroupRunConclusion: undefined,
+			mergeGroupRunHtmlUrl: undefined,
+		});
+	});
+});
+
+describe('PrMonitorWorker — FR-005a CI failure batching (SC-015)', () => {
+	beforeEach(() => {
+		setupMocks();
+	});
+
+	afterEach(() => {
+		restoreInternals();
+	});
+
+	test('SC-015: three failing checks in one poll cycle produces ONE batched pr.ci.failed event', async () => {
+		// Prior state: all checks passing
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: 'success' },
+				{ n: 'ci/lint', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		// Current state: all three checks now failing
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/lint', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// Exactly ONE pr.ci.failed event emitted (not three)
+		const publishCalls = mockState.busInstance.publish.mock.calls;
+		const ciFailedCalls = publishCalls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+
+		// The single batched event payload contains all three failed checks
+		const batchedPayload = ciFailedCalls[0][1] as Record<string, unknown>;
+		expect(batchedPayload).toHaveProperty('prNumber', 42);
+		expect(batchedPayload).toHaveProperty('repoFullName', 'owner/repo');
+		expect(batchedPayload).toHaveProperty('failedChecks');
+		const failedChecks = batchedPayload.failedChecks as Array<{
+			name: string;
+			conclusion: string;
+		}>;
+		expect(failedChecks).toHaveLength(3);
+		expect(failedChecks.map((c) => c.name).sort()).toEqual([
+			'ci/build',
+			'ci/lint',
+			'ci/test',
+		]);
+	});
+
+	test('SC-015: batched event uses the same dedup token format as individual events', async () => {
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+
+		// The batched event has failedChecks (not a single checkName)
+		const payload = ciFailedCalls[0][1] as Record<string, unknown>;
+		expect(payload).toHaveProperty('failedChecks');
+		expect(payload).not.toHaveProperty('checkName'); // batched payload uses failedChecks
+	});
+
+	test('SC-015: one previously-passing check and two already-failing checks → only one new failure emitted', async () => {
+		// ci/build was already failing; ci/test and ci/lint are new failures
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'failure' },
+				{ n: 'ci/test', c: 'success' },
+				{ n: 'ci/lint', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/lint', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// Only ONE batched event (for the 2 newly-failed checks)
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+
+		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
+			.failedChecks as Array<{ name: string }>;
+		expect(failedChecks.map((c) => c.name).sort()).toEqual([
+			'ci/lint',
+			'ci/test',
+		]);
+	});
+});
+
+describe('formatAdvisory — FR-005a batched CI failure (SC-015)', () => {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const { formatAdvisory } = subscriberInternals as any;
+
+	test('SC-015: batched failedChecks renders all check names in advisory', () => {
+		const advisory = formatAdvisory('pr.ci.failed', {
+			prNumber: 42,
+			repoFullName: 'owner/repo',
+			prUrl: 'https://github.com/owner/repo/pull/42',
+			failedChecks: [
+				{ name: 'ci/build', conclusion: 'failure' },
+				{ name: 'ci/test', conclusion: 'failure' },
+				{ name: 'ci/lint', conclusion: 'failure' },
+			],
+		});
+
+		expect(advisory).toContain('[pr-monitor:pr.ci.failed:owner/repo#42]');
+		expect(advisory).toContain('3 CI checks failed');
+		expect(advisory).toContain('ci/build');
+		expect(advisory).toContain('ci/test');
+		expect(advisory).toContain('ci/lint');
+	});
+
+	test('SC-015: batched advisory uses plural form for singular failure', () => {
+		const advisory = formatAdvisory('pr.ci.failed', {
+			prNumber: 99,
+			repoFullName: 'org/repo',
+			prUrl: 'https://github.com/org/repo/pull/99',
+			failedChecks: [{ name: 'ci/build', conclusion: 'failure' }],
+		});
+
+		expect(advisory).toContain('1 CI check failed');
+		expect(advisory).not.toContain('1 CI checks failed');
+	});
+
+	test('SC-015: legacy single-checkName payload still formats correctly', () => {
+		// Backward-compat: old events with checkName (no failedChecks)
+		const advisory = formatAdvisory('pr.ci.failed', {
+			prNumber: 7,
+			repoFullName: 'old/legacy',
+			prUrl: 'https://github.com/old/legacy/pull/7',
+			checkName: 'ci/build',
+			checkState: 'failure',
+		});
+
+		expect(advisory).toContain('[pr-monitor:pr.ci.failed:old/legacy#7]');
+		expect(advisory).toContain('ci/build');
+		expect(advisory).toContain('CI check "ci/build" failed');
+	});
+});
+
+describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)', () => {
+	beforeEach(() => {
+		setupMocks();
+	});
+
+	afterEach(() => {
+		restoreInternals();
+	});
+
+	// ── Adversarial: PR with 0 failures (all pass) ──────────────────────
+	test('SC-015 adversarial: all checks still passing → no pr.ci.failed event', async () => {
+		// Prior: all passing; Current: all passing → no new failures
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'success' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(0);
+	});
+
+	test('SC-015 adversarial: all checks still passing → no pr.ci.passed (already passing)', async () => {
+		// Prior: all passing; Current: all passing → no pr.ci.passed (no state transition)
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([{ n: 'ci/build', c: 'success' }]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciPassedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.passed',
+		);
+		expect(ciPassedCalls).toHaveLength(0);
+	});
+
+	// ── Adversarial: PR with all checks already-failing (no new events) ─
+	test('SC-015 adversarial: all checks already failing → no pr.ci.failed event', async () => {
+		// Prior: all failing; Current: all failing → no new transition
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'failure' },
+				{ n: 'ci/test', c: 'failure' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(0);
+	});
+
+	// ── Adversarial: PR with mixed pass/fail ────────────────────────────
+	test('SC-015 adversarial: one new failure among already-passing checks → one batched event with one entry', async () => {
+		// Prior: ci/build passing; Current: ci/build failure, ci/test still passing
+		// Only one new failure → batched event with single entry
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'success' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
+			.failedChecks as Array<{ name: string }>;
+		expect(failedChecks).toHaveLength(1);
+		expect(failedChecks[0].name).toBe('ci/build');
+	});
+
+	// ── Adversarial: PR with 1 new + 2 already-failing (suppressed) ────
+	test('SC-015 adversarial: one new failure + two already-failing → only the new one in batched event', async () => {
+		// Prior: ci/build=failure, ci/test=failure, ci/lint=success
+		// Current: ci/build=failure, ci/test=failure, ci/lint=failure (only lint is NEW)
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'failure' },
+				{ n: 'ci/test', c: 'failure' },
+				{ n: 'ci/lint', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+					{ name: 'ci/lint', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
+			.failedChecks as Array<{ name: string }>;
+		// Only ci/lint (the newly-failed check) should be in the batch
+		expect(failedChecks.map((c) => c.name).sort()).toEqual(['ci/lint']);
+		// ci/build and ci/test are already-failing and must NOT be re-reported
+		expect(failedChecks.map((c) => c.name)).not.toContain('ci/build');
+		expect(failedChecks.map((c) => c.name)).not.toContain('ci/test');
+	});
+
+	// ── Adversarial: PR transitions from all-failing to all-passing ────
+	test('SC-015 adversarial: all checks recover from failure → pr.ci.passed emitted', async () => {
+		// Prior: all failing; Current: all passing → pr.ci.passed
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'failure' },
+				{ n: 'ci/test', c: 'failure' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'success' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciPassedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.passed',
+		);
+		expect(ciPassedCalls).toHaveLength(1);
+		const payload = ciPassedCalls[0][1] as Record<string, unknown>;
+		expect(payload).toHaveProperty('checkCount', 2);
+	});
+
+	// ── Adversarial: FAILURE vs failure case-sensitivity ────────────────
+	test('SC-015 adversarial: conclusion is FAILURE (uppercase) still triggers batching', async () => {
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/test', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'FAILURE' },
+					{ name: 'ci/test', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
+			.failedChecks as Array<{ name: string; conclusion: string }>;
+		expect(failedChecks.map((c) => c.name).sort()).toEqual([
+			'ci/build',
+			'ci/test',
+		]);
+	});
+
+	// ── Adversarial: new check appearing in rollup that was not in prior set ─
+	test('SC-015 adversarial: new check not in prior set but now failing → emitted', async () => {
+		// ci/lint is brand new (not in prior set) and now failing
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([{ n: 'ci/build', c: 'success' }]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+					{ name: 'ci/lint', status: 'completed', conclusion: 'failure' },
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(1);
+		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
+			.failedChecks as Array<{ name: string }>;
+		expect(failedChecks.map((c) => c.name)).toEqual(['ci/lint']);
+	});
+
+	// ── Adversarial: check disappears from rollup (was in prior, gone now) ─
+	test('SC-015 adversarial: check missing from current rollup is not emitted as failure', async () => {
+		// ci/lint was in prior (success) but is gone from current rollup
+		const sub = makeSubscription({
+			lastCheckRunSet: JSON.stringify([
+				{ n: 'ci/build', c: 'success' },
+				{ n: 'ci/lint', c: 'success' },
+			]),
+		});
+
+		mockState.listActive.mockResolvedValueOnce([sub]);
+		mockState.getPRStatus.mockResolvedValue(
+			makePRStatus({
+				statusCheckRollup: [
+					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
+					// ci/lint is absent from current rollup
+				],
+			}),
+		);
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker();
+		await worker.pollCycle();
+
+		// No failure events should be emitted for the missing check
+		// (disappeared checks are a separate concern, not part of FR-005a batching)
+		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
+			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
+		);
+		expect(ciFailedCalls).toHaveLength(0);
 	});
 });

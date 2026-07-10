@@ -222,6 +222,10 @@ export function tickAndMaybeDispatchCadence(
 		oversightAgentName,
 		fullAutoConfig: {
 			fail_closed: config.full_auto?.fail_closed !== false,
+			max_dispatch_retries:
+				config.full_auto?.oversight?.max_dispatch_retries ?? 2,
+			max_consecutive_dispatch_failures:
+				config.full_auto?.oversight?.max_consecutive_dispatch_failures ?? 3,
 		},
 	})
 		.catch((err) => {

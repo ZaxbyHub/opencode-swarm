@@ -48,6 +48,7 @@ export interface FullAutoCounters {
 	testFailures: number;
 	oversightChecks: number;
 	consecutiveNoProgressTurns: number;
+	consecutiveOversightFailures: number;
 }
 
 export interface FullAutoRunState {
@@ -70,6 +71,8 @@ export interface FullAutoRunState {
 	counters: FullAutoCounters;
 	pauseReason?: string;
 	terminateReason?: string;
+	/** Consecutive oversight dispatch failures for auto-degrade. */
+	consecutiveOversightFailures?: number;
 }
 
 export interface FullAutoPersistedState {
@@ -118,6 +121,7 @@ function emptyCounters(): FullAutoCounters {
 		testFailures: 0,
 		oversightChecks: 0,
 		consecutiveNoProgressTurns: 0,
+		consecutiveOversightFailures: 0,
 	};
 }
 
@@ -527,6 +531,11 @@ export function startFullAutoRun(
 						consecutive: 0,
 						total: existing.denialCounters.total,
 					},
+					consecutiveOversightFailures: 0,
+					counters: {
+						...existing.counters,
+						consecutiveOversightFailures: 0,
+					},
 				}
 			: {
 					...emptyState(sessionID, mode),
@@ -632,6 +641,51 @@ export function incrementFullAutoCounter(
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
 		return state;
+	});
+}
+
+/**
+ * Increment the consecutive-oversight-failure counter.
+ * Returns the new value after incrementing.
+ */
+export function incrementOversightFailureCounter(
+	directory: string,
+	sessionID: string,
+): number {
+	let result = 0;
+	withStateLock(directory, () => {
+		const persisted = readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return;
+		state.counters.consecutiveOversightFailures =
+			(state.counters.consecutiveOversightFailures ?? 0) + 1;
+		// Also record it in the top-level field for quick access
+		state.consecutiveOversightFailures =
+			state.counters.consecutiveOversightFailures;
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
+		result = state.counters.consecutiveOversightFailures;
+	});
+	return result;
+}
+
+/**
+ * Reset the consecutive-oversight-failure counter to 0.
+ */
+export function resetOversightFailureCounter(
+	directory: string,
+	sessionID: string,
+): void {
+	withStateLock(directory, () => {
+		const persisted = readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return;
+		state.counters.consecutiveOversightFailures = 0;
+		state.consecutiveOversightFailures = 0;
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
 	});
 }
 

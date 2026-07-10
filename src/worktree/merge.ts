@@ -36,6 +36,8 @@ export const _internals: {
 	cleanupOrphanedBranches: typeof cleanupOrphanedBranches;
 	/** Test seam for startupOrphanRecovery — allows tests to intercept the recovery call. */
 	startupOrphanRecovery: typeof startupOrphanRecovery;
+	/** FR-001b: exposes extractSessionId for lane ownership validation. */
+	extractSessionId: typeof extractSessionId;
 } = {
 	bunSpawn,
 	platform: process.platform,
@@ -43,6 +45,7 @@ export const _internals: {
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	cleanupOrphanedBranches,
 	startupOrphanRecovery,
+	extractSessionId,
 };
 
 // ---------------------------------------------------------------------------

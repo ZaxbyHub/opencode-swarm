@@ -225,6 +225,19 @@ COVERAGE REPORTING:
 - Format: COVERAGE_PCT: [N]% (or "N/A" if not available)
 - If COVERAGE_PCT < 70%, add a note: "COVERAGE_WARNING: Below 70% threshold — consider additional test cases for uncovered paths."
 - The architect uses this to decide whether to request an additional test pass (Rule 10 / Phase 5 step 5h).
+
+## MULTI-TASK COVERAGE (FR-007)
+When you are asked to test multiple tasks in a single dispatch (set-dispatch), emit one structured verdict line PER TASK at the END of your output (after all other output fields). This enables per-task attribution in the gate tracker:
+
+[TESTED] | task-<taskId> | PASS | <brief summary>
+[TESTED] | task-<taskId> | FAIL | <brief summary>
+[TESTED] | task-<taskId> | SKIPPED | <reason>
+
+Example:
+[TESTED] | task-2.1 | PASS | 10/10 tests passed, 85% coverage
+[TESTED] | task-2.2 | FAIL | 8/10 tests passed — bar.test.ts missing coverage for error path
+
+If covering a single task only, you do not need to emit the structured verdict line.
 `;
 
 export function createTestEngineerAgent(

@@ -75,6 +75,7 @@ export const _internals: {
 	scheduleClearUnaddressed: typeof scheduleClearUnaddressed;
 	clearUnaddressedDelayMs: number;
 	log: typeof log;
+	formatAdvisory: typeof formatAdvisory;
 } = {
 	handlePrEvent,
 	getGlobalEventBus,
@@ -86,6 +87,7 @@ export const _internals: {
 	scheduleClearUnaddressed,
 	clearUnaddressedDelayMs: CLEAR_UNADDRESSED_DELAY_MS,
 	log,
+	formatAdvisory,
 };
 
 /** Event types eligible for auto PR_FEEDBACK mode injection. */
@@ -115,12 +117,6 @@ interface PrEventPayload {
 	prUrl?: string;
 	checkName?: string;
 	checkState?: string;
-	failedChecks?: Array<{
-		name?: string;
-		status?: string;
-		conclusion?: string | null;
-		checkUrl?: string | null;
-	}>;
 	errorMessage?: string;
 	author?: string;
 	body?: string;
@@ -337,37 +333,26 @@ function formatAdvisory(type: string, payload: PrEventPayload): string | null {
 	const dedupToken = `[pr-monitor:${type}:${payload.repoFullName}#${payload.prNumber}]`;
 
 	switch (type) {
-		case 'pr.ci.failed':
-			if (
-				Array.isArray(payload.failedChecks) &&
-				payload.failedChecks.length > 0
-			) {
-				const failedChecks = payload.failedChecks
-					.map((check) => {
-						if (!check || typeof check !== 'object') return null;
-						const c = check as Record<string, unknown>;
-						const name =
-							typeof c.name === 'string'
-								? c.name
-								: payload.checkName || 'unknown';
-						const conclusion =
-							typeof c.conclusion === 'string'
-								? c.conclusion
-								: payload.checkState || 'failure';
-						return `  - ${name} — ${conclusion}`;
-					})
-					.filter(Boolean);
+		case 'pr.ci.failed': {
+			// FR-005a: batched payload uses failedChecks array; single-check
+			// payloads (backward-compat) use the legacy checkName field.
+			const failedChecks = (
+				payload as {
+					failedChecks?: Array<{ name: string; conclusion: string }>;
+				}
+			).failedChecks;
+			if (failedChecks && failedChecks.length > 0) {
+				const checkLines = failedChecks.map(
+					(c) => `  - ${c.name} — ${c.conclusion || 'failure'}`,
+				);
 				return [
-					`${dedupToken} (advisory) PR #${payload.prNumber} — ${failedChecks.length} CI check(s) failed`,
+					`${dedupToken} (advisory) PR #${payload.prNumber} — ${failedChecks.length} CI check${failedChecks.length === 1 ? '' : 's'} failed`,
 					`  Repository: ${payload.repoFullName}`,
 					`  URL: ${payload.prUrl || ''}`,
-					'  Failed checks:',
-					...failedChecks,
-					payload.errorMessage ? `  Details: ${payload.errorMessage}` : '',
-				]
-					.filter(Boolean)
-					.join('\n');
+					...checkLines,
+				].join('\n');
 			}
+			// Legacy single-check payload (backward compat)
 			return [
 				`${dedupToken} (advisory) PR #${payload.prNumber} — CI check "${payload.checkName || 'unknown'}" failed`,
 				`  Repository: ${payload.repoFullName}`,
@@ -377,6 +362,7 @@ function formatAdvisory(type: string, payload: PrEventPayload): string | null {
 			]
 				.filter(Boolean)
 				.join('\n');
+		}
 
 		case 'pr.ci.passed':
 			return [

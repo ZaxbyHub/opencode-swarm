@@ -258,6 +258,13 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		reason:
 			'PENDING MAINTAINER CONFIRMATION (#1497): OpenCode-runtime test execution guidance (test_runner tool); no .claude mirror currently exists. Classified opencode-only (non-failing) until confirmed.',
 	},
+	{
+		slug: 'swarm',
+		kind: 'divergent',
+		canonical: '.opencode',
+		reason:
+			'MODE: SWARM is the canonical OpenCode swarm workflow (behavior model); .claude/skills/swarm is a thin runtime adapter that documents the /swarm command and its subcommands. Both exist but serve different purposes — .opencode is the canonical workflow definition, .claude is the command-interface adapter.',
+	},
 ];
 
 /**

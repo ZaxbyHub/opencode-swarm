@@ -521,6 +521,16 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
+	'ci-simulate': {
+		handler: (ctx) => handleCiSimulateCommand(ctx.directory, ctx.args),
+		description:
+			'Simulate CI by merging a PR into a temp worktree and running the validation suite',
+		args: '[<pr-ref>]',
+		details:
+			'Creates a temporary worktree from origin/main, merges the PR branch (or current HEAD), and runs the full validation suite: bun run typecheck, bun run lint, bun run build, bun test. Detects integration failures that pass on PR branch but fail after merge — the root cause of 3+ merge-queue kick-outs (issue #1746 item #5). Reports file:line for each failure. Discards the worktree after completion.',
+		category: 'diagnostics',
+		toolPolicy: 'none',
+	},
 	learning: {
 		handler: (ctx) => handleLearningCommand(ctx.directory, ctx.args),
 		description: 'Show learning metrics and violation trends',

@@ -129,10 +129,33 @@ async function listMergeGroupRuns(
 }
 
 /**
+ * Format merge-group run status for display.
+ *
+ * Shows the run status (queued/in_progress/completed), conclusion if available,
+ * and a link reference.
+ */
+function formatMergeGroupStatus(
+	status?: string,
+	conclusion?: string,
+	htmlUrl?: string,
+): string {
+	if (!status) return 'Merge group: unknown';
+	const parts: string[] = [`Merge group: ${status}`];
+	if (conclusion) {
+		parts.push(conclusion);
+	}
+	if (htmlUrl) {
+		parts.push(`(${htmlUrl})`);
+	}
+	return parts.join(' ');
+}
+
+/**
  * Exposed for unit testing via _internals.
  */
 export const _internals = {
 	formatRelativeTime,
+	formatMergeGroupStatus,
 	listActive,
 	listMergeGroupRuns,
 	parseMergeGroupRuns,
@@ -224,6 +247,13 @@ export async function handlePrMonitorStatusCommand(
 		}
 		lines.push(`     Last checked: ${formatRelativeTime(sub.lastCheckedAt)}`);
 		lines.push(`     Watching: ${sub.isWatching ? 'yes' : 'no'}`);
+		lines.push(
+			`     ${formatMergeGroupStatus(
+				sub.mergeGroupRunStatus,
+				sub.mergeGroupRunConclusion,
+				sub.mergeGroupRunHtmlUrl,
+			)}`,
+		);
 		lines.push(`     Errors: ${sub.errorCount}`);
 		if (i < subs.length - 1) {
 			lines.push('');

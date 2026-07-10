@@ -356,6 +356,8 @@ export const PlaceholderScanConfigSchema = GateFeatureSchema.extend({
 			'**/__tests__/**',
 		]),
 	max_allowed_findings: z.number().min(0).default(0),
+	/** Sentinel values that suppress findings when found as substrings in the excerpt. */
+	sentinel_allowlist: z.array(z.string()).default([]),
 });
 
 export type PlaceholderScanConfig = z.infer<typeof PlaceholderScanConfigSchema>;
@@ -420,6 +422,7 @@ export const GateConfigSchema = z.object({
 			'**/__tests__/**',
 		],
 		max_allowed_findings: 0,
+		sentinel_allowlist: [],
 	}),
 	sast_scan: GateFeatureSchema.default({ enabled: true }),
 	sbom_generate: GateFeatureSchema.default({ enabled: true }),
@@ -2829,6 +2832,18 @@ export const PluginConfigSchema = z.object({
 					every_tool_calls: z.number().int().min(0).max(10000).default(25),
 					every_architect_turns: z.number().int().min(0).max(1000).default(5),
 					every_minutes: z.number().int().min(0).max(1440).default(20),
+					// Max retry attempts on transient oversight dispatch error (e.g.
+					// "Unexpected server error", ephemeral session creation failure)
+					// before falling through to pause. Zero disables retries.
+					max_dispatch_retries: z.number().int().min(0).max(10).default(2),
+					// Consecutive oversight dispatch failures that trigger auto-degrade
+					// from full-auto to manual mode. Zero disables auto-degrade.
+					max_consecutive_dispatch_failures: z
+						.number()
+						.int()
+						.min(0)
+						.max(50)
+						.default(3),
 				})
 				.default(() => ({
 					on_plan_change: true,
@@ -2839,6 +2854,8 @@ export const PluginConfigSchema = z.object({
 					every_tool_calls: 25,
 					every_architect_turns: 5,
 					every_minutes: 20,
+					max_dispatch_retries: 2,
+					max_consecutive_dispatch_failures: 3,
 				})),
 		})
 		.optional()
@@ -2893,6 +2910,8 @@ export const PluginConfigSchema = z.object({
 				every_tool_calls: 25,
 				every_architect_turns: 5,
 				every_minutes: 20,
+				max_dispatch_retries: 2,
+				max_consecutive_dispatch_failures: 3,
 			},
 		})),
 

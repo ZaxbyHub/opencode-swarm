@@ -15,11 +15,13 @@ import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { isValidEnvKey } from '../../sandbox/executor';
 import { ensureAgentSession, swarmState } from '../../state';
+import { bunSpawn } from '../../utils/bun-compat';
 import type { WorktreeHandle } from '../../worktree';
 import {
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
 	getMergeStrategy,
+	mergeInternals,
 	postMergeCleanup,
 	provisionWorktree,
 	removeWorktree,
@@ -388,6 +390,153 @@ export function sanitizeWorktreeTaskId(raw: string): string {
 import { resolveWorktreeIsolationConfig } from '../../config/worktree-isolation-config';
 export { resolveWorktreeIsolationConfig };
 
+// ---------------------------------------------------------------------------
+// FR-001b: Pre-provision collision detection
+// ---------------------------------------------------------------------------
+
+const WORKTREE_LIST_TIMEOUT_MS = 15_000;
+
+/**
+ * FR-001b SC-004: Runs `git worktree list --porcelain` and checks whether
+ * ANY registered worktree has a lane branch for the given taskId (regardless
+ * of which session owns it).
+ *
+ * The detection pattern matches both current `swarm/lane/<sessionId>/<taskId>`
+ * and legacy `swarm-lane/<sessionId>/<taskId>` branch formats.
+ *
+ * Returns collision info if any lane for this taskId is found registered in
+ * an active worktree. Does NOT check whether the worktree path is valid on
+ * disk — only whether the branch is checked out somewhere.
+ *
+ * @param taskId       - Task ID to detect collisions for.
+ * @param directory    - Project root (git working tree).
+ * @param sessionId    - Current session ID (used only to populate ownerSessionId
+ *                       in the collision result; NOT used for collision detection).
+ */
+export async function preProvisionCollisionCheck(
+	taskId: string,
+	directory: string,
+	_sessionId: string,
+): Promise<{
+	collision: boolean;
+	existingBranch?: string;
+	ownerSessionId?: string;
+	worktreePath?: string;
+}> {
+	const proc = _internals.bunSpawn(
+		['git', '-C', directory, 'worktree', 'list', '--porcelain'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: WORKTREE_LIST_TIMEOUT_MS,
+		},
+	);
+	let stdout = '';
+	let stderr = '';
+	try {
+		const exitCode = await proc.exited;
+		stdout = await proc.stdout.text();
+		stderr = await proc.stderr.text();
+		if (exitCode !== 0) {
+			// git worktree list failed — fail open with no collision detected.
+			// The actual provisioning will report the error if needed.
+			console.warn(
+				`[swarm] preProvisionCollisionCheck: git worktree list failed (exit ${exitCode}): ${stderr}`,
+			);
+			return { collision: false };
+		}
+	} finally {
+		try {
+			proc.kill();
+		} catch {
+			// best-effort — process may already have exited
+		}
+	}
+
+	// Parse porcelain output. Each worktree entry has:
+	//   worktree <path>
+	//   branch refs/heads/<name>
+	// (the branch line is absent when HEAD is detached)
+	interface ParsedEntry {
+		path: string;
+		branch: string | undefined;
+	}
+	const entries: ParsedEntry[] = [];
+	let current: ParsedEntry = { path: '', branch: undefined };
+	for (const rawLine of stdout.split('\n')) {
+		const line = rawLine.trim();
+		if (line.startsWith('worktree ')) {
+			if (current.path) entries.push(current);
+			current = { path: line.slice('worktree '.length), branch: undefined };
+		} else if (line.startsWith('branch ')) {
+			current.branch = line.slice('branch '.length);
+		}
+	}
+	if (current.path) entries.push(current);
+
+	// SC-004: Scan ALL worktrees to find ANY lane for this taskId
+	// (regardless of which session owns it). A lane is identified by a branch
+	// whose last path segment equals taskId and whose prefix matches the
+	// swarm lane naming convention.
+	for (const entry of entries) {
+		if (!entry.branch) continue;
+		// Strip "refs/heads/" prefix
+		const branchName = entry.branch.startsWith('refs/heads/')
+			? entry.branch.slice('refs/heads/'.length)
+			: entry.branch;
+		// Check modern swarm/lane/<sessionId>/<taskId> format
+		const segments = branchName.split('/');
+		if (
+			segments.length >= 4 &&
+			segments[0] === 'swarm' &&
+			segments[1] === 'lane'
+		) {
+			const laneTaskId = segments[3];
+			if (laneTaskId === taskId) {
+				const ownerSessionId = segments[2];
+				return {
+					collision: true,
+					existingBranch: branchName,
+					ownerSessionId,
+					worktreePath: entry.path,
+				};
+			}
+		}
+		// Check legacy swarm-lane/<sessionId>/<taskId> format
+		if (segments.length >= 3 && segments[0] === 'swarm-lane') {
+			const laneTaskId = segments[2];
+			if (laneTaskId === taskId) {
+				const ownerSessionId = segments[1];
+				return {
+					collision: true,
+					existingBranch: branchName,
+					ownerSessionId,
+					worktreePath: entry.path,
+				};
+			}
+		}
+	}
+
+	return { collision: false };
+}
+
+/**
+ * FR-001b SC-005: Returns true when `branchName`'s embedded session ID matches
+ * `expectedSessionId`.
+ *
+ * Uses `extractSessionId` (merge.ts) to parse the branch name. Supports both
+ * legacy `swarm-lane/<sessionId>/<id>` and current `swarm/lane/<sessionId>/<id>`
+ * patterns.
+ */
+export function isLaneOwnedByCurrentSession(
+	branchName: string,
+	expectedSessionId: string,
+): boolean {
+	const extracted = mergeInternals.extractSessionId(branchName);
+	return extracted === expectedSessionId;
+}
+
 export async function precreateStandardWorktreeSession(args: {
 	config: PluginConfig;
 	directory: string;
@@ -463,6 +612,124 @@ export async function precreateStandardWorktreeSession(args: {
 		]);
 	} catch (cleanupError) {
 		console.warn(`[swarm] orphaned branch cleanup failed: ${cleanupError}`);
+	}
+
+	// FR-001b SC-004/SC-005: Pre-provision collision check — detect a stale lane
+	// for the same task+session before we try to provision. This lets us clean up
+	// our own stale lanes proactively rather than letting provisionWorktree hit the
+	// "branch already exists" error path.
+	//
+	// Choice (a) vs (b) from the spec:
+	//   (a) Return early with an error (refuse the new dispatch)
+	//   (b) Provision a separate lane name to avoid collision
+	// We implement (a) for cross-session collisions — a lane owned by another
+	// active session must NOT be touched or superseded. We implement cleanup +
+	// continue for same-session collisions (stale retry case).
+	const collision = await preProvisionCollisionCheck(
+		args.taskId,
+		args.directory,
+		args.parentSessionID,
+	);
+	if (collision.collision) {
+		const isOwn = collision.existingBranch
+			? isLaneOwnedByCurrentSession(
+					collision.existingBranch,
+					args.parentSessionID,
+				)
+			: false;
+		if (isOwn) {
+			// SC-004: Stale retry — same session left a lane for this task.
+			// Clean up BOTH the worktree directory AND the branch before re-provisioning.
+			// Use cleanupStandardWorktreeForCallId if the callID is still tracked;
+			// otherwise fall back to direct removeWorktree + postMergeCleanup.
+			const session = ensureAgentSession(args.parentSessionID);
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(
+				`FR-001b PREPROVISION: stale lane detected for task ${args.taskId} (session ${args.parentSessionID}); cleaning up before re-provisioning.`,
+			);
+			try {
+				// Try to find the callID for this branch in the tracking maps.
+				let callID: string | null = null;
+				for (const [id, dispatch] of _internals.standardWorktreeByCallID) {
+					if (dispatch.handle.branchName === collision.existingBranch) {
+						callID = id;
+						break;
+					}
+				}
+				if (!callID) {
+					for (const [id, record] of _internals.awaitingMergeByCallID) {
+						if (record.branch === collision.existingBranch) {
+							callID = id;
+							break;
+						}
+					}
+				}
+				if (callID) {
+					// Full cleanup path: removes worktree dir + branch + tracking map entries.
+					await _internals.cleanupStandardWorktreeForCallId(
+						callID,
+						'denied',
+						args.directory,
+						worktreeConfig.worktree_dir,
+					);
+				} else {
+					// Branch is stale (dispatch already GC'd from maps) — remove the
+					// worktree directory directly, then delete the branch.
+					// FR-001c: attempt to preserve any dirty work before cleanup.
+					if (collision.worktreePath) {
+						const preserveResult = await _internals.preserveDirtyWorktreeAtPath(
+							collision.worktreePath,
+							collision.existingBranch!,
+							'denied',
+							args.directory,
+							worktreeConfig.worktree_dir,
+						);
+						// FR-001c fail-closed: if dirty AND preservation failed, ABORT.
+						if (preserveResult.outcome === 'preserve-failed') {
+							const session = ensureAgentSession(args.parentSessionID);
+							session.pendingAdvisoryMessages ??= [];
+							session.pendingAdvisoryMessages.push(
+								`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: pre-provision collision for task ${args.taskId} has dirty uncommitted work but preservation failed (${preserveResult.error}). ` +
+									`Cleanup aborted to protect uncommitted work. Worktree=${collision.worktreePath}; branch=${collision.existingBranch}.`,
+							);
+							return;
+						}
+						await _internals.removeWorktree(
+							collision.worktreePath,
+							args.directory,
+							{ force: true, worktreeDir: worktreeConfig.worktree_dir },
+						);
+					}
+					await _internals.postMergeCleanup(
+						args.directory,
+						collision.existingBranch!,
+					);
+				}
+			} catch (cleanupError) {
+				console.warn(
+					`[swarm] preProvision collision cleanup failed: ${cleanupError}; proceeding with provisioning anyway`,
+				);
+			}
+			// Continue to provisioning — the stale branch will be adopted or replaced.
+		} else {
+			// Cross-session collision: another active session owns this lane.
+			// SC-005: do NOT touch it. Refuse this dispatch.
+			const ownerInfo = collision.ownerSessionId
+				? ` (owned by session ${collision.ownerSessionId})`
+				: '';
+			const message =
+				`FR-001b PREPROVISION_COLLISION: task ${args.taskId} already has an active lane on branch ${collision.existingBranch}${ownerInfo}. ` +
+				`Waiting for the owning session to complete and merge before retrying.`;
+			const session = ensureAgentSession(args.parentSessionID);
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(message);
+			handleStandardWorktreeFailure(
+				args.parentSessionID,
+				worktreeConfig.policy,
+				`PREPROVISION_COLLISION: ${message}`,
+			);
+			return;
+		}
 	}
 
 	// FR-201 SC-123: Allocate lane index and compute runtime profile BEFORE provisioning
@@ -578,6 +845,614 @@ export async function precreateStandardWorktreeSession(args: {
 	});
 }
 
+const PRESERVE_COMMIT_TIMEOUT_MS = 30_000;
+
+/**
+ * FR-001c: Preserves dirty work in a worktree before cleanup on denial or cancellation.
+ *
+ * Detects dirty state, auto-commits with a descriptive message, tags the commit,
+ * and returns the commit hash so the work is recoverable from the reflog.
+ *
+ * @returns Three distinct outcomes:
+ *   - `{ outcome: 'clean', preserved: false }` — worktree was clean; nothing to preserve.
+ *   - `{ outcome: 'preserved', preserved: true, ref: <hash> }` — dirty AND commit succeeded.
+ *   - `{ outcome: 'preserve-failed', preserved: false, error: <msg> }` — dirty AND commit/tag failed.
+ */
+export async function preserveDirtyWorktreeForCallId(
+	callID: string,
+	reason: 'denied' | 'cancelled',
+	_directory: string,
+	_worktree_dir?: string,
+): Promise<{
+	outcome: 'clean' | 'preserved' | 'preserve-failed';
+	preserved: false | true;
+	ref?: string;
+	error?: string;
+}> {
+	// Look in standardWorktreeByCallID first (active dispatch).
+	const dispatch = standardWorktreeByCallID.get(callID);
+	let worktreePath: string;
+	let parentSessionID: string;
+
+	if (dispatch) {
+		worktreePath = dispatch.handle.worktreePath;
+		parentSessionID = dispatch.parentSessionID;
+	} else {
+		// Not in active map — check awaiting-merge map.
+		const awaiting = awaitingMergeByCallID.get(callID);
+		if (!awaiting) {
+			// No entry — either never provisioned or already cleaned up.
+			return { outcome: 'clean', preserved: false };
+		}
+		worktreePath = awaiting.worktreePath;
+		parentSessionID = awaiting.parentSessionID;
+	}
+
+	// Detect dirty state: git status --porcelain
+	const statusProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'status', '--porcelain'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	let statusStdout = '';
+	let statusStderr = '';
+	try {
+		const exitCode = await statusProc.exited;
+		statusStdout = await statusProc.stdout.text();
+		statusStderr = await statusProc.stderr.text();
+		if (exitCode !== 0) {
+			console.warn(
+				`[swarm] preserveDirtyWorktreeForCallId: git status failed for ${callID}: ${statusStderr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git status failed: ${statusStderr || `exit ${exitCode}`}`,
+			};
+		}
+	} finally {
+		try {
+			statusProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// If output is empty, worktree is clean — nothing to preserve
+	if (statusStdout.trim() === '') {
+		return { outcome: 'clean', preserved: false };
+	}
+
+	// Dirty — stage all changes
+	const addProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'add', '-A'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const addExit = await addProc.exited;
+		if (addExit !== 0) {
+			const addErr = await addProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeForCallId: git add failed for ${callID}: ${addErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git add failed: ${addErr || `exit ${addExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			addProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// Commit with a descriptive message
+	const isoDate = new Date().toISOString();
+	const sanitizedCallID = callID.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
+	const commitMessage = `swarm-preserved: ${reason} for callID ${sanitizedCallID} at ${isoDate}`;
+
+	const commitProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	let commitHash = '';
+	try {
+		const commitExit = await commitProc.exited;
+		if (commitExit !== 0) {
+			const commitErr = await commitProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeForCallId: git commit failed for ${callID}: ${commitErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git commit failed: ${commitErr || `exit ${commitExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			commitProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// Get commit hash: git rev-parse HEAD
+	const hashProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const hashExit = await hashProc.exited;
+		if (hashExit !== 0) {
+			const hashErr = await hashProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeForCallId: git rev-parse failed for ${callID}: ${hashErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git rev-parse failed: ${hashErr || `exit ${hashExit}`}`,
+			};
+		}
+		commitHash = (await hashProc.stdout.text()).trim();
+	} finally {
+		try {
+			hashProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	if (!commitHash) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: 'git rev-parse returned empty hash',
+		};
+	}
+
+	// Tag the preserved commit: swarm-preserved-<sanitizedCallID>-<shortHash>
+	const shortHash = commitHash.slice(0, 8);
+	const tagName = `swarm-preserved-${sanitizedCallID}-${shortHash}`;
+
+	const tagProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'tag', tagName],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const tagExit = await tagProc.exited;
+		if (tagExit !== 0) {
+			const tagErr = await tagProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeForCallId: git tag failed for ${callID}: ${tagErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git tag failed: ${tagErr || `exit ${tagExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			tagProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// Push advisory
+	const session = ensureAgentSession(parentSessionID);
+	session.pendingAdvisoryMessages ??= [];
+	session.pendingAdvisoryMessages.push(
+		`STANDARD_WORKTREE_PRESERVED: dispatch ${callID} dirty work preserved as commit ${commitHash} (tag: ${tagName}; reason: ${reason}); worktree will be cleaned.`,
+	);
+
+	return { outcome: 'preserved', preserved: true, ref: commitHash };
+}
+
+/**
+ * FR-001b SC-004: Preserves dirty worktree state at a known worktree path.
+ *
+ * This is the path-based counterpart of `preserveDirtyWorktreeForCallId` for the
+ * pre-provision collision fallback path where the callID is no longer tracked in
+ * any map (dispatch was GC'd). It runs the same git status → add → commit → tag
+ * sequence on a direct worktreePath.
+ *
+ * @param worktreePath - Absolute path to the worktree directory.
+ * @param branchName - Branch name (used only for advisory messages).
+ * @param reason - Preservation reason: 'denied' (pre-provision collision) or 'cancelled'.
+ * @param directory - Project root for git commands.
+ * @param worktree_dir - Optional worktree-dir override.
+ * @returns Preservation result matching preserveDirtyWorktreeForCallId's shape.
+ */
+export async function preserveDirtyWorktreeAtPath(
+	worktreePath: string,
+	branchName: string,
+	reason: 'denied' | 'cancelled',
+	directory: string,
+	_worktree_dir?: string,
+): Promise<{
+	outcome: 'clean' | 'preserved' | 'preserve-failed';
+	preserved: false | true;
+	ref?: string;
+	error?: string;
+}> {
+	// Detect dirty state: git status --porcelain
+	const statusProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'status', '--porcelain'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	let statusStdout = '';
+	let statusStderr = '';
+	try {
+		const exitCode = await statusProc.exited;
+		statusStdout = await statusProc.stdout.text();
+		statusStderr = await statusProc.stderr.text();
+		if (exitCode !== 0) {
+			console.warn(
+				`[swarm] preserveDirtyWorktreeAtPath: git status failed for ${worktreePath}: ${statusStderr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git status failed: ${statusStderr || `exit ${exitCode}`}`,
+			};
+		}
+	} finally {
+		try {
+			statusProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// If output is empty, worktree is clean — nothing to preserve
+	if (statusStdout.trim() === '') {
+		return { outcome: 'clean', preserved: false };
+	}
+
+	// Dirty — stage all changes
+	const addProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'add', '-A'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const addExit = await addProc.exited;
+		if (addExit !== 0) {
+			const addErr = await addProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeAtPath: git add failed for ${worktreePath}: ${addErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git add failed: ${addErr || `exit ${addExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			addProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// Commit with a descriptive message
+	const isoDate = new Date().toISOString();
+	const sanitizedPath = worktreePath
+		.replace(/[^A-Za-z0-9._-]/g, '-')
+		.slice(0, 64);
+	const sanitizedBranch = branchName
+		.replace(/[^A-Za-z0-9._-]/g, '-')
+		.slice(0, 64);
+	const commitMessage = `swarm-preserved: ${reason} for worktree ${sanitizedPath} at ${isoDate}`;
+
+	const commitProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	let commitHash = '';
+	try {
+		const commitExit = await commitProc.exited;
+		if (commitExit !== 0) {
+			const commitErr = await commitProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeAtPath: git commit failed for ${worktreePath}: ${commitErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git commit failed: ${commitErr || `exit ${commitExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			commitProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	// Get commit hash: git rev-parse HEAD
+	const hashProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const hashExit = await hashProc.exited;
+		if (hashExit !== 0) {
+			const hashErr = await hashProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeAtPath: git rev-parse failed for ${worktreePath}: ${hashErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git rev-parse failed: ${hashErr || `exit ${hashExit}`}`,
+			};
+		}
+		commitHash = (await hashProc.stdout.text()).trim();
+	} finally {
+		try {
+			hashProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	if (!commitHash) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: 'git rev-parse returned empty hash',
+		};
+	}
+
+	// Tag the preserved commit: swarm-preserved-worktree-<sanitizedPath>-<shortHash>
+	const shortHash = commitHash.slice(0, 8);
+	const tagName = `swarm-preserved-worktree-${sanitizedBranch}-${shortHash}`;
+
+	const tagProc = _internals.bunSpawn(
+		['git', '-C', worktreePath, 'tag', tagName],
+		{
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+		},
+	);
+	try {
+		const tagExit = await tagProc.exited;
+		if (tagExit !== 0) {
+			const tagErr = await tagProc.stderr.text();
+			console.warn(
+				`[swarm] preserveDirtyWorktreeAtPath: git tag failed for ${worktreePath}: ${tagErr}`,
+			);
+			return {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: `git tag failed: ${tagErr || `exit ${tagExit}`}`,
+			};
+		}
+	} finally {
+		try {
+			tagProc.kill();
+		} catch {
+			// best-effort
+		}
+	}
+
+	return { outcome: 'preserved', preserved: true, ref: commitHash };
+}
+
+/**
+ * FR-001a: Unconditionally cleans up a standard worktree dispatch's resources.
+ *
+ * Called at the end of every dispatch outcome (success, denial, cancellation)
+ * to ensure no worktree or branch is left behind.
+ *
+ * @param callID - The callID of the dispatch to clean up.
+ * @param reason - The outcome reason: 'success', 'denied', or 'cancelled'.
+ * @param directory - The project root (required for git worktree/branch commands).
+ * @param worktree_dir - Configured worktree-dir override.
+ */
+export async function cleanupStandardWorktreeForCallId(
+	callID: string,
+	reason: 'success' | 'denied' | 'cancelled',
+	directory: string,
+	worktree_dir?: string,
+): Promise<void> {
+	// Look in standardWorktreeByCallID first (active dispatch).
+	const dispatch = standardWorktreeByCallID.get(callID);
+	let worktreePath: string;
+	let branchName: string;
+	let parentSessionID: string;
+
+	if (dispatch) {
+		worktreePath = dispatch.handle.worktreePath;
+		branchName = dispatch.handle.branchName;
+		parentSessionID = dispatch.parentSessionID;
+	} else {
+		// Not in active map — check awaiting-merge map (production moves the
+		// entry there BEFORE calling finishStandardWorktreeDispatch).
+		const awaiting = awaitingMergeByCallID.get(callID);
+		if (!awaiting) {
+			// No entry — either never provisioned or already cleaned up.
+			return;
+		}
+		worktreePath = awaiting.worktreePath;
+		branchName = awaiting.branch;
+		parentSessionID = awaiting.parentSessionID;
+	}
+
+	// FR-001c: Preserve dirty work before cleanup on denial or cancellation.
+	// The success path uses attemptMergeBackFromDirty which handles state differently.
+	let preserveResult:
+		| {
+				outcome: 'clean' | 'preserved' | 'preserve-failed';
+				preserved: boolean;
+				ref?: string;
+				error?: string;
+		  }
+		| undefined;
+	if (reason === 'denied' || reason === 'cancelled') {
+		try {
+			preserveResult = await _internals.preserveDirtyWorktreeForCallId(
+				callID,
+				reason,
+				directory,
+				worktree_dir,
+			);
+		} catch (err) {
+			console.warn(
+				`[swarm] cleanupStandardWorktreeForCallId: preserveDirtyWorktreeForCallId threw for ${callID}: ${err}`,
+			);
+			preserveResult = {
+				outcome: 'preserve-failed',
+				preserved: false,
+				error: String(err),
+			};
+		}
+	}
+
+	// FR-001c fail-closed: if dirty state was detected AND preservation did NOT succeed,
+	// do NOT remove the worktree or branch — return early with a clear advisory.
+	if (preserveResult && preserveResult.outcome === 'preserve-failed') {
+		// Dirty work was present but could not be preserved — ABORT cleanup to protect uncommitted work.
+		// Do NOT call removeWorktree or postMergeCleanup.
+		// Remove ONLY the in-memory tracking entries so a future retry can pick up the worktree state.
+		standardWorktreeByCallID.delete(callID);
+		awaitingMergeByCallID.delete(callID);
+
+		const session = ensureAgentSession(parentSessionID);
+		session.pendingAdvisoryMessages ??= [];
+		session.pendingAdvisoryMessages.push(
+			`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: dispatch ${callID} has dirty uncommitted work but preservation failed (${preserveResult.error}). ` +
+				`Cleanup aborted to protect uncommitted work. Investigate and resolve manually. ` +
+				`Worktree=${worktreePath}; branch=${branchName}.`,
+		);
+		return;
+	}
+
+	// Remove the worktree directory.
+	await _internals
+		.removeWorktree(worktreePath, directory, {
+			force: true,
+			worktreeDir: worktree_dir,
+		})
+		.catch((err) =>
+			console.warn(
+				`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
+			),
+		);
+
+	// BRANCH DELETION: unconditionally on every dispatch outcome.
+	// The branch is deleted on success (merge-back completed cleanly), denied
+	// (orchestrator denied the dispatch), and cancelled (user/system cancelled).
+	// Branch deletion is safe in all cases — the user's work is preserved in
+	// the commit history via the lane branch reflog until GC.
+	await _internals
+		.postMergeCleanup(directory, branchName)
+		.catch((err) =>
+			console.warn(
+				`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
+			),
+		);
+
+	// Remove entries from in-memory tracking maps.
+	standardWorktreeByCallID.delete(callID);
+	awaitingMergeByCallID.delete(callID);
+
+	const session = ensureAgentSession(parentSessionID);
+	session.pendingAdvisoryMessages ??= [];
+	session.pendingAdvisoryMessages.push(
+		`STANDARD_WORKTREE_CLEANUP: dispatch ${callID} cleaned up (reason: ${reason}); worktree=${worktreePath}; branch=${branchName}.`,
+	);
+}
+
+/**
+ * FR-001a: Abort an in-flight standard worktree dispatch.
+ *
+ * Called when a dispatch needs to be cancelled before merge-back completes.
+ * Handles the case where the worktree was never provisioned (no entry in
+ * standardWorktreeByCallID) by returning early with a no-op diagnostic.
+ *
+ * @param callID - The callID of the dispatch to abort.
+ * @param reason - The abort reason: 'denied' or 'cancelled'.
+ * @param directory - The project root (required for git worktree/branch commands).
+ */
+export async function abortStandardWorktreeDispatch(
+	callID: string,
+	reason: 'denied' | 'cancelled',
+	directory: string,
+): Promise<void> {
+	const dispatch = standardWorktreeByCallID.get(callID);
+	if (!dispatch) {
+		// No entry — either never provisioned or already cleaned up.
+		const session = ensureAgentSession('unknown');
+		session.pendingAdvisoryMessages ??= [];
+		session.pendingAdvisoryMessages.push(
+			`STANDARD_WORKTREE_ABORT_NOOP: dispatch ${callID} has no tracked worktree to abort (reason: ${reason}).`,
+		);
+		return;
+	}
+
+	await cleanupStandardWorktreeForCallId(
+		callID,
+		reason,
+		directory,
+		dispatch.worktree_dir,
+	);
+}
+
 export async function finishStandardWorktreeDispatch(
 	directory: string,
 	dispatch: StandardWorktreeDispatch,
@@ -627,16 +1502,6 @@ export async function finishStandardWorktreeDispatch(
 				/* non-fatal */
 			}
 
-			await _internals
-				.removeWorktree(dispatch.handle.worktreePath, directory, {
-					force: true,
-					worktreeDir: dispatch.worktree_dir,
-				})
-				.catch(() => {});
-			await _internals
-				.postMergeCleanup(directory, dispatch.handle.branchName)
-				.catch(() => {});
-
 			// FR-104 SC-111: Increment successful-dispatch counter and check release
 			const state = serializationStateBySessionID.get(dispatch.parentSessionID);
 			if (state) {
@@ -646,6 +1511,14 @@ export async function finishStandardWorktreeDispatch(
 					wtConfig,
 				);
 			}
+
+			// Cleanup unconditionally — runs on success, partial, AND failed.
+			await cleanupStandardWorktreeForCallId(
+				resolvedCallID,
+				'success',
+				directory,
+				dispatch.worktree_dir,
+			);
 
 			return;
 		}
@@ -663,6 +1536,15 @@ export async function finishStandardWorktreeDispatch(
 			session.pendingAdvisoryMessages.push(
 				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
 			);
+
+			// Cleanup unconditionally — runs on success, partial, AND failed.
+			await cleanupStandardWorktreeForCallId(
+				resolvedCallID,
+				'success', // Treat partial as success for cleanup (worktree still removed)
+				directory,
+				dispatch.worktree_dir,
+			);
+
 			return;
 		}
 
@@ -680,6 +1562,14 @@ export async function finishStandardWorktreeDispatch(
 			session.pendingAdvisoryMessages.push(
 				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
+
+			// Cleanup unconditionally — runs on success, partial, AND failed.
+			await cleanupStandardWorktreeForCallId(
+				resolvedCallID,
+				'success', // Treat failed as success for cleanup (worktree still removed)
+				directory,
+				dispatch.worktree_dir,
+			);
 		}
 	};
 
@@ -688,6 +1578,9 @@ export async function finishStandardWorktreeDispatch(
 
 	// SC-115: Remove from awaiting-merge registry after merge-back completes
 	// (success, partial, or failed — all three paths).
+	// NOTE: This is now redundant since cleanupStandardWorktreeForCallId also
+	// deletes from awaitingMergeByCallID, but kept for safety in case
+	// cleanupStandardWorktreeForCallId was never called (e.g., early throw).
 	if (resolvedCallID) {
 		awaitingMergeByCallID.delete(resolvedCallID);
 	}
@@ -767,4 +1660,19 @@ export const _internals = {
 	awaitingMergeByCallID,
 	startupOrphanRecovery,
 	cleanupOrphanedBranches,
+	/** FR-001a: cleanup entry point for finishStandardWorktreeDispatch. */
+	cleanupStandardWorktreeForCallId,
+	/** FR-001c: preserves dirty worktree state before cleanup on denial/cancellation. */
+	preserveDirtyWorktreeForCallId,
+	/** FR-001b SC-004: path-based dirty worktree preservation for stale-lane fallback. */
+	preserveDirtyWorktreeAtPath,
+	/** FR-001a: abort entry point for in-flight dispatches. */
+	abortStandardWorktreeDispatch,
+	standardWorktreeByCallID,
+	/** FR-001b SC-004: pre-provision collision check. */
+	preProvisionCollisionCheck,
+	/** FR-001b SC-005: lane ownership validation. */
+	isLaneOwnedByCurrentSession,
+	/** FR-001b: bunSpawn — exposed for test injection so collision check can be mocked. */
+	bunSpawn,
 };

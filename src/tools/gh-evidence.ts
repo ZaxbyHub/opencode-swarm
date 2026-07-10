@@ -62,14 +62,39 @@ const ISSUE_FIELD_ALLOWLIST = new Set([
 	'updatedAt',
 ]);
 
+const DEFAULT_RUN_FIELDS = [
+	'status',
+	'conclusion',
+	'htmlUrl',
+	'headBranch',
+	'headSha',
+] as const;
+
+const RUN_FIELD_ALLOWLIST = new Set([
+	...DEFAULT_RUN_FIELDS,
+	'name',
+	'workflowId',
+	'runNumber',
+	'event',
+	'runStartedAt',
+	'createdAt',
+	'updatedAt',
+]);
+
 interface GhEvidenceResult {
-	target: 'pr' | 'issue';
+	target: 'pr' | 'issue' | 'run';
 	number: number;
 	repo?: string;
 	fields: string[];
 	command: string[];
 	data: unknown;
 	outputTruncated?: boolean;
+	/** Present when target is 'run' */
+	runStatus?: string;
+	runConclusion?: string | null;
+	runHtmlUrl?: string;
+	runHeadBranch?: string;
+	runHeadSha?: string;
 }
 
 interface GhEvidenceError {
@@ -102,13 +127,15 @@ function normalizeRepo(value: unknown): string | undefined | GhEvidenceError {
 }
 
 function normalizeFields(
-	target: 'pr' | 'issue',
+	target: 'pr' | 'issue' | 'run',
 	value: unknown,
 ): string[] | GhEvidenceError {
 	const defaults =
 		target === 'pr'
 			? Array.from(DEFAULT_PR_FIELDS)
-			: Array.from(DEFAULT_ISSUE_FIELDS);
+			: target === 'issue'
+				? Array.from(DEFAULT_ISSUE_FIELDS)
+				: Array.from(DEFAULT_RUN_FIELDS);
 	if (value === undefined || value === null || value === '') return defaults;
 	const raw = Array.isArray(value)
 		? value
@@ -123,7 +150,11 @@ function normalizeFields(
 		};
 	}
 	const allowlist =
-		target === 'pr' ? PR_FIELD_ALLOWLIST : ISSUE_FIELD_ALLOWLIST;
+		target === 'pr'
+			? PR_FIELD_ALLOWLIST
+			: target === 'issue'
+				? ISSUE_FIELD_ALLOWLIST
+				: RUN_FIELD_ALLOWLIST;
 	const fields = Array.from(new Set(raw.map((f) => f.trim()).filter(Boolean)));
 	if (
 		fields.length === 0 ||
@@ -168,10 +199,10 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 		'Fetch bounded GitHub pull request or issue metadata via gh for review evidence. Read-only; resolves gh lazily.',
 	args: {
 		target: z
-			.enum(['pr', 'issue'])
+			.enum(['pr', 'issue', 'run'])
 			.default('pr')
-			.describe('GitHub object type to view: pr or issue'),
-		number: z.number().describe('Pull request or issue number'),
+			.describe('GitHub object type to view: pr, issue, or run'),
+		number: z.number().describe('Pull request, issue, or run number'),
 		repo: z
 			.string()
 			.optional()
@@ -180,14 +211,23 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 			.union([z.string(), z.array(z.string())])
 			.optional()
 			.describe(
-				'Optional JSON fields. Defaults to high-signal bounded PR or issue fields.',
+				'Optional JSON fields. Defaults to high-signal bounded PR or issue fields. Ignored for run with log_failed.',
+			),
+		log_failed: z
+			.boolean()
+			.optional()
+			.default(false)
+			.describe(
+				'When true with target=run, fetches failed job logs instead of JSON',
 			),
 	},
 	execute: async (args: unknown, directory: string) => {
 		const obj = (
 			typeof args === 'object' && args !== null ? args : {}
 		) as Record<string, unknown>;
-		const target = obj.target === 'issue' ? 'issue' : 'pr';
+		const rawTarget = obj.target;
+		const target: 'pr' | 'issue' | 'run' =
+			rawTarget === 'issue' ? 'issue' : rawTarget === 'run' ? 'run' : 'pr';
 		const number = typeof obj.number === 'number' ? obj.number : NaN;
 		if (!Number.isInteger(number) || number <= 0) {
 			return JSON.stringify(
@@ -204,6 +244,7 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 		if (repo && typeof repo === 'object') {
 			return JSON.stringify(repo, null, 2);
 		}
+		const logFailed: boolean = obj.log_failed === true;
 		const fields = normalizeFields(target, obj.fields);
 		if (!Array.isArray(fields)) {
 			return JSON.stringify(fields, null, 2);
@@ -223,9 +264,18 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 			);
 		}
 
-		const ghArgs = [target, 'view', String(number), '--json', fields.join(',')];
+		// Build gh arguments based on target and log_failed flag
+		const ghArgs: string[] = [target, 'view', String(number)];
+		// log_failed is only valid with target=run; when set, skip --json and get raw log output
+		const isLogFailedMode = target === 'run' && logFailed;
+		if (!isLogFailedMode) {
+			ghArgs.push('--json', fields.join(','));
+		}
 		if (repo) {
 			ghArgs.push('--repo', repo);
+		}
+		if (isLogFailedMode) {
+			ghArgs.push('--log-failed');
 		}
 		const run = await _internals.runExternalTool({
 			executable,
@@ -271,18 +321,69 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 		}
 
 		let data: unknown;
-		try {
-			data = sanitizeParsedJson(JSON.parse(run.stdout));
-		} catch {
-			return JSON.stringify(
-				{
-					error: true,
-					type: 'unknown',
-					message: 'gh output was not valid JSON',
-				} satisfies GhEvidenceError,
-				null,
-				2,
-			);
+		let runStatus: string | undefined;
+		let runConclusion: string | null | undefined;
+		let runHtmlUrl: string | undefined;
+		let runHeadBranch: string | undefined;
+		let runHeadSha: string | undefined;
+
+		if (isLogFailedMode) {
+			// For --log-failed, output is raw text (not JSON)
+			data = run.stdout;
+		} else {
+			// Parse JSON output and extract run-specific metadata
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(run.stdout);
+			} catch {
+				return JSON.stringify(
+					{
+						error: true,
+						type: 'unknown',
+						message: 'gh output was not valid JSON',
+					} satisfies GhEvidenceError,
+					null,
+					2,
+				);
+			}
+			data = sanitizeParsedJson(parsed);
+			// Extract run metadata if available
+			if (
+				target === 'run' &&
+				parsed !== null &&
+				(Array.isArray(parsed) || typeof parsed !== 'object')
+			) {
+				// Non-object JSON (array, primitive) is not valid run metadata — return error
+				return JSON.stringify(
+					{
+						error: true,
+						type: 'invalid-input',
+						message:
+							'gh run view --json returned an array or primitive instead of a run object',
+					} satisfies GhEvidenceError,
+					null,
+					2,
+				);
+			}
+			if (target === 'run' && parsed && typeof parsed === 'object') {
+				const runData = parsed as Record<string, unknown>;
+				runStatus =
+					typeof runData.status === 'string' ? runData.status : undefined;
+				runConclusion =
+					runData.conclusion === null
+						? null
+						: typeof runData.conclusion === 'string'
+							? runData.conclusion
+							: undefined;
+				runHtmlUrl =
+					typeof runData.htmlUrl === 'string' ? runData.htmlUrl : undefined;
+				runHeadBranch =
+					typeof runData.headBranch === 'string'
+						? runData.headBranch
+						: undefined;
+				runHeadSha =
+					typeof runData.headSha === 'string' ? runData.headSha : undefined;
+			}
 		}
 
 		return JSON.stringify(
@@ -290,10 +391,17 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 				target,
 				number,
 				repo,
-				fields,
+				fields: isLogFailedMode ? [] : fields,
 				command: ['gh', ...ghArgs],
 				data,
 				outputTruncated: run.stdoutTruncated || run.stderrTruncated,
+				...(target === 'run' && {
+					runStatus,
+					runConclusion,
+					runHtmlUrl,
+					runHeadBranch,
+					runHeadSha,
+				}),
 			} satisfies GhEvidenceResult,
 			null,
 			2,

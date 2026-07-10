@@ -1388,4 +1388,242 @@ function h() { return {}; }
 			expect(result.summary.files_scanned).toBe(0);
 		});
 	});
+
+	// ============ Diff-Aware / Added-Lines Tests (FR-006 SC-018/019) ============
+
+	describe('diff-aware scanning (added_lines filter)', () => {
+		it('SC-018: pre-existing pattern on unchanged line is silently ignored', async () => {
+			// File has TODO on line 1 (unchanged)
+			createTestFile(
+				tempDir,
+				'existing.ts',
+				'// TODO: pre-existing\nfunction clean() {}\n',
+			);
+
+			// Only line 2 is marked as added (the clean function line)
+			const addedLines: Record<string, Set<number>> = {
+				'existing.ts': new Set([2]),
+			};
+
+			const result = await placeholderScan(
+				{ changed_files: ['existing.ts'], added_lines: addedLines },
+				tempDir,
+			);
+
+			// The TODO on line 1 should be ignored because it's not an added line
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('SC-019: pattern on PR-added line flags', async () => {
+			// File has TODO on line 2 (the added line)
+			createTestFile(
+				tempDir,
+				'added.ts',
+				'function clean() {}\n// TODO: new implementation\n',
+			);
+
+			// Line 2 is marked as added
+			const addedLines: Record<string, Set<number>> = {
+				'added.ts': new Set([2]),
+			};
+
+			const result = await placeholderScan(
+				{ changed_files: ['added.ts'], added_lines: addedLines },
+				tempDir,
+			);
+
+			// The TODO on line 2 should be flagged because it's an added line
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0].line).toBe(2);
+			expect(result.findings[0].rule_id).toBe('placeholder/comment-todo');
+		});
+
+		it('only flags patterns on lines in the added_lines set', async () => {
+			// File has TODOs on lines 1, 3, 5 (only line 3 is added)
+			createTestFile(
+				tempDir,
+				'mixed.ts',
+				'// TODO: line 1\nfunction a() {}\n// TODO: line 3\nfunction b() {}\n// TODO: line 5\n',
+			);
+
+			// Only line 3 is marked as added
+			const addedLines: Record<string, Set<number>> = {
+				'mixed.ts': new Set([3]),
+			};
+
+			const result = await placeholderScan(
+				{ changed_files: ['mixed.ts'], added_lines: addedLines },
+				tempDir,
+			);
+
+			// Only the TODO on line 3 should be flagged
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0].line).toBe(3);
+		});
+
+		it('parser finds multi-line block comment on added lines when root node starts at line 1 (regression)', async () => {
+			// File: line 1 is unchanged (function declaration), lines 2-4 are added (multi-line TODO comment)
+			// This was broken because walkNode started at root (line 1, not in addedLines)
+			// and returned early without traversing to children on added lines
+			createTestFile(
+				tempDir,
+				'multi.ts',
+				'function clean() {}\n/* TODO\n   multi-line\n   comment */\n',
+			);
+
+			// Lines 2-4 are marked as added (the multi-line block comment)
+			const addedLines: Record<string, Set<number>> = {
+				'multi.ts': new Set([2, 3, 4]),
+			};
+
+			const result = await placeholderScan(
+				{ changed_files: ['multi.ts'], added_lines: addedLines },
+				tempDir,
+			);
+
+			// The TODO in the multi-line block comment on added lines must be found
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0].line).toBe(2);
+			expect(result.findings[0].rule_id).toBe('placeholder/comment-todo');
+		});
+
+		it('without added_lines, reports all findings (backward compatible)', async () => {
+			createTestFile(
+				tempDir,
+				'all.ts',
+				'// TODO: one\n// TODO: two\n// TODO: three\n',
+			);
+
+			const result = await placeholderScan(
+				{ changed_files: ['all.ts'] },
+				tempDir,
+			);
+
+			// All TODOs should be reported when no added_lines filter
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(3);
+		});
+	});
+
+	// ============ Sentinel Allowlist Tests (FR-006 SC-020/021) ============
+
+	describe('sentinel_allowlist filtering', () => {
+		it('SC-020: sentinel allowlist excludes findings by value (e.g., SC-PLACEHOLDER)', async () => {
+			createTestFile(
+				tempDir,
+				'sentinel.ts',
+				'// TODO: SC-PLACEHOLDER implement later\nfunction clean() {}\n',
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['sentinel.ts'],
+					sentinel_allowlist: ['SC-PLACEHOLDER'],
+				},
+				tempDir,
+			);
+
+			// The finding should be suppressed because excerpt contains SC-PLACEHOLDER
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('SC-021: allowlist matches by value, not by file', async () => {
+			// File A has SC-PLACEHOLDER in the finding
+			createTestFile(
+				tempDir,
+				'file-a.ts',
+				'// TODO: SC-PLACEHOLDER in file A\nfunction a() {}\n',
+			);
+			// File B has the same pattern but no sentinel
+			createTestFile(
+				tempDir,
+				'file-b.ts',
+				'// TODO: real issue in file B\nfunction b() {}\n',
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['file-a.ts', 'file-b.ts'],
+					sentinel_allowlist: ['SC-PLACEHOLDER'],
+				},
+				tempDir,
+			);
+
+			// file-a.ts should be suppressed, file-b.ts should be flagged
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0].path).toContain('file-b.ts');
+		});
+
+		it('suppresses findings where excerpt contains any sentinel value', async () => {
+			createTestFile(
+				tempDir,
+				'multi.ts',
+				`// TODO: TEMP-BLOCKER implement later
+// FIXME: ANOTHER-SENTINEL needs review
+function clean() {}
+`,
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['multi.ts'],
+					sentinel_allowlist: ['TEMP-BLOCKER', 'ANOTHER-SENTINEL'],
+				},
+				tempDir,
+			);
+
+			// Both findings should be suppressed
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('without sentinel_allowlist, reports all findings (backward compatible)', async () => {
+			createTestFile(
+				tempDir,
+				'normal.ts',
+				'// TODO: normal TODO\nfunction clean() {}\n',
+			);
+
+			const result = await placeholderScan(
+				{ changed_files: ['normal.ts'] },
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+		});
+
+		it('sentinel allowlist works with added_lines combined', async () => {
+			createTestFile(
+				tempDir,
+				'combined.ts',
+				'// TODO: SC-PLACEHOLDER line 1\n// TODO: real issue line 2\n',
+			);
+
+			// Only line 2 is added AND it has a real issue (no sentinel)
+			const addedLines: Record<string, Set<number>> = {
+				'combined.ts': new Set([2]),
+			};
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['combined.ts'],
+					added_lines: addedLines,
+					sentinel_allowlist: ['SC-PLACEHOLDER'],
+				},
+				tempDir,
+			);
+
+			// Line 1 is ignored (not added), line 2 is flagged (added, no sentinel)
+			expect(result.verdict).toBe('fail');
+			expect(result.findings).toHaveLength(1);
+			expect(result.findings[0].line).toBe(2);
+		});
+	});
 });

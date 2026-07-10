@@ -27,16 +27,19 @@ import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
+import { sleep } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
 import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
 } from './critic-response-parser';
 import {
+	incrementOversightFailureCounter,
 	loadFullAutoRunState,
 	nextFullAutoOversightSequence,
 	pauseFullAutoRun,
 	recordFullAutoOversight,
+	resetOversightFailureCounter,
 	terminateFullAutoRun,
 } from './state';
 
@@ -46,12 +49,6 @@ import {
 // the durable state file.
 let oversightSequenceCounter = 0;
 void oversightSequenceCounter; // referenced via _internals.resetSequence
-const OVERSIGHT_DISPATCH_MAX_ATTEMPTS = 3;
-const OVERSIGHT_DISPATCH_RETRY_BASE_MS = 250;
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export interface FullAutoCriticResult extends ParsedCriticResponse {}
 
@@ -107,6 +104,10 @@ export interface DispatchFullAutoOversightInput {
 	 */
 	fullAutoConfig?: {
 		fail_closed?: boolean;
+		/** Override for max dispatch retries (default from schema: 2). */
+		max_dispatch_retries?: number;
+		/** Override for max consecutive dispatch failures (default from schema: 3). */
+		max_consecutive_dispatch_failures?: number;
 	};
 }
 
@@ -174,74 +175,6 @@ function decisionFromVerdict(
 	if (verdict === 'BLOCKED') return 'deny';
 	if (verdict === 'PENDING') return 'pending';
 	return 'deny';
-}
-
-function isTransientDispatchError(error: unknown): boolean {
-	const text = error instanceof Error ? error.message : String(error);
-	return /(?:\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|\b529\b|timeout|timed out|temporarily unavailable|server error|unexpected server error|rate limit)/i.test(
-		text,
-	);
-}
-
-async function dispatchOversightAttempt(
-	client: NonNullable<typeof stateInternals.swarmState.opencodeClient>,
-	input: DispatchFullAutoOversightInput,
-): Promise<string> {
-	let ephemeralSessionId: string | undefined;
-	const promptController = new AbortController();
-	const cleanup = () => {
-		promptController.abort();
-		if (ephemeralSessionId) {
-			const id = ephemeralSessionId;
-			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id } }).catch(() => {});
-		}
-	};
-
-	try {
-		const createResult = await client.session.create({
-			...(input.sessionID
-				? {
-						body: {
-							parentID: input.sessionID,
-							title: 'full_auto_oversight background',
-						},
-					}
-				: {}),
-			query: { directory: input.directory },
-		});
-		if (!createResult.data) {
-			throw new Error(
-				`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
-			);
-		}
-		ephemeralSessionId = createResult.data.id;
-
-		const promptResult = await client.session.prompt({
-			path: { id: ephemeralSessionId },
-			body: {
-				agent: input.oversightAgentName,
-				tools: { write: false, edit: false, patch: false },
-				parts: [{ type: 'text', text: buildOversightPrompt(input) }],
-			},
-			signal: promptController.signal,
-		});
-
-		if (!promptResult.data) {
-			throw new Error(
-				`Critic prompt failed: ${JSON.stringify(promptResult.error)}`,
-			);
-		}
-		const textParts = promptResult.data.parts.filter(
-			(p): p is typeof p & { text: string } => p.type === 'text',
-		);
-		const response = textParts.map((p) => p.text).join('\n');
-		return response.trim()
-			? response
-			: 'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO';
-	} finally {
-		cleanup();
-	}
 }
 
 /**
@@ -434,37 +367,185 @@ export async function dispatchFullAutoOversight(
 		`[full-auto/oversight] Dispatching ${oversightAgent.name} via ${input.oversightAgentName} (model=${input.criticModel}, trigger=${input.triggerSource})`,
 	);
 
+	let ephemeralSessionId: string | undefined;
+	const promptController = new AbortController();
+	const cleanup = () => {
+		promptController.abort();
+		if (ephemeralSessionId) {
+			const id = ephemeralSessionId;
+			ephemeralSessionId = undefined;
+			client.session.delete({ path: { id } }).catch(() => {});
+		}
+	};
+
 	let criticResponse = '';
 	let dispatchError: unknown;
-	let dispatchAttempts = 0;
-	for (let attempt = 1; attempt <= OVERSIGHT_DISPATCH_MAX_ATTEMPTS; attempt++) {
-		dispatchAttempts = attempt;
+	const maxRetries = input.fullAutoConfig?.max_dispatch_retries ?? 2;
+	const maxConsecutiveFailures =
+		input.fullAutoConfig?.max_consecutive_dispatch_failures ?? 3;
+
+	// Helper: returns { ok, response, error }
+	// Retries transient errors (missing data / server errors) with exponential backoff.
+	async function attemptDispatch(attempt: number): Promise<{
+		ok: boolean;
+		response: string;
+		error: unknown;
+	}> {
+		// Guard: client must be available for all session operations.
+		if (!client) {
+			return {
+				ok: false,
+				response: '',
+				error: new Error('OpenCode client unavailable'),
+			};
+		}
+		// On retry attempts, wait before retrying (1s, 2s, 4s, …).
+		if (attempt > 0) {
+			const delay = 2 ** (attempt - 1) * 1000;
+			await sleep(delay);
+		}
+
+		// Reset any stale session id from a previous attempt.
+		if (ephemeralSessionId) {
+			const staleId = ephemeralSessionId;
+			ephemeralSessionId = undefined;
+			client.session.delete({ path: { id: staleId } }).catch(() => {});
+		}
+
+		let lastError: unknown;
 		try {
-			criticResponse = await dispatchOversightAttempt(client, input);
+			// Bind to the calling session as parent so OpenCode treats this as
+			// a child session and does not persist it as a new root in the TUI.
+			const createResult = await client.session.create({
+				...(input.sessionID
+					? {
+							body: {
+								parentID: input.sessionID,
+								title: 'full_auto_oversight background',
+							},
+						}
+					: {}),
+				query: { directory: input.directory },
+			});
+			if (!createResult.data) {
+				// Treat missing data as a transient server error — retry.
+				lastError = new Error(
+					`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
+				);
+			} else {
+				ephemeralSessionId = createResult.data.id;
+				const promptResult = await client.session.prompt({
+					path: { id: ephemeralSessionId },
+					body: {
+						agent: input.oversightAgentName,
+						tools: { write: false, edit: false, patch: false },
+						parts: [{ type: 'text', text: buildOversightPrompt(input) }],
+					},
+					signal: promptController.signal,
+				});
+
+				if (!promptResult.data) {
+					lastError = new Error(
+						`Critic prompt failed: ${JSON.stringify(promptResult.error)}`,
+					);
+				} else {
+					const textParts = promptResult.data.parts.filter(
+						(p): p is typeof p & { text: string } => p.type === 'text',
+					);
+					const response = textParts.map((p) => p.text).join('\n');
+					if (!response.trim()) {
+						return {
+							ok: true,
+							response:
+								'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO',
+							error: undefined,
+						};
+					}
+					return { ok: true, response, error: undefined };
+				}
+			}
+		} catch (err) {
+			lastError = err;
+		}
+
+		return { ok: false, response: '', error: lastError };
+	}
+
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		// eslint-disable-next-line no-await-in-loop
+		const result = await attemptDispatch(attempt);
+		if (result.ok) {
+			criticResponse = result.response;
 			dispatchError = undefined;
 			break;
-		} catch (error) {
-			dispatchError = error;
-			const transient = isTransientDispatchError(error);
-			logger.error(
-				`[full-auto/oversight] dispatch attempt ${attempt}/${OVERSIGHT_DISPATCH_MAX_ATTEMPTS} failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			if (!transient || attempt === OVERSIGHT_DISPATCH_MAX_ATTEMPTS) {
-				break;
-			}
-			await _internals.sleep(
-				OVERSIGHT_DISPATCH_RETRY_BASE_MS * 2 ** (attempt - 1),
-			);
+		}
+		lastError = result.error;
+		logger.warn(
+			`[full-auto/oversight] dispatch attempt ${attempt + 1}/${maxRetries + 1} failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+		);
+		if (attempt < maxRetries) {
+			// Transient — will retry.
+			dispatchError = undefined;
+		} else {
+			// Exhausted retries.
+			dispatchError = lastError;
 		}
 	}
 
+	cleanup();
+
 	if (dispatchError) {
-		const reason = `oversight dispatch failed after ${dispatchAttempts} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
-		pauseFullAutoRun(input.directory, input.sessionID, reason);
+		const infraReason = `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
+		// Increment consecutive-failure counter. After threshold, auto-degrade to
+		// manual (terminate) so the run doesn't stay paused forever.
+		const consecutive = incrementOversightFailureCounter(
+			input.directory,
+			input.sessionID,
+		);
+		if (consecutive >= maxConsecutiveFailures && maxConsecutiveFailures > 0) {
+			// Auto-degrade: terminate the run so an architect can re-enable manually.
+			const degradeReason = `auto-degraded to manual mode after ${consecutive} consecutive oversight infrastructure failures`;
+			terminateFullAutoRun(input.directory, input.sessionID, degradeReason);
+			logger.error(`[full-auto/oversight] ${degradeReason}`);
+			const event: FullAutoOversightEvent = {
+				...baseEvent,
+				verdict: 'BLOCKED',
+				reasoning: infraReason,
+				decision: 'pause',
+				full_auto_status_after: 'terminated',
+			};
+			await writeFullAutoOversightEvent(input.directory, event);
+			const evidencePath = await writeFullAutoOversightEvidence(
+				input.directory,
+				input.phase,
+				event,
+			);
+			recordFullAutoOversight(
+				input.directory,
+				input.sessionID,
+				'BLOCKED',
+				infraReason,
+			);
+			return {
+				verdict: 'BLOCKED',
+				reasoning: infraReason,
+				evidenceChecked: [],
+				antiPatternsDetected: [],
+				escalationNeeded: false,
+				rawResponse: '',
+				decision: 'pause',
+				event,
+				evidencePath,
+			};
+		}
+
+		// Not yet at degrade threshold — pause and allow architect to resolve.
+		pauseFullAutoRun(input.directory, input.sessionID, infraReason);
 		const event: FullAutoOversightEvent = {
 			...baseEvent,
 			verdict: 'BLOCKED',
-			reasoning: reason,
+			reasoning: infraReason,
 			decision: 'pause',
 			full_auto_status_after: 'paused',
 		};
@@ -478,11 +559,11 @@ export async function dispatchFullAutoOversight(
 			input.directory,
 			input.sessionID,
 			'BLOCKED',
-			reason,
+			infraReason,
 		);
 		return {
 			verdict: 'BLOCKED',
-			reasoning: reason,
+			reasoning: infraReason,
 			evidenceChecked: [],
 			antiPatternsDetected: [],
 			escalationNeeded: false,
@@ -492,6 +573,9 @@ export async function dispatchFullAutoOversight(
 			evidencePath,
 		};
 	}
+
+	// Success — reset consecutive failure counter.
+	resetOversightFailureCounter(input.directory, input.sessionID);
 
 	const parsed = parseFullAutoCriticResponse(criticResponse);
 	const decision = decisionFromVerdict(parsed.verdict, parsed.escalationNeeded);
@@ -618,10 +702,8 @@ export async function dispatchFullAutoOversight(
  */
 export const _internals: {
 	resetSequence: () => void;
-	sleep: (ms: number) => Promise<void>;
 } = {
 	resetSequence: () => {
 		oversightSequenceCounter = 0;
 	},
-	sleep,
 };

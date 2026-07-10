@@ -112,8 +112,20 @@ export function createFullAutoPermissionHook(
 				// narrow allowlist of "state-blocking" tools and let unrelated
 				// tools (fetch/http/request, future tool names) sail through.
 				if (isReadOnlyTool(toolName)) return;
+				// Distinguish oversight-infrastructure pauses from policy pauses.
+				// FR-003: oversight-failure reasons include "infrastructure failure"
+				// which the architect can use to distinguish from denial/threshold pauses.
+				const rawReason =
+					runState.pauseReason ??
+					runState.terminateReason ??
+					'no reason recorded';
+				const statusPrefix =
+					rawReason.includes('infrastructure failure') &&
+					runState.status === 'paused'
+						? 'FULL_AUTO_PAUSED:OVERSIGHT_INFRASTRUCTURE_FAILURE'
+						: `FULL_AUTO_${runState.status.toUpperCase()}`;
 				throw new Error(
-					`FULL_AUTO_${runState.status.toUpperCase()}: tool '${toolName}' blocked because Full-Auto run is ${runState.status} (${runState.pauseReason ?? runState.terminateReason ?? 'no reason recorded'}). Re-enable with /swarm full-auto on after the underlying issue is resolved.`,
+					`${statusPrefix}: tool '${toolName}' blocked because Full-Auto run is ${runState.status} (${rawReason}). Re-enable with /swarm full-auto on after the underlying issue is resolved.`,
 				);
 			}
 
@@ -336,6 +348,10 @@ export function createFullAutoPermissionHook(
 					oversightAgentName,
 					fullAutoConfig: {
 						fail_closed: fullAutoConfig?.fail_closed !== false,
+						max_dispatch_retries:
+							fullAutoConfig?.oversight?.max_dispatch_retries ?? 2,
+						max_consecutive_dispatch_failures:
+							fullAutoConfig?.oversight?.max_consecutive_dispatch_failures ?? 3,
 					},
 				});
 			} catch (error) {

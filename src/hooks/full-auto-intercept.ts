@@ -23,15 +23,18 @@ import {
 	writeFullAutoOversightEvidence as v2WriteOversightEvidence,
 } from '../full-auto/oversight';
 import {
+	incrementOversightFailureCounter,
 	loadFullAutoRunState,
 	pauseFullAutoRun,
 	recordFullAutoOversight,
+	resetOversightFailureCounter,
 	startFullAutoRun,
 	terminateFullAutoRun,
 } from '../full-auto/state';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
+import { sleep } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
 import { validateSwarmPath } from './utils';
 
@@ -462,6 +465,9 @@ export async function dispatchCriticAndWriteEvent(
 	// H4 fix: optional sessionID so the v2 mirror binds the verdict to the
 	// correct architect session in multi-architect / multi-swarm setups.
 	sessionID?: string,
+	// FR-003: optional retry config with schema defaults.
+	maxDispatchRetries = 2,
+	maxConsecutiveDispatchFailures = 3,
 ): Promise<CriticDispatchResult> {
 	const client = stateInternals.swarmState.opencodeClient;
 
@@ -515,66 +521,149 @@ export async function dispatchCriticAndWriteEvent(
 		}
 	};
 
-	let criticResponse = '';
-	try {
-		// 1. Create ephemeral session scoped to project directory.
-		// Bind to the calling session as parent so OpenCode treats this as
-		// a child session and does not persist it as a new root in the TUI.
-		const createResult = await client.session.create({
-			...(sessionID
-				? {
-						body: { parentID: sessionID, title: 'full_auto_critic background' },
+	// FR-003 retry helper: attempts one dispatch, returns { ok, response, error }.
+	// On retry attempts, waits 1s, 2s, 4s, … between tries.
+	async function attemptDispatch(attempt: number): Promise<{
+		ok: boolean;
+		response: string;
+		error: unknown;
+	}> {
+		// Guard: client must be available for all session operations.
+		if (!client) {
+			return {
+				ok: false,
+				response: '',
+				error: new Error('OpenCode client unavailable'),
+			};
+		}
+		if (attempt > 0) {
+			const delay = 2 ** (attempt - 1) * 1000;
+			await sleep(delay);
+		}
+		if (ephemeralSessionId) {
+			const staleId = ephemeralSessionId;
+			ephemeralSessionId = undefined;
+			client.session.delete({ path: { id: staleId } }).catch(() => {});
+		}
+
+		let lastError: unknown;
+		try {
+			// 1. Create ephemeral session scoped to project directory.
+			// Bind to the calling session as parent so OpenCode treats this as
+			// a child session and does not persist it as a new root in the TUI.
+			const createResult = await client.session.create({
+				...(sessionID
+					? {
+							body: {
+								parentID: sessionID,
+								title: 'full_auto_critic background',
+							},
+						}
+					: {}),
+				query: { directory },
+			});
+			if (!createResult.data) {
+				lastError = new Error(
+					`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
+				);
+			} else {
+				ephemeralSessionId = createResult.data.id;
+				logger.log(
+					`[full-auto-intercept] Created ephemeral session: ${ephemeralSessionId}`,
+				);
+
+				// 2. Prompt using the registered oversight agent (read-only tools)
+				const promptResult = await client.session.prompt({
+					path: { id: ephemeralSessionId },
+					body: {
+						agent: oversightAgentName,
+						tools: { write: false, edit: false, patch: false },
+						parts: [{ type: 'text', text: criticContext }],
+					},
+					signal: promptController.signal,
+				});
+
+				if (!promptResult.data) {
+					lastError = new Error(
+						`Critic LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
+					);
+				} else {
+					// 3. Extract text parts from response
+					const textParts = promptResult.data.parts.filter(
+						(p): p is typeof p & { text: string } => p.type === 'text',
+					);
+					const response = textParts.map((p) => p.text).join('\n');
+					logger.log(
+						`[full-auto-intercept] Critic response received (${response.length} chars)`,
+					);
+
+					if (!response.trim()) {
+						logger.warn(
+							'[full-auto-intercept] Critic returned empty response — using fallback verdict',
+						);
+						return {
+							ok: true,
+							response:
+								'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO',
+							error: undefined,
+						};
 					}
-				: {}),
-			query: { directory },
-		});
-		if (!createResult.data) {
-			throw new Error(
-				`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
-			);
-		}
-		ephemeralSessionId = createResult.data.id;
-		logger.log(
-			`[full-auto-intercept] Created ephemeral session: ${ephemeralSessionId}`,
-		);
-
-		// 2. Prompt using the registered oversight agent (read-only tools)
-		const promptResult = await client.session.prompt({
-			path: { id: ephemeralSessionId },
-			body: {
-				agent: oversightAgentName,
-				tools: { write: false, edit: false, patch: false },
-				parts: [{ type: 'text', text: criticContext }],
-			},
-			signal: promptController.signal,
-		});
-
-		if (!promptResult.data) {
-			throw new Error(
-				`Critic LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
-			);
+					return { ok: true, response, error: undefined };
+				}
+			}
+		} catch (err) {
+			lastError = err;
 		}
 
-		// 3. Extract text parts from response
-		const textParts = promptResult.data.parts.filter(
-			(p): p is typeof p & { text: string } => p.type === 'text',
-		);
-		criticResponse = textParts.map((p) => p.text).join('\n');
-		logger.log(
-			`[full-auto-intercept] Critic response received (${criticResponse.length} chars)`,
-		);
-
-		// 3b. Handle empty response
-		if (!criticResponse.trim()) {
-			logger.warn(
-				'[full-auto-intercept] Critic returned empty response — using fallback verdict',
-			);
-			criticResponse =
-				'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO';
-		}
-	} finally {
-		cleanup();
+		return { ok: false, response: '', error: lastError };
 	}
+
+	let criticResponse = '';
+	let lastDispatchError: unknown;
+	for (let attempt = 0; attempt <= maxDispatchRetries; attempt++) {
+		// eslint-disable-next-line no-await-in-loop
+		const result = await attemptDispatch(attempt);
+		if (result.ok) {
+			criticResponse = result.response;
+			lastDispatchError = undefined;
+			// SC-011: reset consecutive failure counter on success.
+			resetOversightFailureCounter(directory, sessionID ?? '');
+			break;
+		}
+		lastDispatchError = result.error;
+		logger.warn(
+			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+		);
+		if (attempt < maxDispatchRetries) {
+			// Transient — will retry.
+		} else {
+			// Exhausted retries: SC-011 auto-degrade.
+			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
+			const consecutive = incrementOversightFailureCounter(
+				directory,
+				sessionID ?? '',
+			);
+			if (
+				consecutive >= maxConsecutiveDispatchFailures &&
+				maxConsecutiveDispatchFailures > 0
+			) {
+				// SC-011: Auto-degrade — terminate the run so an architect can re-enable manually.
+				const degradeReason = `auto-degraded to manual mode after ${consecutive} consecutive oversight infrastructure failures`;
+				// Pause before terminating so the permission hook sees a paused state with reason.
+				pauseFullAutoRun(directory, sessionID ?? '', infraReason);
+				terminateFullAutoRun(directory, sessionID ?? '', degradeReason);
+				logger.error(`[full-auto-intercept] ${degradeReason}`);
+			} else {
+				// Below threshold — pause and allow architect to resolve.
+				pauseFullAutoRun(directory, sessionID ?? '', infraReason);
+				logger.error(
+					`[full-auto-intercept] [ADVISORY] Oversight dispatch exhausted ${maxDispatchRetries + 1} attempts and failed. Intercepting with NEEDS_REVISION. Last error: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+				);
+			}
+		}
+	}
+
+	cleanup();
 
 	// 4. Parse the critic response
 	let parsed: CriticDispatchResult;
@@ -829,6 +918,8 @@ export function createFullAutoInterceptHook(
 			session?.fullAutoDeadlockCount ?? 0,
 			dispatchAgentName,
 			sessionID,
+			fullAutoConfig.oversight?.max_dispatch_retries ?? 2,
+			fullAutoConfig.oversight?.max_consecutive_dispatch_failures ?? 3,
 		);
 
 		// Inject verdict into message stream
