@@ -312,14 +312,29 @@ async function transactShownFile(
 }
 
 // ============================================================================
-// Internal Helper: recordLessonsShown
+// Exported Helper: recordLessonsShown (moved out of readMergedKnowledge, #1768)
 // ============================================================================
 
-async function recordLessonsShown(
+/**
+ * Records the set of knowledge IDs actually injected during a phase under the
+ * canonical `Phase N` key in `.swarm/.knowledge-shown.json`, so
+ * {@link updateRetrievalOutcome} can later attribute the phase's outcome to
+ * exactly those entries.
+ *
+ * Ownership (issue #1768): the shown-set write lives HERE at the injector layer
+ * (which knows the final rendered set), NOT inside `readMergedKnowledge` (which
+ * only sees the widened pre-rerank pool). Multiple injectors (architect +
+ * delegate) may write the same `Phase N` key within one phase, so the key is
+ * **union-merged** (dedup-safe) rather than overwritten — otherwise the last
+ * writer would clobber earlier id sets and those entries would receive no
+ * outcome attribution.
+ */
+export async function recordLessonsShown(
 	directory: string,
 	lessonIds: string[],
 	currentPhase: string,
 ): Promise<void> {
+	if (lessonIds.length === 0) return;
 	const shownFile = path.join(directory, '.swarm', '.knowledge-shown.json');
 
 	try {
@@ -330,7 +345,11 @@ async function recordLessonsShown(
 		const canonicalKey = phaseMatch ? `Phase ${phaseMatch[1]}` : currentPhase;
 
 		const ok = await transactShownFile(shownFile, (shownData) => {
-			shownData[canonicalKey] = lessonIds;
+			// Union-merge (#1768 F3): concurrent architect + delegate writers in
+			// the same phase must not clobber each other. Dedup-safe.
+			const existing = new Set(shownData[canonicalKey] ?? []);
+			for (const id of lessonIds) existing.add(id);
+			shownData[canonicalKey] = [...existing];
 			return shownData;
 		});
 		if (!ok) {
@@ -537,18 +556,12 @@ export async function readMergedKnowledge(
 	const maxInject = config.max_inject_count ?? 5;
 	const topN = ranked.slice(0, maxInject);
 
-	// Step 7: Record lessons shown (fire-and-forget, non-critical)
-	// Note: recordLessonsShown has its own internal catch that logs via warn(),
-	// so this outer .catch() is defensive only (handles unexpected rejections).
-	if (topN.length > 0 && context?.currentPhase) {
-		recordLessonsShown(
-			directory,
-			topN.map((e) => e.id),
-			context.currentPhase,
-		).catch((err) => {
-			warn('[knowledge-reader] recordLessonsShown unexpected rejection:', err);
-		});
-	}
+	// NOTE (#1768): shown-set recording was previously done here via
+	// recordLessonsShown on the (possibly widened) pre-rerank pool, which
+	// attributed outcomes to entries never actually injected. Recording now
+	// lives at the injector layer (which knows the FINAL rendered set) — see
+	// createKnowledgeInjectorHook / injectForDelegate. readMergedKnowledge is a
+	// pure ranking function.
 
 	return topN;
 }
@@ -702,10 +715,12 @@ export const _internals: {
 	scoreDirectiveAgainstContext: typeof scoreDirectiveAgainstContext;
 	transactShownFile: typeof transactShownFile;
 	recordKnowledgeEvent: typeof recordKnowledgeEvent;
+	recordLessonsShown: typeof recordLessonsShown;
 } = {
 	readMergedKnowledge,
 	updateRetrievalOutcome,
 	scoreDirectiveAgainstContext,
 	transactShownFile,
 	recordKnowledgeEvent,
+	recordLessonsShown,
 };

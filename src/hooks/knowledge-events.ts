@@ -192,13 +192,35 @@ export interface SkillStaleBatchEvent {
 	staleCount: number;
 }
 
+/**
+ * A diagnostic tombstone: the architect auto-injection hook skipped injection
+ * for a diagnosable reason (issue #1768). Every silent early-return in
+ * `createKnowledgeInjectorHook` emits one of these so the dead-path cause is
+ * recoverable from `.swarm/knowledge-events.jsonl`. Diagnostic only —
+ * `recomputeCounters` intentionally ignores it (no counter mutation).
+ */
+export interface InjectionSkipEvent {
+	type: 'injection_skip';
+	schema_version?: number;
+	event_id: string;
+	timestamp: string;
+	/** Machine-readable reason tag (e.g. 'headroom_budget', 'no_agent_name'). */
+	reason: string;
+	agent?: string;
+	session_id?: string;
+	phase?: number;
+	/** Structured, redactable detail (char counts, model id, etc.). */
+	detail?: Record<string, unknown>;
+}
+
 export type KnowledgeEvent =
 	| RetrievedEvent
 	| ReceiptEvent
 	| OutcomeEvent
 	| ArchivedEvent
 	| EscalationEvent
-	| SkillStaleBatchEvent;
+	| SkillStaleBatchEvent
+	| InjectionSkipEvent;
 
 export type KnowledgeEventType = KnowledgeEvent['type'];
 
