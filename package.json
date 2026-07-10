@@ -69,7 +69,6 @@
 		".opencode/skills/running-tests",
 		".opencode/skills/engineering-conventions",
 		".opencode/skills/commit-pr",
-<<<<<<< HEAD
 		".opencode/skills/ci-failure-batching",
 		".opencode/skills/gate-attribution",
 		".opencode/skills/merge-queue-readiness",
