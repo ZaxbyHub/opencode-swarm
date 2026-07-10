@@ -12,7 +12,7 @@
  *           gateBefore scoring block integration, end-to-end ranking accuracy.
  */
 
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,6 +31,7 @@ import {
 	readSkillUsageEntriesTail,
 	type SkillUsageEntry,
 } from '../../../src/hooks/skill-usage-log.ts';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 // ============================================================================
 // Helpers
@@ -672,30 +673,32 @@ describe('end-to-end ranking accuracy via tail-read + scoring', () => {
 		const tailEntries = readSkillUsageEntriesTail(tempDir, { sessionID });
 		const taskDesc = 'write tests for hooks';
 
-		const fixedNow = Date.now();
-		const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
-		try {
-			const score1 = computeSkillRelevanceScore(
-				skillPath,
-				taskDesc,
-				tailEntries,
-			);
-			const score2 = computeSkillRelevanceScore(
-				skillPath,
-				taskDesc,
-				tailEntries,
-			);
-			const score3 = computeSkillRelevanceScore(
-				skillPath,
-				taskDesc,
-				tailEntries,
-			);
+		// Freeze the clock so computeSkillRelevanceScore (a continuous function
+		// of Date.now()) is deterministic across repeated calls — see
+		// tests/helpers/test-clock.ts and docs/testing/test-stability.md.
+		withFrozenClock(
+			() => {
+				const score1 = computeSkillRelevanceScore(
+					skillPath,
+					taskDesc,
+					tailEntries,
+				);
+				const score2 = computeSkillRelevanceScore(
+					skillPath,
+					taskDesc,
+					tailEntries,
+				);
+				const score3 = computeSkillRelevanceScore(
+					skillPath,
+					taskDesc,
+					tailEntries,
+				);
 
-			expect(score1).toBe(score2);
-			expect(score2).toBe(score3);
-		} finally {
-			nowSpy.mockRestore();
-		}
+				expect(score1).toBe(score2);
+				expect(score2).toBe(score3);
+			},
+			{ fixedNow: 1_700_000_000_000 },
+		);
 	});
 });
 
@@ -972,16 +975,17 @@ describe('scoring invariants — property tests', () => {
 		const skillPath = '.claude/skills/test/SKILL.md';
 		const taskDesc = 'testing idempotency';
 
-		const fixedNow = Date.now();
-		const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
-		try {
-			const score1 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
-			const score2 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
+		// Freeze the clock so the score is deterministic across the two calls
+		// (computeSkillRelevanceScore is a continuous function of Date.now()).
+		withFrozenClock(
+			() => {
+				const score1 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
+				const score2 = computeSkillRelevanceScore(skillPath, taskDesc, entries);
 
-			expect(score1).toBe(score2);
-		} finally {
-			nowSpy.mockRestore();
-		}
+				expect(score1).toBe(score2);
+			},
+			{ fixedNow: 1_700_000_000_000 },
+		);
 	});
 
 	test('round-trip: append → tail-read → score produces consistent result', () => {
