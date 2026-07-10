@@ -318,12 +318,11 @@ to the user as BLOCKED.
 Do not proceed with "blocking verification and record that async advisory lanes
 were unavailable" — record-and-continue is not coverage closure.
 
-### CI matrix cascade check (after batch collection, before fixing)
+### CI matrix cascade check (do this before fixing)
 
 When the PR's `unit` job is a matrix across multiple OSes and downstream jobs
 (`integration`, `smoke`) have `needs: unit`, an OS leg failure blocks the
-entire pipeline. The batch collection step above already fetched all failing
-check logs. Use those logs to classify the failure before triaging:
+entire pipeline. Before triaging, check:
 
 1. Are `integration` or `smoke` jobs in `skipped` or `cancelled` state rather
    than `failed`? That signals a unit matrix cascade — the unit job failed
