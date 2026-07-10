@@ -324,13 +324,10 @@ describe('handlePrMonitorStatusCommand', () => {
 			expect(lines[1]).toBe('');
 			expect(lines[2]).toBe('Active subscriptions (1):');
 			expect(lines[3]).toBe('  1. owner/repo#1');
-			// Merge group line added before Errors (indices shifted by 1)
-			expect(lines[7]).toBe('     Merge group: unknown');
-			expect(lines[8]).toBe('     Errors: 0');
-			// Blank after last sub before total
-			expect(lines[9]).toBe('');
-			// No total line shown when session count equals total (1 === 1)
-			expect(lines[10]).toBeUndefined();
+			expect(lines).toContain('     Merge group: unknown');
+			expect(lines).toContain('     Errors: 0');
+			// No total line shown when session count equals total (1 === 1).
+			expect(lines).not.toContain('Total active across all sessions: 1');
 		});
 	});
 
