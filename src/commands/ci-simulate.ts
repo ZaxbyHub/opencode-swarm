@@ -369,7 +369,7 @@ export async function handleCiSimulateCommand(
 			if (step.exitCode !== 0) {
 				lines.push(`Exit code: ${step.exitCode}`);
 				const fileRefs = extractFileLineReferences(
-					step.stdout + '\n' + step.stderr,
+					`${step.stdout}\n${step.stderr}`,
 				);
 				if (fileRefs.length > 0) {
 					lines.push('');
