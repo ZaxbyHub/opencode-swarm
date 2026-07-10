@@ -6,6 +6,7 @@ import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getParserForFile } from '../lang/registry';
 import { escapeRegex } from '../utils';
+import { runExternalTool } from '../utils/external-tool-runner';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -14,6 +15,8 @@ export interface PlaceholderScanInput {
 	changed_files: string[];
 	allow_globs?: string[];
 	deny_patterns?: string[];
+	added_lines?: Record<string, number[]>;
+	allow_sentinels?: string[];
 }
 
 export interface PlaceholderFinding {
@@ -37,6 +40,9 @@ export interface PlaceholderScanResult {
 // ============ Constants ============
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
+const GIT_DIFF_TIMEOUT_MS = 5000;
+const GIT_DIFF_MAX_BYTES = 512 * 1024;
+const DEFAULT_ALLOW_SENTINELS = ['SC-PLACEHOLDER'];
 
 // Default deny patterns (comment patterns)
 const DEFAULT_COMMENT_PATTERNS = [
@@ -603,6 +609,168 @@ async function scanWithParser(
 	return findings;
 }
 
+function normalizeRelativePathForDiff(filePath: string): string {
+	return filePath.replace(/\\/g, '/').replace(/^\.\/+/, '');
+}
+
+function parseAddedLinesFromUnifiedDiff(
+	diffOutput: string,
+): Map<string, Set<number>> {
+	const result = new Map<string, Set<number>>();
+	let currentFile: string | null = null;
+
+	for (const line of diffOutput.split('\n')) {
+		if (line.startsWith('+++ b/')) {
+			currentFile = normalizeRelativePathForDiff(line.slice(6).trim());
+			if (!result.has(currentFile)) {
+				result.set(currentFile, new Set());
+			}
+			continue;
+		}
+
+		if (line.startsWith('@@') && currentFile) {
+			const match = line.match(/^@@ [^+]*\+(\d+)(?:,(\d+))? @@/);
+			if (!match) continue;
+			const start = Number.parseInt(match[1], 10);
+			const count = match[2] !== undefined ? Number.parseInt(match[2], 10) : 1;
+			const lines = result.get(currentFile)!;
+			for (let i = start; i < start + count; i++) {
+				lines.add(i);
+			}
+		}
+	}
+
+	return result;
+}
+
+function mergeAddedLineMaps(
+	target: Map<string, Set<number>>,
+	source: Map<string, Set<number>> | null,
+): void {
+	if (!source) return;
+	for (const [filePath, lines] of source) {
+		let existing = target.get(filePath);
+		if (!existing) {
+			existing = new Set<number>();
+			target.set(filePath, existing);
+		}
+		for (const line of lines) {
+			existing.add(line);
+		}
+	}
+}
+
+async function getAddedLinesFromGitDiff(
+	directory: string,
+	changedFiles: string[],
+): Promise<Map<string, Set<number>> | null> {
+	if (changedFiles.length === 0) return new Map();
+
+	const runGitDiff = async (
+		args: string[],
+	): Promise<Map<string, Set<number>> | null> => {
+		try {
+			const result = await runExternalTool({
+				executable: 'git',
+				args: [
+					'-C',
+					directory,
+					'diff',
+					'--unified=0',
+					'--no-ext-diff',
+					...args,
+					'--',
+					...changedFiles.map(normalizeRelativePathForDiff),
+				],
+				cwd: directory,
+				timeoutMs: GIT_DIFF_TIMEOUT_MS,
+				maxStdoutBytes: GIT_DIFF_MAX_BYTES,
+				maxStderrBytes: GIT_DIFF_MAX_BYTES,
+			});
+			if (result.status !== 'completed' || result.exitCode !== 0) return null;
+			if (result.stdoutTruncated) return null;
+			return parseAddedLinesFromUnifiedDiff(result.stdout);
+		} catch {
+			return null;
+		}
+	};
+
+	try {
+		const combined = new Map<string, Set<number>>();
+		for (const baseBranch of [
+			'origin/main',
+			'origin/master',
+			'main',
+			'master',
+		]) {
+			const result = await runExternalTool({
+				executable: 'git',
+				args: ['-C', directory, 'merge-base', baseBranch, 'HEAD'],
+				cwd: directory,
+				timeoutMs: GIT_DIFF_TIMEOUT_MS,
+				maxStdoutBytes: GIT_DIFF_MAX_BYTES,
+				maxStderrBytes: GIT_DIFF_MAX_BYTES,
+			});
+			const mergeBase = result.stdout.trim();
+			if (
+				result.status === 'completed' &&
+				result.exitCode === 0 &&
+				!result.stdoutTruncated &&
+				mergeBase
+			) {
+				const diff = await runGitDiff([`${mergeBase}..HEAD`]);
+				mergeAddedLineMaps(combined, diff);
+				break;
+			}
+		}
+
+		mergeAddedLineMaps(combined, await runGitDiff(['HEAD']));
+		return combined.size > 0 ? combined : null;
+	} catch {
+		return null;
+	}
+}
+
+async function buildAddedLineMap(
+	input: PlaceholderScanInput,
+	directory: string,
+): Promise<Map<string, Set<number>> | null> {
+	if (input.added_lines) {
+		const fromInput = new Map<string, Set<number>>();
+		for (const [filePath, lines] of Object.entries(input.added_lines)) {
+			fromInput.set(normalizeRelativePathForDiff(filePath), new Set(lines));
+		}
+		return fromInput;
+	}
+
+	return getAddedLinesFromGitDiff(directory, input.changed_files);
+}
+
+function filterFindingsToAddedLines(
+	findings: PlaceholderFinding[],
+	filePath: string,
+	addedLineMap: Map<string, Set<number>> | null,
+): PlaceholderFinding[] {
+	if (!addedLineMap) return findings;
+	const allowedLines = addedLineMap.get(normalizeRelativePathForDiff(filePath));
+	if (!allowedLines) return [];
+	return findings.filter((finding) => allowedLines.has(finding.line));
+}
+
+function filterAllowedSentinels(
+	findings: PlaceholderFinding[],
+	allowSentinels: string[] | undefined,
+): PlaceholderFinding[] {
+	const sentinels = [...DEFAULT_ALLOW_SENTINELS, ...(allowSentinels ?? [])]
+		.map((s) => s.trim())
+		.filter(Boolean);
+	if (sentinels.length === 0) return findings;
+	return findings.filter(
+		(finding) =>
+			!sentinels.some((sentinel) => finding.excerpt.includes(sentinel)),
+	);
+}
+
 // ============ Main Function ============
 
 /**
@@ -613,6 +781,7 @@ export async function placeholderScan(
 	directory: string,
 ): Promise<PlaceholderScanResult> {
 	const { changed_files, allow_globs, deny_patterns } = input;
+	const addedLineMap = await buildAddedLineMap(input, directory);
 
 	// Build deny patterns
 	// If custom patterns are provided, they replace the defaults
@@ -713,6 +882,13 @@ export async function placeholderScan(
 			fileFindings = scanWithRegex(content, filePath, denyPatterns);
 		}
 
+		fileFindings = filterFindingsToAddedLines(
+			fileFindings,
+			relativeFilePath,
+			addedLineMap,
+		);
+		fileFindings = filterAllowedSentinels(fileFindings, input.allow_sentinels);
+
 		// Add findings to result
 		if (fileFindings.length > 0) {
 			findings.push(...fileFindings);
@@ -762,6 +938,18 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 			.array(z.string())
 			.optional()
 			.describe('Custom deny patterns to search for'),
+		added_lines: z
+			.record(z.string(), z.array(z.number().int().positive()))
+			.optional()
+			.describe(
+				'Optional map of file path to added line numbers. When omitted, placeholder_scan computes added lines from git diff.',
+			),
+		allow_sentinels: z
+			.array(z.string())
+			.optional()
+			.describe(
+				'Intentional sentinel strings that suppress matching findings on the same line.',
+			),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
 		const result = await placeholderScan(
@@ -769,6 +957,8 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 				changed_files: string[];
 				allow_globs?: string[];
 				deny_patterns?: string[];
+				added_lines?: Record<string, number[]>;
+				allow_sentinels?: string[];
 			},
 			directory,
 		);

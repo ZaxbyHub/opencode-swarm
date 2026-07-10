@@ -6,7 +6,8 @@ description: Batch collection and fix protocol for CI failures. Triggered when a
 # CI Failure Batching
 
 ## Trigger
-When ANY CI check fails on the PR (pr-monitor surfaces `pr.ci.failed`).
+When the PR monitor surfaces `pr.ci.failed`. The event is batched after the
+check set is complete and includes all known failed checks in `failedChecks`.
 
 ## Protocol
 1. **DO NOT immediately fix the first failure.** Check if other jobs are still running:
@@ -29,11 +30,7 @@ Example from session #1685:
 - Without batching: 6 pushes (format → stale-assertion-1 → stale-assertion-2 → integration → merge-group → clean)
 - With batching: 2 pushes (collect all → fix all → push once → clean)
 
-## Pr-monitor workaround
-The pr-monitor fires `pr.ci.failed` per-check. When the first event arrives:
-1. Check `gh pr checks` — are other jobs still running?
-2. If yes: WAIT for completion
-3. If no: the single failure IS the only failure — proceed normally
-
-## Root cause
-The pr-monitor should batch-fire after the CI run completes (issue #1746 item 7). This playbook is the manual protocol.
+## Pr-monitor expectation
+The pr-monitor should fire one `pr.ci.failed` event for the completed failing
+check set, not one event per check. Still verify with `gh pr checks` before
+fixing, because GitHub can append late merge-group or matrix jobs.

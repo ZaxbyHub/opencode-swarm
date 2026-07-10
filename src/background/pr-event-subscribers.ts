@@ -115,6 +115,12 @@ interface PrEventPayload {
 	prUrl?: string;
 	checkName?: string;
 	checkState?: string;
+	failedChecks?: Array<{
+		name?: string;
+		status?: string;
+		conclusion?: string | null;
+		checkUrl?: string | null;
+	}>;
 	errorMessage?: string;
 	author?: string;
 	body?: string;
@@ -332,6 +338,36 @@ function formatAdvisory(type: string, payload: PrEventPayload): string | null {
 
 	switch (type) {
 		case 'pr.ci.failed':
+			if (
+				Array.isArray(payload.failedChecks) &&
+				payload.failedChecks.length > 0
+			) {
+				const failedChecks = payload.failedChecks
+					.map((check) => {
+						if (!check || typeof check !== 'object') return null;
+						const c = check as Record<string, unknown>;
+						const name =
+							typeof c.name === 'string'
+								? c.name
+								: payload.checkName || 'unknown';
+						const conclusion =
+							typeof c.conclusion === 'string'
+								? c.conclusion
+								: payload.checkState || 'failure';
+						return `  - ${name} — ${conclusion}`;
+					})
+					.filter(Boolean);
+				return [
+					`${dedupToken} (advisory) PR #${payload.prNumber} — ${failedChecks.length} CI check(s) failed`,
+					`  Repository: ${payload.repoFullName}`,
+					`  URL: ${payload.prUrl || ''}`,
+					'  Failed checks:',
+					...failedChecks,
+					payload.errorMessage ? `  Details: ${payload.errorMessage}` : '',
+				]
+					.filter(Boolean)
+					.join('\n');
+			}
 			return [
 				`${dedupToken} (advisory) PR #${payload.prNumber} — CI check "${payload.checkName || 'unknown'}" failed`,
 				`  Repository: ${payload.repoFullName}`,

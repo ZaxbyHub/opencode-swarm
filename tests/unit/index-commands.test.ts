@@ -39,7 +39,7 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries.
-		expect(commandKeys.length).toBe(69);
+		expect(commandKeys.length).toBe(70);
 
 		// Verify catch-all exists
 		expect(commands.swarm).toBeDefined();
@@ -153,6 +153,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-finalize',
 			'swarm-close',
 			'swarm-diagnosis',
+			'swarm-ci-simulate',
 		];
 
 		// Verify all expected subcommands exist
@@ -261,6 +262,22 @@ describe('Swarm subcommand registration', () => {
 
 		// This command should be registered
 		expect(commands['swarm-simulate']).toBeDefined();
+	});
+
+	it('should register ci-simulate command', async () => {
+		const plugin = await OpenCodeSwarm.server(mockPluginInput);
+		const mockConfig: Record<string, unknown> = {};
+
+		await plugin.config?.(mockConfig);
+		const commands = mockConfig.command as Record<
+			string,
+			{ template: string; description: string }
+		>;
+
+		expect(commands['swarm-ci-simulate']).toBeDefined();
+		expect(commands['swarm-ci-simulate'].template).toBe(
+			'/swarm ci-simulate $ARGUMENTS',
+		);
 	});
 
 	it('should have correct templates for specific subcommands', async () => {

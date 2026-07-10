@@ -9,12 +9,13 @@
  *   - dispatchFullAutoOversight fallback (no client) with active durable run:
  *     fail-closed pause + BLOCKED verdict.
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	dispatchFullAutoOversight,
+	_internals as oversightInternals,
 	parseFullAutoCriticResponse,
 } from '../../../src/full-auto/oversight';
 import {
@@ -25,6 +26,7 @@ import { _internals as stateInternals } from '../../../src/state';
 
 let tmpDir: string;
 let origClient: typeof stateInternals.swarmState.opencodeClient;
+let origSleep: typeof oversightInternals.sleep;
 
 beforeEach(() => {
 	tmpDir = fs.realpathSync(
@@ -32,11 +34,14 @@ beforeEach(() => {
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	origClient = stateInternals.swarmState.opencodeClient;
+	origSleep = oversightInternals.sleep;
 	stateInternals.swarmState.opencodeClient = null;
+	oversightInternals.sleep = async () => {};
 });
 
 afterEach(() => {
 	stateInternals.swarmState.opencodeClient = origClient;
+	oversightInternals.sleep = origSleep;
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -148,6 +153,47 @@ describe('dispatchFullAutoOversight fail-closed behavior', () => {
 			.readdirSync(evidenceDir)
 			.filter((f) => f.startsWith('full-auto-'));
 		expect(files.length).toBe(1);
+	});
+
+	test('retries transient server dispatch errors before pausing', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const create = mock()
+			.mockRejectedValueOnce(new Error('Unexpected server error 500'))
+			.mockRejectedValueOnce(new Error('temporarily unavailable 503'))
+			.mockResolvedValueOnce({ data: { id: 'critic-session' } });
+		const prompt = mock().mockResolvedValueOnce({
+			data: {
+				parts: [
+					{
+						type: 'text',
+						text: 'VERDICT: APPROVED\nREASONING: retry recovered\nEVIDENCE_CHECKED: diff\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO',
+					},
+				],
+			},
+		});
+		const deleteSession = mock().mockResolvedValue({});
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create,
+				prompt,
+				delete: deleteSession,
+			},
+		} as unknown as typeof stateInternals.swarmState.opencodeClient;
+
+		const out = await dispatchFullAutoOversight({
+			directory: tmpDir,
+			sessionID: 'sess-1',
+			trigger: 'test',
+			triggerSource: 'tool_action',
+			criticModel: 'm',
+			oversightAgentName: 'critic_oversight',
+		});
+
+		expect(create).toHaveBeenCalledTimes(3);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(out.verdict).toBe('APPROVED');
+		expect(out.decision).toBe('allow');
+		expect(loadFullAutoRunState(tmpDir, 'sess-1')?.status).toBe('running');
 	});
 });
 

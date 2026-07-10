@@ -46,6 +46,12 @@ import {
 // the durable state file.
 let oversightSequenceCounter = 0;
 void oversightSequenceCounter; // referenced via _internals.resetSequence
+const OVERSIGHT_DISPATCH_MAX_ATTEMPTS = 3;
+const OVERSIGHT_DISPATCH_RETRY_BASE_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface FullAutoCriticResult extends ParsedCriticResponse {}
 
@@ -168,6 +174,74 @@ function decisionFromVerdict(
 	if (verdict === 'BLOCKED') return 'deny';
 	if (verdict === 'PENDING') return 'pending';
 	return 'deny';
+}
+
+function isTransientDispatchError(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	return /(?:\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|\b529\b|timeout|timed out|temporarily unavailable|server error|unexpected server error|rate limit)/i.test(
+		text,
+	);
+}
+
+async function dispatchOversightAttempt(
+	client: NonNullable<typeof stateInternals.swarmState.opencodeClient>,
+	input: DispatchFullAutoOversightInput,
+): Promise<string> {
+	let ephemeralSessionId: string | undefined;
+	const promptController = new AbortController();
+	const cleanup = () => {
+		promptController.abort();
+		if (ephemeralSessionId) {
+			const id = ephemeralSessionId;
+			ephemeralSessionId = undefined;
+			client.session.delete({ path: { id } }).catch(() => {});
+		}
+	};
+
+	try {
+		const createResult = await client.session.create({
+			...(input.sessionID
+				? {
+						body: {
+							parentID: input.sessionID,
+							title: 'full_auto_oversight background',
+						},
+					}
+				: {}),
+			query: { directory: input.directory },
+		});
+		if (!createResult.data) {
+			throw new Error(
+				`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
+			);
+		}
+		ephemeralSessionId = createResult.data.id;
+
+		const promptResult = await client.session.prompt({
+			path: { id: ephemeralSessionId },
+			body: {
+				agent: input.oversightAgentName,
+				tools: { write: false, edit: false, patch: false },
+				parts: [{ type: 'text', text: buildOversightPrompt(input) }],
+			},
+			signal: promptController.signal,
+		});
+
+		if (!promptResult.data) {
+			throw new Error(
+				`Critic prompt failed: ${JSON.stringify(promptResult.error)}`,
+			);
+		}
+		const textParts = promptResult.data.parts.filter(
+			(p): p is typeof p & { text: string } => p.type === 'text',
+		);
+		const response = textParts.map((p) => p.text).join('\n');
+		return response.trim()
+			? response
+			: 'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO';
+	} finally {
+		cleanup();
+	}
 }
 
 /**
@@ -360,74 +434,32 @@ export async function dispatchFullAutoOversight(
 		`[full-auto/oversight] Dispatching ${oversightAgent.name} via ${input.oversightAgentName} (model=${input.criticModel}, trigger=${input.triggerSource})`,
 	);
 
-	let ephemeralSessionId: string | undefined;
-	const promptController = new AbortController();
-	const cleanup = () => {
-		promptController.abort();
-		if (ephemeralSessionId) {
-			const id = ephemeralSessionId;
-			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id } }).catch(() => {});
-		}
-	};
-
 	let criticResponse = '';
 	let dispatchError: unknown;
-	try {
-		// Bind to the calling session as parent so OpenCode treats this as
-		// a child session and does not persist it as a new root in the TUI.
-		const createResult = await client.session.create({
-			...(input.sessionID
-				? {
-						body: {
-							parentID: input.sessionID,
-							title: 'full_auto_oversight background',
-						},
-					}
-				: {}),
-			query: { directory: input.directory },
-		});
-		if (!createResult.data) {
-			throw new Error(
-				`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
+	let dispatchAttempts = 0;
+	for (let attempt = 1; attempt <= OVERSIGHT_DISPATCH_MAX_ATTEMPTS; attempt++) {
+		dispatchAttempts = attempt;
+		try {
+			criticResponse = await dispatchOversightAttempt(client, input);
+			dispatchError = undefined;
+			break;
+		} catch (error) {
+			dispatchError = error;
+			const transient = isTransientDispatchError(error);
+			logger.error(
+				`[full-auto/oversight] dispatch attempt ${attempt}/${OVERSIGHT_DISPATCH_MAX_ATTEMPTS} failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			if (!transient || attempt === OVERSIGHT_DISPATCH_MAX_ATTEMPTS) {
+				break;
+			}
+			await _internals.sleep(
+				OVERSIGHT_DISPATCH_RETRY_BASE_MS * 2 ** (attempt - 1),
 			);
 		}
-		ephemeralSessionId = createResult.data.id;
-
-		const promptResult = await client.session.prompt({
-			path: { id: ephemeralSessionId },
-			body: {
-				agent: input.oversightAgentName,
-				tools: { write: false, edit: false, patch: false },
-				parts: [{ type: 'text', text: buildOversightPrompt(input) }],
-			},
-			signal: promptController.signal,
-		});
-
-		if (!promptResult.data) {
-			throw new Error(
-				`Critic prompt failed: ${JSON.stringify(promptResult.error)}`,
-			);
-		}
-		const textParts = promptResult.data.parts.filter(
-			(p): p is typeof p & { text: string } => p.type === 'text',
-		);
-		criticResponse = textParts.map((p) => p.text).join('\n');
-		if (!criticResponse.trim()) {
-			criticResponse =
-				'VERDICT: NEEDS_REVISION\nREASONING: Critic returned empty response\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: empty_response\nESCALATION_NEEDED: NO';
-		}
-	} catch (error) {
-		dispatchError = error;
-		logger.error(
-			`[full-auto/oversight] dispatch error: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	} finally {
-		cleanup();
 	}
 
 	if (dispatchError) {
-		const reason = `oversight dispatch failed: ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
+		const reason = `oversight dispatch failed after ${dispatchAttempts} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
 		pauseFullAutoRun(input.directory, input.sessionID, reason);
 		const event: FullAutoOversightEvent = {
 			...baseEvent,
@@ -586,8 +618,10 @@ export async function dispatchFullAutoOversight(
  */
 export const _internals: {
 	resetSequence: () => void;
+	sleep: (ms: number) => Promise<void>;
 } = {
 	resetSequence: () => {
 		oversightSequenceCounter = 0;
 	},
+	sleep,
 };

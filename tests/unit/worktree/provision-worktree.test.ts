@@ -176,25 +176,25 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.rmSync(repoDir, { recursive: true, force: true });
 	});
 
-	// V2: Branch exists + NOT in any worktree (stale) → ADOPT
-	test('V2: branch exists but not in any worktree → adopts via git worktree add -f', async () => {
+	// V2: Branch exists + NOT in any worktree + no commits ahead -> recreate
+	test('V2: branch exists but not in any worktree and has no commits ahead -> recreates safely', async () => {
 		const repoDir = tmpDir();
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
 		const branchName = 'swarm/lane/parent-session/2.1';
 
-		// Create the branch (but no worktree) — simulating a stale branch
+		// Create the branch (but no worktree), then switch back to main so it is
+		// stale but has no commits ahead of HEAD.
 		await runGit(['checkout', '-b', branchName], repoDir);
-		await runGit(['commit', '--allow-empty', '-m', 'stale commit'], repoDir);
-		// Switch back to main so the branch is "stale" (not checked out)
 		await runGit(['checkout', 'main'], repoDir);
 
 		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
 			purpose: 'lane',
 		});
 
-		// Should succeed and adopt the branch
+		// Should succeed and recreate the branch from the current HEAD, not adopt
+		// the stale branch state.
 		expect(result).toHaveProperty('worktreePath');
 		expect(result).toHaveProperty('branchName', branchName);
 		if ('worktreePath' in result) {
@@ -215,6 +215,31 @@ describe('provisionWorktree — verification (FR-004)', () => {
 
 		// Cleanup branch
 		await runGit(['branch', '-D', branchName], repoDir);
+		fs.rmSync(repoDir, { recursive: true, force: true });
+	});
+
+	test('V2b: stale branch with commits ahead is rejected, not force-deleted', async () => {
+		const repoDir = tmpDir();
+		fs.mkdirSync(repoDir, { recursive: true });
+		await initGitRepo(repoDir);
+
+		const branchName = 'swarm/lane/parent-session/2.1';
+		await runGit(['checkout', '-b', branchName], repoDir);
+		await runGit(['commit', '--allow-empty', '-m', 'stale commit'], repoDir);
+		await runGit(['checkout', 'main'], repoDir);
+
+		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
+			purpose: 'lane',
+		});
+
+		expect(result).toEqual({
+			error: `Branch already exists and has unmerged commits: ${branchName}`,
+		});
+		const branchStillExists = await runGit(
+			['branch', '--list', branchName],
+			repoDir,
+		);
+		expect(branchStillExists.stdout).toContain(branchName);
 		fs.rmSync(repoDir, { recursive: true, force: true });
 	});
 
@@ -285,20 +310,23 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			repoDir,
 		);
 		// May fail if directory already exists, but that's fine for our purposes
+		if (addResult.exitCode === 0) {
+			fs.writeFileSync(path.join(expectedPath, 'dirty.txt'), 'do not delete');
+		}
 
 		const result = await provisionWorktree(repoDir, '4.1', 'parent-session', {
 			purpose: 'lane',
 		});
 
-		// Should return error (expected path is registered)
+		// Should return error because same-task cleanup must not delete dirty work.
 		expect(result).toHaveProperty('error');
 		if ('error' in result) {
-			expect(result.error).toMatch(/already exists|active|worktree/i);
+			expect(result.error).toMatch(/dirty|already exists|active|worktree/i);
 		}
 
 		// Cleanup
 		const removeResult = await runGit(
-			['worktree', 'remove', expectedPath],
+			['worktree', 'remove', '--force', expectedPath],
 			repoDir,
 		);
 		if (removeResult.exitCode === 0) {

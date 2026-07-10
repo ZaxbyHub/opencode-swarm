@@ -9,16 +9,12 @@ description: Protocol for cleaning parallel-coder worktree lanes before retry. T
 Before re-dispatching a coder for a task that already has a lane (any prior dispatch status).
 
 ## Protocol
-1. **Ownership check — do this FIRST, before any deletion.** Confirm the lane is not owned by another ACTIVE session: read `.swarm/session/state.json` and verify no other session's `delegationChains` reference `<session>/<task>`. If another active session owns it, STOP — surface the conflict and do not delete.
-2. **Check for existing lane branch:** `git branch --list "swarm/lane/<session>/<task>"`
-3. **If branch exists:**
-   - Verify 0-commits-ahead: `git log --oneline HEAD..swarm/lane/<session>/<task>` — empty = safe
-   - Delete: `git branch -d swarm/lane/<session>/<task>` (use `-D` only if `-d` fails AND the commits are confirmed unneeded)
-   - Under full-auto, `-D` is deny-pattern-blocked — use `-d`
-4. **Remove the per-lane worktree directory.** Target the SPECIFIC lane `.swarm-worktrees/<session>/<task>`, NOT the session parent (the parent holds sibling lanes). Prefer `git worktree remove .swarm-worktrees/<session>/<task>` — this is permitted because the path is under the `.swarm-worktrees/` base. A bare `rm -rf` / `Remove-Item -Recurse -Force` on `.swarm-worktrees/` is deny-pattern-blocked by the guardrail, so do not use it here.
-5. **Prune:** `git worktree prune`
-6. **Verify:** `git branch --list "swarm/lane/<session>/<task>"` returns empty
-7. Only after cleanup, proceed to `declare_scope` + coder dispatch
+1. **Prefer built-in provisioning cleanup.** Re-dispatch normally through the standard coder/worktree path. Provisioning pre-cleans stale same-lane worktrees/branches when ownership is safe and the existing lane is clean.
+2. **If provisioning blocks:** Treat the error as signal. Dirty lanes, lanes active in another worktree, and lanes owned by another active session must be surfaced to the user instead of deleted.
+3. **If manual cleanup is explicitly required:** Do the ownership check FIRST. Confirm the lane is not owned by another ACTIVE session: read `.swarm/session/state.json` and verify no other session's `delegationChains` reference `<session>/<task>`. If another active session owns it, STOP.
+4. **Remove only the specific lane.** Target `.swarm-worktrees/<session>/<task>`, never the session parent. Prefer `git worktree remove .swarm-worktrees/<session>/<task>` and then `git worktree prune`.
+5. **Delete only confirmed stale branches.** `git branch -d swarm/lane/<session>/<task>` is allowed after confirming the branch is not checked out and contains no needed commits. Use force deletion only with explicit human approval.
+6. **Verify:** `git branch --list "swarm/lane/<session>/<task>"` returns empty before retrying.
 
 ## Root cause
-The provisioning code should auto-clean after coder completion/denial/cancellation (tracked in issue #1746 item 1). This playbook is the temporary protocol.
+Stale same-lane worktrees and branches used to require manual cleanup before retry. Provisioning now handles the safe clean/stale cases automatically and fails closed for dirty, active, or cross-session-owned lanes.

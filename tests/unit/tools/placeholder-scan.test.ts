@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { placeholderScan } from '../../../src/tools/placeholder-scan';
+import { bunSpawn } from '../../../src/utils/bun-compat';
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -22,6 +23,23 @@ function createTestFile(
 	}
 	fs.writeFileSync(filePath, content, 'utf-8');
 	return filePath;
+}
+
+async function runGit(args: string[], cwd: string): Promise<void> {
+	const proc = bunSpawn(['git', ...args], {
+		cwd,
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'pipe',
+		timeout: 10_000,
+	});
+	const [exitCode, stderr] = await Promise.all([
+		proc.exited,
+		proc.stderr.text(),
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`git ${args.join(' ')} failed: ${stderr}`);
+	}
 }
 
 describe('placeholder_scan tool', () => {
@@ -71,6 +89,82 @@ describe('placeholder_scan tool', () => {
 			expect(result.findings).toHaveLength(1);
 			expect(result.findings[0].rule_id).toBe('placeholder/comment-todo');
 			expect(result.findings[0].kind).toBe('comment');
+		});
+
+		it('only reports placeholder findings on added diff lines', async () => {
+			createTestFile(
+				tempDir,
+				'diff-aware.ts',
+				`// TODO: pre-existing debt
+export function value() {
+  return null;
+}
+`,
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['diff-aware.ts'],
+					added_lines: { 'diff-aware.ts': [2] },
+				},
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('suppresses intentional sentinel placeholders on added lines', async () => {
+			createTestFile(
+				tempDir,
+				'sentinel.ts',
+				`export const acceptance = "SC-PLACEHOLDER: user chooses this later";
+`,
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['sentinel.ts'],
+					added_lines: { 'sentinel.ts': [1] },
+				},
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('auto-diff includes uncommitted added lines when branch commits already exist', async () => {
+			await runGit(['init', '-b', 'main'], tempDir);
+			await runGit(['config', 'user.email', 'test@example.com'], tempDir);
+			await runGit(['config', 'user.name', 'Test User'], tempDir);
+			createTestFile(tempDir, 'auto-diff.ts', 'export const base = 1;\n');
+			await runGit(['add', 'auto-diff.ts'], tempDir);
+			await runGit(['commit', '-m', 'base'], tempDir);
+			await runGit(['checkout', '-b', 'feature'], tempDir);
+			createTestFile(
+				tempDir,
+				'auto-diff.ts',
+				'export const base = 1;\nexport const committed = 2;\n',
+			);
+			await runGit(['add', 'auto-diff.ts'], tempDir);
+			await runGit(['commit', '-m', 'feature'], tempDir);
+			createTestFile(
+				tempDir,
+				'auto-diff.ts',
+				`export const base = 1;
+export const committed = 2;
+// TODO: uncommitted placeholder
+`,
+			);
+
+			const result = await placeholderScan(
+				{ changed_files: ['auto-diff.ts'] },
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('fail');
+			expect(result.findings.map((finding) => finding.line)).toContain(3);
 		});
 
 		it('should detect FIXME in comments', async () => {

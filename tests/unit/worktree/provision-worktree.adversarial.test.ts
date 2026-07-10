@@ -5,7 +5,7 @@
  *     worktree path → error fires (not adopt-with-force)
  * A2: Unbounded output injection — fake git emits huge stderr → capped ~500 chars
  * A3: Malformed porcelain — garbage lines → parse resilience (skip, don't crash)
- * A4: Empty porcelain (no worktrees) + branch exists → adopt (correct)
+ * A4: Empty porcelain (no worktrees) + ahead branch exists → refuse unmerged commits
  * A5: Force-flag abuse — confirm no path lets caller force-adopt an active branch
  *
  * @note Uses _internals.bunSpawn mock (file-scoped, trivially restorable).
@@ -301,8 +301,8 @@ branch refs/heads/main
 		fs.rmSync(repoDir, { recursive: true, force: true });
 	});
 
-	// A4: EMPTY porcelain (no worktrees) + branch exists → adopt
-	test('A4: empty porcelain (no worktrees) + branch exists → adopts correctly', async () => {
+	// A4: EMPTY porcelain (no worktrees) + ahead branch exists → refuse
+	test('A4: empty porcelain (no worktrees) + ahead branch exists → refuses unmerged commits', async () => {
 		const repoDir = tmpDir();
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
@@ -329,23 +329,9 @@ branch refs/heads/main
 			purpose: 'lane',
 		});
 
-		// Since branch is NOT in any worktree (empty porcelain), it should ADOPT
-		expect(result).toHaveProperty('worktreePath');
-		expect(result).toHaveProperty('branchName', branchName);
-		if ('worktreePath' in result) {
-			// Verify adopted worktree appears in real git worktree list
-			const listResult = await runGit(
-				['worktree', 'list', '--porcelain'],
-				repoDir,
-			);
-			// Issue #1729 Windows quarantine: compare the worktree-relative
-			// suffix (after Temp/) rather than the full path — see A1 comment.
-			const toPosix = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
-			const wtSuffix = toPosix(result.worktreePath).split('Temp/')[1] ?? '';
-			expect(toPosix(listResult.stdout)).toContain(wtSuffix);
-			// Cleanup
-			await runGit(['worktree', 'remove', result.worktreePath], repoDir);
-			fs.rmSync(result.worktreePath, { recursive: true, force: true });
+		expect(result).toHaveProperty('error');
+		if ('error' in result) {
+			expect(result.error).toContain('has unmerged commits');
 		}
 
 		// Cleanup

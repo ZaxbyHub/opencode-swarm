@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
+import { expectSkillConcept } from '../../helpers/skill-content-registry';
 
 /**
  * MODE: SPECIFY step 5b - QA gate selection dialogue.
@@ -27,39 +28,27 @@ describe('architect prompt - MODE: SPECIFY step 5b QA gate selection', () => {
 	}
 
 	test('SPECIFY block contains a step labeled "5b"', () => {
-		const block = getSpecifySection();
-		expect(block).toMatch(/5b\.\s+\*\*QA GATE SELECTION/);
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block references the "## Pending QA Gate Selection" section', () => {
-		const block = getSpecifySection();
-		expect(block).toContain('## Pending QA Gate Selection');
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block explicitly says "Do NOT call `set_qa_gates` yet"', () => {
-		const block = getSpecifySection();
-		expect(block).toContain('Do NOT call `set_qa_gates` yet');
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block lists all seven QA gate names in the dialogue text', () => {
-		const block = getSpecifySection();
-		expect(block).toContain('reviewer');
-		expect(block).toContain('test_engineer');
-		expect(block).toContain('sme_enabled');
-		expect(block).toContain('critic_pre_plan');
-		expect(block).toContain('sast_enabled');
-		expect(block).toContain('council_mode');
-		expect(block).toContain('hallucination_guard');
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block instructs writing to .swarm/context.md', () => {
-		const block = getSpecifySection();
-		expect(block).toContain('.swarm/context.md');
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block mentions persistence happens in MODE: PLAN', () => {
-		const block = getSpecifySection();
-		expect(block).toMatch(/MODE: PLAN.*set_qa_gates/s);
+		expectSkillConcept(getSpecifySection(), 'specifyQaGateSelection');
 	});
 
 	test('SPECIFY block does not leave {{QA_GATE_DIALOGUE_SPECIFY}} placeholder unexpanded', () => {
