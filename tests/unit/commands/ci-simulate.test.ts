@@ -1,174 +1,380 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+/**
+ * Tests for /swarm ci-simulate command (FR-004a / issue #1746 item #5).
+ *
+ * Integration tests that create a minimal git repo with fast scripts to avoid
+ * the slowness of running the full validation suite against the real project.
+ *
+ * SC-012: ci-simulate reproduces a known merge-queue failure locally.
+ * SC-013: ci-simulate runs the documented validation suite in order.
+ * Cleanup: temporary worktree is discarded after run.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	_internals,
-	handleCiSimulateCommand,
-} from '../../../src/commands/ci-simulate';
-import { COMMAND_REGISTRY } from '../../../src/commands/registry';
 
-const original = {
-	runCommand: _internals.runCommand,
-	now: _internals.now,
-	mkdirSync: _internals.mkdirSync,
-};
+const { _internals, handleCiSimulateCommand } = await import(
+	'../../../src/commands/ci-simulate.js'
+);
+const realRunExternalTool = _internals.runExternalTool;
+const realGetDefaultBaseBranch = _internals.getDefaultBaseBranch;
 
-afterEach(() => {
-	_internals.runCommand = original.runCommand;
-	_internals.now = original.now;
-	_internals.mkdirSync = original.mkdirSync;
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+function makeTempDir(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	return dir;
+}
+
+function runGit(dir: string, args: string[]): void {
+	execFileSync('git', args, {
+		cwd: dir,
+		stdio: 'ignore',
+		timeout: 30_000,
+	});
+}
+
+function gitInit(dir: string): void {
+	runGit(dir, ['init']);
+	runGit(dir, ['config', 'user.email', 'test@test.com']);
+	runGit(dir, ['config', 'user.name', 'Test']);
+	runGit(dir, ['branch', '-M', 'main']);
+}
+
+function gitCreateBranch(dir: string, branch: string, fromRef = 'HEAD'): void {
+	runGit(dir, ['branch', branch, fromRef]);
+}
+
+function gitCheckout(dir: string, ref: string): void {
+	runGit(dir, ['checkout', ref]);
+}
+
+function gitAddFile(dir: string, filename: string, content: string): void {
+	const filePath = path.join(dir, filename);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content);
+	// Use explicit path instead of `git add .` to avoid directory-scan race
+	// in CI environments where the filesystem has not yet committed the
+	// writeFileSync before git scans the working tree.
+	runGit(dir, ['add', filename]);
+}
+
+function gitCommit(dir: string, msg: string): void {
+	runGit(dir, ['commit', '-m', msg]);
+}
+
+function gitCreateBareRemote(reposDir: string, name: string): string {
+	const barePath = path.join(reposDir, name);
+	runGit(reposDir, ['init', '--bare', barePath]);
+	return barePath;
+}
+
+function gitSetRemote(
+	dir: string,
+	remoteName: string,
+	remoteUrl: string,
+): void {
+	runGit(dir, ['remote', 'add', remoteName, remoteUrl]);
+}
+
+function gitPush(dir: string, remote: string, ref: string): void {
+	runGit(dir, ['push', remote, ref]);
+}
+
+function createMinimalProject(dir: string): void {
+	// package.json with fast scripts
+	const pkg = {
+		name: 'test-project',
+		version: '1.0.0',
+		scripts: {
+			typecheck: 'echo "typecheck"',
+			lint: 'echo "lint"',
+			build: 'echo "build"',
+		},
+	};
+	fs.writeFileSync(
+		path.join(dir, 'package.json'),
+		JSON.stringify(pkg, null, 2),
+	);
+
+	// A simple test file so bun test doesn't fail
+	fs.writeFileSync(
+		path.join(dir, 'example.test.ts'),
+		'// minimal test file\nexport {};\n',
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Test suite
+// ---------------------------------------------------------------------------
+
+describe('handleCiSimulateCommand', () => {
+	let tempDir: string;
+	let reposDir: string;
+	let bareRepoPath: string;
+
+	beforeEach(() => {
+		tempDir = makeTempDir('ci-simulate-test-');
+		reposDir = path.join(tempDir, 'repos');
+		fs.mkdirSync(reposDir, { recursive: true });
+
+		// Create a bare repo to act as "origin"
+		bareRepoPath = gitCreateBareRemote(reposDir, 'origin.git');
+
+		// Create the test repo with main branch
+		gitInit(tempDir);
+		gitSetRemote(tempDir, 'origin', bareRepoPath);
+
+		// Create initial commit on main with package.json and test file
+		createMinimalProject(tempDir);
+		gitAddFile(
+			tempDir,
+			'package.json',
+			fs.readFileSync(path.join(tempDir, 'package.json'), 'utf-8'),
+		);
+		gitAddFile(
+			tempDir,
+			'example.test.ts',
+			fs.readFileSync(path.join(tempDir, 'example.test.ts'), 'utf-8'),
+		);
+		gitCommit(tempDir, 'initial commit with package.json');
+
+		// Push main to origin
+		gitPush(tempDir, 'origin', 'main');
+	});
+
+	afterEach(() => {
+		_internals.runExternalTool = realRunExternalTool;
+		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
+		// Clean up temp directory
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup
+		}
+	});
+
+	// -------------------------------------------------------------------------
+	// SC-013: ci-simulate runs the documented validation suite in order
+	// -------------------------------------------------------------------------
+
+	it('SC-013: runs typecheck, lint, build, test in order', async () => {
+		// Create a feature branch with a passing file
+		gitCreateBranch(tempDir, 'feature-branch');
+		gitCheckout(tempDir, 'feature-branch');
+		gitAddFile(tempDir, 'passing.txt', 'this passes');
+		gitCommit(tempDir, 'add passing file');
+
+		const result = await handleCiSimulateCommand(tempDir, ['feature-branch']);
+
+		// Should have run all 4 validation steps in order
+		expect(result).toContain('## Validation Suite');
+		expect(result).toContain('typecheck');
+		expect(result).toContain('lint');
+		expect(result).toContain('build');
+		expect(result).toContain('test');
+
+		// All 4 steps should pass
+		expect(result).toContain('4/4 steps passed');
+		expect(result).toContain('All checks passed');
+	});
+
+	// -------------------------------------------------------------------------
+	// Cleanup: temporary worktree is discarded after run
+	// -------------------------------------------------------------------------
+
+	it('cleanup: removes the worktree after run', async () => {
+		gitCreateBranch(tempDir, 'cleanup-test-branch');
+		gitCheckout(tempDir, 'cleanup-test-branch');
+		gitAddFile(tempDir, 'test.txt', 'test');
+		gitCommit(tempDir, 'test commit');
+
+		const result = await handleCiSimulateCommand(tempDir, [
+			'cleanup-test-branch',
+		]);
+
+		// Verify worktree was cleaned up
+		expect(result).toContain('Worktree removed');
+
+		// The worktree path should have been cleaned up
+		const worktreePathMatch = result.match(/Worktree: `([^`]+)`/);
+		if (worktreePathMatch) {
+			const worktreePath = worktreePathMatch[1];
+			expect(fs.existsSync(worktreePath)).toBe(false);
+		}
+	});
+
+	// -------------------------------------------------------------------------
+	// Default PR ref: uses current branch when no argument provided
+	// -------------------------------------------------------------------------
+
+	it('uses current branch when no PR ref argument provided', async () => {
+		gitCreateBranch(tempDir, 'current-test-branch');
+		gitCheckout(tempDir, 'current-test-branch');
+		gitAddFile(tempDir, 'test.txt', 'test');
+		gitCommit(tempDir, 'test commit');
+
+		const result = await handleCiSimulateCommand(tempDir, []);
+
+		// Should use the current branch
+		expect(result).toContain('current-test-branch');
+	});
+
+	// -------------------------------------------------------------------------
+	// Error handling
+	// -------------------------------------------------------------------------
+
+	it('reports error when branch does not exist', async () => {
+		const result = await handleCiSimulateCommand(tempDir, [
+			'nonexistent-branch',
+		]);
+
+		// Should show error during setup (worktree creation or merge)
+		expect(result).toContain('## Error');
+	});
+
+	// -------------------------------------------------------------------------
+	// SC-012: merge failure detection (true line-level conflict)
+	// -------------------------------------------------------------------------
+
+	it('SC-012: cleans up after a deterministic merge conflict', async () => {
+		const calls: string[][] = [];
+		_internals.getDefaultBaseBranch = () => 'origin/main';
+		_internals.runExternalTool = mock(async (options) => {
+			calls.push(options.args);
+			const conflict = options.args[0] === 'merge';
+			return {
+				status: 'completed',
+				exitCode: conflict ? 1 : 0,
+				stdout: '',
+				stderr: conflict ? 'CONFLICT (content): Merge conflict' : '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
+
+		const result = await handleCiSimulateCommand(tempDir, ['conflict-branch']);
+
+		expect(result).toContain('Merge failed');
+		expect(calls).toContainEqual([
+			'merge',
+			'--no-ff',
+			'--no-edit',
+			'--',
+			'conflict-branch',
+		]);
+		expect(
+			calls.some((args) => args[0] === 'worktree' && args[1] === 'remove'),
+		).toBe(true);
+	});
+
+	it('rejects option-like PR refs before invoking git', async () => {
+		const result = await handleCiSimulateCommand(tempDir, ['--upload-pack=x']);
+		expect(result).toContain('safe git branch or commit reference');
+	});
+
+	it('reports when bounded child output is truncated', async () => {
+		const calls: Array<{ maxStderrBytes?: number; maxStdoutBytes?: number }> =
+			[];
+		_internals.getDefaultBaseBranch = () => 'origin/main';
+		_internals.runExternalTool = mock(async (options) => {
+			calls.push(options);
+			const isValidation = options.executable === 'bun';
+			return {
+				status: 'completed',
+				exitCode: isValidation ? 1 : 0,
+				stdout: isValidation ? 'validation output' : '',
+				stderr: '',
+				stdoutTruncated: isValidation,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
+
+		const result = await handleCiSimulateCommand(tempDir, ['feature-branch']);
+
+		expect(result).toContain('child output truncated to bounded limit');
+		expect(calls).not.toHaveLength(0);
+		for (const call of calls) {
+			expect(call.maxStdoutBytes).toBe(12_000);
+			expect(call.maxStderrBytes).toBe(12_000);
+		}
+	});
 });
 
-describe('ci-simulate command', () => {
-	test('creates merge-result worktree, runs fixed CI gates, and cleans up', async () => {
-		const calls: Array<{ cmd: string[]; cwd: string }> = [];
-		const repoRoot = path.join('C:', 'work', 'repo');
-		_internals.now = () => 123;
-		_internals.mkdirSync = mock(() => undefined) as typeof _internals.mkdirSync;
-		_internals.runCommand = mock(async (cmd: string[], cwd: string) => {
-			calls.push({ cmd, cwd });
-			return { exitCode: 0, stdout: '', stderr: '' };
-		}) as typeof _internals.runCommand;
+// ---------------------------------------------------------------------------
+// Tests for repos with master as the default remote branch (not main)
+// ---------------------------------------------------------------------------
 
-		const result = await handleCiSimulateCommand(repoRoot, [
-			'--base',
-			'origin/main',
-			'--head',
-			'feature',
-		]);
+describe('handleCiSimulateCommand with origin/master default branch', () => {
+	let tempDir: string;
+	let reposDir: string;
+	let bareRepoPath: string;
 
-		expect(result).toContain('CI simulation passed');
-		expect(calls[0].cmd.slice(0, 7)).toEqual([
-			'git',
-			'-C',
-			repoRoot,
-			'worktree',
-			'add',
-			'--detach',
-			expect.stringContaining(path.join('.swarm', 'ci-simulate')),
-		]);
-		expect(calls[0].cmd.at(-1)).toBe('origin/main');
-		expect(calls[1].cmd).toEqual([
-			'git',
-			'-C',
-			calls[0].cmd[6],
-			'merge',
-			'--no-edit',
-			'feature',
-		]);
-		expect(calls[2].cmd).toEqual(['bun', 'run', 'typecheck']);
-		expect(calls[2].cwd).toBe(calls[0].cmd[6]);
-		expect(calls).toContainEqual({
-			cmd: ['bun', 'run', 'lint:ci'],
-			cwd: calls[0].cmd[6],
-		});
-		expect(calls).toContainEqual({
-			cmd: ['bun', 'run', 'test:unit:ci'],
-			cwd: calls[0].cmd[6],
-		});
-		expect(calls).toContainEqual({
-			cmd: ['bun', 'test', 'tests/integration', '--timeout', '120000'],
-			cwd: calls[0].cmd[6],
-		});
-		expect(calls.at(-2)?.cmd.slice(0, 6)).toEqual([
-			'git',
-			'-C',
-			repoRoot,
-			'worktree',
-			'remove',
-			'--force',
-		]);
-		expect(calls.at(-1)?.cmd).toEqual([
-			'git',
-			'-C',
-			repoRoot,
-			'worktree',
-			'prune',
-		]);
-	});
+	beforeEach(() => {
+		tempDir = makeTempDir('ci-simulate-master-test-');
+		reposDir = path.join(tempDir, 'repos');
+		fs.mkdirSync(reposDir, { recursive: true });
 
-	test('defaults to current worktree HEAD and CI-equivalent gates', async () => {
-		const calls: Array<string[]> = [];
-		const repoRoot = path.join('C:', 'work', 'default-repo');
-		_internals.now = () => 456;
-		_internals.mkdirSync = mock(() => undefined) as typeof _internals.mkdirSync;
-		_internals.runCommand = mock(async (cmd: string[]) => {
-			calls.push(cmd);
-			if (cmd.includes('rev-parse')) {
-				return { exitCode: 0, stdout: 'abc123\n', stderr: '' };
-			}
-			return { exitCode: 0, stdout: '', stderr: '' };
-		}) as typeof _internals.runCommand;
+		// Create a bare repo to act as "origin"
+		bareRepoPath = gitCreateBareRemote(reposDir, 'origin.git');
 
-		await handleCiSimulateCommand(repoRoot, []);
+		// Create the test repo with master branch (not main)
+		gitInit(tempDir);
+		gitSetRemote(tempDir, 'origin', bareRepoPath);
 
-		expect(calls[0]).toEqual(['git', '-C', repoRoot, 'rev-parse', 'HEAD']);
-		expect(calls[2]).toEqual([
-			'git',
-			'-C',
-			calls[1][6],
-			'merge',
-			'--no-edit',
-			'abc123',
-		]);
-		expect(calls).toContainEqual(['bun', 'run', 'typecheck']);
-		expect(calls).toContainEqual(['bun', 'run', 'lint:ci']);
-		expect(calls).toContainEqual(['bun', 'run', 'build']);
-		expect(calls).toContainEqual(['bun', 'run', 'test:unit:ci']);
-		expect(calls).toContainEqual([
-			'bun',
-			'test',
-			'tests/integration',
-			'--timeout',
-			'120000',
-		]);
-		expect(calls).toContainEqual([
-			'bun',
-			'test',
-			'tests/security',
-			'--timeout',
-			'120000',
-		]);
-		expect(calls).toContainEqual([
-			'bun',
-			'test',
-			'tests/smoke',
-			'--timeout',
-			'120000',
-		]);
-		expect(calls).toContainEqual(['bun', 'run', 'drift:check']);
-	});
+		// Rename initial branch to master instead of main
+		runGit(tempDir, ['branch', '-M', 'master']);
 
-	test('rejects arbitrary command arguments', async () => {
-		const result = await handleCiSimulateCommand(
-			path.join('C:', 'work', 'repo'),
-			['--cmd', 'bun', 'test'],
+		// Create initial commit with package.json and test file
+		createMinimalProject(tempDir);
+		gitAddFile(
+			tempDir,
+			'package.json',
+			fs.readFileSync(path.join(tempDir, 'package.json'), 'utf-8'),
 		);
+		gitAddFile(
+			tempDir,
+			'example.test.ts',
+			fs.readFileSync(path.join(tempDir, 'example.test.ts'), 'utf-8'),
+		);
+		gitCommit(tempDir, 'initial commit with package.json');
 
-		expect(result).toContain('unsupported argument --cmd');
+		// Push master to origin
+		gitPush(tempDir, 'origin', 'master');
 	});
 
-	test('rejects flags hidden behind missing allowed flag values', async () => {
-		const result = await handleCiSimulateCommand(
-			path.join('C:', 'work', 'repo'),
-			['--base', '--cmd', 'bun', 'test'],
-		);
-
-		expect(result).toContain('missing value for --base');
+	afterEach(() => {
+		// Clean up temp directory
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup
+		}
 	});
 
-	test('rejects stray positional arguments', async () => {
-		const result = await handleCiSimulateCommand(
-			path.join('C:', 'work', 'repo'),
-			['feature'],
-		);
+	it('handles repos whose remote default branch is origin/master', async () => {
+		// Create a feature branch
+		gitCreateBranch(tempDir, 'feature-branch');
+		gitCheckout(tempDir, 'feature-branch');
+		gitAddFile(tempDir, 'passing.txt', 'this passes');
+		gitCommit(tempDir, 'add passing file');
 
-		expect(result).toContain('unexpected positional argument feature');
-	});
+		// The report should reference origin/master, not origin/main
+		const result = await handleCiSimulateCommand(tempDir, ['feature-branch']);
 
-	test('is registered as an agent command', () => {
-		expect(COMMAND_REGISTRY['ci-simulate'].toolPolicy).toBe('agent');
-		expect(COMMAND_REGISTRY['ci-simulate'].description).toContain(
-			'temporary merge-result worktree',
-		);
+		// Should have run all 4 validation steps in order
+		expect(result).toContain('## Validation Suite');
+		expect(result).toContain('typecheck');
+		expect(result).toContain('lint');
+		expect(result).toContain('build');
+		expect(result).toContain('test');
+
+		// All 4 steps should pass
+		expect(result).toContain('4/4 steps passed');
+		expect(result).toContain('All checks passed');
 	});
 });

@@ -233,6 +233,30 @@ branches or prior work sessions.
 
 *Reference: Caught during PR #1472 Round 1 closure.*
 
+## Batch Collection (mandatory before any fix)
+
+Issue #1746: 8+ push cycles where 3–4 would have sufficed with batching.
+The anti-pattern: iterating check-by-check, proposing a fix for one failure,
+pushing, waiting for CI, then discovering the next failure. Each cycle costs
+one push + one CI run.
+
+**The fix:** Collect all failures and their logs in one batch operation before
+proposing any fix.
+
+1. `gh pr checks --json checkName,conclusion,detailsUrl` — get every check,
+   its conclusion, and the URL to its run details.
+2. Filter to failing checks (`conclusion: "failure"` | `"cancelled"` | `"timed_out"`).
+3. For each failing check, extract the run ID from `detailsUrl` and run
+   `gh run view <run-id> --log-failed` to fetch the full log output.
+4. Build a complete failure ledger: all checks + all failure logs collected.
+5. Triage the full ledger to identify root causes.
+6. Propose fixes for all failures in **one batch** — do not iterate
+   check-by-check through push cycles.
+
+**Rule:** The complete failure ledger must be collected before any
+modification is proposed. Verifying the ledger is complete is a prerequisite
+for the Fix Planning step.
+
 ## Pre-flight: Scope Discipline
 
 `declare_scope({ taskId, files })` enforces that the delegated coder agent may only modify the declared files. The enforcement requires an active `.swarm/plan.json` — calling `declare_scope` in a feedback-closure run (which does not go through `save_plan`) rejects with "No plan found."

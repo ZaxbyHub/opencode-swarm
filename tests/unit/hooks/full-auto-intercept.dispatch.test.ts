@@ -15,7 +15,15 @@
  * - src/telemetry.js, src/hooks/utils.js, src/parallel/file-locks.js, src/agents/critic.js:
  *   Cannot convert - source uses direct imports (not _internals routing)
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -89,6 +97,8 @@ const mockSwarmState = {
 // - src/hooks/utils.js: source imports { validateSwarmPath } directly
 // - src/parallel/file-locks.js: source imports { tryAcquireLock } directly
 // - src/agents/critic.js: source imports { createCriticAutonomousOversightAgent } directly
+// - src/full-auto/state.js: source imports state functions directly
+// - src/full-auto/oversight.js: source imports writeFullAutoOversightEvent directly
 // =============================================================================
 
 // Track console.warn calls for verification
@@ -137,6 +147,31 @@ mock.module('../../../src/agents/critic.js', () => ({
 	createCriticAutonomousOversightAgent: mock(() => ({
 		name: 'critic_oversight',
 	})),
+}));
+
+// Import real modules to spread into mocks (per AGENTS.md invariant 7: spread-real-exports pattern)
+const realState = await import('../../../src/full-auto/state.js');
+const realOversight = await import('../../../src/full-auto/oversight.js');
+
+mock.module('../../../src/full-auto/state.js', () => ({
+	...realState,
+	incrementOversightFailureCounter: mock(
+		realState.incrementOversightFailureCounter,
+	),
+	resetOversightFailureCounter: mock(realState.resetOversightFailureCounter),
+	terminateFullAutoRun: mock(realState.terminateFullAutoRun),
+	pauseFullAutoRun: mock(realState.pauseFullAutoRun),
+	loadFullAutoRunState: mock(realState.loadFullAutoRunState),
+	startFullAutoRun: mock(realState.startFullAutoRun),
+	recordFullAutoOversight: mock(realState.recordFullAutoOversight),
+}));
+
+mock.module('../../../src/full-auto/oversight.js', () => ({
+	...realOversight,
+	writeFullAutoOversightEvent: mock(realOversight.writeFullAutoOversightEvent),
+	writeFullAutoOversightEvidence: mock(
+		realOversight.writeFullAutoOversightEvidence,
+	),
 }));
 
 // Import after mock setup
@@ -1286,5 +1321,282 @@ describe('injectVerdictIntoMessages', () => {
 			const injected = messages[architectIndex + 1];
 			expect(injected.info.agent).toBe('teamalpha_critic_oversight');
 		});
+	});
+});
+
+// =============================================================================
+// SC-009 / SC-010 / SC-011 — legacy intercept path retry and auto-degrade tests
+// These tests verify the retry, pause-message, and auto-degrade behavior of
+// dispatchCriticAndWriteEvent (the legacy intercept path in full-auto-intercept.ts).
+// =============================================================================
+
+describe('SC-009 — legacy intercept retries transient errors', () => {
+	let origClient: typeof _internals.swarmState.opencodeClient;
+
+	beforeEach(() => {
+		origClient = _internals.swarmState.opencodeClient;
+		testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-retry-'));
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(() => {
+		_internals.swarmState.opencodeClient = origClient;
+		try {
+			fs.rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+		mock.restore();
+	});
+
+	test('retries up to maxDispatchRetries then succeeds on third attempt', async () => {
+		// Start a real full-auto run so state functions work.
+		const { startFullAutoRun: realStart } = await import(
+			'../../../src/full-auto/state.js'
+		);
+		realStart(testDir, 'sess-legacy-retry', { enabled: true });
+
+		let createCallCount = 0;
+		const mockClient = {
+			session: {
+				create: mock(async () => {
+					createCallCount++;
+					// Fail first 2 attempts, succeed on 3rd.
+					if (createCallCount <= 2) {
+						return {
+							data: null,
+							error: { code: 'ERR_TRANSIENT', message: 'server error' },
+						};
+					}
+					return { data: { id: 'critic-session-ok' }, error: null };
+				}),
+				prompt: mock(async () => ({
+					data: {
+						parts: [
+							{
+								type: 'text',
+								text: 'VERDICT: APPROVED\nREASONING: looks fine\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO',
+							},
+						],
+					},
+				})),
+				delete: mock(async () => ({})),
+			},
+		};
+		_internals.swarmState.opencodeClient = mockClient as any;
+
+		const result = await dispatchCriticAndWriteEvent(
+			testDir,
+			'Ready for Phase 2?',
+			'Critic context',
+			'test-model',
+			'phase_completion',
+			0,
+			0,
+			'critic_oversight',
+			'sess-legacy-retry',
+			2, // maxDispatchRetries
+			3, // maxConsecutiveDispatchFailures
+		);
+
+		// Should have retried twice then succeeded on 3rd create attempt.
+		expect(createCallCount).toBe(3);
+		expect(result.verdict).toBe('APPROVED');
+	});
+});
+
+describe('SC-010 — legacy intercept pause reason contains OVERSIGHT_INFRASTRUCTURE_FAILURE', () => {
+	let origClient: typeof _internals.swarmState.opencodeClient;
+
+	beforeEach(() => {
+		origClient = _internals.swarmState.opencodeClient;
+		testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-pause-'));
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(() => {
+		_internals.swarmState.opencodeClient = origClient;
+		try {
+			fs.rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+		mock.restore();
+	});
+
+	test('pause reason contains infrastructure failure text after exhausting retries', async () => {
+		const { startFullAutoRun: realStart } = await import(
+			'../../../src/full-auto/state.js'
+		);
+		realStart(testDir, 'sess-legacy-pause', { enabled: true });
+
+		const mockClient = {
+			session: {
+				create: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_TRANSIENT', message: 'server error' },
+				})),
+				prompt: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_PROMPT', message: 'prompt error' },
+				})),
+				delete: mock(async () => ({})),
+			},
+		};
+		_internals.swarmState.opencodeClient = mockClient as any;
+
+		// maxDispatchRetries=0 → 1 attempt total, should exhaust immediately
+		await dispatchCriticAndWriteEvent(
+			testDir,
+			'Ready for Phase 2?',
+			'Critic context',
+			'test-model',
+			'phase_completion',
+			0,
+			0,
+			'critic_oversight',
+			'sess-legacy-pause',
+			0, // maxDispatchRetries
+			3, // maxConsecutiveDispatchFailures (not reached yet — only 1 failure)
+		);
+
+		// Verify pauseFullAutoRun was called with infrastructure failure reason.
+		const { pauseFullAutoRun } = await import(
+			'../../../src/full-auto/state.js'
+		);
+		expect(pauseFullAutoRun).toHaveBeenCalled();
+		const pauseCall = (pauseFullAutoRun as ReturnType<typeof mock>).mock
+			.calls[0];
+		const pauseReason = pauseCall[2] as string;
+		expect(pauseReason).toContain('infrastructure failure');
+		expect(pauseReason).toContain('1 attempt'); // max_retries=0 → 1 attempt total
+	});
+});
+
+describe('SC-011 — legacy intercept auto-degrades after max consecutive failures', () => {
+	let origClient: typeof _internals.swarmState.opencodeClient;
+
+	beforeEach(() => {
+		origClient = _internals.swarmState.opencodeClient;
+		testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-degrade-'));
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(() => {
+		_internals.swarmState.opencodeClient = origClient;
+		try {
+			fs.rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+		mock.restore();
+	});
+
+	test('terminates (degrades to manual) after 3 consecutive infrastructure failures', async () => {
+		const { startFullAutoRun: realStart } = await import(
+			'../../../src/full-auto/state.js'
+		);
+		realStart(testDir, 'sess-legacy-degrade', { enabled: true });
+
+		const mockClient = {
+			session: {
+				create: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_TRANSIENT', message: 'server error' },
+				})),
+				prompt: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_PROMPT', message: 'prompt error' },
+				})),
+				delete: mock(async () => ({})),
+			},
+		};
+		_internals.swarmState.opencodeClient = mockClient as any;
+
+		// Exhaust 3 failures — should auto-degrade on the 3rd.
+		for (let i = 0; i < 3; i++) {
+			const result = await dispatchCriticAndWriteEvent(
+				testDir,
+				'Ready for Phase 2?',
+				'Critic context',
+				'test-model',
+				'phase_completion',
+				0,
+				0,
+				'critic_oversight',
+				'sess-legacy-degrade',
+				0, // maxDispatchRetries — immediate failure each time
+				3, // maxConsecutiveDispatchFailures
+			);
+			expect(result.verdict).toBe('NEEDS_REVISION');
+		}
+
+		// After 3rd failure, terminateFullAutoRun should have been called.
+		const { terminateFullAutoRun } = await import(
+			'../../../src/full-auto/state.js'
+		);
+		expect(terminateFullAutoRun).toHaveBeenCalled();
+		const terminateCall = (terminateFullAutoRun as ReturnType<typeof mock>).mock
+			.calls[
+			(terminateFullAutoRun as ReturnType<typeof mock>).mock.calls.length - 1
+		];
+		const terminateReason = terminateCall[2] as string;
+		expect(terminateReason).toContain('auto-degraded');
+		expect(terminateReason).toContain('3');
+	});
+
+	test('pauses (does not terminate) when below consecutive failure threshold', async () => {
+		const { startFullAutoRun: realStart, loadFullAutoRunState: realLoad } =
+			await import('../../../src/full-auto/state.js');
+		realStart(testDir, 'sess-legacy-threshold', { enabled: true });
+
+		const mockClient = {
+			session: {
+				create: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_TRANSIENT', message: 'server error' },
+				})),
+				prompt: mock(async () => ({
+					data: null,
+					error: { code: 'ERR_PROMPT', message: 'prompt error' },
+				})),
+				delete: mock(async () => ({})),
+			},
+		};
+		_internals.swarmState.opencodeClient = mockClient as any;
+
+		// Only 2 failures — below the threshold of 3.
+		await dispatchCriticAndWriteEvent(
+			testDir,
+			'Ready for Phase 2?',
+			'Critic context',
+			'test-model',
+			'phase_completion',
+			0,
+			0,
+			'critic_oversight',
+			'sess-legacy-threshold',
+			0, // maxDispatchRetries
+			3, // maxConsecutiveDispatchFailures
+		);
+		await dispatchCriticAndWriteEvent(
+			testDir,
+			'Ready for Phase 2?',
+			'Critic context',
+			'test-model',
+			'phase_completion',
+			0,
+			0,
+			'critic_oversight',
+			'sess-legacy-threshold',
+			0,
+			3,
+		);
+
+		// After 2 failures with threshold 3, run should be paused (not terminated).
+		const state = realLoad(testDir, 'sess-legacy-threshold');
+		expect(state?.status).toBe('paused');
+		// Consecutive counter should be 2.
+		expect(state?.counters.consecutiveOversightFailures).toBe(2);
 	});
 });

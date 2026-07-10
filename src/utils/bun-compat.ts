@@ -205,6 +205,19 @@ export async function bunWrite(
 }
 
 /**
+ * Cross-runtime sleep. Uses `Bun.sleep` when available (Bun), falls back to
+ * a `setTimeout`-based Promise on Node. This is the only correct way to
+ * introduce delays in plugin code that must run under both runtimes.
+ */
+export function sleep(ms: number): Promise<void> {
+	const bun = getBun() as { sleep?: (ms: number) => Promise<void> } | undefined;
+	if (bun?.sleep) {
+		return bun.sleep(ms);
+	}
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Stable 32-bit hash. Bun's `Bun.hash` uses xxHash64 by default; on Node we
  * fall back to a 32-bit djb2 hash — identical hashes are NOT guaranteed
  * across runtimes, so callers should not rely on cross-runtime hash equality

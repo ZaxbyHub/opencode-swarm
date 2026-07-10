@@ -34,11 +34,12 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'running-tests',
 	'engineering-conventions',
 	'commit-pr',
-	'worktree-retry-cleanup',
-	'skill-edit-validation',
-	'merge-queue-readiness',
-	'gate-attribution',
+	// Phase 1 / swarm workflow skills
 	'ci-failure-batching',
+	'gate-attribution',
+	'merge-queue-readiness',
+	'skill-edit-validation',
+	'worktree-retry-cleanup',
 ] as const;
 
 const MAX_SKILL_FILES = 64;

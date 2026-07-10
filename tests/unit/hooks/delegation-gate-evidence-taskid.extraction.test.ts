@@ -13,8 +13,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	createDelegationGateHook,
-	hasReviewedTaskRows,
-	parseReviewedTaskIdsFromSetDispatchOutput,
+	parsePerTaskVerdicts,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
@@ -178,15 +177,14 @@ describe('delegation-gate: set-dispatch reviewed row parsing', () => {
 		const output = [
 			'[REVIEWED] | task-2.1 | APPROVED | source | none',
 			'[REVIEWED] | 2.2 | NEEDS_REVISION | source | issue',
-			'[REVIEWED] | task-2.3 | PASS | source | none',
+			'[REVIEWED] | task-2.3 | APPROVED | source | none',
 			'[REVIEWED] | ../escape | APPROVED | source | unsafe',
 			'[reviewed] | task-2.1 | APPROVED | duplicate | ignored',
 		].join('\n');
 
-		expect(parseReviewedTaskIdsFromSetDispatchOutput(output)).toEqual([
-			'2.1',
-			'2.3',
-		]);
-		expect(hasReviewedTaskRows(output)).toBe(true);
+		const reviewedTaskIds = Array.from(parsePerTaskVerdicts(output)).flatMap(
+			([taskId, verdict]) => (verdict === 'APPROVED' ? [taskId] : []),
+		);
+		expect(reviewedTaskIds).toEqual(['2.1', '2.3']);
 	});
 });

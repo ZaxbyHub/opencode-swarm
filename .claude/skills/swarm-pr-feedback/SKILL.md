@@ -14,13 +14,18 @@ canonical workflow.
 
 ## Claude Code Execution Notes
 
+- **Batch-collect all CI failures before proposing any fix** (Issue #1746).
+  Run `gh pr checks --json checkName,conclusion,detailsUrl`, then for each
+  failing check run `gh run view <run-id> --log-failed`. Build the complete
+  failure ledger before triaging or proposing fixes — do not iterate
+  check-by-check through push cycles.
 - Check out the PR branch locally before verifying or fixing anything. Fetch the
   head ref if absent, confirm the working tree is clean, then verify against the
   PR branch rather than the base branch.
 - Build the complete feedback ledger before editing: pasted feedback, GitHub
-  comments/threads, requested changes, CI/check failures, merge conflicts,
-  stale branch state, PR body claims, linked issues, commits, and any validated
-  `swarm-pr-review` handoff artifact.
+  comments/threads, requested changes, CI/check failures (already batch-
+  collected above), merge conflicts, stale branch state, PR body claims,
+  linked issues, commits, and any validated `swarm-pr-review` handoff artifact.
 - Treat every feedback item as a claim until source evidence, tests, logs, or
   PR metadata prove or disprove it.
 - Preserve original finding IDs and reviewer/critic provenance from review

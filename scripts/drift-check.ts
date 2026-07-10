@@ -35,6 +35,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
+import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
 import { ALL_AGENT_NAMES } from '../src/config/agent-names';
 import {
@@ -501,12 +502,45 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['docs-claim', detectDocsClaimDrift],
 ];
 
-export function runAllDetectors(): DriftFinding[] {
+/**
+ * Run all synchronous detectors. Exported separately so tests that only care about
+ * sync drift categories can call this without triggering async git operations.
+ */
+export function runSyncDetectors(): DriftFinding[] {
 	const findings: DriftFinding[] = [];
 	for (const [, detector] of DETECTORS) {
 		findings.push(...detector());
 	}
 	return findings;
+}
+
+/**
+ * Run all detectors, including the async skill-assertion check (FR-002).
+ */
+export async function runAllDetectors(): Promise<DriftFinding[]> {
+	const findings = runSyncDetectors();
+	const skillFindings = await detectSkillAssertionDrift();
+	findings.push(...skillFindings);
+	return findings;
+}
+
+/**
+ * Run the skill-assertion check (FR-002 / issue #1746 item 3).
+ * Reuses the same logic as `bun run scripts/check-skill-assertions.ts` but
+ * returns DriftFinding[] so it slots into runAllDetectors without subprocess.
+ */
+export async function detectSkillAssertionDrift(
+	cwd: string = REPO_ROOT,
+): Promise<DriftFinding[]> {
+	const result = await checkSkillAssertions(cwd);
+	return result.brokenAssertions.map((b) => ({
+		category: 'skill-assertion',
+		severity: 'error' as const,
+		file: b.testFile,
+		message:
+			`Test at ${b.testFile}:${b.line} asserts "${b.phrase}" ` +
+			`but that phrase is no longer present in "${b.skillFile}"`,
+	}));
 }
 
 function escapeAnnotationData(s: string): string {
@@ -580,9 +614,9 @@ function parseArgs(argv: string[]): { reportPath: string | null; json: boolean }
 	return { reportPath, json };
 }
 
-function main(): void {
+async function main(): Promise<void> {
 	const { reportPath, json } = parseArgs(process.argv.slice(2));
-	const findings = runAllDetectors();
+	const findings = await runAllDetectors();
 
 	for (const finding of findings) {
 		// Annotations go to stdout so they render inline in the Actions log.

@@ -686,47 +686,59 @@ function resolveDelegatedPlanTaskId(
 	return null;
 }
 
-function normalizeReviewedTaskId(raw: string): string | null {
-	const trimmed = raw.trim();
-	const taskPrefix = /^task-(\d+\.\d+(?:\.\d+)*)$/i.exec(trimmed);
-	const candidate = taskPrefix ? taskPrefix[1] : trimmed;
-	return isStrictTaskId(candidate) ? candidate : null;
-}
+/**
+ * Parses structured per-task verdict lines from agent dispatch output.
+ *
+ * Recognized formats:
+ *   [REVIEWED] | task-2.1 | APPROVED | ...
+ *   [TESTED] | task-2.1 | PASS | ...
+ *   [REVIEWED] | 2.1 | APPROVED | ...   (bare task ID without prefix)
+ *
+ * Returns a Map from task ID to verdict string (e.g. "APPROVED", "REJECTED", "PASS", "FAIL").
+ * Only task IDs matching strict task ID format (N.M or N.M.P) are included.
+ * Lines that don't match the pattern are silently ignored.
+ *
+ * @param outputText - Raw text output from the agent dispatch
+ * @returns Map of taskId -> verdict string
+ */
+export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
+	const result = new Map<string, string>();
+	// Match [REVIEWED] or [TESTED] tag lines with task ID and verdict
+	// Supports formats like "[REVIEWED] | task-2.1 | APPROVED | details"
+	// and "[TESTED] | 2.1 | PASS | details"
+	const reviewedPattern =
+		/^\[REVIEWED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(APPROVED|REJECTED|CONCERNS)\s*\|/im;
+	const testedPattern =
+		/^\[TESTED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(PASS|FAIL|SKIPPED)\s*\|/im;
 
-function isPassingReviewedVerdict(raw: string): boolean {
-	const verdict = raw
-		.trim()
-		.toUpperCase()
-		.replace(/[\s-]+/g, '_');
-	return verdict === 'APPROVED' || verdict === 'PASS' || verdict === 'PASSED';
-}
-
-export function hasReviewedTaskRows(output: string): boolean {
-	for (const line of output.split(/\r?\n/)) {
-		const match = /^\s*\[REVIEWED\]\s*\|\s*([^|]+)\s*\|/i.exec(line);
-		if (!match) continue;
-		if (normalizeReviewedTaskId(match[1])) return true;
+	for (const line of outputText.split('\n')) {
+		const trimmed = line.trim();
+		let match = reviewedPattern.exec(trimmed);
+		if (match) {
+			const taskId = match[1];
+			const verdict = match[2];
+			if (isStrictTaskId(taskId)) {
+				result.set(taskId, verdict);
+			}
+			continue;
+		}
+		match = testedPattern.exec(trimmed);
+		if (match) {
+			const taskId = match[1];
+			const verdict = match[2];
+			if (isStrictTaskId(taskId)) {
+				result.set(taskId, verdict);
+			}
+		}
 	}
-	return false;
+	return result;
 }
 
-export function parseReviewedTaskIdsFromSetDispatchOutput(
-	output: string,
-): string[] {
-	const taskIds: string[] = [];
-	const seen = new Set<string>();
-	for (const line of output.split(/\r?\n/)) {
-		const match = /^\s*\[REVIEWED\]\s*\|\s*([^|]+)\s*\|\s*([^|]+)/i.exec(line);
-		if (!match) continue;
-		const taskId = normalizeReviewedTaskId(match[1]);
-		if (!isPassingReviewedVerdict(match[2])) continue;
-		if (!taskId || seen.has(taskId)) continue;
-		seen.add(taskId);
-		taskIds.push(taskId);
-	}
-	return taskIds;
-}
-
+/**
+ * Plural variant of resolveDelegatedPlanTaskId that returns ALL discovered task IDs
+ * rather than failing closed on ambiguity. Used when a single agent covers multiple tasks
+ * (set-dispatch) and we need per-task attribution.
+ */
 async function findTaskAwaitingCompletion(
 	directory: string | undefined,
 	session: AgentSessionState,
@@ -1044,6 +1056,7 @@ async function resolveEvidenceTaskId(
 export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
+	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
 	resetStandardWorktreeIsolationState,
@@ -1861,10 +1874,28 @@ export function createDelegationGateHook(
 							] as const;
 							type EligibleState = (typeof stageBEligibleStates)[number];
 
+							// FR-007: Try to parse per-task verdicts from dispatch output.
+							// When a reviewer or test_engineer covers multiple tasks (set-dispatch),
+							// it emits structured verdict lines like:
+							//   [REVIEWED] | task-2.1 | APPROVED | ...
+							//   [TESTED] | task-2.1 | PASS | ...
+							// If parseable, attribute per-task rather than over-attributing to
+							// every task in taskWorkflowStates.
+							const perTaskVerdicts = parsePerTaskVerdicts(outputText(_output));
+							const hasPerTaskAttribution = perTaskVerdicts.size > 0;
+
+							// FR-007: When per-task verdicts are parseable, iterate ONLY over the
+							// task IDs mentioned in those verdicts — skip all other eligible tasks
+							// to prevent over-attribution. When no verdicts are parseable, iterate
+							// over all eligible tasks (existing fallback behavior).
+
 							for (const [taskId, state] of session.taskWorkflowStates) {
 								if (
 									!(stageBEligibleStates as readonly string[]).includes(state)
 								)
+									continue;
+								// FR-007: Skip tasks NOT mentioned in per-task verdicts
+								if (hasPerTaskAttribution && !perTaskVerdicts.has(taskId))
 									continue;
 								const eligibleState = state as EligibleState;
 								recordStageBCompletion(
@@ -1872,6 +1903,28 @@ export function createDelegationGateHook(
 									taskId,
 									targetAgent as 'reviewer' | 'test_engineer',
 								);
+
+								// FR-007: Record per-task gate evidence when parseable verdicts exist.
+								// Each task gets its own evidence entry keyed by the specific task ID.
+								if (hasPerTaskAttribution) {
+									try {
+										const turbo = hasActiveTurboMode(input.sessionID);
+										const { recordGateEvidence } = await import(
+											'../gate-evidence'
+										);
+										await recordGateEvidence(
+											directory,
+											taskId,
+											targetAgent as 'reviewer' | 'test_engineer',
+											input.sessionID,
+											turbo,
+										);
+									} catch (err) {
+										logger.warn(
+											`[delegation-gate] per-task evidence recording failed for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+										);
+									}
+								}
 
 								if (hasBothStageBCompletions(session, taskId)) {
 									// Barrier reached: both reviewer and test_engineer have completed.
@@ -2027,21 +2080,12 @@ export function createDelegationGateHook(
 			if (typeof subagentType === 'string') {
 				try {
 					const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-					const outputText = String(_output ?? '');
-					const reviewedTaskIds =
-						parseReviewedTaskIdsFromSetDispatchOutput(outputText);
-					const hasReviewedRows = hasReviewedTaskRows(outputText);
-					const fallbackTaskId =
-						!hasReviewedRows && reviewedTaskIds.length === 0
-							? await resolveEvidenceTaskId(mergedArgs, session, directory)
-							: null;
-					const evidenceTaskIds =
-						reviewedTaskIds.length > 0
-							? reviewedTaskIds
-							: fallbackTaskId
-								? [fallbackTaskId]
-								: [];
-					if (evidenceTaskIds.length > 0) {
+					const evidenceTaskId = await resolveEvidenceTaskId(
+						mergedArgs,
+						session,
+						directory,
+					);
+					if (evidenceTaskId) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						const gateAgents = [
 							'reviewer',
@@ -2055,25 +2099,21 @@ export function createDelegationGateHook(
 						const targetAgentForEvidence = stripKnownSwarmPrefix(subagentType);
 						if (gateAgents.includes(targetAgentForEvidence)) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							for (const evidenceTaskId of evidenceTaskIds) {
-								await recordGateEvidence(
-									directory,
-									evidenceTaskId,
-									targetAgentForEvidence,
-									input.sessionID,
-									turbo,
-								);
-							}
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								targetAgentForEvidence,
+								input.sessionID,
+								turbo,
+							);
 						} else {
 							const { recordAgentDispatch } = await import('../gate-evidence');
-							for (const evidenceTaskId of evidenceTaskIds) {
-								await recordAgentDispatch(
-									directory,
-									evidenceTaskId,
-									targetAgentForEvidence,
-									turbo,
-								);
-							}
+							await recordAgentDispatch(
+								directory,
+								evidenceTaskId,
+								targetAgentForEvidence,
+								turbo,
+							);
 						}
 					}
 				} catch (err) {
@@ -2251,45 +2291,32 @@ export function createDelegationGateHook(
 				// Record gate evidence for delegation-chain fallback path
 				// v6.33.7: Entire block wrapped in try-catch (same fix as stored-args path)
 				try {
-					const outputText = String(_output ?? '');
-					const reviewedTaskIds =
-						parseReviewedTaskIdsFromSetDispatchOutput(outputText);
-					const hasReviewedRows = hasReviewedTaskRows(outputText);
-					const fallbackTaskId =
-						!hasReviewedRows && reviewedTaskIds.length === 0
-							? await resolveEvidenceTaskId(directArgs, session, directory)
-							: null;
-					const evidenceTaskIds =
-						reviewedTaskIds.length > 0
-							? reviewedTaskIds
-							: fallbackTaskId
-								? [fallbackTaskId]
-								: [];
-					if (evidenceTaskIds.length > 0) {
+					const evidenceTaskId = await resolveEvidenceTaskId(
+						directArgs,
+						session,
+						directory,
+					);
+					if (evidenceTaskId) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						if (hasReviewer) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							for (const evidenceTaskId of evidenceTaskIds) {
-								await recordGateEvidence(
-									directory,
-									evidenceTaskId,
-									'reviewer',
-									input.sessionID,
-									turbo,
-								);
-							}
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								'reviewer',
+								input.sessionID,
+								turbo,
+							);
 						}
 						if (hasTestEngineer) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							for (const evidenceTaskId of evidenceTaskIds) {
-								await recordGateEvidence(
-									directory,
-									evidenceTaskId,
-									'test_engineer',
-									input.sessionID,
-									turbo,
-								);
-							}
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								'test_engineer',
+								input.sessionID,
+								turbo,
+							);
 						}
 					}
 				} catch (err) {

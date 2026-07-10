@@ -8,6 +8,10 @@
 #
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
+
+# FR-003 oversight retry tests (full-auto-intercept.dispatch.test.ts)
+src/full-auto/state
+src/full-auto/oversight
 #
 # Last updated: 2026-07-05 (normalization in scripts/lib/normalize-mock-target.sh)
 

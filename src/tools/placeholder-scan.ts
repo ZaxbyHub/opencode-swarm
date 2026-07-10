@@ -6,7 +6,6 @@ import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getParserForFile } from '../lang/registry';
 import { escapeRegex } from '../utils';
-import { runExternalTool } from '../utils/external-tool-runner';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -15,7 +14,20 @@ export interface PlaceholderScanInput {
 	changed_files: string[];
 	allow_globs?: string[];
 	deny_patterns?: string[];
-	added_lines?: Record<string, number[]>;
+	/**
+	 * When provided, the scanner filters findings to only report patterns
+	 * on lines that were added in this PR. The direct API accepts Sets and the
+	 * JSON tool boundary accepts arrays, which are normalized before scanning.
+	 * Lines not in the set are treated as pre-existing and silently ignored.
+	 */
+	added_lines?: Record<string, Set<number> | number[]>;
+	/**
+	 * Values that suppress findings when found as substrings in the excerpt.
+	 * Unlike FILE_ALLOWLIST (which skips entire files), this filters individual
+	 * findings by matching against the excerpt text.
+	 */
+	sentinel_allowlist?: string[];
+	/** @deprecated Use sentinel_allowlist. Kept for existing callers. */
 	allow_sentinels?: string[];
 }
 
@@ -40,9 +52,7 @@ export interface PlaceholderScanResult {
 // ============ Constants ============
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
-const GIT_DIFF_TIMEOUT_MS = 5000;
-const GIT_DIFF_MAX_BYTES = 512 * 1024;
-const DEFAULT_ALLOW_SENTINELS = ['SC-PLACEHOLDER'];
+const DEFAULT_SENTINEL_ALLOWLIST = ['SC-PLACEHOLDER'];
 
 // Default deny patterns (comment patterns)
 const DEFAULT_COMMENT_PATTERNS = [
@@ -269,6 +279,7 @@ function isPlanFile(filePath: string): boolean {
 function scanPlanFileForPlaceholders(
 	content: string,
 	filePath: string,
+	addedLines?: Set<number>,
 ): PlaceholderFinding[] {
 	const findings: PlaceholderFinding[] = [];
 	const lines = content.split('\n');
@@ -276,6 +287,7 @@ function scanPlanFileForPlaceholders(
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		const lineNumber = i + 1;
+		if (addedLines && !addedLines.has(lineNumber)) continue;
 
 		for (const { pattern, rule_id } of PLAN_PLACEHOLDER_PATTERNS) {
 			if (pattern.test(line)) {
@@ -293,6 +305,15 @@ function scanPlanFileForPlaceholders(
 	}
 
 	return findings;
+}
+
+/** Normalize JSON-array and direct-API Set inputs to the scanner's Set shape. */
+function normalizeAddedLines(
+	value: Set<number> | number[] | undefined,
+): Set<number> | undefined {
+	if (value instanceof Set) return value;
+	if (Array.isArray(value)) return new Set(value);
+	return undefined;
 }
 
 /**
@@ -405,13 +426,22 @@ function scanWithRegex(
 		string: typeof DEFAULT_STRING_PATTERNS;
 		code: typeof DEFAULT_CODE_PATTERNS;
 	},
+	addedLines?: Set<number>,
 ): PlaceholderFinding[] {
 	const findings: PlaceholderFinding[] = [];
 	const lines = content.split('\n');
 
+	// When added_lines is provided, only report findings on PR-added lines
+	const filterByAddedLines = addedLines !== undefined;
+
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		const lineNumber = i + 1;
+
+		// Skip lines not in the added-lines set when diff-aware mode is active
+		if (filterByAddedLines && !addedLines.has(lineNumber)) {
+			continue;
+		}
 
 		// Check comment patterns (various comment styles)
 		// // comment, # comment, /* comment */, <!-- comment -->
@@ -515,11 +545,17 @@ async function scanWithParser(
 		string: typeof DEFAULT_STRING_PATTERNS;
 		code: typeof DEFAULT_CODE_PATTERNS;
 	},
+	addedLines?: Set<number>,
 ): Promise<PlaceholderFinding[]> {
 	const findings: PlaceholderFinding[] = [];
 
 	// First do regex scan (works reliably)
-	const regexFindings = scanWithRegex(content, filePath, denyPatterns);
+	const regexFindings = scanWithRegex(
+		content,
+		filePath,
+		denyPatterns,
+		addedLines,
+	);
 	findings.push(...regexFindings);
 
 	// Then try parser for additional coverage
@@ -541,58 +577,68 @@ async function scanWithParser(
 			seenKeys.add(`${f.line}:${f.rule_id}`);
 		}
 
+		// When added_lines is provided, only report findings on PR-added lines
+		const filterByAddedLines = addedLines !== undefined;
+
 		// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
 		function walkNode(node: any) {
 			const nodeType = node.type;
 			const nodeText = node.text;
 			const lineNum = node.startPosition.row + 1;
 
+			// Determine if this node is on an added line (for filtering findings)
+			const isOnAddedLine = filterByAddedLines ? addedLines.has(lineNum) : true;
+
 			// Check comment nodes (various types across languages)
-			if (
-				nodeType === 'comment' ||
-				nodeType === 'line_comment' ||
-				nodeType === 'block_comment' ||
-				nodeType === 'documentation_comment' ||
-				nodeType === 'doc_comment'
-			) {
-				for (const { pattern, rule_id } of denyPatterns.comment) {
-					const key = `${lineNum}:${rule_id}`;
-					if (!seenKeys.has(key) && pattern.test(nodeText)) {
-						seenKeys.add(key);
-						findings.push({
-							path: filePath,
-							line: lineNum,
-							kind: 'comment',
-							excerpt: nodeText.substring(0, 100),
-							rule_id,
-						});
+			// Only report if the node is on an added line when diff-aware mode is active
+			if (isOnAddedLine) {
+				if (
+					nodeType === 'comment' ||
+					nodeType === 'line_comment' ||
+					nodeType === 'block_comment' ||
+					nodeType === 'documentation_comment' ||
+					nodeType === 'doc_comment'
+				) {
+					for (const { pattern, rule_id } of denyPatterns.comment) {
+						const key = `${lineNum}:${rule_id}`;
+						if (!seenKeys.has(key) && pattern.test(nodeText)) {
+							seenKeys.add(key);
+							findings.push({
+								path: filePath,
+								line: lineNum,
+								kind: 'comment',
+								excerpt: nodeText.substring(0, 100),
+								rule_id,
+							});
+						}
+					}
+				}
+
+				// Check string literals
+				if (
+					nodeType === 'string' ||
+					nodeType === 'template_string' ||
+					nodeType === 'string_literal' ||
+					nodeType === 'string_fragment'
+				) {
+					for (const { pattern, rule_id } of denyPatterns.string) {
+						const key = `${lineNum}:${rule_id}`;
+						if (!seenKeys.has(key) && pattern.test(nodeText)) {
+							seenKeys.add(key);
+							findings.push({
+								path: filePath,
+								line: lineNum,
+								kind: 'string',
+								excerpt: nodeText.substring(0, 100),
+								rule_id,
+							});
+						}
 					}
 				}
 			}
 
-			// Check string literals
-			if (
-				nodeType === 'string' ||
-				nodeType === 'template_string' ||
-				nodeType === 'string_literal' ||
-				nodeType === 'string_fragment'
-			) {
-				for (const { pattern, rule_id } of denyPatterns.string) {
-					const key = `${lineNum}:${rule_id}`;
-					if (!seenKeys.has(key) && pattern.test(nodeText)) {
-						seenKeys.add(key);
-						findings.push({
-							path: filePath,
-							line: lineNum,
-							kind: 'string',
-							excerpt: nodeText.substring(0, 100),
-							rule_id,
-						});
-					}
-				}
-			}
-
-			// Recursively walk children
+			// Always recurse into children — findings are filtered by isOnAddedLine above,
+			// so skipping a parent node must not prevent traversal to its descendants
 			if (node.children) {
 				for (const child of node.children) {
 					walkNode(child);
@@ -609,168 +655,6 @@ async function scanWithParser(
 	return findings;
 }
 
-function normalizeRelativePathForDiff(filePath: string): string {
-	return filePath.replace(/\\/g, '/').replace(/^\.\/+/, '');
-}
-
-function parseAddedLinesFromUnifiedDiff(
-	diffOutput: string,
-): Map<string, Set<number>> {
-	const result = new Map<string, Set<number>>();
-	let currentFile: string | null = null;
-
-	for (const line of diffOutput.split('\n')) {
-		if (line.startsWith('+++ b/')) {
-			currentFile = normalizeRelativePathForDiff(line.slice(6).trim());
-			if (!result.has(currentFile)) {
-				result.set(currentFile, new Set());
-			}
-			continue;
-		}
-
-		if (line.startsWith('@@') && currentFile) {
-			const match = line.match(/^@@ [^+]*\+(\d+)(?:,(\d+))? @@/);
-			if (!match) continue;
-			const start = Number.parseInt(match[1], 10);
-			const count = match[2] !== undefined ? Number.parseInt(match[2], 10) : 1;
-			const lines = result.get(currentFile)!;
-			for (let i = start; i < start + count; i++) {
-				lines.add(i);
-			}
-		}
-	}
-
-	return result;
-}
-
-function mergeAddedLineMaps(
-	target: Map<string, Set<number>>,
-	source: Map<string, Set<number>> | null,
-): void {
-	if (!source) return;
-	for (const [filePath, lines] of source) {
-		let existing = target.get(filePath);
-		if (!existing) {
-			existing = new Set<number>();
-			target.set(filePath, existing);
-		}
-		for (const line of lines) {
-			existing.add(line);
-		}
-	}
-}
-
-async function getAddedLinesFromGitDiff(
-	directory: string,
-	changedFiles: string[],
-): Promise<Map<string, Set<number>> | null> {
-	if (changedFiles.length === 0) return new Map();
-
-	const runGitDiff = async (
-		args: string[],
-	): Promise<Map<string, Set<number>> | null> => {
-		try {
-			const result = await runExternalTool({
-				executable: 'git',
-				args: [
-					'-C',
-					directory,
-					'diff',
-					'--unified=0',
-					'--no-ext-diff',
-					...args,
-					'--',
-					...changedFiles.map(normalizeRelativePathForDiff),
-				],
-				cwd: directory,
-				timeoutMs: GIT_DIFF_TIMEOUT_MS,
-				maxStdoutBytes: GIT_DIFF_MAX_BYTES,
-				maxStderrBytes: GIT_DIFF_MAX_BYTES,
-			});
-			if (result.status !== 'completed' || result.exitCode !== 0) return null;
-			if (result.stdoutTruncated) return null;
-			return parseAddedLinesFromUnifiedDiff(result.stdout);
-		} catch {
-			return null;
-		}
-	};
-
-	try {
-		const combined = new Map<string, Set<number>>();
-		for (const baseBranch of [
-			'origin/main',
-			'origin/master',
-			'main',
-			'master',
-		]) {
-			const result = await runExternalTool({
-				executable: 'git',
-				args: ['-C', directory, 'merge-base', baseBranch, 'HEAD'],
-				cwd: directory,
-				timeoutMs: GIT_DIFF_TIMEOUT_MS,
-				maxStdoutBytes: GIT_DIFF_MAX_BYTES,
-				maxStderrBytes: GIT_DIFF_MAX_BYTES,
-			});
-			const mergeBase = result.stdout.trim();
-			if (
-				result.status === 'completed' &&
-				result.exitCode === 0 &&
-				!result.stdoutTruncated &&
-				mergeBase
-			) {
-				const diff = await runGitDiff([`${mergeBase}..HEAD`]);
-				mergeAddedLineMaps(combined, diff);
-				break;
-			}
-		}
-
-		mergeAddedLineMaps(combined, await runGitDiff(['HEAD']));
-		return combined.size > 0 ? combined : null;
-	} catch {
-		return null;
-	}
-}
-
-async function buildAddedLineMap(
-	input: PlaceholderScanInput,
-	directory: string,
-): Promise<Map<string, Set<number>> | null> {
-	if (input.added_lines) {
-		const fromInput = new Map<string, Set<number>>();
-		for (const [filePath, lines] of Object.entries(input.added_lines)) {
-			fromInput.set(normalizeRelativePathForDiff(filePath), new Set(lines));
-		}
-		return fromInput;
-	}
-
-	return getAddedLinesFromGitDiff(directory, input.changed_files);
-}
-
-function filterFindingsToAddedLines(
-	findings: PlaceholderFinding[],
-	filePath: string,
-	addedLineMap: Map<string, Set<number>> | null,
-): PlaceholderFinding[] {
-	if (!addedLineMap) return findings;
-	const allowedLines = addedLineMap.get(normalizeRelativePathForDiff(filePath));
-	if (!allowedLines) return [];
-	return findings.filter((finding) => allowedLines.has(finding.line));
-}
-
-function filterAllowedSentinels(
-	findings: PlaceholderFinding[],
-	allowSentinels: string[] | undefined,
-): PlaceholderFinding[] {
-	const sentinels = [...DEFAULT_ALLOW_SENTINELS, ...(allowSentinels ?? [])]
-		.map((s) => s.trim())
-		.filter(Boolean);
-	if (sentinels.length === 0) return findings;
-	return findings.filter(
-		(finding) =>
-			!sentinels.some((sentinel) => finding.excerpt.includes(sentinel)),
-	);
-}
-
 // ============ Main Function ============
 
 /**
@@ -780,8 +664,33 @@ export async function placeholderScan(
 	input: PlaceholderScanInput,
 	directory: string,
 ): Promise<PlaceholderScanResult> {
-	const { changed_files, allow_globs, deny_patterns } = input;
-	const addedLineMap = await buildAddedLineMap(input, directory);
+	const {
+		changed_files,
+		allow_globs,
+		deny_patterns,
+		added_lines,
+		sentinel_allowlist,
+		allow_sentinels,
+	} = input;
+
+	// Build sentinel allowlist as regex patterns for efficient matching
+	const sentinelPatterns = [
+		...DEFAULT_SENTINEL_ALLOWLIST,
+		...(sentinel_allowlist ?? allow_sentinels ?? []),
+	].map((sentinel) => new RegExp(escapeRegex(sentinel), 'i'));
+
+	/**
+	 * Check if an excerpt should be suppressed by the sentinel allowlist.
+	 * Returns true if the excerpt contains any sentinel value (substring match).
+	 */
+	function isSentinelAllowed(excerpt: string): boolean {
+		for (const pattern of sentinelPatterns) {
+			if (pattern.test(excerpt)) {
+				return true;
+			}
+		}
+		return false;
+	}
 
 	// Build deny patterns
 	// If custom patterns are provided, they replace the defaults
@@ -872,26 +781,44 @@ export async function placeholderScan(
 
 		filesScanned++;
 
+		// Get added lines for this file (normalized to relative path)
+		const addedLinesForFile = normalizeAddedLines(
+			added_lines?.[relativeFilePath] ?? added_lines?.[filePath],
+		);
+
 		// Use plan-specific scanner for .swarm/plan.md, parser for supported languages, regex fallback otherwise
 		let fileFindings: PlaceholderFinding[];
 		if (isPlanFile(filePath)) {
-			fileFindings = scanPlanFileForPlaceholders(content, filePath);
+			fileFindings = scanPlanFileForPlaceholders(
+				content,
+				filePath,
+				addedLinesForFile,
+			);
 		} else if (isParserSupported(filePath)) {
-			fileFindings = await scanWithParser(content, filePath, denyPatterns);
+			fileFindings = await scanWithParser(
+				content,
+				filePath,
+				denyPatterns,
+				addedLinesForFile,
+			);
 		} else {
-			fileFindings = scanWithRegex(content, filePath, denyPatterns);
+			fileFindings = scanWithRegex(
+				content,
+				filePath,
+				denyPatterns,
+				addedLinesForFile,
+			);
 		}
 
-		fileFindings = filterFindingsToAddedLines(
-			fileFindings,
-			relativeFilePath,
-			addedLineMap,
-		);
-		fileFindings = filterAllowedSentinels(fileFindings, input.allow_sentinels);
+		// Filter out findings suppressed by sentinel allowlist
+		const filteredFindings =
+			sentinelPatterns.length > 0
+				? fileFindings.filter((f) => !isSentinelAllowed(f.excerpt))
+				: fileFindings;
 
 		// Add findings to result
-		if (fileFindings.length > 0) {
-			findings.push(...fileFindings);
+		if (filteredFindings.length > 0) {
+			findings.push(...filteredFindings);
 			filesWithFindings.add(filePath);
 		}
 	}
@@ -941,25 +868,19 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 		added_lines: z
 			.record(z.string(), z.array(z.number().int().positive()))
 			.optional()
-			.describe(
-				'Optional map of file path to added line numbers. When omitted, placeholder_scan computes added lines from git diff.',
-			),
+			.describe('Optional map of file path to PR-added line numbers'),
+		sentinel_allowlist: z
+			.array(z.string())
+			.optional()
+			.describe('Intentional sentinel strings that suppress matching findings'),
 		allow_sentinels: z
 			.array(z.string())
 			.optional()
-			.describe(
-				'Intentional sentinel strings that suppress matching findings on the same line.',
-			),
+			.describe('Deprecated alias for sentinel_allowlist'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
 		const result = await placeholderScan(
-			args as {
-				changed_files: string[];
-				allow_globs?: string[];
-				deny_patterns?: string[];
-				added_lines?: Record<string, number[]>;
-				allow_sentinels?: string[];
-			},
+			args as PlaceholderScanInput,
 			directory,
 		);
 		return JSON.stringify(result);

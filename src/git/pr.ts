@@ -309,12 +309,14 @@ export const _internals: {
 	spawnSyncWithTransientRetry: typeof spawnSyncWithTransientRetry;
 	spawnSync: typeof __spawnSyncSeam.spawnSync;
 	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
+	getMergeGroupRun: typeof getMergeGroupRun;
 } = {
 	ghExec,
 	ghExecAsync,
 	spawnSyncWithTransientRetry,
 	spawnSync: __spawnSyncSeam.spawnSync,
 	readLaneEnvFileFromDiskSync,
+	getMergeGroupRun,
 };
 
 /**
@@ -504,6 +506,7 @@ export interface PRStatusResult {
 		name: string;
 		status: string;
 		conclusion: string | null;
+		detailsUrl?: string;
 	}>;
 }
 
@@ -741,5 +744,79 @@ export async function getPRReviewState(
 	return {
 		reviewDecision: parsed.reviewDecision ?? '',
 		reviewRequestCount: parsed.reviewRequests?.length ?? 0,
+	};
+}
+
+/**
+ * Result of fetching a GitHub Actions run for a PR's merge group.
+ */
+export interface MergeGroupRunResult {
+	/** Run status: queued, in_progress, completed. */
+	status: string;
+	/** Run conclusion: success, failure, cancelled, etc. */
+	conclusion: string | null;
+	/** HTML URL to the run. */
+	htmlUrl: string;
+}
+
+/**
+ * Fetch the merge group GitHub Actions run for a PR.
+ *
+ * Searches the PR's statusCheckRollup for the "Merge pull request" check,
+ * extracts the run ID from its detailsUrl, and fetches the run details
+ * via `gh run view`.
+ *
+ * Returns null if no merge group check is found (PR not in a merge queue).
+ */
+export async function getMergeGroupRun(
+	statusCheckRollup: PRStatusResult['statusCheckRollup'],
+	repoFullName: string,
+	cwd: string,
+): Promise<MergeGroupRunResult | null> {
+	// Find the merge group check run in the status check rollup
+	const mergeGroupCheck = statusCheckRollup.find(
+		(check) => check.name === 'Merge pull request' && check.detailsUrl,
+	);
+	if (!mergeGroupCheck?.detailsUrl) {
+		return null;
+	}
+
+	// Extract run ID from detailsUrl
+	// Format: https://github.com/owner/repo/actions/runs/<run_id>
+	const runIdMatch = mergeGroupCheck.detailsUrl.match(/\/actions\/runs\/(\d+)/);
+	if (!runIdMatch) {
+		return null;
+	}
+	const runId = runIdMatch[1];
+
+	let stdout: string;
+	try {
+		stdout = await _internals.ghExecAsync(
+			[
+				'run',
+				'view',
+				runId,
+				'--json',
+				'status,conclusion,htmlUrl',
+				'--repo',
+				repoFullName,
+			],
+			cwd,
+		);
+	} catch (err) {
+		throw new Error(
+			`Failed to fetch merge group run for ${repoFullName}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	const parsed = JSON.parse(stdout) as {
+		status: string;
+		conclusion: string | null;
+		htmlUrl: string;
+	};
+	return {
+		status: parsed.status ?? '',
+		conclusion: parsed.conclusion ?? null,
+		htmlUrl: parsed.htmlUrl ?? '',
 	};
 }

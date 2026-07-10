@@ -8,7 +8,7 @@ import {
 } from '../../../src/commands/pr-monitor-status.js';
 import { COMMAND_REGISTRY } from '../../../src/commands/registry.js';
 
-const { formatRelativeTime } = _internals;
+const { formatRelativeTime, formatMergeGroupStatus } = _internals;
 const fixedNow = 1_700_000_000_000;
 
 function withFixedNow<T>(callback: () => T): T {
@@ -25,7 +25,6 @@ function withFixedNow<T>(callback: () => T): T {
 // Mock listActive via _internals DI seam — no mock.module needed
 // ---------------------------------------------------------------------------
 const mockListActive = mock(() => Promise.resolve([]));
-const mockListMergeGroupRuns = mock(() => Promise.resolve({ runs: [] }));
 
 // ---------------------------------------------------------------------------
 // Temp directory
@@ -37,20 +36,13 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'pr-status-test-'));
 	savedInternals = { ..._internals };
 	_internals.listActive = mockListActive;
-	_internals.listMergeGroupRuns = mockListMergeGroupRuns;
 	mockListActive.mockReset();
-	mockListMergeGroupRuns.mockReset();
-	mockListMergeGroupRuns.mockImplementation(() =>
-		Promise.resolve({ runs: [] }),
-	);
 });
 
 afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
 	mockListActive.mockReset();
-	mockListMergeGroupRuns.mockReset();
 	_internals.listActive = savedInternals.listActive;
-	_internals.listMergeGroupRuns = savedInternals.listMergeGroupRuns;
 });
 
 // ---------------------------------------------------------------------------
@@ -199,64 +191,9 @@ describe('handlePrMonitorStatusCommand', () => {
 			expect(result).toContain('Active subscriptions (1):');
 			expect(result).toContain('  1. owner/repo#42');
 			expect(result).toContain('URL: https://github.com/owner/repo/pull/42');
-			expect(result).toContain('Merge-group runs: none found in recent runs');
-			expect(result).toContain(
-				'Merge-group checks: gh pr checks 42 --repo owner/repo',
-			);
-			expect(result).toContain(
-				'Failed logs: gh run view <run-id> --repo owner/repo --log-failed',
-			);
 			expect(result).toContain('Last checked: 1 minute ago');
 			expect(result).toContain('Watching: yes');
 			expect(result).toContain('Errors: 0');
-		});
-
-		test('renders recent failed merge-group runs with log commands', async () => {
-			mockListActive.mockImplementation(() =>
-				Promise.resolve([
-					{
-						correlationId: 'session-1::owner/repo::42',
-						sessionID: 'session-1',
-						prNumber: 42,
-						repoFullName: 'owner/repo',
-						prUrl: 'https://github.com/owner/repo/pull/42',
-						lastCheckedAt: Date.now() - 90_000,
-						isWatching: true,
-						hasUnaddressedEvents: false,
-						status: 'active' as const,
-						createdAt: Date.now() - 300_000,
-						updatedAt: Date.now() - 90_000,
-						errorCount: 0,
-					},
-				]),
-			);
-			mockListMergeGroupRuns.mockImplementation(() =>
-				Promise.resolve({
-					runs: [
-						{
-							databaseId: 123,
-							headBranch: 'gh-readonly-queue/main/pr-42-abc',
-							status: 'completed',
-							conclusion: 'failure',
-							url: 'https://github.com/owner/repo/actions/runs/123',
-						},
-					],
-				}),
-			);
-
-			const result = await handlePrMonitorStatusCommand(
-				tempDir,
-				[],
-				'session-1',
-			);
-
-			expect(result).toContain('Merge-group runs:');
-			expect(result).toContain(
-				'123: failure https://github.com/owner/repo/actions/runs/123',
-			);
-			expect(result).toContain(
-				'Failed logs: gh run view 123 --repo owner/repo --log-failed',
-			);
 		});
 
 		test('shows "Watching: no" when isWatching is false', async () => {
@@ -381,23 +318,16 @@ describe('handlePrMonitorStatusCommand', () => {
 				'session-1',
 			);
 
-			// Verify structure: header, blank, active count, sub block, blank, total
+			// Verify structure: header, blank, active count, sub block (URL, Last checked, Watching, Merge group, Errors), blank, total
 			const lines = result.split('\n');
 			expect(lines[0]).toBe('PR Monitor Status — Session: session-1');
 			expect(lines[1]).toBe('');
 			expect(lines[2]).toBe('Active subscriptions (1):');
 			expect(lines[3]).toBe('  1. owner/repo#1');
-			expect(lines).toContain(
-				'     Merge-group checks: gh pr checks 1 --repo owner/repo',
-			);
-			expect(lines).toContain(
-				'     Failed logs: gh run view <run-id> --repo owner/repo --log-failed',
-			);
+			expect(lines).toContain('     Merge group: unknown');
 			expect(lines).toContain('     Errors: 0');
-			// Blank after last sub before total
-			expect(lines[lines.indexOf('     Errors: 0') + 1]).toBe('');
-			// No total line shown when session count equals total (1 === 1)
-			expect(lines[lines.indexOf('     Errors: 0') + 2]).toBeUndefined();
+			// No total line shown when session count equals total (1 === 1).
+			expect(lines).not.toContain('Total active across all sessions: 1');
 		});
 	});
 
@@ -634,6 +564,180 @@ describe('handlePrMonitorStatusCommand', () => {
 			expect(result).toBe('No active PR subscriptions for this session.');
 			expect(result).not.toContain('other/repo#2');
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// formatMergeGroupStatus tests
+// ---------------------------------------------------------------------------
+describe('formatMergeGroupStatus', () => {
+	test('returns "Merge group: unknown" when status is undefined', () => {
+		expect(formatMergeGroupStatus()).toBe('Merge group: unknown');
+	});
+
+	test('returns "Merge group: unknown" when status is empty string', () => {
+		expect(formatMergeGroupStatus('', undefined, undefined)).toBe(
+			'Merge group: unknown',
+		);
+	});
+
+	test('shows status only when no conclusion or url', () => {
+		expect(formatMergeGroupStatus('completed', undefined, undefined)).toBe(
+			'Merge group: completed',
+		);
+	});
+
+	test('shows status and conclusion when provided', () => {
+		expect(formatMergeGroupStatus('completed', 'success', undefined)).toBe(
+			'Merge group: completed success',
+		);
+	});
+
+	test('shows status, conclusion, and url when all provided', () => {
+		const url = 'https://github.com/owner/repo/actions/runs/123';
+		expect(formatMergeGroupStatus('completed', 'failure', url)).toBe(
+			'Merge group: completed failure (https://github.com/owner/repo/actions/runs/123)',
+		);
+	});
+
+	test('shows status and url when conclusion is missing', () => {
+		const url = 'https://github.com/owner/repo/actions/runs/456';
+		expect(formatMergeGroupStatus('in_progress', undefined, url)).toBe(
+			'Merge group: in_progress (https://github.com/owner/repo/actions/runs/456)',
+		);
+	});
+
+	test('shows queued status', () => {
+		expect(formatMergeGroupStatus('queued', undefined, undefined)).toBe(
+			'Merge group: queued',
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// handlePrMonitorStatusCommand — merge_group status display
+// ---------------------------------------------------------------------------
+describe('handlePrMonitorStatusCommand — merge_group status', () => {
+	test('displays merge_group status when available in subscription', async () => {
+		mockListActive.mockImplementation(() =>
+			Promise.resolve([
+				{
+					correlationId: 'session-1::owner/repo::1',
+					sessionID: 'session-1',
+					prNumber: 1,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/1',
+					lastCheckedAt: Date.now() - 60_000,
+					isWatching: true,
+					hasUnaddressedEvents: false,
+					status: 'active' as const,
+					createdAt: Date.now() - 120_000,
+					updatedAt: Date.now() - 60_000,
+					errorCount: 0,
+					mergeGroupRunStatus: 'completed',
+					mergeGroupRunConclusion: 'failure',
+					mergeGroupRunHtmlUrl:
+						'https://github.com/owner/repo/actions/runs/123',
+				},
+			]),
+		);
+
+		const result = await handlePrMonitorStatusCommand(tempDir, [], 'session-1');
+
+		expect(result).toContain('Merge group: completed failure');
+		expect(result).toContain('https://github.com/owner/repo/actions/runs/123');
+	});
+
+	test('displays "Merge group: unknown" when merge_group status is missing', async () => {
+		mockListActive.mockImplementation(() =>
+			Promise.resolve([
+				{
+					correlationId: 'session-1::owner/repo::1',
+					sessionID: 'session-1',
+					prNumber: 1,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/1',
+					lastCheckedAt: Date.now() - 60_000,
+					isWatching: true,
+					hasUnaddressedEvents: false,
+					status: 'active' as const,
+					createdAt: Date.now() - 120_000,
+					updatedAt: Date.now() - 60_000,
+					errorCount: 0,
+					// No mergeGroupRunStatus - field is absent
+				},
+			]),
+		);
+
+		const result = await handlePrMonitorStatusCommand(tempDir, [], 'session-1');
+
+		expect(result).toContain('Merge group: unknown');
+	});
+
+	test('displays merge_group status with success conclusion', async () => {
+		mockListActive.mockImplementation(() =>
+			Promise.resolve([
+				{
+					correlationId: 'session-1::owner/repo::1',
+					sessionID: 'session-1',
+					prNumber: 1,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/1',
+					lastCheckedAt: Date.now() - 60_000,
+					isWatching: true,
+					hasUnaddressedEvents: false,
+					status: 'active' as const,
+					createdAt: Date.now() - 120_000,
+					updatedAt: Date.now() - 60_000,
+					errorCount: 0,
+					mergeGroupRunStatus: 'completed',
+					mergeGroupRunConclusion: 'success',
+					mergeGroupRunHtmlUrl:
+						'https://github.com/owner/repo/actions/runs/789',
+				},
+			]),
+		);
+
+		const result = await handlePrMonitorStatusCommand(tempDir, [], 'session-1');
+
+		expect(result).toContain('Merge group: completed success');
+		expect(result).toContain('https://github.com/owner/repo/actions/runs/789');
+	});
+
+	test('SC-014: PR with failing merge_group run shows failure reference', async () => {
+		// Regression test: failing merge_group runs must appear in /swarm pr status
+		// with a reference to the failed run's logs (URL).
+		mockListActive.mockImplementation(() =>
+			Promise.resolve([
+				{
+					correlationId: 'session-1::owner/repo::42',
+					sessionID: 'session-1',
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+					lastCheckedAt: Date.now() - 30_000,
+					isWatching: true,
+					hasUnaddressedEvents: false,
+					status: 'active' as const,
+					createdAt: Date.now() - 300_000,
+					updatedAt: Date.now() - 30_000,
+					errorCount: 1,
+					mergeGroupRunStatus: 'completed',
+					mergeGroupRunConclusion: 'failure',
+					mergeGroupRunHtmlUrl:
+						'https://github.com/owner/repo/actions/runs/999',
+				},
+			]),
+		);
+
+		const result = await handlePrMonitorStatusCommand(tempDir, [], 'session-1');
+
+		// The failing merge_group run must be surfaced with its failure status
+		expect(result).toContain('Merge group: completed failure');
+		// The URL reference must be present so users can view failed run logs
+		expect(result).toContain('https://github.com/owner/repo/actions/runs/999');
+		// The PR should still show its own error count
+		expect(result).toContain('Errors: 1');
 	});
 });
 

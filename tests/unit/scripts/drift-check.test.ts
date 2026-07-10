@@ -12,7 +12,7 @@ import {
 	detectDocsClaimDrift,
 	detectSkillMirrorDrift,
 	detectToolRegistrationDrift,
-	runAllDetectors,
+	runSyncDetectors,
 } from '../../../scripts/drift-check.ts';
 
 // Issue #1497: the drift checker must (a) detect real drift in each category and
@@ -40,8 +40,8 @@ afterEach(() => {
 });
 
 describe('drift-check: no false positives on the real repository', () => {
-	test('runAllDetectors produces zero error/warning findings on the current tree', () => {
-		const blocking = runAllDetectors().filter((f) => f.severity !== 'notice');
+	test('runSyncDetectors produces zero error/warning findings on the current tree', () => {
+		const blocking = runSyncDetectors().filter((f) => f.severity !== 'notice');
 		// If this fails, the message lists the offending findings for triage.
 		expect(blocking.map((f) => `${f.category}: ${f.message}`)).toEqual([]);
 	});

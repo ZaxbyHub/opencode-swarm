@@ -70,6 +70,12 @@ export interface PrSubscriptionRecord {
 	/** JSON stringified array of check names + conclusions. */
 	lastCheckRunSet?: string;
 	mergeableState?: string;
+	/** Merge-group run status (e.g. "queued", "in_progress", "completed"). */
+	mergeGroupRunStatus?: string;
+	/** Merge-group run conclusion (e.g. "success", "failure"). */
+	mergeGroupRunConclusion?: string;
+	/** Merge-group run HTML URL for linking to the run. */
+	mergeGroupRunHtmlUrl?: string;
 	isWatching: boolean;
 	/** Guard for cleanup sweep — subscriptions with unaddressed events are retained. */
 	hasUnaddressedEvents: boolean;
@@ -114,6 +120,9 @@ const RecordSchema = z
 		lastCommentId: z.string().optional(),
 		lastCheckRunSet: z.string().optional(),
 		mergeableState: z.string().optional(),
+		mergeGroupRunStatus: z.string().optional(),
+		mergeGroupRunConclusion: z.string().optional(),
+		mergeGroupRunHtmlUrl: z.string().optional(),
 		isWatching: z.boolean(),
 		hasUnaddressedEvents: z.boolean(),
 		status: z.enum(['active', 'removed', 'expired']),

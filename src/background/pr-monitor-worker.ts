@@ -9,10 +9,12 @@
 
 import type { PrMonitorConfig } from '../config/schema';
 import {
+	getMergeGroupRun,
 	getMergeState,
 	getPRComments,
 	getPRReviewState,
 	getPRStatus,
+	type MergeGroupRunResult,
 	type MergeStateResult,
 	type PRCommentResult,
 	type PRStatusResult,
@@ -68,6 +70,7 @@ interface PrFetchResult {
 	comments: PRCommentResult[];
 	merge: MergeStateResult;
 	review: ReviewStateResult;
+	mergeGroupRun: MergeGroupRunResult | null;
 }
 
 /** Computed changes from comparing current PR state against the last snapshot. */
@@ -391,13 +394,44 @@ export class PrMonitorWorker {
 				return;
 			}
 
+			// Fetch merge group run info (depends on statusResult.statusCheckRollup)
+			let mergeGroupRunResult: MergeGroupRunResult | null = null;
+			let mergeGroupRunFetchSucceeded = false;
+			try {
+				mergeGroupRunResult = await _internals.getMergeGroupRun(
+					statusResult.statusCheckRollup,
+					sub.repoFullName,
+					this.directory,
+				);
+				mergeGroupRunFetchSucceeded = true;
+			} catch (err) {
+				log('[PrMonitorWorker] Failed to fetch merge group run', {
+					correlationId: sub.correlationId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				// Continue without merge group run info — do NOT overwrite existing snapshot state
+			}
+
+			// Abort if pollWithTimeout already fired — don't mutate state after timeout
+			if (isTimedOut?.()) {
+				log('[PrMonitorWorker] Skipping late result — poll already timed out', {
+					correlationId: sub.correlationId,
+				});
+				return;
+			}
+
 			// Phase 1: pure computation (no side effects, no await)
-			const changes = this.computeChanges(sub, {
-				status: statusResult,
-				comments: commentsResult,
-				merge: mergeResult,
-				review: reviewResult,
-			});
+			const changes = this.computeChanges(
+				sub,
+				{
+					status: statusResult,
+					comments: commentsResult,
+					merge: mergeResult,
+					review: reviewResult,
+					mergeGroupRun: mergeGroupRunResult,
+				},
+				mergeGroupRunFetchSucceeded,
+			);
 
 			// Phase 2: apply changes with single timeout guard
 			await this.applyChanges(sub, changes, isTimedOut);
@@ -430,10 +464,15 @@ export class PrMonitorWorker {
 	/**
 	 * Pure computation: compare current fetch results against the subscription
 	 * snapshot and return all events/mutations to apply. No side effects.
+	 *
+	 * @param mergeGroupRunFetchSucceeded - if false, mergeGroupRun fields are
+	 *   intentionally omitted from snapshotUpdates to preserve prior snapshot state
+	 *   on transient fetch failures.
 	 */
 	private computeChanges(
 		sub: PrSubscriptionRecord,
 		current: PrFetchResult,
+		mergeGroupRunFetchSucceeded: boolean,
 	): ComputedChanges {
 		const events: Array<{ type: AutomationEventType; payload: unknown }> = [];
 		const snapshotUpdates: Partial<PrSubscriptionRecord> = {
@@ -441,6 +480,16 @@ export class PrMonitorWorker {
 			mergeableState: current.merge.mergeable,
 			lastCheckedAt: Date.now(),
 		};
+
+		// Only overwrite mergeGroupRun snapshot fields when the fetch succeeded.
+		// On transient failure we intentionally leave these fields absent so
+		// updateSnapshot merge preserves whatever the prior snapshot held.
+		if (mergeGroupRunFetchSucceeded) {
+			snapshotUpdates.mergeGroupRunStatus = current.mergeGroupRun?.status;
+			snapshotUpdates.mergeGroupRunConclusion =
+				current.mergeGroupRun?.conclusion ?? undefined;
+			snapshotUpdates.mergeGroupRunHtmlUrl = current.mergeGroupRun?.htmlUrl;
+		}
 		let isMerged = false;
 		let isClosed = false;
 		let newReviewDecision = '';
@@ -618,6 +667,8 @@ export class PrMonitorWorker {
 
 	/**
 	 * Pure computation: detect CI transitions and push events into the array.
+	 * When multiple checks fail in a single poll cycle, emits ONE batched
+	 * pr.ci.failed event listing all failed checks (FR-005a batching).
 	 */
 	private computeCIEvents(
 		sub: PrSubscriptionRecord,
@@ -631,56 +682,35 @@ export class PrMonitorWorker {
 	): void {
 		let allPassed = true;
 		const prevMap = new Map(prevChecks.map((c) => [c.name, c.conclusion]));
-		const allComplete =
-			currentChecks.length > 0 &&
-			currentChecks.every(
-				(check) =>
-					check.status === 'completed' ||
-					check.status === 'COMPLETED' ||
-					check.conclusion !== null,
-			);
-		const failedChecks = currentChecks.filter(
-			(check) =>
-				check.conclusion === 'failure' || check.conclusion === 'FAILURE',
-		);
+		const newlyFailedChecks: Array<{ name: string; conclusion: string }> = [];
 
 		for (const check of currentChecks) {
+			if (check.conclusion === 'failure' || check.conclusion === 'FAILURE') {
+				const prev = prevMap.get(check.name);
+				if (prev !== 'failure' && prev !== 'FAILURE') {
+					newlyFailedChecks.push({
+						name: check.name,
+						conclusion: check.conclusion,
+					});
+				}
+			}
+
 			if (check.conclusion !== 'success' && check.conclusion !== 'SUCCESS') {
 				allPassed = false;
 			}
 		}
 
-		if (allComplete && failedChecks.length > 0) {
-			const prevWasIncomplete = prevChecks.some(
-				(check) =>
-					check.conclusion !== 'success' &&
-					check.conclusion !== 'SUCCESS' &&
-					check.conclusion !== 'failure' &&
-					check.conclusion !== 'FAILURE',
-			);
-			const hasNewFailure = failedChecks.some((check) => {
-				const prev = prevMap.get(check.name);
-				return prev !== 'failure' && prev !== 'FAILURE';
+		// FR-005a: batch all newly-failed checks into a single event
+		if (newlyFailedChecks.length > 0) {
+			events.push({
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: sub.prNumber,
+					repoFullName: sub.repoFullName,
+					prUrl: sub.prUrl,
+					failedChecks: newlyFailedChecks,
+				},
 			});
-			if (hasNewFailure || prevWasIncomplete || prevChecks.length === 0) {
-				events.push({
-					type: 'pr.ci.failed',
-					payload: {
-						prNumber: sub.prNumber,
-						repoFullName: sub.repoFullName,
-						prUrl: sub.prUrl,
-						checkName: failedChecks[0]?.name,
-						checkUrl: null,
-						conclusion: failedChecks[0]?.conclusion,
-						failedChecks: failedChecks.map((check) => ({
-							name: check.name,
-							status: check.status,
-							conclusion: check.conclusion,
-							checkUrl: null,
-						})),
-					},
-				});
-			}
 		}
 
 		if (allPassed && currentChecks.length > 0) {
@@ -946,6 +976,7 @@ export const _internals = {
 	getPRStatus,
 	getPRComments,
 	getMergeState,
+	getMergeGroupRun,
 	getPRReviewState,
 	listActive,
 	updateSnapshot,
