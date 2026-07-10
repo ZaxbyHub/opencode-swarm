@@ -71,6 +71,40 @@ export function stripCustomReleaseNotesBlock(body) {
 }
 
 /**
+ * Extract full (40-character) commit SHAs from GitHub commit URLs in a body.
+ *
+ * release-please with `changelog-notes-type: "github"` frequently generates
+ * changelog entries that link directly to the merge commit instead of the
+ * source PR, e.g.:
+ *
+ *   * description ([ba948b4](https://github.com/owner/repo/commit/ba948b40...))
+ *
+ * These commit URLs contain a 40-hex SHA that can be used to look up the
+ * associated PR(s) via the GitHub API. Short (7-char) SHA labels shown in
+ * the link text are NOT extracted — only the full 40-char SHA embedded in
+ * the URL is reliable.
+ *
+ * Returns deduplicated SHAs in first-seen order. Does not perform any I/O.
+ * Exported for unit tests.
+ */
+export function extractCommitShasFromBody(body) {
+	if (typeof body !== 'string' || body.length === 0) return [];
+	const seen = new Set();
+	const out = [];
+	// Match /commit/<40-hex> anywhere in the body. The word boundary \b after
+	// the SHA ensures we don't partially match a longer hex string.
+	const re = /\/commit\/([0-9a-f]{40})\b/gi;
+	for (const m of body.matchAll(re)) {
+		const sha = m[1].toLowerCase();
+		if (!seen.has(sha)) {
+			seen.add(sha);
+			out.push(sha);
+		}
+	}
+	return out;
+}
+
+/**
  * Extract candidate PR numbers from a release-please body string.
  *
  * release-please writes changelog entries that reference source PRs as
@@ -244,6 +278,31 @@ export function upsertReleaseNotesBlock(body, combined) {
 	return `${block}\n\n${original}`;
 }
 
+/**
+ * Merge two arrays of PR candidate numbers into a single deduplicated array,
+ * preserving first-seen order across both sources.
+ *
+ * `direct` entries come first (they are more reliable — explicit PR-number
+ * references in the release body). Entries from `shaResolved` are appended
+ * only if they haven't already appeared in `direct`.
+ *
+ * Exported for unit tests. Pure — no I/O, no side effects.
+ */
+export function mergeCandidateLists(direct, shaResolved) {
+	if (!Array.isArray(direct) && !Array.isArray(shaResolved)) return [];
+	// Seed `seen` and `out` both from the Set so intra-list duplicates in
+	// `direct` are collapsed before any `shaResolved` entries are appended.
+	const seen = new Set(Array.isArray(direct) ? direct : []);
+	const out = Array.isArray(direct) ? [...seen] : [];
+	for (const n of (Array.isArray(shaResolved) ? shaResolved : [])) {
+		if (!seen.has(n)) {
+			seen.add(n);
+			out.push(n);
+		}
+	}
+	return out;
+}
+
 // -----------------------------------------------------------------------------
 // gh CLI shim — wrapped so update modes can be exercised at integration time
 // while pure helpers stay testable without network access.
@@ -261,6 +320,7 @@ function ghJson(args) {
 		encoding: 'utf8',
 		maxBuffer: 16 * 1024 * 1024,
 		timeout: GH_TIMEOUT_MS,
+		stdin: 'ignore',
 	});
 	return JSON.parse(raw);
 }
@@ -270,6 +330,7 @@ function ghText(args) {
 		encoding: 'utf8',
 		maxBuffer: 16 * 1024 * 1024,
 		timeout: GH_TIMEOUT_MS,
+		stdin: 'ignore',
 	});
 }
 
@@ -289,6 +350,143 @@ function verifyPr(num) {
 	const res = tryGhJson(['pr', 'view', String(num), '--json', 'number,files']);
 	if (!res.ok) return null;
 	return res.value;
+}
+
+/**
+ * Validate a candidate PR number from an API response.
+ *
+ * Guards against garbage values (NaN, zero, negative, excessively large)
+ * that could slip through from malformed API responses.
+ *
+ * Exported for unit tests. Pure — no I/O, no side effects.
+ *
+ * @param {*} n — candidate number (may be any type from JSON)
+ * @returns {boolean} — true if n is a valid PR number
+ */
+export function isValidPrNumber(n) {
+	return (
+		Number.isInteger(n) &&
+		n > 0 &&
+		n < 10 ** MAX_PR_DIGITS
+	);
+}
+
+/**
+ * From a flat array of candidate PR objects (e.g. the .flat()-ed result of a
+ * `gh api --slurp` response), return the valid PR numbers in first-seen order,
+ * skipping null/non-object/invalid entries. Pure — no I/O. Exported for tests.
+ *
+ * Defense-in-depth: a malformed API response containing null or non-object
+ * slots must never throw here (which would crash the release-notes job and
+ * discard already-extracted direct candidates — see resolveAllCandidates).
+ * @param {unknown[]} prs
+ * @returns {number[]}
+ */
+export function selectValidPrNumbers(prs) {
+	if (!Array.isArray(prs)) return [];
+	const seen = new Set();
+	const out = [];
+	for (const pr of prs) {
+		if (pr && typeof pr === 'object' && isValidPrNumber(pr.number) && !seen.has(pr.number)) {
+			seen.add(pr.number);
+			out.push(pr.number);
+		}
+	}
+	return out;
+}
+
+/**
+ * Resolve a list of commit SHAs to PR numbers via the GitHub REST API.
+ *
+ * release-please with `changelog-notes-type: "github"` often emits commit
+ * SHA links rather than PR-number links. For each SHA we call
+ * `GET /repos/{repo}/commits/{sha}/pulls` to discover which PR(s) introduced
+ * that commit, then collect their numbers for fragment lookup.
+ *
+ * Edge cases handled:
+ * - A commit that maps to multiple PRs (e.g. cherry-picks): all PR numbers
+ *   are collected; each is logged. Fragment de-duplication in
+ *   `collectFragmentsForPrs` ensures a file is never included twice.
+ * - API failures for a given SHA are logged and skipped (non-fatal).
+ * - The GITHUB_REPOSITORY env var provides the repo slug (owner/repo).
+ *   Without it the lookup is skipped gracefully.
+ * - `--paginate --slurp` is passed to `gh api` so that commits associated
+ *   with more than 30 PRs (e.g. heavily cherry-picked base commits) are not
+ *   silently truncated to the first page. `--slurp` wraps each page into an
+ *   outer JSON array (`[[...page1],[...page2]]`), which `.flat()` unwraps into
+ *   a single PR-object array; without `--slurp`, `JSON.parse()` would fail
+ *   on the multiple-array output from `--paginate`.
+ *
+ * Returns a deduplicated array of PR numbers in first-seen order.
+ */
+function resolveCommitShasToPrNumbers(shas, log) {
+	if (!Array.isArray(shas) || shas.length === 0) return [];
+	const repoSlug = process.env.GITHUB_REPOSITORY;
+	if (!repoSlug) {
+		log('GITHUB_REPOSITORY not set — cannot resolve commit SHAs to PR numbers');
+		return [];
+	}
+	const seen = new Set();
+	const out = [];
+	for (const sha of shas) {
+		const res = tryGhJson(['api', '--paginate', '--slurp', `repos/${repoSlug}/commits/${sha}/pulls`]);
+		if (!res.ok || !Array.isArray(res.value)) {
+			log(`skip SHA ${sha.slice(0, 7)} — API lookup failed`);
+			continue;
+		}
+		// With --slurp, gh api returns an array of pages: [[...page1], [...page2]].
+		// Flatten into a single array of PR objects.
+		const prs = res.value.flat();
+		if (prs.length === 0) {
+			log(`SHA ${sha.slice(0, 7)} — no associated PRs found`);
+			continue;
+		}
+		const validNums = selectValidPrNumbers(prs);
+		if (validNums.length > 1) {
+			log(`SHA ${sha.slice(0, 7)} — resolves to ${validNums.length} PRs: ${validNums.map((n) => `#${n}`).join(', ')}`);
+		}
+		for (const n of validNums) {
+			if (!seen.has(n)) {
+				seen.add(n);
+				out.push(n);
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Extract and resolve all PR candidates from a release body.
+ *
+ * Shared by modeUpdatePr and modeUpdateRelease. Runs the direct
+ * PR-number extractor first, then falls back to commit-SHA resolution,
+ * and merges both result sets (deduped, first-seen order).
+ *
+ * Exported for unit tests. The only I/O is in `resolveCommitShasToPrNumbers`
+ * (when commit SHAs are present); the rest is pure.
+ *
+ * @param {string} strippedBody — body with custom-release-notes block stripped
+ * @param {(msg: string) => void} log — logger function
+ * @returns {number[]} — merged array of PR numbers
+ */
+export function resolveAllCandidates(strippedBody, log) {
+	const directCandidates = extractCandidatePrNumbers(strippedBody);
+	log(`found ${directCandidates.length} direct PR ref(s) in body`);
+
+	const commitShas = extractCommitShasFromBody(strippedBody);
+	log(`found ${commitShas.length} commit SHA(s) in body`);
+	let shaResolved = [];
+	if (commitShas.length > 0) {
+		try {
+			shaResolved = resolveCommitShasToPrNumbers(commitShas, log);
+		} catch (err) {
+			log(`commit-SHA resolution failed unexpectedly — continuing with direct candidates only: ${err instanceof Error ? err.message : String(err)}`);
+			shaResolved = [];
+		}
+	}
+	log(`resolved ${shaResolved.length} PR number(s) from commit SHAs`);
+
+	return mergeCandidateLists(directCandidates, shaResolved);
 }
 
 /**
@@ -364,17 +562,20 @@ async function modeUpdatePr(log) {
 		return 0;
 	}
 	const releasePr = prList.value[0];
-	// Exclude our previously-injected block before scanning, so PR
-	// references inside the injected fragments don't get re-treated as
-	// new source PRs on the next run.
-	const candidates = extractCandidatePrNumbers(
-		stripCustomReleaseNotesBlock(releasePr.body || ''),
-	);
-	if (candidates.length === 0) {
-		log('Release PR body has no PR references — exiting 0');
+	// Strip any previously-injected block before scanning, so PR/commit
+	// references inside the injected fragments are not re-treated as new
+	// source PRs on the next run.
+	const strippedBody = stripCustomReleaseNotesBlock(releasePr.body || '');
+
+	// Extract direct PR refs and resolve commit-SHA links, then merge.
+	const allCandidates = resolveAllCandidates(strippedBody, log);
+
+	if (allCandidates.length === 0) {
+		log('Release PR body has no PR references (direct or via commit SHAs) — exiting 0');
 		return 0;
 	}
-	const entries = collectFragmentsForPrs(candidates, repoRoot, log);
+	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
 	if (entries.length === 0) {
 		log('No pending fragments found across referenced PRs — exiting 0');
 		return 0;
@@ -413,15 +614,19 @@ async function modeUpdateRelease(log) {
 		return 0;
 	}
 	const releaseBody = rel.value.body || '';
-	// Same exclusion as update-pr — see modeUpdatePr above.
-	const candidates = extractCandidatePrNumbers(
-		stripCustomReleaseNotesBlock(releaseBody),
-	);
-	if (candidates.length === 0) {
-		log('Release body has no PR references — exiting 0');
+	// Strip any previously-injected block before scanning — same defense as
+	// modeUpdatePr: prevents re-scanning our own injected content on re-runs.
+	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
+
+	// Extract direct PR refs and resolve commit-SHA links, then merge.
+	const allCandidates = resolveAllCandidates(strippedBody, log);
+
+	if (allCandidates.length === 0) {
+		log('Release body has no PR references (direct or via commit SHAs) — exiting 0');
 		return 0;
 	}
-	const entries = collectFragmentsForPrs(candidates, repoRoot, log);
+	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
 	if (entries.length === 0) {
 		log('No pending fragments found across referenced PRs — exiting 0');
 		return 0;

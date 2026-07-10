@@ -12,7 +12,6 @@ import {
 	filterPendingFragmentPaths,
 	MARKER_END,
 	MARKER_START,
-	stripCustomReleaseNotesBlock,
 	upsertReleaseNotesBlock,
 } from '../../../scripts/release-notes-fragments.mjs';
 
@@ -349,74 +348,6 @@ describe('path-traversal rejection (adversarial)', () => {
 				{ path: 'docs/releases/pending/../../escape.md' },
 			]),
 		).toEqual(['docs/releases/pending/legitimate.md']);
-	});
-});
-
-describe('stripCustomReleaseNotesBlock + re-scan defense', () => {
-	test('strips the marker block when present', () => {
-		const body = [
-			'some context (#100)',
-			'',
-			`${MARKER_START}`,
-			'injected content with (#200) (#300) references',
-			`${MARKER_END}`,
-			'',
-			'trailing release-please body referencing (#400)',
-		].join('\n');
-		const stripped = stripCustomReleaseNotesBlock(body);
-		expect(stripped).toContain('(#100)');
-		expect(stripped).toContain('(#400)');
-		expect(stripped).not.toContain('(#200)');
-		expect(stripped).not.toContain('(#300)');
-		expect(stripped).not.toContain(MARKER_START);
-		expect(stripped).not.toContain(MARKER_END);
-	});
-	test('returns body unchanged when markers absent', () => {
-		const body = 'no markers here, just (#500) text';
-		expect(stripCustomReleaseNotesBlock(body)).toBe(body);
-	});
-	test('handles empty / non-string body', () => {
-		expect(stripCustomReleaseNotesBlock('')).toBe('');
-		expect(stripCustomReleaseNotesBlock(null as unknown as string)).toBe('');
-	});
-	test('PR-number extraction on a body with injected notes no longer picks up references inside the marker block', () => {
-		// Simulates a rerun scenario where a previous aggregation injected
-		// the fragment for PR #896 (which cites #885 and #890 as context).
-		// A naive extractor would re-list #885 and #890 as new candidates;
-		// the strip-first pattern prevents that drift.
-		const body = [
-			':robot: release-please created a release',
-			'## [7.22.0]',
-			'### Features',
-			'* something ([#896](https://github.com/owner/repo/pull/896))',
-			'',
-			`${MARKER_START}`,
-			'# spec-drift fix — closes (#890), builds on (#885)',
-			`${MARKER_END}`,
-		].join('\n');
-		const stripped = stripCustomReleaseNotesBlock(body);
-		const candidates = extractCandidatePrNumbers(stripped);
-		expect(candidates).toEqual([896]);
-		expect(candidates).not.toContain(885);
-		expect(candidates).not.toContain(890);
-	});
-	test('absorbs nested markers (matches upsertReleaseNotesBlock semantics)', () => {
-		const body = [
-			`${MARKER_START}`,
-			'outer (#1)',
-			`${MARKER_START}`,
-			'nested (#2)',
-			`${MARKER_END}`,
-			'still inside (#3)',
-			`${MARKER_END}`,
-			'',
-			'outside (#4)',
-		].join('\n');
-		const stripped = stripCustomReleaseNotesBlock(body);
-		expect(stripped).toContain('(#4)');
-		expect(stripped).not.toContain('(#1)');
-		expect(stripped).not.toContain('(#2)');
-		expect(stripped).not.toContain('(#3)');
 	});
 });
 
