@@ -244,54 +244,49 @@ describe('handleCiSimulateCommand', () => {
 	// in the Ubuntu 24.04 runner image. A follow-up PR will replace this
 	// with a synthetic-mock test (using dependency-injected git invocations
 	// rather than real git) and re-enable the assertion.
-	it.skip(
-		'SC-012: detects merge conflict when same line modified differently',
-		async () => {
-			// Create a shared file on main first
-			gitCheckout(tempDir, 'main');
-			fs.writeFileSync(
-				path.join(tempDir, 'config.js'),
-				'export const VERSION = 1;\n',
-			);
-			gitAddFile(tempDir, 'config.js', 'export const VERSION = 1;\n');
-			gitCommit(tempDir, 'add shared file on main');
-			gitPush(tempDir, 'origin', 'main');
+	it.skip('SC-012: detects merge conflict when same line modified differently', async () => {
+		// Create a shared file on main first
+		gitCheckout(tempDir, 'main');
+		fs.writeFileSync(
+			path.join(tempDir, 'config.js'),
+			'export const VERSION = 1;\n',
+		);
+		gitAddFile(tempDir, 'config.js', 'export const VERSION = 1;\n');
+		gitCommit(tempDir, 'add shared file on main');
+		gitPush(tempDir, 'origin', 'main');
 
-			// Create branch from main
-			gitCreateBranch(tempDir, 'conflict-branch');
-			gitCheckout(tempDir, 'conflict-branch');
+		// Create branch from main
+		gitCreateBranch(tempDir, 'conflict-branch');
+		gitCheckout(tempDir, 'conflict-branch');
 
-			// Modify the SAME line to a different value
-			fs.writeFileSync(
-				path.join(tempDir, 'config.js'),
-				'export const VERSION = 2;\n',
-			);
-			gitAddFile(tempDir, 'config.js', 'modify VERSION on branch');
-			gitCommit(tempDir, 'modify VERSION on branch');
+		// Modify the SAME line to a different value
+		fs.writeFileSync(
+			path.join(tempDir, 'config.js'),
+			'export const VERSION = 2;\n',
+		);
+		gitAddFile(tempDir, 'config.js', 'modify VERSION on branch');
+		gitCommit(tempDir, 'modify VERSION on branch');
 
-			// Switch back to main and modify the SAME line to yet another value
-			gitCheckout(tempDir, 'main');
-			fs.writeFileSync(
-				path.join(tempDir, 'config.js'),
-				'export const VERSION = 3;\n',
-			);
-			gitAddFile(tempDir, 'config.js', 'modify VERSION on main');
-			gitCommit(tempDir, 'modify VERSION on main');
-			gitPush(tempDir, 'origin', 'main');
+		// Switch back to main and modify the SAME line to yet another value
+		gitCheckout(tempDir, 'main');
+		fs.writeFileSync(
+			path.join(tempDir, 'config.js'),
+			'export const VERSION = 3;\n',
+		);
+		gitAddFile(tempDir, 'config.js', 'modify VERSION on main');
+		gitCommit(tempDir, 'modify VERSION on main');
+		gitPush(tempDir, 'origin', 'main');
 
-			// Simulate CI on the branch - should detect merge conflict
-			const result = await handleCiSimulateCommand(tempDir, [
-				'conflict-branch',
-			]);
+		// Simulate CI on the branch - should detect merge conflict
+		const result = await handleCiSimulateCommand(tempDir, ['conflict-branch']);
 
-			// The merge should fail due to conflict - either error or validation failure
-			expect(
-				result.includes('## Error') ||
-					result.includes('merge') ||
-					result.includes('conflict'),
-			).toBe(true);
-		},
-	); // close it.skipIf callback
+		// The merge should fail due to conflict - either error or validation failure
+		expect(
+			result.includes('## Error') ||
+				result.includes('merge') ||
+				result.includes('conflict'),
+		).toBe(true);
+	}); // close it.skipIf callback
 });
 
 // ---------------------------------------------------------------------------
