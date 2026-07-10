@@ -1,12 +1,4 @@
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	mock,
-	spyOn,
-	test,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,6 +9,7 @@ import {
 	isPlanMdInSync,
 	regeneratePlanMarkdown,
 } from '../../../src/plan/manager';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 
 // ---------------------------------------------------------------------------
 // FR-001 / F-11: isPlanMdInSync must NOT treat a non-equivalent plan.md that
@@ -69,20 +62,18 @@ async function writePlanMd(dir: string, content: string): Promise<void> {
 
 describe('isPlanMdInSync — FR-001 / F-11 substring-fallback tightening', () => {
 	let tempDir: string;
-	let toISOStringSpy: ReturnType<typeof spyOn> | null = null;
+	let restoreClock: Restore | null = null;
 
 	beforeEach(async () => {
 		tempDir = await mkdtemp(join(tmpdir(), 'plan-md-sync-'));
 		// Freeze the timestamp embedded by derivePlanMarkdown so the
 		// exact-equality and superset cases are deterministic.
-		toISOStringSpy = spyOn(Date.prototype, 'toISOString').mockReturnValue(
-			'2026-01-01T00:00:00.000Z',
-		);
+		restoreClock = freezeClock({ isoNow: '2026-01-01T00:00:00.000Z' });
 	});
 
 	afterEach(async () => {
-		toISOStringSpy?.mockRestore();
-		toISOStringSpy = null;
+		restoreClock?.();
+		restoreClock = null;
 		mock.restore();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });

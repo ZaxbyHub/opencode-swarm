@@ -1,0 +1,90 @@
+# Flake detection (issue #1782, root-cause detection phase §6).
+#
+# Triggers on completion of the `ci.yml` workflow when the triggering event was
+# a merge_group run. Downloads the per-shard flake-annotations artifacts
+# uploaded by ci.yml's unit job, concatenates them, and runs
+# scripts/ci/detect-and-quarantine-flakes.sh to produce quarantine suggestions
+# + a best-effort tracking issue.
+#
+# This workflow is ADVISORY ONLY: it never fails a run (the detection script
+# always exits 0). A detected flake already failed in ci.yml; this workflow
+# only surfaces the suggestion to quarantine so the next PR isn't blocked.
+#
+# Why a separate workflow_run (not a step in ci.yml): the detection needs the
+# FULL set of shards' annotations, but each unit shard is a separate job. A
+# workflow_run runs once after ALL ci.yml jobs finish and can see every shard's
+# artifact. (Plan critic C1 fix.)
+name: Flake Detection
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+# Only one detection run per triggering ci run. Without this, two near-simultaneous
+# merge-group failures could each spawn a detection run and double-file tracking
+# issues (PR review F-006). cancel-in-progress is false so a queued run still
+# completes (detection is cheap and advisory — we don't want to lose a suggestion).
+concurrency:
+  group: flake-detection-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    # Only act when the triggering ci run was on the default branch's merge
+    # queue (merge_group). PR-branch runs don't hit the Windows/macOS/coverage
+    # matrix, so their flakes aren't the target population. Skips release-please
+    # runs and cancelled runs.
+    if: >-
+      github.event.workflow_run.event == 'merge_group' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Download flake-annotation artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # run-id pins the download to the artifacts of the triggering ci run,
+          # not this workflow's run (plan critic C1 fix — workflow_run otherwise
+          # cannot see the triggering run's artifacts).
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: flake-annotations-unit-shard-*
+          merge-multiple: true
+          path: annotations
+
+      - name: Concatenate annotations
+        shell: bash
+        run: |
+          mkdir -p detection-out
+          cat annotations/flake-annotations-unit-shard-*.txt 2>/dev/null > detection-out/flake-annotations.txt || true
+          echo "Combined annotation line count: $(wc -l < detection-out/flake-annotations.txt | tr -d ' ')"
+          if [ ! -s detection-out/flake-annotations.txt ]; then
+            echo "No flake annotations found (ci.yml may have failed for a non-test reason)."
+          fi
+
+      - name: Run flake detection
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/ci/detect-and-quarantine-flakes.sh
+          bash scripts/ci/detect-and-quarantine-flakes.sh detection-out/flake-annotations.txt
+
+      - name: Upload flake suggestions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flake-suggestions
+          path: |
+            flake-suggestions.txt
+            detection-out/flake-annotations.txt
+          if-no-files-found: ignore

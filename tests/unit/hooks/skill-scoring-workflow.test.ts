@@ -1,5 +1,13 @@
 /**
  * Tests for workflow skill scoring boost (#1234 Part 4D) and score clamping.
+ *
+ * NOTE: this file is currently quarantined in scripts/ci/quarantined-tests.txt
+ * (merge-group flake). The freezeClock wraps below are the root-cause fix
+ * (root-cause class 1: time-sensitive assertions — computeSkillRelevanceScore
+ * is a continuous function of Date.now() via computeRecencyScore, and
+ * makeUsageEntry stamps entries with live new Date().toISOString()). The file
+ * stays quarantined until a merge-group run confirms greenness on all 3 OSes
+ * (issue #1782, plan critic H1 — un-quarantine is gated, not in this PR).
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -9,6 +17,7 @@ import {
 	type SkillMetadata,
 } from '../../../src/hooks/skill-scoring.js';
 import type { SkillUsageEntry } from '../../../src/hooks/skill-usage-log.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 function makeUsageEntry(
 	skillPath: string,
@@ -84,115 +93,138 @@ describe('computeSkillRelevanceScore: workflow boost', () => {
 	const skillPath = '.opencode/skills/generated/edit-test-lint/SKILL.md';
 
 	it('gives a workflow boost when skill_type is workflow and context matches', () => {
-		const history = Array.from({ length: 5 }, (_, i) =>
-			makeUsageEntry(skillPath, { taskID: `task-${i}` }),
+		// Freeze the clock: makeUsageEntry stamps with new Date().toISOString()
+		// and computeSkillRelevanceScore reads Date.now() — freezing both makes
+		// the relative ordering of scores deterministic (issue #1782).
+		withFrozenClock(
+			() => {
+				const history = Array.from({ length: 5 }, (_, i) =>
+					makeUsageEntry(skillPath, { taskID: `task-${i}` }),
+				);
+
+				const directiveMeta: SkillMetadata = {
+					path: skillPath,
+					name: 'edit-test-lint',
+					description: 'A directive',
+					skillType: 'directive',
+				};
+
+				const workflowMeta: SkillMetadata = {
+					path: skillPath,
+					name: 'edit-test-lint',
+					description: 'A workflow',
+					skillType: 'workflow',
+				};
+
+				const taskDescription = 'edit the file and run test and lint';
+
+				const directiveScore = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+					directiveMeta,
+				);
+				const workflowScore = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+					workflowMeta,
+				);
+
+				expect(workflowScore).toBeGreaterThan(directiveScore);
+			},
+			{ fixedNow: 1_700_000_000_000 },
 		);
-
-		const directiveMeta: SkillMetadata = {
-			path: skillPath,
-			name: 'edit-test-lint',
-			description: 'A directive',
-			skillType: 'directive',
-		};
-
-		const workflowMeta: SkillMetadata = {
-			path: skillPath,
-			name: 'edit-test-lint',
-			description: 'A workflow',
-			skillType: 'workflow',
-		};
-
-		const taskDescription = 'edit the file and run test and lint';
-
-		const directiveScore = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-			directiveMeta,
-		);
-		const workflowScore = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-			workflowMeta,
-		);
-
-		expect(workflowScore).toBeGreaterThan(directiveScore);
 	});
 
 	it('does not give workflow boost when context does not match', () => {
-		const history = Array.from({ length: 5 }, (_, i) =>
-			makeUsageEntry(skillPath, { taskID: `task-${i}` }),
+		withFrozenClock(
+			() => {
+				const history = Array.from({ length: 5 }, (_, i) =>
+					makeUsageEntry(skillPath, { taskID: `task-${i}` }),
+				);
+
+				const workflowMeta: SkillMetadata = {
+					path: skillPath,
+					name: 'edit-test-lint',
+					description: 'A workflow',
+					skillType: 'workflow',
+				};
+
+				const taskDescription = 'unrelated database migration task';
+
+				const scoreWithMeta = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+					workflowMeta,
+				);
+				const scoreWithoutMeta = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+				);
+
+				expect(scoreWithMeta).toBe(scoreWithoutMeta);
+			},
+			{ fixedNow: 1_700_000_000_000 },
 		);
-
-		const workflowMeta: SkillMetadata = {
-			path: skillPath,
-			name: 'edit-test-lint',
-			description: 'A workflow',
-			skillType: 'workflow',
-		};
-
-		const taskDescription = 'unrelated database migration task';
-
-		const scoreWithMeta = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-			workflowMeta,
-		);
-		const scoreWithoutMeta = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-		);
-
-		expect(scoreWithMeta).toBe(scoreWithoutMeta);
 	});
 
 	it('clamps score to 1.0 maximum', () => {
-		const history = Array.from({ length: 20 }, (_, i) =>
-			makeUsageEntry(skillPath, {
-				taskID: `task-${i}`,
-				complianceVerdict: 'compliant',
-				timestamp: new Date().toISOString(),
-			}),
+		withFrozenClock(
+			() => {
+				const history = Array.from({ length: 20 }, (_, i) =>
+					makeUsageEntry(skillPath, {
+						taskID: `task-${i}`,
+						complianceVerdict: 'compliant',
+						timestamp: new Date(1_700_000_000_000).toISOString(),
+					}),
+				);
+
+				const workflowMeta: SkillMetadata = {
+					path: skillPath,
+					name: 'edit-test-lint',
+					description: 'A workflow',
+					skillType: 'workflow',
+				};
+
+				const taskDescription = 'edit test lint';
+
+				const score = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+					workflowMeta,
+				);
+
+				expect(score).toBeLessThanOrEqual(1.0);
+			},
+			{ fixedNow: 1_700_000_000_000 },
 		);
-
-		const workflowMeta: SkillMetadata = {
-			path: skillPath,
-			name: 'edit-test-lint',
-			description: 'A workflow',
-			skillType: 'workflow',
-		};
-
-		const taskDescription = 'edit test lint';
-
-		const score = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-			workflowMeta,
-		);
-
-		expect(score).toBeLessThanOrEqual(1.0);
 	});
 
 	it('clamps score to 1.0 even without workflow boost', () => {
-		const history = Array.from({ length: 20 }, (_, i) =>
-			makeUsageEntry(skillPath, {
-				taskID: `task-${i}`,
-				complianceVerdict: 'compliant',
-				timestamp: new Date().toISOString(),
-			}),
-		);
+		withFrozenClock(
+			() => {
+				const history = Array.from({ length: 20 }, (_, i) =>
+					makeUsageEntry(skillPath, {
+						taskID: `task-${i}`,
+						complianceVerdict: 'compliant',
+						timestamp: new Date(1_700_000_000_000).toISOString(),
+					}),
+				);
 
-		const taskDescription = 'edit test lint';
-		const score = computeSkillRelevanceScore(
-			skillPath,
-			taskDescription,
-			history,
-		);
+				const taskDescription = 'edit test lint';
+				const score = computeSkillRelevanceScore(
+					skillPath,
+					taskDescription,
+					history,
+				);
 
-		expect(score).toBeLessThanOrEqual(1.0);
+				expect(score).toBeLessThanOrEqual(1.0);
+			},
+			{ fixedNow: 1_700_000_000_000 },
+		);
 	});
 });

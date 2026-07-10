@@ -103,6 +103,13 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: chmod +x scripts/check-cross-contamination.sh && bash scripts/check-cross-contamination.sh
+      # Diff-scoped: fails only on NEW time-touching tests that don't reference
+      # the freezeClock helper. Pre-existing files are non-blocking warnings
+      # (issue #1782 root-cause class 1 prevention).
+      - name: Test-clock lint (freezeClock adoption)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-test-clock.sh && bash scripts/check-test-clock.sh
 
   # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback.
   # On merge_group (merge queue), run the full 3-OS matrix for merge safety.
@@ -189,6 +196,12 @@ jobs:
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
+          # flake-annotations.txt captures retry-flake + hard-failure signals so
+          # the downstream flake-detection workflow_run can suggest quarantines
+          # (issue #1782). Written to a workspace-relative path (survives the
+          # tmpdir trap cleanup) and uploaded if-always below.
+          flake_ann="flake-annotations-unit-shard-$SHARD.txt"
+          : > "$flake_ann"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
@@ -213,6 +226,7 @@ jobs:
               bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
               if [ $exit_code -eq 0 ]; then
                 echo "::notice file=$f::Passed on retry $retry_num (flaky): $f"
+                echo "::notice file=$f::Passed on retry $retry_num (flaky): $f" >> "$flake_ann"
               fi
             done
             if [ $exit_code -ne 0 ]; then
@@ -229,6 +243,7 @@ jobs:
               cat "$tmp"
               echo "::endgroup::"
               echo "::error file=$f::FAILED: $f"
+              echo "::error file=$f::FAILED: $f" >> "$flake_ann"
               failed=1
             fi
             # Surface timing and timeout info to CI output (not just temp file)
@@ -236,6 +251,17 @@ jobs:
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
           exit $failed
+      # Upload the per-shard flake-annotations file `if: always()` so the
+      # downstream flake-detection workflow_run can download it and suggest
+      # quarantines even when this job failed (issue #1782). if-no-files-found:
+      # ignore — an empty annotation file (no flakes/failures) is normal.
+      - name: Upload flake annotations
+        if: always() && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flake-annotations-unit-shard-${{ matrix.shard }}
+          path: flake-annotations-unit-shard-*.txt
+          if-no-files-found: ignore
       # NOTE: the coverage gate used to run here as an extra step on
       # `unit (ubuntu-latest, 1)`, which made that one cell execute the entire
       # unit suite twice (sharded run + full-suite coverage run) inside the 40m
