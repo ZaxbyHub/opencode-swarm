@@ -9,14 +9,17 @@
  * Cleanup: temporary worktree is discarded after run.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const { handleCiSimulateCommand } = await import(
+const { _internals, handleCiSimulateCommand } = await import(
 	'../../../src/commands/ci-simulate.js'
 );
+const realRunExternalTool = _internals.runExternalTool;
+const realGetDefaultBaseBranch = _internals.getDefaultBaseBranch;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -27,44 +30,46 @@ function makeTempDir(prefix: string): string {
 	return dir;
 }
 
+function runGit(dir: string, args: string[]): void {
+	execFileSync('git', args, {
+		cwd: dir,
+		stdio: 'ignore',
+		timeout: 30_000,
+	});
+}
+
 function gitInit(dir: string): void {
-	const { execSync } = require('child_process');
-	execSync('git init', { cwd: dir });
-	execSync('git config user.email "test@test.com"', { cwd: dir });
-	execSync('git config user.name "Test"', { cwd: dir });
-	execSync('git branch -M main', { cwd: dir });
+	runGit(dir, ['init']);
+	runGit(dir, ['config', 'user.email', 'test@test.com']);
+	runGit(dir, ['config', 'user.name', 'Test']);
+	runGit(dir, ['branch', '-M', 'main']);
 }
 
 function gitCreateBranch(dir: string, branch: string, fromRef = 'HEAD'): void {
-	const { execSync } = require('child_process');
-	execSync(`git branch ${branch} ${fromRef}`, { cwd: dir });
+	runGit(dir, ['branch', branch, fromRef]);
 }
 
 function gitCheckout(dir: string, ref: string): void {
-	const { execSync } = require('child_process');
-	execSync(`git checkout ${ref}`, { cwd: dir });
+	runGit(dir, ['checkout', ref]);
 }
 
 function gitAddFile(dir: string, filename: string, content: string): void {
 	const filePath = path.join(dir, filename);
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, content);
-	const { execSync } = require('child_process');
 	// Use explicit path instead of `git add .` to avoid directory-scan race
 	// in CI environments where the filesystem has not yet committed the
 	// writeFileSync before git scans the working tree.
-	execSync(`git add "${filename}"`, { cwd: dir });
+	runGit(dir, ['add', filename]);
 }
 
 function gitCommit(dir: string, msg: string): void {
-	const { execSync } = require('child_process');
-	execSync(`git commit -m "${msg}"`, { cwd: dir });
+	runGit(dir, ['commit', '-m', msg]);
 }
 
 function gitCreateBareRemote(reposDir: string, name: string): string {
-	const { execSync } = require('child_process');
 	const barePath = path.join(reposDir, name);
-	execSync(`git init --bare "${barePath}"`, { cwd: reposDir });
+	runGit(reposDir, ['init', '--bare', barePath]);
 	return barePath;
 }
 
@@ -73,13 +78,11 @@ function gitSetRemote(
 	remoteName: string,
 	remoteUrl: string,
 ): void {
-	const { execSync } = require('child_process');
-	execSync(`git remote add ${remoteName} "${remoteUrl}"`, { cwd: dir });
+	runGit(dir, ['remote', 'add', remoteName, remoteUrl]);
 }
 
 function gitPush(dir: string, remote: string, ref: string): void {
-	const { execSync } = require('child_process');
-	execSync(`git push ${remote} ${ref}`, { cwd: dir });
+	runGit(dir, ['push', remote, ref]);
 }
 
 function createMinimalProject(dir: string): void {
@@ -145,6 +148,8 @@ describe('handleCiSimulateCommand', () => {
 	});
 
 	afterEach(() => {
+		_internals.runExternalTool = realRunExternalTool;
+		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
 		// Clean up temp directory
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -236,57 +241,68 @@ describe('handleCiSimulateCommand', () => {
 	// SC-012: merge failure detection (true line-level conflict)
 	// -------------------------------------------------------------------------
 
-	// SC-012 is disabled in this PR (2026-07-10) because the real-git test
-	// flakes consistently in CI (4 consecutive run failures across unit
-	// shards 1 and 2). The flake manifests as a sub-second test duration
-	// (typically 155ms in CI vs 3.5s locally) indicating the tempDir
-	// filesystem race that even explicit-path `git add` cannot eliminate
-	// in the Ubuntu 24.04 runner image. A follow-up PR will replace this
-	// with a synthetic-mock test (using dependency-injected git invocations
-	// rather than real git) and re-enable the assertion.
-	it.skip('SC-012: detects merge conflict when same line modified differently', async () => {
-		// Create a shared file on main first
-		gitCheckout(tempDir, 'main');
-		fs.writeFileSync(
-			path.join(tempDir, 'config.js'),
-			'export const VERSION = 1;\n',
-		);
-		gitAddFile(tempDir, 'config.js', 'export const VERSION = 1;\n');
-		gitCommit(tempDir, 'add shared file on main');
-		gitPush(tempDir, 'origin', 'main');
+	it('SC-012: cleans up after a deterministic merge conflict', async () => {
+		const calls: string[][] = [];
+		_internals.getDefaultBaseBranch = () => 'origin/main';
+		_internals.runExternalTool = mock(async (options) => {
+			calls.push(options.args);
+			const conflict = options.args[0] === 'merge';
+			return {
+				status: 'completed',
+				exitCode: conflict ? 1 : 0,
+				stdout: '',
+				stderr: conflict ? 'CONFLICT (content): Merge conflict' : '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
 
-		// Create branch from main
-		gitCreateBranch(tempDir, 'conflict-branch');
-		gitCheckout(tempDir, 'conflict-branch');
-
-		// Modify the SAME line to a different value
-		fs.writeFileSync(
-			path.join(tempDir, 'config.js'),
-			'export const VERSION = 2;\n',
-		);
-		gitAddFile(tempDir, 'config.js', 'modify VERSION on branch');
-		gitCommit(tempDir, 'modify VERSION on branch');
-
-		// Switch back to main and modify the SAME line to yet another value
-		gitCheckout(tempDir, 'main');
-		fs.writeFileSync(
-			path.join(tempDir, 'config.js'),
-			'export const VERSION = 3;\n',
-		);
-		gitAddFile(tempDir, 'config.js', 'modify VERSION on main');
-		gitCommit(tempDir, 'modify VERSION on main');
-		gitPush(tempDir, 'origin', 'main');
-
-		// Simulate CI on the branch - should detect merge conflict
 		const result = await handleCiSimulateCommand(tempDir, ['conflict-branch']);
 
-		// The merge should fail due to conflict - either error or validation failure
+		expect(result).toContain('Merge failed');
+		expect(calls).toContainEqual([
+			'merge',
+			'--no-ff',
+			'--no-edit',
+			'--',
+			'conflict-branch',
+		]);
 		expect(
-			result.includes('## Error') ||
-				result.includes('merge') ||
-				result.includes('conflict'),
+			calls.some((args) => args[0] === 'worktree' && args[1] === 'remove'),
 		).toBe(true);
-	}); // close it.skipIf callback
+	});
+
+	it('rejects option-like PR refs before invoking git', async () => {
+		const result = await handleCiSimulateCommand(tempDir, ['--upload-pack=x']);
+		expect(result).toContain('safe git branch or commit reference');
+	});
+
+	it('reports when bounded child output is truncated', async () => {
+		const calls: Array<{ maxStderrBytes?: number; maxStdoutBytes?: number }> =
+			[];
+		_internals.getDefaultBaseBranch = () => 'origin/main';
+		_internals.runExternalTool = mock(async (options) => {
+			calls.push(options);
+			const isValidation = options.executable === 'bun';
+			return {
+				status: 'completed',
+				exitCode: isValidation ? 1 : 0,
+				stdout: isValidation ? 'validation output' : '',
+				stderr: '',
+				stdoutTruncated: isValidation,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
+
+		const result = await handleCiSimulateCommand(tempDir, ['feature-branch']);
+
+		expect(result).toContain('child output truncated to bounded limit');
+		expect(calls).not.toHaveLength(0);
+		for (const call of calls) {
+			expect(call.maxStdoutBytes).toBe(12_000);
+			expect(call.maxStderrBytes).toBe(12_000);
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -311,8 +327,7 @@ describe('handleCiSimulateCommand with origin/master default branch', () => {
 		gitSetRemote(tempDir, 'origin', bareRepoPath);
 
 		// Rename initial branch to master instead of main
-		const { execSync } = require('child_process');
-		execSync('git branch -M master', { cwd: tempDir });
+		runGit(tempDir, ['branch', '-M', 'master']);
 
 		// Create initial commit with package.json and test file
 		createMinimalProject(tempDir);

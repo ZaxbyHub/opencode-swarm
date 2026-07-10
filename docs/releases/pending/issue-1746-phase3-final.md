@@ -73,16 +73,17 @@ Reviewer and test_engineer agents now emit structured per-task verdict lines whe
 
 | File | Phase |
 |------|-------|
-| `src/tools/worktree.ts` and related cleanup paths | 1 |
-| `src/hooks/worktree-lifecycle.ts` | 1 |
+| `src/hooks/delegation-gate/worktree-isolation.ts` | 1 |
+| `src/hooks/delegation-gate.ts` | 1 |
+| `scripts/check-skill-assertions.ts` | 1 |
 | `scripts/drift-check.ts` (skill-assertion extension) | 1 |
-| `src/config/full-auto.ts` (FR-003 config keys) | 2 |
+| `src/config/schema.ts` (FR-003 config keys) | 2 |
 | `src/full-auto/oversight.ts` (dispatch retry / auto-degrade) | 2 |
-| `src/full-auto/full-auto-intercept.ts` (exponential backoff) | 2 |
+| `src/hooks/full-auto-intercept.ts` (exponential backoff) | 2 |
 | `src/commands/ci-simulate.ts` (FR-004a) | 2 |
-| `src/commands/pr-status.ts` (merge_group extension) | 2 |
-| `src/hooks/pr-event-subscribers.ts` (batched events) | 2 |
-| `src/skills/swarm-pr-feedback/skill.md` (batching) | 2 |
+| `src/commands/pr-monitor-status.ts` (merge_group extension) | 2 |
+| `src/background/pr-event-subscribers.ts` (batched events) | 2 |
+| `.opencode/skills/swarm-pr-feedback/SKILL.md` (batching) | 2 |
 | `src/tools/placeholder-scan.ts` (FR-006 added_lines + sentinel_allowlist) | 3 |
 | `src/agents/reviewer.ts` (structured verdict output) | 3 |
 | `src/agents/test-engineer.ts` (structured verdict output) | 3 |

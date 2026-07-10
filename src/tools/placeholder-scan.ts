@@ -16,16 +16,19 @@ export interface PlaceholderScanInput {
 	deny_patterns?: string[];
 	/**
 	 * When provided, the scanner filters findings to only report patterns
-	 * on lines that were added in this PR. Shape: file path → Set<line numbers>.
+	 * on lines that were added in this PR. The direct API accepts Sets and the
+	 * JSON tool boundary accepts arrays, which are normalized before scanning.
 	 * Lines not in the set are treated as pre-existing and silently ignored.
 	 */
-	added_lines?: Record<string, Set<number>>;
+	added_lines?: Record<string, Set<number> | number[]>;
 	/**
 	 * Values that suppress findings when found as substrings in the excerpt.
 	 * Unlike FILE_ALLOWLIST (which skips entire files), this filters individual
 	 * findings by matching against the excerpt text.
 	 */
 	sentinel_allowlist?: string[];
+	/** @deprecated Use sentinel_allowlist. Kept for existing callers. */
+	allow_sentinels?: string[];
 }
 
 export interface PlaceholderFinding {
@@ -49,6 +52,7 @@ export interface PlaceholderScanResult {
 // ============ Constants ============
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
+const DEFAULT_SENTINEL_ALLOWLIST = ['SC-PLACEHOLDER'];
 
 // Default deny patterns (comment patterns)
 const DEFAULT_COMMENT_PATTERNS = [
@@ -275,6 +279,7 @@ function isPlanFile(filePath: string): boolean {
 function scanPlanFileForPlaceholders(
 	content: string,
 	filePath: string,
+	addedLines?: Set<number>,
 ): PlaceholderFinding[] {
 	const findings: PlaceholderFinding[] = [];
 	const lines = content.split('\n');
@@ -282,6 +287,7 @@ function scanPlanFileForPlaceholders(
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		const lineNumber = i + 1;
+		if (addedLines && !addedLines.has(lineNumber)) continue;
 
 		for (const { pattern, rule_id } of PLAN_PLACEHOLDER_PATTERNS) {
 			if (pattern.test(line)) {
@@ -299,6 +305,15 @@ function scanPlanFileForPlaceholders(
 	}
 
 	return findings;
+}
+
+/** Normalize JSON-array and direct-API Set inputs to the scanner's Set shape. */
+function normalizeAddedLines(
+	value: Set<number> | number[] | undefined,
+): Set<number> | undefined {
+	if (value instanceof Set) return value;
+	if (Array.isArray(value)) return new Set(value);
+	return undefined;
 }
 
 /**
@@ -655,14 +670,14 @@ export async function placeholderScan(
 		deny_patterns,
 		added_lines,
 		sentinel_allowlist,
+		allow_sentinels,
 	} = input;
 
 	// Build sentinel allowlist as regex patterns for efficient matching
-	const sentinelPatterns = sentinel_allowlist
-		? sentinel_allowlist.map(
-				(sentinel) => new RegExp(escapeRegex(sentinel), 'i'),
-			)
-		: [];
+	const sentinelPatterns = [
+		...DEFAULT_SENTINEL_ALLOWLIST,
+		...(sentinel_allowlist ?? allow_sentinels ?? []),
+	].map((sentinel) => new RegExp(escapeRegex(sentinel), 'i'));
 
 	/**
 	 * Check if an excerpt should be suppressed by the sentinel allowlist.
@@ -767,14 +782,18 @@ export async function placeholderScan(
 		filesScanned++;
 
 		// Get added lines for this file (normalized to relative path)
-		const addedLinesForFile = added_lines
-			? (added_lines[relativeFilePath] ?? added_lines[filePath] ?? undefined)
-			: undefined;
+		const addedLinesForFile = normalizeAddedLines(
+			added_lines?.[relativeFilePath] ?? added_lines?.[filePath],
+		);
 
 		// Use plan-specific scanner for .swarm/plan.md, parser for supported languages, regex fallback otherwise
 		let fileFindings: PlaceholderFinding[];
 		if (isPlanFile(filePath)) {
-			fileFindings = scanPlanFileForPlaceholders(content, filePath);
+			fileFindings = scanPlanFileForPlaceholders(
+				content,
+				filePath,
+				addedLinesForFile,
+			);
 		} else if (isParserSupported(filePath)) {
 			fileFindings = await scanWithParser(
 				content,
@@ -846,14 +865,22 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 			.array(z.string())
 			.optional()
 			.describe('Custom deny patterns to search for'),
+		added_lines: z
+			.record(z.string(), z.array(z.number().int().positive()))
+			.optional()
+			.describe('Optional map of file path to PR-added line numbers'),
+		sentinel_allowlist: z
+			.array(z.string())
+			.optional()
+			.describe('Intentional sentinel strings that suppress matching findings'),
+		allow_sentinels: z
+			.array(z.string())
+			.optional()
+			.describe('Deprecated alias for sentinel_allowlist'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
 		const result = await placeholderScan(
-			args as {
-				changed_files: string[];
-				allow_globs?: string[];
-				deny_patterns?: string[];
-			},
+			args as PlaceholderScanInput,
 			directory,
 		);
 		return JSON.stringify(result);

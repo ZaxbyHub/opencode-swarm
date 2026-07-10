@@ -7,7 +7,8 @@
  * CI today; this check surfaces it locally before push.
  *
  * Detects broken assertions by:
- *   1. Getting the list of changed skill files via `git diff --name-only HEAD`
+ *   1. Getting changed skill files from the working tree, or from the CI PR
+ *      merge-base range when the checkout is already committed
  *   2. Finding test files that assert phrases from those skill files
  *   3. Extracting the toContain/toMatch assertion strings
  *   4. Verifying each phrase is still present in the new skill content
@@ -94,10 +95,28 @@ async function gitStdout(
  * Only returns files under .opencode/skills/ and .claude/skills/.
  */
 async function getChangedSkillFiles(cwd: string): Promise<string[]> {
-	const stdout = await gitStdout(
+	let stdout = await gitStdout(
 		['diff', '--name-only', 'HEAD'],
 		cwd,
 	);
+
+	// A CI checkout is normally clean, so inspect the PR commit range when
+	// GitHub exposes its base branch. Keep the working-tree diff as the local
+	// pre-push behavior and fall back silently when the base ref is unavailable.
+	if (!stdout.trim() && process.env.GITHUB_BASE_REF) {
+		for (const baseRef of [
+			`origin/${process.env.GITHUB_BASE_REF}`,
+			process.env.GITHUB_BASE_REF,
+		]) {
+			const mergeBase = await gitStdout(['merge-base', 'HEAD', baseRef], cwd);
+			if (!mergeBase.trim()) continue;
+			stdout = await gitStdout(
+				['diff', '--name-only', `${mergeBase.trim()}..HEAD`],
+				cwd,
+			);
+			break;
+		}
+	}
 	const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 	return lines.filter((file) => {
 		const rel = path.relative(cwd, path.join(cwd, file)).replace(/\\/g, '/');

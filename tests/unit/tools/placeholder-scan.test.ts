@@ -1464,6 +1464,41 @@ function h() { return {}; }
 			expect(result.findings[0].line).toBe(3);
 		});
 
+		it('C-003: accepts JSON-array added_lines at the exported boundary', async () => {
+			// Before the fix, this JSON-shaped input reached `.has()` directly and threw.
+			createTestFile(
+				tempDir,
+				'array-input.ts',
+				'// TODO: existing\nfunction clean() {}\n',
+			);
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['array-input.ts'],
+					added_lines: { 'array-input.ts': [2] },
+				},
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
+		it('C-005: ignores unchanged plan placeholders in diff-aware mode', async () => {
+			createTestFile(tempDir, '.swarm/plan.md', '[task]\n## Complete task\n');
+
+			const result = await placeholderScan(
+				{
+					changed_files: ['.swarm/plan.md'],
+					added_lines: { '.swarm/plan.md': [2] },
+				},
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.findings).toHaveLength(0);
+		});
+
 		it('parser finds multi-line block comment on added lines when root node starts at line 1 (regression)', async () => {
 			// File: line 1 is unchanged (function declaration), lines 2-4 are added (multi-line TODO comment)
 			// This was broken because walkNode started at root (line 1, not in addedLines)

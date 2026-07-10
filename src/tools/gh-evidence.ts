@@ -329,7 +329,10 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 
 		if (isLogFailedMode) {
 			// For --log-failed, output is raw text (not JSON)
-			data = run.stdout;
+			data = neutralizeUntrustedMarkdown(
+				run.stdout,
+				'GitHub Actions failed-job log',
+			);
 		} else {
 			// Parse JSON output and extract run-specific metadata
 			let parsed: unknown;

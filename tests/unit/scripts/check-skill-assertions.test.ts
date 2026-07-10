@@ -304,6 +304,46 @@ describe('brainstorm critic', () => {
 		);
 	});
 
+	test('C-010: checks committed PR skill changes against the CI base branch', async () => {
+		const repo = makeGitRepo();
+		runGit(['branch', '-M', 'main'], repo);
+		writeFile(
+			repo,
+			'.opencode/skills/committed/SKILL.md',
+			'Original committed phrase.',
+		);
+		writeFile(
+			repo,
+			'tests/unit/agents/committed.test.ts',
+			`const content = readFileSync('.opencode/skills/committed/SKILL.md', 'utf-8');
+expect(content).toContain('Original committed phrase.');
+`,
+		);
+		runGit(['add', '.'], repo);
+		runGit(['commit', '-q', '-m', 'add committed skill'], repo);
+		runGit(['checkout', '-q', '-b', 'feature'], repo);
+		writeFile(
+			repo,
+			'.opencode/skills/committed/SKILL.md',
+			'Updated committed phrase.',
+		);
+		runGit(['add', '.opencode/skills/committed/SKILL.md'], repo);
+		runGit(['commit', '-q', '-m', 'update committed skill'], repo);
+
+		const previousBaseRef = process.env.GITHUB_BASE_REF;
+		process.env.GITHUB_BASE_REF = 'main';
+		try {
+			const result = await checkSkillAssertions(repo);
+			expect(result.changedSkillFiles).toEqual([
+				'.opencode/skills/committed/SKILL.md',
+			]);
+			expect(result.brokenAssertions).toHaveLength(1);
+		} finally {
+			if (previousBaseRef === undefined) delete process.env.GITHUB_BASE_REF;
+			else process.env.GITHUB_BASE_REF = previousBaseRef;
+		}
+	});
+
 	test('no broken assertions when skill content still contains the asserted phrase', async () => {
 		const repo = makeGitRepo();
 

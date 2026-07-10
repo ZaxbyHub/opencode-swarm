@@ -23,16 +23,21 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getDefaultBaseBranch } from '../git/branch.js';
-import { bunSpawn } from '../utils/bun-compat.js';
+import {
+	type ExternalToolRunResult,
+	runExternalTool,
+} from '../utils/external-tool-runner.js';
 
 /** Default timeout for git operations (30 seconds). */
 const GIT_TIMEOUT_MS = 30_000;
 
 /** Default timeout for validation commands (5 minutes). */
 const VALIDATION_TIMEOUT_MS = 5 * 60 * 1000;
+const OUTPUT_LIMIT_BYTES = 12_000;
 
 export const _internals: {
-	bunSpawn: typeof bunSpawn;
+	runExternalTool: typeof runExternalTool;
+	getDefaultBaseBranch: typeof getDefaultBaseBranch;
 	platform: string;
 	osTmpdir: () => string;
 	fs: {
@@ -40,7 +45,8 @@ export const _internals: {
 		rmSync: typeof fs.rmSync;
 	};
 } = {
-	bunSpawn,
+	runExternalTool,
+	getDefaultBaseBranch,
 	platform: process.platform,
 	osTmpdir: () => os.tmpdir(),
 	fs: {
@@ -53,6 +59,7 @@ interface GitResult {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
+	outputTruncated: boolean;
 }
 
 interface StepResult {
@@ -62,6 +69,7 @@ interface StepResult {
 	stdout: string;
 	stderr: string;
 	durationMs: number;
+	outputTruncated: boolean;
 }
 
 interface CiSimulateResult {
@@ -72,70 +80,68 @@ interface CiSimulateResult {
 }
 
 /**
- * Runs a git command via `_internals.bunSpawn` and returns the exit code,
- * captured stdout, and captured stderr.
- *
- * Every call uses:
- * - Array-form command (never shell-string)
- * - Explicit `cwd`
- * - `stdin: 'ignore'` (prevents Bun/Windows pipe hangs)
- * - Bounded `timeout`
- * - Best-effort `proc.kill()` in `finally`
+ * Runs a bounded git command and returns its captured result.
  */
 async function runGit(
 	args: string[],
 	cwd: string,
 	timeoutMs = GIT_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(['git', ...args], {
+	const result: ExternalToolRunResult = await _internals.runExternalTool({
+		executable: 'git',
+		args,
 		cwd,
-		timeout: timeoutMs,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'pipe' as const,
-		env: { ...process.env, LC_ALL: 'C' },
+		timeoutMs,
+		maxStdoutBytes: OUTPUT_LIMIT_BYTES,
+		maxStderrBytes: OUTPUT_LIMIT_BYTES,
 	});
-	try {
-		const exitCode = await proc.exited;
-		const stdout = await proc.stdout.text();
-		const stderr = await proc.stderr.text();
-		return { exitCode, stdout, stderr };
-	} finally {
-		try {
-			proc.kill();
-		} catch {
-			// best-effort — process may already be exited
-		}
-	}
+	return {
+		exitCode: result.exitCode ?? 1,
+		stdout: result.message
+			? [result.message, result.stdout].filter(Boolean).join('\n')
+			: result.stdout,
+		stderr: result.stderr,
+		outputTruncated: result.stdoutTruncated || result.stderrTruncated,
+	};
 }
 
 /**
- * Runs a validation command via `_internals.bunSpawn` and returns the result.
+ * Runs a bounded validation command and returns the result.
  */
 async function runValidationCommand(
 	cmd: string[],
 	cwd: string,
 	timeoutMs = VALIDATION_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(cmd, {
+	const [executable, ...args] = cmd;
+	const result: ExternalToolRunResult = await _internals.runExternalTool({
+		executable,
+		args,
 		cwd,
-		timeout: timeoutMs,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'pipe' as const,
+		timeoutMs,
+		maxStdoutBytes: OUTPUT_LIMIT_BYTES,
+		maxStderrBytes: OUTPUT_LIMIT_BYTES,
 	});
-	try {
-		const exitCode = await proc.exited;
-		const stdout = await proc.stdout.text();
-		const stderr = await proc.stderr.text();
-		return { exitCode, stdout, stderr };
-	} finally {
-		try {
-			proc.kill();
-		} catch {
-			// best-effort — process may already be exited
-		}
-	}
+	return {
+		exitCode: result.exitCode ?? 1,
+		stdout: result.message
+			? [result.message, result.stdout].filter(Boolean).join('\n')
+			: result.stdout,
+		stderr: result.stderr,
+		outputTruncated: result.stdoutTruncated || result.stderrTruncated,
+	};
+}
+
+function isSafeGitRef(ref: string): boolean {
+	return (
+		ref.length > 0 &&
+		ref.length <= 255 &&
+		/^[A-Za-z0-9][A-Za-z0-9._/@-]*$/.test(ref) &&
+		!ref.includes('..') &&
+		!ref.includes('//') &&
+		!ref.includes('@{') &&
+		!ref.endsWith('.')
+	);
 }
 
 /**
@@ -160,6 +166,7 @@ async function setupWorktree(
 	projectRoot: string,
 	prRef: string,
 	baseBranch: string,
+	onWorktreeCreated: (worktreePath: string) => void,
 ): Promise<string> {
 	const worktreeBase = path.join(_internals.osTmpdir(), 'swarm-ci-simulate');
 	const worktreeName = `pr-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -178,10 +185,11 @@ async function setupWorktree(
 			`Failed to create worktree: ${addResult.stderr.trim() || addResult.stdout.trim()}`,
 		);
 	}
+	onWorktreeCreated(worktreePath);
 
 	// Merge the PR branch into the worktree
 	const mergeResult = await runGit(
-		['merge', '--no-ff', prRef, '-m', `ci-simulate: merge ${prRef}`],
+		['merge', '--no-ff', '--no-edit', '--', prRef],
 		worktreePath,
 		GIT_TIMEOUT_MS * 2, // Merge can be slow for large histories
 	);
@@ -252,6 +260,7 @@ async function runValidationSuite(worktreePath: string): Promise<StepResult[]> {
 			stdout: result.stdout,
 			stderr: result.stderr,
 			durationMs,
+			outputTruncated: result.outputTruncated,
 		});
 	}
 
@@ -264,6 +273,7 @@ async function runValidationSuite(worktreePath: string): Promise<StepResult[]> {
 function formatStepOutput(
 	stdout: string,
 	stderr: string,
+	outputTruncated: boolean,
 	maxLength = 2000,
 ): string {
 	let output = stdout;
@@ -272,6 +282,9 @@ function formatStepOutput(
 	}
 	if (output.length > maxLength) {
 		output = `${output.slice(0, maxLength)}\n... (output truncated)`;
+	}
+	if (outputTruncated) {
+		output = `${output}\n... (child output truncated to bounded limit)`;
 	}
 	return output;
 }
@@ -316,6 +329,9 @@ export async function handleCiSimulateCommand(
 ): Promise<string> {
 	// Parse PR ref from args (first positional argument)
 	const prRef = args[0] ?? (await getCurrentBranchOrRef(directory));
+	if (!isSafeGitRef(prRef)) {
+		return 'CI simulation failed: PR ref must be a safe git branch or commit reference.';
+	}
 
 	const lines: string[] = [];
 	lines.push(`# CI Simulation Report`);
@@ -333,14 +349,24 @@ export async function handleCiSimulateCommand(
 
 	try {
 		// Detect the default remote branch (handles origin/main, origin/master, etc.)
-		const baseBranch = getDefaultBaseBranch(directory);
+		const baseBranch = _internals.getDefaultBaseBranch(directory);
+		if (!isSafeGitRef(baseBranch)) {
+			throw new Error('Detected default branch is not a safe git reference.');
+		}
 
 		// Step 1: Create worktree and merge
 		lines.push('## Setup');
 		lines.push('');
 		lines.push(`Creating temporary worktree from ${baseBranch}...`);
 
-		worktreePath = await setupWorktree(directory, prRef, baseBranch);
+		worktreePath = await setupWorktree(
+			directory,
+			prRef,
+			baseBranch,
+			(createdPath) => {
+				worktreePath = createdPath;
+			},
+		);
 		result.worktreePath = worktreePath;
 		lines.push(`Worktree: \`${worktreePath}\``);
 		lines.push('');
@@ -381,7 +407,9 @@ export async function handleCiSimulateCommand(
 				lines.push('');
 				lines.push('**Output:**');
 				lines.push('```');
-				lines.push(formatStepOutput(step.stdout, step.stderr));
+				lines.push(
+					formatStepOutput(step.stdout, step.stderr, step.outputTruncated),
+				);
 				lines.push('```');
 			}
 			lines.push('');

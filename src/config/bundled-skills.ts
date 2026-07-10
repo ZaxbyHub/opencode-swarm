@@ -39,8 +39,6 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'gate-attribution',
 	'merge-queue-readiness',
 	'skill-edit-validation',
-	'swarm',
-	'swarm-ci-monitor',
 	'worktree-retry-cleanup',
 ] as const;
 

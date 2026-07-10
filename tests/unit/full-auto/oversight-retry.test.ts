@@ -133,6 +133,89 @@ describe('SC-009 — oversight retries transient errors', () => {
 		expect(state?.pauseReason).toContain('infrastructure failure');
 	});
 
+	test('does not retry or count a permanent authorization failure', async () => {
+		startFullAutoRun(tmpDir, 'sess-permanent', { enabled: true });
+		const create = mock(async () => ({
+			data: null,
+			error: { code: 401, message: 'unauthorized' },
+		}));
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create,
+				prompt: mock(async () => ({ data: null, error: null })),
+				delete: mock(async () => ({})),
+			},
+		} as any;
+
+		const out = await dispatchFullAutoOversight({
+			directory: tmpDir,
+			sessionID: 'sess-permanent',
+			trigger: 'test',
+			triggerSource: 'tool_action',
+			criticModel: 'test-model',
+			oversightAgentName: 'critic_oversight',
+			fullAutoConfig: {
+				max_dispatch_retries: 2,
+				max_consecutive_dispatch_failures: 3,
+			},
+		});
+
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(out.verdict).toBe('BLOCKED');
+		const state = loadFullAutoRunState(tmpDir, 'sess-permanent');
+		expect(state?.counters.consecutiveOversightFailures).toBe(0);
+		expect(state?.pauseReason).toContain('without retry');
+	});
+
+	test('resets prior infrastructure failures after a permanent error', async () => {
+		startFullAutoRun(tmpDir, 'sess-permanent-reset', { enabled: true });
+		const errors = [
+			{ code: 'ERR_TRANSIENT', message: 'server error' },
+			{ code: 'ERR_TRANSIENT', message: 'server error' },
+			{ code: 401, message: 'unauthorized' },
+			{ code: 'ERR_TRANSIENT', message: 'server error' },
+		];
+		const create = mock(async () => ({ data: null, error: errors.shift() }));
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create,
+				prompt: mock(async () => ({ data: null, error: null })),
+				delete: mock(async () => ({})),
+			},
+		} as any;
+
+		const input = {
+			directory: tmpDir,
+			sessionID: 'sess-permanent-reset',
+			trigger: 'test' as const,
+			triggerSource: 'tool_action' as const,
+			criticModel: 'test-model',
+			oversightAgentName: 'critic_oversight',
+			fullAutoConfig: {
+				max_dispatch_retries: 0,
+				max_consecutive_dispatch_failures: 3,
+			},
+		};
+
+		await dispatchFullAutoOversight(input);
+		await dispatchFullAutoOversight(input);
+		expect(
+			loadFullAutoRunState(tmpDir, 'sess-permanent-reset')?.counters
+				.consecutiveOversightFailures,
+		).toBe(2);
+
+		await dispatchFullAutoOversight(input);
+		expect(
+			loadFullAutoRunState(tmpDir, 'sess-permanent-reset')?.counters
+				.consecutiveOversightFailures,
+		).toBe(0);
+
+		await dispatchFullAutoOversight(input);
+		const state = loadFullAutoRunState(tmpDir, 'sess-permanent-reset');
+		expect(state?.counters.consecutiveOversightFailures).toBe(1);
+		expect(state?.status).toBe('paused');
+	});
+
 	test('resets consecutive failure counter on success', async () => {
 		// Start with an active run.
 		startFullAutoRun(tmpDir, 'sess-reset', { enabled: true });

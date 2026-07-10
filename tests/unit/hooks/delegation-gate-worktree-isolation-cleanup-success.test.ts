@@ -106,6 +106,8 @@ describe('FR-001a SC-001: cleanupStandardWorktreeForCallId — success path', ()
 			mergeStrategy: 'merge',
 			queuedAt: Date.now(),
 		});
+		// Production moves the dispatch to awaiting-merge before merge-back.
+		standardWorktreeByCallID.delete(callID);
 
 		// Spy on removeWorktree and postMergeCleanup
 		const removeCalls: Array<{ worktreePath: string; projectRoot: string }> =
@@ -211,7 +213,7 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 		}
 	});
 
-	it('cleanup fires on partial merge (worktree and branch removed)', async () => {
+	it('F-C004: partial merge preserves the worktree and branch for recovery', async () => {
 		const callID = 'call-finish-partial';
 		const worktreePath = path.join(tempDir, 'wt-partial');
 		const branchName = 'swarm-lane/test-session/lane-0';
@@ -228,6 +230,8 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 			mergeStrategy: 'merge',
 			queuedAt: Date.now(),
 		});
+		// Production moves the dispatch to awaiting-merge before merge-back.
+		standardWorktreeByCallID.delete(callID);
 
 		const removeCalls: Array<{ worktreePath: string; projectRoot: string }> =
 			[];
@@ -263,20 +267,16 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 
 		await finishStandardWorktreeDispatch(tempDir, dispatch, undefined, callID);
 
-		// Cleanup should have fired (removeWorktree called) even though merge was partial
-		expect(removeCalls).toHaveLength(1);
-		expect(removeCalls[0].worktreePath).toBe(worktreePath);
-
-		// Branch should also be deleted on partial merge (unconditional cleanup)
-		expect(cleanupCalls).toHaveLength(1);
-		expect(cleanupCalls[0].branchName).toBe(branchName);
+		// F-C004: a conflict can retain uncommitted state; do not force-remove it.
+		expect(removeCalls).toHaveLength(0);
+		expect(cleanupCalls).toHaveLength(0);
 
 		// Maps should be cleared
 		expect(standardWorktreeByCallID.has(callID)).toBe(false);
 		expect(awaitingMergeByCallID.has(callID)).toBe(false);
 	});
 
-	it('cleanup fires on failed merge (worktree and branch removed)', async () => {
+	it('F-C004: cleanup-stage failure preserves the worktree and branch for recovery', async () => {
 		const callID = 'call-finish-failed';
 		const worktreePath = path.join(tempDir, 'wt-failed');
 		const branchName = 'swarm-lane/test-session/lane-1';
@@ -293,6 +293,8 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 			mergeStrategy: 'merge',
 			queuedAt: Date.now(),
 		});
+		// Production moves the dispatch to awaiting-merge before merge-back.
+		standardWorktreeByCallID.delete(callID);
 
 		const removeCalls: Array<{ worktreePath: string; projectRoot: string }> =
 			[];
@@ -315,7 +317,7 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 		// Simulate failed merge result
 		_internals.attemptMergeBackFromDirty = mock(async () => ({
 			failed: true,
-			stage: 'merge',
+			stage: 'cleanup',
 			message: 'Auto-commit and clean both failed',
 		}));
 
@@ -325,13 +327,9 @@ describe('FR-001a: finishStandardWorktreeDispatch cleanup on partial/failed merg
 
 		await finishStandardWorktreeDispatch(tempDir, dispatch, undefined, callID);
 
-		// Cleanup should have fired even though merge failed
-		expect(removeCalls).toHaveLength(1);
-		expect(removeCalls[0].worktreePath).toBe(worktreePath);
-
-		// Branch should also be deleted on failed merge (unconditional cleanup)
-		expect(cleanupCalls).toHaveLength(1);
-		expect(cleanupCalls[0].branchName).toBe(branchName);
+		// F-C004: cleanup-stage failure may retain dirty work; do not force-remove it.
+		expect(removeCalls).toHaveLength(0);
+		expect(cleanupCalls).toHaveLength(0);
 
 		// Maps should be cleared
 		expect(standardWorktreeByCallID.has(callID)).toBe(false);

@@ -1361,6 +1361,29 @@ export async function cleanupStandardWorktreeForCallId(
 				error: String(err),
 			};
 		}
+
+		// F-FB013: a dispatch can modify its worktree after the first clean
+		// snapshot but before force-removal begins. Re-check immediately before
+		// destructive cleanup so a late write is committed or fails closed.
+		if (preserveResult.outcome === 'clean') {
+			try {
+				preserveResult = await _internals.preserveDirtyWorktreeForCallId(
+					callID,
+					reason,
+					directory,
+					worktree_dir,
+				);
+			} catch (err) {
+				console.warn(
+					`[swarm] cleanupStandardWorktreeForCallId: final preservation check threw for ${callID}: ${err}`,
+				);
+				preserveResult = {
+					outcome: 'preserve-failed',
+					preserved: false,
+					error: String(err),
+				};
+			}
+		}
 	}
 
 	// FR-001c fail-closed: if dirty state was detected AND preservation did NOT succeed,
@@ -1537,13 +1560,9 @@ export async function finishStandardWorktreeDispatch(
 				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
 			);
 
-			// Cleanup unconditionally — runs on success, partial, AND failed.
-			await cleanupStandardWorktreeForCallId(
-				resolvedCallID,
-				'success', // Treat partial as success for cleanup (worktree still removed)
-				directory,
-				dispatch.worktree_dir,
-			);
+			// F-C004: merge conflicts retain the lane worktree and branch for
+			// recovery. The conflict can leave uncommitted state that must not be
+			// force-removed under the successful-cleanup path.
 
 			return;
 		}
@@ -1563,13 +1582,9 @@ export async function finishStandardWorktreeDispatch(
 				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
 
-			// Cleanup unconditionally — runs on success, partial, AND failed.
-			await cleanupStandardWorktreeForCallId(
-				resolvedCallID,
-				'success', // Treat failed as success for cleanup (worktree still removed)
-				directory,
-				dispatch.worktree_dir,
-			);
+			// F-C004: retain failed merge lanes for recovery. In particular, a
+			// cleanup-stage failure can leave dirty or untracked work that has not
+			// been safely committed yet.
 		}
 	};
 

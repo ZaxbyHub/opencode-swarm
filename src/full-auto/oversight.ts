@@ -177,6 +177,13 @@ function decisionFromVerdict(
 	return 'deny';
 }
 
+function isTransientDispatchError(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	return /(?:\b408\b|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|\b529\b|timeout|timed out|temporarily unavailable|server error|unexpected server error|rate limit|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)/i.test(
+		text,
+	);
+}
+
 /**
  * Append a Full-Auto oversight event to `.swarm/events.jsonl`.
  *
@@ -380,6 +387,7 @@ export async function dispatchFullAutoOversight(
 
 	let criticResponse = '';
 	let dispatchError: unknown;
+	let dispatchFailureWasTransient = false;
 	const maxRetries = input.fullAutoConfig?.max_dispatch_retries ?? 2;
 	const maxConsecutiveFailures =
 		input.fullAutoConfig?.max_consecutive_dispatch_failures ?? 3;
@@ -481,28 +489,37 @@ export async function dispatchFullAutoOversight(
 			break;
 		}
 		lastError = result.error;
+		dispatchFailureWasTransient = isTransientDispatchError(lastError);
 		logger.warn(
 			`[full-auto/oversight] dispatch attempt ${attempt + 1}/${maxRetries + 1} failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
 		);
-		if (attempt < maxRetries) {
+		if (dispatchFailureWasTransient && attempt < maxRetries) {
 			// Transient — will retry.
 			dispatchError = undefined;
 		} else {
 			// Exhausted retries.
 			dispatchError = lastError;
+			break;
 		}
 	}
 
 	cleanup();
 
 	if (dispatchError) {
-		const infraReason = `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
+		const infraReason = dispatchFailureWasTransient
+			? `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`
+			: `oversight dispatch failed without retry: ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
 		// Increment consecutive-failure counter. After threshold, auto-degrade to
 		// manual (terminate) so the run doesn't stay paused forever.
-		const consecutive = incrementOversightFailureCounter(
-			input.directory,
-			input.sessionID,
-		);
+		let consecutive = 0;
+		if (dispatchFailureWasTransient) {
+			consecutive = incrementOversightFailureCounter(
+				input.directory,
+				input.sessionID,
+			);
+		} else {
+			resetOversightFailureCounter(input.directory, input.sessionID);
+		}
 		if (consecutive >= maxConsecutiveFailures && maxConsecutiveFailures > 0) {
 			// Auto-degrade: terminate the run so an architect can re-enable manually.
 			const degradeReason = `auto-degraded to manual mode after ${consecutive} consecutive oversight infrastructure failures`;
