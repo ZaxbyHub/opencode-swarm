@@ -48,6 +48,8 @@ const requiredProjectSkillSlugs = [
 	'merge-queue-readiness',
 	'gate-attribution',
 	'ci-failure-batching',
+	'test-file-split',
+	'fork-pr-operations',
 ];
 
 const expectedProjectSkillFiles = [

@@ -110,6 +110,57 @@ default stdio behavior:
 - `fs.renameSync` cannot overwrite existing directories on Windows. Use a
   remove-then-rename pattern or `fs.rename` with error handling.
 
+## gh CLI Subprocess Patterns
+
+The `gh` CLI is a common subprocess in this repo (`scripts/release-notes-fragments.mjs`, CI workflows). It follows the same six required properties as all subprocesses, plus several `gh`-specific patterns.
+
+### `gh api --paginate` requires `--slurp`
+
+**Bug pattern (PR #1762 F-002):** `gh api --paginate` without `--slurp` produces concatenated JSON arrays on stdout. `JSON.parse()` can only parse the first array — subsequent arrays cause a parse error or are silently lost.
+
+**Correct pattern:**
+```javascript
+const raw = execFileSync('gh', ['api', '--paginate', '--slurp', 'repos/.../pulls', ...], {
+  encoding: 'utf8',
+  timeout: 30_000,
+  maxBuffer: 16 * 1024 * 1024,
+  stdio: ['ignore', 'pipe', 'pipe'], // required for execFileSync (AGENTS.md §3)
+});
+// --slurp wraps paginated results as [[page1], [page2], ...]
+const pages = JSON.parse(raw);
+const allItems = pages.flat(); // flatten to single array
+```
+
+**Without `--slurp`:** stdout is `[item1, item2][item3, item4]` — invalid JSON after the first array. This is a silent data loss bug that only manifests when results span multiple pages (>30 items by default).
+
+### `stdin: 'ignore'` for `gh` calls
+
+`gh` subprocess calls must include `stdin: 'ignore'` (or `stdio: ['ignore', 'pipe', 'pipe']` for `execFileSync`). This is the same invariant as all subprocesses (AGENTS.md §3). For example, `scripts/release-notes-fragments.mjs` defines `ghJson()` and `ghText()` helpers using `execFileSync` — these must include `stdio: ['ignore', 'pipe', 'pipe']` per the six required properties. A PR review (pre-merge) identified this gap.
+
+### `Number.isInteger()` for API response validation
+
+When validating integer IDs from API responses (PR numbers, issue numbers, run IDs), use `Number.isInteger()`, not `Number.isFinite()`. `Number.isFinite()` accepts floats like `1.5`, which are never valid IDs.
+
+```javascript
+// Correct
+function isValidPrNumber(n) {
+  return Number.isInteger(n) && n > 0;
+}
+
+// Wrong — accepts 1.5, NaN, Infinity
+function isValidPrNumber(n) {
+  return Number.isFinite(n) && n > 0;
+}
+```
+
+> **Note:** This is a stricter pattern. Some existing code uses `Number.isFinite()` after `parseInt()` — while technically safe for parsed integers, `Number.isInteger()` is the correct guard for all ID validation going forward.
+
+### `maxBuffer` for large API responses
+
+`gh api` can return large payloads. Set `maxBuffer: 16 * 1024 * 1024` (16 MiB) to prevent silent truncation. This is especially important for `--paginate` calls that aggregate multiple pages.
+
+> **Note:** `maxBuffer` is specific to Node.js `child_process.execFile`/`execFileSync`. For Bun's `bunSpawn`, use the equivalent output bounding option.
+
 ## Testing pattern: `_internals` DI seam, NOT `mock.module`
 
 `mock.module(...)` leaks across test files in Bun's shared test-runner process.

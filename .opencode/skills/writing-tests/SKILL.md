@@ -610,6 +610,48 @@ authority checks:
 - For matcher caches or other shared state, test both priming orders when the
   selected behavior depends on mode, platform, or prior calls.
 
+## FR-006: Test File Size Limit (500 lines)
+
+CI enforces a **hard 500-line limit** per test file (FR-006). Files exceeding this limit fail the quality gate and block PR merge.
+
+### Checking file length
+
+```bash
+# Check a single file
+wc -l tests/unit/scripts/my-test.test.ts
+
+# Find all test files exceeding 400 lines (early warning threshold)
+find tests/ -name "*.test.ts" -exec wc -l {} \; | sort -rn | awk '$1 > 400'
+```
+
+### Splitting pattern
+
+When a test file approaches or exceeds 500 lines, split it by extracting cohesive `describe()` blocks into a new file with a descriptive suffix:
+
+1. **Identify natural boundaries.** Group `describe()` blocks by functional area (e.g., SHA resolution, validation, merge logic).
+2. **Create the new file** with a descriptive suffix: `<module>-<area>.test.ts` (e.g., `release-notes-fragments-sha.test.ts`, `release-notes-fragments-validation.test.ts`).
+3. **Move shared imports and helpers.** Either:
+   - Duplicate shared imports in both files (simple, for small overlap), OR
+   - Extract shared test helpers to a utility module (e.g., `tests/helpers/<module>-shared.ts`) and import from both files (preferred for complex shared setup).
+4. **Extract testable pure functions.** If the source module has inline validation logic (e.g., `isValidPrNumber`), extract it as an exported pure function so both test files can target it independently.
+5. **Verify both files are under 500 lines.**
+6. **Run both files independently AND co-run** to verify no mock isolation breakage:
+   ```bash
+   bun --smol test tests/unit/scripts/release-notes-fragments.test.ts --timeout 60000
+   bun --smol test tests/unit/scripts/release-notes-fragments-sha.test.ts --timeout 60000
+   bun --smol test tests/unit/scripts/release-notes-fragments*.test.ts --timeout 60000
+   ```
+
+### When to split vs refactor
+
+- **Split** when there are natural `describe()` boundaries (e.g., one file per functional area).
+- **Refactor** when the file is a single monolithic test with no clear boundaries — consolidate test logic instead.
+- **Warning:** If a previously split file exceeds 500 lines again, the test suite is structurally too large. Reorganize by module rather than continuing to split.
+
+### Reference
+
+See PR #1762 for a real-world example: `release-notes-fragments.test.ts` was split into `release-notes-fragments.test.ts` (379 lines) + `release-notes-fragments-sha.test.ts` (261 lines).
+
 ## Cross-Entry Invariants (config maps)
 
 When you modify any entry of a "map of agents/tools/roles" in `src/config/constants.ts` (`AGENT_TOOL_MAP`, `DEFAULT_MODELS`, `QA_AGENTS`, `PIPELINE_AGENTS`, etc.) or tool-name registration in `src/tools/tool-names.ts`, there are tests that assert **parity across sibling entries**, not just shape of one entry.

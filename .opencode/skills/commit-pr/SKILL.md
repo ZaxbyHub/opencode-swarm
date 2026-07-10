@@ -240,6 +240,20 @@ git fetch origin $prBranch
 git push origin "<your-local-branch>:$prBranch" --force-with-lease
 ```
 
+### Fork PR workflow approval
+
+If the PR is from a fork (head repository differs from base repository), GitHub requires explicit workflow approval after every push. CI jobs will remain in "waiting" status until approved:
+
+```bash
+# List pending runs
+gh run list --repo <upstream-owner>/<upstream-repo> --branch <branch-name> --limit 5
+
+# Approve the pending run
+gh api -X POST repos/<upstream-owner>/<upstream-repo>/actions/runs/<run-id>/approve
+```
+
+This requires `actions: write` permission on the base repository. See the `fork-pr-operations` skill for the full protocol including race conditions, permission requirements, and stale CI verification.
+
 ### Pre-push: Push Protection and Canonical Remote
 
 Before `git push`, run both checks:

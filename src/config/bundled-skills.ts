@@ -40,6 +40,8 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'merge-queue-readiness',
 	'skill-edit-validation',
 	'worktree-retry-cleanup',
+	'test-file-split',
+	'fork-pr-operations',
 ] as const;
 
 const MAX_SKILL_FILES = 64;

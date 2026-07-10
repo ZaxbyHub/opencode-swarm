@@ -265,6 +265,20 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		reason:
 			'MODE: SWARM is the canonical OpenCode swarm workflow (behavior model); .claude/skills/swarm is a thin runtime adapter that documents the /swarm command and its subcommands. Both exist but serve different purposes — .opencode is the canonical workflow definition, .claude is the command-interface adapter.',
 	},
+	{
+		slug: 'test-file-split',
+		kind: 'identical',
+		canonical: '.opencode',
+		reason:
+			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
+	},
+	{
+		slug: 'fork-pr-operations',
+		kind: 'identical',
+		canonical: '.opencode',
+		reason:
+			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
+	},
 ];
 
 /**

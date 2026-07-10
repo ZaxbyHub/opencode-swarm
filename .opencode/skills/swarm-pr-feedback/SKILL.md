@@ -512,9 +512,29 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
 - When `main` has a merge queue enabled, do not rebase or force-push a PR only
   because `main` advanced. Once required checks and review are green, queue the PR
   and let the merge queue perform final current-base validation. Still resolve real
-  merge conflicts and SHA-dependent review threads before queuing.
+   merge conflicts and SHA-dependent review threads before queuing.
 
-## Mandatory Gates
+ ### Operational Gotchas
+
+ - **Plan identity change:** When switching from a review plan to a feedback-closure
+   plan, `save_plan` rejects with `PLAN_IDENTITY_MISMATCH`. Pass
+   `confirm_identity_change: true` to acknowledge the intentional overwrite.
+ - **Stale gate evidence:** After a plan identity change, `check_gate_status` returns
+   timestamps from the *prior* plan. Reset task statuses and re-run Stage A gates
+   before trusting gate results. Do not accept cached gate verdicts from before the
+   identity change.
+ - **PowerShell PR comment posting:** Complex markdown bodies containing backticks,
+   dollar signs, or nested quotes fail in PowerShell here-strings. Write the body
+   to a temp file and use `gh pr comment <number> --body-file <tempfile>` instead
+   of inline `--body "..."`.
+ - **Same-file batching:** Multiple findings targeting the same file for the same
+   review cycle CAN be fixed in one coder task when the fixes are trivially
+   independent (e.g., a one-line guard and a typo fix). When findings require
+   different fixes on different code paths, use separate coder tasks even if
+   targeting the same file. The "ONE task per coder" rule is about distinct
+   objectives, not about N edits to one file.
+
+ ## Mandatory Gates
 
 **Stage A and Stage B gates and the reviewer + critic closeout gate are
 MANDATORY for any change made as part of the PR-feedback process.** No fix

@@ -50,6 +50,8 @@ const NON_COMMAND_SKILLS = new Set([
 	'merge-queue-readiness',
 	'gate-attribution',
 	'ci-failure-batching',
+	'test-file-split',
+	'fork-pr-operations',
 ]);
 
 /**

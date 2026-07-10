@@ -47,6 +47,8 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'merge-queue-readiness',
 	'gate-attribution',
 	'ci-failure-batching',
+	'test-file-split',
+	'fork-pr-operations',
 ];
 
 const REQUIRED_PACKAGE_FILES = [
