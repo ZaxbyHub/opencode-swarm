@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.112.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.1...v7.112.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* **scripts:** resolve commit SHA links in release-please bodies to inject pending fragments ([e5d4269](https://github.com/ZaxbyHub/opencode-swarm/commit/e5d4269794d0b9b79fc176096cc30dea33097914))
+
 ## [7.112.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.0...v7.112.1) (2026-07-10)
 
 
