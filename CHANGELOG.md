@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.112.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.111.0...v7.112.0) (2026-07-10)
+
+
+### Features
+
+* **qol:** address 7 friction points from long swarm sessions ([#1746](https://github.com/ZaxbyHub/opencode-swarm/issues/1746)) ([05fac89](https://github.com/ZaxbyHub/opencode-swarm/commit/05fac895ce21c46ee9a36a0f902897c14be3fb79))
+
+
+### Bug Fixes
+
+* **feedback:** resolve pr 1780 review findings ([4f56880](https://github.com/ZaxbyHub/opencode-swarm/commit/4f568809284cd78ec956372f55ee7c19664fb307))
+* **quality:** remove unused resolveDelegatedPlanTaskIds + biome string template ([4d34cc5](https://github.com/ZaxbyHub/opencode-swarm/commit/4d34cc50039f3c3a5b65a360e5e057e4918593d2))
+* **quality:** underscore unused 'directory' param in preserveDirtyWorktreeAtPath ([885e4d2](https://github.com/ZaxbyHub/opencode-swarm/commit/885e4d2b4e9fafdaed2cf63d54ab30bb95dc17f6))
+* **quality:** use template literal in ci-simulate.ts extractFileLineReferences call ([2557f5c](https://github.com/ZaxbyHub/opencode-swarm/commit/2557f5cd9cecad23c6b930894a5ee2b79d850128))
+
 ## [7.111.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.2...v7.111.0) (2026-07-10)
 
 
