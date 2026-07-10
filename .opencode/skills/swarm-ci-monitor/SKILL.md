@@ -1,5 +1,6 @@
 ---
 name: swarm-ci-monitor
+audience: swarm-plugin
 description: >
   End-to-end CI monitor that takes an already-human-reviewed PR, exhaustively
   researches every CI failure, fixes it end-to-end, iterates until all required
@@ -33,7 +34,7 @@ invoking user is the source of truth: only invoke after review is done.
 
 Load these skills before doing anything destructive (push / merge):
 
-- `../../../.opencode/skills/generated/ci-fix-monitor/SKILL.md` — for failure
+- `file:.swarm/bundled-skills/ci-fix-monitor/SKILL.md` — for failure
   classification and the per-type fix recipes (package-check, rebase,
   format/lint, macOS file I/O, integration, security, smoke). Do not re-derive
   these recipes here; ci-fix-monitor owns them.
@@ -94,9 +95,9 @@ Only after all three gates pass, enter the loop.
 Maintain an iteration counter starting at 5 (decremented at the end of each
 fix-push cycle, in 2g — this is a hard safety gate, not a soft target). At 0,
 stop (Step 5). This loop can span multiple CI runs and several minutes per
-iteration; if the session may compact mid-loop, persist the counter per
-`../../../.claude/skills/durable-session-state/SKILL.md` so the 5-cap
-survives a resume.
+iteration; if the session may compact mid-loop, record the remaining count in
+the active durable task/plan checkpoint and reload it on resume. Never reset
+the counter to 5 after compaction.
 
 ### 2a. Fetch check runs for the PR head SHA
 

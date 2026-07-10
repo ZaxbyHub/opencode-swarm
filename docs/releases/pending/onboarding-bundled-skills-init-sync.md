@@ -5,9 +5,9 @@
 On a brand-new project, the architect now follows the swarm workflow out of the
 box — no manual `/swarm` command and no session restart required.
 
-- The bundled architect MODE skills (`.opencode/skills/<mode>/SKILL.md` for all
-  20 modes: specify, plan, execute, critic-gate, brainstorm, clarify, …) are now
-  materialized into the project during plugin initialization via a new
+- The complete allowlisted bundled protocol inventory (architect MODE skills,
+  support protocols, and required generated-protocol dependencies) is now
+  materialized privately under `.swarm/bundled-skills/` during plugin initialization via a new
   bounded, fail-open async sync (`syncBundledProjectSkillsIfMissingAsync`).
   Per AGENTS.md invariant 1 / issue #704 the sync is **deferred** off the
   `server()`-resolution path via `queueMicrotask` (not `await`ed inline) and
@@ -34,10 +34,12 @@ onboarding gap, especially with non-frontier architect models.
 ## Migration
 
 No breaking changes. All changes are additive:
-- The init-time sync is missing-only and never overwrites user-customized skill
-  files (COPYFILE_EXCL + existence checks, symlink-guarded, byte/file-bounded,
-  rollback-on-error). It is a no-op after first run and on every supported
-  platform fails open without blocking plugin init.
+- The init-time sync refreshes only plugin-owned private runtime copies and never
+  writes repository-native skill roots. It compares content before atomic
+  replacement, refuses symlinks, enforces byte/file bounds, and rolls back a
+  partial copy on error. Identical content is a no-op; changed packaged content
+  refreshes the private copy. Every supported platform fails open without
+  blocking plugin init.
 - The `doctor-tools` alias is a convenience redirect to `doctor tools`.
 
 ## Caveats
@@ -50,4 +52,5 @@ No breaking changes. All changes are additive:
   sync remains a backstop. Whether OpenCode's own native skill-discovery picks up
   files written during the same boot is external to this repo and unverified
   here; the runtime-read path is demonstrated by a fresh-project materialization
-  check (20/20 mode skills present, incl. `specify/SKILL.md`).
+  check (the complete allowlisted inventory and its required nested/generated
+  dependencies are present, including `specify/SKILL.md`).

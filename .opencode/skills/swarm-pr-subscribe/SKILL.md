@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-subscribe
+audience: swarm-plugin
 description: >
   Monitor a pull request after creation and act autonomously on pushed PR
   activity. Use when subscribing to a PR after opening it, when asked to watch,

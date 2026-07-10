@@ -3,7 +3,7 @@
  *
  * Sanitizes the objective input, parses flags, and emits a [MODE: LOOP ...]
  * signal. The architect picks up the signal and loads
- * `.opencode/skills/loop/SKILL.md`, which runs the compound-engineering loop:
+ * `.swarm/bundled-skills/loop/SKILL.md`, which runs the compound-engineering loop:
  * brainstorm → plan → build → review → improve, iterating under
  * defense-in-depth stop conditions until the objective is met or a budget is
  * exhausted.

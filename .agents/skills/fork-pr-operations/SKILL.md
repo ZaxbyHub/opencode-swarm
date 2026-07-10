@@ -1,5 +1,6 @@
 ---
 name: fork-pr-operations
+audience: swarm-plugin
 description: Operational patterns for fork PRs (head repo differs from base repo). Covers GitHub workflow approval after push, force-push protocol, remote naming conventions, stale CI verification, and bot review multi-round awareness. Load when working with fork PRs, cross-repo contributions, or workflow approval issues.
 ---
 

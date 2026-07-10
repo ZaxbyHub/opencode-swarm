@@ -78,6 +78,8 @@
 		".opencode/skills/worktree-retry-cleanup",
 		".opencode/skills/test-file-split",
 		".opencode/skills/fork-pr-operations",
+		".opencode/skills/parallel-work-check",
+		".opencode/skills/ci-fix-monitor",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"

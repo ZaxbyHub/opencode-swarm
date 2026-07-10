@@ -1,5 +1,6 @@
 ---
 name: consult
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: CONSULT -- answering advisory questions with bounded evidence and clear uncertainty.
 ---

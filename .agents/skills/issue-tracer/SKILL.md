@@ -1,5 +1,6 @@
 ---
 name: issue-tracer
+audience: swarm-plugin
 description: Evidence-first issue and bug investigation for Codex. Use when asked to trace, investigate, root-cause, plan, fix, close, or prepare a PR for a GitHub issue, bug report, regression, failing test, or confusing runtime behavior. Drives intake, reproduction, localization, critic review, implementation, validation, invariant-aware PR closure, and no-gap evidence capture.
 ---
 

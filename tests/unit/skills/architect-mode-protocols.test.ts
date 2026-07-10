@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createArchitectAgent } from '../../../src/agents/architect';
 
 const MODE_SKILLS = [
 	[
@@ -64,10 +65,7 @@ const MODE_SKILLS = [
 	],
 ] as const;
 
-const architectPrompt = readFileSync(
-	join(process.cwd(), 'src/agents/architect.ts'),
-	'utf-8',
-);
+const architectPrompt = createArchitectAgent('test-model').config.prompt ?? '';
 
 describe('architect MODE protocol skills', () => {
 	for (const [modeName, slug, expectedContent] of MODE_SKILLS) {
@@ -91,7 +89,7 @@ describe('architect MODE protocol skills', () => {
 			});
 
 			it('keeps the protocol out of the architect prompt behind a skill stub', () => {
-				const skillRef = `file:.opencode/skills/${slug}/SKILL.md`;
+				const skillRef = `file:.swarm/bundled-skills/${slug}/SKILL.md`;
 				expect(architectPrompt).toContain(skillRef);
 				expect(architectPrompt).toContain(`### MODE: ${modeName}`);
 			});
@@ -149,5 +147,38 @@ describe('architect MODE protocol skills', () => {
 
 			expect(stub).toContain('HARD CONSTRAINTS');
 		}
+	});
+
+	it('keeps LOOP cross-mode loads on the plugin-owned bundled skill root', () => {
+		const loopSkill = readFileSync(
+			join(process.cwd(), '.opencode/skills/loop/SKILL.md'),
+			'utf-8',
+		);
+		for (const slug of [
+			'brainstorm',
+			'pre-phase-briefing',
+			'plan',
+			'critic-gate',
+			'execute',
+			'phase-wrap',
+		]) {
+			expect(loopSkill).toContain(
+				`file:.swarm/bundled-skills/${slug}/SKILL.md`,
+			);
+		}
+		expect(loopSkill).not.toContain('file:.opencode/skills/');
+	});
+
+	it('keeps engineering-conventions cross-skill loads on the bundled root', () => {
+		const conventions = readFileSync(
+			join(process.cwd(), '.opencode/skills/engineering-conventions/SKILL.md'),
+			'utf-8',
+		);
+		expect(conventions).toContain(
+			'.swarm/bundled-skills/writing-tests/SKILL.md',
+		);
+		expect(conventions).not.toContain(
+			'load [`.opencode/skills/writing-tests/SKILL.md`]',
+		);
 	});
 });

@@ -2,6 +2,28 @@
 
 This document describes the complete lifecycle of knowledge in OpenCode Swarm: from creation through retrieval, feedback, promotion, and compilation into reusable skills. For knowledge storage schema and configuration details, see [Knowledge System](knowledge.md).
 
+## Skill ownership and audience metadata
+
+Repository-native skill roots are project-owned:
+
+- `.opencode/skills/<name>/SKILL.md`
+- `.claude/skills/<name>/SKILL.md`
+- `.agents/skills/<name>/SKILL.md`
+
+The plugin does not install its runtime protocols into those roots. Shipped protocols are materialized privately under `.swarm/bundled-skills/<name>/` and loaded explicitly by `/swarm` MODE dispatch, so a repository skill may reuse a shipped slug without overwrite or native registry collision.
+
+Static skills declare a top-level audience:
+
+```yaml
+audience: ragappv3
+# or a domain plus runner constraint
+audience: [ragappv3, runner:codex]
+```
+
+An absent audience remains unscoped for backward compatibility. Explicit empty/malformed declarations fail closed. Domain values are alternatives to one another, runner values are alternatives to one another, and the domain/runner dimensions must both match. OpenCode project audiences are configured through `skillPropagation.audiences`; the plugin adds `swarm-plugin` and `runner:opencode` itself.
+
+The field is opencode-swarm routing metadata. Native hosts currently choose files from their own skill roots; they may ignore the custom top-level field. Runtime-generated skills under `.opencode/skills/generated/` therefore stay unscoped unless their creator has an explicit audience instead of inheriting a guessed repository identity.
+
 ## Complete Knowledge Lifecycle
 
 ### Phase 1: Knowledge Creation

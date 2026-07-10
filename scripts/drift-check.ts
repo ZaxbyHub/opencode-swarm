@@ -48,6 +48,7 @@ import {
 } from '../src/config/constants';
 import { COMMAND_NAME_SET, COMMAND_NAMES } from '../src/commands/command-names';
 import { COMMAND_REGISTRY } from '../src/commands/registry';
+import { parseSkillFrontmatter } from '../src/hooks/skill-scoring';
 import {
 	ADAPTER_ARCHITECT_MODE_SKILLS,
 	ADDITIONAL_SKILL_MIRROR_CONTRACTS,
@@ -312,6 +313,51 @@ interface PackageJson {
 	files?: string[];
 }
 
+/**
+ * Require declarative audience metadata on tracked, static skill surfaces.
+ * Runtime-generated skills are deliberately excluded: their repository
+ * audience cannot be guessed safely and absence remains legacy match-all.
+ */
+export function detectSkillAudienceDrift(
+	root: string = REPO_ROOT,
+): DriftFinding[] {
+	const { fileExists, readFile, listDirNames } = makeFs(root);
+	const findings: DriftFinding[] = [];
+	const category = 'skill-audience';
+
+	for (const skillRoot of [
+		'.opencode/skills',
+		'.claude/skills',
+		'.agents/skills',
+	]) {
+		for (const slug of listDirNames(skillRoot)) {
+			if (skillRoot === '.opencode/skills' && slug === 'generated') continue;
+			const skillPath = `${skillRoot}/${slug}/SKILL.md`;
+			if (!fileExists(skillPath)) continue;
+			const metadata = parseSkillFrontmatter(readFile(skillPath), skillPath);
+			if (metadata.frontmatterStatus !== 'valid') {
+				findings.push({
+					category,
+					severity: 'error',
+					file: skillPath,
+					message: `static skill "${slug}" has ${metadata.frontmatterStatus ?? 'invalid'} frontmatter`,
+				});
+				continue;
+			}
+			if (metadata.audience?.status !== 'valid') {
+				findings.push({
+					category,
+					severity: 'error',
+					file: skillPath,
+					message: `static skill "${slug}" must declare a valid top-level audience`,
+				});
+			}
+		}
+	}
+
+	return findings;
+}
+
 export function detectBundledSkillDrift(root: string = REPO_ROOT): DriftFinding[] {
 	const { fileExists, readFile, listDirNames } = makeFs(root);
 	const findings: DriftFinding[] = [];
@@ -495,6 +541,7 @@ export function detectAgentDrift(): DriftFinding[] {
 
 const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['skill-mirror', detectSkillMirrorDrift],
+	['skill-audience', detectSkillAudienceDrift],
 	['bundled-skill', detectBundledSkillDrift],
 	['tool', detectToolRegistrationDrift],
 	['command', detectCommandDrift],

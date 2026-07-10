@@ -8,9 +8,10 @@
  *      tool to a skill-capable agent (coder, reviewer, test_engineer, sme,
  *      docs, designer) and the SKILLS field is missing or "none" while
  *      skills exist in the project, appends a warning event to
- *      `.swarm/events.jsonl`. This is a SOFT WARNING — it NEVER blocks
- *      tool execution. Also records skill delegation entries to
- *      `.swarm/skill-usage.jsonl` for auditability.
+ *      `.swarm/events.jsonl`. Missing skills are a soft warning by default;
+ *      malformed, escaping, unreadable, or audience-ineligible explicit
+ *      `SKILLS:` references always block. Also records skill delegation entries
+ *      to `.swarm/skill-usage.jsonl` for auditability.
  *
  *   2. `experimental.chat.messages.transform` — scans reviewer output
  *      for SKILL_COMPLIANCE verdicts and records compliance outcomes
@@ -25,7 +26,10 @@ import type { MessageWithParts } from './knowledge-types.js';
 import {
 	computeSkillRelevanceScore,
 	formatSkillIndexWithContext,
+	isSkillAudienceMatch,
 	readSkillMetadata,
+	type SkillAudienceContext,
+	type SkillMetadata,
 } from './skill-scoring.js';
 import {
 	appendSkillUsageEntry,
@@ -249,6 +253,8 @@ export interface SkillPropagationConfig {
 	enabled: boolean;
 	/** When true, blocks delegations missing SKILLS field instead of warning. */
 	enforce?: boolean;
+	/** Project/domain audience tokens accepted by this repository. */
+	audiences?: readonly string[];
 }
 
 // ============================================================================
@@ -260,6 +266,7 @@ export const _internals: {
 	readdirSync: typeof fs.readdirSync;
 	existsSync: typeof fs.existsSync;
 	statSync: typeof fs.statSync;
+	realpathSync: typeof fs.realpathSync;
 	mkdirSync: typeof fs.mkdirSync;
 	appendFileSync: typeof fs.appendFileSync;
 	readFileSync: typeof fs.readFileSync;
@@ -275,6 +282,8 @@ export const _internals: {
 	readSkillUsageEntries: typeof readSkillUsageEntries;
 	readSkillUsageEntriesTail: typeof readSkillUsageEntriesTail;
 	parseSkillPaths: typeof parseSkillPaths;
+	extractFileSkillReferences: typeof extractFileSkillReferences;
+	validateSkillReference: typeof validateSkillReference;
 	extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
 	extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
 	computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
@@ -285,6 +294,7 @@ export const _internals: {
 	readdirSync: fs.readdirSync.bind(fs),
 	existsSync: fs.existsSync.bind(fs),
 	statSync: fs.statSync.bind(fs),
+	realpathSync: fs.realpathSync.bind(fs),
 	mkdirSync: fs.mkdirSync.bind(fs),
 	appendFileSync: fs.appendFileSync.bind(fs),
 	readFileSync: fs.readFileSync.bind(fs),
@@ -303,6 +313,9 @@ export const _internals: {
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
 	parseSkillPaths: null as unknown as typeof parseSkillPaths,
+	extractFileSkillReferences:
+		null as unknown as typeof extractFileSkillReferences,
+	validateSkillReference: null as unknown as typeof validateSkillReference,
 	extractTaskIdFromPrompt: null as unknown as typeof extractTaskIdFromPrompt,
 	extractSkillsFieldFromPrompt:
 		null as unknown as typeof extractSkillsFieldFromPrompt,
@@ -529,6 +542,204 @@ export function parseSkillPaths(fieldValue: string): string[] {
 		.filter((s) => s.length > 0);
 }
 
+/** Return only authoritative file references; all other content is inline. */
+export function extractFileSkillReferences(fieldValue: string): string[] {
+	return parseSkillPaths(fieldValue).filter((reference) =>
+		reference.startsWith('file:'),
+	);
+}
+
+/** Bound synchronous filesystem validation driven by model-authored fields. */
+export const MAX_EXPLICIT_SKILL_REFERENCES = 16;
+export const MAX_PROVENANCE_SKILL_REFERENCES_PER_TRANSFORM = 64;
+
+interface SkillReferenceValidation {
+	valid: boolean;
+	reason: string | null;
+	skillPath?: string;
+	metadata?: SkillMetadata;
+}
+
+/** Build the OpenCode plugin's active audience context. */
+export function resolveSkillAudienceContext(
+	config: SkillPropagationConfig,
+): SkillAudienceContext {
+	return {
+		runner: 'opencode',
+		audiences: [...new Set(['swarm-plugin', ...(config.audiences ?? [])])],
+	};
+}
+
+function isWithinRoot(root: string, candidate: string): boolean {
+	return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+/**
+ * Validate a repo-relative skill reference without trusting its frontmatter.
+ * Explicit and discovered loads require a real, readable SKILL.md. Legacy
+ * frontmatter-less skills remain compatible and have match-all audience;
+ * malformed or unreadable frontmatter fails closed.
+ */
+export function validateSkillReference(
+	directory: string,
+	reference: string,
+	context: SkillAudienceContext,
+	options: { enforceAudience: boolean; requireFilePrefix?: boolean },
+): SkillReferenceValidation {
+	const raw = reference.trim();
+	if (options.requireFilePrefix !== false && !raw.startsWith('file:')) {
+		return { valid: false, reason: 'SKILLS entries must use file: paths' };
+	}
+
+	const withoutPrefix = raw
+		.replace(/^file:/, '')
+		.replace(/\\/g, '/')
+		.trim();
+	if (
+		!withoutPrefix ||
+		path.posix.basename(withoutPrefix) !== 'SKILL.md' ||
+		path.isAbsolute(withoutPrefix) ||
+		path.win32.isAbsolute(withoutPrefix) ||
+		withoutPrefix.split('/').includes('..')
+	) {
+		return {
+			valid: false,
+			reason: 'skill path must name an in-project SKILL.md',
+		};
+	}
+
+	try {
+		const root = _internals.realpathSync(directory);
+		const lexicalPath = path.resolve(root, withoutPrefix);
+		if (!isWithinRoot(root, lexicalPath)) {
+			return {
+				valid: false,
+				reason: 'skill path resolves outside the project',
+			};
+		}
+		if (
+			!_internals.existsSync(lexicalPath) ||
+			!_internals.statSync(lexicalPath).isFile()
+		) {
+			return { valid: false, reason: 'skill file does not exist' };
+		}
+
+		const realPath = _internals.realpathSync(lexicalPath);
+		if (!isWithinRoot(root, realPath)) {
+			return {
+				valid: false,
+				reason: 'skill symlink resolves outside the project',
+			};
+		}
+
+		const normalizedPath = withoutPrefix.replace(/^\.\//, '');
+		// Read metadata from the path whose realpath was already containment-
+		// checked. Reopening the lexical path here would allow a symlink swap
+		// between validation and frontmatter parsing.
+		const validatedMetadataPath = path
+			.relative(root, realPath)
+			.replace(/\\/g, '/');
+		const metadata = _internals.readSkillMetadata(validatedMetadataPath, root);
+		if (
+			metadata.frontmatterStatus !== 'valid' &&
+			metadata.frontmatterStatus !== 'absent'
+		) {
+			return {
+				valid: false,
+				reason: `skill frontmatter is ${metadata.frontmatterStatus ?? 'invalid'}`,
+			};
+		}
+		if (options.enforceAudience && !isSkillAudienceMatch(metadata, context)) {
+			return {
+				valid: false,
+				reason:
+					metadata.audience?.status === 'invalid'
+						? 'skill audience metadata is invalid'
+						: 'skill audience does not match the active project and runner',
+			};
+		}
+
+		return {
+			valid: true,
+			reason: null,
+			skillPath: normalizedPath,
+			metadata,
+		};
+	} catch {
+		return { valid: false, reason: 'skill file is unreadable' };
+	}
+}
+
+/**
+ * Mandatory explicit-reference integrity gate. This is intentionally separate
+ * from optional recommendation/scoring behavior and must run even when
+ * `skillPropagation.enabled` is false.
+ */
+export async function validateExplicitSkillReferencesBefore(
+	directory: string,
+	input: SkillGateInput,
+	config: SkillPropagationConfig,
+): Promise<{
+	blocked: boolean;
+	reason: string | null;
+	validatedSkillPaths?: string[];
+}> {
+	const toolName = typeof input.tool === 'string' ? input.tool : '';
+	if (toolName !== 'task' && toolName !== 'Task') {
+		return { blocked: false, reason: null };
+	}
+	const agentRaw = typeof input.agent === 'string' ? input.agent : '';
+	if (!agentRaw || stripKnownSwarmPrefix(agentRaw) !== 'architect') {
+		return { blocked: false, reason: null };
+	}
+
+	const parsed = _internals.parseDelegationArgs(input.args);
+	if (!parsed) return { blocked: false, reason: null };
+	const targetBase = stripKnownSwarmPrefix(parsed.targetAgent);
+	if (!_internals.SKILL_CAPABLE_AGENTS.has(targetBase)) {
+		return { blocked: false, reason: null };
+	}
+
+	const skillsValue = parsed.skillsField.trim();
+	if (!skillsValue || skillsValue.toLowerCase() === 'none') {
+		return { blocked: false, reason: null };
+	}
+	const fileReferences = _internals.extractFileSkillReferences(skillsValue);
+	// Inline skill bodies are an established recovery path when a recipient
+	// cannot load a file reference. They contain no path authority to validate.
+	if (fileReferences.length === 0) {
+		return { blocked: false, reason: null, validatedSkillPaths: [] };
+	}
+	if (fileReferences.length > MAX_EXPLICIT_SKILL_REFERENCES) {
+		return {
+			blocked: true,
+			reason: `Blocked SKILLS field with ${fileReferences.length} file references; maximum is ${MAX_EXPLICIT_SKILL_REFERENCES}`,
+		};
+	}
+
+	const context = resolveSkillAudienceContext(config);
+	const validatedSkillPaths: string[] = [];
+	for (const reference of fileReferences) {
+		const result = _internals.validateSkillReference(
+			directory,
+			reference,
+			context,
+			{
+				enforceAudience: true,
+			},
+		);
+		if (!result.valid) {
+			return {
+				blocked: true,
+				reason: `Blocked invalid SKILLS reference "${reference}": ${result.reason}`,
+			};
+		}
+		if (result.skillPath) validatedSkillPaths.push(result.skillPath);
+	}
+
+	return { blocked: false, reason: null, validatedSkillPaths };
+}
+
 /**
  * Extract a task ID from a delegation prompt string.
  * Looks for patterns like "taskId: <id>" or "TASK: <id>" (case-insensitive).
@@ -579,6 +790,18 @@ export async function skillPropagationGateBefore(
 		usageCount: number;
 	}>;
 }> {
+	const explicitIntegrity = await validateExplicitSkillReferencesBefore(
+		directory,
+		input,
+		config,
+	);
+	if (explicitIntegrity.blocked) {
+		return {
+			blocked: true,
+			reason: explicitIntegrity.reason,
+			recommendedSkills: undefined,
+		};
+	}
 	if (!config.enabled)
 		return { blocked: false, reason: null, recommendedSkills: undefined };
 
@@ -607,7 +830,22 @@ export async function skillPropagationGateBefore(
 		typeof input.sessionID === 'string' ? input.sessionID : 'unknown';
 
 	// --- Discover available skills early (used by scoring and warning blocks) ---
-	const availableSkills = _internals.discoverAvailableSkills(directory);
+	const audienceContext = resolveSkillAudienceContext(config);
+	const availableSkills: string[] = [];
+	const metadataBySkillPath = new Map<string, SkillMetadata>();
+	for (const skillPath of _internals.discoverAvailableSkills(directory)) {
+		const validation = _internals.validateSkillReference(
+			directory,
+			skillPath,
+			audienceContext,
+			{ enforceAudience: true, requireFilePrefix: false },
+		);
+		if (!validation.valid || !validation.skillPath) continue;
+		availableSkills.push(validation.skillPath);
+		if (validation.metadata) {
+			metadataBySkillPath.set(validation.skillPath, validation.metadata);
+		}
+	}
 
 	// --- Record skill delegation usage (best-effort, never block) ---
 	const skillsValue = parsed.skillsField.trim();
@@ -619,7 +857,7 @@ export async function skillPropagationGateBefore(
 		const taskId = _internals.extractTaskIdFromPrompt(prompt);
 
 		// Parse SKILLS field for primary skill paths
-		const skillPaths = _internals.parseSkillPaths(skillsValue);
+		const skillPaths = explicitIntegrity.validatedSkillPaths ?? [];
 
 		// Also parse SKILLS_USED_BY_CODER from prompt if present
 		let coderSkillPaths: string[] = [];
@@ -635,7 +873,21 @@ export async function skillPropagationGateBefore(
 		}
 
 		// Combine and deduplicate all skill paths
-		const allPaths = [...new Set([...skillPaths, ...coderSkillPaths])];
+		const safeCoderSkillPaths = coderSkillPaths.flatMap((skillPath) => {
+			const validation = _internals.validateSkillReference(
+				directory,
+				skillPath,
+				audienceContext,
+				{ enforceAudience: false },
+			);
+			return validation.valid && validation.skillPath
+				? [validation.skillPath]
+				: [];
+		});
+
+		// Primary SKILLS paths were already integrity/audience validated. Historical
+		// SKILLS_USED_BY_CODER is provenance only and is recorded only when safe.
+		const allPaths = [...new Set([...skillPaths, ...safeCoderSkillPaths])];
 
 		for (const skillPath of allPaths) {
 			try {
@@ -684,7 +936,9 @@ export async function skillPropagationGateBefore(
 						const skillEntries = sessionEntries.filter(
 							(e) => e.skillPath === skillPath,
 						);
-						const metadata = _internals.readSkillMetadata(skillPath, directory);
+						const metadata =
+							metadataBySkillPath.get(skillPath) ??
+							_internals.readSkillMetadata(skillPath, directory);
 						const score = _internals.computeSkillRelevanceScore(
 							skillPath,
 							prompt,
@@ -723,20 +977,33 @@ export async function skillPropagationGateBefore(
 			// Create a set of existing paths for fast lookup
 			const existingPaths = new Set(scored.map((s) => s.skillPath));
 			for (const routingPath of routingPaths) {
+				const validation = _internals.validateSkillReference(
+					directory,
+					routingPath,
+					audienceContext,
+					{ enforceAudience: true, requireFilePrefix: false },
+				);
+				if (!validation.valid || !validation.skillPath) continue;
+				const eligibleRoutingPath = validation.skillPath;
+				if (validation.metadata) {
+					metadataBySkillPath.set(eligibleRoutingPath, validation.metadata);
+				}
 				// Skip retired or stale skills (marker in containing directory)
-				const routedSkillDir = path.dirname(path.join(directory, routingPath));
+				const routedSkillDir = path.dirname(
+					path.join(directory, eligibleRoutingPath),
+				);
 				if (
 					_internals.existsSync(path.join(routedSkillDir, 'retired.marker')) ||
 					_internals.existsSync(path.join(routedSkillDir, 'stale.marker'))
 				)
 					continue;
-				if (!existingPaths.has(routingPath)) {
+				if (!existingPaths.has(eligibleRoutingPath)) {
 					scored.push({
-						skillPath: routingPath,
+						skillPath: eligibleRoutingPath,
 						score: 0.9, // High score for explicitly routed skills
 						usageCount: 0,
 					});
-					existingPaths.add(routingPath);
+					existingPaths.add(eligibleRoutingPath);
 				}
 			}
 			// Re-sort by score descending
@@ -769,6 +1036,7 @@ export async function skillPropagationGateBefore(
 			const formattedIndex = _internals.formatSkillIndexWithContext(
 				skillsForIndex,
 				directory,
+				metadataBySkillPath,
 			);
 			if (formattedIndex.length > 0) {
 				const contextPath = path.join(directory, '.swarm', 'context.md');
@@ -914,12 +1182,34 @@ export async function skillPropagationTransformScan(
 	directory: string,
 	output: { messages?: MessageWithParts[] },
 	sessionID?: string,
+	config: SkillPropagationConfig = { enabled: true },
 ): Promise<void> {
 	if (!output?.messages) return;
 	if (!sessionID) return;
 
 	const messages = output.messages;
 	let hadRecordingError = false;
+	const audienceContext = resolveSkillAudienceContext(config);
+	let remainingProvenanceValidationBudget =
+		MAX_PROVENANCE_SKILL_REFERENCES_PER_TRANSFORM;
+	const validatedProvenancePaths = (fieldValue: string): string[] => {
+		if (remainingProvenanceValidationBudget <= 0) return [];
+		const references = _internals
+			.parseSkillPaths(fieldValue)
+			.slice(0, remainingProvenanceValidationBudget);
+		remainingProvenanceValidationBudget -= references.length;
+		return references.flatMap((reference) => {
+			const validation = _internals.validateSkillReference(
+				directory,
+				reference,
+				audienceContext,
+				{ enforceAudience: true },
+			);
+			return validation.valid && validation.skillPath
+				? [validation.skillPath]
+				: [];
+		});
+	};
 
 	// --- Build dedup set from existing entries for this session ---
 	// Prevents duplicate entries when the same message is scanned on
@@ -986,7 +1276,7 @@ export async function skillPropagationTransformScan(
 			}
 			const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
 			if (coderMatch) {
-				const parsed = _internals.parseSkillPaths(coderMatch[1]);
+				const parsed = validatedProvenancePaths(coderMatch[1]);
 				skillPaths.push(...parsed);
 			}
 		}
@@ -1109,7 +1399,7 @@ export async function skillPropagationTransformScan(
 				skillsField &&
 				skillsField.toLowerCase() !== 'none'
 			) {
-				const skillPaths = _internals.parseSkillPaths(skillsField);
+				const skillPaths = validatedProvenancePaths(skillsField);
 				const taskId = _internals.extractTaskIdFromPrompt(text);
 
 				for (const skillPath of skillPaths) {
@@ -1151,6 +1441,8 @@ _internals.writeWarnEvent = writeWarnEvent;
 _internals.discoverAvailableSkills = discoverAvailableSkills;
 _internals.parseDelegationArgs = parseDelegationArgs;
 _internals.parseSkillPaths = parseSkillPaths;
+_internals.extractFileSkillReferences = extractFileSkillReferences;
+_internals.validateSkillReference = validateSkillReference;
 _internals.extractTaskIdFromPrompt = extractTaskIdFromPrompt;
 _internals.extractSkillsFieldFromPrompt = extractSkillsFieldFromPrompt;
 _internals.formatSkillIndexWithContext = formatSkillIndexWithContext;

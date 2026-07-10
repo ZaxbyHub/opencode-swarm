@@ -10,6 +10,7 @@ import {
 	detectBundledSkillDrift,
 	detectCommandDrift,
 	detectDocsClaimDrift,
+	detectSkillAudienceDrift,
 	detectSkillMirrorDrift,
 	detectToolRegistrationDrift,
 	runSyncDetectors,
@@ -93,6 +94,45 @@ describe('drift-check: skill-mirror detection', () => {
 		const findings = detectSkillMirrorDrift(root);
 		const hit = findings.find((f) => f.message.includes('"generated"'));
 		expect(hit).toBeUndefined();
+	});
+});
+
+describe('drift-check: static skill audience metadata', () => {
+	test('detects missing and invalid audience declarations', () => {
+		const root = makeTempRoot();
+		writeFile(
+			root,
+			'.opencode/skills/missing/SKILL.md',
+			'---\nname: missing\ndescription: missing audience\n---\n',
+		);
+		writeFile(
+			root,
+			'.claude/skills/invalid/SKILL.md',
+			'---\nname: invalid\naudience: []\ndescription: invalid audience\n---\n',
+		);
+
+		const findings = detectSkillAudienceDrift(root);
+		expect(findings).toHaveLength(2);
+		expect(findings.map((finding) => finding.file)).toEqual([
+			'.opencode/skills/missing/SKILL.md',
+			'.claude/skills/invalid/SKILL.md',
+		]);
+	});
+
+	test('accepts valid static audiences and ignores generated skills', () => {
+		const root = makeTempRoot();
+		writeFile(
+			root,
+			'.agents/skills/codex-adapter/SKILL.md',
+			'---\nname: codex-adapter\naudience: swarm-plugin\ndescription: valid\n---\n',
+		);
+		writeFile(
+			root,
+			'.opencode/skills/generated/dynamic/SKILL.md',
+			'---\nname: dynamic\ndescription: intentionally unscoped\n---\n',
+		);
+
+		expect(detectSkillAudienceDrift(root)).toEqual([]);
 	});
 });
 

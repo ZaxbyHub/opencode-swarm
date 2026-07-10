@@ -1,5 +1,6 @@
 ---
 name: phase-wrap
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: PHASE-WRAP -- phase boundary evidence, drift and hallucination gates, retrospectives, phase completion, and final council.
 ---

@@ -1,5 +1,6 @@
 ---
 name: unswarm
+audience: swarm-plugin
 description: Codex adapter for disabling a previously requested swarm-like workflow in the current thread. Use when the user says unswarm, stop swarm mode, return to normal mode, simplify the workflow, or stop using extra review/delegation rigor.
 ---
 

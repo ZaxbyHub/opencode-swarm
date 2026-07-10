@@ -1,5 +1,6 @@
 ---
 name: swarm-implement
+audience: swarm-plugin
 description: Claude Code adapter for the canonical opencode-swarm implementation workflow. Use for feature work, bug fixes, refactors, and multi-file changes that need exploration, implementation, review, and validation.
 disable-model-invocation: true
 ---

@@ -1620,9 +1620,27 @@ export type KnowledgeApplicationConfig = z.infer<
 >;
 
 // Skill propagation gate configuration
+const SkillPropagationAudienceSchema = z
+	.string()
+	.max(64)
+	.refine((value) => value !== 'swarm-plugin', {
+		message: 'swarm-plugin is reserved for plugin-internal skill routing',
+	})
+	.refine((value) => !value.startsWith('runner:'), {
+		message: 'runner:* values are derived from the active runner',
+	})
+	.regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/, {
+		message: 'audiences must be lowercase domain tokens',
+	});
+
 export const SkillPropagationConfigSchema = z.object({
 	enabled: z.boolean().default(true),
 	enforce: z.boolean().default(false),
+	audiences: z
+		.array(SkillPropagationAudienceSchema)
+		.max(16)
+		.transform((values) => [...new Set(values)])
+		.default([]),
 });
 
 export type SkillPropagationConfig = z.infer<

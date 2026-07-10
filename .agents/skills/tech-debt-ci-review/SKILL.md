@@ -1,5 +1,6 @@
 ---
 name: tech-debt-ci-review
+audience: swarm-plugin
 description: Codex adapter for deep technical-debt and CI-stability audits. Use when asked to find test theater, flaky tests, missing or mis-scoped tests, brittle CI/toolchain behavior, structural debt blocking green PRs, or a remediation order for opencode-swarm.
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: swarm
+audience: swarm-plugin
 description: Cross-agent swarm-mode behavior model — a higher-rigor workflow using parallel investigation, independent reviewer validation, and critic challenge, plus the mandatory implementation closeout gate. Runtime adapters (.claude, .agents) add execution-specific notes and command wiring.
 ---
 

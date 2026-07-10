@@ -4,7 +4,7 @@ All `/swarm` subcommands available in the current OpenCode Swarm source tree. Th
 
 Commands are grouped by function. Compound commands (e.g., `/swarm config doctor`) resolve the two-word form first, then fall back to the first token.
 
-First-class MODE commands are repo-agnostic. The npm package ships the built-in OpenCode mode skills and, when a command needs one, materializes missing copies under the target repository's `.opencode/skills/` tree before emitting the MODE signal. Existing project skill files are never overwritten.
+First-class MODE commands are repo-agnostic. The npm package ships the built-in OpenCode mode skills and materializes private runtime copies under `.swarm/bundled-skills/` before emitting a MODE signal. Native project skill roots (`.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`) remain project-owned and are never overwritten.
 
 ---
 
@@ -311,7 +311,7 @@ Read-only codebase audit using parallel explorer waves with independent reviewer
 
 ### `/swarm codebase-review [scope] [--mode <name>] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]`
 
-Launch the `codebase-review-swarm` skill for a quote-grounded full-repo or large-subsystem audit. This command is repo-agnostic: the plugin ships the skill package, materializes it into `.opencode/skills/codebase-review-swarm/` when missing, emits a `MODE: CODEBASE_REVIEW` signal in the current project, and then the architect loads `.opencode/skills/codebase-review-swarm/SKILL.md`.
+Launch the `codebase-review-swarm` skill for a quote-grounded full-repo or large-subsystem audit. This command is repo-agnostic: the plugin ships the skill package, materializes it into `.swarm/bundled-skills/codebase-review-swarm/`, emits a `MODE: CODEBASE_REVIEW` signal in the current project, and then the architect loads the private runtime copy. A repository may define its own native `codebase-review-swarm` skill without collision.
 
 | Alias |
 |-------|

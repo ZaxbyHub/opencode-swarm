@@ -146,12 +146,12 @@ describe('1 — Injection via skill paths', () => {
 		expect(paths).toEqual([longPath]);
 	});
 
-	test('records skill usage with path-traversal skill path', async () => {
+	test('blocks path-traversal skill paths before usage recording', async () => {
 		const recorded: RecordedEntry[] = [];
 		applyOverrides(_internals, {
 			parseDelegationArgs: () => ({
 				targetAgent: 'coder',
-				skillsField: '../../../secrets/db',
+				skillsField: 'file:../../../secrets/db/SKILL.md',
 			}),
 			discoverAvailableSkills: () => ['.claude/skills/foo/SKILL.md'],
 			appendSkillUsageEntry: makeMockAppendSkillUsageEntry(recorded),
@@ -159,7 +159,7 @@ describe('1 — Injection via skill paths', () => {
 			parseSkillPaths: (v: string) => [v],
 		});
 
-		await skillPropagationGateBefore(
+		const result = await skillPropagationGateBefore(
 			tmp,
 			{
 				tool: 'task',
@@ -167,22 +167,22 @@ describe('1 — Injection via skill paths', () => {
 				sessionID: 'sess-traversal',
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: ../../../secrets/db\ndo work',
+					prompt: 'SKILLS: file:../../../secrets/db/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },
 		);
 
-		expect(recorded).toHaveLength(1);
-		expect(recorded[0].skillPath).toBe('../../../secrets/db');
+		expect(result.blocked).toBe(true);
+		expect(recorded).toHaveLength(0);
 	});
 
-	test('records skill usage with absolute path skill path', async () => {
+	test('blocks absolute skill paths before usage recording', async () => {
 		const recorded: RecordedEntry[] = [];
 		applyOverrides(_internals, {
 			parseDelegationArgs: () => ({
 				targetAgent: 'coder',
-				skillsField: '/root/.ssh/id_rsa',
+				skillsField: 'file:/root/.ssh/SKILL.md',
 			}),
 			discoverAvailableSkills: () => ['.claude/skills/foo/SKILL.md'],
 			appendSkillUsageEntry: makeMockAppendSkillUsageEntry(recorded),
@@ -190,7 +190,7 @@ describe('1 — Injection via skill paths', () => {
 			parseSkillPaths: (v: string) => [v],
 		});
 
-		await skillPropagationGateBefore(
+		const result = await skillPropagationGateBefore(
 			tmp,
 			{
 				tool: 'task',
@@ -198,19 +198,19 @@ describe('1 — Injection via skill paths', () => {
 				sessionID: 'sess-abs',
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: /root/.ssh/id_rsa\ndo work',
+					prompt: 'SKILLS: file:/root/.ssh/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },
 		);
 
-		expect(recorded).toHaveLength(1);
-		expect(recorded[0].skillPath).toBe('/root/.ssh/id_rsa');
+		expect(result.blocked).toBe(true);
+		expect(recorded).toHaveLength(0);
 	});
 
-	test('records skill usage with null-byte embedded skill path', async () => {
+	test('blocks null-byte embedded skill paths before usage recording', async () => {
 		const recorded: RecordedEntry[] = [];
-		const nullPath = 'skill\0path';
+		const nullPath = 'file:skill\0path/SKILL.md';
 		applyOverrides(_internals, {
 			parseDelegationArgs: () => ({
 				targetAgent: 'coder',
@@ -222,7 +222,7 @@ describe('1 — Injection via skill paths', () => {
 			parseSkillPaths: (v: string) => [v],
 		});
 
-		await skillPropagationGateBefore(
+		const result = await skillPropagationGateBefore(
 			tmp,
 			{
 				tool: 'task',
@@ -236,8 +236,8 @@ describe('1 — Injection via skill paths', () => {
 			{ enabled: true },
 		);
 
-		expect(recorded).toHaveLength(1);
-		expect(recorded[0].skillPath).toBe(nullPath);
+		expect(result.blocked).toBe(true);
+		expect(recorded).toHaveLength(0);
 	});
 });
 
@@ -1034,15 +1034,13 @@ End of code.`,
 			},
 		]);
 
-		// The TO pattern regex matches regardless of code block context
-		// This is a design decision — the pattern matches the literal text
+		// The textual TO pattern may match, but an invalid shorthand reference
+		// must not create a phantom usage record.
 		const entries = readUsageFile();
-		// The current implementation matches even inside code blocks
-		// This documents the existing behavior
-		expect(entries.length).toBeGreaterThanOrEqual(1);
+		expect(entries).toEqual([]);
 	});
 
-	test('architect message with SKILLS in comment is matched (TO and SKILLS on separate lines)', async () => {
+	test('architect message with invalid shorthand SKILLS is not recorded', async () => {
 		applyOverrides(_internals, {
 			parseSkillPaths: (v: string) =>
 				v === 'skill-comment' ? ['skill-comment'] : [],
@@ -1062,8 +1060,7 @@ End of code.`,
 		]);
 
 		const entries = readUsageFile();
-		expect(entries.length).toBeGreaterThan(0);
-		expect(entries[0].skillPath).toBe('skill-comment');
+		expect(entries).toEqual([]);
 	});
 
 	test('reviewer message with no info.agent does not crash', async () => {
@@ -1163,7 +1160,7 @@ End of code.`,
 		]);
 
 		const entries = readUsageFile();
-		expect(entries[0].skillPath).toBe('whitespace-skill');
+		expect(entries).toEqual([]);
 	});
 
 	test('architect delegation with lowercase to (not TO) is not matched', async () => {
@@ -1185,9 +1182,8 @@ End of code.`,
 			},
 		]);
 
-		// Pattern is /TO\s+(coder|...)/i — lowercase "to" matches because of /i flag
-		// So it SHOULD match
+		// Lowercase TO still matches, but shorthand SKILLS remains ineligible.
 		const entries = readUsageFile();
-		expect(entries[0].skillPath).toBe('lowercase-skill');
+		expect(entries).toEqual([]);
 	});
 });

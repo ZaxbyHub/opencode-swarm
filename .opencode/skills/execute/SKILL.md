@@ -1,5 +1,6 @@
 ---
 name: execute
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: EXECUTE -- task execution, coder retry handling, QA gates, completion evidence, and per-task closure.
 ---

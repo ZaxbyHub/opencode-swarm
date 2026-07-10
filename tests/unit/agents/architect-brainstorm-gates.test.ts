@@ -69,7 +69,7 @@ describe('architect prompt - MODE: BRAINSTORM Phase 6 QA gate selection', () => 
 	});
 
 	test('BRAINSTORM RULES updated: gates persisted during MODE: PLAN are ratchet-tighter from that point', () => {
-		expect(prompt).toContain('file:.opencode/skills/brainstorm/SKILL.md');
+		expect(prompt).toContain('file:.swarm/bundled-skills/brainstorm/SKILL.md');
 		expect(skill).toContain(
 			'QA gates elected in Phase 6 are persisted during MODE: PLAN',
 		);

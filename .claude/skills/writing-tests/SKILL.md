@@ -1,5 +1,6 @@
 ---
 name: writing-tests
+audience: swarm-plugin
 description: Claude Code adapter for opencode-swarm test authoring rules. Use before creating or modifying tests in this repository.
 ---
 

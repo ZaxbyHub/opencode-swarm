@@ -129,7 +129,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 
 ### PR #1356 — `withTimeout`-bounded work is still on the critical path if you `await` it
 
-- **Context:** PR #1356 added an init-time step that materializes up to 20 bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The merged form is the **correct** pattern — deferred via `queueMicrotask`, `withTimeout`-bounded, fail-open, missing-only, byte/file-bounded (`src/index.ts` ~line 392). It is cited here as an exemplar, not a regression.
+- **Context:** PR #1356 added an init-time step that materializes allowlisted bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The current form is the **correct** pattern — deferred via `queueMicrotask`, `withTimeout`-bounded, fail-open, content-aware with atomic replacement, byte/file-bounded, and confined to `.swarm/bundled-skills` (`src/index.ts`). It is cited here as an exemplar, not a regression.
 - **The lesson (recorded in the in-code comment at `src/index.ts`, ~line 381):** during development an earlier revision **`await`ed the sync inline** on the `server()`-resolution path. That version was still `withTimeout`-bounded and fail-open, yet the ~20 sequential `fsp.*` calls' real latency on a **cold Windows filesystem pushed `server()` past the `repro-704` T1 deadline** (`TIMING_DEADLINE_MS = 400` in `scripts/repro-704.mjs:42`). It was corrected to `queueMicrotask` deferral before merge; deferred, `server()` resolves in single-digit ms and the copy runs in the background. (No separate broken commit exists — the inline-await form was fixed pre-merge; the authority for this lesson is the in-code comment, not a CI artifact. Exact failing/passing millisecond figures were not recorded.)
 - **Root cause of the inline-await misstep:** treating `withTimeout` as if it makes work free. `withTimeout` is `Promise.race` against an (unref'd) timer (`src/utils/timeout.ts`) — it only protects against an *unbounded* await; it does nothing to remove the awaited work's actual latency from the `server()`-resolution path. The repo-graph scan (v7.0.3) established the deferral pattern via `queueMicrotask`; the skill sync now follows it.
 - **Invariants established:** **Bounded ≠ free.** Decide await-vs-defer explicitly for every init step:
@@ -139,6 +139,16 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Maps to AGENTS.md:** invariant 1 (plugin init).
 
 ## Invariants — anti-pattern, required pattern, verification
+
+### Skill ownership and audience routing
+
+- **Native roots are project-owned by the bundled-protocol installer.** Plugin-shipped protocols are never materialized into `.opencode/skills`, `.claude/skills`, or `.agents/skills`; they live under the Git-excluded `.swarm/bundled-skills/<slug>/` runtime root, so a repository may use the same slug without data loss or native skill-name collision. This does not change the separate, user-authorized generated-skill workflow, which promotes reviewed project skills into `.opencode/skills/generated/`.
+- **MODE dispatch is explicit.** Architect MODE stubs and bundled cross-protocol references resolve the private runtime copy through the shared bundled-skill path helper. Generic skill propagation continues to discover project-owned roots only.
+- **Audience metadata is bounded.** Static skills declare a top-level `audience`; parser input remains capped by the existing 16 KiB frontmatter read and audience values are additionally capped at 16 tokens of 64 characters. Absent means legacy match-all; explicit invalid metadata fails closed.
+- **Dimensions are conjunctive.** Domain tags are ORed with domain tags, runner tags are ORed with runner tags, and domain/runner dimensions are ANDed. Repository audiences come from explicit `skillPropagation.audiences`, never arbitrary swarm names.
+- **Explicit loads are integrity-checked.** An architect-provided `SKILLS:` path must be a readable, valid, contained SKILL.md whose audience matches. This mandatory validation remains active when optional propagation recommendations are disabled. `SKILLS_USED_BY_CODER` is provenance only and cannot authorize a load.
+
+**Verification:** bundled sync coexistence/concurrency tests, audience parser/config tests, explicit-route and companion-route tests, MODE/dependency path audits, package smoke, `repro-704`, and Node ESM import.
 
 ### 1. Plugin initialization
 
@@ -503,6 +513,7 @@ Two failures motivated the automated check:
 |---|---|---|
 | `skill-mirror` | `.opencode`↔`.claude` byte identity / divergence / adapter / opencode-only; unclassified both-tree pairs | `src/config/skill-mirrors.ts` (shared with `tests/unit/skills/skill-mirrors.test.ts`) |
 | `bundled-skill` | `.opencode/skills/` ⊆ `BUNDLED_PROJECT_SKILLS`; no phantom entries; `package.json#files` coverage | `src/config/bundled-skills.ts`, `package.json` |
+| `skill-audience` | tracked static skills declare valid top-level audience metadata; generated lifecycle skills are excluded | static skill frontmatter parsed by `src/hooks/skill-scoring.ts` |
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |

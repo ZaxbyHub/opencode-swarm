@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-subscribe
+audience: swarm-plugin
 description: >
   Claude Code adapter for post-PR monitoring. Use when subscribing to a pull
   request after opening it, when asked to watch, babysit, or autofix a PR until

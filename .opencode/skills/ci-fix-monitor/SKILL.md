@@ -1,5 +1,6 @@
 ---
 name: ci-fix-monitor
+audience: swarm-plugin
 description: >
   Monitor CI on a PR, diagnose failures, fix them, and re-push until green.
   Covers reading CI logs, classifying failure types (check-title, package-check,
@@ -72,7 +73,7 @@ readCuratorSummary reads file back successfully`), while the same tests pass
 on `ubuntu-latest` and `windows-latest`.
 
 **Canonical patterns:** See
-[`.claude/skills/writing-tests/SKILL.md`](../../../claude/skills/writing-tests/SKILL.md)
+`file:.swarm/bundled-skills/writing-tests/SKILL.md`
 § Cross-Platform Requirements → "macOS rename-visibility race" for the
 full three-layer fix pattern (bunWrite + ENOENT retry + Node FileHandle.sync()
 not fsync()). This skill is a triage pointer; the canonical technical
@@ -84,7 +85,7 @@ or path, the security test `ADVERSARIAL: Command Services Attack Vectors >
 Attack Vector 1: Malformed Arguments > EVIDENCE: extremely long task ID
 (buffer overflow) - ACCEPTED by regex but no crash` requires a path length
 guard BEFORE `validateSwarmPath` in `src/evidence/manager.ts:loadEvidence`.
-See [`.claude/skills/engineering-conventions/SKILL.md`](../../../claude/skills/engineering-conventions/SKILL.md)
+See `file:.swarm/bundled-skills/engineering-conventions/SKILL.md`
 for the evidence file flow that this gate check triggers on macOS CI.
 
 ## Step 3 — Diagnose with logs

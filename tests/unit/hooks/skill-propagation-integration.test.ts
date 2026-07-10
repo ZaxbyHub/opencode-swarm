@@ -43,7 +43,10 @@ function createTempSwarmDir(): string {
 function createMockSkill(skillPath: string): void {
 	const skillDir = path.dirname(skillPath);
 	fs.mkdirSync(skillDir, { recursive: true });
-	fs.writeFileSync(skillPath, '# Test Skill\n\nMock skill for testing.\n');
+	fs.writeFileSync(
+		skillPath,
+		'---\nname: propagation-fixture\ndescription: Mock skill for testing.\n---\n',
+	);
 }
 
 function appendSkillEntry(
@@ -79,7 +82,7 @@ describe('skill propagation integration', () => {
 			const sessionID = `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 			try {
 				const skillsFieldValue = 'file:.claude/skills/writing-tests/SKILL.md';
-				const expectedStoredPath = skillsFieldValue;
+				const expectedStoredPath = skillsFieldValue.replace(/^file:/, '');
 				const skillAbsPath = path.join(
 					tmpDir,
 					'.claude',
@@ -158,8 +161,8 @@ Write tests.`;
 			try {
 				const skillsValue = 'file:.claude/skills/skill-a/SKILL.md';
 				const skillsUsedByCoderValue = 'file:.claude/skills/skill-b/SKILL.md';
-				const expectedSkillA = skillsValue;
-				const expectedSkillB = skillsUsedByCoderValue;
+				const expectedSkillA = skillsValue.replace(/^file:/, '');
+				const expectedSkillB = skillsUsedByCoderValue.replace(/^file:/, '');
 				createMockSkill(
 					path.join(tmpDir, '.claude', 'skills', 'skill-a', 'SKILL.md'),
 				);
@@ -201,7 +204,7 @@ Write integration tests.`,
 			const sessionID = `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 			try {
 				const sharedSkill = 'file:.claude/skills/writing-tests/SKILL.md';
-				const expectedStoredPath = sharedSkill;
+				const expectedStoredPath = sharedSkill.replace(/^file:/, '');
 				createMockSkill(
 					path.join(tmpDir, '.claude', 'skills', 'writing-tests', 'SKILL.md'),
 				);
@@ -277,7 +280,7 @@ Write integration tests.`,
 			const sessionID = `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 			try {
 				const skillsFieldValue = 'file:.claude/skills/writing-tests/SKILL.md';
-				const expectedStoredPath = skillsFieldValue;
+				const expectedStoredPath = skillsFieldValue.replace(/^file:/, '');
 				const skillAbsPath = path.join(
 					tmpDir,
 					'.claude',
@@ -608,7 +611,7 @@ SKILL_COMPLIANCE: COMPLIANT — all skill guidelines were followed.`,
 			const sessionID = `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 			try {
 				const skillsFieldValue = 'file:.claude/skills/writing-tests/SKILL.md';
-				const expectedStoredPath = skillsFieldValue;
+				const expectedStoredPath = skillsFieldValue.replace(/^file:/, '');
 				const skillAbsPath = path.join(
 					tmpDir,
 					'.claude',
@@ -883,6 +886,9 @@ SKILL_COMPLIANCE: COMPLIANT — all skill guidelines followed correctly.`,
 			const tmpDir = createTempSwarmDir();
 			const sessionID = `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 			try {
+				createMockSkill(
+					path.join(tmpDir, '.claude', 'skills', 'test', 'SKILL.md'),
+				);
 				// parseDelegationArgs takes the first non-empty line as targetAgent.
 				// Since the prompt starts with 'TO reviewer' and 'reviewer' is skill-capable,
 				// the gate records the delegation entry.
@@ -891,7 +897,7 @@ SKILL_COMPLIANCE: COMPLIANT — all skill guidelines followed correctly.`,
 					agent: 'architect',
 					sessionID,
 					args: {
-						prompt: 'TO reviewer\nSKILLS: file:.claude/skills/test/skills.md',
+						prompt: 'TO reviewer\nSKILLS: file:.claude/skills/test/SKILL.md',
 					},
 				};
 

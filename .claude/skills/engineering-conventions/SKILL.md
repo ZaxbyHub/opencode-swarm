@@ -1,5 +1,6 @@
 ---
 name: engineering-conventions
+audience: swarm-plugin
 description: >
   Guidelines and non-negotiable engineering invariants for modifying opencode-swarm.
   Load before architecture, plugin initialization, subprocess, tool registration, plan

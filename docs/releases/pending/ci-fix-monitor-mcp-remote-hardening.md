@@ -2,7 +2,7 @@
 
 ## What changed
 
-- Added **Environment note** section to `.opencode/skills/generated/ci-fix-monitor/SKILL.md`
+- Added **Environment note** section to `.opencode/skills/ci-fix-monitor/SKILL.md`
   with an MCP tool equivalents table mapping `gh` CLI commands to their
   `mcp__github__` counterparts (`pull_request_read`, `get_job_logs`,
   `update_pull_request`), plus a ToolSearch caveat noting that MCP tool

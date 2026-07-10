@@ -3,6 +3,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_test_exports,
+	BUNDLED_PROJECT_SKILL_ROOT,
+	BUNDLED_PROJECT_SKILLS,
+	bundledProjectSkillFileReference,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../../../src/config/bundled-skills';
 import {
@@ -11,10 +14,10 @@ import {
 } from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-// Mirrors tests/unit/config/bundled-skills.test.ts for the async, init-path
-// variant. The async variant is what the plugin awaits (under withTimeout) at
-// startup so a fresh project has its architect MODE skills before the first
-// turn. It must preserve every guard of the sync version.
+// The async variant is what the plugin runs (under withTimeout) at startup so a
+// fresh project has its architect MODE skills before the first turn. Plugin
+// skills are materialized under the project-private `.swarm/` tree; native
+// repository skill roots are user-owned and must remain byte-for-byte intact.
 
 function writePackageSkill(
 	packageRoot: string,
@@ -70,9 +73,9 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 	});
 
 	const projectSkillPath = (slug = 'codebase-review-swarm') =>
-		path.join(projectDir, '.opencode', 'skills', slug, 'SKILL.md');
+		path.join(projectDir, BUNDLED_PROJECT_SKILL_ROOT, slug, 'SKILL.md');
 
-	test('installs missing bundled skills (incl. nested references) into the project', async () => {
+	test('installs missing bundled skills and nested assets into the private runtime root', async () => {
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
@@ -85,8 +88,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 			fs.existsSync(
 				path.join(
 					projectDir,
-					'.opencode',
-					'skills',
+					BUNDLED_PROJECT_SKILL_ROOT,
 					'codebase-review-swarm',
 					'references',
 					'review-protocol-v8.2.md',
@@ -97,6 +99,50 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		// expected event and must NEVER write raw stderr — it now goes through
 		// the debug-gated logger only. Assert silence rather than narration.
 		expect(warnOutput).toEqual([]);
+		expect(bundledProjectSkillFileReference('codebase-review-swarm')).toBe(
+			'file:.swarm/bundled-skills/codebase-review-swarm/SKILL.md',
+		);
+	});
+
+	test('preserves a repository-native same-slug skill byte for byte', async () => {
+		const nativeSkill = path.join(
+			projectDir,
+			'.opencode',
+			'skills',
+			'codebase-review-swarm',
+			'SKILL.md',
+		);
+		const nativeBytes = Buffer.from([0, 1, 2, 13, 10, 255]);
+		fs.mkdirSync(path.dirname(nativeSkill), { recursive: true });
+		fs.writeFileSync(nativeSkill, nativeBytes);
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.readFileSync(nativeSkill)).toEqual(nativeBytes);
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+	});
+
+	test('preserves a prior legacy native bundled copy while creating the private copy', async () => {
+		const legacySkill = path.join(
+			projectDir,
+			'.opencode',
+			'skills',
+			'design-docs',
+			'SKILL.md',
+		);
+		fs.mkdirSync(path.dirname(legacySkill), { recursive: true });
+		fs.writeFileSync(legacySkill, 'previous plugin copy\n', 'utf-8');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.readFileSync(legacySkill, 'utf-8')).toBe(
+			'previous plugin copy\n',
+		);
+		expect(fs.readFileSync(projectSkillPath('design-docs'), 'utf-8')).toBe(
+			'design docs skill\n',
+		);
 	});
 
 	test('updates an existing bundled project skill from the package source', async () => {
@@ -152,18 +198,63 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		expect(warnOutput).toEqual([]);
 	});
 
-	test('skips a symlinked .opencode directory', async () => {
-		const target = path.join(projectDir, 'real-opencode');
+	test('skips a symlinked .swarm directory', async () => {
+		const target = path.join(projectDir, 'real-swarm');
 		fs.mkdirSync(target, { recursive: true });
 		fs.symlinkSync(
 			target,
-			path.join(projectDir, '.opencode'),
+			path.join(projectDir, '.swarm'),
 			process.platform === 'win32' ? 'junction' : 'dir',
 		);
 
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
-		expect(fs.existsSync(path.join(target, 'skills'))).toBe(false);
+		expect(fs.existsSync(path.join(target, 'bundled-skills'))).toBe(false);
+	});
+
+	test('refuses a nested symlink without writing through it', async () => {
+		const outside = path.join(projectDir, 'outside-references');
+		const destDir = path.dirname(projectSkillPath());
+		fs.mkdirSync(outside, { recursive: true });
+		fs.mkdirSync(destDir, { recursive: true });
+		fs.symlinkSync(
+			outside,
+			path.join(destDir, 'references'),
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.existsSync(projectSkillPath())).toBe(false);
+		expect(fs.readdirSync(outside)).toEqual([]);
+		expect(
+			warnOutput.some((message) =>
+				message.includes('refusing to traverse unsafe bundled skill directory'),
+			),
+		).toBe(true);
+	});
+
+	test('refuses a symlinked bundled source directory', async () => {
+		const sourceDir = path.join(
+			packageRoot,
+			'.opencode',
+			'skills',
+			'codebase-review-swarm',
+		);
+		const linkedSource = path.join(packageRoot, 'linked-skill-source');
+		fs.renameSync(sourceDir, linkedSource);
+		fs.symlinkSync(
+			linkedSource,
+			sourceDir,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.existsSync(projectSkillPath())).toBe(false);
+		expect(warnOutput.some((message) => message.includes('symlinked'))).toBe(
+			true,
+		);
 	});
 
 	test('fails open when the bundled source skill is absent', async () => {
@@ -181,8 +272,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 	test('warns non-fatally when bundled skill sync fails', async () => {
 		const destDir = path.join(
 			projectDir,
-			'.opencode',
-			'skills',
+			BUNDLED_PROJECT_SKILL_ROOT,
 			'codebase-review-swarm',
 		);
 		fs.mkdirSync(destDir, { recursive: true });
@@ -206,8 +296,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		// quiet branch stays silent on stderr while still failing open.
 		const destDir = path.join(
 			projectDir,
-			'.opencode',
-			'skills',
+			BUNDLED_PROJECT_SKILL_ROOT,
 			'codebase-review-swarm',
 		);
 		fs.mkdirSync(destDir, { recursive: true });
@@ -227,8 +316,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		// error string is preserved so the operator can diagnose the cause.
 		const destDir = path.join(
 			projectDir,
-			'.opencode',
-			'skills',
+			BUNDLED_PROJECT_SKILL_ROOT,
 			'codebase-review-swarm',
 		);
 		fs.mkdirSync(destDir, { recursive: true });
@@ -267,8 +355,7 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 
 		const destDir = path.join(
 			projectDir,
-			'.opencode',
-			'skills',
+			BUNDLED_PROJECT_SKILL_ROOT,
 			'codebase-review-swarm',
 		);
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
@@ -314,5 +401,95 @@ describe('syncBundledProjectSkillsIfMissingAsync', () => {
 		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
 			'canonical skill\n',
 		);
+	});
+
+	test('serializes concurrent syncs for the same private destination', async () => {
+		await Promise.all(
+			Array.from({ length: 8 }, () =>
+				syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot),
+			),
+		);
+
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+		expect(fs.readFileSync(projectSkillPath('design-docs'), 'utf-8')).toBe(
+			'design docs skill\n',
+		);
+		expect(warnOutput).toEqual([]);
+	});
+
+	test('cleans up failed in-flight state so a corrected sync can retry', async () => {
+		const blockedPath = path.join(
+			projectDir,
+			BUNDLED_PROJECT_SKILL_ROOT,
+			'codebase-review-swarm',
+			'references',
+		);
+		fs.mkdirSync(path.dirname(blockedPath), { recursive: true });
+		fs.writeFileSync(blockedPath, 'not a directory\n', 'utf-8');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+		fs.rmSync(blockedPath, { force: true });
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+		expect(
+			fs.readFileSync(
+				path.join(
+					path.dirname(projectSkillPath()),
+					'references',
+					'review-protocol-v8.2.md',
+				),
+				'utf-8',
+			),
+		).toBe('protocol\n');
+	});
+
+	test('keeps packageRoot equal to projectRoot source-safe', async () => {
+		writePackageSkill(projectDir, 'codebase-review-swarm', 'native source\n');
+		const sourceSkill = path.join(
+			projectDir,
+			'.opencode',
+			'skills',
+			'codebase-review-swarm',
+			'SKILL.md',
+		);
+		const sourceBefore = fs.readFileSync(sourceSkill);
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, projectDir);
+
+		expect(fs.readFileSync(sourceSkill)).toEqual(sourceBefore);
+		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
+			'native source\n',
+		);
+	});
+
+	test('materializes the complete shipped inventory from the repository package root', async () => {
+		const repositoryPackageRoot = path.resolve(import.meta.dir, '../../..');
+
+		await syncBundledProjectSkillsIfMissingAsync(
+			projectDir,
+			repositoryPackageRoot,
+		);
+
+		const missing = BUNDLED_PROJECT_SKILLS.filter(
+			(slug) => !fs.existsSync(projectSkillPath(slug)),
+		);
+		expect(missing).toEqual([]);
+		expect(
+			fs.existsSync(
+				path.join(
+					projectDir,
+					BUNDLED_PROJECT_SKILL_ROOT,
+					'codebase-review-swarm',
+					'references',
+					'review-protocol-v8.2.md',
+				),
+			),
+		).toBe(true);
 	});
 });

@@ -1,5 +1,6 @@
 ---
 name: running-tests
+audience: swarm-plugin
 description: >
   Safe test execution patterns for opencode-swarm. Covers when to use the test_runner
   tool vs shell bun commands, scope safety rules, per-file isolation loops (bash and
