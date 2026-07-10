@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.111.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.2...v7.111.0) (2026-07-10)
+
+
+### Features
+
+* **swarm:** close workflow friction gaps ([08423cf](https://github.com/ZaxbyHub/opencode-swarm/commit/08423cf4c165d5410b23998265c82ed8d5214c0d))
+
 ## [7.110.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.110.1...v7.110.2) (2026-07-09)
 
 
