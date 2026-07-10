@@ -1097,7 +1097,7 @@ export async function preserveDirtyWorktreeAtPath(
 	worktreePath: string,
 	branchName: string,
 	reason: 'denied' | 'cancelled',
-	directory: string,
+	_directory: string,
 	_worktree_dir?: string,
 ): Promise<{
 	outcome: 'clean' | 'preserved' | 'preserve-failed';
