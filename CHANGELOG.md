@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.112.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.0...v7.112.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **knowledge:** revive auto-injection path & fix outcome attribution ([#1768](https://github.com/ZaxbyHub/opencode-swarm/issues/1768)) ([32c69df](https://github.com/ZaxbyHub/opencode-swarm/commit/32c69df5e55901412a22332d2f0eabcf9306a91c))
+* **knowledge:** revive auto-injection path & fix outcome attribution ([#1768](https://github.com/ZaxbyHub/opencode-swarm/issues/1768)) ([a9a6a73](https://github.com/ZaxbyHub/opencode-swarm/commit/a9a6a732e842cb0bd10bcc0fde4f0b7d1e83cd60))
+
 ## [7.112.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.111.0...v7.112.0) (2026-07-10)
 
 
