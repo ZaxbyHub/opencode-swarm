@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.113.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.0...v7.113.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **tui:** migrate init-path console.warn to advisoryWarn (PR2/5 [#1753](https://github.com/ZaxbyHub/opencode-swarm/issues/1753)) ([c81024d](https://github.com/ZaxbyHub/opencode-swarm/commit/c81024dda4ed4583480bc93506fa69209d03768b))
+
 ## [7.113.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.2...v7.113.0) (2026-07-11)
 
 
