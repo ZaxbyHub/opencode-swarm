@@ -588,6 +588,20 @@ describe('Command registration parity', () => {
 		// idempotent and capped, matching Claude Code's agent-callable
 		// subscribe tool, so they now live in the allowlist and their dash
 		// aliases no longer inherit a human-only target.
+		// Newer agent-callable commands added to the allowlist since the
+		// pre-fix baseline was frozen. All are read-only/diagnostic and
+		// therefore agent-appropriate: costs (token/cost totals), ci-simulate
+		// (dry-run CI), guardrail explain (dry-run guardrail preview),
+		// guardrail-log (read decision log), lanes (list worktree lanes),
+		// memory consolidation-log (read consolidation log).
+		const NEWER_ALLOWLIST_ADDITIONS = [
+			'ci-simulate',
+			'costs',
+			'guardrail explain',
+			'guardrail-log',
+			'lanes',
+			'memory consolidation-log',
+		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
 				'pr status',
@@ -595,6 +609,7 @@ describe('Command registration parity', () => {
 				'pr unsubscribe',
 				'learning',
 				'post-mortem',
+				...NEWER_ALLOWLIST_ADDITIONS,
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -609,8 +624,9 @@ describe('Command registration parity', () => {
 				'pr status',
 				'learning',
 				'post-mortem',
+				...NEWER_ALLOWLIST_ADDITIONS,
 			]),
-			noArgs: new Set(['pr status']),
+			noArgs: new Set(['pr status', 'lanes']),
 		};
 
 		const expectedAllowlist = new Set([
@@ -633,7 +649,7 @@ describe('Command registration parity', () => {
 			...EXPECTED_ADDITIONS.noArgs,
 		]);
 
-		it('SWARM_COMMAND_TOOL_ALLOWLIST matches baseline plus exactly 5 additions', () => {
+		it('SWARM_COMMAND_TOOL_ALLOWLIST matches baseline plus the 11 permitted additions', () => {
 			const actual = SWARM_COMMAND_TOOL_ALLOWLIST;
 			const extra = [...actual].filter((x) => !expectedAllowlist.has(x));
 			const missing = [...expectedAllowlist].filter((x) => !actual.has(x));
@@ -657,7 +673,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('SWARM_COMMAND_TOOL_COMMANDS (z.enum) matches baseline plus exactly 5 additions', () => {
+		it('SWARM_COMMAND_TOOL_COMMANDS (z.enum) matches baseline plus the 11 permitted additions', () => {
 			const actual = new Set(SWARM_COMMAND_TOOL_COMMANDS);
 			const extra = [...actual].filter((x) => !expectedToolCommands.has(x));
 			const missing = [...expectedToolCommands].filter((x) => !actual.has(x));
@@ -669,7 +685,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('NO_ARGS (derived from toolNoArgs) matches baseline plus pr status', () => {
+		it('NO_ARGS (derived from toolNoArgs) matches baseline plus pr status and lanes', () => {
 			const actual = new Set(
 				VALID_COMMANDS.filter(
 					(cmd) =>
@@ -690,7 +706,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('only the 5 permitted gap commands differ from the pre-fix baseline', () => {
+		it('only the permitted additions differ from the pre-fix baseline', () => {
 			const actualAllowlist = SWARM_COMMAND_TOOL_ALLOWLIST;
 			const diffFromBaseline = [
 				...[...actualAllowlist].filter((x) => !BASELINE_28_ALLOWLIST.has(x)),
@@ -703,7 +719,7 @@ describe('Command registration parity', () => {
 			expect(
 				unexpectedDiffs.length === 0,
 				`Unexpected differences from pre-fix ALLOWLIST baseline: ${unexpectedDiffs.join(', ')}.\n` +
-					`Only these 5 additions are permitted: ${[...permittedDiffs].join(', ')}`,
+					`Only these additions are permitted: ${[...permittedDiffs].join(', ')}`,
 			).toBe(true);
 		});
 	});

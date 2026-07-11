@@ -125,6 +125,14 @@ function saveDurableStatus(statusPath: string): void {
  * already the live authority); switching to a DIFFERENT path reloads.
  */
 export function initDurableStatusPath(projectDir: string): void {
+	// Defensive: this runs eagerly during delegation-gate hook construction,
+	// which is on the plugin-init path and MUST stay fail-open (AGENTS.md
+	// invariant #1 — hook/plugin construction may never throw). A non-string
+	// directory cannot yield a valid `.swarm` path, so skip durable status
+	// entirely rather than letting `path.join` throw out of hook construction;
+	// the in-memory map still works, matching the "Non-fatal" philosophy of
+	// the load/save paths below.
+	if (typeof projectDir !== 'string' || projectDir.length === 0) return;
 	const nextPath = path.join(
 		projectDir,
 		'.swarm',

@@ -46,8 +46,15 @@ describe('test-runner impact scope ADVERSARIAL security tests', () => {
 			}),
 		);
 
-		// Mock the test-impact/analyzer module
+		// Mock the test-impact/analyzer module.
+		// Spread the real module so other named exports the test runner imports
+		// (e.g. loadImpactMap, used by estimateFanOut) survive the mock — only
+		// analyzeImpact is overridden. loadImpactMap with skipRebuild returns an
+		// empty map for the temp dirs used here, so it is safe and hermetic.
+		// See AGENTS.md invariant 7 (spread-real-exports).
+		const realAnalyzer = await import('../../../src/test-impact/analyzer.js');
 		mock.module('../../../src/test-impact/analyzer.js', () => ({
+			...realAnalyzer,
 			analyzeImpact: mockAnalyzeImpact,
 		}));
 

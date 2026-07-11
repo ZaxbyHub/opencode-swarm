@@ -110,11 +110,21 @@ describe('updateTaskStatus phase status derivation', () => {
 		expect(reloaded?.phases[0].status).toBe('pending');
 	});
 
-	// Regression test: downgrading completed → in_progress must also persist.
-	it('regression: downgrading completed → in_progress is persisted to disk', async () => {
+	// Regression test: forced downgrade completed → in_progress must persist.
+	//
+	// The FR-005 settled-task guard refuses to re-open a settled task
+	// (completed/closed/blocked) to in_progress unless the caller opts in via
+	// { force: true } — an unforced call intentionally returns the settled plan
+	// unchanged. This test exercises the legitimate re-open path (force) and
+	// verifies the older savePlan silent-override bug stays fixed: the explicit
+	// in_progress request must reach disk (savePlan must not re-read the
+	// completed status and revert it).
+	it('regression: forced downgrading completed → in_progress is persisted to disk', async () => {
 		await updateTaskStatus(tempDir, '1.1', 'completed');
 
-		const returned = await updateTaskStatus(tempDir, '1.1', 'in_progress');
+		const returned = await updateTaskStatus(tempDir, '1.1', 'in_progress', {
+			force: true,
+		});
 
 		const task11Returned = returned.phases[0].tasks.find((t) => t.id === '1.1');
 		expect(task11Returned?.status).toBe('in_progress');

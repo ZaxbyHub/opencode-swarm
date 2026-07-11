@@ -69,7 +69,9 @@ describe('executeUpdateTaskStatus fallbackDir guard', () => {
 		});
 
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('No working_directory provided');
+		expect(result.message).toContain(
+			'no explicit working_directory was provided',
+		);
 	});
 
 	it('returns failure with descriptive message when no directory is available', async () => {
@@ -79,7 +81,9 @@ describe('executeUpdateTaskStatus fallbackDir guard', () => {
 		});
 
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('No working_directory provided');
+		expect(result.message).toContain(
+			'no explicit working_directory was provided',
+		);
 	});
 
 	// ── 2. Guard does NOT fire when fallbackDir IS provided ──
@@ -194,7 +198,9 @@ describe('executeUpdateTaskStatus fallbackDir guard', () => {
 		);
 
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('No working_directory provided');
+		expect(result.message).toContain(
+			'no explicit working_directory was provided',
+		);
 	});
 
 	it('guard does NOT fire when fallbackDir is explicitly passed as a valid string', async () => {

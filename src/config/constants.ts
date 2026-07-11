@@ -334,6 +334,9 @@ export const WRITE_TOOL_NAMES = [
 	'replace',
 	'append',
 	'prepend',
+	// extract_code_blocks writes files parsed from LLM content; it is a
+	// workflow-mutating write tool (issue #1778 C1), not a read-only helper.
+	'extract_code_blocks',
 ] as const;
 
 export type WriteToolName = (typeof WRITE_TOOL_NAMES)[number];

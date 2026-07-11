@@ -165,8 +165,8 @@ describe('WRITE_TOOL_NAMES is the canonical write-tool set', () => {
 		}
 	});
 
-	test('WRITE_TOOL_NAMES.length is 10 (canonical count — includes both apply_patch and swarm_apply_patch)', () => {
-		expect(WRITE_TOOL_NAMES.length).toBe(10);
+	test('WRITE_TOOL_NAMES.length is 11 (10 core + extract_code_blocks, issue #1778 C1)', () => {
+		expect(WRITE_TOOL_NAMES.length).toBe(11);
 	});
 
 	test('WRITE_TOOL_NAMES contains the 5 core write tools', () => {

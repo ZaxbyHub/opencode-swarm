@@ -129,9 +129,13 @@ describe('check_gate_status', () => {
 		);
 		const parsed = JSON.parse(result);
 
-		// Tool safely returns no_evidence - no sensitive data leaked
+		// Tool safely returns no_evidence - no sensitive data leaked.
+		// resolveWorkingDirectory rejects /etc/passwd earlier (a file, not a
+		// directory) rather than reaching the evidence-lookup stage, so the
+		// message reflects the directory rejection. Either way the status is
+		// no_evidence and no file contents leak.
 		expect(parsed.status).toBe('no_evidence');
-		expect(parsed.message).toContain('No evidence file found');
+		expect(parsed.message).toContain('is not a directory');
 	});
 
 	// SECURITY FINDING: The path validation uses user-provided working_directory as base,

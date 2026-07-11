@@ -67,8 +67,12 @@ function probeSandboxExec(): boolean {
  * DI seam for testability. Exposes probeSandboxExec so tests can simulate
  * ENOENT / EACCES / ENOSPC error conditions without requiring a real sandbox-exec binary.
  */
-export const _internals: { probeSandboxExec: typeof probeSandboxExec } = {
+export const _internals: {
+	probeSandboxExec: typeof probeSandboxExec;
+	buildSandboxProfile: typeof buildSandboxProfile;
+} = {
 	probeSandboxExec,
+	buildSandboxProfile,
 } as const;
 
 /**
@@ -146,8 +150,20 @@ function buildSandboxProfile(
 		}
 	}
 
-	// Core profile: allow non-file ops (network, IPC, process creation) via (allow default),
-	// allow system ro paths, deny file-writes outside the declared scope paths
+	// Core profile: allow non-file ops (network, IPC, process creation) via
+	// (allow default), allow system read-only paths, then confine writes to the
+	// declared scope.
+	//
+	// SBPL is LAST-MATCH-WINS. The blanket `(deny file-write*)` MUST therefore
+	// appear BEFORE the scoped `(allow file-write* (subpath ...))` lines: an
+	// in-scope write matches both the deny and the later scoped allow, so the
+	// allow (last) wins and the write succeeds (AC-001); an out-of-scope write
+	// matches only the deny, so it is rejected (AC-002, fail-closed). The
+	// previous ordering placed the blanket deny LAST, which overrode the scoped
+	// allow and denied every write — including in-scope writes (issue #1778 H2).
+	//
+	// NOTE: reasoned from documented SBPL last-match-wins semantics; not
+	// empirically re-verified on a macOS host in this environment.
 	const profile = `(version 1)
 (allow default)
 (allow file-read* (subpath "/usr"))
@@ -155,9 +171,9 @@ function buildSandboxProfile(
 (allow file-read* (subpath "/sbin"))
 (allow file-read* (subpath "/lib"))
 (allow file-read* (subpath "/lib64"))
+(deny file-write*)
 ${rwAllowLines}
-${envLines.join('\n')}
-(deny file-write*)`;
+${envLines.join('\n')}`;
 
 	return profile;
 }

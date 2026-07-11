@@ -335,4 +335,30 @@ describe('AutomationQueue', () => {
 			expect(item?.retry?.backoffMs).toBe(2000);
 		});
 	});
+
+	describe('overflow strategy (#1778 H5)', () => {
+		test('throws at cap by default (fail-loud preserved)', () => {
+			const queue = new AutomationQueue<string>({ maxSize: 2 });
+			queue.enqueue('a');
+			queue.enqueue('b');
+			expect(() => queue.enqueue('c')).toThrow('Queue is full');
+			expect(queue.size()).toBe(2);
+		});
+
+		test('evict-oldest keeps a bounded rolling window without throwing', () => {
+			const queue = new AutomationQueue<string>({
+				maxSize: 2,
+				overflowStrategy: 'evict-oldest',
+			});
+			const idA = queue.enqueue('a');
+			queue.enqueue('b');
+			// Third enqueue evicts the oldest ('a') instead of throwing.
+			expect(() => queue.enqueue('c')).not.toThrow();
+			expect(queue.size()).toBe(2);
+			expect(queue.get(idA)).toBeUndefined();
+			const payloads = queue.getAll().map((i) => i.payload);
+			expect(payloads).toContain('b');
+			expect(payloads).toContain('c');
+		});
+	});
 });

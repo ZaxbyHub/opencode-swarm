@@ -1705,6 +1705,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm turbo to enable turbo mode for faster execution',
 				},
+				'swarm-epic': {
+					template: '/swarm epic $ARGUMENTS',
+					description: shortcutDescription('epic'),
+				},
+				'swarm-coupling': {
+					template: '/swarm coupling $ARGUMENTS',
+					description: shortcutDescription('coupling'),
+				},
+				'swarm-lanes': {
+					template: '/swarm lanes',
+					description: shortcutDescription('lanes'),
+				},
+				'swarm-guardrail-explain': {
+					template: '/swarm guardrail explain $ARGUMENTS',
+					description: shortcutDescription('guardrail explain'),
+				},
+				'swarm-guardrail-log': {
+					template: '/swarm guardrail-log $ARGUMENTS',
+					description: shortcutDescription('guardrail-log'),
+				},
 				'swarm-full-auto': {
 					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
@@ -1852,12 +1872,17 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						return Promise.resolve();
 					}
 				},
-				// Final transformation: consolidate multiple system messages into one
-				(_input: unknown, output: { messages?: unknown[] }): Promise<void> => {
+				// Final transformation: consolidate multiple system messages into one.
+				// consolidateSystemMessages handles both the production `{info,parts}`
+				// shape and the flat `{role,content}` shape (issue #1778 H1).
+				(
+					_input: unknown,
+					output: {
+						messages?: import('./hooks/messages-transform.js').Message[];
+					},
+				): Promise<void> => {
 					if (output.messages) {
-						// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-						// biome-ignore lint/suspicious/noExplicitAny: consolidateSystemMessages accepts unknown[]
-						output.messages = consolidateSystemMessages(output.messages as any);
+						output.messages = consolidateSystemMessages(output.messages);
 					}
 					if (process.env.DEBUG_SWARM)
 						console.error(`[DIAG] messagesTransform DONE`);

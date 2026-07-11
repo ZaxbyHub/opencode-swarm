@@ -500,8 +500,12 @@ schedule();`;
 
 	test('process that ignores SIGTERM is still killed when timeout fires', async () => {
 		// SC-003.4: a child that explicitly ignores SIGTERM via process.on handler
-		// must still be terminated when bunSpawn's timeout expires.
-		// bunSpawn uses SIGKILL as the final termination signal, which cannot be ignored.
+		// must still be terminated when the spawn timeout expires. Bun's default
+		// timeout signal is SIGTERM, which such a child traps — leaving `exited`
+		// pending forever (a timeout bypass). The secure configuration, which the
+		// production `bunSpawn` shim applies for every timed spawn, is
+		// `killSignal: 'SIGKILL'`; SIGKILL cannot be trapped, so the deadline is
+		// enforced. This test verifies that secure configuration directly.
 		const scriptContent = `console.log('starting');
 process.on('SIGTERM', () => {
   // Intentionally ignore SIGTERM — this child thinks it's safe
@@ -519,6 +523,7 @@ setTimeout(() => {}, 60000);`;
 			stdout: 'pipe',
 			stderr: 'pipe',
 			timeout: TIMEOUT_MS,
+			killSignal: 'SIGKILL',
 		});
 
 		await Bun.sleep(500);

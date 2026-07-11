@@ -153,12 +153,21 @@ The path ../../../etc/shadow contains sensitive data.`;
 				const output = { system: [] as string[] };
 				await transformFn({ sessionID: 'test-session' }, output);
 
-				// The symlink would be followed and content injected
-				// This is a known risk - validateSwarmPath doesn't check for symlinks
 				const injectedContent = output.system.join('\n');
 
-				// The test documents that symlinks are followed
-				expect(injectedContent).toContain('Sensitive data');
+				if (process.platform === 'win32') {
+					// Windows branch copied the file INTO .swarm (a real, in-directory
+					// handoff, not a symlink), which is legitimate and is injected as
+					// normal handoff content.
+					expect(injectedContent).toContain('Sensitive data');
+				} else {
+					// SECURITY: on POSIX, handoff.md is a symlink whose target lives
+					// OUTSIDE .swarm. validateSwarmPath (invoked by readSwarmFileAsync)
+					// resolves the real path and rejects it because it escapes the
+					// .swarm directory, so the symlink is NOT followed and its target
+					// content is never injected. The symlink-escape attack is blocked.
+					expect(injectedContent).not.toContain('Sensitive data');
+				}
 			} finally {
 				// Cleanup
 				fs.rmSync(targetDir, { recursive: true, force: true });

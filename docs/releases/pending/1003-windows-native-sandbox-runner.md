@@ -11,7 +11,11 @@ New components:
 - `runners/swarm-sandbox-runner/` — Rust crate with dual-mode sandbox
 - `src/sandbox/win32/runner-client.ts` — TypeScript IPC client
 - `src/sandbox/win32/native-sandbox-executor.ts` — new executor (runner-first, PowerShell-fallback)
-- `binaries/win32-{x64,arm64}/` — precompiled signed binaries (committed)
+- `binaries/win32-{x64,arm64}/` — install location for the compiled runner. These
+  are packaged in the npm tarball (`package.json#files`) so the runner ships
+  when present. Producing the signed per-arch binaries requires building on a
+  Windows host with signing certificates; until that release pipeline lands the
+  directories ship empty and the runtime uses the advisory PowerShell fallback.
 
 ## Why
 

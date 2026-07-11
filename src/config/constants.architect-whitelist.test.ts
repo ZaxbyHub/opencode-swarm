@@ -119,6 +119,12 @@ describe('AGENT_TOOL_MAP.architect whitelist verification', () => {
 				'council_generalist',
 				'council_skeptic',
 				'council_domain_expert',
+				// Curator post-mortem/consolidation are read-only synthesis roles:
+				// they aggregate/distill existing evidence and memory (see
+				// curator-agent.ts ROLE_CONFIG) and hold no tools in the base
+				// AGENT_TOOL_MAP — memory access is granted via MEMORY_AGENT_TOOL_MAP.
+				'curator_postmortem',
+				'curator_consolidation',
 			]);
 			Object.entries(AGENT_TOOL_MAP).forEach(([role, tools]) => {
 				if (synthesisOnlyRoles.has(role)) {

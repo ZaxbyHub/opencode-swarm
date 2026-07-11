@@ -12,6 +12,7 @@ export type AutomationEventType =
 	| 'queue.item.enqueued'
 	| 'queue.item.dequeued'
 	| 'queue.item.completed'
+	| 'queue.item.evicted'
 	| 'queue.item.failed'
 	| 'queue.item.retry scheduled'
 	| 'worker.started'

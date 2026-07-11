@@ -219,6 +219,59 @@ function collectRawGatesConfigFindings(directory: string): ConfigFinding[] {
 	return findings;
 }
 
+/**
+ * Surface unrecognized keys in ANY strict config section (council, checkpoint,
+ * pr_monitor, turbo.epic, …) by re-reading the raw on-disk config and running
+ * the full schema. Without this, config-doctor only ever saw the already-parsed
+ * (post-recovery) config, so a nested typo produced no finding (issue #1778 H6).
+ * The loader now recovers such keys instead of wiping the config; the doctor
+ * makes the ignored key visible and actionable. Gates keys are already reported
+ * by collectRawGatesConfigFindings, so gates.* issues are skipped here to avoid
+ * duplicate findings.
+ */
+function collectRawStrictSectionFindings(directory: string): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+			if (!isPlainObject(raw)) continue;
+
+			const parsed = PluginConfigSchema.safeParse(raw);
+			if (parsed.success) continue;
+
+			const seen = new Set<string>();
+			for (const issue of parsed.error.issues) {
+				if (issue.code !== 'unrecognized_keys') continue;
+				if (issue.path[0] === 'gates') continue; // covered elsewhere
+				const keys = (issue as unknown as { keys?: string[] }).keys ?? [];
+				for (const key of keys) {
+					const dotted = [...issue.path.map(String), key].join('.');
+					if (seen.has(dotted)) continue;
+					seen.add(dotted);
+					findings.push({
+						id: 'unknown-config-key',
+						title: 'Unknown config key',
+						description: `Unrecognized key "${dotted}" in ${configPath} is ignored by the loader (the rest of your config is preserved). Fix or remove it.`,
+						severity: 'warn',
+						path: dotted,
+						currentValue: undefined,
+						autoFixable: false,
+					});
+				}
+			}
+		} catch {
+			// Best-effort, non-blocking (see collectRawGatesConfigFindings).
+		}
+	}
+
+	return findings;
+}
+
 function emitWorktreeIsolationLayeringAdvisory(
 	config: PluginConfig,
 	findings: ConfigFinding[],
@@ -1446,6 +1499,7 @@ export function runConfigDoctor(
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', findings);
 	findings.push(...collectRawGatesConfigFindings(directory));
+	findings.push(...collectRawStrictSectionFindings(directory));
 	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity

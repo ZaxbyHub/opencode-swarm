@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+// Spread real engine exports so named imports the tool relies on
+// (validateTestCommand, etc.) survive the mock. See AGENTS.md invariant 7.
+import * as realEngine from '../../mutation/engine.js';
 
 // Mock functions defined at module level - will be used in mock.module calls
 const mockExecuteMutationSuiteFn = mock(async () => ({
@@ -47,9 +50,8 @@ beforeEach(() => {
 
 	// Mock engine and gate modules
 	mock.module('../../mutation/engine.js', () => ({
+		...realEngine,
 		executeMutationSuite: mockExecuteMutationSuiteFn,
-		MutationReport: {},
-		MutationPatch: {},
 	}));
 
 	mock.module('../../mutation/gate.js', () => ({

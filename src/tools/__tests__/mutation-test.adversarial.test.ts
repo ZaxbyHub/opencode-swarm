@@ -386,7 +386,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -449,7 +449,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -502,7 +502,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							};
 						}
 						// Test command uses array form — no shell string injection possible
-						expect(cmd).toBe('echo');
+						expect(cmd).toBe('node');
 						expect(Array.isArray(args)).toBe(true);
 						return {
 							pid: 2,
@@ -518,7 +518,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -646,7 +646,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -707,7 +707,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					manyPatches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -767,7 +767,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -824,7 +824,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					badPatches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -881,7 +881,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					incompletePatches as any,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -950,8 +950,11 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 					tempDir,
 				);
 
-				// Returns a result without crashing
-				expect(report.totalMutants).toBe(1);
+				// An empty/invalid test command is rejected by the runner allowlist
+				// (validateTestCommand) before any mutation executes, so the suite
+				// short-circuits to an empty report instead of crashing.
+				expect(report.totalMutants).toBe(0);
+				expect(Array.isArray(report.results)).toBe(true);
 			},
 		);
 	});
@@ -1012,7 +1015,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -1070,7 +1073,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -1127,7 +1130,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 				const report = await engineInternals.executeMutationSuite(
 					patches,
-					['echo', 'test'],
+					['node', 'test'],
 					['test.test.ts'],
 					tempDir,
 				);
@@ -1181,7 +1184,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 
 			const report = await engineInternals.executeMutationSuite(
 				patches,
-				['echo', 'test'],
+				['node', 'test'],
 				['test.test.ts'],
 				tempDir,
 			);
@@ -1330,7 +1333,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							},
 						],
 						files: ['test.test.ts'],
-						test_command: ['echo', 'test'],
+						test_command: ['node', 'test'],
 						pass_threshold: 0.3,
 						warn_threshold: 0.7,
 					},
@@ -1358,7 +1361,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							},
 						],
 						files: ['test.test.ts'],
-						test_command: ['echo', 'test'],
+						test_command: ['node', 'test'],
 						working_directory: '../../../tmp/non-existent-path',
 					},
 					tempDir,
@@ -1444,7 +1447,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							},
 						],
 						files: ['test.test.ts'],
-						test_command: ['echo', 'test'],
+						test_command: ['node', 'test'],
 						pass_threshold: 0.8,
 						warn_threshold: 0.6,
 					},
@@ -1508,7 +1511,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							},
 						],
 						files: ['test.test.ts'],
-						test_command: ['echo', 'test'],
+						test_command: ['node', 'test'],
 						pass_threshold: 0.8,
 						warn_threshold: 0.6,
 					},
@@ -1581,7 +1584,7 @@ describe('mutation_test adversarial — real executeMutationSuite / evaluateMuta
 							},
 						],
 						files: ['test.test.ts'],
-						test_command: ['echo', 'test'],
+						test_command: ['node', 'test'],
 						pass_threshold: 0.8,
 						warn_threshold: 0.6,
 					},

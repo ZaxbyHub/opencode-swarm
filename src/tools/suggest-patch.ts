@@ -86,6 +86,14 @@ const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|:|$)/i;
  * Check for Windows-specific path attacks.
  */
 function containsWindowsAttacks(str: string): boolean {
+	// Windows drive-letter absolute path (e.g. C:\Windows, C:/Windows). Rejected
+	// on ALL platforms so a Linux/macOS CI host still validates Windows-targeted
+	// attack strings — mirrors the canonical `/^[A-Za-z]:[/\\]/` guard in
+	// utils/path-security.ts (validateDirectory / validateTargetWithinRoot).
+	// Without this, `C:\...` / `C:/...` slip past the `:[^\\/]` check below
+	// (the colon is followed by a separator, not a non-separator char) and fall
+	// through to a misleading file-not-found instead of a path rejection.
+	if (/^[A-Za-z]:[/\\]/.test(str)) return true;
 	if (/:[^\\/]/.test(str)) return true;
 	const parts = str.split(/[/\\]/);
 	for (const part of parts) {

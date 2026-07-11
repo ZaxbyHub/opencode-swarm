@@ -139,7 +139,11 @@ describe('History integration - unit style tests', () => {
 			const parsed = parseResult(result);
 
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('scope "all" is not allowed');
+			// scope "all" is gated behind the SWARM_ALLOW_FULL_SUITE env opt-in
+			// (args.allow_full_suite is intentionally ignored — see test-runner.ts
+			// "do not rely on args.allow_full_suite"). Without the env var it is
+			// blocked. The message deliberately omits bypass instructions.
+			expect(parsed.error).toContain('scope "all" is blocked');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

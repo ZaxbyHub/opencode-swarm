@@ -633,18 +633,20 @@ describe('ATTACK: Queue Overflow/Replay', () => {
 			expect(manager.getQueueSize()).toBeLessThanOrEqual(100);
 		});
 
-		test('SECURE: returns false gracefully when queue full', async () => {
+		test('SECURE: still fires the trigger when queue full (evict-oldest, no brick — #1778 H5)', async () => {
 			// Fill the queue
 			for (let phase = 1; phase <= 100; phase++) {
 				await manager.checkAndTrigger(phase, 5, 10);
 			}
 
-			// Next trigger should return false without throwing
+			// The 101st trigger must NOT be permanently bricked: it fires and the
+			// queue stays bounded via evict-oldest (no throw, no monotonic growth).
 			const result = await manager.checkAndTrigger(101, 5, 10);
-			expect(result).toBe(false);
+			expect(result).toBe(true);
+			expect(manager.getQueueSize()).toBeLessThanOrEqual(100);
 		});
 
-		test('SECURE: concurrent queue overflow handled gracefully', async () => {
+		test('SECURE: concurrent triggers when full are handled without bricking', async () => {
 			// Fill queue first
 			for (let phase = 1; phase <= 100; phase++) {
 				await manager.checkAndTrigger(phase, 5, 10);
@@ -655,9 +657,10 @@ describe('ATTACK: Queue Overflow/Replay', () => {
 				manager.checkAndTrigger(200 + i, 5, 10),
 			);
 
-			// All should resolve (not reject)
+			// All should resolve (not reject) and fire; the queue stays bounded.
 			const results = await Promise.all(promises);
-			expect(results.every((r) => r === false)).toBe(true);
+			expect(results.every((r) => r === true)).toBe(true);
+			expect(manager.getQueueSize()).toBeLessThanOrEqual(100);
 		});
 	});
 

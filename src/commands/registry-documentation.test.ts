@@ -110,15 +110,16 @@ describe('registry-documentation', () => {
 		const agent = createArchitectAgent('test-model');
 		const prompt = agent.config.prompt!;
 
-		// Well-known descriptions from the registry
+		// Well-known descriptions from the registry (verified against the current
+		// COMMAND_REGISTRY entries these commands render with).
 		const wellKnownDescriptions = [
 			'Show current swarm state',
-			'Show plan (optionally filter by phase number)',
+			'Show current plan (optionally filter by phase number)',
 			'List registered agents',
 			'Run health check on swarm state',
-			'Toggle Turbo Mode for the active session [on|off]',
-			'Toggle Full-Auto Mode for the active session [on|off]',
-			'Restore swarm state to a checkpoint <phase>',
+			'Toggle Turbo Mode strategy for the active session [on|off|lean|standard|epic|status]',
+			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
+			'Restore swarm state or project files to a checkpoint',
 			'Manage project checkpoints [save|restore|delete|list] <label>',
 		];
 

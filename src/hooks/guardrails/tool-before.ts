@@ -239,15 +239,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const junctionBlock = dcCheckJunctionCreation(seg, cwd);
 			if (junctionBlock) throw new Error(junctionBlock);
 
-			// POSIX rm — short flags (-rf, -fr, -r -f) and long flags
-			const rmShortMatch =
-				/^rm\s+(-[rRfF]+(?:\s+-[rRfF]+)*|-r\s+-f|-f\s+-r)\s+(.+)$/.exec(seg);
-			const rmLongMatch = /^rm\s+(?:--(?:recursive|force)\s+){1,2}(.+)$/.exec(
-				seg,
-			);
-			const rmAnyMatch = rmShortMatch ?? rmLongMatch;
-			if (rmAnyMatch) {
-				const targetPart = rmAnyMatch[rmShortMatch ? 2 : 1].trim();
+			// POSIX rm — recursive/force delete detection.
+			// Extract leading flag tokens then targets, and require a
+			// recursive/force flag. Matching flags generically (instead of a
+			// strict -[rRfF]+ class) catches stacked non-rf letters such as
+			// `rm -rfv` / `rm -vrf` that the old pattern missed (issue #1778 H3),
+			// while still catching -r/-f alone and --recursive/--force in any order.
+			const rmMatch = /^rm\s+((?:-\S+\s+)+)(.+)$/.exec(seg);
+			const rmFlagsPart = rmMatch?.[1] ?? '';
+			const rmHasRecursiveOrForce =
+				/(?:^|\s)-[A-Za-z]*[rRfF]/.test(rmFlagsPart) ||
+				/(?:^|\s)--(?:recursive|force)\b/.test(rmFlagsPart);
+			if (rmMatch && rmHasRecursiveOrForce) {
+				const targetPart = rmMatch[2].trim();
 				const targets = targetPart.split(/\s+/);
 				const validateBlock = dcValidateTargets(targets, cwd);
 				if (validateBlock) throw new Error(validateBlock);
@@ -858,7 +862,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const normalizedTool = tool;
 
-		let analysis: WriteAnalysis;
 		let shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' = 'posix';
 
 		if (normalizedTool === 'bash') {
@@ -880,15 +883,39 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			);
 		}
 
-		if (normalizedTool === 'bash') {
-			analysis = detectPosixWrites(command);
-		} else {
-			analysis =
-				shellType === 'powershell' || shellType === 'cmd'
-					? detectWindowsWrites(command, shellType)
-					: detectPosixWrites(command);
+		const detect = (c: string): WriteAnalysis =>
+			normalizedTool === 'bash'
+				? detectPosixWrites(c)
+				: shellType === 'powershell' || shellType === 'cmd'
+					? detectWindowsWrites(c, shellType)
+					: detectPosixWrites(c);
+
+		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
+		// malformed command (e.g. an unclosed quote) is still rejected for safety.
+		const primaryAnalysis = detect(command);
+		if (primaryAnalysis.parseError) {
+			throw new Error(
+				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+			);
 		}
 
+		// Unwrap shell wrappers (bash -c '…', sh -c '…', eval '…') on the
+		// write-detection path so a redirect hidden inside a one-layer wrapper is
+		// not invisible to the detector (issue #1778 H3). Only take the unwrapped
+		// form when an actual unwrap occurred, so normal (unwrapped) commands are
+		// analyzed byte-for-byte as before. Detection and resolveWriteTargets must
+		// use the SAME string (resolveWriteTargets re-parses it for cwd tracking).
+		const commandSegments = dcSplitSegments(command);
+		const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
+		const didUnwrap = commandSegments.some(
+			(s, i) => unwrappedSegments[i] !== s,
+		);
+		const detectionCommand = didUnwrap ? unwrappedSegments.join('\n') : command;
+
+		const analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+
+		// A wrapped command whose unwrapped inner form fails to parse is also
+		// rejected for safety.
 		if (analysis.parseError) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
@@ -908,12 +935,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const isArch =
 			stripKnownSwarmPrefix(shellWriteAgent).toLowerCase() === 'architect';
-		if (!isArch && (!declaredScope || declaredScope.length === 0)) {
-			return;
-		}
+		// Previously a no-scope non-architect agent returned here, skipping BOTH
+		// the universal-deny-prefix check AND file-authority (issue #1778 H3
+		// MEDIUM). Now the universal-deny prefixes (protecting .git/.swarm/.env/
+		// etc.) are ALWAYS enforced below; only the declared-scope authority is
+		// relaxed for no-scope agents, so their legitimate shell writes are not
+		// over-blocked while the critical deny list is no longer bypassable.
+		const noScopeLenient =
+			!isArch && (!declaredScope || declaredScope.length === 0);
 
 		const resolvedWrites = resolveWriteTargets(
-			command,
+			detectionCommand,
 			analysis.writes,
 			effectiveDirectory,
 		);
@@ -940,6 +972,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					}
 				}
 			}
+
+			// No-scope agents: enforce only the universal deny list above, then
+			// preserve the prior leniency for the declared-scope authority checks.
+			if (noScopeLenient) continue;
 
 			const authorityCheck = checkFileAuthorityWithRules(
 				shellWriteAgent,
@@ -2099,7 +2135,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				toolArgs?.filePath ??
 				toolArgs?.path ??
 				toolArgs?.file ??
-				toolArgs?.target;
+				toolArgs?.target ??
+				// extract_code_blocks writes into output_dir (issue #1778 C1) —
+				// route it through declared-scope / lstat / universal-deny like
+				// other write tools instead of leaving its target invisible.
+				toolArgs?.output_dir;
 			if (typeof targetPath === 'string' && targetPath.length > 0) {
 				const agentName = swarmState.activeAgent.get(input.sessionID);
 				if (!agentName) {

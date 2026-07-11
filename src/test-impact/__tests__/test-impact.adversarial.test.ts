@@ -62,14 +62,22 @@ describe('test_impact — adversarial input handling', () => {
 		});
 
 		test('Windows path traversal passes through', async () => {
+			// The project root (ctx.directory) must be an absolute path that exists;
+			// on a Linux CI host "C:\\project" is not absolute and is rejected before
+			// the changedFiles are ever examined. Use a valid absolute root — the
+			// Windows-style traversal string in changedFiles is the actual subject,
+			// and it flows through to untestedFiles unsanitized.
 			const result = await test_impact.execute(
 				{ changedFiles: ['..\\..\\..\\Windows\\System32\\config\\sam'] },
-				createMockCtx('C:\\project'),
+				createMockCtx('/project'),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 			expect(Array.isArray(parsed.untestedFiles)).toBe(true);
+			expect(parsed.untestedFiles).toContain(
+				'..\\..\\..\\Windows\\System32\\config\\sam',
+			);
 		});
 	});
 
@@ -239,7 +247,12 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// A non-existent working_directory is rejected by the existence check
+			// in resolveWorkingDirectory (invariant 4). The literal path — spaces
+			// intact — is echoed in the structured error, proving it was handled as
+			// a path string and never interpolated into a shell.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain('/path with spaces/project');
 		});
 
 		test('quotes in working_directory are handled', async () => {
@@ -252,7 +265,10 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected; the literal quoted path is
+			// echoed in the error, proving quotes are handled as path text.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain("/path with 'quotes'/project");
 		});
 
 		test('semicolon in working_directory is passed to analyzer', async () => {
@@ -265,8 +281,12 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			// The working_directory with semicolon is passed through
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected. The full literal path —
+			// including "; echo hacked" — is echoed back in the structured error,
+			// proving the semicolon is treated as ordinary path text and never
+			// executed as a shell command separator.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain('/path; echo hacked/project');
 		});
 
 		test('null byte in working_directory causes error', async () => {
@@ -299,7 +319,10 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected without crashing; the
+			// Unicode path round-trips intact through the structured error.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain('/проект/日本語');
 		});
 	});
 

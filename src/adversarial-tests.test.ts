@@ -58,8 +58,11 @@ describe('ADVERSARIAL: constants.architect-whitelist', () => {
 					toolCount[tool] = (toolCount[tool] || 0) + 1;
 				}
 			}
-			// architect should have way more tools than others
-			expect(toolCount.check_gate_status).toBe(1); // Only architect
+			// check_gate_status is an oversight tool granted to exactly the two
+			// oversight roles declared in tool-metadata (agents: ['architect',
+			// 'critic_oversight']). Two is the intended sanity bound — it must not
+			// leak into unrelated agents.
+			expect(toolCount.check_gate_status).toBe(2); // architect + critic_oversight
 		});
 	});
 
@@ -102,15 +105,25 @@ describe('ADVERSARIAL: constants.architect-whitelist', () => {
 			expect(AGENT_TOOL_MAP.architect.length).toBeLessThan(100);
 		});
 
-		it('all roles should have at least 1 tool (except synthesis-only roles)', () => {
-			const synthesisOnlyRoles = new Set([
+		it('all roles should have at least 1 tool (except overlay/synthesis-only roles)', () => {
+			// AGENT_TOOL_MAP is the BASE map derived from each tool's `agents` list.
+			// A handful of roles intentionally carry no base tools: their tools are
+			// applied only via opt-in overlay maps (MEMORY_AGENT_TOOL_MAP for the
+			// curator_* roles) or are pure synthesis roles (the council members).
+			// Overlay-only tools declare `agents: []` so they never enter the base
+			// map, which is why these roles are legitimately empty here.
+			const noBaseToolRoles = new Set([
+				// Synthesis-only (no tools at all):
 				'council_generalist',
 				'council_skeptic',
 				'council_domain_expert',
+				// Memory-overlay-only (tools come from MEMORY_AGENT_TOOL_MAP):
+				'curator_postmortem',
+				'curator_consolidation',
 			]);
 			for (const [role, tools] of Object.entries(AGENT_TOOL_MAP)) {
-				if (synthesisOnlyRoles.has(role)) {
-					// Synthesis-only roles may have no tools
+				if (noBaseToolRoles.has(role)) {
+					// These roles get their tools from overlay maps, not the base map.
 					continue;
 				}
 				expect(tools.length, `Role '${role}' has no tools`).toBeGreaterThan(0);

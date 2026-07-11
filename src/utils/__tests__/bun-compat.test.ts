@@ -180,7 +180,7 @@ describe('bunSpawn env: {} isolation regression (SC-125)', () => {
 		opts: Parameters<typeof bunSpawn>[1],
 	): Promise<string> {
 		const js = `process.stdout.write(JSON.stringify(process.env))`;
-		const proc = bunSpawn(['node', '-e', js], opts);
+		const proc = bunSpawn([process.execPath, '-e', js], opts);
 		const text = await proc.stdout.text();
 		await proc.exited;
 		return text;
@@ -212,7 +212,7 @@ describe('bunSpawn env: {} isolation regression (SC-125)', () => {
 		let cleanup = false;
 		try {
 			const js = `process.stdout.write(JSON.stringify(process.env))`;
-			const res = bunSpawnSync(['node', '-e', js], { env: {} });
+			const res = bunSpawnSync([process.execPath, '-e', js], { env: {} });
 			const raw = new TextDecoder().decode(res.stdout);
 			const parsed = JSON.parse(raw) as Record<string, string>;
 			expect(parsed['BUN_SPAWN_SYNC_SENTINEL_REGRESSION_TEST']).toBeUndefined();
@@ -231,7 +231,7 @@ describe('bunSpawn envOverrides', () => {
 		envOverrides: Record<string, string | null> | undefined,
 	): Promise<Record<string, string>> {
 		const js = `process.stdout.write(JSON.stringify(Object.entries(process.env).filter(([k])=>k.startsWith('BUN_SPAWN_TEST_')).reduce((acc,[k,v])=>(acc[k]=v,acc),{})))`;
-		const proc = bunSpawn(['node', '-e', js], { envOverrides });
+		const proc = bunSpawn([process.execPath, '-e', js], { envOverrides });
 		const text = await proc.stdout.text();
 		await proc.exited;
 		return JSON.parse(text || '{}');
@@ -284,7 +284,7 @@ describe('bunSpawnSync envOverrides', () => {
 		envOverrides: Record<string, string | null> | undefined,
 	): Record<string, string> {
 		const js = `process.stdout.write(JSON.stringify(Object.entries(process.env).filter(([k])=>k.startsWith('BUN_SPAWN_SYNC_TEST_')).reduce((acc,[k,v])=>(acc[k]=v,acc),{})))`;
-		const res = bunSpawnSync(['node', '-e', js], { envOverrides });
+		const res = bunSpawnSync([process.execPath, '-e', js], { envOverrides });
 		return JSON.parse(res.stdout ? new TextDecoder().decode(res.stdout) : '{}');
 	}
 
@@ -334,7 +334,7 @@ describe('bunSpawn explicit env: {} isolation', () => {
 		prefix: string,
 	): Promise<Record<string, string>> {
 		const js = `process.stdout.write(JSON.stringify(Object.entries(process.env).filter(([k])=>k.startsWith('${prefix}')).reduce((acc,[k,v])=>(acc[k]=v,acc),{})))`;
-		const proc = bunSpawn(['node', '-e', js], opts);
+		const proc = bunSpawn([process.execPath, '-e', js], opts);
 		const text = await proc.stdout.text();
 		await proc.exited;
 		return JSON.parse(text || '{}');
@@ -388,7 +388,7 @@ describe('bunSpawnSync explicit env: {} isolation', () => {
 		prefix: string,
 	): Record<string, string> {
 		const js = `process.stdout.write(JSON.stringify(Object.entries(process.env).filter(([k])=>k.startsWith('${prefix}')).reduce((acc,[k,v])=>(acc[k]=v,acc),{})))`;
-		const res = bunSpawnSync(['node', '-e', js], opts);
+		const res = bunSpawnSync([process.execPath, '-e', js], opts);
 		return JSON.parse(res.stdout ? new TextDecoder().decode(res.stdout) : '{}');
 	}
 

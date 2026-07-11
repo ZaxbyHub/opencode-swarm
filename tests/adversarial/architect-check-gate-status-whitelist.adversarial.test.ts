@@ -80,21 +80,18 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 	});
 
 	describe('ACCIDENTAL MUTATION: other role tool lists must remain unchanged', () => {
-		it('explorer should retain expected 17 tools', () => {
+		it('explorer should retain expected 14 tools', () => {
 			const expected = [
-				'imports',
-				'symbols',
 				'complexity_hotspots',
 				'schema_drift',
 				'todo_extract',
 				'detect_domains',
 				'git_blame',
 				'gitingest',
-				'retrieve_summary',
-				'extract_code_blocks',
 				'doc_scan',
 				'knowledge_recall',
 				'search',
+				'ast_grep',
 				'batch_symbols',
 				'repo_map',
 				'swarm_command',
@@ -103,7 +100,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['explorer']).toEqual(expected);
 		});
 
-		it('coder should retain expected 16 tools', () => {
+		it('coder should retain expected 17 tools', () => {
 			const expected = [
 				'diff',
 				'syntax_check',
@@ -116,6 +113,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'knowledge_add',
 				'knowledge_recall',
 				'search',
+				'ast_grep',
 				'repo_map',
 				'knowledge_receipt',
 				'swarm_command',
@@ -125,7 +123,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['coder']).toEqual(expected);
 		});
 
-		it('test_engineer should retain expected 17 tools', () => {
+		it('test_engineer should retain expected 21 tools', () => {
 			const expected = [
 				'diff',
 				'syntax_check',
@@ -141,6 +139,10 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
+				'ast_grep',
+				'actionlint_scan',
+				'osv_scan',
+				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',
 				'swarm_apply_patch',
@@ -165,18 +167,18 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'test_impact',
 				'git_blame',
 				'retrieve_summary',
-				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
 				'batch_symbols',
 				'suggest_patch',
 				'repo_map',
+				'knowledge_receipt',
 				'swarm_command',
 			];
 			expect(AGENT_TOOL_MAP['reviewer']).toEqual(expected);
 		});
 
-		it('sme should retain expected 12 tools', () => {
+		it('sme should retain expected 13 tools', () => {
 			const expected = [
 				'imports',
 				'symbols',
@@ -184,17 +186,18 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'schema_drift',
 				'detect_domains',
 				'retrieve_summary',
-				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
+				'ast_grep',
 				'web_search',
+				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['sme']).toEqual(expected);
 		});
 
-		it('critic should retain expected 10 tools', () => {
+		it('critic should retain expected 11 tools', () => {
 			const expected = [
 				'imports',
 				'symbols',
@@ -205,12 +208,13 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'req_coverage',
 				'get_approved_plan',
 				'repo_map',
+				'knowledge_receipt',
 				'swarm_command',
 			];
 			expect(AGENT_TOOL_MAP['critic']).toEqual(expected);
 		});
 
-		it('docs should retain expected 12 tools', () => {
+		it('docs should retain expected 14 tools', () => {
 			const expected = [
 				'imports',
 				'symbols',
@@ -222,19 +226,22 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
+				'ast_grep',
+				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['docs']).toEqual(expected);
 		});
 
-		it('designer should retain expected 7 tools', () => {
+		it('designer should retain expected 8 tools', () => {
 			const expected = [
 				'symbols',
 				'retrieve_summary',
 				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
+				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',
 			];

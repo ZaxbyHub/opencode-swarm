@@ -123,11 +123,13 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ github.event_name == 'merge_group' && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ${{ matrix.os }}
-    # 40m: was 90m before sharding (PR #1245). With 4 shards (~263 files each),
-    # per-shard runtime is ~7-15 min on ubuntu/macOS and ~20-25 min on Windows
-    # (4-7× slower GitHub runners, see PR #1245). 40m gives Windows headroom.
+    # 40m: was 90m before sharding (PR #1245). Issue #1778 H4 wired the
+    # previously-orphaned src/** + tests/adversarial trees into this job (~1666
+    # files total), so shards went 4→6 to keep per-shard file counts (~278) at or
+    # below the prior 4-shard level (~342). Per-shard runtime stays ~7-15 min on
+    # ubuntu/macOS and ~20-25 min on Windows (4-7× slower runners). 40m headroom.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -161,7 +163,15 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
-          find tests/unit -name '*.test.ts' -type f | sort > "$tmpdir/all-tests.txt"
+          # Run the previously-orphaned test trees too (issue #1778 H4): src/**,
+          # tests/adversarial, and the other never-gated dirs. tests/integration,
+          # tests/security, tests/smoke, and top-level test/ are intentionally
+          # EXCLUDED — they are owned by the integration/security/smoke jobs.
+          {
+            find src -name '*.test.ts' -type f
+            find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null
+            find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null
+          } | sort -u > "$tmpdir/all-tests.txt"
           # Drop known-red pre-existing failures (issue #1705) so the gate reflects
           # new regressions, not the debt backlog CI's old broken detection had been
           # silently hiding. See scripts/ci/quarantined-tests.txt for the tracked list.
@@ -177,7 +187,7 @@ jobs:
           fi
           sort -u "$tmpdir/quarantined-raw.txt" > "$tmpdir/quarantined.txt"
           comm -23 "$tmpdir/all-tests.txt" "$tmpdir/quarantined.txt" > "$tmpdir/gated-tests.txt"
-          num_shards=4
+          num_shards=6
           awk -v s="$SHARD" -v n="$num_shards" '(NR - 1) % n == (s - 1)' "$tmpdir/gated-tests.txt" > "$tmpdir/shard-tests.txt"
           if [ ! -s "$tmpdir/shard-tests.txt" ]; then
             echo "::error::No test files found for shard ${SHARD}"

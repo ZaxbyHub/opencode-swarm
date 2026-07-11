@@ -102,7 +102,8 @@ const READ_ONLY_TOOLS = new Set<string>([
 	'co_change_analyzer',
 	'complexity_hotspots',
 	'detect_domains',
-	'extract_code_blocks',
+	// extract_code_blocks removed (issue #1778 C1): it writes files and must not
+	// be auto-allowed as a read-only tool by the full-auto permission hook.
 	'gitingest',
 	'lint',
 	'lint_spec',

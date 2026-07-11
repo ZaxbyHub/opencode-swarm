@@ -6,7 +6,7 @@
  */
 
 import type { AutomationConfig } from '../config/schema';
-import { log } from '../utils';
+import { criticalWarn, log } from '../utils';
 import { type AutomationEventBus, getGlobalEventBus } from './event-bus';
 import { AutomationQueue } from './queue';
 
@@ -215,6 +215,7 @@ export class PreflightTriggerManager {
 	private requestCounter = 0;
 	private preflightHandler: PreflightHandler | null = null;
 	private unsubscribe: (() => void) | null = null;
+	private unsubscribeSkipped: (() => void) | null = null;
 
 	constructor(
 		automationConfig: AutomationConfig,
@@ -224,10 +225,39 @@ export class PreflightTriggerManager {
 		this.automationConfig = automationConfig;
 		this.eventBus = eventBus ?? getGlobalEventBus();
 		this.trigger = new PhaseBoundaryTrigger(this.eventBus, triggerConfig);
+		// evict-oldest so a long-lived process can never brick the preflight path
+		// once 100 lifetime triggers accumulate (issue #1778 H5). The queue is
+		// accounting only; the real work runs via the preflight.requested handler.
 		this.requestQueue = new AutomationQueue<PreflightRequest>({
 			maxSize: 100,
 			defaultMaxRetries: 3,
+			overflowStrategy: 'evict-oldest',
 		});
+
+		// preflight.skipped previously had zero subscribers, so an operator got no
+		// signal when a preflight was dropped (issue #1778 H5). Surface overflow /
+		// enqueue faults as an always-visible operational warning with queue depth.
+		this.unsubscribeSkipped = this.eventBus.subscribe(
+			'preflight.skipped',
+			(event) => {
+				const payload = event.payload as {
+					reason?: string;
+					phase?: number;
+					requestId?: string;
+				};
+				if (
+					payload.reason === 'queue_overflow' ||
+					payload.reason === 'queue_enqueue_error'
+				) {
+					criticalWarn('[PreflightTrigger] preflight skipped', {
+						reason: payload.reason,
+						phase: payload.phase,
+						requestId: payload.requestId,
+						queueDepth: this.requestQueue.size(),
+					});
+				}
+			},
+		);
 	}
 
 	/**
@@ -346,30 +376,34 @@ export class PreflightTriggerManager {
 			},
 		};
 
-		// Enqueue the request with overflow protection
+		// Enqueue for accounting. With evict-oldest this can never throw, so it
+		// can NEVER gate the run (issue #1778 H5); the try/catch is defensive
+		// belt-and-suspenders and, crucially, does NOT return early — the
+		// preflight must still be marked triggered and published even if the
+		// accounting enqueue somehow fails. The queued item is drained by the
+		// preflight.requested subscriber below.
 		try {
 			this.requestQueue.enqueue(request, 'high');
 		} catch (error) {
-			// Queue overflow - handle gracefully without crashing
-			log('[PreflightTrigger] Queue overflow - request skipped', {
+			log('[PreflightTrigger] Queue enqueue failed (continuing)', {
 				requestId,
 				phase: boundaryResult.currentPhase,
 				error: error instanceof Error ? error.message : String(error),
 			});
-
-			// Publish failure event instead of crashing
 			await this.eventBus.publish('preflight.skipped', {
-				reason: 'queue_overflow',
+				reason: 'queue_enqueue_error',
 				requestId,
 				phase: boundaryResult.currentPhase,
 			});
-			return false;
+			// Intentionally fall through — the run is not gated by accounting.
 		}
 
-		// Mark as triggered
+		// Mark as triggered — reached unconditionally now so a queue fault can
+		// never leave lastTriggeredPhase un-advanced (which previously caused a
+		// permanent re-entry brick).
 		this.trigger.markTriggered(boundaryResult.currentPhase);
 
-		// Publish events
+		// Publish events (this is what actually invokes the preflight handler)
 		await this.eventBus.publish('preflight.requested', request);
 		await this.eventBus.publish('preflight.triggered', {
 			requestId,
@@ -440,6 +474,10 @@ export class PreflightTriggerManager {
 			this.unsubscribe();
 			this.unsubscribe = null;
 		}
+		if (this.unsubscribeSkipped) {
+			this.unsubscribeSkipped();
+			this.unsubscribeSkipped = null;
+		}
 	}
 
 	/**
@@ -462,10 +500,10 @@ export class PreflightTriggerManager {
 		this.unsubscribe = this.eventBus.subscribe(
 			'preflight.requested',
 			async (event) => {
-				if (this.preflightHandler) {
-					const request = event.payload as PreflightRequest;
-					let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-					try {
+				const request = event.payload as PreflightRequest;
+				let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+				try {
+					if (this.preflightHandler) {
 						// Wrap handler execution with timeout guard
 						await Promise.race([
 							this.preflightHandler(request),
@@ -479,17 +517,24 @@ export class PreflightTriggerManager {
 								}, HANDLER_TIMEOUT_MS);
 							}),
 						]);
-					} catch (error) {
-						// Log error without exposing sensitive details
-						log('[PreflightTrigger] Handler error', {
-							requestId: request.id,
-							phase: request.currentPhase,
-							// Error message may contain sensitive info, don't log it
-							errorType: error instanceof Error ? error.name : 'unknown',
-						});
-					} finally {
-						clearTimeout(timeoutHandle);
 					}
+				} catch (error) {
+					// Log error without exposing sensitive details
+					log('[PreflightTrigger] Handler error', {
+						requestId: request.id,
+						phase: request.currentPhase,
+						// Error message may contain sensitive info, don't log it
+						errorType: error instanceof Error ? error.name : 'unknown',
+					});
+				} finally {
+					clearTimeout(timeoutHandle);
+					// Drain the accounting item for this request so the queue never
+					// fills monotonically (issue #1778 H5). The queue item id differs
+					// from request.id, so match by payload id.
+					const match = this.requestQueue
+						.getAll()
+						.find((it) => it.payload.id === request.id);
+					if (match) this.requestQueue.complete(match.id);
 				}
 			},
 		);

@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
-import { resetGlobalEventBus } from '../../../src/background/event-bus';
+import {
+	getGlobalEventBus,
+	resetGlobalEventBus,
+} from '../../../src/background/event-bus';
 import type { AutomationQueue } from '../../../src/background/queue';
 import {
 	PhaseBoundaryTrigger,
@@ -305,9 +308,8 @@ describe('PreflightTriggerManager', () => {
 
 	// ===== SECURITY TESTS =====
 
-	describe('Queue Overflow Protection', () => {
-		it('should handle queue overflow gracefully without crashing', async () => {
-			// Create a manager with a tiny queue
+	describe('Queue Overflow Protection (#1778 H5 — no permanent brick)', () => {
+		it('still fires the trigger when the queue is full (evict-oldest, no brick)', async () => {
 			const manager = new PreflightTriggerManager({
 				mode: 'hybrid',
 				capabilities: {
@@ -319,13 +321,16 @@ describe('PreflightTriggerManager', () => {
 				},
 			});
 
-			// Fill the queue to capacity (100 items by default in PreflightTriggerManager)
-			// The trigger uses 'high' priority, so we need to fill up with high priority items
-			// We'll directly access the queue and fill it
 			const queue = (manager as unknown as { requestQueue: AutomationQueue })
 				.requestQueue;
 
-			// Fill the queue to max capacity
+			// Observe that the 101st trigger STILL publishes preflight.requested.
+			let requestedCount = 0;
+			const unsub = getGlobalEventBus().subscribe('preflight.requested', () => {
+				requestedCount++;
+			});
+
+			// Fill the queue to max lifetime capacity.
 			for (let i = 0; i < 100; i++) {
 				queue.enqueue(
 					{
@@ -338,19 +343,20 @@ describe('PreflightTriggerManager', () => {
 					'high',
 				);
 			}
-
 			expect(queue.isFull()).toBe(true);
 
-			// Now try to trigger - should return false (not crash)
+			// The 101st trigger must NOT be bricked — it fires and publishes.
 			const triggered = await manager.checkAndTrigger(2, 5, 10);
 
-			// Should gracefully handle overflow
-			expect(triggered).toBe(false);
-			// Queue should still be full, not expanded
+			expect(triggered).toBe(true);
+			expect(requestedCount).toBe(1);
+			// evict-oldest keeps the queue bounded (no unbounded growth, no throw).
 			expect(queue.size()).toBe(100);
+
+			unsub();
 		});
 
-		it('should not throw when queue is full', async () => {
+		it('does not throw when the queue is full', async () => {
 			const manager = new PreflightTriggerManager({
 				mode: 'hybrid',
 				capabilities: {
@@ -365,7 +371,6 @@ describe('PreflightTriggerManager', () => {
 			const queue = (manager as unknown as { requestQueue: AutomationQueue })
 				.requestQueue;
 
-			// Fill the queue
 			for (let i = 0; i < 100; i++) {
 				queue.enqueue(
 					{
@@ -379,9 +384,9 @@ describe('PreflightTriggerManager', () => {
 				);
 			}
 
-			// Should return false gracefully without crashing
+			// No throw, and the trigger succeeds rather than silently failing.
 			const result = await manager.checkAndTrigger(3, 5, 10);
-			expect(result).toBe(false);
+			expect(result).toBe(true);
 		});
 	});
 
