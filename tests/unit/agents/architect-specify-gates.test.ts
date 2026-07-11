@@ -62,7 +62,7 @@ describe('architect prompt - MODE: SPECIFY step 5b QA gate selection', () => {
 	});
 
 	test('MODE: PLAN block contains POST-SAVE_PLAN gate application instructions', () => {
-		expect(prompt).toContain('file:.opencode/skills/plan/SKILL.md');
+		expect(prompt).toContain('file:.swarm/bundled-skills/plan/SKILL.md');
 		expect(planSkill).toContain('POST-SAVE_PLAN');
 		expect(planSkill).toContain('## Pending QA Gate Selection');
 		expect(planSkill).toContain('set_qa_gates');

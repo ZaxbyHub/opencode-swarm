@@ -1,5 +1,6 @@
 ---
 name: issue-tracer
+audience: swarm-plugin
 description: "Use when asked to trace, investigate, root-cause, plan, fix, close, or prepare a PR for a GitHub issue or bug report. Runs an evidence-first issue workflow: GitHub intake, reproduction, reasoning-guided localization, no-gap fix planning, independent critic review, user approval gate, implementation, tests, and PR-ready closure."
 allowed-tools: Read Grep Glob Bash Edit MultiEdit Write WebFetch TodoWrite
 ---

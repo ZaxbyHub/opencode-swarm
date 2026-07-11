@@ -1,5 +1,6 @@
 ---
 name: commit-pr
+audience: swarm-plugin
 description: >
   Mandatory Codex/Copilot publication adapter for opencode-swarm. Use for every
   GitHub issue assignment that results in code changes, commits, pushes, draft PRs,

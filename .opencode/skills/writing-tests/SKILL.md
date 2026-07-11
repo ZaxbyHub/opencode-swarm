@@ -1,5 +1,6 @@
 ---
 name: writing-tests
+audience: swarm-plugin
 description: >
   Guidelines for writing, organizing, and maintaining tests in the opencode-swarm repository.
   Covers framework rules (bun:test), mock isolation, CI pipeline structure, file placement,

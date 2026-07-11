@@ -1,5 +1,6 @@
 ---
 name: discover
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: DISCOVER -- read-only repository discovery and governance/context mapping.
 ---

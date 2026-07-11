@@ -1,5 +1,6 @@
 ---
 name: clarify
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: CLARIFY -- structured clarification funnel with critic review before surfacing user decisions.
 ---

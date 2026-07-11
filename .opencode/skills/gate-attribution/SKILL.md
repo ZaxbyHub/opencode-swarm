@@ -1,5 +1,6 @@
-﻿---
+---
 name: gate-attribution
+audience: swarm-plugin
 description: Per-task gate dispatch protocol. Documents single-task attribution plus parseable set-dispatch reviewer/test_engineer rows.
 ---
 

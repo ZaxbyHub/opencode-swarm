@@ -247,8 +247,8 @@ describe('codebase-review command dispatch bundled skill sync', () => {
 			fs.readFileSync(
 				path.join(
 					projectDir,
-					'.opencode',
-					'skills',
+					'.swarm',
+					'bundled-skills',
 					'codebase-review-swarm',
 					'SKILL.md',
 				),
@@ -272,7 +272,13 @@ describe('codebase-review command dispatch bundled skill sync', () => {
 		expect(result.text).toContain('[MODE: DEEP_DIVE');
 		expect(
 			fs.readFileSync(
-				path.join(projectDir, '.opencode', 'skills', 'deep-dive', 'SKILL.md'),
+				path.join(
+					projectDir,
+					'.swarm',
+					'bundled-skills',
+					'deep-dive',
+					'SKILL.md',
+				),
 				'utf-8',
 			),
 		).toBe('deep dive skill\n');

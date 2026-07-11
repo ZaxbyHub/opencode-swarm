@@ -1,5 +1,6 @@
 ---
 name: swarm
+audience: swarm-plugin
 description: Codex adapter for enabling a higher-rigor swarm-like workflow in the current Codex thread. Use when the user asks for swarm mode, maximum quality, parallel investigation, extra review rigor, or a swarm-style approach without necessarily invoking the OpenCode Swarm plugin.
 ---
 

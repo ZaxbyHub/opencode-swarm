@@ -50,6 +50,12 @@ const SKILL_TRIGGER_MIN_LENGTH = 3;
 const MAX_SKILL_TRIGGERS = 20;
 const MAX_SKILL_TRIGGER_LENGTH = 120;
 
+/** Bound audience metadata independently from free-form skill frontmatter. */
+const MAX_SKILL_AUDIENCES = 16;
+const MAX_SKILL_AUDIENCE_LENGTH = 64;
+const SKILL_AUDIENCE_DOMAIN_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const SKILL_AUDIENCE_RUNNER_PATTERN = /^runner:(opencode|claude|codex)$/;
+
 /**
  * Minimum weighted context score (≈25% task-keyword overlap, since
  * contextScore = matchRatio * CONTEXT_WEIGHT) required before a workflow skill
@@ -92,10 +98,26 @@ export interface SkillStats {
 	topAgents: Array<{ agent: string; count: number }>;
 }
 
+export type SkillRunner = 'opencode' | 'claude' | 'codex';
+
+/** Parsed state of an explicit (or absent) top-level audience declaration. */
+export interface SkillAudienceMetadata {
+	status: 'absent' | 'valid' | 'invalid';
+	values: string[];
+}
+
+/** Active runner and project-domain audiences accepted by a skill loader. */
+export interface SkillAudienceContext {
+	runner: SkillRunner;
+	audiences: readonly string[];
+}
+
 /** Metadata extracted from a SKILL.md frontmatter block. */
 export interface SkillMetadata {
 	/** Repo-relative path to the skill file. */
 	path: string;
+	/** Whether frontmatter was readable and structurally present. */
+	frontmatterStatus?: 'valid' | 'absent' | 'invalid' | 'unavailable';
 	/** Human-readable skill name. */
 	name: string;
 	/** Short description from frontmatter, or a fallback when absent. */
@@ -104,6 +126,8 @@ export interface SkillMetadata {
 	skillType?: 'directive' | 'workflow';
 	/** Literal trigger phrases from frontmatter. */
 	triggers?: string[];
+	/** Bounded, top-level audience declaration and its parse status. */
+	audience?: SkillAudienceMetadata;
 }
 
 // ============================================================================
@@ -234,6 +258,121 @@ function collectYamlList(
 	return { values, nextIndex: i - 1 };
 }
 
+function isValidSkillAudience(value: string): boolean {
+	return (
+		value.length > 0 &&
+		value.length <= MAX_SKILL_AUDIENCE_LENGTH &&
+		(SKILL_AUDIENCE_RUNNER_PATTERN.test(value) ||
+			SKILL_AUDIENCE_DOMAIN_PATTERN.test(value))
+	);
+}
+
+function parseAudienceValues(rawValues: unknown[]): SkillAudienceMetadata {
+	if (rawValues.length === 0 || rawValues.length > MAX_SKILL_AUDIENCES) {
+		return { status: 'invalid', values: [] };
+	}
+
+	const values: string[] = [];
+	const seen = new Set<string>();
+	for (const rawValue of rawValues) {
+		if (typeof rawValue !== 'string') {
+			return { status: 'invalid', values: [] };
+		}
+		const value = stripQuotes(rawValue).trim();
+		if (!isValidSkillAudience(value)) {
+			return { status: 'invalid', values: [] };
+		}
+		if (!seen.has(value)) {
+			seen.add(value);
+			values.push(value);
+		}
+	}
+
+	return { status: 'valid', values };
+}
+
+function parseInlineAudienceList(rawValue: string): SkillAudienceMetadata {
+	const trimmed = rawValue.trim();
+	if (!trimmed) return { status: 'invalid', values: [] };
+
+	if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+		return parseAudienceValues([trimmed]);
+	}
+
+	const body = trimmed.slice(1, -1).trim();
+	if (!body) return { status: 'invalid', values: [] };
+
+	try {
+		const parsed = JSON.parse(trimmed);
+		if (!Array.isArray(parsed)) return { status: 'invalid', values: [] };
+		return parseAudienceValues(parsed);
+	} catch {
+		return parseAudienceValues(body.split(',').map((entry) => entry.trim()));
+	}
+}
+
+function collectAudienceYamlList(
+	lines: string[],
+	start: number,
+	end: number,
+): { audience: SkillAudienceMetadata; nextIndex: number } {
+	const values: string[] = [];
+	let malformed = false;
+	let i = start;
+	for (; i < end; i++) {
+		const line = lines[i] ?? '';
+		if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(line)) break;
+		if (!line.trim()) continue;
+		const match = line.match(/^\s+-\s+(.+?)\s*$/);
+		if (!match) {
+			malformed = true;
+			continue;
+		}
+		values.push(match[1]);
+		if (values.length > MAX_SKILL_AUDIENCES) {
+			malformed = true;
+			break;
+		}
+	}
+
+	return {
+		audience: malformed
+			? { status: 'invalid', values: [] }
+			: parseAudienceValues(values),
+		nextIndex: i - 1,
+	};
+}
+
+/**
+ * Match parsed skill audience metadata against the active project and runner.
+ * Domain tokens are ORed with domains, runner tokens are ORed with runners,
+ * and the two dimensions are ANDed together.
+ */
+export function isSkillAudienceMatch(
+	metadata: Pick<SkillMetadata, 'audience'>,
+	context: SkillAudienceContext,
+): boolean {
+	const audience = metadata.audience;
+	if (!audience || audience.status === 'absent') return true;
+	if (audience.status === 'invalid') return false;
+
+	const domainValues = audience.values.filter(
+		(value) => !value.startsWith('runner:'),
+	);
+	const runnerValues = audience.values.filter((value) =>
+		value.startsWith('runner:'),
+	);
+	const acceptedDomains = new Set(context.audiences);
+
+	const domainMatches =
+		domainValues.length === 0 ||
+		domainValues.some((value) => acceptedDomains.has(value));
+	const runnerMatches =
+		runnerValues.length === 0 ||
+		runnerValues.includes(`runner:${context.runner}`);
+	return domainMatches && runnerMatches;
+}
+
 /**
  * Parse the YAML-like frontmatter from a SKILL.md file. This intentionally
  * supports only the small subset skills use today: scalar `name` and scalar,
@@ -247,8 +386,10 @@ export function parseSkillFrontmatter(
 	const fallbackName = extractSkillName(normalizedPath);
 	const fallback: SkillMetadata = {
 		path: normalizedPath,
+		frontmatterStatus: 'absent',
 		name: fallbackName,
 		description: 'No description provided',
+		audience: { status: 'absent', values: [] },
 	};
 
 	const lines = content.split(/\r?\n/);
@@ -257,12 +398,13 @@ export function parseSkillFrontmatter(
 	const end = lines.findIndex(
 		(line, index) => index > 0 && line.trim() === '---',
 	);
-	if (end === -1) return fallback;
+	if (end === -1) return { ...fallback, frontmatterStatus: 'invalid' };
 
 	let name = fallbackName;
 	let description = '';
 	let skillType: 'directive' | 'workflow' | undefined;
 	let triggers: string[] = [];
+	let audience: SkillAudienceMetadata = { status: 'absent', values: [] };
 
 	for (let i = 1; i < end; i++) {
 		const line = lines[i] ?? '';
@@ -296,6 +438,21 @@ export function parseSkillFrontmatter(
 			continue;
 		}
 
+		if (key === 'audience') {
+			if (audience.status !== 'absent') {
+				audience = { status: 'invalid', values: [] };
+				continue;
+			}
+			if (rawValue === '') {
+				const collected = collectAudienceYamlList(lines, i + 1, end);
+				audience = collected.audience;
+				i = collected.nextIndex;
+			} else {
+				audience = parseInlineAudienceList(rawValue);
+			}
+			continue;
+		}
+
 		if (key !== 'description') continue;
 
 		if (rawValue === '>' || rawValue === '|') {
@@ -314,8 +471,10 @@ export function parseSkillFrontmatter(
 
 	const meta: SkillMetadata = {
 		path: normalizedPath,
+		frontmatterStatus: 'valid',
 		name: name || fallbackName,
 		description: normalizeDescription(description),
+		audience,
 	};
 	if (skillType) meta.skillType = skillType;
 	if (triggers.length > 0) meta.triggers = triggers;
@@ -356,18 +515,18 @@ export function readSkillMetadata(
 			path.isAbsolute(normalizedPath) ||
 			normalizedPath.split('/').includes('..')
 		) {
-			return fallback;
+			return { ...fallback, frontmatterStatus: 'unavailable' };
 		}
 		const root = path.resolve(directory);
 		const absolutePath = path.resolve(directory, normalizedPath);
 		if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) {
-			return fallback;
+			return { ...fallback, frontmatterStatus: 'unavailable' };
 		}
 
 		const content = readFilePrefix(absolutePath);
 		return parseSkillFrontmatter(content, normalizedPath);
 	} catch {
-		return fallback;
+		return { ...fallback, frontmatterStatus: 'unavailable' };
 	}
 }
 
@@ -702,6 +861,7 @@ export function getSkillStats(
 export function formatSkillIndexWithContext(
 	skills: string[],
 	directory: string,
+	metadataBySkillPath?: ReadonlyMap<string, SkillMetadata>,
 ): string {
 	// Bounded check: just verify the log file exists and has content
 	// instead of reading the entire file on every delegation.
@@ -719,7 +879,9 @@ export function formatSkillIndexWithContext(
 		// decide whether to load the full skill body on demand.
 		return skills
 			.map((sp) => {
-				const meta = _internals.readSkillMetadata(sp, directory);
+				const meta =
+					metadataBySkillPath?.get(sp) ??
+					_internals.readSkillMetadata(sp, directory);
 				return `  - file:${meta.path} - ${meta.name}: ${meta.description}`;
 			})
 			.join('\n');
@@ -729,7 +891,9 @@ export function formatSkillIndexWithContext(
 
 	for (const skillPath of skills) {
 		const stats = getSkillStats(skillPath, directory);
-		const meta = _internals.readSkillMetadata(skillPath, directory);
+		const meta =
+			metadataBySkillPath?.get(skillPath) ??
+			_internals.readSkillMetadata(skillPath, directory);
 		const compliancePct = Math.round(stats.complianceRate * 100);
 		const topAgentNames = stats.topAgents
 			.slice(0, 3)

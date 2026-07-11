@@ -1,5 +1,6 @@
 ---
 name: guardrail-patterns
+audience: swarm-plugin
 description: Codex adapter for opencode-swarm destructive-command guardrail changes. Use before modifying src/hooks/guardrails.ts, checkDestructiveCommand, dcNormalizeCommand, shell-wrapper parsing, .swarm destructive-command blocking, or guardrails unit/adversarial tests.
 ---
 

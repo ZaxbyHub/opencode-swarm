@@ -58,17 +58,34 @@ describe('deferred warning buffer', () => {
 		expect(getDeferredWarnings().length).toBe(0);
 	});
 
-	test('addDeferredWarning respects the MAX_DEFERRED_WARNINGS cap (50)', () => {
+	test('addDeferredWarning respects the MAX_DEFERRED_WARNINGS cap (50) with a truncation sentinel', () => {
+		// Epic #1752 PR2 review F-003: overflow must not silently drop
+		// advisories. The buffer reserves the last slot for a truncation
+		// sentinel so /swarm diagnose can tell the operator entries were
+		// dropped, rather than losing them without trace.
 		for (let i = 0; i < 60; i += 1) {
 			addDeferredWarning(`warning ${i}`);
 		}
 
 		const warnings = getDeferredWarnings();
+		// 49 real entries + 1 truncation sentinel = 50 total.
 		expect(warnings.length).toBe(50);
-		// The cap drops overflow entries silently; the last accepted entry is
-		// warning 49 (the 50th), not warning 59.
-		expect(warnings[49]).toBe('warning 49');
+		expect(warnings[48]).toBe('warning 48');
+		// The 50th slot is the sentinel, not warning 49.
+		expect(warnings[49]).toContain('additional advisories were dropped');
+		expect(warnings).not.toContain('warning 49');
 		expect(warnings).not.toContain('warning 59');
+	});
+
+	test('addDeferredWarning sentinel appears exactly once even if the cap is hit repeatedly', () => {
+		for (let i = 0; i < 80; i += 1) {
+			addDeferredWarning(`warning ${i}`);
+		}
+		const warnings = getDeferredWarnings();
+		const sentinels = warnings.filter((w) =>
+			w.includes('additional advisories were dropped'),
+		);
+		expect(sentinels.length).toBe(1);
 	});
 });
 

@@ -1,5 +1,6 @@
 ---
 name: editing-skills
+audience: swarm-plugin
 description: >
   Contract for adding, editing, moving, or removing skills in this repository
   (.claude/skills, .opencode/skills, .agents/skills, any SKILL.md): mirror
@@ -62,10 +63,11 @@ Look the slug up in `src/config/skill-mirrors.ts`:
 
 ## Step 2 — Know what ships where
 
-- Only `.opencode/skills/` is published: `package.json#files` lists the
-  bundled `.opencode/skills/<slug>` directories, and
-  `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`) drives the
-  missing-only sync into user projects at plugin init.
+- Only canonical package sources under `.opencode/skills/` are published:
+  `package.json#files` lists the bundled source directories and
+  `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`) drives a private
+  runtime sync to `.swarm/bundled-skills/<slug>/` at plugin init. Never sync
+  into a target project's native skill roots.
 - `.claude/skills/` is repo-internal — it configures Claude Code sessions in
   *this* repository only.
 - A new skill that should reach npm users must be added to **all three**:
@@ -86,6 +88,11 @@ and do not expect them to auto-trigger.
 
 ## Step 4 — Frontmatter and description conventions
 
+- Every tracked static skill declares `audience: swarm-plugin`. Consumer repos
+  may instead use a domain tag such as `ragappv3` and optionally add a runner
+  constraint (`runner:opencode`, `runner:claude`, or `runner:codex`). Keep
+  byte-identical mirrors' audience lines byte-identical. Runtime-generated
+  skills are intentionally allowed to omit the field (legacy match-all).
 - `description` is how Claude Code auto-selects skills: third person, the
   core use case and concrete trigger keywords first, under ~1024 chars.
   Vague descriptions ("helps with X") never trigger.

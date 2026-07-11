@@ -16,6 +16,7 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { BUNDLED_PROJECT_SKILLS } from '../config/bundled-skills.js';
 import {
 	effectiveRetrievalOutcomes,
 	readKnowledgeCounterRollups,
@@ -52,6 +53,11 @@ import {
 // ============================================================================
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const RESERVED_ACTIVE_SKILL_SLUGS = new Set<string>(BUNDLED_PROJECT_SKILLS);
+
+function reservedActiveSlugReason(slug: string): string {
+	return `reserved bundled skill slug "${slug}" cannot be used for an active generated skill`;
+}
 
 export function sanitizeSlug(input: string): string {
 	const lc = input.toLowerCase().trim();
@@ -689,6 +695,16 @@ export async function generateSkills(
 			});
 			continue;
 		}
+		if (
+			req.mode === 'active' &&
+			RESERVED_ACTIVE_SKILL_SLUGS.has(cluster.slug)
+		) {
+			result.skipped.push({
+				slug: cluster.slug,
+				reason: reservedActiveSlugReason(cluster.slug),
+			});
+			continue;
+		}
 		const targetPath =
 			req.mode === 'active'
 				? activePath(req.directory, cluster.slug)
@@ -1152,6 +1168,14 @@ export async function activateProposal(
 	}
 	const from = proposalPath(directory, cleanSlug);
 	const to = activePath(directory, cleanSlug);
+	if (RESERVED_ACTIVE_SKILL_SLUGS.has(cleanSlug)) {
+		return {
+			activated: false,
+			from,
+			to,
+			reason: reservedActiveSlugReason(cleanSlug),
+		};
+	}
 	if (!existsSync(from)) {
 		return {
 			activated: false,

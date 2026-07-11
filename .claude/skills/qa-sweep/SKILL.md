@@ -1,5 +1,6 @@
 ---
 name: qa-sweep
+audience: swarm-plugin
 description: >
   Apply when implementing features, fixing bugs, debugging errors, investigating failures,
   tracing root causes, reviewing tech debt, tracing issues, planning fixes, or completing

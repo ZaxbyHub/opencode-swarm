@@ -1,5 +1,6 @@
 ---
 name: clarify-spec
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: CLARIFY-SPEC -- resolving spec clarification markers and maintaining spec/planning alignment.
 ---

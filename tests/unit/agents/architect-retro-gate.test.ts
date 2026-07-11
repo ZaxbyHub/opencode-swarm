@@ -40,7 +40,7 @@ describe('RETROSPECTIVE GATE Verification (Task 1.2)', () => {
 	});
 
 	test('4. ARCHITECT_PROMPT points to phase-wrap as retrospective source of truth', () => {
-		expect(prompt).toContain('file:.opencode/skills/phase-wrap/SKILL.md');
+		expect(prompt).toContain('file:.swarm/bundled-skills/phase-wrap/SKILL.md');
 		expect(prompt).toContain('follow its RETROSPECTIVE GATE section');
 	});
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.113.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.2...v7.113.0) (2026-07-11)
+
+
+### Features
+
+* **skills:** isolate plugin skills with audience routing ([4d78429](https://github.com/ZaxbyHub/opencode-swarm/commit/4d78429a047df2818c4af4653956f55c774b7272))
+* **skills:** isolate plugin skills with audience routing ([5972d3e](https://github.com/ZaxbyHub/opencode-swarm/commit/5972d3e4f23cae0a85a6b0c3f35f90eafce6f65e))
+
 ## [7.112.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.112.1...v7.112.2) (2026-07-10)
 
 

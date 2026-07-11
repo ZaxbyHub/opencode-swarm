@@ -372,7 +372,7 @@ describe('Architect Agent - STALE SPEC DETECTION', () => {
 	const p = createArchitectAgent('test-model').config.prompt!;
 
 	it('has STALE SPEC DETECTION with 3 numbered options', () => {
-		expect(p).toContain('file:.opencode/skills/plan/SKILL.md');
+		expect(p).toContain('file:.swarm/bundled-skills/plan/SKILL.md');
 		const idx = PLAN_SKILL.indexOf('STALE SPEC DETECTION');
 		const proceedIdx = PLAN_SKILL.indexOf('proceed with spec:', idx);
 		const section = PLAN_SKILL.slice(

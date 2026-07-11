@@ -1,5 +1,6 @@
 ---
 name: deep-dive
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: DEEP_DIVE — read-only codebase audit with
   parallel explorer waves, 2 independent reviewers, and sequential critic

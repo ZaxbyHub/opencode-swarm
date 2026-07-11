@@ -1,11 +1,12 @@
 ---
 name: ci-fix-monitor
+audience: swarm-plugin
 description: Codex adapter for monitoring and fixing CI failures on opencode-swarm PRs. Use when diagnosing failed checks, fixing `package-check` (npm tarball) failures, resolving quality/lint/format errors, fixing macOS cross-platform file I/O failures, or watching a PR until all checks are green.
 ---
 
 # CI Fix Monitor
 
-Read `.opencode/skills/generated/ci-fix-monitor/SKILL.md` for the full protocol.
+Read `.opencode/skills/ci-fix-monitor/SKILL.md` for the full protocol.
 
 Also load:
 

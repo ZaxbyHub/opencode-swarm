@@ -1,5 +1,6 @@
 ---
 name: test-file-split
+audience: swarm-plugin
 description: Protocol for splitting test files that exceed the FR-006 500-line hard limit. Covers describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, and cascading-split detection. Load when a test file approaches or exceeds 500 lines.
 ---
 

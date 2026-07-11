@@ -1,5 +1,6 @@
 ---
 name: engineering-conventions
+audience: swarm-plugin
 description: >
   Guidelines and non-negotiable engineering invariants for modifying opencode-swarm.
   Load before architecture, plugin initialization, subprocess, tool registration, plan
@@ -40,7 +41,7 @@ The full list of 12 invariants is in `AGENTS.md`. The four that have caused the 
 
 ## Cross-link: writing tests
 
-For test changes, also load [`.opencode/skills/writing-tests/SKILL.md`](../writing-tests/SKILL.md). It covers `bun:test` API, mock isolation rules, CI per-file isolation, and cross-platform anti-patterns.
+For test changes, also load [`.swarm/bundled-skills/writing-tests/SKILL.md`](../writing-tests/SKILL.md). It covers `bun:test` API, mock isolation rules, CI per-file isolation, and cross-platform anti-patterns.
 
 ## Hard warning: do NOT use broad `test_runner` for repo validation
 

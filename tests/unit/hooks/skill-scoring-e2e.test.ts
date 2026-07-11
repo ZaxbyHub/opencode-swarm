@@ -41,6 +41,16 @@ function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), 'skill-scoring-e2e-'));
 }
 
+function writeValidSkill(dir: string, relativePath: string): void {
+	const skillPath = path.join(dir, relativePath);
+	fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+	fs.writeFileSync(
+		skillPath,
+		'---\nname: scoring-fixture\ndescription: valid scoring fixture\n---\n',
+		'utf-8',
+	);
+}
+
 /** Write raw content to the skill-usage log. */
 function writeRawLog(dir: string, content: string): void {
 	const resolved = path.join(dir, '.swarm', 'skill-usage.jsonl');
@@ -282,6 +292,8 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 
 	beforeEach(() => {
 		tempDir = makeTempDir();
+		writeValidSkill(tempDir, '.claude/skills/skill-x/SKILL.md');
+		writeValidSkill(tempDir, '.claude/skills/skill-tail/SKILL.md');
 		originals = {
 			readSkillUsageEntriesTail: gateInternals.readSkillUsageEntriesTail,
 			computeSkillRelevanceScore: gateInternals.computeSkillRelevanceScore,
@@ -331,14 +343,16 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'skill-x',
+			skillsField: 'file:.claude/skills/skill-x/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [
 			'.claude/skills/skill-x/SKILL.md',
 		];
 		gateInternals.extractTaskIdFromPrompt = () => 'task-bound';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'skill-x' ? ['skill-x'] : [];
+			v === 'file:.claude/skills/skill-x/SKILL.md'
+				? ['file:.claude/skills/skill-x/SKILL.md']
+				: [];
 		gateInternals.computeSkillRelevanceScore = () => {
 			scoringCalled = true;
 			return 0.5;
@@ -352,7 +366,7 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 				sessionID,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: skill-x\ndo work',
+					prompt: 'SKILLS: file:.claude/skills/skill-x/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },
@@ -400,14 +414,16 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'skill-x',
+			skillsField: 'file:.claude/skills/skill-x/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [
 			'.claude/skills/skill-x/SKILL.md',
 		];
 		gateInternals.extractTaskIdFromPrompt = () => 'task-overflow';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'skill-x' ? ['.claude/skills/skill-x/SKILL.md'] : [];
+			v === 'file:.claude/skills/skill-x/SKILL.md'
+				? ['file:.claude/skills/skill-x/SKILL.md']
+				: [];
 		gateInternals.computeSkillRelevanceScore = () => {
 			scoringCalled = true;
 			return 0.5;
@@ -422,7 +438,7 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 				sessionID,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: skill-x\ndo work',
+					prompt: 'SKILLS: file:.claude/skills/skill-x/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },
@@ -463,14 +479,16 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 		};
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'skill-tail',
+			skillsField: 'file:.claude/skills/skill-tail/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [
 			'.claude/skills/skill-tail/SKILL.md',
 		];
 		gateInternals.extractTaskIdFromPrompt = () => 'task-tail-verify';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'skill-tail' ? ['skill-tail'] : [];
+			v === 'file:.claude/skills/skill-tail/SKILL.md'
+				? ['file:.claude/skills/skill-tail/SKILL.md']
+				: [];
 		gateInternals.computeSkillRelevanceScore = () => 0.5;
 		gateInternals.MAX_SCORING_SESSION_ENTRIES = 500;
 
@@ -482,7 +500,7 @@ describe('MAX_SCORING_SESSION_ENTRIES bounding', () => {
 				sessionID,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: skill-tail\ndo work',
+					prompt: 'SKILLS: file:.claude/skills/skill-tail/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },
@@ -719,6 +737,7 @@ describe('gateBefore with real tail-read and real scoring', () => {
 
 	beforeEach(() => {
 		tempDir = makeTempDir();
+		writeValidSkill(tempDir, '.claude/skills/writing-tests/SKILL.md');
 		originals = {
 			readSkillUsageEntriesTail: gateInternals.readSkillUsageEntriesTail,
 			computeSkillRelevanceScore: gateInternals.computeSkillRelevanceScore,
@@ -777,12 +796,14 @@ describe('gateBefore with real tail-read and real scoring', () => {
 
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'writing-tests',
+			skillsField: 'file:.claude/skills/writing-tests/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [skillPath];
 		gateInternals.extractTaskIdFromPrompt = () => 'current-task';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'writing-tests' ? [skillPath] : [];
+			v === 'file:.claude/skills/writing-tests/SKILL.md'
+				? [`file:${skillPath}`]
+				: [];
 		gateInternals.computeSkillRelevanceScore = (
 			sp: string,
 			desc: string,
@@ -803,7 +824,8 @@ describe('gateBefore with real tail-read and real scoring', () => {
 				sessionID: delegationSession,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: writing-tests\ndo the work',
+					prompt:
+						'SKILLS: file:.claude/skills/writing-tests/SKILL.md\ndo the work',
 				},
 			},
 			{ enabled: true },
@@ -857,12 +879,14 @@ describe('gateBefore with real tail-read and real scoring', () => {
 		let scoringCalled = false;
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'writing-tests',
+			skillsField: 'file:.claude/skills/writing-tests/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [skillPath];
 		gateInternals.extractTaskIdFromPrompt = () => 'current-task';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'writing-tests' ? [skillPath] : [];
+			v === 'file:.claude/skills/writing-tests/SKILL.md'
+				? [`file:${skillPath}`]
+				: [];
 		gateInternals.computeSkillRelevanceScore = () => {
 			scoringCalled = true;
 			throw new Error('scoring deliberately failed');
@@ -878,7 +902,8 @@ describe('gateBefore with real tail-read and real scoring', () => {
 				sessionID,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: writing-tests\ndo the work',
+					prompt:
+						'SKILLS: file:.claude/skills/writing-tests/SKILL.md\ndo the work',
 				},
 			},
 			{ enabled: true },
@@ -902,14 +927,16 @@ describe('gateBefore with real tail-read and real scoring', () => {
 		let scoringCalled = false;
 		gateInternals.parseDelegationArgs = () => ({
 			targetAgent: 'coder',
-			skillsField: 'writing-tests',
+			skillsField: 'file:.claude/skills/writing-tests/SKILL.md',
 		});
 		gateInternals.discoverAvailableSkills = () => [
 			'.claude/skills/writing-tests/SKILL.md',
 		];
 		gateInternals.extractTaskIdFromPrompt = () => 'task-empty';
 		gateInternals.parseSkillPaths = (v: string) =>
-			v === 'writing-tests' ? ['.claude/skills/writing-tests/SKILL.md'] : [];
+			v === 'file:.claude/skills/writing-tests/SKILL.md'
+				? ['file:.claude/skills/writing-tests/SKILL.md']
+				: [];
 		gateInternals.computeSkillRelevanceScore = () => {
 			scoringCalled = true;
 			return 0;
@@ -925,7 +952,7 @@ describe('gateBefore with real tail-read and real scoring', () => {
 				sessionID,
 				args: {
 					subagent_type: 'mega_coder',
-					prompt: 'SKILLS: writing-tests\ndo work',
+					prompt: 'SKILLS: file:.claude/skills/writing-tests/SKILL.md\ndo work',
 				},
 			},
 			{ enabled: true },

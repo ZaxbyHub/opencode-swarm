@@ -449,3 +449,45 @@ describe('stampSourceEntries refactored signature', () => {
 		expect(q2.generated_skill_slug).toBeUndefined();
 	});
 });
+
+describe('reserved bundled skill slugs', () => {
+	it('blocks active generation and activation without writing generated artifacts', async () => {
+		for (const [index, slug] of [
+			'parallel-work-check',
+			'ci-fix-monitor',
+		].entries()) {
+			const entry = makeEntry(`reserved-${index}`);
+			await seed([entry]);
+			const result = await generateSkills({
+				directory: tmp,
+				mode: 'active',
+				slug,
+				sourceKnowledgeIds: [entry.id],
+			});
+			const activeFile = path.join(
+				tmp,
+				'.opencode',
+				'skills',
+				'generated',
+				slug,
+				'SKILL.md',
+			);
+			expect(result.written).toEqual([]);
+			expect(result.skipped).toEqual([
+				{
+					slug,
+					reason: expect.stringContaining('reserved bundled skill slug'),
+				},
+			]);
+			expect(existsSync(activeFile)).toBe(false);
+			expect(
+				existsSync(path.join(tmp, '.swarm', 'skills', 'evals', slug)),
+			).toBe(false);
+
+			const activation = await activateProposal(tmp, slug);
+			expect(activation.activated).toBe(false);
+			expect(activation.reason).toContain('reserved bundled skill slug');
+			expect(existsSync(activeFile)).toBe(false);
+		}
+	});
+});

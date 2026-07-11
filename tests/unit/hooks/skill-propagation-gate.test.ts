@@ -15,6 +15,27 @@ import {
 	skillPropagationTransformScan,
 	writeWarnEvent,
 } from '../../../src/hooks/skill-propagation-gate';
+
+// This legacy suite focuses on propagation warnings, scoring, usage recording,
+// and transform dedup with shorthand/nonexistent skill fixtures. Real explicit
+// path, frontmatter, symlink, and audience enforcement is exercised in
+// skill-audience-routing.test.ts and skill-propagation-integration.test.ts.
+const realValidateSkillReference = _internals.validateSkillReference;
+const realExtractFileSkillReferences = _internals.extractFileSkillReferences;
+beforeEach(() => {
+	_internals.extractFileSkillReferences = (fieldValue) =>
+		_internals.parseSkillPaths(fieldValue);
+	_internals.validateSkillReference = (_directory, reference) => ({
+		valid: true,
+		reason: null,
+		skillPath: reference.replace(/^file:/, ''),
+	});
+});
+afterEach(() => {
+	_internals.extractFileSkillReferences = realExtractFileSkillReferences;
+	_internals.validateSkillReference = realValidateSkillReference;
+});
+
 import type { SkillUsageEntry } from '../../../src/hooks/skill-usage-log';
 import {
 	appendSkillUsageEntry,
@@ -1530,6 +1551,7 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 			readSkillUsageEntries: _internals.readSkillUsageEntries,
 			readSkillUsageEntriesTail: _internals.readSkillUsageEntriesTail,
 			MAX_SCORING_SESSION_ENTRIES: _internals.MAX_SCORING_SESSION_ENTRIES,
+			readSkillMetadata: _internals.readSkillMetadata,
 		};
 	});
 
@@ -3201,6 +3223,7 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 
 		const sessionID = `dedup-${Date.now()}`;
 		const skillPath = 'file:.claude/skills/writing-tests/SKILL.md';
+		const expectedSkillPath = skillPath.replace(/^file:/, '');
 
 		// Create the mock skill file
 		const skillAbsPath = path.join(
@@ -3282,7 +3305,7 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
 			expect(complianceEntries.length).toBeLessThanOrEqual(2);
 			const actualSkillCompliance = complianceEntries.filter(
-				(e) => e.skillPath === skillPath,
+				(e) => e.skillPath === expectedSkillPath,
 			);
 			expect(actualSkillCompliance.length).toBeGreaterThanOrEqual(1);
 		} finally {

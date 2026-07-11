@@ -10,7 +10,7 @@ describe('Architect prompt: hallucination_guard gate enforcement', () => {
 
 	const getPhaseWrapSection = (): string => {
 		expect(prompt).toContain('### MODE: PHASE-WRAP');
-		expect(prompt).toContain('file:.opencode/skills/phase-wrap/SKILL.md');
+		expect(prompt).toContain('file:.swarm/bundled-skills/phase-wrap/SKILL.md');
 		return PHASE_WRAP_PROTOCOL;
 	};
 

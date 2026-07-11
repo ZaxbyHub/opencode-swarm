@@ -159,9 +159,10 @@ const PACKAGE_ROOT = path.resolve(
 // Upper bound for the DEFERRED bundled-skill materialization. The sync runs in a
 // queueMicrotask off the server()-resolution path, so this ceiling does not count
 // toward init latency (Invariant 1); it only protects the background task from
-// running unboundedly. The copy is missing-only and bounded to ≤64 small files
-// (<512KB total), so it completes in single-digit ms on a healthy FS and is a
-// no-op after first run. The generous 2s ceiling is belt-and-suspenders for
+// running unboundedly. The copy is content-aware and bounded to ≤64 small files
+// (<512KB total), so it completes in single-digit ms on a healthy FS and skips
+// byte-identical files after the first run. The generous 2s ceiling is
+// belt-and-suspenders for
 // pathological filesystems (antivirus interception, NFS stalls) — on timeout we
 // fail open and the command-path sync remains a backstop.
 const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
@@ -344,12 +345,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 // does not trip excess-property checks against `Hooks`. The wrapper above is
 // typed as `Plugin`, which validates the structural shape at the call site.
 async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
+	// Clear deferred warnings at the very start of the session, BEFORE any
+	// init-path work that buffers advisories via advisoryWarn (config load,
+	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
+	// new session from the PREVIOUS session's buffer; running it after config
+	// load (the historical placement) would wipe the current session's
+	// config-validation warnings before /swarm diagnose can surface them
+	// (epic #1752 PR2 — config-load warnings now route through advisoryWarn,
+	// not raw stderr, so the buffer is the only /swarm diagnose channel).
+	clearDeferredWarnings();
+
 	const { config, loadedFromFile } = await loadPluginConfigWithMetaAsync(
 		ctx.directory,
 	);
-
-	// Clear deferred warnings at session start for per-session isolation
-	clearDeferredWarnings();
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -524,7 +532,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	writeProjectConfigIfNew(ctx.directory, config.quiet);
 	// Materialize the bundled architect MODE skills into the project so the
 	// architect's first auto-entered mode (e.g. SPECIFY on a fresh project) can
-	// load its `.opencode/skills/<mode>/SKILL.md` without first running a /swarm
+	// load its `.swarm/bundled-skills/<mode>/SKILL.md` without first running a /swarm
 	// command and restarting the session. Previously these were synced ONLY as a
 	// side effect of a subset of /swarm commands (commands/registry.ts), so a
 	// brand-new project's architect hit missing skill files on turn one and a
@@ -532,7 +540,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	//
 	// DEFERRED via queueMicrotask (NOT awaited on the server()-resolution path)
 	// per Invariant 1 / Issue #704 — see the repoGraphHook precedent above. The
-	// sync touches up to 20 skill directories; awaiting it inline added cold-FS
+	// sync touches the bounded bundled-skill inventory; awaiting it inline added cold-FS
 	// latency that pushed server() past the 400ms repro-704 T1 deadline on
 	// Windows. Deferring keeps server() fast: the sync starts on the next
 	// microtask, runs in the background, and completes long before the architect
@@ -1867,6 +1875,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
 							},
 							p.sessionID,
+							skillPropagationConfig,
 						);
 					} catch {
 						return Promise.resolve();
@@ -2062,18 +2071,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    agents without a SKILLS field. Also pushes a visible warning
 			//    to pendingAdvisoryMessages for injection into the architect's
 			//    next prompt. When enforce=true, blocks the delegation entirely.
-			const skillResult = skillPropagationConfig.enabled
-				? await skillPropagationGateBefore(
-						ctx.directory,
-						{
-							tool: input.tool,
-							agent: input.agent,
-							sessionID: input.sessionID,
-							args: input.args,
-						},
-						skillPropagationConfig,
-					)
-				: { blocked: false, reason: null, recommendedSkills: undefined };
+			// This gate always performs mandatory explicit-reference validation
+			// before its optional propagation-enabled early return. Calling it once
+			// avoids reopening every referenced skill twice.
+			const skillResult = await skillPropagationGateBefore(
+				ctx.directory,
+				{
+					tool: input.tool,
+					agent: input.agent,
+					sessionID: input.sessionID,
+					args: input.args,
+				},
+				skillPropagationConfig,
+			);
 			if (skillResult.blocked) {
 				throw new Error(
 					skillResult.reason ?? 'Blocked by skill propagation gate',

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import { bunSpawn } from './bun-compat';
 
 /**
@@ -96,7 +97,8 @@ function readFileSafe(filePath: string): string | null {
 /**
  * Checks whether `.swarm/` is covered by `.gitignore` or `.git/info/exclude`
  * in the git repo rooted at or above `directory`. If not covered, emits a
- * single `console.warn` (unless `quiet` is true). Fires at most once per process.
+ * single advisory via `advisoryWarn` (buffered for `/swarm diagnose` + debug
+ * log). Fires at most once per process.
  *
  * Never throws — any file-system error silently skips the check.
  *
@@ -105,7 +107,7 @@ function readFileSafe(filePath: string): string | null {
  */
 export function warnIfSwarmNotGitignored(
 	directory: string,
-	quiet = false,
+	_quiet = false,
 ): void {
 	if (_gitignoreWarningEmitted) return;
 
@@ -127,13 +129,12 @@ export function warnIfSwarmNotGitignored(
 			return;
 		}
 
-		// Not covered by either source — emit warning (suppressed when quiet:true)
+		// Not covered by either source — emit advisory (buffered for /swarm
+		// diagnose + debug-gated log; never raw stderr, per epic #1752).
 		_gitignoreWarningEmitted = true;
-		if (!quiet) {
-			console.warn(
-				'[opencode-swarm] WARNING: .swarm/ is not in your .gitignore. Shell audit logs may contain API keys. Add ".swarm/" to your .gitignore to prevent accidental commits.',
-			);
-		}
+		advisoryWarn(
+			'[opencode-swarm] WARNING: .swarm/ is not in your .gitignore. Shell audit logs may contain API keys. Add ".swarm/" to your .gitignore to prevent accidental commits.',
+		);
 	} catch {
 		// Silently swallow any unexpected error — never block plugin init
 	}
@@ -206,8 +207,11 @@ const GIT_SPAWN_OPTIONS = {
  *
  * Never throws. Fires at most once per process.
  *
- * quiet option: only suppresses cosmetic logs. The exclude write and tracked-file
- * warning are never suppressed regardless of quiet mode.
+ * quiet option: deprecated/no-op since epic #1752 PR2 — cosmetic advisories now
+ * route through `advisoryWarn` (buffered for `/swarm diagnose` + debug log)
+ * regardless of quiet. The exclude write always runs; the tracked-file warning
+ * (step 6) is intentionally always emitted as raw `console.warn` because it is
+ * a must-see security/hygiene remediation, not a recoverable advisory.
  */
 export async function ensureSwarmGitExcluded(
 	directory: string,
@@ -216,7 +220,8 @@ export async function ensureSwarmGitExcluded(
 	if (_swarmGitExcludedChecked) return;
 	_swarmGitExcludedChecked = true;
 
-	const { quiet = false } = options;
+	const { quiet: _quiet = false } = options;
+	void _quiet;
 
 	try {
 		// Steps 1, 2, and 3 are independent — run them in parallel to reduce
@@ -322,11 +327,9 @@ export async function ensureSwarmGitExcluded(
 						'\n# opencode-swarm local runtime state\n.swarm/\n',
 						'utf8',
 					);
-					if (!quiet) {
-						console.warn(
-							'[opencode-swarm] Added .swarm/ to .git/info/exclude to prevent runtime state from appearing in git status.',
-						);
-					}
+					advisoryWarn(
+						'[opencode-swarm] Added .swarm/ to .git/info/exclude to prevent runtime state from appearing in git status.',
+					);
 				}
 			} catch {
 				// Failed to write exclude — non-fatal (read-only repo, permissions, etc.)

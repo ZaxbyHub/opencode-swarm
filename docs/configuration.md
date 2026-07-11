@@ -518,16 +518,15 @@ Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK commen
 
 The TODO gate scans for new `TODO`, `FIXME`, and `HACK` comments introduced in the current phase and compares the count against `max_high_priority`. The count is included in the `todo_scan` field returned by the `check_gate_status` tool.
 
-### skill_propagation
+### skillPropagation
 
 Intelligent skill tracking, scoring, and recommendation system for agent delegations.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable/disable skill propagation tracking |
+| `enabled` | boolean | `true` | Enable/disable automatic discovery, scoring, warnings, recommendations, and injection. Explicit `SKILLS:` integrity remains enforced. |
 | `enforce` | boolean | `false` | When `true`, block delegations missing the `SKILLS:` field. Advisory mode (default) only warns. |
-| `scoring.threshold` | number | `0.5` | Minimum relevance score for skill recommendations (0.0–1.0) |
-| `scoring.max_recommendations` | number | `5` | Maximum number of skill recommendations per delegation |
+| `audiences` | string[] | `[]` | Project/domain tags accepted in addition to `swarm-plugin` (maximum 16 lowercase tokens, 64 characters each). Reserved `swarm-plugin` and `runner:*` values are rejected. |
 
 **What it does:**
 - Logs all skill delegations to `.swarm/skill-usage.jsonl` with session-scoped entries
@@ -535,27 +534,36 @@ Intelligent skill tracking, scoring, and recommendation system for agent delegat
 - Provides recommendations when delegating without a `SKILLS:` field
 - Auto-populates `.swarm/context.md` with an "Available Skills" section
 - Supports explicit routing via `.opencode/skill-routing.yaml` (Phase 2)
+- Filters tagged skills by project/domain audience and the active `runner:opencode` dimension
 
 **Guardrails:**
 - Relevance scoring threshold: 0.5 (skills below this are not recommended)
 - Maximum recommendations per delegation: 5
 - Scoring budget safeguard: Skipped when session exceeds 500 skill-usage entries
 - Graceful degradation: Zero installed skills = zero friction (no warnings, no blocks)
+- Explicit `SKILLS:` references must resolve to a readable, in-project SKILL.md with valid frontmatter and a matching audience even when automatic propagation is disabled
 
 **Example:**
 
 ```json
 {
-  "skill_propagation": {
+  "skillPropagation": {
     "enabled": true,
     "enforce": false,
-    "scoring": {
-      "threshold": 0.5,
-      "max_recommendations": 5
-    }
+    "audiences": ["ragappv3"]
   }
 }
 ```
+
+Skill frontmatter may declare one domain or a bounded list of domain and runner constraints:
+
+```yaml
+audience: ragappv3
+# or
+audience: [ragappv3, runner:opencode]
+```
+
+Domain values use OR semantics with other domain values; `runner:*` values use OR semantics with other runner values; the two dimensions are ANDed. Thus `[ragappv3, runner:claude]` does not match an OpenCode runner even when the project accepts `ragappv3`. An absent audience remains unscoped/match-all for backward compatibility; an explicitly empty or malformed audience fails closed.
 
 **Skill routing file** (`.opencode/skill-routing.yaml`):
 

@@ -24,6 +24,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../src/services/warning-buffer';
+import {
 	_internals,
 	ensureSwarmGitExcluded,
 	resetGitignoreWarningState,
@@ -71,11 +75,15 @@ describe('warnIfSwarmNotGitignored', () => {
 	beforeEach(() => {
 		tmpDir = makeTmpDir();
 		resetGitignoreWarningState();
+		// Epic #1752 PR2: advisoryWarn writes to the module-level deferred-warning
+		// buffer. Clear it between tests (AGENTS.md Invariant 7).
+		clearDeferredWarnings();
 		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		clearDeferredWarnings();
 		rmrf(tmpDir);
 		resetGitignoreWarningState();
 	});
@@ -89,11 +97,14 @@ describe('warnIfSwarmNotGitignored', () => {
 
 		warnIfSwarmNotGitignored(tmpDir);
 
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		const [message] = warnSpy.mock.calls[0] as [string];
-		expect(message).toContain('[opencode-swarm] WARNING');
-		expect(message).toContain('.swarm/');
-		expect(message).toContain('.gitignore');
+		// Epic #1752 PR2: advisory routes through advisoryWarn (buffered for
+		// /swarm diagnose), never raw console.warn.
+		expect(warnSpy).not.toHaveBeenCalled();
+		const buffered = getDeferredWarnings();
+		expect(buffered.length).toBe(1);
+		expect(buffered[0]).toContain('[opencode-swarm] WARNING');
+		expect(buffered[0]).toContain('.swarm/');
+		expect(buffered[0]).toContain('.gitignore');
 	});
 
 	// -------------------------------------------------------------------------
@@ -169,7 +180,12 @@ describe('warnIfSwarmNotGitignored', () => {
 		warnIfSwarmNotGitignored(tmpDir);
 		warnIfSwarmNotGitignored(tmpDir);
 
-		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// Dedup flag prevents repeated buffering — only one advisory entry.
+		const gitignoreWarnings = getDeferredWarnings().filter((m) =>
+			m.includes('[opencode-swarm] WARNING'),
+		);
+		expect(gitignoreWarnings.length).toBe(1);
+		expect(warnSpy).not.toHaveBeenCalled();
 	});
 
 	it('does NOT fire a second call after flag was set by a covered repo', () => {
@@ -202,7 +218,10 @@ describe('warnIfSwarmNotGitignored', () => {
 
 		warnIfSwarmNotGitignored(tmpDir);
 
-		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		expect(
+			getDeferredWarnings().some((m) => m.includes('[opencode-swarm] WARNING')),
+		).toBe(true);
 	});
 
 	it('handles whitespace around .swarm/ in .gitignore', () => {
@@ -221,7 +240,10 @@ describe('warnIfSwarmNotGitignored', () => {
 
 		warnIfSwarmNotGitignored(tmpDir);
 
-		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		expect(
+			getDeferredWarnings().some((m) => m.includes('[opencode-swarm] WARNING')),
+		).toBe(true);
 	});
 
 	it('walks up to the git root when called from a subdirectory', () => {
@@ -235,7 +257,10 @@ describe('warnIfSwarmNotGitignored', () => {
 		warnIfSwarmNotGitignored(subDir);
 
 		// Should find tmpDir/.git and read tmpDir/.gitignore
-		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		expect(
+			getDeferredWarnings().some((m) => m.includes('[opencode-swarm] WARNING')),
+		).toBe(true);
 	});
 
 	it('does NOT fire when walking up finds a covered .gitignore', () => {
@@ -280,11 +305,15 @@ describe('ensureSwarmGitExcluded', () => {
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-ensure-git-test-'));
 		resetSwarmGitExcludedState();
+		// Epic #1752 PR2: advisoryWarn writes to the module-level deferred-warning
+		// buffer. Clear it between tests (AGENTS.md Invariant 7).
+		clearDeferredWarnings();
 		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		clearDeferredWarnings();
 		rmrf(tmpDir);
 		resetSwarmGitExcludedState();
 	});
@@ -330,19 +359,25 @@ describe('ensureSwarmGitExcluded', () => {
 		expect(matches?.length ?? 0).toBe(1);
 	});
 
-	// 4. quiet mode — exclude write still runs, no cosmetic log
-	it('still writes to exclude in quiet mode (no cosmetic log)', async () => {
+	// 4. quiet mode — exclude write still runs; the cosmetic "Added .swarm/"
+	// advisory now routes through advisoryWarn (buffered for /swarm diagnose)
+	// regardless of quiet, never raw console.warn (epic #1752 PR2).
+	it('still writes to exclude in quiet mode (cosmetic advisory buffered, not raw stderr)', async () => {
 		makeRealGitRepo(tmpDir);
 
 		await ensureSwarmGitExcluded(tmpDir, { quiet: true });
 
 		const exclude = readExclude(tmpDir);
 		expect(exclude).toContain('.swarm/');
-		// Cosmetic "Added .swarm/" log suppressed in quiet mode
+		// Cosmetic advisory never reaches raw stderr.
 		const addedMsg = warnSpy.mock.calls.find((c) =>
 			String(c[0]).includes('Added .swarm/'),
 		);
 		expect(addedMsg).toBeUndefined();
+		// It IS buffered so /swarm diagnose can surface it.
+		expect(getDeferredWarnings().some((m) => m.includes('Added .swarm/'))).toBe(
+			true,
+		);
 	});
 
 	// 5. Tracked .swarm/foo.json — emits unsuppressed warning with remediation

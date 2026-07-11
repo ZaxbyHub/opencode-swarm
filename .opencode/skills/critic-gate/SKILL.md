@@ -1,5 +1,6 @@
 ---
 name: critic-gate
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: CRITIC-GATE -- plan critic review, revision loops, and hard stop before execution.
 ---

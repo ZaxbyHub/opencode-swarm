@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-review
+audience: swarm-plugin
 description: Run a graph-guided, tool-augmented Swarm PR review using context packing, parallel exploration, triggered plugin micro-lanes, independent reviewer validation, critic challenge, and metrics writeback. Use for deep pull request review with low false-positive tolerance and high recall.
 disable-model-invocation: true
 ---
@@ -308,7 +309,7 @@ For each new commit on the remote:
    - Does the remote commit introduce a new branch-state fact the handoff should
      mention?
 3. **Default stance: prefer the remote state as the next baseline.** Run
-   the [`parallel-work-check`](../generated/parallel-work-check/SKILL.md)
+   `file:.swarm/bundled-skills/parallel-work-check/SKILL.md`
    protocol for the formal decision template and record the outcome in the
    handoff artifact.
 

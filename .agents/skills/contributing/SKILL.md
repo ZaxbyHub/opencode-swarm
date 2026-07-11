@@ -1,5 +1,6 @@
 ---
 name: contributing
+audience: swarm-plugin
 description: Codex adapter for the opencode-swarm contribution checklist. Use when preparing user-visible changes, release note fragments, local validation, branch hygiene, PR checklist items, or contribution-policy compliance before publishing work.
 ---
 

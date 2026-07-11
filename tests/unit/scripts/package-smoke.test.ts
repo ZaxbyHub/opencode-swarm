@@ -50,6 +50,8 @@ const requiredProjectSkillSlugs = [
 	'ci-failure-batching',
 	'test-file-split',
 	'fork-pr-operations',
+	'parallel-work-check',
+	'ci-fix-monitor',
 ];
 
 const expectedProjectSkillFiles = [

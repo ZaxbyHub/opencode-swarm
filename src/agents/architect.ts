@@ -9,6 +9,7 @@ import {
 	type RegisteredCommand,
 	VALID_COMMANDS,
 } from '../commands/registry.js';
+import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import {
 	AGENT_TOOL_MAP,
 	COUNCIL_AGENT_TOOL_MAP,
@@ -19,6 +20,7 @@ import {
 	TOOL_DESCRIPTIONS,
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
+import { advisoryWarn } from '../services/warning-buffer.js';
 
 export interface AgentDefinition {
 	name: string;
@@ -681,7 +683,7 @@ Activates when: user invokes /swarm brainstorm, uses brainstorm-style phrasing, 
 
 Purpose: Run structured requirements discovery before committing to a spec.
 
-ACTION: Load skill file:.opencode/skills/brainstorm/SKILL.md immediately. Follow the full protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('brainstorm')} immediately. Follow the full protocol defined there.
 
 HARD CONSTRAINTS:
 - Complete the loaded skill's QA gate dialogue before save_plan.
@@ -697,7 +699,7 @@ Activates when: user asks to specify, define requirements, write a spec, define 
 
 Purpose: Produce a testable .swarm/spec.md before planning.
 
-ACTION: Load skill file:.opencode/skills/specify/SKILL.md immediately. Follow the full protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('specify')} immediately. Follow the full protocol defined there.
 
 HARD CONSTRAINTS:
 - Complete the loaded skill's QA gate dialogue before save_plan.
@@ -718,7 +720,7 @@ Activates when .swarm/spec.md exists with [NEEDS CLARIFICATION] markers, the use
 
 Purpose: Resolve open spec questions as a minimal delta.
 
-ACTION: Load skill file:.opencode/skills/clarify-spec/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('clarify-spec')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Resolve only the open spec questions or [NEEDS CLARIFICATION] markers required to continue.
@@ -728,7 +730,7 @@ Activates when an existing .swarm/plan.md or .swarm/spec.md must be resumed.
 
 Purpose: Reconcile saved workflow state with the current swarm and continue without corrupting ownership.
 
-ACTION: Load skill file:.opencode/skills/resume/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('resume')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Preserve existing plan/spec state and reconcile swarm ownership before continuing work.
@@ -738,7 +740,7 @@ Activates when the request is ambiguous and must be clarified before discovery, 
 
 Purpose: Ask only the minimal questions required to unblock a clear next mode.
 
-ACTION: Load skill file:.opencode/skills/clarify/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('clarify')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Inventory all material uncertainties, classify each, consult critic_sounding_board to resolve what it can, then surface only remaining user decisions as a structured packet. Do not substitute assumptions for required user input. See loaded clarify skill for full funnel protocol.
@@ -748,7 +750,7 @@ Activates when the task is clear enough for codebase and governance discovery.
 
 Purpose: Gather implementation context, governance requirements, risk, and relevant prior art.
 
-ACTION: Load skill file:.opencode/skills/discover/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('discover')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Delegate factual codebase discovery to {{AGENT_PREFIX}}explorer; do not treat discovery as implementation.
@@ -758,7 +760,7 @@ Activates when domain guidance, cached SME guidance, or phase-specific expert co
 
 Purpose: Reuse cached guidance where possible and call relevant SMEs only when useful.
 
-ACTION: Load skill file:.opencode/skills/consult/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('consult')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Reuse cached SME guidance when applicable and keep new SME calls scoped to the needed domain.
@@ -768,7 +770,7 @@ Activates before creating, resuming, or starting any implementation phase.
 
 Purpose: Read the previous retrospective and produce a codebase reality report before phase work begins.
 
-ACTION: Load skill file:.opencode/skills/pre-phase-briefing/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('pre-phase-briefing')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Complete the codebase reality report before spec finalization, plan generation, plan ingestion, declare_scope, or starting/resuming phase implementation. Dispatching the reality-check lanes asynchronously is allowed and preferred; settling all lanes before any of that downstream work is not optional.
@@ -779,7 +781,7 @@ Activates when the user invokes /swarm council or requests a council-style decis
 
 Purpose: Convene the configured council and produce a structured recommendation.
 
-ACTION: Load skill file:.opencode/skills/council/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('council')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Provide research context up front and synthesize only from returned council member responses.
@@ -790,7 +792,7 @@ Activates when: architect receives \`[MODE: DEEP_DIVE profile=X max_explorers=N 
 
 Purpose: Read-only deep audit of the specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
-ACTION: Load skill file:.opencode/skills/deep-dive/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('deep-dive')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
@@ -807,7 +809,7 @@ Activates when: architect receives \`[MODE: LOOP max_cycles=N autonomy=checkpoin
 
 Purpose: Run the compound-engineering loop — BRAINSTORM → PLAN → BUILD → REVIEW → IMPROVE — iterating until the objective is met or a stop condition fires. Each cycle reuses the existing mode skills (brainstorm, plan, critic-gate, execute, phase-wrap) and then captures learnings so the next cycle is cheaper (compounding). This is a real implementation workflow: it DOES delegate to coder, DOES declare scope, and DOES mutate source code through the normal EXECUTE path. It is distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): LOOP is a user-initiated, gated, compounding workflow.
 
-ACTION: Load skill file:.opencode/skills/loop/SKILL.md immediately and follow its protocol. Parse the header to get \`max_cycles\`, \`autonomy\`, \`depth\`, and \`resume\`.
+ACTION: Load skill ${bundledProjectSkillFileReference('loop')} immediately and follow its protocol. Parse the header to get \`max_cycles\`, \`autonomy\`, \`depth\`, and \`resume\`.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Execute the loop phases IN ORDER as defined in the skill; do not skip a phase or collapse phases. A phase's entry gate must pass before it starts and its exit gate must pass (with positive evidence) before the next phase starts.
@@ -823,7 +825,7 @@ Activates when: architect receives \`[MODE: DEEP_RESEARCH depth=X max_researcher
 
 Purpose: Orchestrator-worker deep research over external sources. Decompose the question into subtopics, gather evidence with \`web_search\` and \`web_fetch\` across up to \`rounds\` iterative rounds (re-planning gaps between rounds), dispatch parallel sme synthesis workers, verify every claim against cited sources with 2 reviewers, challenge high-stakes claims with the critic, and present a cited report in chat. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
-ACTION: Load skill file:.opencode/skills/deep-research/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('deep-research')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
@@ -841,7 +843,7 @@ Activates when: architect receives \`[MODE: CODEBASE_REVIEW mode=X output=X upda
 
 Purpose: Run codebase-review-swarm as a read-only full-repo or large-subsystem review with Phase 0 inventory, selected-track depth planning, coverage closure, reviewer validation, critic challenge, and \`.swarm/review-v8\` artifacts. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
-ACTION: Load skill file:.opencode/skills/codebase-review-swarm/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('codebase-review-swarm')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
@@ -862,11 +864,11 @@ Activates when: architect receives \`[MODE: DESIGN_DOCS out=X lang=X update=X] <
 
 Purpose: Generate or sync the project's structured, language-agnostic design docs (domain.md, technical-spec.md, behavior-spec.md, reference/) in the target project repo. Authoring is delegated to the active swarm's docs_design agent.
 
-ACTION: Load skill file:.opencode/skills/design-docs/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('design-docs')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Delegate authoring to the active swarm's docs_design agent (never the standard docs agent, never coder).
-- Inject the design-docs skill into the docs_design delegation via the SKILLS field as \`file:.opencode/skills/design-docs/SKILL.md\`.
+- Inject the design-docs skill into the docs_design delegation via the SKILLS field as \`${bundledProjectSkillFileReference('design-docs')}\`.
 - The docs_design agent may create/modify ONLY: <out>/domain.md, <out>/technical-spec.md, <out>/behavior-spec.md, <out>/reference/reference-impl.md, <out>/reference/idiom-notes.md, <out>/reference/traceability.json, and <out>/design-changelog.md. No other files.
 - Do NOT touch .swarm/spec.md, CHANGELOG.md, or docs/releases/pending/* in this mode.
 - Requires design_docs.enabled: true — if the docs_design agent is not registered, instruct the user to enable it and stop.
@@ -876,7 +878,7 @@ Activates when: architect receives \`[MODE: PR_REVIEW pr="https://github.com/...
 
 Purpose: Read-only structured PR review using parallel explorer lanes, independent reviewer validation, critic challenge, and synthesis. Does NOT mutate source code. Does NOT delegate to coder.
 
-ACTION: Load skill file:.opencode/skills/swarm-pr-review/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('swarm-pr-review')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
@@ -900,7 +902,7 @@ Activates when: architect receives \`[MODE: PR_FEEDBACK pr="https://github.com/.
 
 Purpose: Ingest and resolve KNOWN pull-request feedback — review threads, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes — verifying every claim against source before fixing. This is NOT a fresh broad PR review; use MODE: PR_REVIEW for new-finding discovery.
 
-ACTION: Load skill file:.opencode/skills/swarm-pr-feedback/SKILL.md immediately and follow its protocol.
+ACTION: Load skill ${bundledProjectSkillFileReference('swarm-pr-feedback')} immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - FOLLOW THE SKILL EXACTLY: build the complete feedback ledger from all available sources before editing, and execute every phase in order with no shortcuts.
@@ -918,7 +920,7 @@ Activates when the user invokes /swarm issue <url> or the architect receives an 
 
 Purpose: Ingest issue evidence, trace impact, and transition to planning or tracing.
 
-ACTION: Load skill file:.opencode/skills/issue-ingest/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('issue-ingest')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Preserve issue evidence, flag missing repro details, and route non-mega swarms through the active swarm's agents.
@@ -928,7 +930,7 @@ Activates when: workflow mode detection selects PLAN; the user asks to create, i
 
 Purpose: Create or ingest the implementation plan, apply QA gate selections after \`save_plan\`, enforce plan granularity, and run traceability checks.
 
-ACTION: Load skill file:.opencode/skills/plan/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('plan')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Before drafting or saving a plan, offer the loaded skill's General Council advisory option when \`council.general.enabled\` is true and a search API key is configured. If the user accepts, use the council output as context before calling \`save_plan\` and before any critic pre-plan review.
@@ -960,7 +962,7 @@ Activates before implementation begins or when a plan needs independent review.
 
 Purpose: Stop implementation until the critic has approved a complete, evidence-backed plan.
 
-ACTION: Load skill file:.opencode/skills/critic-gate/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('critic-gate')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Do not begin implementation until the critic has reviewed and approved the plan.
@@ -977,7 +979,7 @@ Activates when: MODE: CRITIC-GATE has approved a complete plan, or an existing a
 
 Purpose: Execute plan tasks through coder delegation, quality gates, retry handling, evidence capture, and task completion updates.
 
-ACTION: Load skill file:.opencode/skills/execute/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('execute')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - For each task, respect dependencies and delegate implementation to \`{{AGENT_PREFIX}}coder\`; do not self-fix ordinary gate failures.
@@ -993,14 +995,14 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 {{ADVERSARIAL_TEST_CHECKLIST}}
 ## ⛔ RETROSPECTIVE GATE
 
-The full retrospective protocol lives in file:.opencode/skills/phase-wrap/SKILL.md. Before calling \`phase_complete\`, load MODE: PHASE-WRAP and follow its RETROSPECTIVE GATE section. Calling \`phase_complete(N)\` without a valid \`retro-N\` bundle will be blocked with reason \`RETROSPECTIVE_MISSING\`.
+The full retrospective protocol lives in ${bundledProjectSkillFileReference('phase-wrap')}. Before calling \`phase_complete\`, load MODE: PHASE-WRAP and follow its RETROSPECTIVE GATE section. Calling \`phase_complete(N)\` without a valid \`retro-N\` bundle will be blocked with reason \`RETROSPECTIVE_MISSING\`.
 
 ### MODE: PHASE-WRAP
 Activates when a phase is ready to close.
 
 Purpose: Run rescan, documentation, tests, adversarial review, and retrospective capture before phase_complete.
 
-ACTION: Load skill file:.opencode/skills/phase-wrap/SKILL.md immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('phase-wrap')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Complete retrospective evidence with \`write_retro\` before \`phase_complete\`.
@@ -1833,7 +1835,7 @@ export function createArchitectAgent(
 				prompt ?? '',
 			)
 		) {
-			console.warn(
+			advisoryWarn(
 				'[swarm] WARNING: Custom architect prompt may still contain designer references after stripping. ' +
 					'Verify your custom prompt does not reference @designer when ui_review is disabled.',
 			);

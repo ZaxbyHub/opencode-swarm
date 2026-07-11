@@ -19,7 +19,9 @@ describe('MODE: DESIGN_DOCS protocol elements in architect.ts', () => {
 	});
 
 	test('loads the design-docs skill on demand', () => {
-		expect(ARCHITECT).toContain('file:.opencode/skills/design-docs/SKILL.md');
+		expect(ARCHITECT).toContain(
+			"bundledProjectSkillFileReference('design-docs')",
+		);
 	});
 
 	test('delegates authoring to docs_design and renders its target', () => {
@@ -78,6 +80,7 @@ describe('createArchitectAgent strips DESIGN_DOCS when disabled (opt-in)', () =>
 		const p = buildPrompt(true);
 		expect(p).toContain('### MODE: DESIGN_DOCS');
 		expect(p).toContain('docs_design');
+		expect(p).toContain('file:.swarm/bundled-skills/design-docs/SKILL.md');
 		// The strip must not have eaten the following mode.
 		expect(p).toContain('### MODE: ISSUE_INGEST');
 	});

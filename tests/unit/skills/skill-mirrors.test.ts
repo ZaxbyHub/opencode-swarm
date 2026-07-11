@@ -151,7 +151,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		]);
 		const stubSlugs = [
 			...architectSource.matchAll(
-				/file:\.opencode\/skills\/([^/\s`]+)\/SKILL\.md/g,
+				/bundledProjectSkillFileReference\('([^']+)'\)/g,
 			),
 		].map((match) => match[1]);
 		const mirroredSlugs = [

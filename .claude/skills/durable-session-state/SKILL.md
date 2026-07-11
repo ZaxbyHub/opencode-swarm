@@ -1,5 +1,6 @@
 ---
 name: durable-session-state
+audience: swarm-plugin
 description: >
   Persist plans, scope decisions, evidence, and reviewer/critic verdicts to
   durable files during long or multi-phase tasks so work survives context

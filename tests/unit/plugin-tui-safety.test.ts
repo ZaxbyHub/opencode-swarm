@@ -47,6 +47,30 @@ const TUI_SAFETY_SCOPES: Array<{
 		label: 'registry.ts',
 		quietTokens: ['!config.quiet', '!quiet'],
 	},
+	// PR2 of epic #1752 migrated these init-path modules to advisoryWarn/log.
+	// They must contain ZERO raw console.warn/error/log (the `noConsole` lint
+	// rule is deferred to PR5, so this static guard is the interim regression
+	// net). quietTokens: [] means findUnguardedWarns flags ANY console.warn.
+	{
+		file: 'src/config/loader.ts',
+		label: 'loader.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/agents/architect.ts',
+		label: 'architect.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/session/snapshot-reader.ts',
+		label: 'snapshot-reader.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/config/project-init.ts',
+		label: 'project-init.ts',
+		quietTokens: [],
+	},
 ];
 
 function readScope(file: string): string {
@@ -155,5 +179,34 @@ describe('Plugin TUI safety', () => {
 				0,
 			);
 		}
+	});
+
+	test('PR2-migrated init-path modules have zero raw console.warn (epic #1752)', () => {
+		// loader.ts, architect.ts, snapshot-reader.ts, project-init.ts were
+		// migrated to advisoryWarn/log in PR2. They must contain ZERO raw
+		// console.warn so the bubbletea TUI is never corrupted on the init
+		// path (issue #1249 class). This is the interim regression guard until
+		// PR5 enables Biome `noConsole` globally.
+		for (const scope of TUI_SAFETY_SCOPES) {
+			if (scope.quietTokens.length > 0) continue; // skip guarded-scope files
+			const src = readScope(scope.file);
+			const warnCount = (src.match(/console\.warn\(/g) || []).length;
+			expect(
+				warnCount,
+				`${scope.file} must contain zero raw console.warn after epic #1752 PR2 migration`,
+			).toBe(0);
+		}
+	});
+
+	test('gitignore-warning.ts has exactly one intentional raw console.warn (tracked-file security)', () => {
+		// src/utils/gitignore-warning.ts retains ONE intentionally-unguarded
+		// console.warn — the ".swarm/ files are tracked by Git" remediation
+		// warning (must-see-always security/hygiene). All other advisories in
+		// this file route through advisoryWarn. Assert the count is exactly 1
+		// and the comment rationale is present.
+		const src = readScope('src/utils/gitignore-warning.ts');
+		const warnMatches = src.match(/console\.warn\(/g) || [];
+		expect(warnMatches.length).toBe(1);
+		expect(src).toContain('INTENTIONALLY NOT gated behind quiet');
 	});
 });
