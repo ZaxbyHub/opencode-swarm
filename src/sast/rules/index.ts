@@ -11,8 +11,7 @@ export interface SastRule {
 	languages: string[];
 	description: string;
 	remediation?: string;
-	// Detection: either query OR pattern
-	query?: string;
+	// Detection: regex pattern
 	pattern?: RegExp;
 	// Optional validation for context-aware filtering
 	validate?: (match: SastMatch, context: SastContext) => boolean;
@@ -31,8 +30,6 @@ export interface SastContext {
 	filePath: string;
 	content: string;
 	language: string;
-	parser?: unknown;
-	tree?: unknown;
 }
 
 export interface SastFinding {
@@ -78,7 +75,6 @@ export const _internals: {
 	getRuleById: typeof getRuleById;
 	findPatternMatches: typeof findPatternMatches;
 	executeRulesSync: typeof executeRulesSync;
-	executeRules: typeof executeRules;
 	getRuleStats: typeof getRuleStats;
 } = {
 	getAllRules,
@@ -86,7 +82,6 @@ export const _internals: {
 	getRuleById,
 	findPatternMatches,
 	executeRulesSync,
-	executeRules,
 	getRuleStats,
 } as const;
 
@@ -202,20 +197,6 @@ export function executeRulesSync(
 	}
 
 	return findings;
-}
-
-/**
- * Execute rules against a file (async version with tree-sitter support)
- * Falls back to pattern matching if tree-sitter is unavailable
- */
-export async function executeRules(
-	filePath: string,
-	content: string,
-	language: string,
-): Promise<SastFinding[]> {
-	// For now, just use the sync version
-	// Tree-sitter integration can be added later
-	return _internals.executeRulesSync(filePath, content, language);
 }
 
 /**
