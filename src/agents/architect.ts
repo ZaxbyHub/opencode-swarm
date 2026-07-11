@@ -19,6 +19,7 @@ import {
 	TOOL_DESCRIPTIONS,
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
+import { advisoryWarn } from '../services/warning-buffer.js';
 
 export interface AgentDefinition {
 	name: string;
@@ -1833,7 +1834,7 @@ export function createArchitectAgent(
 				prompt ?? '',
 			)
 		) {
-			console.warn(
+			advisoryWarn(
 				'[swarm] WARNING: Custom architect prompt may still contain designer references after stripping. ' +
 					'Verify your custom prompt does not reference @designer when ui_review is disabled.',
 			);

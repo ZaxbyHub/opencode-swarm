@@ -13,6 +13,7 @@ import {
 	swarmState,
 } from '../state';
 import { bunFile } from '../utils/bun-compat';
+import { log } from '../utils/logger.js';
 import type {
 	SerializedAgentSession,
 	SerializedInvocationWindow,
@@ -315,9 +316,8 @@ export async function rehydrateState(
 				typeof serializedSession.lastToolCallTime !== 'number' ||
 				typeof serializedSession.delegationActive !== 'boolean'
 			) {
-				console.warn(
-					'[snapshot-reader] Skipping malformed session %s: missing required fields (agentName, lastToolCallTime, delegationActive)',
-					sessionId,
+				log(
+					`[snapshot-reader] Skipping malformed session ${sessionId}: missing required fields (agentName, lastToolCallTime, delegationActive)`,
 				);
 				continue;
 			}

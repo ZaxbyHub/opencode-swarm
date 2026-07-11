@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import {
 	ExternalSkillsConfigSchema,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
@@ -36,10 +37,10 @@ function loadRawConfigFromPath(configPath: string): {
 	try {
 		const stats = fs.statSync(configPath);
 		if (stats.size > MAX_CONFIG_FILE_BYTES) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Config file too large (max 100 KB): ${configPath}`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -48,10 +49,10 @@ function loadRawConfigFromPath(configPath: string): {
 		const content = fs.readFileSync(configPath, 'utf-8');
 		// TOCTOU guard: re-check size after read (file may have grown between statSync and readFileSync)
 		if (content.length > MAX_CONFIG_FILE_BYTES) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Config file too large after read (max 100 KB): ${configPath}`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -70,10 +71,10 @@ function loadRawConfigFromPath(configPath: string): {
 			rawConfig === null ||
 			Array.isArray(rawConfig)
 		) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Invalid config at ${configPath}: expected an object`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config format invalid. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -95,10 +96,10 @@ function loadRawConfigFromPath(configPath: string): {
 			// Any other error (JSON parse error, permission denied, etc.) - treat as load failure
 			const errorMessage =
 				error instanceof Error ? error.message : String(error);
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] ⚠️ CONFIG LOAD FAILURE — config exists at ${configPath} but could not be loaded: ${errorMessage}`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config load failed. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -135,7 +136,7 @@ function migratePresetsConfig(
 			delete migrated.preset;
 			delete migrated.presets;
 			delete migrated.swarm_mode;
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] Migrated v6.12 presets config to agents format. Consider updating your opencode-swarm.json.',
 			);
 			return migrated;
@@ -162,9 +163,11 @@ function sanitizeExternalSkillsConfig(
 			external_skills: resolveExternalSkillsConfig(esResult.data),
 		};
 	}
-	console.warn('[opencode-swarm] external_skills config validation failed:');
-	console.warn(esResult.error.format());
-	console.warn(
+	advisoryWarn(
+		'[opencode-swarm] external_skills config validation failed:',
+		esResult.error.format(),
+	);
+	advisoryWarn(
 		'[opencode-swarm] External skills curation disabled due to invalid config. Fix the external_skills section to enable it.',
 	);
 	const cleaned = { ...raw };
@@ -183,7 +186,7 @@ function sanitizeGatesConfig(
 		raw.gates === null ||
 		Array.isArray(raw.gates)
 	) {
-		console.warn(
+		advisoryWarn(
 			'[opencode-swarm] gates config validation failed: expected an object. Quality gates will use defaults; other config sections remain active.',
 		);
 		const cleaned = { ...raw };
@@ -196,7 +199,7 @@ function sanitizeGatesConfig(
 	for (const [key, value] of Object.entries(cleanedGates)) {
 		const schema = gateSchemas[key as keyof typeof gateSchemas];
 		if (!schema) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Unknown gates config section "gates.${key}" ignored. Other config sections remain active.`,
 			);
 			delete cleanedGates[key];
@@ -217,7 +220,7 @@ function sanitizeGatesConfig(
 			const knownFieldSet = new Set<string>(knownFields);
 			for (const fieldName of Object.keys(cleanedSection)) {
 				if (!knownFieldSet.has(fieldName)) {
-					console.warn(
+					advisoryWarn(
 						`[opencode-swarm] Unknown gates config key "gates.${key}.${fieldName}" ignored. Other config sections remain active.`,
 					);
 					delete cleanedSection[fieldName];
@@ -228,10 +231,10 @@ function sanitizeGatesConfig(
 		}
 		const sectionResult = schema.safeParse(sectionValue);
 		if (!sectionResult.success) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] gates.${key} config validation failed; that gate section will use defaults and other config sections remain active:`,
+				sectionResult.error.format(),
 			);
-			console.warn(sectionResult.error.format());
 			delete cleanedGates[key];
 		}
 	}
@@ -244,10 +247,10 @@ function sanitizeGatesConfig(
 		};
 	}
 
-	console.warn(
+	advisoryWarn(
 		'[opencode-swarm] gates config validation failed after section cleanup; quality gates will use defaults and other config sections remain active:',
+		gatesResult.error.format(),
 	);
-	console.warn(gatesResult.error.format());
 	const cleaned = { ...raw };
 	delete cleaned.gates;
 	return cleaned;
@@ -347,16 +350,18 @@ export function loadPluginConfig(directory: string): PluginConfig {
 				sanitizeSectionConfigs(rawUserConfig ?? {}),
 			);
 			if (userParseResult.success) {
-				console.warn(
+				advisoryWarn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
 				);
 				return userParseResult.data;
 			}
 		}
 		// Neither merged nor user config is valid, return defaults with guardrails ENABLED (fail-secure)
-		console.warn('[opencode-swarm] Merged config validation failed:');
-		console.warn(result.error.format());
-		console.warn(
+		advisoryWarn(
+			'[opencode-swarm] Merged config validation failed:',
+			result.error.format(),
+		);
+		advisoryWarn(
 			'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
 		);
 		// Fail-secure: return defaults with guardrails explicitly enabled
@@ -420,20 +425,20 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 	try {
 		const stats = await fsPromises.stat(configPath);
 		if (stats.size > MAX_CONFIG_FILE_BYTES) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Config file too large (max 100 KB): ${configPath}`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
 		}
 		const content = await fsPromises.readFile(configPath, 'utf-8');
 		if (content.length > MAX_CONFIG_FILE_BYTES) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Config file too large after read (max 100 KB): ${configPath}`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -448,10 +453,10 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 			rawConfig === null ||
 			Array.isArray(rawConfig)
 		) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Invalid config at ${configPath}: expected an object`,
 			);
-			console.warn(
+			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config format invalid. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -466,7 +471,7 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 		if (code === 'ENOENT') {
 			return { config: null, fileExisted: false, hadError: false };
 		}
-		console.warn(
+		advisoryWarn(
 			`[opencode-swarm] Failed to load config from ${configPath}:`,
 			error instanceof Error ? error.message : String(error),
 		);
@@ -496,15 +501,17 @@ function reduceParsedConfig(
 				sanitizeSectionConfigs(rawUserConfig ?? {}),
 			);
 			if (userParseResult.success) {
-				console.warn(
+				advisoryWarn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
 				);
 				return userParseResult.data;
 			}
 		}
-		console.warn('[opencode-swarm] Merged config validation failed:');
-		console.warn(result.error.format());
-		console.warn(
+		advisoryWarn(
+			'[opencode-swarm] Merged config validation failed:',
+			result.error.format(),
+		);
+		advisoryWarn(
 			'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
 		);
 		return PluginConfigSchema.parse({ guardrails: { enabled: true } });
@@ -571,7 +578,7 @@ export function loadAgentPrompt(agentName: string): {
 		try {
 			result.prompt = fs.readFileSync(promptPath, 'utf-8');
 		} catch (error) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Error reading prompt file ${promptPath}:`,
 				error instanceof Error ? error.message : String(error),
 			);
@@ -584,7 +591,7 @@ export function loadAgentPrompt(agentName: string): {
 		try {
 			result.appendPrompt = fs.readFileSync(appendPromptPath, 'utf-8');
 		} catch (error) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Error reading append prompt ${appendPromptPath}:`,
 				error instanceof Error ? error.message : String(error),
 			);

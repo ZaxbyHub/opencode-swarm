@@ -1,7 +1,23 @@
-import { describe, expect, it, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../services/warning-buffer';
 import { createArchitectAgent } from './architect';
 
 describe('createArchitectAgent — designer gate (ui_review)', () => {
+	// Epic #1752 PR2: the designer-reference warning now routes through
+	// advisoryWarn (buffered for /swarm diagnose) instead of raw console.warn.
+	// Clear the module-level deferred-warning buffer between tests (AGENTS.md
+	// Invariant 7 — no cross-test pollution in the shared bun test-runner
+	// process).
+	beforeEach(() => {
+		clearDeferredWarnings();
+	});
+	afterEach(() => {
+		clearDeferredWarnings();
+	});
+
 	describe('when ui_review is not enabled (default)', () => {
 		const agent = createArchitectAgent('test-model');
 		const prompt = agent.config.prompt ?? '';
@@ -113,7 +129,7 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 	});
 
 	describe('custom prompt designer-reference warning (issue #653)', () => {
-		it('emits console.warn when custom prompt retains designer refs after stripping', () => {
+		it('buffers a warning when custom prompt retains designer refs after stripping', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt =
 				'You are an architect. Delegate UI tasks to @designer for scaffold generation.';
@@ -127,21 +143,25 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 					enabled: false,
 				},
 			);
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining(
-					'Custom architect prompt may still contain designer references',
+			expect(
+				getDeferredWarnings().some((m) =>
+					m.includes(
+						'Custom architect prompt may still contain designer references',
+					),
 				),
-			);
+			).toBe(true);
+			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
 
-		it('emits console.warn when ui_review is absent (default) and custom prompt has designer refs', () => {
+		it('buffers a warning when ui_review is absent (default) and custom prompt has designer refs', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt = 'Architect prompt that mentions @designer agent.';
 			createArchitectAgent('test-model', customPrompt);
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining('[swarm] WARNING'),
-			);
+			expect(
+				getDeferredWarnings().some((m) => m.includes('[swarm] WARNING')),
+			).toBe(true);
+			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
 
@@ -186,7 +206,7 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 			warnSpy.mockRestore();
 		});
 
-		it('emits console.warn for @Designer (capital D) in custom prompt when ui_review is disabled', () => {
+		it('buffers a warning for @Designer (capital D) in custom prompt when ui_review is disabled', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt = 'Delegate UI tasks to @Designer agent.';
 			createArchitectAgent(
@@ -199,15 +219,18 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 					enabled: false,
 				},
 			);
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining(
-					'Custom architect prompt may still contain designer references',
+			expect(
+				getDeferredWarnings().some((m) =>
+					m.includes(
+						'Custom architect prompt may still contain designer references',
+					),
 				),
-			);
+			).toBe(true);
+			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
 
-		it('emits console.warn for {{AGENT_PREFIX}}designer (no @ prefix) in custom prompt', () => {
+		it('buffers a warning for {{AGENT_PREFIX}}designer (no @ prefix) in custom prompt', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt =
 				'You can delegate UI tasks to {{AGENT_PREFIX}}designer for scaffolding.';
@@ -221,11 +244,14 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 					enabled: false,
 				},
 			);
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining(
-					'Custom architect prompt may still contain designer references',
+			expect(
+				getDeferredWarnings().some((m) =>
+					m.includes(
+						'Custom architect prompt may still contain designer references',
+					),
 				),
-			);
+			).toBe(true);
+			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
 	});
