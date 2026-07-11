@@ -22,12 +22,14 @@
 import { describe, expect, it } from 'bun:test';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { createArchitectAgent } from '../../../src/agents/architect';
 
 const ROOT = process.cwd();
 const architectSource = readFileSync(
 	join(ROOT, 'src/agents/architect.ts'),
 	'utf-8',
 );
+const architectPrompt = createArchitectAgent('test-model').config.prompt ?? '';
 
 /**
  * Skills under .opencode/skills that are NOT architect MODE skills — they are
@@ -52,6 +54,10 @@ const NON_COMMAND_SKILLS = new Set([
 	'ci-failure-batching',
 	'test-file-split',
 	'fork-pr-operations',
+	// Mandatory lifecycle protocols are support skills loaded by workflow
+	// adapters, not architect MODE commands.
+	'parallel-work-check',
+	'ci-fix-monitor',
 ]);
 
 /**
@@ -92,7 +98,7 @@ function collectEmittedModes(): Set<string> {
 function architectSkillSlugs(): string[] {
 	return [
 		...architectSource.matchAll(
-			/file:\.opencode\/skills\/([^/\s`]+)\/SKILL\.md/g,
+			/bundledProjectSkillFileReference\('([^']+)'\)/g,
 		),
 	].map((m) => m[1]);
 }
@@ -158,8 +164,8 @@ describe('swarm-pr-feedback is fully wired (regression for the orphaned-skill bu
 		);
 		expect(handler).toContain('[MODE: PR_FEEDBACK]');
 		expect(architectSource).toContain('### MODE: PR_FEEDBACK');
-		expect(architectSource).toContain(
-			'file:.opencode/skills/swarm-pr-feedback/SKILL.md',
+		expect(architectPrompt).toContain(
+			'file:.swarm/bundled-skills/swarm-pr-feedback/SKILL.md',
 		);
 	});
 

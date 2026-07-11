@@ -1,5 +1,6 @@
 ---
 name: orchestrating-subagents
+audience: swarm-plugin
 description: >
   Tiering and economics for delegating to subagents: which agent type, model,
   and effort to use per role (explorer, implementer, reviewer, critic), how many

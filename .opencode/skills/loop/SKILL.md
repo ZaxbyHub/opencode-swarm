@@ -1,5 +1,6 @@
 ---
 name: loop
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: LOOP — the compound-engineering loop:
   brainstorm → plan → build → review → improve, iterating under
@@ -116,7 +117,7 @@ directly (skip full discovery dialogue) — the objective is already framed.
 ### Phase 1 — BRAINSTORM (cycle 1 only)
 
 - **Entry gate:** objective is non-empty; no approved plan already covers it.
-- **Action:** Load `file:.opencode/skills/brainstorm/SKILL.md` and run it to
+- **Action:** Load `file:.swarm/bundled-skills/brainstorm/SKILL.md` and run it to
   produce `.swarm/spec.md` and a QA gate profile. With `depth=exhaustive`,
   require at least one non-obvious candidate approach.
 - **Exit gate:** `spec.md` exists with explicit, testable success criteria and
@@ -128,13 +129,13 @@ directly (skip full discovery dialogue) — the objective is already framed.
 
 - **Entry gate:** a spec (or, on cycle 2+, the improvement directives) exists.
 - **Action:**
-  1. Load `file:.opencode/skills/pre-phase-briefing/SKILL.md` (required before
+  1. Load `file:.swarm/bundled-skills/pre-phase-briefing/SKILL.md` (required before
      planning, especially on cycle 2+: it reads the prior retrospective and
      verifies codebase reality so the new plan reflects what actually changed).
-  2. Load `file:.opencode/skills/plan/SKILL.md` to decompose the work into
+  2. Load `file:.swarm/bundled-skills/plan/SKILL.md` to decompose the work into
      tasks and call `save_plan`. With `depth=exhaustive`, prefer finer task
      granularity and deeper localization.
-  3. Load `file:.opencode/skills/critic-gate/SKILL.md` to put the plan through
+  3. Load `file:.swarm/bundled-skills/critic-gate/SKILL.md` to put the plan through
      an independent critic.
 - **Exit gate:** critic verdict is APPROVED (NEEDS_REVISION → revise and
   re-submit, max 2 cycles per the critic-gate skill; REJECTED → stop and report
@@ -143,7 +144,7 @@ directly (skip full discovery dialogue) — the objective is already framed.
 ### Phase 3 — BUILD
 
 - **Entry gate:** a critic-approved plan exists.
-- **Action:** Load `file:.opencode/skills/execute/SKILL.md` and run the plan
+- **Action:** Load `file:.swarm/bundled-skills/execute/SKILL.md` and run the plan
   phase by phase. The coder implements each task; per-task QA gates (tests,
   lint, security, etc.) run as defined by the selected QA profile. The coder
   context is the **generator** — it does not get to declare its own work
@@ -188,7 +189,7 @@ This is what makes the loop compound. Do not declare completion without it.
 
 - **Entry gate:** REVIEW exit gate passed.
 - **Action:**
-  1. Load `file:.opencode/skills/phase-wrap/SKILL.md` and write the mandatory
+  1. Load `file:.swarm/bundled-skills/phase-wrap/SKILL.md` and write the mandatory
      retrospective (the `phase_complete` gate blocks without a valid `retro-N`
      bundle). Rescan the codebase and update documentation exactly as the
      phase-wrap skill directs — that is, scoped to its authorized set

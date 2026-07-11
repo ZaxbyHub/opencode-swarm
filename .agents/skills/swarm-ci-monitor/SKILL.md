@@ -1,5 +1,6 @@
 ---
 name: swarm-ci-monitor
+audience: swarm-plugin
 description: Codex adapter for end-to-end CI monitoring of an already-reviewed PR in opencode-swarm. Use when the user wants the swarm to monitor a reviewed-and-approved PR's CI, research every failure exhaustively, fix end-to-end, iterate until green (max 5 cycles), then merge. Composes ci-fix-monitor for fix recipes.
 ---
 
@@ -23,7 +24,7 @@ canonical workflow.
 - Do not soften Step 1's pre-flight gates or Step 3's pre-merge re-check —
   this is the first skill in the repo authorized to execute a merge.
 - Load `../commit-pr/SKILL.md` before committing or pushing any fix, and
-  `../../../.opencode/skills/generated/ci-fix-monitor/SKILL.md` for
+  `../../../.opencode/skills/ci-fix-monitor/SKILL.md` for
   failure-type-specific fix recipes, as the canonical's Composition section
   directs.
 - Do not declare victory until the post-merge local-git confirmation (Step 4b)

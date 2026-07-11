@@ -243,7 +243,7 @@ export function noteSessionIdle(sessionID: string): void {
 /**
  * Standing instruction appended to every wake message. MUST stay in sync
  * with the swarm-pr-subscribe skill
- * (.opencode/skills/swarm-pr-subscribe/SKILL.md), which quotes this format.
+ * (.swarm/bundled-skills/swarm-pr-subscribe/SKILL.md), which quotes this format.
  */
 const WAKE_INSTRUCTION = [
 	'[swarm pr-monitor] Pushed PR activity for a PR this session is subscribed to. Follow the',

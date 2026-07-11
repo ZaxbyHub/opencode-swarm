@@ -49,6 +49,8 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'ci-failure-batching',
 	'test-file-split',
 	'fork-pr-operations',
+	'parallel-work-check',
+	'ci-fix-monitor',
 ];
 
 const REQUIRED_PACKAGE_FILES = [
@@ -102,7 +104,10 @@ function runCommand(command, args, options = {}) {
 	});
 
 	if (result.error) {
-		throw result.error;
+		throw new Error(
+			`Command failed before exit: ${command} ${args.join(' ')}\n${result.error.message}`,
+			{ cause: result.error },
+		);
 	}
 	if (result.status !== 0) {
 		const stdout = (result.stdout ?? '').trim();
@@ -301,6 +306,55 @@ async function main() {
 			tarball,
 		]);
 		runCommand(install.command, install.args, { cwd: installDir });
+
+		// Exercise the installed tarball's real plugin-init path, not the source
+		// checkout. The package must materialize plugin-owned skills under the
+		// collision-safe private runtime root while leaving a repository-owned
+		// skill with the same slug byte-for-byte unchanged.
+		writeFileSync(
+			path.join(installDir, 'materialization-probe.mjs'),
+			[
+				"import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';",
+				"import path from 'node:path';",
+				"import plugin from 'opencode-swarm';",
+				"const projectDir = path.join(process.cwd(), 'probe-project');",
+				"const nativePlan = path.join(projectDir, '.opencode', 'skills', 'plan', 'SKILL.md');",
+				"const privatePlan = path.join(projectDir, '.swarm', 'bundled-skills', 'plan', 'SKILL.md');",
+				"const privateAsset = path.join(projectDir, '.swarm', 'bundled-skills', 'codebase-review-swarm', 'assets', 'jsonl-schemas.md');",
+				"const privateParallelWork = path.join(projectDir, '.swarm', 'bundled-skills', 'parallel-work-check', 'SKILL.md');",
+				"const privateCiFix = path.join(projectDir, '.swarm', 'bundled-skills', 'ci-fix-monitor', 'SKILL.md');",
+				"const packageRoot = path.join(process.cwd(), 'node_modules', 'opencode-swarm');",
+				"const packagedPlan = path.join(packageRoot, '.opencode', 'skills', 'plan', 'SKILL.md');",
+				"const sentinel = '---\\nname: plan\\naudience: ragappv3\\ndescription: repository-owned sentinel\\n---\\n';",
+				"mkdirSync(path.dirname(nativePlan), { recursive: true });",
+				"writeFileSync(nativePlan, sentinel);",
+				"const ctx = {",
+				"  directory: projectDir,",
+				"  project: { id: 'package-smoke', root: projectDir },",
+				"  worktree: { directory: projectDir },",
+				"  client: { app: {}, config: { get: async () => ({}) } },",
+				"  experimental_workspace: { register() {} },",
+				"  get serverUrl() { return new URL('http://localhost:4096'); },",
+				"  $: undefined,",
+				"};",
+				"await plugin.server(ctx, {});",
+				"const deadline = Date.now() + 10_000;",
+				"while ((!existsSync(privatePlan) || !existsSync(privateAsset) || !existsSync(privateParallelWork) || !existsSync(privateCiFix)) && Date.now() < deadline) {",
+				"  await new Promise((resolve) => setTimeout(resolve, 25));",
+				"}",
+				"if (readFileSync(nativePlan, 'utf8') !== sentinel) throw new Error('repository-owned native skill was overwritten');",
+				"if (!existsSync(privatePlan)) throw new Error('private bundled plan skill was not materialized');",
+				"if (!readFileSync(privatePlan).equals(readFileSync(packagedPlan))) throw new Error('private bundled plan differs from packed source');",
+				"if (!existsSync(privateAsset)) throw new Error('nested bundled skill asset was not materialized');",
+				"if (!existsSync(privateParallelWork)) throw new Error('parallel-work-check dependency was not materialized');",
+				"if (!existsSync(privateCiFix)) throw new Error('ci-fix-monitor dependency was not materialized');",
+				"console.log('installed package private skill materialization OK');",
+				"process.exit(0);",
+			].join('\n'),
+		);
+		runCommand(process.execPath, ['materialization-probe.mjs'], {
+			cwd: installDir,
+		});
 
 		runCommand(process.execPath, [
 			'--input-type=module',

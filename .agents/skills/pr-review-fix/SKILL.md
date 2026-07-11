@@ -1,5 +1,6 @@
 ---
 name: pr-review-fix
+audience: swarm-plugin
 description: Codex adapter for addressing pull request review feedback in opencode-swarm. Use when the user asks to fix PR review comments, requested changes, reviewer findings, CI-review notes, or a pasted review summary with low false-positive tolerance.
 ---
 

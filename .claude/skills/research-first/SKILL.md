@@ -1,5 +1,6 @@
 ---
 name: research-first
+audience: swarm-plugin
 description: >
   Apply when planning fixes, investigating tech debt, architecting solutions, or
   diagnosing unknown issues that may involve external frameworks, dependencies,

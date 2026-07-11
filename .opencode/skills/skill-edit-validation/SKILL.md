@@ -1,5 +1,6 @@
-﻿---
+---
 name: skill-edit-validation
+audience: swarm-plugin
 description: Content-assertion sweep after editing SKILL.md files. Triggered when a task changes skill or prompt content that tests assert against. Prevents stale-assertion CI failures.
 ---
 

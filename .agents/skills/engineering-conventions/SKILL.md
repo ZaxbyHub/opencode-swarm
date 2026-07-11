@@ -1,5 +1,6 @@
 ---
 name: engineering-conventions
+audience: swarm-plugin
 description: Codex adapter for opencode-swarm engineering invariants. Use before modifying plugin initialization, subprocesses, runtime portability, .swarm containment, plan durability, test_runner behavior, test-writing patterns, session/global state, guardrails/retry semantics, chat/system hooks, tool registration, release/cache hygiene, or related architecture.
 ---
 

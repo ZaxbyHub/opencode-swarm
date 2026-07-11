@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-feedback
+audience: swarm-plugin
 description: >
   Claude Code adapter for closing known PR feedback. Use when addressing pasted
   review feedback, GitHub review comments or threads, requested changes,

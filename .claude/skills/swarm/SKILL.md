@@ -1,5 +1,6 @@
 ---
 name: swarm
+audience: swarm-plugin
 description: Enable a high-quality swarm-like Claude Code workflow for the current session, and optionally execute a task immediately using that mode. Uses parallel subagents for breadth, independent reviewer validation for precision, and critic challenge for final confidence. Use when the user wants swarm-like behavior, higher review rigor, or maximum quality without sacrificing Claude Code speed.
 disable-model-invocation: true
 argument-hint: "[optional task]"

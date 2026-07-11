@@ -140,6 +140,7 @@ describe('skill injection mechanics', () => {
 			appendSkillUsageEntry: _internals.appendSkillUsageEntry,
 			readSkillUsageEntries: _internals.readSkillUsageEntries,
 			parseSkillPaths: _internals.parseSkillPaths,
+			validateSkillReference: _internals.validateSkillReference,
 			extractTaskIdFromPrompt: _internals.extractTaskIdFromPrompt,
 			formatSkillIndexWithContext: _internals.formatSkillIndexWithContext,
 			MAX_SCORING_SESSION_ENTRIES: _internals.MAX_SCORING_SESSION_ENTRIES,
@@ -648,6 +649,13 @@ describe('skill injection mechanics', () => {
 					'.claude/skills/code/SKILL.md',
 				],
 				readSkillUsageEntriesTail: () => sessionEntries,
+				// This fixture intentionally models discovery without creating real
+				// SKILL.md files; make the new integrity gate explicit at the seam.
+				validateSkillReference: (_directory, reference) => ({
+					valid: true,
+					reason: null,
+					skillPath: reference.replace(/^file:/, ''),
+				}),
 				computeSkillRelevanceScore: (
 					skillPath: string,
 					_prompt: string,

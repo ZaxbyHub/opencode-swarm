@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-review
+audience: swarm-plugin
 description: >
   Codex adapter for deep PR review in opencode-swarm. Use when the user
   wants a broad, read-only PR review with low false-positive tolerance. The

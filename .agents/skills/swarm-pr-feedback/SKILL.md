@@ -1,5 +1,6 @@
 ---
 name: swarm-pr-feedback
+audience: swarm-plugin
 description: >
   Codex adapter for closing known PR feedback in opencode-swarm. Use when asked
   to address pasted review feedback, GitHub review comments or threads,

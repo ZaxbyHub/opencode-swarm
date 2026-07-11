@@ -1,5 +1,6 @@
 ---
 name: deep-research
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: DEEP_RESEARCH — orchestrator-worker deep
   research over external sources: decompose, iterative web_search/web_fetch

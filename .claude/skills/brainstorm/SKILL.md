@@ -1,5 +1,6 @@
 ---
 name: brainstorm
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: BRAINSTORM -- structured discovery dialogue, approach selection, spec drafting, QA gate selection, and transition handling.
 ---

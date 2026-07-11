@@ -84,10 +84,16 @@ describe('skillPropagationGateBefore — recommendedSkills field', () => {
 			appendSkillUsageEntry: _internals.appendSkillUsageEntry,
 			readSkillUsageEntries: _internals.readSkillUsageEntries,
 			parseSkillPaths: _internals.parseSkillPaths,
+			validateSkillReference: _internals.validateSkillReference,
 			extractTaskIdFromPrompt: _internals.extractTaskIdFromPrompt,
 			formatSkillIndexWithContext: _internals.formatSkillIndexWithContext,
 			MAX_SCORING_SESSION_ENTRIES: _internals.MAX_SCORING_SESSION_ENTRIES,
 		};
+		_internals.validateSkillReference = (_directory, reference) => ({
+			valid: true,
+			reason: null,
+			skillPath: reference.replace(/^file:/, ''),
+		});
 	});
 
 	afterEach(() => {

@@ -1,5 +1,6 @@
 ---
 name: specify
+audience: swarm-plugin
 description: >
   Full execution protocol for MODE: SPECIFY -- spec creation, codebase reality checks, SME input, QA gate persistence, and optional council spec review.
 ---

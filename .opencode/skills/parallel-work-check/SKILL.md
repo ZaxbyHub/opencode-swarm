@@ -1,5 +1,6 @@
 ---
 name: parallel-work-check
+audience: swarm-plugin
 description: >
   Apply before starting work on an existing branch. Checks for parallel work by
   other agents or developers that may supersede or conflict with your planned
@@ -120,9 +121,9 @@ The parallel-work-check skill is referenced by other skills that start work on a
 
 | Skill | Usage |
 |-------|-------|
-| [.opencode/skills/swarm-pr-feedback/SKILL.md](../../swarm-pr-feedback/SKILL.md) | Checks before starting PR feedback fixes — ensures no parallel work has already addressed the same findings |
-| [.opencode/skills/generated/pr-review-fix/SKILL.md](../pr-review-fix/SKILL.md) | Legacy compatibility path that delegates to swarm-pr-feedback |
-| [.opencode/skills/swarm-implement/SKILL.md](../../swarm-implement/SKILL.md) | Checks before implementation Phase 1 — ensures the branch is up-to-date before planning |
+| `file:.swarm/bundled-skills/swarm-pr-feedback/SKILL.md` | Checks before starting PR feedback fixes — ensures no parallel work has already addressed the same findings |
+| Legacy `pr-review-fix` alias | Compatibility entry that delegates to the bundled `swarm-pr-feedback` protocol |
+| `file:.swarm/bundled-skills/swarm-implement/SKILL.md` | Checks before implementation Phase 1 — ensures the branch is up-to-date before planning |
 | Any skill that starts work on an existing branch | Run the parallel-work-check protocol before beginning fixes or implementation |
 
 When a skill references parallel-work-check, the checking agent must:

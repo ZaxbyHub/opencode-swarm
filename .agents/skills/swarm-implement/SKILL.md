@@ -1,5 +1,6 @@
 ---
 name: swarm-implement
+audience: swarm-plugin
 description: Codex adapter for complex implementation work using the canonical opencode-swarm implementation workflow. Use for multi-file features, bug fixes, refactors, risky code changes, or tasks that benefit from exploration, scoped planning, implementation, review, and validation.
 ---
 

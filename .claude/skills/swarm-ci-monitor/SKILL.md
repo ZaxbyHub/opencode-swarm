@@ -1,5 +1,6 @@
 ---
 name: swarm-ci-monitor
+audience: swarm-plugin
 description: >
   Claude Code adapter for end-to-end CI monitoring of an already-reviewed PR
   in opencode-swarm. Use when the user wants the swarm to monitor a
@@ -25,7 +26,7 @@ canonical workflow.
   re-check (Step 3), or the post-merge local-git confirmation (Step 4b) — they
   are the load-bearing safety mechanism, not optional ceremony.
 - Load `../commit-pr/SKILL.md` before any commit/push inside the fix loop, and
-  `../../../.opencode/skills/generated/ci-fix-monitor/SKILL.md` for
+  `../../../.opencode/skills/ci-fix-monitor/SKILL.md` for
   failure-type-specific fix recipes, as the canonical's Composition section
   directs.
 - Do not declare victory on green checks alone — Step 4b's local-git

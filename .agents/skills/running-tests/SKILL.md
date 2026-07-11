@@ -1,5 +1,6 @@
 ---
 name: running-tests
+audience: swarm-plugin
 description: Codex adapter for safely executing opencode-swarm tests. Use whenever Codex needs to run focused tests, per-file isolation loops, CI-equivalent validation, test-impact checks, or diagnose failing/truncated test output without stalling the session.
 ---
 

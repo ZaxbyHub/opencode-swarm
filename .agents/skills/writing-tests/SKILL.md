@@ -1,5 +1,6 @@
 ---
 name: writing-tests
+audience: swarm-plugin
 description: Codex adapter for opencode-swarm test authoring rules. Use before creating or modifying any test file in this repository, especially bun:test files, mock.module usage, _internals seams, temp directories, cross-platform tests, or CI-sensitive test structure.
 ---
 

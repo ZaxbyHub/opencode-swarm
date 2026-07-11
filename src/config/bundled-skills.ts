@@ -42,10 +42,30 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'worktree-retry-cleanup',
 	'test-file-split',
 	'fork-pr-operations',
+	'parallel-work-check',
+	'ci-fix-monitor',
 ] as const;
+
+export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
+
+/**
+ * Project-private runtime location for plugin-owned skills. Repository-native
+ * skill roots (`.opencode/skills`, `.claude/skills`, and `.agents/skills`) are
+ * user-owned and must never be used as materialization destinations.
+ */
+export const BUNDLED_PROJECT_SKILL_ROOT = '.swarm/bundled-skills';
+
+export function bundledProjectSkillFileReference(
+	slug: BundledProjectSkill,
+): string {
+	return `file:${BUNDLED_PROJECT_SKILL_ROOT}/${slug}/SKILL.md`;
+}
 
 const MAX_SKILL_FILES = 64;
 const MAX_SKILL_BYTES = 512_000;
+const MAX_IN_FLIGHT_SYNCS = 64;
+
+const inFlightSyncs = new Map<string, Promise<void>>();
 
 interface CopyState {
 	files: number;
@@ -69,7 +89,7 @@ function describeBundledSkillSyncFailure(err: unknown): string {
 // NOT bounded. This implementation uses `fs/promises` with real await points
 // between files so the timeout is enforceable at file boundaries.
 //
-// Guarantees: update known bundled slugs in place, symlink refusal,
+// Guarantees: update known private bundled copies in place, symlink refusal,
 // MAX_SKILL_FILES/MAX_SKILL_BYTES bounds, and rollback-on-error. Any filesystem
 // error leaves command execution fail-open.
 // ---------------------------------------------------------------------------
@@ -107,14 +127,16 @@ async function collectBundledSkillFilesBoundedAsync(
 ): Promise<BundledSkillFile[]> {
 	const currentSource = path.join(sourceDir, relativeDir);
 	const entries = await fsp.readdir(currentSource, { withFileTypes: true });
+	entries.sort((a, b) => a.name.localeCompare(b.name));
 	const files: BundledSkillFile[] = [];
 
 	for (const entry of entries) {
 		const relativeEntry = path.join(relativeDir, entry.name);
 		const sourcePath = path.join(sourceDir, relativeEntry);
 
-		if (entry.isSymbolicLink() || (await isSymbolicLinkAsync(sourcePath)))
-			continue;
+		if (entry.isSymbolicLink() || (await isSymbolicLinkAsync(sourcePath))) {
+			throw new Error('refusing to copy symlinked bundled skill entry');
+		}
 
 		if (entry.isDirectory()) {
 			files.push(
@@ -141,6 +163,55 @@ async function collectBundledSkillFilesBoundedAsync(
 	}
 
 	return files;
+}
+
+async function ensureContainedDirectoryAsync(
+	rootDir: string,
+	directory: string,
+): Promise<void> {
+	const safeRoot = path.resolve(rootDir);
+	const safeDirectory = path.resolve(directory);
+	const relative = path.relative(safeRoot, safeDirectory);
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		throw new Error('bundled skill destination escaped its private root');
+	}
+	try {
+		const rootStat = await fsp.lstat(safeRoot);
+		if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+			throw new Error('refusing to traverse unsafe bundled skill directory');
+		}
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+		await fsp.mkdir(safeRoot, { recursive: true });
+		const rootStat = await fsp.lstat(safeRoot);
+		if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+			throw new Error('refusing to traverse unsafe bundled skill directory');
+		}
+	}
+
+	let current = safeRoot;
+	for (const segment of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		try {
+			const stat = await fsp.lstat(current);
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				throw new Error('refusing to traverse unsafe bundled skill directory');
+			}
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+			try {
+				await fsp.mkdir(current);
+			} catch (mkdirErr) {
+				if ((mkdirErr as NodeJS.ErrnoException).code !== 'EEXIST') {
+					throw mkdirErr;
+				}
+			}
+			const stat = await fsp.lstat(current);
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				throw new Error('refusing to traverse unsafe bundled skill directory');
+			}
+		}
+	}
 }
 
 async function rollbackCopiedFilesAsync(
@@ -222,7 +293,7 @@ async function copyBundledDirectoryBoundedAsync(
 			const sourcePath = path.join(sourceDir, file.relativePath);
 			const destPath = path.join(destDir, file.relativePath);
 
-			await fsp.mkdir(path.dirname(destPath), { recursive: true });
+			await ensureContainedDirectoryAsync(destDir, path.dirname(destPath));
 			if (await pathExistsAsync(destPath)) {
 				if (await isSymbolicLinkAsync(destPath)) {
 					throw new Error('refusing to overwrite symlinked bundled skill file');
@@ -247,31 +318,20 @@ async function copyBundledDirectoryBoundedAsync(
 	}
 }
 
-/**
- * Materialize missing built-in mode skills into the target project so architect
- * MODE dispatch can load SKILL.md files in repositories that do not already
- * vendor the latest opencode-swarm skill tree.
- *
- * Async, bounded, and fail-open: safe to `await withTimeout(...)` on the
- * plugin-init path (AGENTS.md Invariant 1). Runs at plugin init so the
- * architect's very first auto-entered mode (e.g. SPECIFY on a fresh project) can
- * load its SKILL.md without a manual `/swarm` command or session restart; the
- * command path calls it again as a backstop for pre-existing projects.
- *
- * This is intentionally fail-open: bundled slugs are refreshed from the package
- * source, and any filesystem error leaves command execution fail-open.
- */
-export async function syncBundledProjectSkillsIfMissingAsync(
+async function performBundledProjectSkillSyncAsync(
 	projectDirectory: string,
 	packageRoot: string,
-	quiet = false,
+	quiet: boolean,
 ): Promise<void> {
 	try {
 		const sourceRoot = path.join(packageRoot, '.opencode', 'skills');
-		const opencodeDir = path.join(projectDirectory, '.opencode');
-		const skillsDir = path.join(opencodeDir, 'skills');
+		const swarmDir = path.join(projectDirectory, '.swarm');
+		const skillsDir = path.join(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT);
 
-		if (!(await ensureNotSymlinkedDirectoryAsync(opencodeDir))) return;
+		if (!(await ensureNotSymlinkedDirectoryAsync(sourceRoot))) {
+			throw new Error('refusing to copy symlinked bundled skill source root');
+		}
+		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) return;
 		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
 
 		for (const slug of BUNDLED_PROJECT_SKILLS) {
@@ -280,6 +340,9 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 			const destDir = path.join(skillsDir, slug);
 
 			if (!(await pathExistsAsync(sourceSkill))) continue;
+			if (!(await ensureNotSymlinkedDirectoryAsync(sourceDir))) {
+				throw new Error('refusing to copy symlinked bundled skill directory');
+			}
 			if (!(await ensureNotSymlinkedDirectoryAsync(destDir))) continue;
 
 			await copyBundledDirectoryBoundedAsync(sourceDir, destDir);
@@ -289,7 +352,7 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 			// #1249 class). `quiet` is intentionally not consulted here: a success
 			// narration is diagnostic noise under either quiet setting.
 			log('synchronized bundled skill', {
-				slug: `.opencode/skills/${slug}/SKILL.md`,
+				slug: bundledProjectSkillFileReference(slug),
 			});
 		}
 	} catch (err) {
@@ -310,9 +373,52 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 	}
 }
 
+/**
+ * Materialize built-in mode skills into the target project's private runtime
+ * tree so architect MODE dispatch never collides with repository-owned skills
+ * that happen to use the same slug.
+ *
+ * Async, bounded, and fail-open: safe to `await withTimeout(...)` on the
+ * plugin-init path (AGENTS.md Invariant 1). Runs at plugin init so the
+ * architect's very first auto-entered mode (e.g. SPECIFY on a fresh project) can
+ * load its SKILL.md without a manual `/swarm` command or session restart; the
+ * command path calls it again as a backstop for pre-existing projects.
+ *
+ * This is intentionally fail-open: bundled slugs are refreshed from the package
+ * source, and any filesystem error leaves command execution fail-open.
+ */
+export async function syncBundledProjectSkillsIfMissingAsync(
+	projectDirectory: string,
+	packageRoot: string,
+	quiet = false,
+): Promise<void> {
+	const syncKey = path.resolve(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT);
+	const existing = inFlightSyncs.get(syncKey);
+	if (existing) return existing;
+	if (inFlightSyncs.size >= MAX_IN_FLIGHT_SYNCS) {
+		log('skipping bundled skill sync because the in-flight limit was reached', {
+			limit: MAX_IN_FLIGHT_SYNCS,
+		});
+		return;
+	}
+
+	const syncPromise = performBundledProjectSkillSyncAsync(
+		projectDirectory,
+		packageRoot,
+		quiet,
+	).finally(() => {
+		if (inFlightSyncs.get(syncKey) === syncPromise) {
+			inFlightSyncs.delete(syncKey);
+		}
+	});
+
+	inFlightSyncs.set(syncKey, syncPromise);
+
+	return syncPromise;
+}
+
 export const _test_exports = {
 	collectBundledSkillFilesBoundedAsync,
-	// No-op: the cache was removed in favor of content-equality checks on every
-	// call. This stub is retained for backward compatibility with existing tests.
-	resetBundledProjectSkillSyncCache: () => undefined,
+	copyBundledDirectoryBoundedAsync,
+	resetBundledProjectSkillSyncCache: () => inFlightSyncs.clear(),
 };

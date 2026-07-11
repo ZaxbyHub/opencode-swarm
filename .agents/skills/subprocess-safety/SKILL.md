@@ -1,5 +1,6 @@
 ---
 name: subprocess-safety
+audience: swarm-plugin
 description: Guidelines for safe subprocess calls in opencode-swarm. Load before adding, modifying, or reviewing any file that calls spawn, spawnSync, bunSpawn, or child_process. Covers the six required properties, Windows portability, _internals DI seam pattern, and verification grep.
 ---
 

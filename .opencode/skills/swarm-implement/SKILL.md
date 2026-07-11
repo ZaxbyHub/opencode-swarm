@@ -1,5 +1,6 @@
 ---
 name: swarm-implement
+audience: swarm-plugin
 description: Execute complex implementation work with a swarm-like workflow: parallel exploration, scoped planning, objective validation, mandatory independent implementation review for changed work, and final critic approval. Use for feature work, bug fixes, refactors, and multi-file changes.
 disable-model-invocation: true
 ---
@@ -58,10 +59,9 @@ before coding.
 
 ### Phase 0a - Parallel work check
 
-If this project has the OpenCode-generated
-[`parallel-work-check` skill](../generated/parallel-work-check/SKILL.md), follow
-its full protocol. Otherwise, before starting implementation on an existing
-branch:
+Load and follow
+`file:.swarm/bundled-skills/parallel-work-check/SKILL.md`. Then, before
+starting implementation on an existing branch:
 
 1. Fetch remote state and compare with local (`git fetch` plus HEAD hashes).
 2. If parallel swarm work is detected on the target branch, read the new commits,

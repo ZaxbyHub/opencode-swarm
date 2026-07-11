@@ -31,6 +31,54 @@ describe('SkillPropagationConfigSchema', () => {
 		).toThrow();
 		expect(() => SkillPropagationConfigSchema.parse({ enforce: 1 })).toThrow();
 	});
+
+	test('defaults audiences to an empty list', () => {
+		const result = SkillPropagationConfigSchema.parse({});
+		expect(result.audiences).toEqual([]);
+	});
+
+	test('accepts lowercase domain audiences and deduplicates them', () => {
+		const result = SkillPropagationConfigSchema.parse({
+			audiences: ['ragappv3', 'ragappv3.api-tests_v2', 'ragappv3'],
+		});
+		expect(result.audiences).toEqual(['ragappv3', 'ragappv3.api-tests_v2']);
+	});
+
+	test('rejects reserved plugin and runner audiences', () => {
+		for (const audience of [
+			'swarm-plugin',
+			'runner:opencode',
+			'runner:claude',
+			'runner:codex',
+			'runner:future',
+		]) {
+			expect(() =>
+				SkillPropagationConfigSchema.parse({ audiences: [audience] }),
+			).toThrow();
+		}
+	});
+
+	test('rejects invalid or oversized domain audiences', () => {
+		for (const audience of [
+			'RAGAPPv3',
+			'-ragappv3',
+			'ragappv3-',
+			'ragappv3..api',
+			'a'.repeat(65),
+		]) {
+			expect(() =>
+				SkillPropagationConfigSchema.parse({ audiences: [audience] }),
+			).toThrow();
+		}
+	});
+
+	test('rejects more than 16 configured audience entries', () => {
+		expect(() =>
+			SkillPropagationConfigSchema.parse({
+				audiences: Array.from({ length: 17 }, () => 'ragappv3'),
+			}),
+		).toThrow();
+	});
 });
 
 describe('PluginConfigSchema — skillPropagation field', () => {
@@ -45,5 +93,6 @@ describe('PluginConfigSchema — skillPropagation field', () => {
 		});
 		expect(result.skillPropagation?.enabled).toBe(true);
 		expect(result.skillPropagation?.enforce).toBe(false);
+		expect(result.skillPropagation?.audiences).toEqual([]);
 	});
 });

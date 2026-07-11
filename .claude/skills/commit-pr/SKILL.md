@@ -1,5 +1,6 @@
 ---
 name: commit-pr
+audience: swarm-plugin
 description: >
   Apply when committing, pushing, opening or updating a PR, writing a pull request,
   creating release notes, or closing out remote CI. Enforces the opencode-swarm
