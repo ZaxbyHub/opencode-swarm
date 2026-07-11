@@ -2,7 +2,13 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import {
+	appendFile,
+	mkdir,
+	readFile,
+	realpath,
+	writeFile,
+} from 'node:fs/promises';
 import * as path from 'node:path';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
@@ -70,6 +76,8 @@ const seenRetroSections = new Map<
 // would otherwise grow this map without bound. Cap the entry count and evict the
 // oldest-timestamp entries (LRU-by-recency) once the cap is exceeded.
 const MAX_TRACKED_RETRO_SECTIONS = 500;
+const MAX_IN_FLIGHT_EVIDENCE_ENTRIES = 500;
+const inFlightEvidenceEntries = new Set<string>();
 
 /**
  * Prune entries from seenRetroSections that are older than 24 hours.
@@ -113,6 +121,137 @@ function recordSeenRetroSection(
 
 function hashContent(content: string): string {
 	return createHash('sha1').update(content).digest('hex');
+}
+
+async function canonicalExistingPath(candidate: string): Promise<string> {
+	let resolved = path.resolve(candidate);
+	try {
+		resolved = await _internals.realpath(resolved);
+	} catch {
+		// Paths can be absent in isolated tests or during teardown. Fall back to
+		// a lexical absolute path without blocking curation.
+	}
+	return resolved;
+}
+
+function isPathContained(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return (
+		relative === '' ||
+		(!relative.startsWith(`..${path.sep}`) &&
+			relative !== '..' &&
+			!path.isAbsolute(relative))
+	);
+}
+
+function physicalPathIdentity(candidate: string): string {
+	const normalized = candidate.replaceAll('\\', '/').normalize('NFC');
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+interface EvidencePathScope {
+	projectIdentity: string;
+	evidenceIdentity: string;
+}
+
+async function resolveEvidencePathScope(
+	directory: string,
+	relativeEvidencePath: string,
+): Promise<EvidencePathScope | null> {
+	const projectRoot = await canonicalExistingPath(directory);
+	const swarmRoot = await canonicalExistingPath(
+		path.join(projectRoot, '.swarm'),
+	);
+	if (!isPathContained(projectRoot, swarmRoot)) return null;
+	const evidenceRoot = await canonicalExistingPath(
+		path.join(swarmRoot, 'evidence'),
+	);
+	if (!isPathContained(swarmRoot, evidenceRoot)) return null;
+	const evidenceTarget = await canonicalExistingPath(
+		path.join(swarmRoot, ...relativeEvidencePath.split('/')),
+	);
+	if (!isPathContained(evidenceRoot, evidenceTarget)) return null;
+	return {
+		projectIdentity: hashContent(physicalPathIdentity(projectRoot)),
+		evidenceIdentity: hashContent(physicalPathIdentity(evidenceTarget)),
+	};
+}
+
+interface EvidenceLessonBatch {
+	identity: string;
+	lessons: string[];
+	projectName: string;
+	phaseNumber: number;
+}
+
+function sanitizeEvidenceLessons(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.filter((lesson): lesson is string => typeof lesson === 'string')
+		.map((lesson) => lesson.trim())
+		.filter((lesson) => lesson.length > 0 && lesson.length <= 280);
+}
+
+function evidenceProjectName(
+	entry: Record<string, unknown>,
+	root: Record<string, unknown>,
+): string {
+	const metadata = isRecord(entry.metadata) ? entry.metadata : null;
+	return typeof entry.project_name === 'string'
+		? entry.project_name
+		: typeof metadata?.project_name === 'string'
+			? metadata.project_name
+			: typeof root.project_name === 'string'
+				? root.project_name
+				: 'unknown';
+}
+
+function evidencePhaseNumber(
+	entry: Record<string, unknown>,
+	root: Record<string, unknown>,
+): number {
+	return typeof entry.phase_number === 'number'
+		? entry.phase_number
+		: typeof root.phase_number === 'number'
+			? root.phase_number
+			: 1;
+}
+
+function extractEvidenceLessonBatches(
+	evidenceData: Record<string, unknown>,
+): EvidenceLessonBatch[] {
+	const rawEntries = Array.isArray(evidenceData.entries)
+		? evidenceData.entries
+		: [evidenceData];
+	const batches: EvidenceLessonBatch[] = [];
+	for (const rawEntry of rawEntries) {
+		if (!isRecord(rawEntry)) continue;
+		if (Object.hasOwn(rawEntry, 'type') && rawEntry.type !== 'retrospective') {
+			continue;
+		}
+		const lessons = sanitizeEvidenceLessons(rawEntry.lessons_learned);
+		if (lessons.length === 0) continue;
+		const phaseNumber = evidencePhaseNumber(rawEntry, evidenceData);
+		const projectName = evidenceProjectName(rawEntry, evidenceData);
+		const identity = hashContent(
+			JSON.stringify([
+				rawEntry.type ?? 'legacy-retrospective',
+				rawEntry.task_id ?? evidenceData.task_id ?? '',
+				rawEntry.timestamp ?? '',
+				rawEntry.agent ?? '',
+				phaseNumber,
+				projectName,
+				lessons,
+			]),
+		);
+		batches.push({
+			identity,
+			lessons,
+			projectName,
+			phaseNumber,
+		});
+	}
+	return batches;
 }
 
 // ============================================================================
@@ -1489,11 +1628,16 @@ export function createKnowledgeCuratorHook(
 			// Compute normalized relative path (strip leading path up to and including .swarm/)
 			// Use this for both the read and the idempotency key to ensure stability
 			// across absolute vs relative path representations of the same file.
-			const relativeEvidencePath = trigger.filePath.replace(/^.*\.swarm\//, '');
-			// Create idempotency key for evidence: evidence:${sessionID}:${relativePath}
-			const evidenceKey = `evidence:${trigger.sessionID}:${relativeEvidencePath}`;
-			const lastSeenEvidence = seenRetroSections.get(evidenceKey);
-
+			const relativeEvidencePath = trigger.filePath
+				.replaceAll('\\', '/')
+				.replace(/^.*\.swarm\//i, '');
+			const canonicalRelativeEvidencePath =
+				path.posix.normalize(relativeEvidencePath);
+			const evidenceScope = await resolveEvidencePathScope(
+				directory,
+				canonicalRelativeEvidencePath,
+			);
+			if (!evidenceScope) return;
 			// Read and parse the evidence JSON file
 			const evidenceContent = await readSwarmFileAsync(
 				directory,
@@ -1508,49 +1652,40 @@ export function createKnowledgeCuratorHook(
 				return;
 			}
 
-			// Extract lessons_learned (handle both formats: { entries: [{ lessons_learned }] } and { lessons_learned })
-			let lessons: string[] = [];
-			if (
-				Array.isArray(evidenceData.entries) &&
-				evidenceData.entries.length > 0
-			) {
-				const firstEntry = evidenceData.entries[0] as Record<string, unknown>;
-				if (Array.isArray(firstEntry.lessons_learned)) {
-					lessons = firstEntry.lessons_learned as string[];
+			const batches = extractEvidenceLessonBatches(evidenceData);
+			for (const batch of batches) {
+				const evidenceKey = `evidence:${evidenceScope.projectIdentity}:${evidenceScope.evidenceIdentity}:entry:${batch.identity}`;
+				if (
+					seenRetroSections.has(evidenceKey) ||
+					inFlightEvidenceEntries.has(evidenceKey)
+				) {
+					continue;
 				}
-			} else if (Array.isArray(evidenceData.lessons_learned)) {
-				lessons = evidenceData.lessons_learned as string[];
+				if (inFlightEvidenceEntries.size >= MAX_IN_FLIGHT_EVIDENCE_ENTRIES) {
+					warn(
+						`Evidence curation overload: ${MAX_IN_FLIGHT_EVIDENCE_ENTRIES} entries already in flight; retrying ${relativeEvidencePath} on a later trigger`,
+					);
+					continue;
+				}
+
+				inFlightEvidenceEntries.add(evidenceKey);
+				try {
+					await _internals.curateAndStoreSwarm(
+						batch.lessons,
+						batch.projectName,
+						{ phase_number: batch.phaseNumber },
+						directory,
+						config,
+						{
+							llmDelegate: options.llmDelegateFactory?.(trigger.sessionID),
+							enrichmentQuota: options.enrichmentQuota,
+						},
+					);
+					recordSeenRetroSection(evidenceKey, batch.identity, Date.now());
+				} finally {
+					inFlightEvidenceEntries.delete(evidenceKey);
+				}
 			}
-
-			if (lessons.length === 0) return;
-
-			// Idempotency check for evidence
-			const evidenceHash = hashContent(JSON.stringify(lessons));
-			if (lastSeenEvidence?.value === evidenceHash) {
-				return; // no change
-			}
-			recordSeenRetroSection(evidenceKey, evidenceHash, Date.now());
-
-			// Extract project name from evidence data
-			const projectName = (evidenceData.project_name as string) ?? 'unknown';
-
-			// Extract phase number from evidence data
-			const phaseNumber =
-				typeof evidenceData.phase_number === 'number'
-					? evidenceData.phase_number
-					: 1;
-
-			await _internals.curateAndStoreSwarm(
-				lessons,
-				projectName,
-				{ phase_number: phaseNumber },
-				directory,
-				config,
-				{
-					llmDelegate: options.llmDelegateFactory?.(trigger.sessionID),
-					enrichmentQuota: options.enrichmentQuota,
-				},
-			);
 
 			return;
 		}
@@ -1618,6 +1753,10 @@ export const _internals: {
 	hashContent: typeof hashContent;
 	capSeenRetroSections: typeof capSeenRetroSections;
 	MAX_TRACKED_RETRO_SECTIONS: number;
+	inFlightEvidenceEntries: typeof inFlightEvidenceEntries;
+	MAX_IN_FLIGHT_EVIDENCE_ENTRIES: number;
+	extractEvidenceLessonBatches: typeof extractEvidenceLessonBatches;
+	realpath: typeof realpath;
 } = {
 	isWriteToEvidenceFile,
 	curateAndStoreSwarm,
@@ -1629,4 +1768,8 @@ export const _internals: {
 	hashContent,
 	capSeenRetroSections,
 	MAX_TRACKED_RETRO_SECTIONS,
+	inFlightEvidenceEntries,
+	MAX_IN_FLIGHT_EVIDENCE_ENTRIES,
+	extractEvidenceLessonBatches,
+	realpath,
 };

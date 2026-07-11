@@ -16,10 +16,29 @@ afterEach(() => {
 // Mock curator module
 const mockReadCuratorSummary = mock();
 const mockWriteCuratorSummary = mock();
+const mockAppendCuratorRecommendation = mock(
+	async (directory: string, recommendation: unknown) => {
+		const summary = await mockReadCuratorSummary(directory);
+		if (!summary) return false;
+		await mockWriteCuratorSummary(directory, {
+			...summary,
+			last_updated: new Date().toISOString(),
+			knowledge_recommendations: [
+				...(Array.isArray(summary.knowledge_recommendations)
+					? summary.knowledge_recommendations
+					: []),
+				recommendation,
+			],
+		});
+		return true;
+	},
+);
 
 mock.module('../../../src/hooks/curator.js', () => ({
 	readCuratorSummary: (...args: unknown[]) => mockReadCuratorSummary(...args),
 	writeCuratorSummary: (...args: unknown[]) => mockWriteCuratorSummary(...args),
+	appendCuratorRecommendation: (...args: unknown[]) =>
+		mockAppendCuratorRecommendation(...args),
 }));
 
 // Mock knowledge-store module
@@ -49,11 +68,18 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 }));
 
 // Import after mocking
-import { createHivePromoterHook } from '../../../src/hooks/hive-promoter.js';
+import {
+	_internals,
+	createHivePromoterHook,
+} from '../../../src/hooks/hive-promoter.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 describe('Task 3.4: curator-summary feedback integration adversarial tests', () => {
 	let mockConfig: KnowledgeConfig;
+	const realCheckHivePromotions = _internals.checkHivePromotions;
+	const realReadCuratorSummary = _internals.readCuratorSummary;
+	const realAppendCuratorRecommendation =
+		_internals.appendCuratorRecommendation;
 
 	beforeEach(() => {
 		mock.restore();
@@ -82,6 +108,23 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			encounter_increment: 0.1,
 			max_encounter_score: 5.0,
 		};
+		_internals.checkHivePromotions = mock(async () => ({
+			timestamp: new Date().toISOString(),
+			new_promotions: 1,
+			encounters_incremented: 0,
+			advancements: 0,
+			total_hive_entries: 1,
+		}));
+		_internals.readCuratorSummary = (...args) =>
+			mockReadCuratorSummary(...args);
+		_internals.appendCuratorRecommendation = (...args) =>
+			mockAppendCuratorRecommendation(...args);
+	});
+
+	afterEach(() => {
+		_internals.checkHivePromotions = realCheckHivePromotions;
+		_internals.readCuratorSummary = realReadCuratorSummary;
+		_internals.appendCuratorRecommendation = realAppendCuratorRecommendation;
 	});
 
 	describe('VULNERABILITY 2: Corrupted curator summary data', () => {

@@ -163,6 +163,23 @@ Written to `.swarm/curator-summary.json` after the curator runs each phase (`src
 }
 ```
 
+`knowledge_recommendations` is a bounded persistence surface: semantic
+duplicates collapse to their newest occurrence and at most 200 unique entries
+are retained. Hive promotion observations are recorded only when promotion state
+actually changes. On the first read of an older bloated summary, the curator
+deduplicates and caps the array in place so affected projects recover without a
+manual cleanup step.
+
+Evidence bundles under `.swarm/evidence/` may contain multiple retrospective
+entries. The knowledge curator ingests every eligible entry independently,
+preserving its phase metadata and avoiding replay of unchanged earlier entries
+when a later entry is appended. Idempotency claims are project-scoped, so
+identical relative evidence paths in separate workspaces cannot suppress one
+another. Physical project-root aliases, physical evidence-file aliases, and
+filesystem-equivalent relative paths share the same claim, preventing unchanged
+evidence from replaying through path spelling differences. Aliases that resolve
+outside the project's physical `.swarm/evidence/` tree are rejected.
+
 ---
 
 ## Curator Findings

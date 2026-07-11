@@ -55,6 +55,7 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 }));
 
 import {
+	_internals,
 	checkHivePromotions,
 	createHivePromoterHook,
 } from '../../../src/hooks/hive-promoter.js';
@@ -1891,15 +1892,37 @@ describe('Task 3.3: same-run double-count prevention', () => {
 // Mock curator module for curator-summary tests
 const mockReadCuratorSummary = mock();
 const mockWriteCuratorSummary = mock();
+const mockAppendCuratorRecommendation = mock(
+	async (directory: string, recommendation: unknown) => {
+		const summary = await mockReadCuratorSummary(directory);
+		if (!summary) return false;
+		await mockWriteCuratorSummary(directory, {
+			...summary,
+			last_updated: new Date().toISOString(),
+			knowledge_recommendations: [
+				...(Array.isArray(summary.knowledge_recommendations)
+					? summary.knowledge_recommendations
+					: []),
+				recommendation,
+			],
+		});
+		return true;
+	},
+);
 
 mock.module('../../../src/hooks/curator.js', () => ({
 	readCuratorSummary: (...args: unknown[]) => mockReadCuratorSummary(...args),
 	writeCuratorSummary: (...args: unknown[]) => mockWriteCuratorSummary(...args),
+	appendCuratorRecommendation: (...args: unknown[]) =>
+		mockAppendCuratorRecommendation(...args),
 }));
 
 describe('Task 3.4: curator-summary feedback integration', () => {
 	let mockConfig: KnowledgeConfig;
 	let baseSwarmEntry: SwarmKnowledgeEntry;
+	const realReadCuratorSummary = _internals.readCuratorSummary;
+	const realAppendCuratorRecommendation =
+		_internals.appendCuratorRecommendation;
 
 	beforeEach(() => {
 		mock.restore();
@@ -1914,6 +1937,10 @@ describe('Task 3.4: curator-summary feedback integration', () => {
 		});
 		mockReadCuratorSummary.mockResolvedValue(null);
 		mockWriteCuratorSummary.mockResolvedValue(undefined);
+		_internals.readCuratorSummary = (...args) =>
+			mockReadCuratorSummary(...args);
+		_internals.appendCuratorRecommendation = (...args) =>
+			mockAppendCuratorRecommendation(...args);
 
 		// Base swarm entry for these tests
 		baseSwarmEntry = {
@@ -1967,6 +1994,11 @@ describe('Task 3.4: curator-summary feedback integration', () => {
 			max_encounter_score: 5.0,
 			initial_encounter_score: 1.0,
 		};
+	});
+
+	afterEach(() => {
+		_internals.readCuratorSummary = realReadCuratorSummary;
+		_internals.appendCuratorRecommendation = realAppendCuratorRecommendation;
 	});
 
 	it('createHivePromoterHook adds knowledge recommendation with promotion summary', async () => {

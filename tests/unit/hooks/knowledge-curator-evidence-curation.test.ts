@@ -661,7 +661,7 @@ Phase: 1
 			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
-		test('idempotency key uses sessionID + filePath', async () => {
+		test('evidence entry identity is stable across session IDs', async () => {
 			// Setup: evidence JSON with lessons
 			const evidenceContent = JSON.stringify({
 				lessons_learned: ['Lesson for session test'],
@@ -680,7 +680,7 @@ Phase: 1
 			};
 			await hook(input1, {});
 
-			// Second call with different sessionID 'session-2' - should NOT be idempotent
+			// Second call with a different session ID still targets the same entry.
 			const input2 = {
 				toolName: 'write',
 				path: '/project/.swarm/evidence/retro-1/evidence.json',
@@ -688,8 +688,8 @@ Phase: 1
 			};
 			await hook(input2, {});
 
-			// Expected: curateAndStoreSwarm called twice (different sessionIDs)
-			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: the stable entry identity suppresses cross-session replay.
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -728,7 +728,14 @@ Phase: 1
 				project_name: 'test-project',
 				phase_number: 1,
 			});
-			mockReadSwarmFileAsync.mockResolvedValue(evidenceContent);
+			const patchedEvidenceContent = JSON.stringify({
+				lessons_learned: ['Lesson from apply patch operation'],
+				project_name: 'test-project',
+				phase_number: 1,
+			});
+			mockReadSwarmFileAsync
+				.mockResolvedValueOnce(evidenceContent)
+				.mockResolvedValueOnce(patchedEvidenceContent);
 
 			const hook = createKnowledgeCuratorHook('/project', defaultConfig);
 

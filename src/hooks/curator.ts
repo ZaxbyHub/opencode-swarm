@@ -71,6 +71,7 @@ import {
 	getArchivedKnowledgeIds,
 	readKnowledge,
 	resolveSwarmKnowledgePath,
+	transactFile,
 	transactKnowledge,
 } from './knowledge-store.js';
 import type {
@@ -114,6 +115,11 @@ export const _internals = {
 	parseKnowledgeRecommendationsWithDiagnostics,
 	readCuratorSummary,
 	writeCuratorSummary,
+	appendCuratorRecommendation,
+	mergeCuratorPhaseSummary,
+	readCuratorSummaryState,
+	writeCuratorSummaryState,
+	transactFile,
 	filterPhaseEvents,
 	checkPhaseCompliance,
 	normalizeAgentName,
@@ -205,10 +211,66 @@ function capComplianceObservations(
 	return observations.slice(-MAX_CURATOR_COMPLIANCE_OBSERVATIONS);
 }
 
-function capKnowledgeRecommendations(
-	recommendations: KnowledgeRecommendation[],
+function canonicalizeJson(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalizeJson);
+	if (value === null || typeof value !== 'object') return value;
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, nested]) => [key, canonicalizeJson(nested)]),
+	);
+}
+
+function recommendationIdentity(
+	recommendation: KnowledgeRecommendation,
+): string {
+	const stable = { ...recommendation } as Record<string, unknown>;
+	if (
+		recommendation.action === 'promote' &&
+		recommendation.lesson.startsWith('Hive promotion:')
+	) {
+		try {
+			const parsedReason = JSON.parse(recommendation.reason) as unknown;
+			if (
+				parsedReason !== null &&
+				typeof parsedReason === 'object' &&
+				!Array.isArray(parsedReason)
+			) {
+				const { timestamp: _volatileTimestamp, ...stableReason } =
+					parsedReason as Record<string, unknown>;
+				stable.reason = stableReason;
+			}
+		} catch {
+			// Keep an unparsable reason in the identity; only a recognized timestamp
+			// field in a valid hive payload is intentionally volatile.
+		}
+	}
+	return JSON.stringify(canonicalizeJson(stable));
+}
+
+function normalizeKnowledgeRecommendations(
+	recommendations: unknown,
 ): KnowledgeRecommendation[] {
-	return recommendations.slice(-MAX_CURATOR_RECOMMENDATIONS);
+	const input = Array.isArray(recommendations)
+		? recommendations.filter(
+				(entry): entry is KnowledgeRecommendation =>
+					entry !== null &&
+					typeof entry === 'object' &&
+					typeof (entry as { action?: unknown }).action === 'string' &&
+					typeof (entry as { lesson?: unknown }).lesson === 'string' &&
+					typeof (entry as { reason?: unknown }).reason === 'string',
+			)
+		: [];
+	const seen = new Set<string>();
+	const newestUnique: KnowledgeRecommendation[] = [];
+	for (let index = input.length - 1; index >= 0; index--) {
+		const recommendation = input[index];
+		const identity = recommendationIdentity(recommendation);
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		newestUnique.push(recommendation);
+	}
+	return newestUnique.reverse().slice(-MAX_CURATOR_RECOMMENDATIONS);
 }
 
 function buildDigestFromPhaseDigests(digests: PhaseDigestEntry[]): string {
@@ -653,49 +715,267 @@ function clampConf(v: unknown): number {
 	return v;
 }
 
+interface CuratorSummaryFileState {
+	summary: CuratorSummary | null;
+	dirty: boolean;
+}
+
+interface CuratorSummaryMutation<T> {
+	next?: CuratorSummary | null;
+	result: T;
+}
+
+interface CuratorSummaryTransaction<T> {
+	invoked: boolean;
+	result: T | undefined;
+}
+
+function normalizeCuratorSummary(summary: CuratorSummary): {
+	summary: CuratorSummary;
+	changed: boolean;
+} {
+	const recommendations = normalizeKnowledgeRecommendations(
+		(summary as { knowledge_recommendations?: unknown })
+			.knowledge_recommendations,
+	);
+	const original = Array.isArray(summary.knowledge_recommendations)
+		? summary.knowledge_recommendations
+		: [];
+	const changed =
+		!Array.isArray(summary.knowledge_recommendations) ||
+		original.length !== recommendations.length ||
+		original.some((entry, index) => entry !== recommendations[index]);
+	return {
+		summary: changed
+			? { ...summary, knowledge_recommendations: recommendations }
+			: summary,
+		changed,
+	};
+}
+
+async function readCuratorSummaryState(
+	filePath: string,
+): Promise<CuratorSummaryFileState> {
+	let content: string;
+	try {
+		content = await fs.promises.readFile(filePath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return { summary: null, dirty: false };
+		}
+		throw error;
+	}
+
+	return parseCuratorSummaryContent(content);
+}
+
+function parseCuratorSummaryContent(content: string): CuratorSummaryFileState {
+	try {
+		const parsed = JSON.parse(content) as CuratorSummary;
+		if (parsed.schema_version !== 1) {
+			logger.warn(
+				`Curator summary has unsupported schema version: ${parsed.schema_version}. Expected 1.`,
+			);
+			return { summary: null, dirty: false };
+		}
+		const normalized = normalizeCuratorSummary(parsed);
+		return { summary: normalized.summary, dirty: normalized.changed };
+	} catch {
+		logger.warn('Failed to parse curator-summary.json: invalid JSON');
+		return { summary: null, dirty: false };
+	}
+}
+
+async function writeCuratorSummaryState(
+	filePath: string,
+	state: CuratorSummaryFileState,
+): Promise<void> {
+	if (!state.summary) return;
+	await bunWrite(filePath, JSON.stringify(state.summary, null, 2));
+}
+
+async function transactCuratorSummary<T>(
+	directory: string,
+	mutate: (summary: CuratorSummary | null) => CuratorSummaryMutation<T>,
+): Promise<CuratorSummaryTransaction<T>> {
+	const resolvedPath = validateSwarmPath(directory, 'curator-summary.json');
+	let invoked = false;
+	let mutationResult: T | undefined;
+	await _internals.transactFile<CuratorSummaryFileState>(
+		resolvedPath,
+		_internals.readCuratorSummaryState,
+		_internals.writeCuratorSummaryState,
+		(state) => {
+			invoked = true;
+			const mutation = mutate(state.summary);
+			mutationResult = mutation.result;
+			if (mutation.next === null) return null;
+			const candidate = mutation.next ?? state.summary;
+			if (!candidate) return null;
+			const normalized = normalizeCuratorSummary(candidate).summary;
+			const explicitlyChanged =
+				mutation.next !== undefined &&
+				JSON.stringify(normalized) !== JSON.stringify(state.summary);
+			if (!state.dirty && !explicitlyChanged) return null;
+			return { summary: normalized, dirty: false };
+		},
+	);
+	return { invoked, result: mutationResult };
+}
+
 /**
- * Read curator summary from .swarm/curator-summary.json
- * @param directory - The workspace directory
- * @returns CuratorSummary if valid, null if missing or invalid
+ * Read and normalize curator summary from .swarm/curator-summary.json.
+ * Legacy recommendation spam is deduplicated and capped on first successful read.
+ * Cleanup failure is fail-open: callers still receive the normalized in-memory state.
  */
 export async function readCuratorSummary(
 	directory: string,
 ): Promise<CuratorSummary | null> {
 	const content = await readSwarmFileAsync(directory, 'curator-summary.json');
+	if (content === null) return null;
+	const initial = parseCuratorSummaryContent(content);
+	if (!initial.summary || !initial.dirty) return initial.summary;
 
-	if (content === null) {
-		return null;
-	}
-
+	let normalized: CuratorSummary | null = initial.summary;
 	try {
-		const parsed = JSON.parse(content) as CuratorSummary;
-
-		if (parsed.schema_version !== 1) {
-			logger.warn(
-				`Curator summary has unsupported schema version: ${parsed.schema_version}. Expected 1.`,
-			);
-			return null;
-		}
-
-		return parsed;
-	} catch {
-		logger.warn('Failed to parse curator-summary.json: invalid JSON');
-		return null;
+		await transactCuratorSummary(directory, (summary) => {
+			if (summary) normalized = summary;
+			return { result: normalized };
+		});
+	} catch (error) {
+		logger.warn(
+			`Failed to persist curator-summary cleanup: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
+	return normalized;
 }
 
-/**
- * Write curator summary to .swarm/curator-summary.json
- * @param directory - The workspace directory
- * @param summary - The curator summary to write
- */
+/** Write a fully normalized curator summary under the shared summary lock. */
 export async function writeCuratorSummary(
 	directory: string,
 	summary: CuratorSummary,
 ): Promise<void> {
-	const resolvedPath = validateSwarmPath(directory, 'curator-summary.json');
-	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-	await bunWrite(resolvedPath, JSON.stringify(summary, null, 2));
+	const transaction = await transactCuratorSummary(directory, () => ({
+		next: summary,
+		result: undefined,
+	}));
+	if (!transaction.invoked) {
+		throw new Error('Failed to persist curator summary');
+	}
+}
+
+/**
+ * Append one recommendation through the shared locked persistence boundary.
+ * Returns false when no summary exists or no persisted representation changes.
+ * A semantic duplicate can return true when it replaces the retained representative
+ * under the newest-wins policy (for example, a hive event with a newer timestamp).
+ */
+export async function appendCuratorRecommendation(
+	directory: string,
+	recommendation: KnowledgeRecommendation,
+): Promise<boolean> {
+	const transaction = await transactCuratorSummary(directory, (summary) => {
+		if (!summary) return { next: null, result: false };
+		const recommendations = normalizeKnowledgeRecommendations([
+			...normalizeKnowledgeRecommendations(summary.knowledge_recommendations),
+			recommendation,
+		]);
+		const current = normalizeKnowledgeRecommendations(
+			summary.knowledge_recommendations,
+		);
+		const changed =
+			current.length !== recommendations.length ||
+			current.some((entry, index) => entry !== recommendations[index]);
+		if (!changed) return { result: false };
+		return {
+			next: {
+				...summary,
+				last_updated: new Date().toISOString(),
+				knowledge_recommendations: recommendations,
+			},
+			result: true,
+		};
+	});
+	return transaction.invoked ? (transaction.result ?? false) : false;
+}
+
+interface CuratorPhaseSummaryMerge {
+	phase: number;
+	phaseDigest: PhaseDigestEntry;
+	complianceObservations: ComplianceObservation[];
+	knowledgeRecommendations: KnowledgeRecommendation[];
+	sessionId: string;
+	timestamp: string;
+}
+
+/** Merge a phase result against the latest on-disk summary under the shared lock. */
+export async function mergeCuratorPhaseSummary(
+	directory: string,
+	merge: CuratorPhaseSummaryMerge,
+): Promise<boolean> {
+	const transaction = await transactCuratorSummary(directory, (current) => {
+		if (
+			current?.phase_digests?.some((digest) => digest.phase === merge.phase)
+		) {
+			return { result: false };
+		}
+		if (current) {
+			const phaseDigests = capPhaseDigests([
+				...(Array.isArray(current.phase_digests) ? current.phase_digests : []),
+				merge.phaseDigest,
+			]);
+			return {
+				next: {
+					...current,
+					last_updated: merge.timestamp,
+					last_phase_covered: Math.max(
+						typeof current.last_phase_covered === 'number'
+							? current.last_phase_covered
+							: 0,
+						merge.phase,
+					),
+					digest: buildDigestFromPhaseDigests(phaseDigests),
+					phase_digests: phaseDigests,
+					compliance_observations: capComplianceObservations([
+						...(Array.isArray(current.compliance_observations)
+							? current.compliance_observations
+							: []),
+						...merge.complianceObservations,
+					]),
+					knowledge_recommendations: normalizeKnowledgeRecommendations([
+						...normalizeKnowledgeRecommendations(
+							current.knowledge_recommendations,
+						),
+						...merge.knowledgeRecommendations,
+					]),
+				},
+				result: true,
+			};
+		}
+
+		const phaseDigests = capPhaseDigests([merge.phaseDigest]);
+		return {
+			next: {
+				schema_version: 1,
+				session_id: merge.sessionId,
+				last_updated: merge.timestamp,
+				last_phase_covered: merge.phase,
+				digest: buildDigestFromPhaseDigests(phaseDigests),
+				phase_digests: phaseDigests,
+				compliance_observations: capComplianceObservations(
+					merge.complianceObservations,
+				),
+				knowledge_recommendations: normalizeKnowledgeRecommendations(
+					merge.knowledgeRecommendations,
+				),
+			},
+			result: true,
+		};
+	});
+	if (!transaction.invoked) {
+		throw new Error('Failed to persist curator phase summary');
+	}
+	return transaction.result ?? false;
 }
 
 /**
@@ -1375,47 +1655,17 @@ export async function runCuratorPhase(
 		const sessionId = `session-${Date.now()}`;
 		const now = new Date().toISOString();
 
-		let updatedSummary: CuratorSummary;
-		if (priorSummary) {
-			const phaseDigests = capPhaseDigests([
-				...priorSummary.phase_digests,
+		const summaryUpdated = await _internals.mergeCuratorPhaseSummary(
+			directory,
+			{
+				phase,
 				phaseDigest,
-			]);
-			// Extend existing summary
-			updatedSummary = {
-				...priorSummary,
-				last_updated: now,
-				last_phase_covered: Math.max(priorSummary.last_phase_covered, phase),
-				digest: buildDigestFromPhaseDigests(phaseDigests),
-				phase_digests: phaseDigests,
-				compliance_observations: capComplianceObservations([
-					...priorSummary.compliance_observations,
-					...complianceObservations,
-				]),
-				knowledge_recommendations: capKnowledgeRecommendations([
-					...priorSummary.knowledge_recommendations,
-					...knowledgeRecommendations,
-				]),
-			};
-		} else {
-			const phaseDigests = capPhaseDigests([phaseDigest]);
-			updatedSummary = {
-				schema_version: 1,
-				session_id: sessionId,
-				last_updated: now,
-				last_phase_covered: phase,
-				digest: buildDigestFromPhaseDigests(phaseDigests),
-				phase_digests: phaseDigests,
-				compliance_observations: capComplianceObservations(
-					complianceObservations,
-				),
-				knowledge_recommendations: capKnowledgeRecommendations(
-					knowledgeRecommendations,
-				),
-			};
-		}
-
-		await _internals.writeCuratorSummary(directory, updatedSummary);
+				complianceObservations,
+				knowledgeRecommendations,
+				sessionId,
+				timestamp: now,
+			},
+		);
 
 		// 7b. Persist knowledge application findings to per-phase evidence.
 		if (knowledgeApplicationFindings.length > 0) {
@@ -1633,7 +1883,7 @@ export async function runCuratorPhase(
 			digest: phaseDigest,
 			compliance: complianceObservations,
 			knowledge_recommendations: knowledgeRecommendations,
-			summary_updated: true,
+			summary_updated: summaryUpdated,
 			knowledge_application_findings: knowledgeApplicationFindings,
 			skill_candidates: skillCandidates,
 		};
@@ -1642,7 +1892,7 @@ export async function runCuratorPhase(
 		getGlobalEventBus().publish('curator.phase.completed', {
 			phase,
 			compliance_count: complianceObservations.length,
-			summary_updated: true,
+			summary_updated: summaryUpdated,
 		});
 
 		return result;
