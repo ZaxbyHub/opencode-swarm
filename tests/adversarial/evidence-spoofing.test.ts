@@ -236,6 +236,16 @@ describe('SC-005.2 — Timestamp manipulation rejection', () => {
 		await expect(
 			saveEvidence(tempDir, '1.1', forgedEvidence),
 		).resolves.toBeDefined();
+
+		// PR #1790 review F-L5-002: resolves.toBeDefined() alone only proves the
+		// call didn't throw — round-trip through loadEvidence to prove the
+		// future timestamp was actually persisted verbatim, not silently
+		// dropped, truncated, or clamped.
+		const result = await loadEvidence(tempDir, '1.1');
+		expect(result.status).toBe('found');
+		if (result.status === 'found') {
+			expect(result.bundle.entries[0].timestamp).toBe(futureTimestamp);
+		}
 	});
 
 	it('accepts a past timestamp (before task assignment) — known limitation', async () => {
@@ -347,6 +357,14 @@ describe('SC-005.3 — Task-ID spoofing rejection', () => {
 		await expect(
 			saveEvidence(tempDir, '999.999', evidence),
 		).resolves.toBeDefined();
+
+		// PR #1790 review F-L5-003: verify the evidence was actually persisted
+		// under the given task_id, not merely that the call resolved.
+		const result = await loadEvidence(tempDir, '999.999');
+		expect(result.status).toBe('found');
+		if (result.status === 'found') {
+			expect(result.bundle.entries[0].task_id).toBe('999.999');
+		}
 	});
 
 	it('accepts evidence for a task marked completed in plan.json (completion status is gated by the plan/gate layer, not persistence)', async () => {
@@ -359,6 +377,14 @@ describe('SC-005.3 — Task-ID spoofing rejection', () => {
 		writePlanJsonForCompletionTest(tempDir, '1.1');
 		const evidence = validBase({ task_id: '1.1' });
 		await expect(saveEvidence(tempDir, '1.1', evidence)).resolves.toBeDefined();
+
+		// PR #1790 review F-L5-004: verify the write actually landed despite the
+		// task's completed status in plan.json.
+		const result = await loadEvidence(tempDir, '1.1');
+		expect(result.status).toBe('found');
+		if (result.status === 'found') {
+			expect(result.bundle.entries[0].task_id).toBe('1.1');
+		}
 	});
 });
 

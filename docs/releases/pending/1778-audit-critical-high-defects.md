@@ -65,7 +65,7 @@ now fixed with regression coverage.
 ### CI coverage
 
 - **CI now runs the previously-orphaned test trees.** `src/**/*.test.ts` and
-  `tests/adversarial/` (≈296 files, including the adversarial security suites)
+  `tests/adversarial/` (284 files, including the adversarial security suites)
   were never executed by CI; they are now wired into the unit job and coverage
   gate (shards rebudgeted 4→6, coverage floor recalibrated for the larger set).
   Wiring them surfaced — and this change fixes — several genuinely-failing tests

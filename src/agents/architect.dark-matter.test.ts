@@ -98,28 +98,32 @@ describe('createArchitectAgent - DARK MATTER CO-CHANGE DETECTION', () => {
 		);
 	});
 
-	// TEST 9: Turbo mode preserves dark matter detection
-	it('9. dark matter detection preserved when Turbo Mode is active', () => {
+	// TEST 9: Turbo mode does not break agent construction.
+	// PR #1790 review F-L5-006: this test's name previously implied it verifies
+	// dark-matter-detection behavior varies (or is "preserved") per Turbo Mode
+	// state. It does not — dark matter detection lives entirely in the
+	// config-independent execute skill file (verified once in TEST 1) and is
+	// unaffected by any architect prompt/session state. What this test
+	// actually verifies: createArchitectAgent still constructs a valid,
+	// non-empty prompt when a Turbo Mode session is active — a construction
+	// smoke test, not a dark-matter-specific assertion.
+	it('9. createArchitectAgent builds a valid prompt when a Turbo Mode session is active', () => {
 		startAgentSession('turbo-session', 'architect');
 		const agent = createArchitectAgent('test-model');
 
-		// createArchitectAgent still builds a valid prompt under Turbo Mode…
 		expect(typeof agent.config.prompt).toBe('string');
 		expect(agent.config.prompt!.length).toBeGreaterThan(0);
-		// …and the execute-mode dark matter instruction (config-independent) is intact.
-		expect(EXECUTE_SKILL).toContain('DARK MATTER CO-CHANGE DETECTION');
-		expect(EXECUTE_SKILL).toContain('BLAST RADIUS');
 	});
 
-	// TEST 10: Without Turbo mode also works
-	it('10. dark matter detection present when Turbo Mode is inactive', () => {
+	// TEST 10: Same construction smoke test without an active Turbo Mode
+	// session — see TEST 9's comment for why this does not re-assert
+	// EXECUTE_SKILL content (already covered once by TEST 1).
+	it('10. createArchitectAgent builds a valid prompt without an active Turbo Mode session', () => {
 		startAgentSession('normal-session', 'architect');
 		const agent = createArchitectAgent('test-model');
 
 		expect(typeof agent.config.prompt).toBe('string');
 		expect(agent.config.prompt!.length).toBeGreaterThan(0);
-		expect(EXECUTE_SKILL).toContain('DARK MATTER CO-CHANGE DETECTION');
-		expect(EXECUTE_SKILL).toContain('BLAST RADIUS');
 	});
 
 	// TEST 11: Adversarial testing enabled preserves dark matter detection
