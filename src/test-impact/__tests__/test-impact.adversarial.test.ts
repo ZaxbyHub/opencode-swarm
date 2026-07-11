@@ -354,8 +354,10 @@ describe('test_impact — adversarial input handling', () => {
 
 			// Non-existent working_directory is rejected without crashing; the
 			// Unicode path round-trips intact through the structured error.
+			// Windows renders the resolved path with backslashes — normalize
+			// before comparing (see the "spaces" test above for why).
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('/проект/日本語');
+			expect(parsed.error.replace(/\\/g, '/')).toContain('/проект/日本語');
 		});
 	});
 
