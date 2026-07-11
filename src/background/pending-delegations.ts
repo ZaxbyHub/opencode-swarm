@@ -79,6 +79,8 @@ export interface BackgroundDelegationRecord {
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
 	workspace?: BackgroundWorkspaceSnapshot;
+	/** Immutable pre-coder provenance for doc-only gate classification. */
+	taskChangeContext?: BackgroundTaskChangeContext;
 	prompt?: BackgroundPromptSnapshot;
 	generation?: number;
 	result?: BackgroundDelegationResult;
@@ -89,8 +91,14 @@ export interface BackgroundWorkspaceSnapshot {
 	directory: string;
 	gitHead: string | null;
 	dirtyHash: string | null;
+	changedFiles?: string[] | null;
 	prHeadSha: string | null;
 	scope: string | null;
+}
+
+export interface BackgroundTaskChangeContext {
+	declaredFiles: string[] | null;
+	baseline: BackgroundWorkspaceSnapshot;
 }
 
 export interface BackgroundPromptSnapshot {
@@ -135,8 +143,16 @@ const WorkspaceSchema = z
 		directory: z.string(),
 		gitHead: z.string().nullable(),
 		dirtyHash: z.string().nullable(),
+		changedFiles: z.array(z.string()).nullable().optional(),
 		prHeadSha: z.string().nullable(),
 		scope: z.string().nullable(),
+	})
+	.strict();
+
+const TaskChangeContextSchema = z
+	.object({
+		declaredFiles: z.array(z.string()).nullable(),
+		baseline: WorkspaceSchema,
 	})
 	.strict();
 
@@ -178,6 +194,7 @@ const RecordSchema = z
 		mode: z.string().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
+		taskChangeContext: TaskChangeContextSchema.optional(),
 		prompt: PromptSchema.optional(),
 		generation: z.number().optional(),
 		result: ResultSchema.optional(),
@@ -273,6 +290,7 @@ export interface RecordPendingInput {
 	mode?: string;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
+	taskChangeContext?: BackgroundTaskChangeContext;
 	prompt?: BackgroundPromptSnapshot;
 	generation?: number;
 }
@@ -309,6 +327,9 @@ export async function recordPendingDelegation(
 		...(input.mode ? { mode: input.mode } : {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
+		...(input.taskChangeContext
+			? { taskChangeContext: input.taskChangeContext }
+			: {}),
 		...(input.prompt ? { prompt: input.prompt } : {}),
 		...(input.generation !== undefined ? { generation: input.generation } : {}),
 	};

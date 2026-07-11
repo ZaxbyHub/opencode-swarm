@@ -86,6 +86,43 @@ describe('drift-check: skill-mirror detection', () => {
 		expect(hit).toBeDefined();
 	});
 
+	test('detects drift in an extra identical .agents mirror', () => {
+		const root = makeTempRoot();
+		const canonical = 'canonical body\n';
+		writeFile(root, '.opencode/skills/test-file-split/SKILL.md', canonical);
+		writeFile(root, '.claude/skills/test-file-split/SKILL.md', canonical);
+		writeFile(
+			root,
+			'.agents/skills/test-file-split/SKILL.md',
+			'DRIFTED body\n',
+		);
+
+		const findings = detectSkillMirrorDrift(root);
+		const hit = findings.find(
+			(f) =>
+				f.severity === 'error' &&
+				f.file === '.agents/skills/test-file-split/SKILL.md' &&
+				f.message.includes('extra mirror drifted'),
+		);
+		expect(hit).toBeDefined();
+	});
+
+	test('detects a missing extra identical .agents mirror', () => {
+		const root = makeTempRoot();
+		const canonical = 'canonical body\n';
+		writeFile(root, '.opencode/skills/fork-pr-operations/SKILL.md', canonical);
+		writeFile(root, '.claude/skills/fork-pr-operations/SKILL.md', canonical);
+
+		const findings = detectSkillMirrorDrift(root);
+		const hit = findings.find(
+			(f) =>
+				f.severity === 'error' &&
+				f.file === '.agents/skills/fork-pr-operations/SKILL.md' &&
+				f.message.includes('missing extra identical mirror'),
+		);
+		expect(hit).toBeDefined();
+	});
+
 	test('does not flag the generated/ directory as an unclassified pair', () => {
 		const root = makeTempRoot();
 		writeFile(root, '.opencode/skills/generated/x/SKILL.md', 'a\n');

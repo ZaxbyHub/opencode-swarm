@@ -511,7 +511,7 @@ Two failures motivated the automated check:
 
 | Category | What it checks | Source of truth |
 |---|---|---|
-| `skill-mirror` | `.opencode`↔`.claude` byte identity / divergence / adapter / opencode-only; unclassified both-tree pairs | `src/config/skill-mirrors.ts` (shared with `tests/unit/skills/skill-mirrors.test.ts`) |
+| `skill-mirror` | `.opencode`↔`.claude` byte identity / divergence / adapter / opencode-only; declared extra identical paths such as `.agents`; unclassified both-tree pairs | `src/config/skill-mirrors.ts` (shared with `tests/unit/skills/skill-mirrors.test.ts`) |
 | `bundled-skill` | `.opencode/skills/` ⊆ `BUNDLED_PROJECT_SKILLS`; no phantom entries; `package.json#files` coverage | `src/config/bundled-skills.ts`, `package.json` |
 | `skill-audience` | tracked static skills declare valid top-level audience metadata; generated lifecycle skills are excluded | static skill frontmatter parsed by `src/hooks/skill-scoring.ts` |
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |

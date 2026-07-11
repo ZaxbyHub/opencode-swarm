@@ -52,6 +52,8 @@ export interface SastScanInput {
 export interface SastScanResult {
 	/** Overall verdict: pass if no findings above threshold, fail otherwise */
 	verdict: EvidenceVerdict;
+	/** Validation error when the requested scan cannot safely run */
+	error?: string;
 	/** Array of security findings */
 	findings: SastScanFinding[];
 	/** Summary information */
@@ -438,8 +440,8 @@ export async function sastScan(
 	}
 
 	// ── Capture mode ─────────────────────────────────────────────────────────
-	// Records a baseline snapshot WITHOUT applying severity_threshold and WITHOUT
-	// the zero-coverage-fail invariant (capturing nothing is legitimate).
+	// Records a baseline snapshot WITHOUT applying severity_threshold. A scan of
+	// supported files with zero findings is legitimate; scanning zero files is not.
 	if (capture_baseline) {
 		if (phase === undefined || !Number.isInteger(phase) || phase < 1) {
 			// Capture without a valid phase is a hard error
@@ -456,6 +458,22 @@ export async function sastScan(
 				},
 			};
 			return errorResult;
+		}
+
+		if (scannedFilePaths.length === 0) {
+			const finalFindings = allFindings.slice(0, MAX_FINDINGS);
+			return {
+				verdict: 'fail',
+				error:
+					'capture_baseline requires changed_files to produce a non-empty baseline',
+				findings: finalFindings,
+				summary: {
+					engine,
+					files_scanned: filesScanned,
+					findings_count: finalFindings.length,
+					findings_by_severity: countBySeverity(finalFindings),
+				},
+			};
 		}
 
 		// Use raised cap for baseline capture so mediums/lows aren't silently lost.

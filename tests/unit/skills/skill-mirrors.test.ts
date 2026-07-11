@@ -110,12 +110,16 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 			);
 
 			if (contract.kind === 'identical') {
-				it(`${contract.slug}: .opencode and .claude are byte-identical`, () => {
+				it(`${contract.slug}: every declared mirror is byte-identical`, () => {
 					expect(existsSync(opencodePath)).toBe(true);
 					expect(existsSync(claudePath)).toBe(true);
-					expect(readFileSync(claudePath, 'utf-8')).toBe(
-						readFileSync(opencodePath, 'utf-8'),
-					);
+					const canonical = readFileSync(opencodePath, 'utf-8');
+					expect(readFileSync(claudePath, 'utf-8')).toBe(canonical);
+					for (const extraPath of contract.extraIdenticalPaths ?? []) {
+						const resolvedExtraPath = join(process.cwd(), extraPath);
+						expect(existsSync(resolvedExtraPath)).toBe(true);
+						expect(readFileSync(resolvedExtraPath, 'utf-8')).toBe(canonical);
+					}
 				});
 			} else if (contract.kind === 'divergent') {
 				it(`${contract.slug}: both .opencode and .claude mirrors exist (divergent)`, () => {

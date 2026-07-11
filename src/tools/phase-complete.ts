@@ -2057,3 +2057,7 @@ export const phase_complete: ToolDefinition = createSwarmTool({
 		);
 	},
 });
+
+export const _test_exports = {
+	allCompletedTasksHavePassedGateEvidence,
+};

@@ -211,7 +211,8 @@ export const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
  * `kind`:
  *  - `identical`: `.opencode` and `.claude` SKILL.md must be byte-identical.
  *    `canonical` records which side wins when they drift (fix direction only;
- *    detection is symmetric).
+ *    detection is symmetric). `extraIdenticalPaths` narrowly extends the same
+ *    byte-identity contract to additional runtime mirrors when present.
  *  - `divergent`: both must exist; content intentionally differs per runtime.
  *  - `opencode-only`: `.opencode` exists; no `.claude` mirror expected.
  */
@@ -219,6 +220,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	slug: string;
 	kind: 'identical' | 'divergent' | 'opencode-only';
 	canonical?: '.claude' | '.opencode';
+	extraIdenticalPaths?: string[];
 	reason: string;
 }> = [
 	{
@@ -269,6 +271,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		slug: 'test-file-split',
 		kind: 'identical',
 		canonical: '.opencode',
+		extraIdenticalPaths: ['.agents/skills/test-file-split/SKILL.md'],
 		reason:
 			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
 	},
@@ -276,6 +279,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		slug: 'fork-pr-operations',
 		kind: 'identical',
 		canonical: '.opencode',
+		extraIdenticalPaths: ['.agents/skills/fork-pr-operations/SKILL.md'],
 		reason:
 			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
 	},

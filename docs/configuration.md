@@ -1098,10 +1098,17 @@ The QA gate profile (per-plan, persisted in the project DB) controls which quali
 
 All gates are **ratchet-tighter** — once enabled they cannot be disabled until the profile is reset, and once locked (after critic approval) no changes are accepted at all.
 
+`test_engineer` is exempted for a coder task only when both its immutable
+declared scope and the observed Git changes are non-empty, contain exact
+case-sensitive `.md` final extensions, and the observed paths remain within
+the declaration. Missing Git provenance, mixed files, scope mismatches, legacy
+background records, and any non-`.md` path keep the full gate. `reviewer` and
+`council_mode` behavior are unchanged.
+
 | Gate | Default | Description |
 |------|---------|-------------|
 | `reviewer` | ON | Code review of coder output |
-| `test_engineer` | ON | Test verification of coder output |
+| `test_engineer` | ON | Test verification of coder output; automatically exempted only for proven exact `.md`-only tasks |
 | `sme_enabled` | ON | SME consultation during planning / clarification |
 | `critic_pre_plan` | ON | Critic review before plan finalization |
 | `sast_enabled` | ON | Static security scanning |

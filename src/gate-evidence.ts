@@ -33,6 +33,8 @@ export interface TaskEvidence {
 	required_gates: string[];
 	gates: Record<string, GateEvidence>;
 	turbo?: boolean;
+	/** Durable proof that the coder dispatch was classified as exact Markdown-only. */
+	test_engineer_exempt?: boolean;
 }
 
 const GateEvidenceSchema = z
@@ -48,9 +50,15 @@ const TaskEvidenceSchema = z.object({
 	required_gates: z.array(z.string()).default([]),
 	gates: z.record(z.string(), GateEvidenceSchema),
 	turbo: z.boolean().optional(),
+	test_engineer_exempt: z.boolean().optional(),
 });
 
 export const DEFAULT_REQUIRED_GATES = ['reviewer', 'test_engineer'];
+
+export interface GateDerivationContext {
+	/** Trusted pre/post workspace classification; false/absent fails closed. */
+	testEngineerExempt?: boolean;
+}
 
 /**
  * Canonical task-id validation helper.
@@ -69,10 +77,15 @@ function assertValidTaskId(taskId: string): void {
  * Maps the first-dispatched agent type to the initial required_gates array.
  * Unknown agent types fall back to the safe default ["reviewer", "test_engineer"].
  */
-export function deriveRequiredGates(agentType: string): string[] {
+export function deriveRequiredGates(
+	agentType: string,
+	context: GateDerivationContext = {},
+): string[] {
 	switch (agentType) {
 		case 'coder':
-			return ['reviewer', 'test_engineer'];
+			return context.testEngineerExempt === true
+				? ['reviewer']
+				: ['reviewer', 'test_engineer'];
 		case 'docs':
 			return ['docs'];
 		case 'designer':
@@ -107,8 +120,9 @@ export function deriveRequiredGates(agentType: string): string[] {
 export function expandRequiredGates(
 	existingGates: string[],
 	newAgentType: string,
+	context: GateDerivationContext = {},
 ): string[] {
-	const newGates = deriveRequiredGates(newAgentType);
+	const newGates = deriveRequiredGates(newAgentType, context);
 	const combined = [...new Set([...(existingGates ?? []), ...newGates])];
 	return combined.sort();
 }
@@ -195,6 +209,7 @@ export async function recordGateEvidence(
 			taskId,
 			required_gates: requiredGates,
 			turbo: turbo === true ? true : existing?.turbo,
+			test_engineer_exempt: existing?.test_engineer_exempt,
 			gates: {
 				...(existing?.gates ?? {}),
 				[gate]: {
@@ -220,6 +235,7 @@ export async function recordAgentDispatch(
 	taskId: string,
 	agentType: string,
 	turbo?: boolean,
+	context: GateDerivationContext = {},
 ): Promise<void> {
 	assertValidTaskId(taskId);
 
@@ -234,13 +250,18 @@ export async function recordAgentDispatch(
 			throw error;
 		}
 		const requiredGates = existing
-			? expandRequiredGates(existing.required_gates, agentType)
-			: deriveRequiredGates(agentType);
+			? expandRequiredGates(existing.required_gates, agentType, context)
+			: deriveRequiredGates(agentType, context);
 
 		const updated: TaskEvidence = {
 			taskId,
 			required_gates: requiredGates,
 			turbo: turbo === true ? true : existing?.turbo,
+			test_engineer_exempt:
+				agentType === 'coder'
+					? context.testEngineerExempt === true &&
+						!requiredGates.includes('test_engineer')
+					: existing?.test_engineer_exempt,
 			gates: existing?.gates ?? {},
 		};
 

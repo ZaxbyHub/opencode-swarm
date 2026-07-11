@@ -18,7 +18,12 @@ import {
 	spyOn,
 } from 'bun:test';
 import * as fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import { sastScan } from '../../../src/tools/sast-scan';
+
+const BASELINE_COVERAGE_ERROR =
+	'capture_baseline requires changed_files to produce a non-empty baseline';
 
 describe('SAST Scan - Adversarial Tests (R2)', () => {
 	const MOCK_DIR = process.cwd();
@@ -60,6 +65,17 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 		expect(result.summary.files_scanned).toBe(0);
 	});
 
+	it('empty baseline capture fails with an actionable error', async () => {
+		const result = await sastScan(
+			{ changed_files: [], capture_baseline: true, phase: 1 },
+			MOCK_DIR,
+		);
+
+		expect(result.verdict).toBe('fail');
+		expect(result.error).toBe(BASELINE_COVERAGE_ERROR);
+		expect(result.summary.files_scanned).toBe(0);
+	});
+
 	/**
 	 * ATTACK VECTOR 2: Invalid non-existent paths
 	 * Attempt to bypass by providing paths that don't exist
@@ -96,6 +112,45 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 		existsSyncMock.mockRestore();
 	});
 
+	it('baseline capture fails when every requested file is unscannable', async () => {
+		const result = await sastScan(
+			{
+				changed_files: ['missing.ts', 'README.md'],
+				capture_baseline: true,
+				phase: 1,
+			},
+			MOCK_DIR,
+		);
+
+		expect(result.verdict).toBe('fail');
+		expect(result.error).toBe(BASELINE_COVERAGE_ERROR);
+		expect(result.summary.files_scanned).toBe(0);
+	});
+
+	it('baseline capture allows a supported file with zero findings', async () => {
+		mock.restore();
+		const tempDir = fs.mkdtempSync(
+			path.join(tmpdir(), 'sast-valid-baseline-test-'),
+		);
+		const testFile = path.join(tempDir, 'valid.ts');
+		fs.writeFileSync(testFile, 'const answer = 42;');
+
+		try {
+			const result = await sastScan(
+				{ changed_files: [testFile], capture_baseline: true, phase: 1 },
+				tempDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe('baseline_captured');
+			expect(result.finding_count).toBe(0);
+			expect(result.summary.files_scanned).toBe(1);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	/**
 	 * ATTACK VECTOR 4: Enabled mode with zero coverage must FAIL (not PASS)
 	 * This is the critical security invariant - zero coverage cannot be treated as success
@@ -124,21 +179,26 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 	 * When feature is disabled, zero coverage should return PASS
 	 */
 	it('disabled mode bypasses zero coverage → PASS (control test)', async () => {
-		const result = await sastScan({ changed_files: [] }, MOCK_DIR, {
-			gates: {
-				syntax_check: { enabled: true },
-				placeholder_scan: {
-					enabled: true,
-					deny_patterns: [],
-					allow_globs: [],
-					max_allowed_findings: 0,
+		const result = await sastScan(
+			{ changed_files: [], capture_baseline: true, phase: 1 },
+			MOCK_DIR,
+			{
+				gates: {
+					syntax_check: { enabled: true },
+					placeholder_scan: {
+						enabled: true,
+						deny_patterns: [],
+						allow_globs: [],
+						max_allowed_findings: 0,
+					},
+					sast_scan: { enabled: false },
+					sbom_generate: { enabled: true },
+					build_check: { enabled: true },
+					quality_budget: { enabled: true },
 				},
-				sast_scan: { enabled: false },
-				sbom_generate: { enabled: true },
-				build_check: { enabled: true },
-				quality_budget: { enabled: true },
-			},
-		} as any);
+			} as any,
+		);
 		expect(result.verdict).toBe('pass');
+		expect(result.error).toBeUndefined();
 	});
 });

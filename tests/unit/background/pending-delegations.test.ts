@@ -63,6 +63,34 @@ describe('pending-delegations store', () => {
 		).toBe(true);
 	});
 
+	it('round-trips immutable coder task-change provenance', async () => {
+		const baseline = {
+			directory: dir,
+			gitHead: 'abc123',
+			dirtyHash: 'clean-hash',
+			changedFiles: [],
+			prHeadSha: null,
+			scope: '1.1',
+		};
+		await recordPendingDelegation(
+			dir,
+			input({
+				normalizedAgent: 'coder',
+				swarmPrefixedAgent: 'coder',
+				taskChangeContext: {
+					declaredFiles: ['README.md'],
+					baseline,
+				},
+			}),
+		);
+
+		const restored = readDelegations(dir)[0];
+		expect(restored.taskChangeContext).toEqual({
+			declaredFiles: ['README.md'],
+			baseline,
+		});
+	});
+
 	it('returns empty for a missing store (no throw)', () => {
 		expect(readDelegations(dir)).toEqual([]);
 		expect(findByCorrelationId(dir, 'nope')).toBeNull();

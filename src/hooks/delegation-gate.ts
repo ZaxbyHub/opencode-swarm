@@ -8,10 +8,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
-
+import type { BackgroundTaskChangeContext } from '../background/pending-delegations.js';
+import {
+	captureWorkspaceSnapshot,
+	changedFilesSinceSnapshot,
+} from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
+import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -624,6 +629,18 @@ function getPlanTaskStatus(plan: Plan, taskId: string): string | null {
 	return null;
 }
 
+function getPlanTaskDeclaredFiles(
+	plan: Plan | null,
+	taskId: string | null,
+): string[] | null {
+	if (!plan || !taskId) return null;
+	for (const phase of plan.phases) {
+		const task = phase.tasks.find((candidate) => candidate.id === taskId);
+		if (task) return [...task.files_touched];
+	}
+	return null;
+}
+
 function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
 	knownPlanTaskIds?: ReadonlySet<string>,
@@ -1137,6 +1154,28 @@ export function createDelegationGateHook(
 		(((config.hooks as Record<string, unknown> | undefined)
 			?.background_pending_timeout_minutes as number | undefined) ?? 30) *
 		60_000;
+	const MAX_PENDING_CODER_CHANGE_CONTEXTS = 128;
+	const coderTaskChangeContextByCallID = new Map<
+		string,
+		BackgroundTaskChangeContext
+	>();
+	const coderObservedFilesByCallID = new Map<string, string[] | null>();
+	const rememberCoderTaskChangeContext = (
+		callID: string,
+		declaredFiles: string[] | null,
+		observationDirectory = directory,
+	): void => {
+		if (
+			coderTaskChangeContextByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			const oldest = coderTaskChangeContextByCallID.keys().next().value;
+			if (oldest !== undefined) coderTaskChangeContextByCallID.delete(oldest);
+		}
+		coderTaskChangeContextByCallID.set(callID, {
+			declaredFiles,
+			baseline: captureWorkspaceSnapshot(observationDirectory),
+		});
+	};
 
 	if (!enabled) {
 		return {
@@ -1300,6 +1339,10 @@ export function createDelegationGateHook(
 		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
 
 		await assertPlanCriticApprovedForExecution(directory, plan);
+		rememberCoderTaskChangeContext(
+			input.callID,
+			getPlanTaskDeclaredFiles(plan, incomingCoderTaskId),
+		);
 
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
 		// review. In parallel mode (parallelization_enabled), dispatching a coder
@@ -1423,6 +1466,14 @@ export function createDelegationGateHook(
 					? { taskId: resolvedTaskId, files: laneScope }
 					: undefined,
 		});
+		const standardDispatch = standardWorktreeByCallID.get(input.callID);
+		if (standardDispatch) {
+			rememberCoderTaskChangeContext(
+				input.callID,
+				getPlanTaskDeclaredFiles(plan, incomingCoderTaskId),
+				standardDispatch.handle.worktreePath,
+			);
+		}
 	};
 
 	// toolAfter: resets qaSkip fields and advances task states based on delegation type
@@ -1722,6 +1773,10 @@ export function createDelegationGateHook(
 								mergedArgs.prHeadSha ?? mergedArgs.pr_head_sha;
 							const prHeadSha =
 								typeof prHeadShaRaw === 'string' ? prHeadShaRaw : null;
+							const taskChangeContext =
+								stripKnownSwarmPrefix(subagentType) === 'coder'
+									? coderTaskChangeContextByCallID.get(input.callID)
+									: undefined;
 							await recordPendingDelegation(
 								directory,
 								{
@@ -1734,10 +1789,13 @@ export function createDelegationGateHook(
 									swarmPrefixedAgent: subagentType,
 									planTaskId: evidenceTaskId,
 									evidenceTaskId,
-									workspace: captureWorkspaceSnapshot(directory, {
-										prHeadSha,
-										scope,
-									}),
+									workspace: taskChangeContext
+										? { ...taskChangeContext.baseline, prHeadSha, scope }
+										: captureWorkspaceSnapshot(directory, {
+												prHeadSha,
+												scope,
+											}),
+									taskChangeContext,
 									prompt:
 										typeof mergedArgs.prompt === 'string'
 											? buildPromptSnapshot(
@@ -1764,6 +1822,7 @@ export function createDelegationGateHook(
 						);
 					}
 				}
+				coderTaskChangeContextByCallID.delete(input.callID);
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				return;
 			}
@@ -1785,6 +1844,18 @@ export function createDelegationGateHook(
 			}
 
 			if (standardDispatch) {
+				const taskChangeContext = coderTaskChangeContextByCallID.get(
+					input.callID,
+				);
+				if (taskChangeContext) {
+					coderObservedFilesByCallID.set(
+						input.callID,
+						changedFilesSinceSnapshot(
+							taskChangeContext.baseline.directory,
+							taskChangeContext.baseline,
+						),
+					);
+				}
 				// SC-115: Move from active → awaiting-merge BEFORE calling merge-back.
 				// The dispatch is removed from standardWorktreeByCallID here and
 				// added to awaitingMergeByCallID so /swarm lanes can show the real state.
@@ -1889,6 +1960,7 @@ export function createDelegationGateHook(
 							// to prevent over-attribution. When no verdicts are parseable, iterate
 							// over all eligible tasks (existing fallback behavior).
 
+							const { readTaskEvidence } = await import('../gate-evidence');
 							for (const [taskId, state] of session.taskWorkflowStates) {
 								if (
 									!(stageBEligibleStates as readonly string[]).includes(state)
@@ -1926,7 +1998,14 @@ export function createDelegationGateHook(
 									}
 								}
 
-								if (hasBothStageBCompletions(session, taskId)) {
+								const taskEvidence = await readTaskEvidence(directory, taskId);
+								const reviewerCompletesStageB =
+									targetAgent === 'reviewer' &&
+									taskEvidence?.test_engineer_exempt === true;
+								if (
+									hasBothStageBCompletions(session, taskId) ||
+									reviewerCompletesStageB
+								) {
 									// Barrier reached: both reviewer and test_engineer have completed.
 									// Advance through reviewer_run → tests_run in a single compound
 									// step so the state machine stays consistent.
@@ -1985,6 +2064,13 @@ export function createDelegationGateHook(
 							// in every other session would contaminate unrelated tasks.
 							const seedTaskId = getSeedTaskId(session);
 							if (seedTaskId) {
+								const seedEvidence = await readTaskEvidence(
+									directory,
+									seedTaskId,
+								);
+								const reviewerCompletesSeedStageB =
+									targetAgent === 'reviewer' &&
+									seedEvidence?.test_engineer_exempt === true;
 								for (const [, otherSession] of swarmState.agentSessions) {
 									if (otherSession === session) continue;
 									if (!otherSession.taskWorkflowStates) continue;
@@ -2012,7 +2098,10 @@ export function createDelegationGateHook(
 										seedTaskId,
 										targetAgent as 'reviewer' | 'test_engineer',
 									);
-									if (hasBothStageBCompletions(otherSession, seedTaskId)) {
+									if (
+										hasBothStageBCompletions(otherSession, seedTaskId) ||
+										reviewerCompletesSeedStageB
+									) {
 										try {
 											if (
 												seedEligibleState === 'coder_delegated' ||
@@ -2108,11 +2197,30 @@ export function createDelegationGateHook(
 							);
 						} else {
 							const { recordAgentDispatch } = await import('../gate-evidence');
+							const taskChangeContext =
+								targetAgentForEvidence === 'coder'
+									? coderTaskChangeContextByCallID.get(input.callID)
+									: undefined;
+							const observedFiles = taskChangeContext
+								? (coderObservedFilesByCallID.get(input.callID) ??
+									changedFilesSinceSnapshot(
+										taskChangeContext.baseline.directory,
+										taskChangeContext.baseline,
+									))
+								: null;
 							await recordAgentDispatch(
 								directory,
 								evidenceTaskId,
 								targetAgentForEvidence,
 								turbo,
+								{
+									testEngineerExempt:
+										targetAgentForEvidence === 'coder' &&
+										isMarkdownOnlyTaskChange(
+											taskChangeContext?.declaredFiles,
+											observedFiles,
+										),
+								},
 							);
 						}
 					}
@@ -2121,6 +2229,11 @@ export function createDelegationGateHook(
 					console.warn(
 						`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
+				} finally {
+					if (stripKnownSwarmPrefix(subagentType) === 'coder') {
+						coderTaskChangeContextByCallID.delete(input.callID);
+						coderObservedFilesByCallID.delete(input.callID);
+					}
 				}
 			}
 
