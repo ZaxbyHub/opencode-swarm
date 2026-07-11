@@ -317,12 +317,11 @@ describe('regression: existing tool registrations', () => {
 	// extract_code_blocks is a write tool (issue #1778 C1); the architect is a
 	// delegating orchestrator that holds no write tool (capability-drift-guard
 	// invariant), so it is excluded from the architect-tools membership check.
-	it.each(existingTools.filter((t) => t !== 'extract_code_blocks'))(
-		'should have %s in architect tools',
-		(toolName) => {
-			expect(AGENT_TOOL_MAP.architect).toContain(toolName);
-		},
-	);
+	it.each(
+		existingTools.filter((t) => t !== 'extract_code_blocks'),
+	)('should have %s in architect tools', (toolName) => {
+		expect(AGENT_TOOL_MAP.architect).toContain(toolName);
+	});
 
 	it('should NOT have extract_code_blocks in architect tools (write tool, #1778 C1)', () => {
 		expect(AGENT_TOOL_MAP.architect).not.toContain('extract_code_blocks');
