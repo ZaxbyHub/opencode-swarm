@@ -130,12 +130,14 @@ describe('check_gate_status', () => {
 		const parsed = JSON.parse(result);
 
 		// Tool safely returns no_evidence - no sensitive data leaked.
-		// resolveWorkingDirectory rejects /etc/passwd earlier (a file, not a
-		// directory) rather than reaching the evidence-lookup stage, so the
-		// message reflects the directory rejection. Either way the status is
-		// no_evidence and no file contents leak.
+		// resolveWorkingDirectory rejects /etc/passwd earlier rather than
+		// reaching the evidence-lookup stage. On Linux/macOS /etc/passwd is a
+		// real file, so the rejection is "is not a directory"; on Windows a
+		// leading '/' resolves drive-relative (e.g. D:\etc\passwd), which
+		// doesn't exist at all there, so the rejection is "does not exist".
+		// Either way the status is no_evidence and no file contents leak.
 		expect(parsed.status).toBe('no_evidence');
-		expect(parsed.message).toContain('is not a directory');
+		expect(parsed.message).toMatch(/is not a directory|does not exist/);
 	});
 
 	// SECURITY FINDING: The path validation uses user-provided working_directory as base,

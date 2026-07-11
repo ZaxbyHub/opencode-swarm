@@ -618,8 +618,11 @@ console.log('arg:' + (args[0] || ''));`,
 		// Even if a tool traverses through symlinks, cwd should stay bounded
 		const result = await runNodeScript(script, [], { cwd: innerDir });
 
-		// process.cwd() should show the inner directory, not resolved symlink target
-		expect(result.stdout.trim()).toBe(`cwd:${innerDir}`);
+		// process.cwd() always reports the OS-canonical (symlink-resolved) path —
+		// on macOS os.tmpdir() itself sits under a symlink (/var -> /private/var),
+		// so the expected value must be realpath-resolved the same way, or this
+		// assertion spuriously fails on macOS even though nothing escaped bounds.
+		expect(result.stdout.trim()).toBe(`cwd:${fs.realpathSync(innerDir)}`);
 	});
 
 	test('dot-dot cwd escape attempt is rejected or bounds the process correctly', async () => {

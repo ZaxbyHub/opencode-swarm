@@ -269,9 +269,15 @@ describe('test_impact — adversarial input handling', () => {
 			// A non-existent working_directory is rejected by the existence check
 			// in resolveWorkingDirectory (invariant 4). The literal path — spaces
 			// intact — is echoed in the structured error, proving it was handled as
-			// a path string and never interpolated into a shell.
+			// a path string and never interpolated into a shell. On Windows the
+			// resolved path renders with backslashes (drive-relative resolution
+			// of a leading '/'), so normalize separators before comparing —
+			// the property under test is that the segment text survives intact,
+			// not which separator character the platform used.
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('/path with spaces/project');
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				'/path with spaces/project',
+			);
 		});
 
 		test('quotes in working_directory are handled', async () => {
@@ -285,9 +291,13 @@ describe('test_impact — adversarial input handling', () => {
 			const parsed = JSON.parse(resultToString(result));
 
 			// Non-existent working_directory is rejected; the literal quoted path is
-			// echoed in the error, proving quotes are handled as path text.
+			// echoed in the error, proving quotes are handled as path text. Windows
+			// renders the resolved path with backslashes — normalize before
+			// comparing (see the "spaces" test above for why).
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain("/path with 'quotes'/project");
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				"/path with 'quotes'/project",
+			);
 		});
 
 		test('semicolon in working_directory is passed to analyzer', async () => {
@@ -303,9 +313,13 @@ describe('test_impact — adversarial input handling', () => {
 			// Non-existent working_directory is rejected. The full literal path —
 			// including "; echo hacked" — is echoed back in the structured error,
 			// proving the semicolon is treated as ordinary path text and never
-			// executed as a shell command separator.
+			// executed as a shell command separator. Windows renders the resolved
+			// path with backslashes — normalize before comparing (see the
+			// "spaces" test above for why).
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('/path; echo hacked/project');
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				'/path; echo hacked/project',
+			);
 		});
 
 		test('null byte in working_directory causes error', async () => {

@@ -199,9 +199,15 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 				const id = `h3-${cmd.replace(/\W+/g, '')}`;
 				coderSession(id);
 				setDeclaredScope(id, ['src/']);
+				// On macOS /etc is itself a symlink (-> /private/etc), so the
+				// more specific symlink/junction ancestor guard fires instead of
+				// the generic destructive-command message — both are correct
+				// rejections of the same unsafe command, so accept either.
 				await expect(
 					hooks.toolBefore(makeBashInput(id), makeOutput(cmd)),
-				).rejects.toThrow(/destructive|not authorised|unsafe/i);
+				).rejects.toThrow(
+					/destructive|not authorised|unsafe|symlink\/junction/i,
+				);
 			});
 		}
 	});
