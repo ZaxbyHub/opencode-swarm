@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	isExactMarkdownPath,
+	isMarkdownOnlyDeclaredScope,
 	isMarkdownOnlyTaskChange,
 } from './gate-evidence-classification';
 
@@ -47,6 +48,17 @@ describe('doc-only gate classification', () => {
 		expect(
 			isMarkdownOnlyTaskChange(['README.md'], ['README.md', 'docs/extra.md']),
 		).toBe(false);
+	});
+
+	test('cheap declared-scope pre-classification rejects ineligible tasks', () => {
+		expect(isMarkdownOnlyDeclaredScope(['README.md', 'docs/guide.md'])).toBe(
+			true,
+		);
+		expect(isMarkdownOnlyDeclaredScope([])).toBe(false);
+		expect(isMarkdownOnlyDeclaredScope(['README.md', 'src/code.ts'])).toBe(
+			false,
+		);
+		expect(isMarkdownOnlyDeclaredScope(null)).toBe(false);
 	});
 
 	test('fails closed for malformed runtime values', () => {

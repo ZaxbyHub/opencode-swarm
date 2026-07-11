@@ -3,9 +3,13 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { _internals as workspaceSnapshotInternals } from '../../../src/background/workspace-snapshot';
 import type { Plan } from '../../../src/config/plan-schema';
 import { readTaskEvidence } from '../../../src/gate-evidence';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	createDelegationGateHook,
+	_internals as delegationGateInternals,
+} from '../../../src/hooks/delegation-gate';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -61,6 +65,7 @@ function makePlan(filesTouched: string[]): Plan {
 
 describe('delegation gate doc-only durable evidence', () => {
 	let directory: string;
+	const originalWorkspaceSpawnSync = workspaceSnapshotInternals.spawnSync;
 
 	beforeEach(() => {
 		resetSwarmState();
@@ -80,6 +85,9 @@ describe('delegation gate doc-only durable evidence', () => {
 	});
 
 	afterEach(() => {
+		workspaceSnapshotInternals.spawnSync = originalWorkspaceSpawnSync;
+		delegationGateInternals.resetStandardWorktreeIsolationState();
+		swarmState.opencodeClient = undefined;
 		resetSwarmState();
 		fs.rmSync(directory, { recursive: true, force: true });
 	});
@@ -177,5 +185,129 @@ describe('delegation gate doc-only durable evidence', () => {
 		await runCoder(['README.md'], ['README.md', 'src/undeclared.ts']);
 		const evidence = await readTaskEvidence(directory, '1.1');
 		expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
+	});
+
+	describe('regression: snapshot work is limited to exemption candidates (F-002)', () => {
+		test('non-Markdown declared scope performs no workspace snapshot Git calls', async () => {
+			const plan = makePlan(['src/code.ts']);
+			fs.writeFileSync(
+				path.join(directory, '.swarm', 'plan.json'),
+				JSON.stringify(plan, null, 2),
+			);
+			await recordPlanCriticApproval(directory, plan);
+			const hook = createDelegationGateHook(makeConfig(), directory);
+			let snapshotSpawnCalls = 0;
+			workspaceSnapshotInternals.spawnSync = ((..._args: unknown[]) => {
+				snapshotSpawnCalls++;
+				throw new Error('non-Markdown dispatch must not capture a snapshot');
+			}) as typeof workspaceSnapshotInternals.spawnSync;
+
+			// Before F-002, every coder dispatch synchronously captured HEAD and status,
+			// so this seam threw before toolBefore could complete.
+			await hook.toolBefore(
+				{
+					tool: 'Task',
+					sessionID: 'architect-session',
+					callID: 'non-doc-coder-call',
+				},
+				{
+					args: {
+						subagent_type: 'coder',
+						task_id: '1.1',
+						prompt: 'TASK: 1.1\nImplement the approved code task.',
+					},
+				},
+			);
+
+			expect(snapshotSpawnCalls).toBe(0);
+		});
+	});
+
+	describe('regression: foreground standard-worktree evidence (F-003)', () => {
+		test('observes the lane before merge rather than project-root changes', async () => {
+			const plan = makePlan(['README.md']);
+			plan.execution_profile = {
+				parallelization_enabled: true,
+				max_concurrent_tasks: 2,
+				council_parallel: true,
+				locked: true,
+				auto_proceed: false,
+			};
+			fs.writeFileSync(
+				path.join(directory, '.swarm', 'plan.json'),
+				JSON.stringify(plan, null, 2),
+			);
+			await recordPlanCriticApproval(directory, plan);
+
+			swarmState.opencodeClient = {
+				session: {
+					create: async () => ({ data: { id: 'foreground-lane-session' } }),
+				},
+			} as never;
+			const originalProvisionWorktree =
+				delegationGateInternals.provisionWorktree;
+			let lanePath: string | undefined;
+			delegationGateInternals.provisionWorktree = async (...args) => {
+				const result = await originalProvisionWorktree(...args);
+				if ('worktreePath' in result) lanePath = result.worktreePath;
+				return result;
+			};
+			const hook = createDelegationGateHook(
+				makeConfig({ worktree: { policy: 'auto', merge_strategy: 'merge' } }),
+				directory,
+			);
+			const args = {
+				subagent_type: 'coder',
+				task_id: '1.1',
+				prompt: 'TASK: 1.1\nUpdate the approved documentation.',
+			};
+
+			try {
+				await hook.toolBefore(
+					{
+						tool: 'Task',
+						sessionID: 'architect-session',
+						callID: 'worktree-doc-coder-call',
+					},
+					{ args },
+				);
+				expect(lanePath).toBeDefined();
+
+				fs.writeFileSync(path.join(lanePath!, 'README.md'), '# lane docs\n');
+				fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+				fs.writeFileSync(
+					path.join(directory, 'src', 'root-only.ts'),
+					'export const rootOnly = true;\n',
+				);
+
+				// Before F-003, observing the project root here sees root-only.ts and
+				// fails closed. The lane itself contains exactly the declared Markdown.
+				await hook.toolAfter(
+					{
+						tool: 'Task',
+						sessionID: 'architect-session',
+						callID: 'worktree-doc-coder-call',
+						args,
+					},
+					{},
+				);
+
+				const evidence = await readTaskEvidence(directory, '1.1');
+				expect(fs.existsSync(path.join(directory, 'src', 'root-only.ts'))).toBe(
+					true,
+				);
+				expect(evidence?.required_gates).toEqual(['reviewer']);
+				expect(evidence?.test_engineer_exempt).toBe(true);
+			} finally {
+				delegationGateInternals.provisionWorktree = originalProvisionWorktree;
+				if (lanePath && fs.existsSync(lanePath)) {
+					try {
+						git(directory, ['worktree', 'remove', '--force', lanePath]);
+					} catch {
+						// Best-effort cleanup; the enclosing temp repository is removed next.
+					}
+				}
+			}
+		});
 	});
 });

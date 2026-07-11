@@ -9,6 +9,11 @@
  * Evidence files survive session restarts (unlike in-memory state).
  * Agents never write these files directly — only the hook does.
  * Gates are append-only: required_gates can only grow, never shrink.
+ *
+ * Threat boundary: this store provides atomic, path-contained durability and
+ * auditability for cooperative same-user agents. It is not tamper-proof
+ * authorization against a process with arbitrary same-user workspace access;
+ * that requires a protected trust root outside the project workspace.
  */
 
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs';

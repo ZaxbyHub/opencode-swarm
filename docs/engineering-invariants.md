@@ -316,6 +316,15 @@ if (!resolved) return { success: false, error: 'working_directory must resolve t
 
 - `grep -rn "process.cwd()" src/tools src/hooks` — every remaining match has a comment justifying it as a documented direct-CLI/test fallback.
 
+**Evidence trust boundary:** Runtime JSON under `.swarm/`, including
+`.swarm/evidence/{taskId}.json`, is durable audit and recovery state for
+cooperative agents running as the same OS user. Evidence writes are atomic and
+path-safe, but workspace files are not tamper-proof authorization records: a
+process with the same user's filesystem access can replace them. Treat gate
+evidence as trustworthy only within that cooperative-agent threat model. Strong
+integrity against a same-user adversarial process would require a protected
+trust root outside the workspace.
+
 **Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The resume skill explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
 
 **Anti-pattern:**

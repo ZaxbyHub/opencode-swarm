@@ -16,7 +16,10 @@ import {
 import type { PluginConfig } from '../config';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
-import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import {
+	isMarkdownOnlyDeclaredScope,
+	isMarkdownOnlyTaskChange,
+} from '../gate-evidence-classification.js';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -1160,16 +1163,38 @@ export function createDelegationGateHook(
 		BackgroundTaskChangeContext
 	>();
 	const coderObservedFilesByCallID = new Map<string, string[] | null>();
+	const clearCoderTaskChangeContext = (callID: string): void => {
+		coderTaskChangeContextByCallID.delete(callID);
+		coderObservedFilesByCallID.delete(callID);
+	};
+	const rememberCoderObservedFiles = (
+		callID: string,
+		observedFiles: string[] | null,
+	): void => {
+		if (
+			!coderObservedFilesByCallID.has(callID) &&
+			coderObservedFilesByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			const oldest = coderObservedFilesByCallID.keys().next().value;
+			if (oldest !== undefined) coderObservedFilesByCallID.delete(oldest);
+		}
+		coderObservedFilesByCallID.set(callID, observedFiles);
+	};
 	const rememberCoderTaskChangeContext = (
 		callID: string,
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
 	): void => {
+		if (!isMarkdownOnlyDeclaredScope(declaredFiles)) {
+			clearCoderTaskChangeContext(callID);
+			return;
+		}
 		if (
+			!coderTaskChangeContextByCallID.has(callID) &&
 			coderTaskChangeContextByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
 		) {
 			const oldest = coderTaskChangeContextByCallID.keys().next().value;
-			if (oldest !== undefined) coderTaskChangeContextByCallID.delete(oldest);
+			if (oldest !== undefined) clearCoderTaskChangeContext(oldest);
 		}
 		coderTaskChangeContextByCallID.set(callID, {
 			declaredFiles,
@@ -1339,9 +1364,9 @@ export function createDelegationGateHook(
 		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
 
 		await assertPlanCriticApprovedForExecution(directory, plan);
-		rememberCoderTaskChangeContext(
-			input.callID,
-			getPlanTaskDeclaredFiles(plan, incomingCoderTaskId),
+		const incomingCoderDeclaredFiles = getPlanTaskDeclaredFiles(
+			plan,
+			incomingCoderTaskId,
 		);
 
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
@@ -1441,8 +1466,14 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (!plan) return;
-		if (!parallelModeActive) return;
+		if (!plan) {
+			clearCoderTaskChangeContext(input.callID);
+			return;
+		}
+		if (!parallelModeActive) {
+			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
+			return;
+		}
 
 		const resolvedTaskId = incomingCoderTaskId;
 		// FR-102: pass declared scope (from pending map populated by FILE: extraction
@@ -1470,9 +1501,13 @@ export function createDelegationGateHook(
 		if (standardDispatch) {
 			rememberCoderTaskChangeContext(
 				input.callID,
-				getPlanTaskDeclaredFiles(plan, incomingCoderTaskId),
+				incomingCoderDeclaredFiles,
 				standardDispatch.handle.worktreePath,
 			);
+		} else {
+			// Isolation may degrade to the project root; capture only after the
+			// provisioning attempt and before the upstream coder begins execution.
+			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
 		}
 	};
 
@@ -1822,7 +1857,7 @@ export function createDelegationGateHook(
 						);
 					}
 				}
-				coderTaskChangeContextByCallID.delete(input.callID);
+				clearCoderTaskChangeContext(input.callID);
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				return;
 			}
@@ -1848,7 +1883,7 @@ export function createDelegationGateHook(
 					input.callID,
 				);
 				if (taskChangeContext) {
-					coderObservedFilesByCallID.set(
+					rememberCoderObservedFiles(
 						input.callID,
 						changedFilesSinceSnapshot(
 							taskChangeContext.baseline.directory,
@@ -2231,8 +2266,7 @@ export function createDelegationGateHook(
 					);
 				} finally {
 					if (stripKnownSwarmPrefix(subagentType) === 'coder') {
-						coderTaskChangeContextByCallID.delete(input.callID);
-						coderObservedFilesByCallID.delete(input.callID);
+						clearCoderTaskChangeContext(input.callID);
 					}
 				}
 			}

@@ -27,6 +27,13 @@ export function isExactMarkdownPath(value: unknown): boolean {
 	return normalized !== null && path.posix.extname(normalized) === '.md';
 }
 
+/** Cheap pre-classification used to avoid Git snapshots for ineligible tasks. */
+export function isMarkdownOnlyDeclaredScope(value: unknown): value is string[] {
+	return (
+		Array.isArray(value) && value.length > 0 && value.every(isExactMarkdownPath)
+	);
+}
+
 /** Require independent non-empty declared and observed exact-.md proof. */
 export function isMarkdownOnlyTaskChange(
 	declaredFiles: unknown,
@@ -34,8 +41,8 @@ export function isMarkdownOnlyTaskChange(
 ): boolean {
 	if (!Array.isArray(declaredFiles) || !Array.isArray(observedFiles))
 		return false;
-	if (declaredFiles.length === 0 || observedFiles.length === 0) return false;
-	if (!declaredFiles.every(isExactMarkdownPath)) return false;
+	if (!isMarkdownOnlyDeclaredScope(declaredFiles) || observedFiles.length === 0)
+		return false;
 	if (!observedFiles.every(isExactMarkdownPath)) return false;
 
 	const declared = new Set(

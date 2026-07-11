@@ -28,4 +28,11 @@ None.
 
 ## Known caveats
 
-None.
+- The workspace snapshot's `dirtyHash` now includes Git's NUL-delimited (`-z`)
+  status encoding. During an upgrade, dirty in-flight background records created
+  by the previous encoding conservatively compare as stale and require the
+  affected Stage B gate to be re-dispatched; clean empty-status hashes are
+  unchanged.
+- `.swarm/evidence/{taskId}.json` is durable audit state for cooperative agents,
+  not tamper-proof authorization against a process with the same user's
+  workspace access.
