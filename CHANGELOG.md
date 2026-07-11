@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.113.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.1...v7.113.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* **gates:** harden skill and evidence workflows ([5004d25](https://github.com/ZaxbyHub/opencode-swarm/commit/5004d25090c9fcbe7cceb481d5097dd890b2fc93))
+
 ## [7.113.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.0...v7.113.1) (2026-07-11)
 
 
