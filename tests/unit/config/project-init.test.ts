@@ -6,6 +6,10 @@ import {
 	writeProjectConfigIfNew,
 	writeSwarmConfigExampleIfNew,
 } from '../../../src/config/project-init';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 describe('writeProjectConfigIfNew', () => {
@@ -21,10 +25,14 @@ describe('writeProjectConfigIfNew', () => {
 		console.warn = (...args: unknown[]) => {
 			warnOutput.push(args.map(String).join(' '));
 		};
+		// Epic #1752 PR2: advisoryWarn writes to the module-level deferred-warning
+		// buffer. Clear it between tests (AGENTS.md Invariant 7).
+		clearDeferredWarnings();
 	});
 
 	afterEach(() => {
 		console.warn = origWarn;
+		clearDeferredWarnings();
 		cleanup();
 	});
 
@@ -179,10 +187,17 @@ describe('writeProjectConfigIfNew', () => {
 		expect(fs.existsSync(configPath(dir))).toBe(false);
 	});
 
-	// 8. Respects quiet flag — no console.warn when quiet=true
-	test('8. suppresses console.warn when quiet=true', () => {
+	// 8. Epic #1752 PR2: advisory now routes through advisoryWarn (buffered for
+	// /swarm diagnose) regardless of quiet. console.warn is never called; the
+	// message reaches the deferred-warning buffer.
+	test('8. routes the created-config advisory to the deferred buffer (quiet=true)', () => {
 		writeProjectConfigIfNew(dir, true);
+		// advisoryWarn never writes raw stderr — the console.warn override stays empty.
 		expect(warnOutput).toHaveLength(0);
+		// The advisory IS buffered so /swarm diagnose can surface it.
+		expect(
+			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
+		).toBe(true);
 	});
 
 	// 9a. Symlink guard: skips creation when .opencode is a symlink
@@ -228,12 +243,15 @@ describe('writeProjectConfigIfNew', () => {
 		).toBe(true);
 	});
 
-	// 9. Emits console.warn when quiet=false (default)
-	test('9. emits console.warn when quiet=false', () => {
+	// 9. Epic #1752 PR2: even with quiet=false the advisory routes through
+	// advisoryWarn (never raw stderr). The message reaches the deferred-warning
+	// buffer so /swarm diagnose can surface it.
+	test('9. routes the created-config advisory to the deferred buffer (quiet=false)', () => {
 		writeProjectConfigIfNew(dir, false);
-		expect(warnOutput.some((m) => m.includes('opencode-swarm.json'))).toBe(
-			true,
-		);
+		expect(warnOutput).toHaveLength(0);
+		expect(
+			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
+		).toBe(true);
 	});
 });
 

@@ -345,12 +345,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 // does not trip excess-property checks against `Hooks`. The wrapper above is
 // typed as `Plugin`, which validates the structural shape at the call site.
 async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
+	// Clear deferred warnings at the very start of the session, BEFORE any
+	// init-path work that buffers advisories via advisoryWarn (config load,
+	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
+	// new session from the PREVIOUS session's buffer; running it after config
+	// load (the historical placement) would wipe the current session's
+	// config-validation warnings before /swarm diagnose can surface them
+	// (epic #1752 PR2 — config-load warnings now route through advisoryWarn,
+	// not raw stderr, so the buffer is the only /swarm diagnose channel).
+	clearDeferredWarnings();
+
 	const { config, loadedFromFile } = await loadPluginConfigWithMetaAsync(
 		ctx.directory,
 	);
-
-	// Clear deferred warnings at session start for per-session isolation
-	clearDeferredWarnings();
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {

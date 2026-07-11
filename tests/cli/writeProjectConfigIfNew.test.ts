@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { writeProjectConfigIfNew } from '../../src/config/project-init';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../src/services/warning-buffer';
 
 describe('writeProjectConfigIfNew', () => {
 	let tmpDir: string;
@@ -11,11 +15,15 @@ describe('writeProjectConfigIfNew', () => {
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-test-'));
 		origWarn = console.warn;
+		// Epic #1752 PR2: advisoryWarn writes to the module-level deferred-warning
+		// buffer. Clear it between tests (AGENTS.md Invariant 7).
+		clearDeferredWarnings();
 	});
 
 	afterEach(() => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 		console.warn = origWarn;
+		clearDeferredWarnings();
 	});
 
 	// 1. .opencode/opencode-swarm.json created in cwd
@@ -55,8 +63,9 @@ describe('writeProjectConfigIfNew', () => {
 		});
 	});
 
-	// 4. Quiet mode suppresses success console.warn
-	test('4. quiet mode suppresses success console.warn', () => {
+	// 4. Epic #1752 PR2: advisory now routes through advisoryWarn (buffered for
+	// /swarm diagnose) regardless of quiet. console.warn is never called.
+	test('4. quiet=true routes advisory to buffer, never raw stderr', () => {
 		let warned = false;
 		console.warn = (..._args: unknown[]) => {
 			warned = true;
@@ -65,10 +74,14 @@ describe('writeProjectConfigIfNew', () => {
 		writeProjectConfigIfNew(tmpDir, true);
 
 		expect(warned).toBe(false);
+		expect(
+			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
+		).toBe(true);
 	});
 
-	// 5. Non-quiet mode emits success console.warn
-	test('5. non-quiet mode emits success console.warn', () => {
+	// 5. Epic #1752 PR2: even with quiet=false the advisory routes through
+	// advisoryWarn (never raw stderr).
+	test('5. quiet=false routes advisory to buffer, never raw stderr', () => {
 		let warned = false;
 		console.warn = (..._args: unknown[]) => {
 			warned = true;
@@ -76,6 +89,9 @@ describe('writeProjectConfigIfNew', () => {
 
 		writeProjectConfigIfNew(tmpDir, false);
 
-		expect(warned).toBe(true);
+		expect(warned).toBe(false);
+		expect(
+			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
+		).toBe(true);
 	});
 });

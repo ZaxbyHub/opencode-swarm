@@ -9,6 +9,10 @@ import {
 	MAX_CONFIG_FILE_BYTES,
 	MAX_MERGE_DEPTH,
 } from '../../../src/config/loader';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 
 describe('config/loader', () => {
 	describe('deepMerge', () => {
@@ -179,9 +183,16 @@ describe('config/loader', () => {
 			// Override XDG_CONFIG_HOME to isolate from real user config
 			originalXDG = process.env.XDG_CONFIG_HOME;
 			process.env.XDG_CONFIG_HOME = tempDir;
+			// The deferred-warning buffer is module-level
+			// (src/services/warning-buffer); clear it between tests so a prior
+			// test's advisoryWarn entry cannot leak into this one (AGENTS.md
+			// Invariant 7 — no cross-test pollution in the shared bun test-runner
+			// process).
+			clearDeferredWarnings();
 		});
 
 		afterEach(() => {
+			clearDeferredWarnings();
 			// Restore original XDG_CONFIG_HOME
 			if (originalXDG === undefined) {
 				delete process.env.XDG_CONFIG_HOME;
@@ -714,6 +725,9 @@ describe('config/loader', () => {
 		});
 
 		it('warns and keeps valid config when one gates subsection is invalid', () => {
+			// Epic #1752 PR2: validation warnings now route through advisoryWarn
+			// (buffered for /swarm diagnose) instead of raw console.warn. Assert
+			// via getDeferredWarnings(); spy stays to prove no raw stderr.
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const userConfigDir = path.join(tempDir, 'opencode');
 			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
@@ -748,9 +762,10 @@ describe('config/loader', () => {
 				).toBe(true);
 				expect(result.gates?.quality_budget.enabled).toBe(true);
 
-				const warnings = warnSpy.mock.calls.flat().join('\n');
+				const warnings = getDeferredWarnings().join('\n');
 				expect(warnings).toContain('gates.placeholder_scan');
 				expect(warnings).toContain('other config sections remain active');
+				expect(warnSpy).not.toHaveBeenCalled();
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });
@@ -784,9 +799,10 @@ describe('config/loader', () => {
 				expect(result.gates?.syntax_check.enabled).toBe(false);
 				expect(result.gates?.quality_budget.enabled).toBe(true);
 
-				const warnings = warnSpy.mock.calls.flat().join('\n');
+				const warnings = getDeferredWarnings().join('\n');
 				expect(warnings).toContain('gates.placeholder_scn');
 				expect(warnings).toContain('Other config sections remain active');
+				expect(warnSpy).not.toHaveBeenCalled();
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });
@@ -823,11 +839,12 @@ describe('config/loader', () => {
 				expect(result.gates?.placeholder_scan.max_allowed_findings).toBe(0);
 				expect(result.gates?.quality_budget.enabled).toBe(true);
 
-				const warnings = warnSpy.mock.calls.flat().join('\n');
+				const warnings = getDeferredWarnings().join('\n');
 				expect(warnings).toContain(
 					'gates.placeholder_scan.max_allowed_finding',
 				);
 				expect(warnings).toContain('Other config sections remain active');
+				expect(warnSpy).not.toHaveBeenCalled();
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });
@@ -858,8 +875,9 @@ describe('config/loader', () => {
 				// gates: null is stripped by sanitizeGatesConfig; gates becomes undefined
 				expect(result.gates).toBeUndefined();
 
-				const warnings = warnSpy.mock.calls.flat().join('\n');
+				const warnings = getDeferredWarnings().join('\n');
 				expect(warnings).toContain('expected an object');
+				expect(warnSpy).not.toHaveBeenCalled();
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });
@@ -890,8 +908,9 @@ describe('config/loader', () => {
 				// gates: [] is stripped by sanitizeGatesConfig; gates becomes undefined
 				expect(result.gates).toBeUndefined();
 
-				const warnings = warnSpy.mock.calls.flat().join('\n');
+				const warnings = getDeferredWarnings().join('\n');
 				expect(warnings).toContain('expected an object');
+				expect(warnSpy).not.toHaveBeenCalled();
 			} finally {
 				warnSpy.mockRestore();
 				fs.rmSync(projectDir, { recursive: true, force: true });

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import { DEFAULT_MODELS } from './constants';
 
 const STARTER_CONTENT = '{}\n';
@@ -14,7 +15,7 @@ const STARTER_CONTENT = '{}\n';
  */
 export function writeProjectConfigIfNew(
 	directory: string,
-	quiet = false,
+	_quiet = false,
 ): void {
 	try {
 		const opencodeDir = path.join(directory, '.opencode');
@@ -55,12 +56,10 @@ export function writeProjectConfigIfNew(
 				encoding: 'utf-8',
 				flag: 'wx',
 			});
-			if (!quiet) {
-				console.warn(
-					'[opencode-swarm] Created .opencode/opencode-swarm.json — ' +
-						'edit it to customize agent LLMs for this project, or commit it to share settings with your team',
-				);
-			}
+			advisoryWarn(
+				'[opencode-swarm] Created .opencode/opencode-swarm.json — ' +
+					'edit it to customize agent LLMs for this project, or commit it to share settings with your team',
+			);
 		} catch (_writeErr) {
 			// EEXIST means the file already exists — skip silently.
 			// All other write errors (EACCES, ENOSPC, etc.) are also non-fatal.
