@@ -1,4 +1,9 @@
-import { recordAgentDispatch, recordGateEvidence } from '../gate-evidence.js';
+import {
+	readTaskEvidence,
+	recordAgentDispatch,
+	recordGateEvidence,
+} from '../gate-evidence.js';
+import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import { collectReviewerReceiptFromTranscript } from '../hooks/review-receipt-collector.js';
 import {
 	type AgentSessionState,
@@ -16,6 +21,7 @@ import type {
 } from './pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
+	changedFilesSinceSnapshot,
 	compareWorkspaceSnapshots,
 } from './workspace-snapshot.js';
 
@@ -73,9 +79,39 @@ export async function ingestBackgroundStageBCompletion(args: {
 	result: BackgroundDelegationResult;
 }): Promise<StageBIngestionResult> {
 	const taskId = args.record.evidenceTaskId ?? args.record.planTaskId;
-	if (!taskId || !isBackgroundGateBearingRecord(args.record)) {
+	if (!taskId) {
 		// The trusted terminal completion is still settled in the durable ledger by
 		// the caller; it simply has no Stage B evidence/state side effects.
+		return { ok: true, consumed: false };
+	}
+
+	if (args.record.normalizedAgent === 'coder') {
+		const taskChangeContext = args.record.taskChangeContext;
+		const observedFiles = taskChangeContext
+			? changedFilesSinceSnapshot(
+					taskChangeContext.baseline.directory,
+					taskChangeContext.baseline,
+				)
+			: null;
+		try {
+			await recordAgentDispatch(args.directory, taskId, 'coder', undefined, {
+				testEngineerExempt: isMarkdownOnlyTaskChange(
+					taskChangeContext?.declaredFiles,
+					observedFiles,
+				),
+			});
+			return { ok: true, consumed: true };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return {
+				ok: false,
+				consumed: false,
+				reason: `background coder evidence ingestion failed: ${message}`,
+			};
+		}
+	}
+
+	if (!isBackgroundGateBearingRecord(args.record)) {
 		return { ok: true, consumed: false };
 	}
 
@@ -91,12 +127,16 @@ export async function ingestBackgroundStageBCompletion(args: {
 	}
 
 	try {
-		await recordAgentDispatch(
-			args.directory,
-			taskId,
-			stageBRequiredGateAgent(args.record.normalizedAgent),
-			hasActiveTurboMode(args.record.parentSessionId),
-		);
+		const existingEvidence = await readTaskEvidence(args.directory, taskId);
+		if (existingEvidence?.test_engineer_exempt !== true) {
+			// Legacy/missing coder provenance fails closed to the full Stage B pair.
+			await recordAgentDispatch(
+				args.directory,
+				taskId,
+				stageBRequiredGateAgent(args.record.normalizedAgent),
+				hasActiveTurboMode(args.record.parentSessionId),
+			);
+		}
 		await recordGateEvidence(
 			args.directory,
 			taskId,
@@ -122,6 +162,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				taskId,
 				args.record.normalizedAgent,
 				args.record.parentSessionId,
+				existingEvidence?.test_engineer_exempt === true,
 			);
 		}
 
@@ -150,13 +191,17 @@ function applyStageBStateCompletion(
 	taskId: string,
 	agent: StageBStateRole,
 	parentSessionId: string,
+	testEngineerExempt: boolean,
 ): void {
 	for (const session of candidateSessions(parentSessionId)) {
 		recordStageBCompletion(session, taskId, agent);
 		const state = getTaskState(session, taskId);
 		if (state === 'tests_run' || state === 'complete') continue;
 
-		if (hasBothStageBCompletions(session, taskId)) {
+		if (
+			hasBothStageBCompletions(session, taskId) ||
+			(testEngineerExempt && agent === 'reviewer')
+		) {
 			try {
 				if (state === 'coder_delegated' || state === 'pre_check_passed') {
 					advanceTaskState(session, taskId, 'reviewer_run', {

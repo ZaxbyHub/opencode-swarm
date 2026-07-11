@@ -149,6 +149,11 @@ A baseline captured post-edit silently encodes the very bugs the scan is meant
 to catch as "pre-existing," suppressing them indefinitely. This turns the SAST
 gate into theater.
 
+Baseline capture also requires at least one supported, existing file to be
+successfully scanned. Omitted, empty, or entirely unscannable `changed_files`
+returns `capture_baseline requires changed_files to produce a non-empty baseline`
+instead of reporting a successful no-op capture.
+
 ### How to use it
 
 1. Identify the files to scan. In a phase, use the union of declared task-scope

@@ -1,0 +1,38 @@
+# Skill infrastructure and QA tool hardening
+
+## What changed
+
+- Reject SAST baseline capture when no supported file was scanned, replacing a
+  successful-looking no-op with an explicit validation failure.
+- Exempt `test_engineer` only when immutable declared scope and observed Git
+  changes independently prove the same non-empty exact `.md`-only boundary.
+- Complete the `test-file-split` and `fork-pr-operations` skill wiring with
+  plugin audience metadata and enforced byte identity across OpenCode, Claude,
+  and Codex skill trees.
+- Document that gate evidence is persisted independently for every task in a
+  set-dispatch.
+
+## Why
+
+Issue #1764 identified a false-success SAST baseline response, unnecessary test
+delegations for proven documentation-only work, and incomplete cross-runtime
+skill contracts after the post-mortem skill additions.
+
+## Migration
+
+No migration is required.
+
+## Breaking changes
+
+None.
+
+## Known caveats
+
+- The workspace snapshot's `dirtyHash` now includes Git's NUL-delimited (`-z`)
+  status encoding. During an upgrade, dirty in-flight background records created
+  by the previous encoding conservatively compare as stale and require the
+  affected Stage B gate to be re-dispatched; clean empty-status hashes are
+  unchanged.
+- `.swarm/evidence/{taskId}.json` is durable audit state for cooperative agents,
+  not tamper-proof authorization against a process with the same user's
+  workspace access.

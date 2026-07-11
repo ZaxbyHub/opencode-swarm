@@ -253,6 +253,25 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 					message: `skill "${slug}" mirror drifted: ${opencodePath} and ${claudePath} must be byte-identical (canonical: ${contract.canonical ?? '.claude'})`,
 				});
 			}
+			for (const extraPath of contract.extraIdenticalPaths ?? []) {
+				if (!fileExists(extraPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: extraPath,
+						message: `skill "${slug}" missing extra identical mirror ${extraPath}`,
+					});
+					continue;
+				}
+				if (readFile(opencodePath) !== readFile(extraPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: extraPath,
+						message: `skill "${slug}" extra mirror drifted: ${opencodePath} and ${extraPath} must be byte-identical (canonical: ${contract.canonical ?? '.claude'})`,
+					});
+				}
+			}
 		} else if (kind === 'divergent') {
 			for (const p of [opencodePath, claudePath]) {
 				if (!fileExists(p)) {

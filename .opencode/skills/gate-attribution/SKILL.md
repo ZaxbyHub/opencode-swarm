@@ -35,6 +35,8 @@ no reviewed rows are parseable, attribution falls back to the single-task rule.
 4. **Collect + attribute:** Single-task lanes auto-attribute to their taskId; set-dispatch rows auto-attribute per parsed row.
 5. **Do NOT rely on prose summaries:** A batched dispatch without parseable rows is ambiguous and does not count per-task.
 
+Gate evidence is persisted independently as `.swarm/evidence/{taskId}.json` for each task. Passing set-dispatch rows cause the hook to write one task-scoped file per task; a single multi-task evidence file cannot satisfy any task.
+
 ## Optimization for trivial tasks
 For pure ceremony gates (1-line doc fix):
 ```
