@@ -8,12 +8,8 @@
 #
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
-
-# FR-003 oversight retry tests (full-auto-intercept.dispatch.test.ts)
-src/full-auto/state
-src/full-auto/oversight
 #
-# Last updated: 2026-07-05 (normalization in scripts/lib/normalize-mock-target.sh)
+# Last updated: 2026-07-11 (normalization in scripts/lib/normalize-mock-target.sh)
 
 # --- Node builtins ---
 node:child_process
@@ -64,6 +60,8 @@ src/config/schema.ts
 src/db/qa-gate-profile
 src/evidence/manager
 src/evidence/task-file
+src/full-auto/oversight
+src/full-auto/state
 src/git/branch
 src/git/pr
 src/hooks/curator
@@ -106,7 +104,6 @@ src/sast/semgrep
 src/sdd/effective-spec
 src/services/evidence-summary-service
 src/services/handoff-service
-src/services/preflight-service
 src/services/run-memory
 src/services/skill-generator
 src/services/skill-improver

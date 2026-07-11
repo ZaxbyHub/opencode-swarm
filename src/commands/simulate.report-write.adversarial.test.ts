@@ -64,6 +64,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw circularObj;
 			}),
@@ -108,6 +109,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw null;
 			}),
@@ -153,6 +155,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw undefined;
 			}),
@@ -205,6 +208,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw badToStringObj;
 			}),
@@ -265,6 +269,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw Object.assign(new Error('EACCES: permission denied'), {
 					code: 'EACCES',
@@ -314,6 +319,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw Object.assign(new Error('ENOENT: no such file or directory'), {
 					code: 'ENOENT',
@@ -383,6 +389,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw Object.assign(new Error('ENOSPC: no space left on device'), {
 					code: 'ENOSPC',
@@ -433,6 +440,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw 42;
 			}),
@@ -479,6 +487,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw sym;
 			}),
@@ -533,6 +542,7 @@ describe('simulate command report write adversarial', () => {
 
 		await mock.module('node:fs/promises', () => ({
 			...fs,
+			mkdir: mock(async () => undefined),
 			writeFile: mock(async () => {
 				throw thenableNonError;
 			}),
