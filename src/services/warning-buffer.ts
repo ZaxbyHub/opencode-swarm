@@ -10,10 +10,25 @@ import { log } from '../utils/logger.js';
 
 const deferredWarnings: string[] = [];
 const MAX_DEFERRED_WARNINGS = 50;
+// Set once the cap is reached so a single trailing sentinel can be appended
+// by addDeferredWarning. Prevents silent truncation from hiding actionable
+// advisories (epic #1752 PR2 review F-003).
+let deferredWarningsTruncated = false;
 
 export function addDeferredWarning(warning: string): void {
-	if (deferredWarnings.length < MAX_DEFERRED_WARNINGS) {
+	if (deferredWarnings.length < MAX_DEFERRED_WARNINGS - 1) {
 		deferredWarnings.push(warning);
+		return;
+	}
+	// Reserve the last slot for a truncation sentinel so /swarm diagnose can
+	// tell the operator that further advisories were dropped, rather than
+	// silently losing them. SECURITY/fallback messages emitted after the cap
+	// is hit would otherwise vanish without trace.
+	if (!deferredWarningsTruncated) {
+		deferredWarnings.push(
+			`[opencode-swarm] ${MAX_DEFERRED_WARNINGS - 1} deferred warnings buffered; additional advisories were dropped (cap reached). Run with OPENCODE_SWARM_DEBUG=1 to see all advisories in the debug log.`,
+		);
+		deferredWarningsTruncated = true;
 	}
 }
 
@@ -67,4 +82,5 @@ export function getDeferredWarnings(): readonly string[] {
  */
 export function clearDeferredWarnings(): void {
 	deferredWarnings.length = 0;
+	deferredWarningsTruncated = false;
 }

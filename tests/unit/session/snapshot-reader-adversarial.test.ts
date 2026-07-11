@@ -4,7 +4,7 @@
  * Focus: Path traversal, malicious JSON, prototype pollution, edge cases.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -230,6 +230,44 @@ describe('snapshot-reader ADVERSARIAL tests', () => {
 			await expect(rehydrateState(snapshot)).resolves.toBeUndefined();
 			// The null session should NOT appear in agentSessions
 			expect(swarmState.agentSessions.has('session1')).toBe(false);
+		});
+
+		it('routes the malformed-session skip to the debug-gated logger (epic #1752 PR2)', async () => {
+			// A non-null object missing required fields hits the `log()` skip
+			// path (snapshot-reader.ts:319), not the null guard. The skip must
+			// route through the debug-gated `log()` — NEVER raw console.warn —
+			// so 50 malformed sessions cannot flood /swarm diagnose or corrupt
+			// the TUI (issue #1249 class). Under OPENCODE_SWARM_DEBUG=1 the
+			// skip is observable via console.log; otherwise it is silent.
+			const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+			process.env.OPENCODE_SWARM_DEBUG = '1';
+			const logSpy = spyOn(console, 'log').mockImplementation(() => undefined);
+			try {
+				const snapshot: SnapshotData = {
+					version: 1,
+					writtenAt: Date.now(),
+					toolAggregates: {},
+					activeAgent: {},
+					delegationChains: {},
+					agentSessions: {
+						badSession: { agentName: 'orphan' } as any, // missing lastToolCallTime + delegationActive
+					},
+				};
+
+				await expect(rehydrateState(snapshot)).resolves.toBeUndefined();
+				expect(swarmState.agentSessions.has('badSession')).toBe(false);
+				// The skip was logged (debug-gated), referencing the session id.
+				expect(
+					logSpy.mock.calls.some((c) =>
+						String(c[0]).includes('Skipping malformed session badSession'),
+					),
+				).toBe(true);
+			} finally {
+				logSpy.mockRestore();
+				if (originalDebug === undefined)
+					delete process.env.OPENCODE_SWARM_DEBUG;
+				else process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
 		});
 
 		it('should filter out NaN keys in reviewerCallCount', async () => {
