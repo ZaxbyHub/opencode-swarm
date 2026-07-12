@@ -1,4 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+// Spread the real engine exports so named imports the tool relies on
+// (validateTestCommand, etc.) survive the mock — only executeMutationSuite
+// is overridden. See AGENTS.md invariant 7 (spread-real-exports).
+import * as realEngine from '../../mutation/engine.js';
 
 // Mock functions defined at module level - will be used in mock.module calls
 const mockExecuteMutationSuiteFn = mock(async () => ({
@@ -37,9 +44,8 @@ describe('mutation_test tool', () => {
 	beforeEach(() => {
 		// Mock engine and gate modules - these are the actual dependencies we need to control
 		mock.module('../../mutation/engine.js', () => ({
+			...realEngine,
 			executeMutationSuite: mockExecuteMutationSuiteFn,
-			MutationReport: {},
-			MutationPatch: {},
 		}));
 
 		mock.module('../../mutation/gate.js', () => ({
@@ -253,20 +259,34 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			await execute(
-				{ ...validArgs, working_directory: '/custom/path' },
-				'/test',
-			);
 
-			expect(mockExecuteMutationSuiteFn).toHaveBeenCalledWith(
-				validArgs.patches,
-				validArgs.test_command,
-				validArgs.files,
-				'/custom/path',
-				undefined,
-				undefined,
-				undefined,
+			// working_directory is existence-validated by resolveWorkingDirectory
+			// (invariant 4). Use a real directory so the override is exercised;
+			// the tool resolves it via path.resolve(path.normalize(...)).
+			const overrideDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), 'mutation-wd-'),
 			);
+			try {
+				await execute(
+					{ ...validArgs, working_directory: overrideDir },
+					'/test',
+				);
+
+				// Resolved override dir is passed as the 4th arg (cwd), taking
+				// precedence over the injected directory '/test'. No source files
+				// exist under it, so sourceFiles is undefined (7th arg).
+				expect(mockExecuteMutationSuiteFn).toHaveBeenCalledWith(
+					validArgs.patches,
+					validArgs.test_command,
+					validArgs.files,
+					path.resolve(overrideDir),
+					undefined,
+					undefined,
+					undefined,
+				);
+			} finally {
+				fs.rmSync(overrideDir, { recursive: true, force: true });
+			}
 		});
 	});
 

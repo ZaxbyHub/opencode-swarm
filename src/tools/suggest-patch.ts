@@ -7,6 +7,7 @@ import { z } from 'zod';
 import {
 	containsControlChars,
 	containsPathTraversal,
+	isCanonicalPathWithinRoot,
 } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 
@@ -86,6 +87,14 @@ const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|:|$)/i;
  * Check for Windows-specific path attacks.
  */
 function containsWindowsAttacks(str: string): boolean {
+	// Windows drive-letter absolute path (e.g. C:\Windows, C:/Windows). Rejected
+	// on ALL platforms so a Linux/macOS CI host still validates Windows-targeted
+	// attack strings — mirrors the canonical `/^[A-Za-z]:[/\\]/` guard in
+	// utils/path-security.ts (validateDirectory / validateTargetWithinRoot).
+	// Without this, `C:\...` / `C:/...` slip past the `:[^\\/]` check below
+	// (the colon is followed by a separator, not a non-separator char) and fall
+	// through to a misleading file-not-found instead of a path rejection.
+	if (/^[A-Za-z]:[/\\]/.test(str)) return true;
 	if (/:[^\\/]/.test(str)) return true;
 	const parts = str.split(/[/\\]/);
 	for (const part of parts) {
@@ -100,17 +109,18 @@ function containsWindowsAttacks(str: string): boolean {
 function isPathInWorkspace(filePath: string, workspace: string): boolean {
 	try {
 		const resolvedPath = path.resolve(workspace, filePath);
-		// If the file doesn't exist, return true — let the caller handle missing files
-		if (!fs.existsSync(resolvedPath)) {
-			return true;
-		}
-		const realWorkspace = fs.realpathSync(workspace);
-		const realResolvedPath = fs.realpathSync(resolvedPath);
-		const relativePath = path.relative(realWorkspace, realResolvedPath);
-		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-			return false;
-		}
-		return true;
+		// A not-yet-existing target (e.g. a new file to create) used to
+		// short-circuit to `true` unconditionally here — but an absolute
+		// out-of-workspace path (e.g. `/etc/passwd`, which resolves
+		// drive-relative to something like `D:\etc\passwd` on Windows) whose
+		// target happens not to exist would then bypass containment entirely,
+		// only surfacing later as a misleading "file not found" instead of a
+		// path rejection. `isCanonicalPathWithinRoot` handles both the
+		// existing- and non-existing-target cases correctly by walking up to
+		// the nearest existing ancestor before resolving symlinks, so delegate
+		// to the same canonical primitive `extract_code_blocks` uses (#1778 C1)
+		// instead of hand-rolling a parallel check here.
+		return isCanonicalPathWithinRoot(resolvedPath, workspace);
 	} catch {
 		return false;
 	}

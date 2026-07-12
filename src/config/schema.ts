@@ -1836,10 +1836,11 @@ export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;
 // src/agents/index.ts surfaces a deferred deprecation warning when the
 // moderator fields are set.
 //
-// IMPORTANT: this schema is `.strict()`. A typo in any nested key will fail
-// validation and the loader (config/loader.ts:186-207) will fall back to
-// guardrail-only defaults — silently losing the user's council config. Keep
-// the field set in sync with `GeneralCouncilConfig` in
+// NOTE: this schema is `.strict()`. An unrecognized nested key is caught by the
+// loader's targeted section recovery (issue #1778 H6): the offending key is
+// dropped with a named warning and the rest of the user's config is preserved
+// (it no longer wipes the whole config). config-doctor also surfaces such keys.
+// Keep the field set in sync with `GeneralCouncilConfig` in
 // src/council/general-council-types.ts.
 const GeneralCouncilMemberConfigSchema = z
 	.object({

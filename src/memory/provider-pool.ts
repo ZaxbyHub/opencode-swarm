@@ -38,6 +38,19 @@ const entriesByKey = new Map<string, PoolEntry>();
 const deferredEntries = new Set<PoolEntry>();
 
 /**
+ * Memoizes the last successful `realpathSync` resolution per raw (syntactic)
+ * `path.resolve(directory)` input, so a directory that is later removed still
+ * maps to the same pool key it had while it existed. Without this, a caller
+ * that acquires a provider, the directory is deleted out from under it, then
+ * re-acquires with the identical directory string would get a DIFFERENT key
+ * (`resolvePoolKey`'s fallback is purely syntactic) whenever the raw and
+ * canonical forms differ — e.g. on macOS, where `os.tmpdir()` sits under a
+ * symlink prefix (`/var` -> `/private/var`). Bounded by the same MAX_POOL_SIZE
+ * cap as `entriesByKey` (see `resolvePoolKey`) and cleared by `clearPool`.
+ */
+const resolvedKeyCache = new Map<string, string>();
+
+/**
  * Tag a provider as pool-managed. The pool replaces the provider's `close()`
  * with a function that calls `releaseProvider(provider)`. This makes `close()`
  * itself the release mechanism:
@@ -279,13 +292,26 @@ function unlinkEntry(entry: PoolEntry): void {
  *
  * Prefers `realpathSync` (resolves symlinks, normalises casing on Windows).
  * Falls back to `path.resolve` when realpath fails so the pool remains usable
- * even for paths that cannot be stat'd.
+ * even for paths that cannot be stat'd. When falling back, reuses this exact
+ * raw path's last successful realpath resolution (if any) so the SAME
+ * directory string always maps to the SAME key, even after the directory is
+ * removed — see `resolvedKeyCache`'s docstring.
  */
 function resolvePoolKey(directory: string): string {
+	const rawKey = path.resolve(directory);
 	try {
-		return realpathSync(directory);
+		const canonical = realpathSync(directory);
+		// Refresh recency (Map preserves insertion order) so eviction below
+		// drops the least-recently-resolved raw path, not an arbitrary one.
+		resolvedKeyCache.delete(rawKey);
+		resolvedKeyCache.set(rawKey, canonical);
+		if (resolvedKeyCache.size > MAX_POOL_SIZE) {
+			const oldest = resolvedKeyCache.keys().next().value;
+			if (oldest !== undefined) resolvedKeyCache.delete(oldest);
+		}
+		return canonical;
 	} catch {
-		return path.resolve(directory);
+		return resolvedKeyCache.get(rawKey) ?? rawKey;
 	}
 }
 
@@ -314,6 +340,7 @@ export function clearPool(): void {
 	}
 	deferredEntries.clear();
 	entriesByKey.clear();
+	resolvedKeyCache.clear();
 	head = null;
 	tail = null;
 }

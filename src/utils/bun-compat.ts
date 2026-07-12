@@ -562,8 +562,18 @@ export function bunSpawn(
 		// callers do not have to know which runtime they're on. Bun exposes
 		// `stdout`/`stderr` as `ReadableStream`; we wrap them.
 		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
-		const spawnOpts =
-			mergedEnv !== undefined ? { ...options, env: mergedEnv } : options;
+		// Always build a fresh options object so we never mutate the caller's.
+		const spawnOpts: Record<string, unknown> = { ...options };
+		if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
+		// Security (SC-003.4): a child that traps SIGTERM must still be killed
+		// when the timeout fires. Bun's default kill signal on timeout is
+		// SIGTERM, which the child can ignore — leaving `proc.exited` pending
+		// forever (a timeout bypass). Force SIGKILL: the deadline has already
+		// passed, so a graceful signal is no longer owed. This mirrors the Node
+		// fallback path below, which already escalates to SIGKILL on timeout.
+		if (options?.timeout && options.timeout > 0) {
+			spawnOpts.killSignal = 'SIGKILL';
+		}
 		const proc = bun.spawn(cmd, spawnOpts) as {
 			stdout?: unknown;
 			stderr?: unknown;

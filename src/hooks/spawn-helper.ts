@@ -4,6 +4,16 @@ import * as child_process from 'node:child_process';
 // Only exact matches are extended — user-configured or other commands are left unchanged.
 const WIN32_CMD_BINARIES = new Set(['npm', 'npx', 'pnpm', 'yarn']);
 
+/**
+ * DI seam (AGENTS.md invariant #7 — prefer `_internals` over `mock.module`).
+ * Tests inject a spawn spy here to assert the win32 `.cmd` transformation of
+ * the resolved command name without depending on `npm.cmd` actually existing
+ * on the (POSIX) test runner. Restore in `afterEach`.
+ */
+export const _internals = {
+	spawn: child_process.spawn,
+};
+
 export function spawnAsync(
 	command: string[],
 	cwd: string,
@@ -18,7 +28,7 @@ export function spawnAsync(
 				!rawCmd.includes('.')
 					? `${rawCmd}.cmd`
 					: rawCmd;
-			const proc = child_process.spawn(cmd, args, {
+			const proc = _internals.spawn(cmd, args, {
 				cwd,
 				stdio: ['ignore', 'pipe', 'pipe'],
 			});

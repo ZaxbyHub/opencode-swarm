@@ -193,8 +193,18 @@ describe('SummaryConfigSchema - Adversarial Tests', () => {
 			const default2 = result2.success ? result2.data.exempt_tools : [];
 
 			// Both defaults should be correct
-			expect(default1).toEqual(['retrieve_summary', 'task', 'read']);
-			expect(default2).toEqual(['retrieve_summary', 'task', 'read']);
+			expect(default1).toEqual([
+				'retrieve_summary',
+				'retrieve_lane_output',
+				'task',
+				'read',
+			]);
+			expect(default2).toEqual([
+				'retrieve_summary',
+				'retrieve_lane_output',
+				'task',
+				'read',
+			]);
 			// SECURITY: Zod creates new instances, not shared references
 			expect(default1).not.toBe(default2);
 		});
@@ -212,6 +222,7 @@ describe('SummaryConfigSchema - Adversarial Tests', () => {
 				expect(result2.success).toBe(true);
 				expect(result2.data?.exempt_tools).toEqual([
 					'retrieve_summary',
+					'retrieve_lane_output',
 					'task',
 					'read',
 				]);

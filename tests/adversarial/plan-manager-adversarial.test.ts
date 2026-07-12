@@ -661,6 +661,12 @@ describe('ADVERSARIAL: Failure injection around auto-heal', () => {
 		} catch (error) {
 			// If chmod fails, test is inconclusive but not failed
 			expect(true).toBe(true);
+		} finally {
+			// Restore writable permissions before the shared afterEach's
+			// rm(tempDir, {recursive:true}) runs — on a non-root CI runner a
+			// 0o444 directory left behind causes an unrelated EACCES on cleanup
+			// that bun attributes to THIS test (issue #1778 H4 red-fix).
+			await chmod(swarmDir, 0o755).catch(() => {});
 		}
 	});
 
@@ -681,6 +687,9 @@ describe('ADVERSARIAL: Failure injection around auto-heal', () => {
 		} catch (error) {
 			// On Unix-like systems, this should throw
 			expect(error).toBeDefined();
+		} finally {
+			// Same EACCES-on-cleanup hazard as the sibling test above.
+			await chmod(readOnlyDir, 0o755).catch(() => {});
 		}
 	});
 

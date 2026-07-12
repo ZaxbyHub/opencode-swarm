@@ -6,17 +6,27 @@ import { resolveWorkingDirectory } from './resolve-working-directory';
 
 let tmpDir: string;
 let subDir: string;
+let otherDir: string;
 
 beforeEach(() => {
 	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'rwd-anchor-test-'));
 	const { mkdirSync } = require('node:fs');
 	subDir = path.join(tmpDir, 'src');
 	mkdirSync(subDir, { recursive: true });
+	// A second, sibling temp directory — exists and is absolute on every
+	// platform (unlike a hardcoded '/tmp', which doesn't resolve on Windows),
+	// and guaranteed not to be a subdirectory of tmpDir.
+	otherDir = mkdtempSync(path.join(os.tmpdir(), 'rwd-other-'));
 });
 
 afterEach(() => {
 	try {
 		rmSync(tmpDir, { recursive: true, force: true });
+	} catch {
+		/* best effort */
+	}
+	try {
+		rmSync(otherDir, { recursive: true, force: true });
 	} catch {
 		/* best effort */
 	}
@@ -32,11 +42,11 @@ describe('resolveWorkingDirectory project root anchor (issue #577 regression)', 
 	});
 
 	it('accepts working_directory pointing to a different absolute path that is not a subdirectory', () => {
-		const result = resolveWorkingDirectory('/tmp', tmpDir);
-		// /tmp is a valid directory and is not a subdirectory of the project root, so it should be accepted
+		const result = resolveWorkingDirectory(otherDir, tmpDir);
+		// otherDir is a valid directory and is not a subdirectory of the project root, so it should be accepted
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.directory).toBe(path.resolve('/tmp'));
+			expect(result.directory).toBe(path.resolve(otherDir));
 		}
 	});
 

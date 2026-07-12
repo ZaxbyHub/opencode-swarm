@@ -81,23 +81,36 @@ describe('Task 1.3: clashesWithNativeCcCommand field', () => {
 	describe('3. buildHelpText() outputs conflict warnings for CRITICAL commands', () => {
 		const helpText = buildHelpText();
 
+		// The disambiguation target is the command the user should actually run.
+		// For deprecated aliases this is the canonical replacement, not the alias
+		// itself — e.g. `plan` is a deprecated alias of `show-plan`, so its clash
+		// warning points to `/swarm show-plan`. Non-deprecated commands point to
+		// themselves.
+		const DISAMBIGUATION_TARGET: Record<string, string> = {
+			plan: 'show-plan',
+			reset: 'reset',
+			checkpoint: 'checkpoint',
+		};
+
 		for (const cmd of ['plan', 'reset', 'checkpoint']) {
 			const ccCommand = EXPECTED_CONFLICTS[cmd];
+			const target = DISAMBIGUATION_TARGET[cmd];
 			test(`'${cmd}' warning appears in help text with correct CC command`, () => {
-				const warningPattern = `⚠️ Name conflicts with CC built-in \`${ccCommand}\` — always use \`/swarm ${cmd}\``;
+				const warningPattern = `⚠️ Name conflicts with CC built-in \`${ccCommand}\` — always use \`/swarm ${target}\``;
 				expect(helpText).toContain(warningPattern);
 			});
 		}
 
-		// Also verify the warning format is correct (should contain "always use /swarm {cmd}")
+		// Also verify the warning format is correct (should contain "always use /swarm {target}")
 		test('all CRITICAL warnings contain "always use /swarm" instruction', () => {
 			for (const cmd of ['plan', 'reset', 'checkpoint']) {
 				const ccCommand = EXPECTED_CONFLICTS[cmd];
+				const target = DISAMBIGUATION_TARGET[cmd];
 				const lines = helpText.split('\n');
 				const foundWarning = lines.some(
 					(line) =>
 						line.includes(`\`${ccCommand}\``) &&
-						line.includes(`always use \`/swarm ${cmd}\``),
+						line.includes(`always use \`/swarm ${target}\``),
 				);
 				expect(
 					foundWarning,

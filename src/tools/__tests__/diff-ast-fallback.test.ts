@@ -16,7 +16,9 @@ mock.module('node:child_process', () => ({
 	execFileSync: mockExecFileSync,
 }));
 
+const realFs = await import('node:fs');
 mock.module('node:fs', () => ({
+	...realFs,
 	readFileSync: mockReadFileSync,
 }));
 

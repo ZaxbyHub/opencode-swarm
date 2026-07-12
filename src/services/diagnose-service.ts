@@ -836,10 +836,31 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 		const hasExecutor = executor !== null;
 
 		if (hasExecutor) {
+			// An available executor is NOT automatically strong. The Windows
+			// PowerShell fallback (and any future advisory mechanism) only scrubs
+			// the environment — it is not kernel-enforced. Never report advisory
+			// containment as green (issue #1778 H2). Prefer the executor's own
+			// strength when it exposes one, else the probe's.
+			const executorStrength = (
+				executor as { strength?: 'strong' | 'weak' | 'advisory' } | null
+			)?.strength;
+			const strength =
+				executorStrength === 'weak' || executorStrength === 'advisory'
+					? 'advisory'
+					: (capability.strength ?? executorStrength ?? 'strong');
+
+			if (strength === 'advisory') {
+				return {
+					name: 'Sandbox',
+					status: '⚠️',
+					detail: `Mechanism: ${mechanism.toLowerCase()} | Available: advisory only | Strength: ADVISORY (env-scrub, NOT kernel-enforced) | Commands are NOT strongly sandboxed`,
+				};
+			}
+
 			return {
 				name: 'Sandbox',
 				status: '✅',
-				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: yes | Sandboxing commands: yes`,
+				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: yes | Strength: strong (kernel-enforced) | Sandboxing commands: yes`,
 			};
 		}
 

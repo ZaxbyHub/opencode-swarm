@@ -4,6 +4,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { handleFullAutoCommand } from '../commands/full-auto';
 import * as commandsIndex from '../commands/index';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from '../commands/registry';
@@ -37,7 +40,7 @@ describe('Full-Auto Command Registration', () => {
 
 	describe('Help Text Verification', () => {
 		it('HELP_TEXT should contain full-auto command documentation', async () => {
-			const handler = commandsIndex.createSwarmCommandHandler('/tmp', {});
+			const handler = commandsIndex.createSwarmCommandHandler(os.tmpdir(), {});
 			const output = { parts: [] as unknown[] };
 
 			await handler(
@@ -52,7 +55,7 @@ describe('Full-Auto Command Registration', () => {
 		});
 
 		it('HELP_TEXT should document toggle behavior', async () => {
-			const handler = commandsIndex.createSwarmCommandHandler('/tmp', {});
+			const handler = commandsIndex.createSwarmCommandHandler(os.tmpdir(), {});
 			const output = { parts: [] as unknown[] };
 
 			await handler(
@@ -68,8 +71,16 @@ describe('Full-Auto Command Registration', () => {
 
 	describe('Switch Case Routing', () => {
 		let testSessionId: string;
+		let projectDir: string;
 
 		beforeEach(() => {
+			// '/test-project' is a fictional filesystem-root path: full-auto
+			// activation durably writes .swarm/full-auto-state.json, and mkdir at
+			// the root requires privileges a non-root CI runner does not have
+			// (issue #1778 H4 red-fix — this file was never run in CI before).
+			projectDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), 'full-auto-reg-test-'),
+			);
 			testSessionId = `full-auto-reg-test-${Date.now()}`;
 			// Enable config-level full-auto so command activation succeeds
 			swarmState.fullAutoEnabledInConfig = true;
@@ -123,13 +134,11 @@ describe('Full-Auto Command Registration', () => {
 
 		afterEach(() => {
 			swarmState.agentSessions.delete(testSessionId);
+			fs.rmSync(projectDir, { recursive: true, force: true });
 		});
 
 		it('should route "full-auto on" subcommand to handleFullAutoCommand', async () => {
-			const handler = commandsIndex.createSwarmCommandHandler(
-				'/test-project',
-				{},
-			);
+			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
 			await handler(
@@ -152,10 +161,7 @@ describe('Full-Auto Command Registration', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			const handler = commandsIndex.createSwarmCommandHandler(
-				'/test-project',
-				{},
-			);
+			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
 			await handler(
@@ -174,10 +180,7 @@ describe('Full-Auto Command Registration', () => {
 		});
 
 		it('should route "full-auto" (no args) to toggle', async () => {
-			const handler = commandsIndex.createSwarmCommandHandler(
-				'/test-project',
-				{},
-			);
+			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
 			// Initial fullAutoMode is false, so toggle should enable it
@@ -197,10 +200,7 @@ describe('Full-Auto Command Registration', () => {
 		});
 
 		it('should return error when no active session', async () => {
-			const handler = commandsIndex.createSwarmCommandHandler(
-				'/test-project',
-				{},
-			);
+			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
 			await handler(

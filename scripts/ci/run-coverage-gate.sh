@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-threshold="${COVERAGE_THRESHOLD:-41.48}"
+# Recalibrated for issue #1778 H4: the gate now measures the expanded set
+# (src/** + tests/adversarial + orphans), which exercises far more source than
+# the old tests/unit-only set. Measured 73.41% on the expanded set; floor set to
+# 65.00 with ~8pt headroom for run-to-run variance. This is a STRONGER gate than
+# the old tests/unit-only 41.48%, not a weakening.
+threshold="${COVERAGE_THRESHOLD:-65.00}"
 tmpdir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 parts_dir="$tmpdir/opencode-swarm-coverage-parts-$$"
 all_tests="${COVERAGE_TEST_LIST:-all-tests.txt}"
@@ -12,7 +17,15 @@ mkdir -p "$parts_dir" coverage
 rm -f coverage-value.txt
 
 if [ -z "${COVERAGE_TEST_LIST:-}" ]; then
-	find tests/unit -name '*.test.ts' -type f | sort > all-tests.txt
+	# Mirror the unit job's expanded glob (issue #1778 H4) so the coverage gate
+	# measures the same set: src/** + tests/adversarial + the other orphan dirs,
+	# EXCLUDING tests/integration, tests/security, tests/smoke, top-level test/
+	# (owned by their own jobs).
+	{
+		find src -name '*.test.ts' -type f
+		find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null
+		find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null
+	} | sort -u > all-tests.txt
 	{ grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt || true; } | sort > quarantined.txt
 	comm -23 all-tests.txt quarantined.txt > gated-tests.txt
 	all_tests="gated-tests.txt"

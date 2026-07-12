@@ -17,10 +17,25 @@ import * as os from 'node:os';
 /** Possible sandbox status values. */
 export type SandboxStatus = 'enabled' | 'disabled' | 'unsupported';
 
+/**
+ * Enforcement strength of an available sandbox mechanism.
+ * - `strong`: real kernel-level enforcement (bubblewrap, sandbox-exec, the
+ *   Windows native runner).
+ * - `advisory`: best-effort, non-kernel restriction (the Windows PowerShell
+ *   environment-scrub fallback). Must NEVER be reported as real containment
+ *   (issue #1778 H2).
+ */
+export type SandboxStrength = 'strong' | 'advisory';
+
 /** Result of a sandbox capability probe. */
 export interface SandboxCapability {
 	/** Whether the sandbox mechanism is available. */
 	status: SandboxStatus;
+	/**
+	 * Enforcement strength when `status === 'enabled'`. Absent for
+	 * disabled/unsupported results.
+	 */
+	strength?: SandboxStrength;
 	/** Human-readable mechanism name, e.g. "Bubblewrap". */
 	mechanism: string;
 	/** Current process.platform value. */
@@ -101,6 +116,7 @@ async function probeLinux(): Promise<SandboxCapability> {
 		if (output.length > 0) {
 			return {
 				status: 'enabled',
+				strength: 'strong',
 				mechanism: 'Bubblewrap',
 				platform: 'linux',
 			};
@@ -140,6 +156,7 @@ async function probeMacOS(): Promise<SandboxCapability> {
 		if (output.length > 0) {
 			return {
 				status: 'enabled',
+				strength: 'strong',
 				mechanism: 'sandbox-exec',
 				platform: 'darwin',
 			};
@@ -179,6 +196,7 @@ function probeWindows(): SandboxCapability {
 		if (result.available) {
 			return {
 				status: 'enabled',
+				strength: 'strong',
 				platform: 'win32',
 				mechanism: `native-runner/${result.mode}`,
 			};
@@ -207,6 +225,10 @@ function probeWindows(): SandboxCapability {
 		return result.status === 0
 			? {
 					status: 'enabled',
+					// The native runner was absent (we fell through to here), so this
+					// is the env-scrub PowerShell wrapper — advisory, NOT kernel
+					// enforcement. Never surface it as real containment (#1778 H2).
+					strength: 'advisory',
 					platform: 'win32',
 					mechanism: 'PowerShell wrapper',
 				}

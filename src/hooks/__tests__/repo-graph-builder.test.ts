@@ -10,11 +10,28 @@
  *   - the homedir-refusal guard surfaces as a clean catch in `init()`.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import * as os from 'node:os';
 import { createRepoGraphBuilderHook } from '../repo-graph-builder';
 
 describe('createRepoGraphBuilderHook — issue #704 contract', () => {
+	// bun test's per-test --timeout cannot fire when the event loop goes
+	// idle (oven-sh/bun#32056 — CI already applies a global preload
+	// workaround for this, see scripts/ci/bun-32056-keepalive.ts). This
+	// file's first test races a real `queueMicrotask` callback against an
+	// unref'd `setTimeout(resolve, 0)` inside `doInit()` (see
+	// `yieldToEventLoop` in ../repo-graph-builder.ts) — the exact
+	// idle-loop shape the upstream bug targets. A local, ref'd keepalive
+	// is cheap insurance in case the global preload's timing doesn't
+	// cover this specific race on every platform.
+	let keepalive: ReturnType<typeof setInterval>;
+	beforeAll(() => {
+		keepalive = setInterval(() => {}, 50);
+	});
+	afterAll(() => {
+		clearInterval(keepalive);
+	});
+
 	test('init() returns to caller before scan work runs', async () => {
 		const events: string[] = [];
 		const hook = createRepoGraphBuilderHook('/nonexistent-workspace-704', {

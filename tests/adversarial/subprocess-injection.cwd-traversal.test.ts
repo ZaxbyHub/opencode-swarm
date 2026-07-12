@@ -103,8 +103,11 @@ console.log('arg:' + (args[0] || ''));`,
 		// Even if a tool traverses through symlinks, cwd should stay bounded
 		const result = await runNodeScript(script, [], { cwd: innerDir });
 
-		// process.cwd() should show the inner directory, not resolved symlink target
-		expect(result.stdout.trim()).toBe(`cwd:${innerDir}`);
+		// process.cwd() always reports the OS-canonical (symlink-resolved) path —
+		// on macOS os.tmpdir() itself sits under a symlink (/var -> /private/var),
+		// so the expected value must be realpath-resolved the same way, or this
+		// assertion spuriously fails on macOS even though nothing escaped bounds.
+		expect(result.stdout.trim()).toBe(`cwd:${fs.realpathSync(innerDir)}`);
 	});
 
 	test('dot-dot cwd escape attempt is rejected or bounds the process correctly', async () => {
@@ -125,10 +128,20 @@ console.log('arg:' + (args[0] || ''));`,
 
 		// The resolved cwd must be inside os.tmpdir() OR still in our sandbox.
 		// This prevents escape to user home or system directories.
+		//
+		// process.cwd() always reports the OS-canonical (symlink-resolved) path,
+		// so os.tmpdir() must be realpath-resolved the same way before comparing
+		// — on macOS os.tmpdir() itself sits under a symlink (/var ->
+		// /private/var), which would otherwise make isInTemp spuriously false
+		// even though nothing escaped bounds (see the sibling symlink-traversal
+		// test above for the same fix). isInSandbox is a defensive fallback but
+		// cannot be true here: dotDotCwd is tmpDir's PARENT, which strips the
+		// 'subprocess-injection-test' segment from the resolved cwd entirely.
 		const resolvedCwd = result.stdout.trim().replace('cwd:', '');
+		const realTmpDir = fs.realpathSync(os.tmpdir());
 		const isInTemp = path
 			.normalize(resolvedCwd)
-			.startsWith(path.normalize(os.tmpdir()));
+			.startsWith(path.normalize(realTmpDir));
 		const isInSandbox = resolvedCwd.includes('subprocess-injection-test');
 		expect(isInTemp || isInSandbox).toBe(true);
 	});

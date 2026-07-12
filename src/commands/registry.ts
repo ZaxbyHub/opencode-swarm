@@ -475,6 +475,23 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: false,
 	},
+	// Alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
+	// subcommand as the single dash token 'guardrail-explain'. Without this alias
+	// resolveCommand(['guardrail-explain']) returns null and the TUI shows
+	// "command not found" (mirrors the 'config-doctor'/'doctor-tools' pattern).
+	// aliasOf is warning text only — resolveCommand invokes this entry's OWN
+	// handler, so the handler must be set here.
+	'guardrail-explain': {
+		handler: async (ctx) => {
+			const { handleGuardrailExplain } = await import('./guardrail-explain.js');
+			return handleGuardrailExplain(ctx.directory, ctx.args);
+		},
+		description:
+			'Dry-run: show what the guardrails would do to a command or write target (executes nothing)',
+		category: 'diagnostics',
+		aliasOf: 'guardrail explain',
+		deprecated: true,
+	},
 	'guardrail-log': {
 		handler: async (ctx) => {
 			const { handleGuardrailLog } = await import('./guardrail-log.js');

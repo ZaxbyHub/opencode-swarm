@@ -119,12 +119,18 @@ describe('buildSlashCommandsList adversarial tests', () => {
 	// ============ 4. COMMAND NAMES MATCH REGISTRY KEYS ============
 
 	it('all command names in output match actual COMMAND_REGISTRY keys', () => {
-		// Extract all command names that appear after `/swarm ` in backticks
-		const commandMatches = slashCommandsSection.matchAll(/`\/swarm ([^`]+)`/g);
+		// Only command ENTRY lines advertise a command name; extract from those
+		// (bullet-anchored, first backtick token), matching the line-prefix
+		// convention used by the subcommand-duplication test below. A blanket
+		// scan would also catch `/swarm ...` usage examples embedded in a
+		// command's `details` prose (e.g. turbo's details reference
+		// `/swarm turbo epic on`), which are documentation, not command entries.
 		const invalidCommands: string[] = [];
 
-		for (const match of commandMatches) {
-			const cmdName = match[1];
+		for (const line of slashCommandsSection.split('\n')) {
+			const entryMatch = line.match(/^\s*-\s+`\/swarm ([^`]+)`/);
+			if (!entryMatch) continue;
+			const cmdName = entryMatch[1];
 
 			// Check if this command exists in COMMAND_REGISTRY
 			if (!Object.hasOwn(COMMAND_REGISTRY, cmdName)) {

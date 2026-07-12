@@ -455,9 +455,12 @@ describe('ATTACK: Queue Flooding via Triggers', () => {
 	});
 
 	describe('queue exhaustion', () => {
-		test('SECURE: queue overflow returns false gracefully', async () => {
-			// Trigger queue has maxSize of 100
-			// Trigger for 100 different phases
+		test('SECURE: queue overflow is bounded and never bricks (evict-oldest)', async () => {
+			// The preflight accounting queue has maxSize 100 with an evict-oldest
+			// overflow strategy (issue #1778 H5): it forms a bounded rolling window
+			// so a long-lived process can NEVER brick once 100 lifetime triggers
+			// accumulate. The queue is accounting only — the real preflight run is
+			// NOT gated by it, so the trigger must still fire on overflow.
 			for (let phase = 1; phase <= 99; phase++) {
 				await manager.checkAndTrigger(phase, 5, 10);
 			}
@@ -469,29 +472,37 @@ describe('ATTACK: Queue Flooding via Triggers', () => {
 			await manager.checkAndTrigger(100, 5, 10);
 			expect(manager.getQueueSize()).toBe(100);
 
-			// SECURE BEHAVIOR: Returns false gracefully when queue is full
-			// Does not throw - simply skips the event
-			const result = await manager.checkAndTrigger(101, 5, 10);
-			expect(result).toBe(false);
-			// Queue size should remain at max (100)
+			// SECURE BEHAVIOR: overflow does NOT throw and does NOT drop the new
+			// event — it evicts the oldest accounting item and still fires the
+			// trigger (returns true). The attacker cannot brick the preflight path.
+			let result: boolean | undefined;
+			expect(async () => {
+				result = await manager.checkAndTrigger(101, 5, 10);
+			}).not.toThrow();
+			result = await manager.checkAndTrigger(102, 5, 10);
+			expect(result).toBe(true);
+			// Queue size stays bounded at max (100) — unbounded growth is prevented.
 			expect(manager.getQueueSize()).toBe(100);
 		});
 
-		test('SECURE: concurrent triggers return false when queue full', async () => {
+		test('SECURE: concurrent triggers stay bounded when queue full', async () => {
 			// Fill queue first
 			for (let phase = 1; phase <= 100; phase++) {
 				await manager.checkAndTrigger(phase, 5, 10);
 			}
+			expect(manager.getQueueSize()).toBe(100);
 
 			// Fire concurrent trigger attempts when queue is already full
 			const promises = Array.from({ length: 10 }, (_, i) =>
 				manager.checkAndTrigger(200 + i, 5, 10),
 			);
 
-			// SECURE BEHAVIOR: Returns false for all, no rejections
+			// SECURE BEHAVIOR: none reject; each still fires (evict-oldest keeps the
+			// queue bounded rather than bricking or throwing under a flood).
 			const results = await Promise.all(promises);
-			// All should resolve to false (not rejected)
-			expect(results.every((r) => r === false)).toBe(true);
+			expect(results.every((r) => r === true)).toBe(true);
+			// Queue remains bounded at its cap despite the concurrent flood.
+			expect(manager.getQueueSize()).toBe(100);
 		});
 	});
 

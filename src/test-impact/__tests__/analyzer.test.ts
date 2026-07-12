@@ -578,31 +578,32 @@ test('both', () => { expect(foo).toBe(1); });`,
 	});
 
 	describe('path normalization across platforms', () => {
-		test('impactMap keys use forward slashes on Windows', async () => {
-			if (!isWindows) {
-				test.skip('Windows-specific test', () => {});
-				return;
-			}
+		// Windows-only: backslash normalization is only observable on win32.
+		// Use skipIf at declaration time — calling test.skip() inside a running
+		// test throws "Cannot call test.skip() inside a test" in bun:test.
+		test.skipIf(!isWindows)(
+			'impactMap keys use forward slashes on Windows',
+			async () => {
+				const testDir = path.join(tempDir, '__tests__');
+				await fs.promises.mkdir(testDir, { recursive: true });
 
-			const testDir = path.join(tempDir, '__tests__');
-			await fs.promises.mkdir(testDir, { recursive: true });
-
-			const testFile = path.join(testDir, 'example.test.ts');
-			const sourceFile = path.join(tempDir, 'example.ts');
-			await fs.promises.writeFile(sourceFile, 'export const x = 1;');
-			await fs.promises.writeFile(
-				testFile,
-				`import { x } from '../example';
+				const testFile = path.join(testDir, 'example.test.ts');
+				const sourceFile = path.join(tempDir, 'example.ts');
+				await fs.promises.writeFile(sourceFile, 'export const x = 1;');
+				await fs.promises.writeFile(
+					testFile,
+					`import { x } from '../example';
 test('ex', () => { expect(x).toBe(1); });`,
-			);
+				);
 
-			const impactMap = await buildImpactMap(tempDir);
+				const impactMap = await buildImpactMap(tempDir);
 
-			// Keys should be normalized to forward slashes
-			for (const key of Object.keys(impactMap)) {
-				expect(key.includes('\\')).toBe(false);
-			}
-		});
+				// Keys should be normalized to forward slashes
+				for (const key of Object.keys(impactMap)) {
+					expect(key.includes('\\')).toBe(false);
+				}
+			},
+		);
 	});
 
 	describe('validateProjectRoot guard', () => {

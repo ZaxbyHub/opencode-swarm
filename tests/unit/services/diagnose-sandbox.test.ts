@@ -25,6 +25,7 @@ import {
 
 interface MockSandboxCapability {
 	status: 'enabled' | 'disabled' | 'unsupported';
+	strength?: 'strong' | 'advisory';
 	mechanism: string;
 	platform: 'linux' | 'darwin' | 'win32';
 	error?: string;
@@ -32,6 +33,7 @@ interface MockSandboxCapability {
 
 type MockExecutor = {
 	mechanism: string;
+	strength?: 'strong' | 'weak' | 'advisory';
 	isAvailable: () => boolean;
 	wrapCommand: (cmd: string, scopes: string[], tempDir?: string) => string;
 	getEnvOverrides: () => Record<string, string | null>;
@@ -268,6 +270,54 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 		expect(sandbox.detail).toContain('bubblewrap');
 		expect(sandbox.detail).toContain('Available: no');
 		expect(sandbox.detail).toContain('Commands NOT sandboxed');
+	});
+
+	test('advisory Windows fallback is downgraded to ⚠️, never green (#1778 H2)', async () => {
+		// An available executor whose probe reports advisory strength must NOT be
+		// reported as strong containment.
+		mockCapability = {
+			status: 'enabled',
+			strength: 'advisory',
+			mechanism: 'PowerShell wrapper',
+			platform: 'win32',
+		};
+		mockExecutor = {
+			mechanism: 'PowerShell wrapper',
+			strength: 'weak',
+			isAvailable: () => true,
+			wrapCommand: (c) => c,
+			getEnvOverrides: () => ({}),
+		};
+
+		const result = await getDiagnoseData('/test/dir');
+		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
+
+		expect(sandbox.status).toBe('⚠️');
+		expect(sandbox.status).not.toBe('✅');
+		expect(sandbox.detail.toUpperCase()).toContain('ADVISORY');
+		expect(sandbox.detail).toContain('NOT kernel-enforced');
+	});
+
+	test('strong kernel mechanism stays ✅ with strength in detail (#1778 H2)', async () => {
+		mockCapability = {
+			status: 'enabled',
+			strength: 'strong',
+			mechanism: 'Bubblewrap',
+			platform: 'linux',
+		};
+		mockExecutor = {
+			mechanism: 'Bubblewrap',
+			strength: 'strong',
+			isAvailable: () => true,
+			wrapCommand: (c) => c,
+			getEnvOverrides: () => ({}),
+		};
+
+		const result = await getDiagnoseData('/test/dir');
+		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
+
+		expect(sandbox.status).toBe('✅');
+		expect(sandbox.detail).toContain('strong');
 	});
 
 	test('detail string mentions mechanism for ⬜ path', async () => {

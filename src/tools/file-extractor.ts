@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { validateTargetWithinRoot } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 
 // Language to extension mapping
@@ -104,7 +105,22 @@ export const extract_code_blocks: ToolDefinition = createSwarmTool({
 			output_dir?: string;
 			prefix?: string;
 		};
-		const targetDir = output_dir || directory;
+
+		// SECURITY: output_dir is untrusted input. It must resolve inside the
+		// workspace root (`directory`). Reject absolute paths, traversal, and
+		// symlink escapes before creating any directory. Without this,
+		// extract_code_blocks is an arbitrary out-of-workspace write primitive
+		// reachable by (formerly read-only) agents.
+		let targetDir: string;
+		if (output_dir && output_dir.trim() !== '') {
+			const dirReason = validateTargetWithinRoot(output_dir, directory);
+			if (dirReason) {
+				return `Error: output_dir rejected — ${dirReason}`;
+			}
+			targetDir = path.resolve(directory, output_dir);
+		} else {
+			targetDir = directory;
+		}
 
 		// Ensure output directory exists
 		if (!fs.existsSync(targetDir)) {
@@ -136,6 +152,22 @@ export const extract_code_blocks: ToolDefinition = createSwarmTool({
 				filename = `${prefix}_${filename}`;
 			}
 
+			// SECURITY: filenames are derived from untrusted `# filename:` comments
+			// in LLM-generated content. Require a bare filename — reject anything
+			// containing path separators, traversal, or an absolute component so a
+			// crafted comment (e.g. `# filename: ../../evil.sh`) cannot escape
+			// targetDir.
+			if (
+				filename.includes('/') ||
+				filename.includes('\\') ||
+				validateTargetWithinRoot(filename, targetDir) !== null
+			) {
+				errors.push(
+					`Rejected unsafe filename (must be a bare name): ${filename}`,
+				);
+				continue;
+			}
+
 			let filepath = path.join(targetDir, filename);
 
 			// Avoid overwriting - add counter if exists
@@ -147,13 +179,69 @@ export const extract_code_blocks: ToolDefinition = createSwarmTool({
 				counter++;
 			}
 
+			// Defense in depth: the final resolved path must stay inside the
+			// workspace root even after collision-avoidance renaming.
+			if (
+				validateTargetWithinRoot(
+					path.relative(directory, filepath),
+					directory,
+				) !== null
+			) {
+				errors.push(`Rejected write outside workspace: ${filepath}`);
+				continue;
+			}
+
+			// SECURITY (issue #1778 C1): reject a final path that is itself a
+			// symlink — including a BROKEN one whose target does not exist.
+			// fs.existsSync follows links (a broken link reads as absent, so the
+			// collision loop skips it) and a plain write would then follow the
+			// link and write OUTSIDE the workspace. lstat does not follow links,
+			// so it detects the symlink; it throws only when nothing exists at the
+			// path (the normal new-file case), which is safe to proceed with. This
+			// pre-check gives an early, specific error message.
 			try {
-				fs.writeFileSync(filepath, code.trim(), 'utf-8');
+				if (fs.lstatSync(filepath).isSymbolicLink()) {
+					errors.push(`Rejected write through symlink: ${filepath}`);
+					continue;
+				}
+			} catch {
+				// Path does not exist at all — a genuine new-file write. Proceed.
+			}
+
+			// SECURITY (PR #1790 review F-L2-002): the lstat check above and the
+			// write below are two separate syscalls with no atomicity between
+			// them — a TOCTOU window where an attacker with local write access to
+			// targetDir could plant a symlink after the check but before the
+			// write. Open with O_CREAT|O_EXCL instead of a plain write: per POSIX,
+			// when O_EXCL is set, open() does not follow a symlink at the final
+			// path component and fails with EEXIST if ANY entry (including a
+			// symlink, broken or not) already occupies that name; on Windows this
+			// maps to CreateFile's CREATE_NEW disposition, which fails the same
+			// way on an existing reparse point. This closes the race atomically
+			// without depending on the platform-inconsistent O_NOFOLLOW flag.
+			let fd: number | undefined;
+			try {
+				fd = fs.openSync(
+					filepath,
+					fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
+				);
+				// writeFileSync (not writeSync) so a short write can't silently
+				// truncate the file — it loops internally until the full buffer
+				// is written, and passing a fd (vs. a path) does not close it.
+				fs.writeFileSync(fd, code.trim(), 'utf-8');
 				savedFiles.push(filepath);
 			} catch (error) {
 				errors.push(
 					`Failed to save ${filename}: ${error instanceof Error ? error.message : String(error)}`,
 				);
+			} finally {
+				if (fd !== undefined) {
+					try {
+						fs.closeSync(fd);
+					} catch {
+						// best-effort close
+					}
+				}
 			}
 		}
 

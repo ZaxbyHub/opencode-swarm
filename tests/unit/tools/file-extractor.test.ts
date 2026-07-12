@@ -90,33 +90,32 @@ describe('file-extractor', () => {
 	});
 
 	describe('extract_code_blocks.execute', () => {
-		it('extracts single code block and writes to disk', async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
+		// Secure model (issue #1778 C1): the 2nd arg is the workspace root and
+		// output_dir must resolve inside it. Tests use a real workspace dir.
+		const makeWorkspace = () =>
+			fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-ws-')));
+
+		it('extracts single code block into the workspace root', async () => {
+			const ws = makeWorkspace();
 			const content = '```python\nprint("hello")\n```';
 
-			const result = await extract_code_blocks.execute(
-				{ content, output_dir: tempDir },
-				{} as any,
-			);
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
 
 			expect(result).toContain('Extracted 1 file(s):');
-			expect(result).toContain(tempDir);
 
-			const files = fs.readdirSync(tempDir);
+			const files = fs.readdirSync(ws);
 			expect(files).toHaveLength(1);
-
-			const fileContent = fs.readFileSync(
-				path.join(tempDir, files[0]),
-				'utf-8',
+			expect(fs.readFileSync(path.join(ws, files[0]), 'utf-8')).toBe(
+				'print("hello")',
 			);
-			expect(fileContent).toBe('print("hello")');
 
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
 		});
 
 		it('extracts multiple code blocks', async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
+			const ws = makeWorkspace();
 			const content = `
 \`\`\`python
 def hello():
@@ -128,65 +127,51 @@ console.log("world");
 \`\`\`
 `;
 
-			const result = await extract_code_blocks.execute(
-				{ content, output_dir: tempDir },
-				{} as any,
-			);
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
 
 			expect(result).toContain('Extracted 2 file(s):');
 
-			const files = fs.readdirSync(tempDir);
+			const files = fs.readdirSync(ws);
 			expect(files).toHaveLength(2);
+			expect(files.find((f) => f.endsWith('.py'))).toBeDefined();
+			expect(files.find((f) => f.endsWith('.js'))).toBeDefined();
 
-			// Check that both files were created with correct extensions
-			const pyFile = files.find((f) => f.endsWith('.py'));
-			const jsFile = files.find((f) => f.endsWith('.js'));
-
-			expect(pyFile).toBeDefined();
-			expect(jsFile).toBeDefined();
-
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
 		});
 
 		it('returns "No code blocks found" for content without fences', async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
+			const ws = makeWorkspace();
 			const content = 'This is just plain text without any code blocks.';
 
-			const result = await extract_code_blocks.execute(
-				{ content, output_dir: tempDir },
-				{} as any,
-			);
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
 
 			expect(result).toBe('No code blocks found in content.');
+			expect(fs.readdirSync(ws)).toHaveLength(0);
 
-			const files = fs.readdirSync(tempDir);
-			expect(files).toHaveLength(0);
-
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
 		});
 
 		it('applies prefix to filenames', async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
+			const ws = makeWorkspace();
 			const content = '```python\nprint("hello")\n```';
 
 			const result = await extract_code_blocks.execute(
-				{ content, output_dir: tempDir, prefix: 'test_prefix' },
-				{} as any,
+				{ content, prefix: 'test_prefix' },
+				{ directory: ws } as any,
 			);
 
 			expect(result).toContain('test_prefix_');
+			expect(fs.readdirSync(ws)[0]).toStartWith('test_prefix_');
 
-			const files = fs.readdirSync(tempDir);
-			expect(files[0]).toStartWith('test_prefix_');
-
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
 		});
 
 		it('handles filename collisions by incrementing counter', async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
+			const ws = makeWorkspace();
 			const content = `
 \`\`\`python
 print("first")
@@ -196,48 +181,128 @@ print("first")
 print("second")
 \`\`\`
 `;
-
-			// Manually create a file first to force collision
-			const existingFile = path.join(
-				tempDir,
-				'output_1_1970-01-01T00-00-00.py',
-			);
+			const existingFile = path.join(ws, 'output_1_1970-01-01T00-00-00.py');
 			fs.writeFileSync(existingFile, 'existing content');
 
-			const result = await extract_code_blocks.execute(
-				{ content, output_dir: tempDir },
-				{} as any,
-			);
+			await extract_code_blocks.execute({ content }, { directory: ws } as any);
 
-			const files = fs.readdirSync(tempDir);
+			const files = fs.readdirSync(ws);
 			expect(files).toHaveLength(3); // existing + 2 new files
-
-			// Should have counter appended to avoid collision
 			const newFiles = files.filter((f) => f !== path.basename(existingFile));
 			expect(newFiles.some((f) => f.includes('_1_'))).toBe(true);
 
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
 		});
 
-		it("creates output directory if it doesn't exist", async () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-test-'));
-			const nonExistentDir = path.join(tempDir, 'non-existent-subdir');
+		it('creates a relative output subdirectory inside the workspace', async () => {
+			const ws = makeWorkspace();
 			const content = '```python\nprint("hello")\n```';
 
 			const result = await extract_code_blocks.execute(
-				{ content, output_dir: nonExistentDir },
-				{} as any,
+				{ content, output_dir: 'gen/sub' },
+				{ directory: ws } as any,
 			);
 
-			expect(fs.existsSync(nonExistentDir)).toBe(true);
+			const sub = path.join(ws, 'gen', 'sub');
+			expect(fs.existsSync(sub)).toBe(true);
 			expect(result).toContain('Extracted 1 file(s):');
+			expect(fs.readdirSync(sub)).toHaveLength(1);
 
-			const files = fs.readdirSync(nonExistentDir);
-			expect(files).toHaveLength(1);
+			fs.rmSync(ws, { recursive: true, force: true });
+		});
 
-			// Cleanup
-			fs.rmSync(tempDir, { recursive: true, force: true });
+		// --- Security: containment (issue #1778 C1) ---
+
+		it('rejects an absolute output_dir outside the workspace', async () => {
+			const ws = makeWorkspace();
+			const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-out-'));
+			const content = '```python\nprint("pwn")\n```';
+
+			const result = await extract_code_blocks.execute(
+				{ content, output_dir: outside },
+				{ directory: ws } as any,
+			);
+
+			expect(result).toContain('output_dir rejected');
+			expect(fs.readdirSync(outside)).toHaveLength(0);
+
+			fs.rmSync(ws, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		});
+
+		it('rejects a traversal output_dir that escapes the workspace', async () => {
+			const ws = makeWorkspace();
+			const content = '```python\nprint("pwn")\n```';
+
+			const result = await extract_code_blocks.execute(
+				{ content, output_dir: '../escaped' },
+				{ directory: ws } as any,
+			);
+
+			expect(result).toContain('output_dir rejected');
+			expect(fs.existsSync(path.join(path.dirname(ws), 'escaped'))).toBe(false);
+
+			fs.rmSync(ws, { recursive: true, force: true });
+		});
+
+		it('rejects a malicious `# filename:` traversal comment', async () => {
+			const ws = makeWorkspace();
+			// First line is a filename comment that tries to escape via ../.
+			const content = '```python\n# filename: ../../evil.sh\nprint("pwn")\n```';
+
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
+
+			expect(result).toContain('Rejected unsafe filename');
+			expect(fs.existsSync(path.join(path.dirname(ws), 'evil.sh'))).toBe(false);
+			expect(
+				fs.existsSync(path.join(path.dirname(path.dirname(ws)), 'evil.sh')),
+			).toBe(false);
+			// Nothing written into the workspace either.
+			expect(fs.readdirSync(ws)).toHaveLength(0);
+
+			fs.rmSync(ws, { recursive: true, force: true });
+		});
+
+		it('rejects a filename comment with a nested path segment', async () => {
+			const ws = makeWorkspace();
+			const content =
+				'```python\n# filename: subdir/nested.py\nprint("x")\n```';
+
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
+
+			expect(result).toContain('Rejected unsafe filename');
+			expect(fs.existsSync(path.join(ws, 'subdir'))).toBe(false);
+
+			fs.rmSync(ws, { recursive: true, force: true });
+		});
+
+		it('rejects a write through a pre-planted broken symlink (final component)', async () => {
+			const ws = makeWorkspace();
+			const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'extractor-sym-'));
+			// A broken symlink inside the workspace pointing outside to a
+			// not-yet-existing file. existsSync(link) follows it → false, so the
+			// collision loop would skip it and writeFileSync would follow it out
+			// of the workspace. The lstat guard must reject it (#1778 C1 F2).
+			const outsideTarget = path.join(outside, 'escaped.py');
+			// Deterministic generated filename via a bare `# filename:` comment,
+			// so the pre-planted symlink name matches the write target exactly.
+			const linkName = 'planted.py';
+			fs.symlinkSync(outsideTarget, path.join(ws, linkName));
+			const content = '```python\n# filename: planted.py\nprint("pwn")\n```';
+
+			const result = await extract_code_blocks.execute({ content }, {
+				directory: ws,
+			} as any);
+
+			expect(result).toContain('Rejected write through symlink');
+			expect(fs.existsSync(outsideTarget)).toBe(false);
+
+			fs.rmSync(ws, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
 		});
 	});
 });

@@ -7,10 +7,15 @@ import { test_runner } from '../test-runner.js';
 // ============ Mocks ============
 
 const mockAppendTestRun = vi.fn();
+const mockBatchAppendTestRuns = vi.fn();
 const mockGetAllHistory = vi.fn();
 
+// test-runner records history via batchAppendTestRuns (one batched write),
+// not the older per-record appendTestRun. Provide both so the module's named
+// imports resolve; assertions target batchAppendTestRuns.
 vi.mock('../../test-impact/history-store.js', () => ({
 	appendTestRun: mockAppendTestRun,
+	batchAppendTestRuns: mockBatchAppendTestRuns,
 	getAllHistory: mockGetAllHistory,
 }));
 
@@ -126,6 +131,7 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 
 	beforeEach(() => {
 		mockAppendTestRun.mockReset().mockImplementation(() => {});
+		mockBatchAppendTestRuns.mockReset().mockImplementation(() => {});
 		mockGetAllHistory.mockReset().mockReturnValue([]);
 		mockBunSpawn.mockReset();
 
@@ -177,12 +183,15 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		// Verify test execution succeeded
 		expect(parsed.success).toBe(true);
 
-		// Verify appendTestRun was called
-		expect(mockAppendTestRun).toHaveBeenCalled();
+		// Verify history was recorded via the batched writer
+		expect(mockBatchAppendTestRuns).toHaveBeenCalled();
 
-		// Get the first call to appendTestRun
-		const firstCall = mockAppendTestRun.mock.calls[0];
-		const recordedChangedFiles = firstCall[0].changedFiles as string[];
+		// batchAppendTestRuns(records, workingDir): the first argument is the
+		// array of records; every record shares the same computed changedFiles.
+		const records = mockBatchAppendTestRuns.mock.calls[0][0] as Array<{
+			changedFiles: string[];
+		}>;
+		const recordedChangedFiles = records[0].changedFiles;
 
 		// changedFiles should contain the SOURCE file path (from args.files), not the test file path
 		// Source file: src/foo.ts
@@ -193,27 +202,15 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	});
 
 	/**
-	 * Test 2: When sourceFiles has different paths than testFiles,
-	 * recorded data has sourceFiles (the paths from args.files).
+	 * Test 2: Impact scope enforces the single-source-file cap.
+	 *
+	 * scope "impact" fans out from source files to their covering tests; to bound
+	 * that fan-out it accepts at most MAX_SAFE_SOURCE_FILES (1) source file
+	 * (AGENTS.md invariant 6 / writing-tests skill). Multiple source files are
+	 * rejected with outcome "scope_exceeded" BEFORE any analysis or history write,
+	 * so the correct single-source recording behavior is covered by tests 1/4/5.
 	 */
-	test('2. sourceFiles different from testFiles → changedFiles uses sourceFiles', async () => {
-		mockAnalyzeImpact.mockResolvedValueOnce({
-			impactedTests: [
-				path.join(tempDir, 'src', '__tests__', 'foo.ts'),
-				path.join(tempDir, 'src', '__tests__', 'bar.ts'),
-			],
-			unrelatedTests: [],
-			untestedFiles: [],
-			impactMap: {
-				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
-				],
-				[path.join(tempDir, 'src', 'bar.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'bar.ts'),
-				],
-			},
-		});
-
+	test('2. impact scope rejects multiple source files with scope_exceeded', async () => {
 		const args = {
 			scope: 'impact' as const,
 			files: ['src/foo.ts', 'src/bar.ts'],
@@ -222,24 +219,14 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		const result = await execute(args, tempDir);
 		const parsed = parseResult(result);
 
-		expect(parsed.success).toBe(true);
+		expect(parsed.success).toBe(false);
+		expect(parsed.outcome).toBe('scope_exceeded');
+		expect(parsed.error).toContain('at most');
 
-		// Verify appendTestRun was called (once per test file)
-		expect(mockAppendTestRun.mock.calls.length).toBeGreaterThan(0);
-
-		// Get all changedFiles from all calls
-		const allChangedFiles = mockAppendTestRun.mock.calls.map(
-			(call) => call[0].changedFiles as string[],
-		);
-
-		// Each call should have changedFiles containing the SOURCE files, not test files
-		for (const changedFiles of allChangedFiles) {
-			expect(changedFiles).toContain('src/foo.ts');
-			expect(changedFiles).toContain('src/bar.ts');
-			// Should NOT contain test file paths
-			expect(changedFiles).not.toContain('src/__tests__/foo.ts');
-			expect(changedFiles).not.toContain('src/__tests__/bar.ts');
-		}
+		// Rejected before the run — no history is recorded and the impact
+		// analyzer is never invoked.
+		expect(mockBatchAppendTestRuns).not.toHaveBeenCalled();
+		expect(mockAnalyzeImpact).not.toHaveBeenCalled();
 	});
 
 	/**
@@ -289,10 +276,12 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		const parsed = parseResult(result);
 
 		expect(parsed.success).toBe(true);
-		expect(mockAppendTestRun).toHaveBeenCalled();
+		expect(mockBatchAppendTestRuns).toHaveBeenCalled();
 
-		const firstCall = mockAppendTestRun.mock.calls[0];
-		const recordedChangedFiles = firstCall[0].changedFiles as string[];
+		const records = mockBatchAppendTestRuns.mock.calls[0][0] as Array<{
+			changedFiles: string[];
+		}>;
+		const recordedChangedFiles = records[0].changedFiles;
 
 		// Should be normalized to forward slashes
 		expect(recordedChangedFiles).toContain('src/foo.ts');
@@ -324,10 +313,12 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		const parsed = parseResult(result);
 
 		expect(parsed.success).toBe(true);
-		expect(mockAppendTestRun).toHaveBeenCalled();
+		expect(mockBatchAppendTestRuns).toHaveBeenCalled();
 
-		const firstCall = mockAppendTestRun.mock.calls[0];
-		const recordedChangedFiles = firstCall[0].changedFiles as string[];
+		const records = mockBatchAppendTestRuns.mock.calls[0][0] as Array<{
+			changedFiles: string[];
+		}>;
+		const recordedChangedFiles = records[0].changedFiles;
 
 		// Should contain exactly the source file, not test file
 		expect(recordedChangedFiles).toEqual(['src/foo.ts']);

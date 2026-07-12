@@ -125,6 +125,86 @@ export function validateSymlinkBoundary(
 }
 
 /**
+ * Verify that a target path canonically resolves inside a root directory.
+ * For targets that do not exist yet (e.g. new-file creation), resolves the
+ * nearest existing ancestor instead, so a symlinked intermediate directory
+ * cannot be used to escape the root. Mirrors the containment used by
+ * swarm_apply_patch (the correct template for write tools).
+ *
+ * @param targetPath - absolute path to validate
+ * @param rootPath - absolute root boundary
+ * @returns true if the canonical target is within the canonical root
+ */
+export function isCanonicalPathWithinRoot(
+	targetPath: string,
+	rootPath: string,
+): boolean {
+	let canonicalRoot: string;
+	try {
+		canonicalRoot = fs.realpathSync(rootPath);
+	} catch {
+		canonicalRoot = path.normalize(rootPath);
+	}
+
+	// Walk up to the nearest existing ancestor of the (possibly not-yet-created)
+	// target so symlinks on any existing component are resolved.
+	let probe = path.normalize(targetPath);
+	// Guard against an unbounded loop on malformed input.
+	for (let i = 0; i < 4096; i++) {
+		try {
+			const canonicalProbe = fs.realpathSync(probe);
+			const relative = path.relative(canonicalRoot, canonicalProbe);
+			return !relative.startsWith('..') && !path.isAbsolute(relative);
+		} catch {
+			const parent = path.dirname(probe);
+			if (parent === probe) return false; // reached filesystem root, nothing resolved
+			probe = parent;
+		}
+	}
+	return false;
+}
+
+/**
+ * Validate that a caller-supplied path stays within an allowed root directory.
+ * Rejects empty paths, absolute paths (POSIX + Windows drive), traversal,
+ * control characters, lexical escape, and symlink/junction escape.
+ * Returns a human-readable reason string on rejection, or null when valid.
+ *
+ * This is the shared containment primitive for write-capable tools whose
+ * target path is derived from untrusted input (e.g. extract_code_blocks'
+ * output_dir and `# filename:` comments).
+ *
+ * @param filePath - the caller-supplied path (relative to root, or absolute-rejected)
+ * @param root - the absolute root boundary (workspace directory)
+ */
+export function validateTargetWithinRoot(
+	filePath: string,
+	root: string,
+): string | null {
+	if (!filePath || filePath.trim() === '') {
+		return 'Empty path';
+	}
+	if (path.isAbsolute(filePath) || /^[A-Za-z]:[/\\]/.test(filePath)) {
+		return `Absolute path rejected: ${filePath}`;
+	}
+	if (containsPathTraversal(filePath)) {
+		return `Path traversal detected: ${filePath}`;
+	}
+	if (containsControlChars(filePath)) {
+		return `Control characters detected in path: ${filePath}`;
+	}
+	const resolved = path.resolve(root, filePath);
+	const relative = path.relative(root, resolved);
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		return `Path escapes root: ${filePath}`;
+	}
+	if (!isCanonicalPathWithinRoot(resolved, root)) {
+		return `Path escapes root via symlink/junction: ${filePath}`;
+	}
+	return null; // valid
+}
+
+/**
  * DI seam for testability. Contains all test-mocked exports.
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
@@ -133,9 +213,13 @@ export const _internals: {
 	containsControlChars: typeof containsControlChars;
 	validateDirectory: typeof validateDirectory;
 	validateSymlinkBoundary: typeof validateSymlinkBoundary;
+	isCanonicalPathWithinRoot: typeof isCanonicalPathWithinRoot;
+	validateTargetWithinRoot: typeof validateTargetWithinRoot;
 } = {
 	containsPathTraversal,
 	containsControlChars,
 	validateDirectory,
 	validateSymlinkBoundary,
+	isCanonicalPathWithinRoot,
+	validateTargetWithinRoot,
 } as const;

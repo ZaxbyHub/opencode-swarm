@@ -1,6 +1,33 @@
 import { afterEach, describe, expect, it } from 'bun:test';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
-import { spawnAsync } from './spawn-helper';
+import { _internals, spawnAsync } from './spawn-helper';
+
+/**
+ * Build a fake `child_process.spawn` that records the resolved command name and
+ * immediately reports a clean exit. This lets the win32 `.cmd` transformation be
+ * asserted directly on any platform — the POSIX test runner has no real
+ * `npm.cmd` to spawn, so the original "resolves non-null" assertions were
+ * environment-specific. Capturing the resolved command name verifies the actual
+ * transformation logic and is strictly stronger than a spawn-succeeds check.
+ */
+function makeFakeSpawn(capture: { cmd?: string; args?: string[] }) {
+	return (cmd: string, args: string[]) => {
+		capture.cmd = cmd;
+		capture.args = args;
+		const proc = new EventEmitter() as EventEmitter & {
+			stdout: EventEmitter;
+			stderr: EventEmitter;
+			kill: () => void;
+		};
+		proc.stdout = new EventEmitter();
+		proc.stderr = new EventEmitter();
+		proc.kill = () => {};
+		// Emit 'close' after spawnAsync synchronously attaches its listeners.
+		queueMicrotask(() => proc.emit('close', 0));
+		return proc;
+	};
+}
 
 describe('spawn-helper', () => {
 	const testCwd = tmpdir();
@@ -162,6 +189,8 @@ describe('spawn-helper', () => {
 				'platform',
 			);
 
+			const originalSpawn = _internals.spawn;
+
 			afterEach(() => {
 				// Restore original platform after each test to avoid test pollution
 				if (originalPlatformDescriptor) {
@@ -171,26 +200,40 @@ describe('spawn-helper', () => {
 						originalPlatformDescriptor,
 					);
 				}
+				// Restore the real spawn binding after any seam injection.
+				_internals.spawn = originalSpawn;
 			});
 
-			// Test 1: npm on win32 → resolves non-null (npm.cmd exists in PATH on this Windows env)
-			it('npm on win32 resolves non-null', async () => {
+			// Test 1: npm on win32 → resolved command is transformed to npm.cmd.
+			// A spawn spy captures the resolved command name so the transformation
+			// is verified even though the POSIX runner has no real npm.cmd.
+			it('npm on win32 is spawned as npm.cmd', async () => {
 				Object.defineProperty(process, 'platform', {
 					value: 'win32',
 					configurable: true,
 				});
+				const capture: { cmd?: string } = {};
+				_internals.spawn = makeFakeSpawn(
+					capture,
+				) as unknown as typeof _internals.spawn;
 				const result = await spawnAsync(['npm', '--version'], testCwd, 5000);
+				expect(capture.cmd).toBe('npm.cmd');
 				expect(result).not.toBeNull();
 				expect(result!.exitCode).toBe(0);
 			});
 
-			// Test 2: npx on win32 → resolves non-null
-			it('npx on win32 resolves non-null', async () => {
+			// Test 2: npx on win32 → resolved command is transformed to npx.cmd.
+			it('npx on win32 is spawned as npx.cmd', async () => {
 				Object.defineProperty(process, 'platform', {
 					value: 'win32',
 					configurable: true,
 				});
+				const capture: { cmd?: string } = {};
+				_internals.spawn = makeFakeSpawn(
+					capture,
+				) as unknown as typeof _internals.spawn;
 				const result = await spawnAsync(['npx', '--version'], testCwd, 5000);
+				expect(capture.cmd).toBe('npx.cmd');
 				expect(result).not.toBeNull();
 				expect(result!.exitCode).toBe(0);
 			});
@@ -228,17 +271,24 @@ describe('spawn-helper', () => {
 				expect(result === null || result!.exitCode === 0).toBe(true);
 			});
 
-			// Test 6: Already-extended command npm.cmd not double-extended
+			// Test 6: Already-extended command npm.cmd not double-extended.
+			// The `!rawCmd.includes('.')` guard must leave npm.cmd untouched
+			// (no npm.cmd.cmd). Verified via the resolved command name.
 			it('npm.cmd on win32 is not double-extended', async () => {
 				Object.defineProperty(process, 'platform', {
 					value: 'win32',
 					configurable: true,
 				});
+				const capture: { cmd?: string } = {};
+				_internals.spawn = makeFakeSpawn(
+					capture,
+				) as unknown as typeof _internals.spawn;
 				const result = await spawnAsync(
 					['npm.cmd', '--version'],
 					testCwd,
 					5000,
 				);
+				expect(capture.cmd).toBe('npm.cmd');
 				expect(result).not.toBeNull();
 				expect(result!.exitCode).toBe(0);
 			});

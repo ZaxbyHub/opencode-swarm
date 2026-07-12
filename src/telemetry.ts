@@ -107,12 +107,20 @@ export function initTelemetry(projectDirectory: string): void {
 		}
 
 		const telemetryPath = path.join(swarmDir, 'telemetry.jsonl');
-		_writeStream = createWriteStream(telemetryPath, { flags: 'a' });
+		const stream = createWriteStream(telemetryPath, { flags: 'a' });
 
-		_writeStream.on('error', () => {
-			_disabled = true;
-			_writeStream = null;
+		// Guard on stream identity: a stale stream that was already replaced (by
+		// rotation) or ended (by resetTelemetryForTesting) must NOT clobber the
+		// currently-active stream's state when it emits a late 'error' — otherwise
+		// one dead stream permanently disables telemetry for the live one.
+		stream.on('error', () => {
+			if (_writeStream === stream) {
+				_disabled = true;
+				_writeStream = null;
+			}
 		});
+
+		_writeStream = stream;
 	} catch {
 		_disabled = true;
 		_writeStream = null;
@@ -142,8 +150,10 @@ export function emit(
 				...data,
 			}) + os.EOL;
 
-		_writeStream.write(line, (err) => {
-			if (err) {
+		const stream = _writeStream;
+		stream.write(line, (err) => {
+			// Only disable on write error if this is still the active stream.
+			if (err && _writeStream === stream) {
 				_disabled = true;
 				_writeStream = null;
 			}
@@ -219,11 +229,16 @@ export function rotateTelemetryIfNeeded(
 
 		if (_writeStream !== null) {
 			_writeStream.end();
-			_writeStream = createWriteStream(telemetryPath, { flags: 'a' });
-			_writeStream.on('error', () => {
-				_disabled = true;
-				_writeStream = null;
+			const stream = createWriteStream(telemetryPath, { flags: 'a' });
+			// Same identity guard as initTelemetry: the just-ended old stream must
+			// not disable telemetry for this fresh post-rotation stream.
+			stream.on('error', () => {
+				if (_writeStream === stream) {
+					_disabled = true;
+					_writeStream = null;
+				}
 			});
+			_writeStream = stream;
 		}
 	} catch {
 		// Rotation errors must be silent

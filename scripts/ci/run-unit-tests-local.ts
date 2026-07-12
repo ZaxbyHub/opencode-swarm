@@ -102,11 +102,44 @@ async function runOneTest(filePath: string): Promise<{
 	};
 }
 
+function collectAllTestFiles(): string[] {
+	// Mirror the CI unit job's expanded glob (issue #1778 H4): src/** plus the
+	// previously-orphaned test trees, EXCLUDING tests/integration, tests/security,
+	// tests/smoke, and top-level test/ (owned by their own jobs).
+	const roots = [
+		'src',
+		'tests/unit',
+		'tests/adversarial',
+		'tests/architect',
+		'tests/cli',
+		'tests/tools',
+		'tests/helpers',
+	];
+	const collected = roots.flatMap((rel) => {
+		const abs = path.join(process.cwd(), rel);
+		return fs.existsSync(abs) ? walkTestFiles(abs) : [];
+	});
+	// Top-level tests/*.test.ts (non-recursive).
+	const testsDir = path.join(process.cwd(), 'tests');
+	if (fs.existsSync(testsDir)) {
+		for (const entry of fs.readdirSync(testsDir, { withFileTypes: true })) {
+			if (entry.isFile() && entry.name.endsWith('.test.ts')) {
+				collected.push(
+					repoRelative(
+						path.relative(process.cwd(), path.join(testsDir, entry.name)),
+					),
+				);
+			}
+		}
+	}
+	return Array.from(new Set(collected)).sort();
+}
+
 async function main(): Promise<void> {
-	const unitRoot = path.join(process.cwd(), 'tests', 'unit');
 	const quarantined = collectQuarantinedTests();
 	const requestedTests = process.argv.slice(2).map(normalizeRequestedTest);
-	const allTests = requestedTests.length > 0 ? requestedTests.sort() : walkTestFiles(unitRoot);
+	const allTests =
+		requestedTests.length > 0 ? requestedTests.sort() : collectAllTestFiles();
 	const gatedTests = allTests.filter((filePath) => !quarantined.has(filePath));
 
 	if (gatedTests.length === 0) {

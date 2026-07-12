@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { test_runner } from '../test-runner.js';
 
@@ -116,9 +117,7 @@ describe('impact scope execution', () => {
 
 	beforeEach(async () => {
 		// Create temp directory for tests
-		tempDir = fs.mkdtempSync(
-			path.join(fs.realpathSync('/tmp') || '/tmp', 'test-runner-impact-'),
-		);
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-impact-'));
 		createPackageJson(tempDir, 'bun');
 		createSourceAndTestFiles(tempDir);
 
@@ -273,10 +272,7 @@ describe('impact scope schema validation', () => {
 
 	test('impact scope without files fails at guard check (not schema check)', async () => {
 		const tempDir = fs.mkdtempSync(
-			path.join(
-				fs.realpathSync('/tmp') || '/tmp',
-				'test-runner-impact-schema-',
-			),
+			path.join(os.tmpdir(), 'test-runner-impact-schema-'),
 		);
 		createPackageJson(tempDir, 'bun');
 

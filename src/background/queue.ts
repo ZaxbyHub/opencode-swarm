@@ -11,6 +11,15 @@ import { type AutomationEventBus, getGlobalEventBus } from './event-bus';
 /** Queue priority levels */
 export type QueuePriority = 'critical' | 'high' | 'normal' | 'low';
 
+/**
+ * Behaviour when enqueueing into a full queue.
+ * - `throw` (default): reject the new item — the historical behaviour.
+ * - `evict-oldest`: drop the oldest item to make room, forming a bounded
+ *   rolling window that can never brick (issue #1778 H5). Opt-in per queue so
+ *   other consumers keep the fail-loud `throw` semantics.
+ */
+export type OverflowStrategy = 'throw' | 'evict-oldest';
+
 /** Retry metadata for failed items */
 export interface RetryMetadata {
 	attempts: number;
@@ -38,6 +47,8 @@ export interface QueueConfig {
 	defaultMaxRetries?: number;
 	defaultBackoffMs?: number;
 	maxBackoffMs?: number;
+	/** Overflow behaviour at cap. Defaults to `throw`. */
+	overflowStrategy?: OverflowStrategy;
 }
 
 /**
@@ -68,6 +79,7 @@ export class AutomationQueue<T = unknown> {
 	private readonly defaultBackoffMs: number;
 	private readonly maxBackoffMs: number;
 	private readonly eventBus: AutomationEventBus;
+	private readonly overflowStrategy: OverflowStrategy;
 	private itemCounter = 0;
 
 	constructor(config?: QueueConfig) {
@@ -75,6 +87,7 @@ export class AutomationQueue<T = unknown> {
 		this.defaultMaxRetries = config?.defaultMaxRetries ?? 3;
 		this.defaultBackoffMs = config?.defaultBackoffMs ?? 1000;
 		this.maxBackoffMs = config?.maxBackoffMs ?? 60000;
+		this.overflowStrategy = config?.overflowStrategy ?? 'throw';
 		this.eventBus = getGlobalEventBus();
 	}
 
@@ -94,7 +107,23 @@ export class AutomationQueue<T = unknown> {
 		metadata?: Record<string, unknown>,
 	): string {
 		if (this.items.length >= this.maxSize) {
-			throw new Error(`Queue is full (max ${this.maxSize} items)`);
+			if (this.overflowStrategy === 'evict-oldest') {
+				// Drop the genuinely oldest item (smallest createdAt) to make room,
+				// forming a bounded rolling window instead of a hard brick
+				// (issue #1778 H5).
+				let oldestIdx = 0;
+				for (let i = 1; i < this.items.length; i++) {
+					if (this.items[i].createdAt < this.items[oldestIdx].createdAt) {
+						oldestIdx = i;
+					}
+				}
+				const [evicted] = this.items.splice(oldestIdx, 1);
+				if (evicted) {
+					this.eventBus.publish('queue.item.evicted', { itemId: evicted.id });
+				}
+			} else {
+				throw new Error(`Queue is full (max ${this.maxSize} items)`);
+			}
 		}
 
 		const item: QueueItem<T> = {

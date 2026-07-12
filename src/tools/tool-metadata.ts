@@ -263,15 +263,16 @@ export const TOOL_METADATA = {
 	},
 	extract_code_blocks: {
 		description: 'extract code blocks from text content and save them to files',
+		// Write-capable NON-orchestrator roles only (issue #1778 C1). Read-only
+		// lane roles (explorer, sme, reviewer) must not hold a file-writing tool;
+		// architect is a delegating orchestrator that writes nothing directly, so
+		// it must not hold a WRITE_TOOL_NAMES member either (capability-drift-guard
+		// invariant: no write tool in AGENT_TOOL_MAP.architect).
 		agents: [
-			'architect',
-			'sme',
 			'docs',
 			'docs_design',
 			'designer',
 			'spec_writer',
-			'reviewer',
-			'explorer',
 			'coder',
 			'test_engineer',
 		],

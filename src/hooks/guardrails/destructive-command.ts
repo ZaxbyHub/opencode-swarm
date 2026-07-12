@@ -186,6 +186,13 @@ export function dcStripOneWrapper(cmd: string): string | null {
 		/^(?:bash|sh|zsh|dash|fish)(?:\.exe)?\s+-c\s+"?(.*?)"?\s*$/is.exec(t);
 	if (shellMatch) return shellMatch[1].trim();
 
+	// eval 'inner' / eval "inner" / eval inner — the POSIX builtin executes its
+	// argument as a command, so it must be unwrapped like other wrappers or a
+	// destructive/write command hidden inside `eval` slips past every matcher
+	// (issue #1778 H3). Case-insensitive for obfuscation parity.
+	const evalMatch = /^eval\s+(.+)$/is.exec(t);
+	if (evalMatch) return evalMatch[1].replace(/^["']|["']$/g, '').trim();
+
 	// sudo / env VAR=val / time / nohup / nice -n N: strip leading word + optional args
 	// Case-insensitive: SUDO, TIME, NOHUP are valid in encoded/obfuscated commands.
 	const prefixMatch =
@@ -274,6 +281,21 @@ export function dcSplitSegments(cmd: string): string[] {
 				segments.push(current.trim());
 				current = '';
 				continue;
+			}
+			// Single & (background / command separator) — but NOT part of `&&`
+			// (handled above) and NOT a POSIX fd-duplication redirect
+			// (`2>&1`, `>&`, `&>`). Splitting an fd-redirect would corrupt the
+			// command and make the guard reject legitimate commands, while a
+			// destructive command after a lone `&` must NOT evade the
+			// `^`-anchored matchers (issue #1778 H3).
+			if (ch === '&' && next !== '&') {
+				const prev = cmd[i - 1];
+				const isFdRedirect = prev === '>' || next === '>';
+				if (!isFdRedirect) {
+					segments.push(current.trim());
+					current = '';
+					continue;
+				}
 			}
 		}
 		current += ch;

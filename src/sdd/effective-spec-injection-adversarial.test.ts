@@ -136,12 +136,18 @@ describe('ATTACK VECTOR 1 — featureLabel content injection', () => {
 		);
 		expect(scLines.length).toBe(1);
 
-		// Additionally, no markdown header (## ) should appear INSIDE the SC line.
-		// If the newline-split content includes a ## header mid-SC line, that's
-		// an injected section — the SC line will have > 1 ## markers.
+		// Additionally, the label's newlines must be neutralised so the change id
+		// cannot inject an extra section. If newlines were NOT sanitised, the SC
+		// line would be truncated at the first newline (leaving an unclosed
+		// envelope) and a standalone `## Success Criteria` header would appear on
+		// its own line. We verify the envelope stays a single, well-formed line.
+		// NOTE: we must strip the SC line's own `### SC-XXX: ` prefix first — those
+		// three '#' are the scaffold heading, not an injected `##` section header.
 		for (const l of scLines) {
-			const headerCount = (l.match(/^##+ /g) ?? []).length;
-			expect(headerCount).toBe(0);
+			const scContent = l.replace(/^### SC-\d{3}: /, '');
+			expect(scContent).toMatch(
+				/^\[NEEDS CLARIFICATION — define success criterion for [^\]]+\]$/,
+			);
 		}
 	});
 
