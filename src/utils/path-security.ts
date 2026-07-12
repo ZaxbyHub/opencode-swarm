@@ -89,6 +89,19 @@ export function validateDirectory(directory: string): void {
  * Resolves symlinks via realpathSync for both the target path and the root,
  * then verifies the resolved target is within the resolved root.
  *
+ * The non-existent-path fallback uses path.resolve (not path.normalize):
+ * path.resolve anchors a rootless-absolute path (e.g. POSIX-style '/foo/bar'
+ * passed on Windows) to the current drive, matching what realpathSync would
+ * produce for a path that DOES exist. path.normalize does not add a drive
+ * letter. Without this, a case where exactly one of targetPath/rootPath
+ * happens to exist on disk (e.g. leftover state from an unrelated test, or
+ * any incidental real path) resolves that side via realpathSync (drive
+ * letter attached) while the other falls back to normalize (no drive
+ * letter) — an apples-to-oranges comparison that spuriously throws
+ * regardless of whether a real boundary escape occurred. Using resolve for
+ * both fallback branches keeps the comparison basis consistent whether
+ * realpathSync succeeds or not, independent of incidental filesystem state.
+ *
  * @param targetPath - The path to validate (absolute)
  * @param rootPath - The root directory boundary (absolute)
  * @throws Error if the resolved target escapes the root boundary
@@ -101,14 +114,14 @@ export function validateSymlinkBoundary(
 	try {
 		realTarget = fs.realpathSync(targetPath);
 	} catch {
-		realTarget = path.normalize(targetPath);
+		realTarget = path.resolve(targetPath);
 	}
 
 	let realRoot: string;
 	try {
 		realRoot = fs.realpathSync(rootPath);
 	} catch {
-		realRoot = path.normalize(rootPath);
+		realRoot = path.resolve(rootPath);
 	}
 
 	const normalizedTarget = path.normalize(realTarget);
