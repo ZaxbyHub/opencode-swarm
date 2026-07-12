@@ -24,11 +24,11 @@ const architectSource = readFileSync(
 );
 
 describe('architect mode skill mirrors - regression: prevent mirror drift (F-001)', () => {
-	for (const [
-		skillName,
+	for (const {
+		slug: skillName,
 		opencodePath,
 		claudePath,
-	] of MIRRORED_ARCHITECT_MODE_SKILLS) {
+	} of MIRRORED_ARCHITECT_MODE_SKILLS) {
 		it(`${skillName} skill stays byte-identical across OpenCode and Claude mirrors`, () => {
 			// Future protocol edits must update both mirrors together; otherwise
 			// OpenCode and Claude sessions can diverge silently.
@@ -159,7 +159,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 			),
 		].map((match) => match[1]);
 		const mirroredSlugs = [
-			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
+			...MIRRORED_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug).filter(
 				(slug) => !eventDrivenAdapterSkills.has(slug),

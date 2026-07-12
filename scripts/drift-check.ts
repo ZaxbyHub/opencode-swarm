@@ -78,6 +78,7 @@ interface FsHelpers {
 	abs: (relativePath: string) => string;
 	fileExists: (relativePath: string) => boolean;
 	readFile: (relativePath: string) => string;
+	writeFile: (relativePath: string, contents: string) => void;
 	listDirNames: (relativePath: string) => string[];
 }
 
@@ -91,6 +92,11 @@ function makeFs(root: string): FsHelpers {
 		abs,
 		fileExists: (relativePath) => fs.existsSync(abs(relativePath)),
 		readFile: (relativePath) => fs.readFileSync(abs(relativePath), 'utf-8'),
+		writeFile: (relativePath, contents) => {
+			const full = abs(relativePath);
+			fs.mkdirSync(path.dirname(full), { recursive: true });
+			fs.writeFileSync(full, contents, 'utf-8');
+		},
 		listDirNames: (relativePath) => {
 			const dir = abs(relativePath);
 			if (!fs.existsSync(dir)) return [];
@@ -113,7 +119,7 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 	const classified = new Set<string>();
 
 	// MIRRORED: both sides must exist AND be byte-identical.
-	for (const [slug, opencodePath, claudePath] of MIRRORED_ARCHITECT_MODE_SKILLS) {
+	for (const { slug, opencodePath, claudePath } of MIRRORED_ARCHITECT_MODE_SKILLS) {
 		classified.add(slug);
 		if (!fileExists(opencodePath)) {
 			findings.push({
@@ -322,6 +328,117 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 	}
 
 	return findings;
+}
+
+// ---------------------------------------------------------------------------
+// 1b) Skill mirror FIX (issue #1781 E3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconcile mirrored skill pairs by copying the canonical side to each mirror.
+ * The detect-only path (`detectSkillMirrorDrift`) reports divergence; this
+ * function fixes it. It is invoked by `drift:fix` (a developer convenience, not
+ * a CI mutation) and is guarded against accidental invocation.
+ *
+ * Invariants:
+ *  - Writes ONLY to native skill roots (`.opencode/skills/`, `.claude/skills/`,
+ *    `.agents/skills/`). These are protected by AGENTS.md invariant 4; this is
+ *    a developer tool, never a plugin-runtime sync, and never runs under
+ *    `DRIFT_CHECK_ENFORCE`. The env-guard below enforces explicit confirmation.
+ *  - Reads `canonical` per pair to decide copy direction (`.opencode` for the
+ *    15 MIRRORED pairs and ADDITIONAL identical pairs whose canonical is
+ *    `.opencode`; `.claude` for `commit-pr` whose canonical is `.claude` per
+ *    `.github/workflows/pr-standards.yml`). A wrong direction would corrupt
+ *    the operative side, so this MUST read the field, not assume `.opencode`.
+ *  - No-op on `divergent` and `opencode-only` pairs and on already-in-sync
+ *    pairs.
+ *  - Returns `DriftFinding[]` with severity `'notice'` describing what was
+ *    synced, so callers can print a summary.
+ */
+export function fixSkillMirrorDrift(
+	root: string = REPO_ROOT,
+	options: { confirmed?: boolean } = {},
+): DriftFinding[] {
+	const confirmed =
+		options.confirmed === true ||
+		process.env.SWARM_SKILL_SYNC_CONFIRM === '1';
+	if (!confirmed) {
+		throw new Error(
+			'fixSkillMirrorDrift writes to native skill roots (.opencode/skills, ' +
+				'.claude/skills, .agents/skills) protected by AGENTS.md invariant 4. ' +
+				'Confirm by passing `--confirm` on the CLI or setting ' +
+				'SWARM_SKILL_SYNC_CONFIRM=1. This tool is a developer convenience ' +
+				'(run via `bun run drift:fix`); it is never a plugin-runtime sync and ' +
+				'is never invoked under DRIFT_CHECK_ENFORCE.',
+		);
+	}
+	const { fileExists, readFile, writeFile } = makeFs(root);
+	const synced: DriftFinding[] = [];
+	const category = 'skill-mirror';
+
+	// MIRRORED architect-mode pairs (canonical always `.opencode`).
+	for (const {
+		slug,
+		opencodePath,
+		claudePath,
+		canonical,
+	} of MIRRORED_ARCHITECT_MODE_SKILLS) {
+		if (!fileExists(opencodePath) || !fileExists(claudePath)) continue;
+		const opencodeContent = readFile(opencodePath);
+		const claudeContent = readFile(claudePath);
+		if (opencodeContent === claudeContent) continue;
+		if (canonical === '.opencode') {
+			writeFile(claudePath, opencodeContent);
+		} else {
+			writeFile(opencodePath, claudeContent);
+		}
+		synced.push({
+			category,
+			severity: 'notice',
+			file: canonical === '.opencode' ? claudePath : opencodePath,
+			message: `mirrored skill "${slug}" synced from ${canonical} canonical`,
+		});
+	}
+
+	// ADDITIONAL `identical` pairs (canonical may be either side; honor it).
+	for (const contract of ADDITIONAL_SKILL_MIRROR_CONTRACTS) {
+		if (contract.kind !== 'identical') continue;
+		const { slug, canonical } = contract;
+		const canonicalSide = canonical ?? '.opencode';
+		const opencodePath = `.opencode/skills/${slug}/SKILL.md`;
+		const claudePath = `.claude/skills/${slug}/SKILL.md`;
+		if (!fileExists(opencodePath) || !fileExists(claudePath)) continue;
+		const opencodeContent = readFile(opencodePath);
+		const claudeContent = readFile(claudePath);
+		const canonicalContent =
+			canonicalSide === '.opencode' ? opencodeContent : claudeContent;
+		const mirrorPath =
+			canonicalSide === '.opencode' ? claudePath : opencodePath;
+		if (opencodeContent !== claudeContent) {
+			writeFile(mirrorPath, canonicalContent);
+			synced.push({
+				category,
+				severity: 'notice',
+				file: mirrorPath,
+				message: `identical skill "${slug}" synced from ${canonicalSide} canonical`,
+			});
+		}
+		// extraIdenticalPaths: bring each extra mirror in line with the canonical.
+		for (const extraPath of contract.extraIdenticalPaths ?? []) {
+			if (!fileExists(extraPath)) continue;
+			if (readFile(extraPath) !== canonicalContent) {
+				writeFile(extraPath, canonicalContent);
+				synced.push({
+					category,
+					severity: 'notice',
+					file: extraPath,
+					message: `identical skill "${slug}" extra mirror synced from ${canonicalSide} canonical`,
+				});
+			}
+		}
+	}
+
+	return synced;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,20 +785,52 @@ function isEnforce(): boolean {
 	return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
-function parseArgs(argv: string[]): { reportPath: string | null; json: boolean } {
+function parseArgs(argv: string[]): {
+	reportPath: string | null;
+	json: boolean;
+	fix: boolean;
+	confirm: boolean;
+} {
 	let reportPath: string | null = 'drift-report.md';
 	let json = false;
+	let fix = false;
+	let confirm = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--no-report') reportPath = null;
 		else if (arg === '--report') reportPath = argv[++i] ?? reportPath;
 		else if (arg === '--json') json = true;
+		else if (arg === '--fix') fix = true;
+		else if (arg === '--confirm') confirm = true;
 	}
-	return { reportPath, json };
+	return { reportPath, json, fix, confirm };
 }
 
 async function main(): Promise<void> {
-	const { reportPath, json } = parseArgs(process.argv.slice(2));
+	const { reportPath, json, fix, confirm } = parseArgs(process.argv.slice(2));
+
+	// Issue #1781 E3: `drift:fix` reconciles mirrored skill pairs before
+	// detection. It is a developer convenience (env-guarded or --confirm,
+	// never a CI mutation). Refuse to run under DRIFT_CHECK_ENFORCE so a CI
+	// accident can never mutate native skill roots (AGENTS.md invariant 4).
+	if (fix) {
+		if (isEnforce()) {
+			console.error(
+				'drift-check: --fix is a developer tool and must not run under DRIFT_CHECK_ENFORCE (would mutate native skill roots in CI).',
+			);
+			process.exit(1);
+		}
+		const synced = fixSkillMirrorDrift(REPO_ROOT, { confirmed: confirm });
+		if (synced.length > 0) {
+			console.log(`drift-check --fix: synced ${synced.length} skill mirror(s):`);
+			for (const f of synced) {
+				console.log(`  - ${f.file}: ${f.message}`);
+			}
+		} else {
+			console.log('drift-check --fix: no mirrored skills were out of sync.');
+		}
+	}
+
 	const findings = await runAllDetectors();
 
 	for (const finding of findings) {

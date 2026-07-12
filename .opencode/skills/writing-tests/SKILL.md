@@ -613,7 +613,7 @@ authority checks:
 
 ## FR-006: Test File Size Limit (500 lines)
 
-CI enforces a **hard 500-line limit** per test file (FR-006). Files exceeding this limit fail the quality gate and block PR merge.
+`scripts/check-test-file-cap.sh` enforces the **500-line cap** per test file (FR-006) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns (use only for a deliberate growth PR).
 
 ### Checking file length
 

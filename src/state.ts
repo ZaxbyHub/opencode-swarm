@@ -1928,6 +1928,28 @@ export function hasActiveFullAuto(sessionID?: string): boolean {
 }
 
 /**
+ * Issue #1781 E2: return the sessionID of any currently-active Full-Auto
+ * session, or `undefined` if none. Used by `/swarm status` to scope its
+ * escalation-detail read to the live session (avoids surfacing stale
+ * escalations from prior sessions persisted in `.swarm/full-auto-state.json`).
+ * If multiple sessions are active, the one with the most recent tool-call
+ * timestamp wins (a proxy for "most recently touched").
+ */
+export function getActiveFullAutoSessionID(): string | undefined {
+	let activeId: string | undefined;
+	let activeLastToolCall = -1;
+	for (const [id, session] of swarmState.agentSessions) {
+		if (session.fullAutoMode !== true) continue;
+		const lastToolCall = session.lastToolCallTime ?? 0;
+		if (activeId === undefined || lastToolCall > activeLastToolCall) {
+			activeId = id;
+			activeLastToolCall = lastToolCall;
+		}
+	}
+	return activeId;
+}
+
+/**
  * Check if Lean Turbo Mode is active for a specific session or ANY session.
  * @param sessionID - Optional session ID to check. If provided, checks only that session.
  *                    If omitted, checks all sessions.

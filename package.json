@@ -93,6 +93,7 @@
 		"lint:ci": "biome ci .",
 		"test:unit:ci": "bun scripts/ci/run-unit-tests-local.ts",
 		"drift:check": "bun run scripts/drift-check.ts",
+		"drift:fix": "bun run scripts/drift-check.ts --fix --confirm",
 		"format": "biome format . --write",
 		"check": "biome check --write .",
 		"dev": "bun run build && opencode",

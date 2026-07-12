@@ -26,6 +26,7 @@ import {
 	incrementOversightFailureCounter,
 	loadFullAutoRunState,
 	pauseFullAutoRun,
+	recordFullAutoEscalation,
 	recordFullAutoOversight,
 	resetOversightFailureCounter,
 	startFullAutoRun,
@@ -1081,6 +1082,22 @@ async function handleEscalation(
 		deadlockCount,
 		phase,
 	);
+
+	// Issue #1781 E2: persist escalation detail to durable state so /swarm
+	// status can surface reason + interaction/deadlock counts + phase without
+	// parsing the human-readable markdown report. The subsequent
+	// pause/terminate writes spread `...state`, so this field survives them.
+	if (sessionID) {
+		if (!loadFullAutoRunState(directory, sessionID)) {
+			startFullAutoRun(directory, sessionID, { enabled: true });
+		}
+		recordFullAutoEscalation(directory, sessionID, {
+			reason,
+			interactionCount,
+			deadlockCount,
+			phase,
+		});
+	}
 
 	if (escalationMode === 'terminate') {
 		logger.error(
