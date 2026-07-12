@@ -72,6 +72,8 @@ Run before publication work:
 ```bash
 git fetch origin main
 rm -f .swarm/evidence/*.json
+rm -f .swarm/evidence/pr_body.md
+rm -f .swarm/evidence/commit-pr-validation.md
 git status --short
 ```
 
@@ -112,6 +114,8 @@ The fragment should cover:
 - breaking changes, if any
 - known caveats
 
+Bot authors (e.g. `[bot]`, Copilot) and docs/workflow/meta-only changes (no `src/`, `tests/`, `scripts/`, `package.json`, etc.) are exempt from this requirement by CI; all other PRs that touch code must include a fragment.
+
 Do not manually edit:
 
 - `package.json` version
@@ -147,24 +151,26 @@ node --input-type=module -e "await import('./dist/index.js'); console.log('dist 
 
 ### Tier 1 - quality
 
-Run both linter AND formatter — e.g., `bunx @biomejs/biome@<version> check --write .` or equivalent — because CI quality gates reject code that passes tests but fails style validation. **Pin the tool version** to match the version in `package.json` (`@biomejs/biome`); unversioned `bunx biome` resolves to a different version than the CI gate uses.
+Run both linter AND formatter — e.g., `bunx @biomejs/biome@<version> check --write .` or equivalent — because CI quality gates reject code that passes tests but fails style validation. **Pin the tool version** to match the version in `package.json` (`@biomejs/biome`); unversioned `bunx biome` resolves to a different version than the CI gate uses. (the repo script `bun run lint:ci` runs the pinned Biome version; prefer it over invoking `bunx biome` directly).
 
 ```bash
 bun run typecheck
-bunx @biomejs/biome@<version> ci .
+bun run lint:ci
+bun run scripts/check-tool-registration.ts
+bash scripts/check-mock-cleanup.sh
+bash scripts/check-invariants.sh
+bash scripts/check-cross-contamination.sh
+bash scripts/check-test-clock.sh
 ```
 
 ### Tier 2 - unit tests
 
 ```bash
-for f in tests/unit/tools/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-for f in tests/unit/services/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-for f in tests/unit/agents/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-for f in tests/unit/hooks/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-bun --smol test tests/unit/cli tests/unit/commands tests/unit/config --timeout 120000
+bun run test:unit:ci               # CI-equivalent unit gate (quarantine ledgers + retry budget)
+bun run test:unit:ci <file>...     # scoped mode: run only the listed repo-relative test files
 ```
 
-If agent prompt text changed, grep for the changed text in tests and rerun every matching file individually.
+`bun run test:unit:ci` runs `scripts/ci/run-unit-tests-local.ts`, the CI-equivalent unit gate with per-platform quarantine ledgers (`scripts/ci/quarantined-tests.txt`, `quarantined-tests-macos.txt`, `quarantined-tests-windows.txt`) and the retry budget. The full serial run is 45–90 min, so use the scoped mode (`bun run test:unit:ci <file>...`) when the evidence justifies narrowing (e.g. you only touched one module). This closes the gap the hand-rolled loops left (~40% of CI's colocated `src/**` tests were uncovered).
 
 ### Tier 3 - integration
 
@@ -191,7 +197,11 @@ If a failure looks unrelated, prove it on clean `origin/main` before carrying it
 
 ```bash
 git worktree add /tmp/repro-check origin/main
-bun --smol test /tmp/repro-check/<path-to-failing-test> --timeout 30000
+cd /tmp/repro-check
+bun install --frozen-lockfile
+bun run build
+bun --smol test <repo-relative-path-to-failing-test> --timeout 120000
+cd ..
 git worktree remove /tmp/repro-check
 ```
 
@@ -221,14 +231,14 @@ Before opening a PR, verify no local-only files are staged:
 git diff --name-only HEAD origin/main | grep -E '\.(local\.json|vscode|idea)' || true
 ```
 
-Prefer a single clean commit for the branch before initial PR publication:
+Prefer a single clean commit for the branch before initial PR publication. Resolve the canonical remote first (see "Canonical remote resolution" below), then squash/push:
 
 ```bash
-git fetch origin main
-git log --oneline origin/main..HEAD
-git reset --soft origin/main
+git fetch <canonical-remote> <base-branch>
+git log --oneline <canonical-remote>/<base-branch>..HEAD
+git reset --soft <canonical-remote>/<base-branch>
 git commit -m "type(scope): description"
-git push --force-with-lease -u origin <branch-name>
+git push --force-with-lease -u <canonical-remote> <branch-name>
 ```
 
 If a review cycle is already active and inline comments depend on current SHAs, avoid resquashing until threads are resolved.
@@ -237,8 +247,8 @@ If pushing to a PR branch owned by another agent or bot, push to the PR's actual
 
 ```powershell
 $prBranch = gh pr view <number> --json headRefName --jq '.headRefName'
-git fetch origin $prBranch
-git push origin "<your-local-branch>:$prBranch" --force-with-lease
+git fetch <canonical-remote> $prBranch
+git push <canonical-remote> "<your-local-branch>:$prBranch" --force-with-lease
 ```
 
 ### Fork PR workflow approval
@@ -268,13 +278,13 @@ pattern was pushed before the string-concatenation workaround was applied.
 **The primary check (pre-push, after commit exists):**
 
 ```bash
-git log origin/main..HEAD -p | grep -E "$(printf '%s' "${PREFIX:-sk_live}|ghp_|xox[abprs]-|AKIA|eyJ|AIza")" || true
+git log origin/main..HEAD -p | grep -E 'sk_live|ghp_|xox[abprs]-|AKIA|eyJ|AIza' || true
 ```
 
 **The optional pre-commit add-on (staged changes only):**
 
 ```bash
-git diff --cached | grep -E "$(printf '%s' "${PREFIX:-sk_live}|ghp_|xox[abprs]-|AKIA|eyJ|AIza")" || true
+git diff --cached | grep -E 'sk_live|ghp_|xox[abprs]-|AKIA|eyJ|AIza' || true
 ```
 
 Forbidden patterns: Stripe (`sk_live_*`), GitHub (`ghp_*`), Slack (`xox[abprs]-*`),
@@ -324,6 +334,8 @@ PR body requirements:
 - `## Summary`
 - `## Invariant audit`
 - `## Test plan`
+
+CI enforces both the section ORDER (Summary, then Invariant audit, then Test plan) and that each heading is on its own line with nothing trailing but whitespace (see `.github/workflows/pr-standards.yml`).
 
 ### Publication-gate evidence
 
@@ -415,6 +427,8 @@ $issueCommentPath = Join-Path ([System.IO.Path]::GetTempPath()) "issue-comment.t
 gh issue comment <issue-number> --body-file $issueCommentPath
 ````
 
+If the PR merged before this was done, post the missing issue comment immediately.
+
 ## Commit messages
 
 `git commit -m "..."` with parens, brackets, backticks, or dollar-signs in the message fails on PowerShell because the shell parses them as expressions. Write the commit message to a UTF-8 (no BOM) file first and use `git commit -F <file>`.
@@ -434,8 +448,6 @@ git commit -F $commitMsgPath
 ```
 
 Apply this pattern for any commit message containing special characters, multi-paragraph bodies, or code blocks. The plain `git commit -m "..."` form remains fine for short single-line messages with no special characters.
-
-If the PR merged before this was done, post the missing issue comment immediately.
 
 ## Step 7 - Existing PR follow-up and closeout
 

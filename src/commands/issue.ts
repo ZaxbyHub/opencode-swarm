@@ -31,7 +31,7 @@ const USAGE = [
 	'',
 	'Flags:',
 	'  --plan        Transition to plan creation after spec generation',
-	'  --trace       Run full fix-and-PR workflow (implies --plan)',
+	'  --trace       Run the fix workflow end-to-end (implies --plan); compose commit-pr to publish.',
 	'  --no-repro    Skip reproduction step',
 ].join('\n');
 

@@ -27,7 +27,16 @@ describe('dispatch lane full-output retrieval guidance', () => {
 			const source = readRepoFile(filePath);
 
 			expect(source).toContain('output_ref');
-			expect(source).toContain('retrieve_lane_output');
+			// The .agents (Codex) adapter uses capability phrasing instead of the
+			// OpenCode-specific tool name (GPT-17, issue #1804); all other files
+			// pin the concrete retrieve_lane_output tool.
+			if (!filePath.startsWith('.agents/')) {
+				expect(source).toContain('retrieve_lane_output');
+			} else {
+				expect(source).toMatch(
+					/lane-output retrieval capability|retrieve.*output_ref/i,
+				);
+			}
 			expect(source).toMatch(/preview/i);
 			expect(source).toMatch(
 				/degraded|incomplete|coverage gap|coverage limitation|evidence gaps/i,

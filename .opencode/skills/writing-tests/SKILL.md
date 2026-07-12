@@ -10,7 +10,7 @@ description: >
 
 # Writing Tests for opencode-swarm
 
-> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. `allow_full_suite` should be used only when intentional and justified in the PR description. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
+> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` is gated behind the `SWARM_ALLOW_FULL_SUITE=1` env var (intended for opt-in CI mirrors only; there is no `allow_full_suite` arg). Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
 
 ## ⛔ STOP — Read Before Running Any Tests
 
@@ -522,22 +522,24 @@ const actual = readFileSync(path, 'utf-8').replace(/\r\n/g, '\n');
 
 ## CI Pipeline Structure
 
-The CI runs on three platforms (ubuntu, macos, windows). Tests are split into sequential steps within each platform's job.
+The CI runs on three platforms (ubuntu, macos, windows). Tests are split into 6 logical steps within each platform's job. (CI distributes files across shards via round-robin — see TESTING.md's CI Pipeline Steps table for the authoritative directory lists.)
 
 ```text
-Step 1: hooks — per-file isolation loop on every platform
-Step 2: cli — batch
-Step 3: commands + config — batch
-Step 4: tools — per-file isolation loop
-Step 5: services + build + quality + sast + sbom + scripts — per-file isolation loop
-Step 6: state + agents + knowledge + evidence + plan + misc — per-file isolation loop
+Step 1a: hooks (mock.module files — 15 files) — per-file isolation (dedicated step)
+Step 1b: hooks (remaining groups)               — per-file loop per group
+Step 2:  cli                                     — batch
+Step 3:  commands, config                        — batch
+Step 4:  tools                                   — per-file loop
+Step 5:  services, build, quality, sast, sbom, scripts — per-file loop
+Step 6:  adversarial, agents, background, context, diff, evidence, git, helpers,
+         knowledge, lang, output, parallel, plan, session, skills, types, utils — per-file loop
 ```
 
-**Steps 1 and 4-6 use per-file isolation:** each `.test.ts` file runs in its own `bun --smol` process to prevent `mock.module()` cache poisoning (#330). Steps 2-3 run files in batch (one process per step) because they have fewer mock conflicts.
+**Per-file isolation (steps 1a, 1b, 4-6):** each `.test.ts` file runs in its own `bun --smol` process to prevent `mock.module()` cache poisoning (#330). Steps 2-3 run files in batch because they have fewer mock conflicts. CI partitions the gated test set into **6 shards** round-robin per platform (no hardcoded file lists), with a per-file **retry budget** (two retries / three attempts before a failure is treated as real) and **quarantine** filters (`scripts/ci/quarantined-tests.txt`, plus `-macos`/`-windows` overrides) that drop known pre-existing failures.
 
 When writing a test, know which step your file will run in. In batch steps, do not assume isolation from other files in the same step.
 
-**Job timeout: 15 minutes.** A single hanging test will kill the entire platform's test run.
+**Job timeout: 40 minutes.** A hanging shard will kill the entire platform's test run; the per-file `run-test-with-timeout.ts` wrapper caps each file at 120 s (180 s kill-timeout).
 
 ## File Placement
 
@@ -695,6 +697,9 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - **Do not test framework behavior.** "Zod schema parses valid input" tests Zod, not your schema.
 - **Do not test test utilities.** If it only exists to support other tests, it doesn't need its own test.
 - **Do not mock everything.** If every dependency is mocked, you're testing the mock setup. Prefer real dependencies for pure functions and only mock I/O boundaries (filesystem, network, timers).
+- **Do not hardcode version numbers.** Version bumps are automated — a test asserting `version === '6.31.3'` breaks on every release.
+- **Do not use `sleep` or `setTimeout` for synchronization.** Use explicit signals, resolved promises, or `Bun.sleep()` with tight bounds.
+- **Do not spawn `cat /dev/zero`, `yes`, or other infinite-output commands.** Use `sleep 30` for "blocking command" tests.
 
 ### Anchored Content Assertions
 
@@ -718,9 +723,6 @@ Use this pattern for:
 - Critic outcome mappings in skill files (DROP, ASK_USER, RESOLVE, REPHRASE)
 - Classification category lists (self_resolved, user_decision, etc.)
 - Any structured section where word presence is necessary but position-dependent
-- **Do not hardcode version numbers.** Version bumps are automated — a test asserting `version === '6.31.3'` breaks on every release.
-- **Do not use `sleep` or `setTimeout` for synchronization.** Use explicit signals, resolved promises, or `Bun.sleep()` with tight bounds.
-- **Do not spawn `cat /dev/zero`, `yes`, or other infinite-output commands.** Use `sleep 30` for "blocking command" tests.
 
 ## Documented-Example Regression Tests
 
@@ -763,6 +765,84 @@ if (isWindows) test.skip('reason', () => {});
 - Use `.cmd` extension on Windows for npm/bun binaries: `process.platform === 'win32' ? 'bun.cmd' : 'bun'`.
 - Use array-form `spawn`/`spawnSync`, never shell string commands.
 
+### macOS rename-visibility race (write-then-read atomic files)
+
+On macOS/APFS, `fs.renameSync` can complete before the data is visible to
+subsequent reads. Tests that write-then-read atomic files may fail on
+`macos-latest` but pass on `ubuntu-latest` and `windows-latest`.
+
+**Symptom:** Test fails only on macOS with `result === null` or
+`result === undefined` immediately after a write that should have made the
+file visible.
+
+**Root cause:** macOS filesystem updates the directory entry asynchronously
+after `fs.renameSync`. Immediately-following reads may see ENOENT or stale
+data.
+
+**Fix — three layers (use all three for production code):**
+
+**Layer 1: Use `bunWrite` for atomic writes.** The `bunWrite` function in
+`src/utils/bun-compat.ts` already handles temp file creation, fsync,
+atomic rename, and parent directory fsync correctly across platforms.
+Do NOT reimplement this pattern.
+
+**Layer 2: Add ENOENT retry in the read path.** Wrap `validateSwarmPath` and
+the file read in a try/catch with a bounded retry loop for ENOENT:
+
+```typescript
+// CORRECT — retry on ENOENT only (not other errors), bounded
+const maxAttempts = 5;
+const retryDelayMs = 10;
+for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  try {
+    const resolvedPath = _internals.validateSwarmPath(directory, filename);
+    const file = bunFile(resolvedPath);
+    const content = await file.text();
+    return content;
+  } catch (err) {
+    const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+    if (!isNotFound || attempt === maxAttempts - 1) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+}
+return null;
+```
+
+CRITICAL: `validateSwarmPath` must be INSIDE the try block so that throws
+(for path traversal attempts) are caught and return null. Security tests
+expect `readSwarmFileAsync` to return null for traversal attempts.
+
+**Layer 3: Don't add arbitrary delays.** `setTimeout` should be bounded
+(5-10ms, max 5 attempts). Do not add `await new Promise(r => setTimeout(r, 100))`
+"just in case" — that's a code smell. The retry loop handles it.
+
+See [`.opencode/skills/engineering-conventions/SKILL.md`](../engineering-conventions/SKILL.md)
+for the evidence file flow that triggers this retry pattern in QA gates.
+
+### Node FileHandle API
+
+Node's `FileHandle` uses `.sync()`, NOT `.fsync()`:
+
+```typescript
+// CORRECT
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.sync();
+} finally {
+  await fd.close();
+}
+
+// WRONG — TypeScript error: Property 'fsync' does not exist on type 'FileHandle'
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.fsync();
+} finally {
+  await fd.close();
+}
+```
+
 ## Running Tests
 
 ### bash (Linux / macOS)
@@ -777,7 +857,7 @@ bun --smol test tests/unit/hooks --timeout 30000
 # Per-file loop (required for tools/services/agents — prevents mock poisoning)
 for f in tests/unit/tools/*.test.ts; do bun --smol test "$f" --timeout 30000; done
 
-# CI-equivalent run for batch steps
+# CI-equivalent run for batch steps (step 2: cli; step 3: commands + config)
 bun --smol test tests/unit/cli --timeout 120000
 bun --smol test tests/unit/commands tests/unit/config --timeout 120000
 ```
@@ -794,7 +874,7 @@ bun --smol test tests/unit/hooks --timeout 30000
 # Per-file loop (required for tools/services/agents — prevents mock poisoning)
 Get-ChildItem tests/unit/tools/*.test.ts | ForEach-Object { bun --smol test $_.FullName --timeout 30000 }
 
-# CI-equivalent run for batch steps
+# CI-equivalent run for batch steps (step 2: cli; step 3: commands + config)
 bun --smol test tests/unit/cli --timeout 120000
 bun --smol test tests/unit/commands tests/unit/config --timeout 120000
 
@@ -804,7 +884,7 @@ bun --smol test tests/unit/agents --timeout 60000 | Out-File "$env:TEMP\test_out
 
 **Note:** `for f in ...; do` bash syntax is invalid in PowerShell. Use `Get-ChildItem | ForEach-Object` instead. `Select-String -Last N` is also invalid — use `Select-Object -Last N`.
 
-**Warning:** Running `bun --smol test tests/unit/tools` as a single batch will cause mock poisoning failures. Always use the per-file loop for directories in CI steps 4-6 (tools, services, agents, etc.).
+**Warning:** Running `bun --smol test tests/unit/tools` as a single batch will cause mock poisoning failures. Always use the per-file loop for the per-file-isolation steps (1a, 1b, 4-6: tools, services, agents, etc.).
 
 The `--smol` flag reduces Bun's memory footprint. Use it when running large directories (50+ files).
 
@@ -821,17 +901,7 @@ The `--timeout 120000` flag sets per-test timeout to 120 seconds. Individual tes
 
 ## Known Pre-existing Test Failures
 
-The following test failures are pre-existing and unrelated to mock isolation:
-
-| Test file | Failures | Cause | Status |
-|-----------|----------|-------|--------|
-| `tests/unit/hooks/full-auto-intercept.test.ts` | 21/37 | `logger.log` returns early without `OPENCODE_SWARM_DEBUG=1` | Pre-existing |
-| `tests/unit/hooks/full-auto-intercept.dispatch.test.ts` | 2/46 | Same logger issue | Pre-existing |
-| `tests/unit/commands/help-compound-commands.test.ts` | Multiple | Command routing issues | Pre-existing |
-| `tests/unit/commands/index.test.ts` | Multiple | Command routing issues | Pre-existing |
-| `tests/unit/commands/issue-command.test.ts` | Multiple | Command routing issues | Pre-existing |
-| `src/__tests__/preflight-phase.test.ts` | 3/3 | `loadPlan` called twice per invocation (lines 930 + 545) | Bug exposed by cleanup |
-| `tests/unit/agents/architect-sounding-board-protocol.adversarial.test.ts` | 1 | Token budget threshold `35000` exceeded by prompt growth; soft regression indicator that prompt size needs attention | Pre-existing |
+Pre-existing and flaky failures are tracked in the per-platform quarantine ledgers (`scripts/ci/quarantined-tests.txt`, `quarantined-tests-macos.txt`, `quarantined-tests-windows.txt`), not in this skill. To confirm a failure is pre-existing, reproduce it in a clean worktree on `origin/main` (see the worktree verify protocol in `running-tests`).
 
 ## Known Cross-module mock.module Locations
 

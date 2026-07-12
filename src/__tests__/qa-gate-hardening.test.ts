@@ -136,6 +136,20 @@ describe('buildQaGateSelectionDialogue text', () => {
 			expect(text).toMatch(/recommend/i);
 		}
 	});
+
+	test('dialogue presents auto_proceed as the fourth item and persists it', () => {
+		for (const mode of ['SPECIFY', 'BRAINSTORM', 'PLAN'] as const) {
+			const text = buildQaGateSelectionDialogue(mode);
+			// The dialogue now presents four items, not three.
+			expect(text).toContain('all four');
+			// auto_proceed is the 4th item.
+			expect(text).toContain('Auto-proceed');
+			expect(text).toContain('auto_proceed');
+			// It is routed into the Pending QA Gate Selection section so it persists
+			// into execution_profile on save_plan (issue #1804 MODE-1+2).
+			expect(text).toContain('## Pending QA Gate Selection');
+		}
+	});
 });
 
 describe('Architect prompt behavioral guidance markers', () => {

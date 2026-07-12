@@ -20,7 +20,7 @@ Codex-specific execution notes:
 
 - Use `apply_patch` for manual edits.
 - Use the available shell execution tool for `rg`, `git`, build, smoke, and test commands.
-- Use `multi_tool_use.parallel` for independent file reads and searches.
+- Use the runtime's parallel-execution capability for independent file reads and searches.
 - Keep changes scoped and produce concrete invariant evidence for every touched invariant.
 
 The source of truth is always `AGENTS.md`. If an imported skill conflicts with it, `AGENTS.md` wins.

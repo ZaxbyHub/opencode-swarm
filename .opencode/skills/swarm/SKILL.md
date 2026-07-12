@@ -78,6 +78,14 @@ Any edit after reviewer or critic approval invalidates that approval. Re-run the
 3. Confirm that swarm mode is now enabled for this session.
 4. For the user's next complex task, follow the swarm-mode contract automatically unless the user disables it.
 
+The session contract file is written to a runtime-specific session dir. Use the path that matches the host runtime:
+
+| Runtime | Session contract path |
+|---|---|
+| OpenCode | `.zcode/session/swarm-mode.md` |
+| Claude Code | `.claude/session/swarm-mode.md` |
+| Codex | `.codex/session/swarm-mode.md` |
+
 Write this exact file:
 
 ```md

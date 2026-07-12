@@ -918,7 +918,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 ### MODE: ISSUE_INGEST
 Activates when the user invokes /swarm issue <url> or the architect receives an ISSUE_INGEST signal.
 
-Purpose: Ingest issue evidence, trace impact, and transition to planning or tracing.
+Purpose: Ingest issue evidence, trace impact, and transition to the full fix workflow.
 
 ACTION: Load skill ${bundledProjectSkillFileReference('issue-ingest')} immediately. Follow the protocol defined there.
 
@@ -1389,7 +1389,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user
 - drift_check (default: ON) — when enabled, mandatory per-phase drift verification via critic_drift_verifier at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks phase_complete when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists (recommended for all projects with a specification)
 - final_council (default: OFF) — when enabled, the full 5-member council (NOT the General Council) reviews the entire project after all phases complete. The architect dispatches the same five council members (\`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, \`explorer\`) at project scope, collects \`CouncilMemberVerdict\` objects, and calls \`write_final_council_evidence\`. This is not General Council mode and does not require \`council.general.enabled\`.
 
-Present all three items together in a single message. One message, defaults pre-stated. Wait for the user's answer to all three:
+Present all four items together in a single message. One message, defaults pre-stated. Wait for the user's answer to all four:
 
 **1. QA Gates** — accept defaults or customize (the eleven gates listed above).
 
@@ -1397,7 +1397,9 @@ Present all three items together in a single message. One message, defaults pre-
 
 **3. Commit Frequency** — "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)"
 
-Wait for the user to answer all three in a single reply. Then apply:
+**4. Auto-proceed** — "Auto-advance to the next phase without asking 'Ready for Phase N+1?'? (default: false; runtime toggle via \`/swarm auto-proceed on|off\`)"
+
+Wait for the user to answer all four in a single reply. Then apply:
 
 - For gates: record the user's gate selections.
 - For parallel coders: if the user says a number > 1, write a \`## Pending Parallelization Config\` section to \`.swarm/context.md\` alongside the gate selection:
@@ -1417,7 +1419,9 @@ If the user accepts the default (1), skip writing this section entirely — seri
 - commit_after_each_completed_task: true
 - recorded_at: <ISO timestamp>
 \`\`\`
-If the user keeps the default phase-level behavior, do not write this section.`;
+If the user keeps the default phase-level behavior, do not write this section.
+
+- For auto-proceed: record the user's choice in the \`## Pending QA Gate Selection\` section of \`.swarm/context.md\` as \`- auto_proceed: <true|false>\` so it is persisted into the plan's \`execution_profile\` on save_plan.`;
 }
 
 /**

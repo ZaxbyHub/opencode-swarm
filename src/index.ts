@@ -1573,7 +1573,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				'swarm-council': {
 					template: '/swarm council $ARGUMENTS',
 					description:
-						'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--preset <name>] [--spec-review]',
+						'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--spec-review]',
 				},
 				'swarm-pr-review': {
 					template: '/swarm pr-review $ARGUMENTS',

@@ -26,6 +26,8 @@ This is the final hop of the PR lifecycle:
 watching the PR — routing fresh events back through the feedback discipline —
 until the PR is merged or closed.
 
+> **Cross-reference**: For ongoing CI-status tracking across multiple PRs (not just one PR's feedback), use the `swarm-ci-monitor` skill instead.
+
 ## When To Subscribe
 
 - **Automatically after PR creation.** When `pr_monitor.enabled` and

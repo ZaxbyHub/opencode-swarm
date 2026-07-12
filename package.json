@@ -74,8 +74,6 @@
 		".opencode/skills/gate-attribution",
 		".opencode/skills/merge-queue-readiness",
 		".opencode/skills/skill-edit-validation",
-		".opencode/skills/swarm",
-		".opencode/skills/swarm-ci-monitor",
 		".opencode/skills/worktree-retry-cleanup",
 		".opencode/skills/test-file-split",
 		".opencode/skills/fork-pr-operations",

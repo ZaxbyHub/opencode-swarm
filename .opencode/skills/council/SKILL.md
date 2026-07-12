@@ -15,7 +15,7 @@ the full execution details live here.
 ### MODE: COUNCIL
 
 Activates when: user invokes `/swarm council <question>` (optionally with
-`--preset <name>` and/or `--spec-review`).
+`--spec-review`).
 
 Purpose: convene a fixed three-agent multi-model General Council
 (generalist / skeptic / domain expert) for an advisory deliberation. The

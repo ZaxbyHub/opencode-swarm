@@ -26,10 +26,10 @@ canonical workflow.
   PR metadata prove or disprove it.
 - Preserve original finding IDs and reviewer/critic provenance from review
   handoff artifacts.
-- For async verification lanes, treat `output` as a preview and call
-  `retrieve_lane_output` for full `output_ref` artifacts before classifying or
-  resolving feedback; degraded or incomplete lane outputs keep the affected
-  items open as evidence gaps.
+- For async verification lanes, treat `output` as a preview and retrieve the
+  full `output_ref` artifact via the runtime's lane-output retrieval capability
+  before classifying or resolving feedback; degraded or incomplete lane outputs
+  keep the affected items open as evidence gaps.
 - Do not resolve GitHub review threads unless the user explicitly instructs it.
 - **Mandatory gates — Stage A and Stage B (+ closeout).** Stage A (structural
   pre-checks: build, typecheck, lint/format, `git diff --check`, reproduce the

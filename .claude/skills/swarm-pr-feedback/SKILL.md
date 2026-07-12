@@ -16,9 +16,10 @@ canonical workflow.
 ## Claude Code Execution Notes
 
 - **Batch-collect all CI failures before proposing any fix** (Issue #1746).
-  Run `gh pr checks --json checkName,conclusion,detailsUrl`, then for each
-  failing check run `gh run view <run-id> --log-failed`. Build the complete
-  failure ledger before triaging or proposing fixes — do not iterate
+  Run `gh pr checks <n> --json name,bucket,state,link`, filter to
+  `bucket == "fail" || bucket == "cancel"`, then for each failing check extract
+  the run id from `link` and run `gh run view <run-id> --log-failed`. Build the
+  complete failure ledger before triaging or proposing fixes — do not iterate
   check-by-check through push cycles.
 - Check out the PR branch locally before verifying or fixing anything. Fetch the
   head ref if absent, confirm the working tree is clean, then verify against the

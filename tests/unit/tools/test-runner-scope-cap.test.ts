@@ -363,16 +363,15 @@ describe('two-layer pre-resolution guard', () => {
 	});
 
 	describe('scope "all" bypasses pre-resolution guard', () => {
-		test('12. scope "all" with allow_full_suite bypasses pre-resolution cap', async () => {
-			const result = await execute(
-				{ scope: 'all', files: [], allow_full_suite: true },
-				tempDir,
-			);
+		test('12. scope "all" bypasses pre-resolution cap (reaches own env guard)', async () => {
+			// scope "all" is env-gated (SWARM_ALLOW_FULL_SUITE); without the env opt-in
+			// it returns its own guard error, proving it bypassed the pre-resolution cap.
+			const result = await execute({ scope: 'all', files: [] }, tempDir);
 			const parsed = parseResult(result);
 			expect(parsed.outcome).not.toBe('scope_exceeded');
 		});
 
-		test('13. scope "all" without allow_full_suite returns error (own guard)', async () => {
+		test('13. scope "all" without SWARM_ALLOW_FULL_SUITE returns error (own guard)', async () => {
 			const result = await execute({ scope: 'all', files: [] }, tempDir);
 			const parsed = parseResult(result);
 			expect(parsed.success).toBe(false);

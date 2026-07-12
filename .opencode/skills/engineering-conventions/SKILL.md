@@ -35,6 +35,7 @@ If you are not sure whether you are touching one of these, you are touching one 
 The full list of 12 invariants is in `AGENTS.md`. The four that have caused the most recent production regressions:
 
 1. **Plugin initialization is bounded and fail-open.** Every awaited operation on the plugin-init path must be wrapped in `withTimeout(...)` and degrade non-fatally on timeout. Issue #704 (v7.0.3) and the v7.3.3 git-hygiene regression both stem from violating this. The OpenCode plugin host silently drops a plugin whose entry never resolves; users see "no agents in TUI / GUI" with no error.
+   - **Bounded is not free:** `withTimeout` only prevents an *unbounded* hang — the awaited work's latency still counts toward the ~400 ms repro-704 init deadline. Defer non-trivial init I/O via `queueMicrotask` when nothing downstream needs it before `server()` resolves.
 2. **Subprocesses are bounded, non-interactive, and killable.** Every `bunSpawn(['<bin>', ...])` call must pass `cwd`, `stdin: 'ignore'` (unless intentionally interactive), `timeout: <ms>`, bounded stdio, and call `proc.kill()` in a `finally`. An outer `withTimeout` is not enough — it lets the awaiter proceed but does not abort the child.
 3. **Runtime portability — Node-ESM-loadable + v1 plugin shape.** No top-level `bun:` imports in `dist/index.js`. Default export is `{ id, server }`. All `Bun.*` calls go through `src/utils/bun-compat.ts`. v6.86.8 / v6.86.9 are the cautionary tales.
 4. **Test mock isolation.** `mock.module(...)` leaks across files in Bun's shared test-runner process. Prefer, in order: (a) `_test_exports` for pure function testing with zero mocks, (b) `_internals` dependency-injection seam for within-module mocking (see `src/utils/gitignore-warning.ts:_internals` and `src/hooks/diff-scope.ts:_internals`), (c) `mock.module` only when unavoidable. Restore in `afterEach`. The writing-tests skill covers all three tiers in detail; load it before modifying tests.
@@ -49,13 +50,65 @@ The OpenCode `test_runner` tool is for **targeted agent validation** with explic
 
 - `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP. Do not lean on this — broad scopes can stall or kill OpenCode before that guard fires.
 - For repo validation, run the shell commands in `contributing.md` / `TESTING.md` directly (per-file isolation loops + tier orchestration).
-- `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Default to `files: [...]` instead.
+- `scope: 'all'` is gated behind the `SWARM_ALLOW_FULL_SUITE=1` env var (intended for opt-in CI mirrors only); there is no `allow_full_suite` arg. Default to `files: [...]` instead.
 
 ## The invariant-audit gate (PR-time)
 
 Every PR that touches a relevant area must include an `## Invariant audit` section in its description. The format is in `AGENTS.md` ("Invariant audit required in PRs"). The `commit-pr` skill enforces this gate before push/PR — load it before committing.
 
 If you cannot prove a touched invariant from source and test output, **do not push**.
+
+## Evidence file flow (`.swarm/evidence/{taskId}.json`)
+
+**Agents NEVER write these files directly.** The `delegation-gate` hook
+writes them automatically after each reviewer/test_engineer Task
+delegation returns. The schema is defined in `src/gate-evidence.ts`:
+
+```typescript
+export interface GateEvidence {
+  sessionId: string;  // actual session ID from the Task delegation
+  timestamp: string;  // ISO 8601
+  agent: string;     // 'reviewer' | 'test_engineer' | 'sme' | etc.
+}
+
+export interface TaskEvidence {
+  taskId: string;
+  required_gates: string[];
+  gates: Record<string, GateEvidence>;
+  turbo?: boolean;
+}
+```
+
+**How to verify the flow is working:**
+
+1. After dispatching a reviewer/test_engineer Task, the `delegation-gate`
+   toolAfter hook should automatically write/update
+   `.swarm/evidence/{taskId}.json`.
+2. When you call `update_task_status(completed)`, the tool reads the
+   evidence file and verifies the `required_gates` are all present.
+3. If `update_task_status` fails with "required QA gates not yet satisfied"
+   or "Evidence file is corrupt or unreadable," inspect the evidence
+   file with `cat .swarm/evidence/{taskId}.json` to diagnose.
+
+**Do NOT manually write or fabricate evidence files.** This bypasses the
+gate enforcement and can cause downstream tool failures when the real
+session IDs are looked up.
+
+**When to suspect the flow is broken:**
+
+- The evidence file doesn't exist after a reviewer/test_engineer Task
+  delegation returns
+- The evidence file exists but has wrong `agent` or `sessionId` values
+- The plan has newly-added task IDs that the hook may not recognize
+
+**Workaround for broken flow:** If the hook consistently fails to write
+the evidence file, escalate to the user — do NOT silently fabricate
+evidence with placeholder session IDs. The gate check exists to enforce
+that a real review/test run happened.
+
+See [`.opencode/skills/writing-tests/SKILL.md`](../writing-tests/SKILL.md)
+§ Cross-Platform Requirements → "macOS rename-visibility race" for the
+ENOENT retry pattern that this gate flow triggers on macOS CI.
 
 ## Init-path-safe imports (invariant 1 deep-dive)
 

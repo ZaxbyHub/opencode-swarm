@@ -6,8 +6,9 @@ description: >
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
   PR follow-up work that must close all known issues without dropping findings.
-  Supports multi-round bot reviews (the repository's bot posts a new review
-  after every push) via the iterative pattern documented in the body. Stage A
+  Supports multi-round bot reviews — when the repo uses an auto-review bot that
+  posts a new review after every push (in opencode-swarm, `hermes-pr-review`) —
+  via the iterative pattern documented in the body. Stage A
   (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the
   reviewer + critic closeout gate are MANDATORY for any change made as part of
   this process.
@@ -42,9 +43,10 @@ fixes.
 
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
-The repository's bot reviewer (`hermes-pr-review` / Qwen3.6 + Gemma-4 dual-model)
-posts a new review comment after **every push** to the PR branch, not just the
-final state. Expect N rounds of review for N pushes, and budget for it.
+When the repo uses an auto-review bot — in opencode-swarm, `hermes-pr-review`
+(Qwen3.6 + Gemma-4 dual-model) — it posts a new review comment after **every
+push** to the PR branch, not just the final state. Expect N rounds of review for
+N pushes, and budget for it.
 
 **Round N+1 deltas vs Round N:**
 - Fresh `FB-###` ledger IDs for new findings (do not reuse IDs from earlier rounds)
@@ -66,14 +68,15 @@ final state. Expect N rounds of review for N pushes, and budget for it.
    defense-in-depth rationale comment rather than continue to debate. One extra
    condition is cheap; per-round debate is expensive. Document the parent-vs-inner
    relationship inline so future readers see the rationale.
-   **When not to apply 3-strikes:** If the suggested fix would add incorrect,
-   misleading, or redundant code — e.g., an outer guard that already exists at an
+   **When not to apply 3-strikes:** If the suggested fix would add incorrect or
+   misleading code about existing guards — e.g., an outer guard that already exists at an
    inner scope and whose addition would imply the inner guard is absent, a type
    narrowing that masks a real error class, or a check whose presence asserts a
    false invariant — do not add the change. A wrong fix embedded in the code is
-   harder to remove than a repeated rebuttal in a comment thread. Apply item 6's
-   "surface to user" path instead, with the cumulative evidence that the fix
-   direction is incorrect.
+   harder to remove than a repeated rebuttal in a comment thread. When the
+   repeated finding is misleading about existing guards, apply item 6's
+   "surface to user" path instead of 3-strikes; otherwise the 3-strikes rule
+   applies.
 4. **Verify bot fix-direction suggestions against actual file structure.** Bots
    read files linearly and can miss parent-block guards. For any "add an X check"
    suggestion, read the surrounding function/block to confirm the check is genuinely
@@ -244,10 +247,10 @@ one push + one CI run.
 **The fix:** Collect all failures and their logs in one batch operation before
 proposing any fix.
 
-1. `gh pr checks --json checkName,conclusion,detailsUrl` — get every check,
-   its conclusion, and the URL to its run details.
-2. Filter to failing checks (`conclusion: "failure"` | `"cancelled"` | `"timed_out"`).
-3. For each failing check, extract the run ID from `detailsUrl` and run
+1. `gh pr checks <n> --json name,bucket,state,link` — get every check,
+   its bucket/state, and the URL to its run details.
+2. Filter to failing checks (`bucket == "fail"` | `bucket == "cancel"`).
+3. For each failing check, extract the run ID from `link` and run
    `gh run view <run-id> --log-failed` to fetch the full log output.
 4. Build a complete failure ledger: all checks + all failure logs collected.
 5. Triage the full ledger to identify root causes.
@@ -264,7 +267,7 @@ for the Fix Planning step.
 
 **When to use `declare_scope` (preferred):** any feedback round that touches 2+ files, OR any feedback round where the file scope is not 100% obvious from the prompt. Before delegating, save a minimal plan via `save_plan` with a single phase containing the feedback-closure tasks, then call `declare_scope` per task with the exact file list.
 
-**Carve-out for direct Task delegation:** 1-file, single-function changes where the file path appears verbatim in the coder's prompt may use direct `Task(subagent_type="paid_coder", ...)` delegation without `declare_scope`. This is a narrow exception; the orchestrator is responsible for verifying the scope is unambiguous.
+**Carve-out for direct Task delegation:** 1-file, single-function changes where the file path appears verbatim in the coder's prompt may use direct `Task(subagent_type="<coder>", ...)` delegation without `declare_scope`, where `<coder>` is the active swarm's coder agent (e.g. `coder`, or `paid_coder` when the swarm id is `paid`). This is a narrow exception; the orchestrator is responsible for verifying the scope is unambiguous.
 
 **Anti-pattern:** do not use `Task` delegation for multi-file feedback fixes just to skip `save_plan` — the loss of scope discipline is not worth the saved ceremony.
 
@@ -303,15 +306,17 @@ architect work: normalize feedback IDs, gather deterministic PR metadata, prepar
 reproduction commands, and plan likely fix groups. Do not edit, close items, or
 mark feedback resolved from running lanes.
 
-Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
-`PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, every open
-verification batch must be fully settled. Poll with `collect_lane_results` (wait
-omitted or `false`) to process settled lanes incrementally — clustering confirmed
-items and pre-reading files for settled findings while ledger-safe work remains —
-then issue a final `collect_lane_results` with `wait: true` per batch once
-independent work is exhausted, to confirm every lane is settled.
+Before the Verification step can mark any item `CONFIRMED`, `PARTIAL`,
+`DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`,
+every open verification batch must be fully settled. Poll with
+`collect_lane_results` (wait omitted or `false`) to process settled lanes
+incrementally — clustering confirmed items and pre-reading files for settled
+findings while ledger-safe work remains — then issue a final
+`collect_lane_results` with `wait: true` per batch once independent work is
+exhausted, to confirm every lane is settled.
 Missing, stale, cancelled, or failed lanes are coverage gaps that must be closed
-before marking any item RESOLVED/DISPROVED/PRE_EXISTING. Apply the COVERAGE GATE:
+before marking any item CONFIRMED/PARTIAL/DISPROVED/PRE_EXISTING. Apply the
+COVERAGE GATE:
 retry failed lanes (max 2), deploy a verified equivalent alternative (same agent
 type, same prompt, same scope, same isolation, with Task-tool dispatch as the
 final fallback when lane tools do not work), or stop and surface the lane failure
@@ -345,8 +350,9 @@ entire pipeline. Before triaging, check:
 ### PR body claim verification
 
 PR body text like "PHASE 2 council APPROVED (5/5, round 2)" or "Final council
-APPROVED" must be backed by an evidence file in `.swarm/evidence/`
-(typically `phase-council.json` or `final-council.json`). Bot-generated PR
+APPROVED" must be backed by an evidence file under `.swarm/evidence/` — phase
+councils write `.swarm/evidence/{phaseNumber}/phase-council.json`; the final
+council writes the flat `.swarm/evidence/final-council.json`. Bot-generated PR
 bodies commonly auto-fill these claims without real review. Before accepting
 such a claim as part of triage:
 
@@ -381,9 +387,9 @@ Rules:
   `CONFLICT-001` for merge/base drift and `CI-001` for check failures, so PR
   bodies can show exactly how operational blockers were closed.
 
-### Mandatory: integrate all PR comments with feedback or findings before validation
+### Mandatory: integrate all PR comments with feedback or findings before branch validation (Stage A)
 
-**Before the Verification step begins, every PR comment that contains feedback
+**Before branch validation (Stage A) can begin, every PR comment that contains feedback
 or findings MUST be integrated into the total feedback ledger as a
 `FB-###` item.** This is a hard requirement, not a best-effort step.
 
@@ -408,13 +414,13 @@ Rules:
   reviewer mentioned, the corresponding `FB-###` item MUST be in the ledger
   before the fix. If you skip the fix, the `FB-###` item MUST be in the
   ledger with a `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or
-  `NEEDS_USER_DECISION` status before validation can begin.
+  `NEEDS_USER_DECISION` status before branch validation (Stage A) can begin.
 - **Status semantics for unaddressed items:**
   - `CONFIRMED` and `PARTIAL` items must be addressed (fixed or
-    disproved) before validation can begin. A `CONFIRMED` item that is
+    disproved) before branch validation (Stage A) can begin. A `CONFIRMED` item that is
     left unaddressed is a regression against the review.
   - `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, and
-    `NEEDS_USER_DECISION` items may remain open at validation time, but
+    `NEEDS_USER_DECISION` items may remain open at branch-validation (Stage A) time, but
     each must be explicitly justified in the closure ledger.
 - **The closure ledger at the end of the run must account for every `FB-###`
   item** with a final status (fixed / disproved / pre-existing / needs user
@@ -515,7 +521,7 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
   and let the merge queue perform final current-base validation. Still resolve real
    merge conflicts and SHA-dependent review threads before queuing.
 
- ### Operational Gotchas
+### Operational Gotchas
 
  - **Plan identity change:** When switching from a review plan to a feedback-closure
    plan, `save_plan` rejects with `PLAN_IDENTITY_MISMATCH`. Pass
@@ -535,7 +541,7 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
    targeting the same file. The "ONE task per coder" rule is about distinct
    objectives, not about N edits to one file.
 
- ## Mandatory Gates
+## Mandatory Gates
 
 **Stage A and Stage B gates and the reviewer + critic closeout gate are
 MANDATORY for any change made as part of the PR-feedback process.** No fix
@@ -566,7 +572,10 @@ than skipping silently.
 
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 
-Two independent agents on the Stage-A-green diff:
+Two independent agents on the Stage-A-green diff, run in order: **reviewer
+first**, then **test_engineer**. The reviewer validates the fixes before the
+test_engineer writes falsification probes against them; running them in parallel
+risks the test_engineer pinning a not-yet-approved fix shape.
 
 - **reviewer** — independent (fresh context, not the implementer, not a continued
   conversation). Validates each fix on the current diff against the feedback
@@ -576,7 +585,10 @@ Two independent agents on the Stage-A-green diff:
   newly covered gaps). Verdict per item: PASS / FAIL / BLOCKED.
 
 Address every NEEDS_REVISION / BLOCKED / FAIL, then re-run the affected agent on
-the current diff.
+the current diff. When the test_engineer authors or modifies test files during
+Stage B, re-run the Stage A structural pre-checks (build / typecheck / lint)
+over those test files before the Stage B verdict is considered final — Stage A
+must be green over the full Stage-B-inclusive diff.
 
 ### Closeout gate — reviewer + critic (mandatory after Stage B)
 
@@ -598,9 +610,11 @@ critic surfaces correctness issues, then re-critic. **Any edit after the
 reviewer's or critic's approval invalidates that approval** — re-run the
 affected gate on the current diff before publishing.
 
-Record both closeout verdicts (reviewer + critic, with HEAD/diff) in
-`.claude/session/tasks/<slug>/gates.md` per the `durable-session-state` skill
-(`.swarm/` is the plugin's runtime state — never write task artifacts there).
+Record both closeout verdicts (reviewer + critic, with HEAD/diff) in the
+runtime's session task-gates artifact (e.g. `.claude/session/tasks/<slug>/gates.md`
+under Claude Code, or the OpenCode/Codex equivalent) per the
+`durable-session-state` skill (`.swarm/` is the plugin's runtime state — never
+write task artifacts there).
 
 ### Post-publish verification (mandatory after the PR is pushed)
 
@@ -616,6 +630,9 @@ pre-checks and must not be folded into Stage A.
 
 ## Publishing And Communication
 
+Commits and pushes follow `file:.swarm/bundled-skills/commit-pr/SKILL.md` (the
+repository's commit/PR workflow) — do not push ad-hoc.
+
 After fixes, update the PR body or comment with a closure ledger:
 
 ```text
@@ -623,7 +640,7 @@ FB-001 | fixed | commit/test evidence
 FB-002 | disproved | code evidence
 FB-003 | pre-existing | base-branch evidence
 FB-004 | needs user decision | decision required
-FB-005 | needs more evidence | .swarm/evidence/phase-council.json missing
+FB-005 | needs more evidence | .swarm/evidence/{phase}/phase-council.json missing
 CONFLICT-001 | fixed | remote mergeability is MERGEABLE/CLEAN
 CI-001 | fixed | current-head check/run evidence
 ```

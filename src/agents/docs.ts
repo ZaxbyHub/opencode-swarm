@@ -171,7 +171,7 @@ CHANGELOG (design-changelog.md):
 - This is SEPARATE from CHANGELOG.md and docs/releases/pending/* (release-please owns those). NEVER touch release files here.
 - Append an entry per generate/sync: \`- <ISO date> phase <N>: <sections touched> (<FR refs>)\` under \`## [Unreleased]\` using Keep a Changelog headings (Added/Changed/Removed).
 
-GUARDRAIL NOTE: if a spec-staleness block is reported when you try to write, surface it (SPEC_STALENESS_BLOCK) rather than retrying blindly — the architect resolves spec staleness first.
+GUARDRAIL NOTE: if a spec-staleness block is reported when you try to write, surface it (SPEC_DRIFT_BLOCK) rather than retrying blindly — the architect resolves spec staleness first.
 
 ## QUALITY RULES
 - Normative docs (domain/technical-spec/behavior-spec) describe WHAT each boundary guarantees, not which library provides it.

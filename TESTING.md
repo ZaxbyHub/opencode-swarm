@@ -4,7 +4,7 @@
 
 > **Writing stable tests?** See [`docs/testing/test-stability.md`](./docs/testing/test-stability.md) — the runbook for the four root-cause classes of merge-group flaky tests (time-sensitive, coverage-sensitivity, cross-platform, subprocess) and the `freezeClock` / `withIsolatedState` helpers that prevent them. The `check-test-clock.sh` lint (CI `quality` job) fails on NEW time-touching tests that don't use the helper.
 
-> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands below — per-file isolation loops match CI behavior. See [`AGENTS.md`](./AGENTS.md) invariant 6 for the full contract.
+> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` is gated behind the `SWARM_ALLOW_FULL_SUITE=1` env var (intended for opt-in CI mirrors only; there is no `allow_full_suite` arg). Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands below — per-file isolation loops match CI behavior. See [`AGENTS.md`](./AGENTS.md) invariant 6 for the full contract.
 
 ## Quick Reference
 
@@ -97,7 +97,7 @@ import { execFileSync } from 'node:child_process';
 ### Test File Size Limits
 
 To prevent monolithic test files that cause mock isolation issues and slow CI:
-- **Maximum 500 lines per test file**, enforced by `scripts/check-test-file-cap.sh` as a diff-scoped ratchet (FR-006). Pre-existing over-cap files are non-blocking; new over-cap files and grown over-cap files fail CI. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns.
+- **Maximum 500 lines per test file** (enforced in CI by `scripts/check-test-file-cap.sh` as a diff-scoped ratchet: new over-cap files and existing over-cap files that grew fail the gate; pre-existing over-cap files untouched by the PR are non-blocking; `TEST_CAP_ENFORCE=0` soft-warns)
 - `delegation-gate.test.ts` was split into 45 focused files (FR-006 SC-006.1) — all under 500 lines
 - When a test file exceeds 500 lines, split it by behavior/feature into focused files
 
