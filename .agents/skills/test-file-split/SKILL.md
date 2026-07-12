@@ -6,7 +6,7 @@ description: Protocol for splitting test files that exceed the FR-006 500-line h
 
 # Test File Split Protocol (FR-006)
 
-CI enforces a **hard 500-line limit** per test file (FR-006 / SC-006.1). Files exceeding this limit fail the quality gate and block PR merge. This skill covers the complete splitting protocol.
+`scripts/check-test-file-cap.sh` enforces the **500-line cap** per test file (FR-006 / SC-006.1) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns. This skill covers the complete splitting protocol.
 
 Read first: `.opencode/skills/writing-tests/SKILL.md` (or `.claude/skills/writing-tests/SKILL.md`) for bun:test framework rules, mock isolation patterns, and file placement conventions.
 

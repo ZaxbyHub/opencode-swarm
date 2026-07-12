@@ -15,6 +15,7 @@ import {
 	loadFullAutoRunState,
 	pauseFullAutoRun,
 	recordFullAutoDenial,
+	recordFullAutoEscalation,
 	recordFullAutoOversight,
 	resetFullAutoDenials,
 	saveFullAutoRunState,
@@ -183,5 +184,54 @@ describe('saveFullAutoRunState', () => {
 		saveFullAutoRunState(tmpDir, state);
 		const loaded = loadFullAutoRunState(tmpDir, 'sess-1');
 		expect(loaded?.currentTaskID).toBe('task-7');
+	});
+});
+
+describe('recordFullAutoEscalation (issue #1781 E2)', () => {
+	test('persists lastEscalation and round-trips through loadFullAutoRunState', () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const state = recordFullAutoEscalation(tmpDir, 'sess-1', {
+			reason: 'deadlock',
+			interactionCount: 5,
+			deadlockCount: 3,
+			phase: 2,
+		});
+		expect(state?.lastEscalation).toBeDefined();
+		expect(state?.lastEscalation?.reason).toBe('deadlock');
+		expect(state?.lastEscalation?.interactionCount).toBe(5);
+		expect(state?.lastEscalation?.deadlockCount).toBe(3);
+		expect(state?.lastEscalation?.phase).toBe(2);
+		expect(state?.lastEscalation?.escalatedAt).toBeTruthy();
+
+		// Re-read from disk to confirm persistence.
+		const reloaded = loadFullAutoRunState(tmpDir, 'sess-1');
+		expect(reloaded?.lastEscalation?.reason).toBe('deadlock');
+		expect(reloaded?.lastEscalation?.interactionCount).toBe(5);
+	});
+
+	test('lastEscalation survives a subsequent pauseFullAutoRun (no clobber)', () => {
+		// Critic-verified guarantee: pause/terminate read-modify-write spread
+		// `...state`, preserving lastEscalation. Asserted as a regression guard.
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		recordFullAutoEscalation(tmpDir, 'sess-1', {
+			reason: 'interaction_limit',
+			interactionCount: 12,
+			deadlockCount: 0,
+		});
+		pauseFullAutoRun(tmpDir, 'sess-1', 'escalation');
+		const after = loadFullAutoRunState(tmpDir, 'sess-1');
+		expect(after?.status).toBe('paused');
+		expect(after?.pauseReason).toBe('escalation');
+		expect(after?.lastEscalation?.reason).toBe('interaction_limit');
+		expect(after?.lastEscalation?.interactionCount).toBe(12);
+	});
+
+	test('returns undefined when the session does not exist', () => {
+		const result = recordFullAutoEscalation(tmpDir, 'no-such-session', {
+			reason: 'deadlock',
+			interactionCount: 1,
+			deadlockCount: 1,
+		});
+		expect(result).toBeUndefined();
 	});
 });

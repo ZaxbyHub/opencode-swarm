@@ -15,82 +15,111 @@
  * Architect MODE skills whose `.opencode` and `.claude` mirrors must be
  * byte-identical. `.opencode` is the operative protocol loaded by
  * `src/agents/architect.ts` MODE stubs; the `.claude` mirror must match so
- * Claude Code and OpenCode sessions cannot diverge silently. Tuple shape is
- * `[slug, opencodePath, claudePath]`.
+ * Claude Code and OpenCode sessions cannot diverge silently.
+ *
+ * `canonical` records which side wins when they drift (fix direction only;
+ * detection is symmetric). For architect MODE skills `.opencode` is always
+ * canonical because it is the operative protocol the MODE stubs load. Issue
+ * #1781 E3 added this field so `drift:fix` can copy the canonical side to the
+ * mirror without guessing.
  */
-export const MIRRORED_ARCHITECT_MODE_SKILLS = [
-	[
-		'brainstorm',
-		'.opencode/skills/brainstorm/SKILL.md',
-		'.claude/skills/brainstorm/SKILL.md',
-	],
-	[
-		'specify',
-		'.opencode/skills/specify/SKILL.md',
-		'.claude/skills/specify/SKILL.md',
-	],
-	[
-		'clarify-spec',
-		'.opencode/skills/clarify-spec/SKILL.md',
-		'.claude/skills/clarify-spec/SKILL.md',
-	],
-	[
-		'resume',
-		'.opencode/skills/resume/SKILL.md',
-		'.claude/skills/resume/SKILL.md',
-	],
-	[
-		'clarify',
-		'.opencode/skills/clarify/SKILL.md',
-		'.claude/skills/clarify/SKILL.md',
-	],
-	[
-		'discover',
-		'.opencode/skills/discover/SKILL.md',
-		'.claude/skills/discover/SKILL.md',
-	],
-	[
-		'consult',
-		'.opencode/skills/consult/SKILL.md',
-		'.claude/skills/consult/SKILL.md',
-	],
-	[
-		'pre-phase-briefing',
-		'.opencode/skills/pre-phase-briefing/SKILL.md',
-		'.claude/skills/pre-phase-briefing/SKILL.md',
-	],
-	[
-		'council',
-		'.opencode/skills/council/SKILL.md',
-		'.claude/skills/council/SKILL.md',
-	],
-	[
-		'deep-dive',
-		'.opencode/skills/deep-dive/SKILL.md',
-		'.claude/skills/deep-dive/SKILL.md',
-	],
-	[
-		'deep-research',
-		'.opencode/skills/deep-research/SKILL.md',
-		'.claude/skills/deep-research/SKILL.md',
-	],
-	[
-		'issue-ingest',
-		'.opencode/skills/issue-ingest/SKILL.md',
-		'.claude/skills/issue-ingest/SKILL.md',
-	],
-	['plan', '.opencode/skills/plan/SKILL.md', '.claude/skills/plan/SKILL.md'],
-	[
-		'critic-gate',
-		'.opencode/skills/critic-gate/SKILL.md',
-		'.claude/skills/critic-gate/SKILL.md',
-	],
-	[
-		'design-docs',
-		'.opencode/skills/design-docs/SKILL.md',
-		'.claude/skills/design-docs/SKILL.md',
-	],
-] as const;
+export const MIRRORED_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	opencodePath: string;
+	claudePath: string;
+	canonical: '.opencode' | '.claude';
+}> = [
+	{
+		slug: 'brainstorm',
+		opencodePath: '.opencode/skills/brainstorm/SKILL.md',
+		claudePath: '.claude/skills/brainstorm/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'specify',
+		opencodePath: '.opencode/skills/specify/SKILL.md',
+		claudePath: '.claude/skills/specify/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'clarify-spec',
+		opencodePath: '.opencode/skills/clarify-spec/SKILL.md',
+		claudePath: '.claude/skills/clarify-spec/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'resume',
+		opencodePath: '.opencode/skills/resume/SKILL.md',
+		claudePath: '.claude/skills/resume/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'clarify',
+		opencodePath: '.opencode/skills/clarify/SKILL.md',
+		claudePath: '.claude/skills/clarify/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'discover',
+		opencodePath: '.opencode/skills/discover/SKILL.md',
+		claudePath: '.claude/skills/discover/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'consult',
+		opencodePath: '.opencode/skills/consult/SKILL.md',
+		claudePath: '.claude/skills/consult/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'pre-phase-briefing',
+		opencodePath: '.opencode/skills/pre-phase-briefing/SKILL.md',
+		claudePath: '.claude/skills/pre-phase-briefing/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'council',
+		opencodePath: '.opencode/skills/council/SKILL.md',
+		claudePath: '.claude/skills/council/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'deep-dive',
+		opencodePath: '.opencode/skills/deep-dive/SKILL.md',
+		claudePath: '.claude/skills/deep-dive/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'deep-research',
+		opencodePath: '.opencode/skills/deep-research/SKILL.md',
+		claudePath: '.claude/skills/deep-research/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'issue-ingest',
+		opencodePath: '.opencode/skills/issue-ingest/SKILL.md',
+		claudePath: '.claude/skills/issue-ingest/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'plan',
+		opencodePath: '.opencode/skills/plan/SKILL.md',
+		claudePath: '.claude/skills/plan/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'critic-gate',
+		opencodePath: '.opencode/skills/critic-gate/SKILL.md',
+		claudePath: '.claude/skills/critic-gate/SKILL.md',
+		canonical: '.opencode',
+	},
+	{
+		slug: 'design-docs',
+		opencodePath: '.opencode/skills/design-docs/SKILL.md',
+		claudePath: '.claude/skills/design-docs/SKILL.md',
+		canonical: '.opencode',
+	},
+];
 
 /**
  * Architect MODE skills where `.opencode` is the full operative protocol and
@@ -241,12 +270,6 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		kind: 'divergent',
 		reason:
 			'.opencode is the canonical implementation workflow; .claude and .agents are thin adapters that delegate to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
-	},
-	{
-		slug: 'swarm',
-		kind: 'divergent',
-		reason:
-			'.opencode is the canonical swarm behavior model (workflow posture, quality/speed policy, default triage model, mandatory implementation closeout gate); .claude holds the Claude Code /swarm command wiring and .agents is the Codex adapter, both delegating the behavior model to .opencode. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
 	},
 	{
 		slug: 'writing-tests',

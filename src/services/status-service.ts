@@ -3,6 +3,10 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import {
+	type FullAutoRunState,
+	loadFullAutoRunState,
+} from '../full-auto/state';
+import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
 } from '../hooks/extractors';
@@ -14,6 +18,7 @@ import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {
+	getActiveFullAutoSessionID,
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -31,6 +36,8 @@ export const _internals = {
 	loadLeanTurboRunState,
 	hasActiveLeanTurbo,
 	hasActiveFullAuto,
+	getActiveFullAutoSessionID,
+	loadFullAutoRunState,
 };
 
 /**
@@ -61,6 +68,18 @@ export interface StatusData {
 	leanDegradationSummary?: string;
 	/** Whether Full-Auto mode is currently active */
 	fullAutoActive?: boolean;
+	/**
+	 * Issue #1781 E2: latest oversight-escalation detail, surfaced when
+	 * Full-Auto is active so an operator can see why oversight escalated and
+	 * how close the run is to a deadlock/human handoff. `undefined` when
+	 * Full-Auto is inactive or no escalation has occurred.
+	 */
+	fullAutoEscalation?: {
+		reason: string;
+		interactionCount: number;
+		deadlockCount: number;
+		phase?: number;
+	};
 	/** Reason for pause if Lean Turbo is paused */
 	leanPauseReason?: string;
 	/** Last known context budget percentage (0-100), or null if not yet measured */
@@ -233,6 +252,27 @@ export async function getStatusData(
 		validateSwarmPath(directory, 'insight-candidates.jsonl'),
 	);
 
+	// Check Full-Auto status (issue #1781 E2: this was previously nested
+	// inside `enrichWithLeanTurbo`, past its `if (!leanActive) return status`
+	// early-exit, so it only ran when Lean Turbo was active. Hoisted here so
+	// `fullAutoActive` and the escalation detail surface regardless of turbo.
+	status.fullAutoActive = _internals.hasActiveFullAuto();
+	if (status.fullAutoActive) {
+		const sid = _internals.getActiveFullAutoSessionID();
+		if (sid) {
+			const runState: FullAutoRunState | undefined =
+				_internals.loadFullAutoRunState(directory, sid);
+			if (runState?.lastEscalation) {
+				status.fullAutoEscalation = {
+					reason: runState.lastEscalation.reason,
+					interactionCount: runState.lastEscalation.interactionCount,
+					deadlockCount: runState.lastEscalation.deadlockCount,
+					phase: runState.lastEscalation.phase,
+				};
+			}
+		}
+	}
+
 	// Enrich with Lean Turbo data if active
 	return enrichWithLeanTurbo(status, directory);
 }
@@ -309,9 +349,6 @@ function enrichWithLeanTurbo(
 		}
 	}
 
-	// Check Full-Auto status
-	status.fullAutoActive = _internals.hasActiveFullAuto();
-
 	return status;
 }
 
@@ -372,15 +409,27 @@ export function formatStatusMarkdown(status: StatusData): string {
 		} else {
 			lines.push(`**Turbo**: standard`);
 		}
-
-		// Show Full-Auto status if active
-		if (status.fullAutoActive) {
-			lines.push(`**Full-Auto**: active`);
-		}
 	} else if (status.turboStrategy === undefined && status.turboMode === true) {
 		// Backward-compatibility: callers that only set turboMode (no turboStrategy) get the old format
 		lines.push('');
 		lines.push('**TURBO MODE**: active');
+	}
+
+	// Issue #1781 E2: Full-Auto status is rendered as its own block, OUTSIDE
+	// the turbo block, so escalation detail surfaces even when Full-Auto runs
+	// WITHOUT turbo (the common escalation scenario). Previously this was
+	// nested inside the `turboStrategy !== 'off'` branch and was invisible
+	// whenever Full-Auto ran alone.
+	if (status.fullAutoActive) {
+		lines.push('');
+		lines.push('**Full-Auto**: active');
+		if (status.fullAutoEscalation) {
+			const e = status.fullAutoEscalation;
+			const phaseStr = e.phase !== undefined ? ` | Phase ${e.phase}` : '';
+			lines.push(
+				`  - Escalation: ${e.reason} (interactions=${e.interactionCount}, deadlocks=${e.deadlockCount}${phaseStr})`,
+			);
+		}
 	}
 
 	if (status.contextBudgetPct !== null && status.contextBudgetPct > 0) {

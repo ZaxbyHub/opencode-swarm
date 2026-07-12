@@ -110,6 +110,14 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: chmod +x scripts/check-test-clock.sh && bash scripts/check-test-clock.sh
+      # Diff-scoped ratchet (FR-006): fails only on NEW test files over 500
+      # lines or existing over-cap files that grew. Pre-existing violators
+      # are non-blocking. Escape hatch: TEST_CAP_ENFORCE=0 soft-warns.
+      # (issue #1781 E1)
+      - name: Test file line-cap ratchet (FR-006)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-test-file-cap.sh && bash scripts/check-test-file-cap.sh
 
   # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback.
   # On merge_group (merge queue), run the full 3-OS matrix for merge safety.

@@ -10,9 +10,17 @@
  * descriptions, AGENT_TOOL_MAP) stay coherent with the metadata, and exits
  * non-zero on any drift.
  *
+ * Issue #1781 E4 added a REVERSE-direction check (section 6): every exported
+ * `createSwarmTool(...)` binding in `src/tools/**` must have a TOOL_METADATA
+ * entry or declare a `@tool-opt-out` JSDoc tag. This catches the `knowledge_ack`
+ * class — a fully built + tested tool that was never registered.
+ *
  * Usage: bun run scripts/check-tool-registration.ts
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AGENT_TOOL_MAP } from '../src/config/constants';
 import { TOOL_MANIFEST } from '../src/tools/manifest';
 import { buildPluginToolObject } from '../src/tools/plugin-registration';
@@ -22,6 +30,12 @@ import {
 	TOOL_NAMES,
 	type ToolName,
 } from '../src/tools/tool-metadata';
+
+const REPO_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'..',
+);
+const TOOLS_DIR = path.join(REPO_ROOT, 'src', 'tools');
 
 /**
  * Pure collector for tool-registration coherence violations. Returns the list
@@ -133,7 +147,186 @@ export function collectToolRegistrationErrors(): string[] {
 		}
 	}
 
+	// 6) REVERSE check (issue #1781 E4): every exported `createSwarmTool(...)`
+	//    binding in src/tools/** must have a TOOL_METADATA entry or declare an
+	//    explicit @tool-opt-out JSDoc tag. Catches the `knowledge_ack` class —
+	//    a fully built + tested tool that was never registered. The forward
+	//    checks above (1–5) validate metadata → consumers; this validates
+	//    source → metadata, closing the reverse gap.
+	//
+	//    A small number of tools are exported with a camelCase binding name and
+	//    registered under the snake_case alias declared in TOOL_MANIFEST (e.g.
+	//    `swarmApplyPatch` is registered as `swarm_apply_patch`). We accept both
+	//    the exact name and its camelCase→snake_case conversion so the legitimate
+	//    alias pattern is not flagged.
+	const exportedToolBindings = collectExportedCreateSwarmToolBindings();
+	for (const { name, file, hasOptOut } of exportedToolBindings) {
+		if (metaKeySet.has(name)) continue;
+		const snakeCase = camelToSnakeCase(name);
+		if (snakeCase !== name && metaKeySet.has(snakeCase)) continue;
+		if (hasOptOut) continue;
+		const relPath = path.relative(REPO_ROOT, file).replace(/\\/g, '/');
+		errors.push(
+			`Tool "${name}" is built via createSwarmTool() in src/tools/${path.basename(relPath)} but has no TOOL_METADATA entry. ` +
+				`Register it in src/tools/tool-metadata.ts, delete it, or add a /** @tool-opt-out <reason> */ JSDoc tag above its export const definition.`,
+		);
+	}
+
 	return errors;
+}
+
+/**
+ * Convert a camelCase identifier to snake_case (e.g. `swarmApplyPatch` →
+ * `swarm_apply_patch`). Used to resolve the legitimate camelCase-export →
+ * snake_case-registration alias pattern so the reverse check does not flag
+ * it as an orphan.
+ */
+export function camelToSnakeCase(name: string): string {
+	return name.replace(/[A-Z]/g, (cap, offset) =>
+		offset === 0 ? cap.toLowerCase() : `_${cap.toLowerCase()}`,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Reverse-direction enumeration helpers (issue #1781 E4)
+// ---------------------------------------------------------------------------
+
+export interface ExportedToolBinding {
+	name: string;
+	file: string;
+	hasOptOut: boolean;
+}
+
+/**
+ * Walk every `.ts` file under `src/tools/` (recursively, excluding tests and
+ * the create-tool.ts factory) and enumerate every exported `createSwarmTool(...)`
+ * binding. Uses two passes per file (critic B1): Pass A finds `export const
+ * NAME =` binding spans; Pass B finds `createSwarmTool(` call positions; a
+ * binding "owns" a call when the call is at or after the binding's `=` and
+ * before the next binding. This correctly handles multi-line type annotations
+ * like `export const x: ReturnType<typeof createSwarmTool> = createSwarmTool({`.
+ */
+export function collectExportedCreateSwarmToolBindings(
+	dir: string = TOOLS_DIR,
+): ExportedToolBinding[] {
+	const bindings: ExportedToolBinding[] = [];
+	const factoryFileName = 'create-tool.ts';
+	for (const file of walkTsFiles(dir)) {
+		if (file.endsWith('.test.ts')) continue;
+		if (path.basename(file) === factoryFileName) continue;
+		const source = fs.readFileSync(file, 'utf-8');
+		const fileBindings = findExportedBindings(source);
+		const callPositions = findCreateSwarmToolCallPositions(source);
+		if (fileBindings.length === 0 || callPositions.length === 0) continue;
+		for (const binding of fileBindings) {
+			// A binding owns a call when the call is at/after the binding's `=`
+			// and before the next sibling binding's `export` keyword. This
+			// correctly attributes each `createSwarmTool(` to its enclosing
+			// `export const` and skips factory-internal calls (e.g. a `return
+			// createSwarmTool(...)` inside `createSwarmCommandTool`, which has
+			// no preceding `export const ... =` on the same binding).
+			const nextBinding = fileBindings
+				.filter((b) => b.declStart > binding.declStart)
+				.sort((a, b) => a.declStart - b.declStart)[0];
+			const ownedCall = callPositions.find((pos) => {
+				if (pos < binding.equalsPosition) return false;
+				if (nextBinding && pos >= nextBinding.declStart) return false;
+				return true;
+			});
+			if (ownedCall === undefined) continue;
+			bindings.push({
+				name: binding.name,
+				file,
+				hasOptOut: hasToolOptOutTag(source, binding.declStart),
+			});
+		}
+	}
+	return bindings;
+}
+
+export interface BindingSpan {
+	name: string;
+	/** Index of the `export` keyword. */
+	declStart: number;
+	/** Index of the `=` after the optional type annotation. */
+	equalsPosition: number;
+}
+
+/**
+ * Pass A: find all `export const NAME =` / `export const NAME: Type =` bindings.
+ * The `[^=]+` between the name and `=` is non-greedy on `=` by construction
+ * (negated char class), so it stops at the first `=` (the assignment) and
+ * correctly spans multi-line type annotations. `[^=]+` cannot be confused by
+ * `<`, `>`, `typeof`, or newlines (none of which is `=`).
+ */
+export function findExportedBindings(source: string): BindingSpan[] {
+	const bindings: BindingSpan[] = [];
+	const re = /\bexport\s+const\s+(\w+)\s*(?::[^=]+)?=/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(source)) !== null) {
+		bindings.push({
+			name: m[1],
+			declStart: m.index,
+			equalsPosition: m.index + m[0].length,
+		});
+	}
+	return bindings;
+}
+
+/**
+ * Pass B: find all `createSwarmTool(` call positions (index of the `c`).
+ */
+export function findCreateSwarmToolCallPositions(source: string): number[] {
+	const positions: number[] = [];
+	const re = /\bcreateSwarmTool\s*\(/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(source)) !== null) {
+		positions.push(m.index);
+	}
+	return positions;
+}
+
+/**
+ * Check whether the binding at `declStart` has a `@tool-opt-out` JSDoc tag in
+ * the immediately preceding block comment. We scan backwards from `declStart`
+ * past whitespace to the end of a block comment close, then locate the matching
+ * open, and test the block text for the `@tool-opt-out` tag.
+ */
+export function hasToolOptOutTag(source: string, declStart: number): boolean {
+	// Skip whitespace/newlines backwards from declStart to find `*/`.
+	let i = declStart - 1;
+	while (i >= 0 && /\s/.test(source[i] ?? '')) i--;
+	// `source[i]` should now be `/` (the close of `*/`).
+	if (source[i] !== '/' || source[i - 1] !== '*') return false;
+	const closeEnd = i + 1; // position just after `*/`
+	const closeStart = i - 1; // position of `*` in `*/`
+	// Find the matching `/**` open by scanning backwards.
+	const openIdx = source.lastIndexOf('/**', closeStart);
+	if (openIdx === -1 || openIdx >= closeStart) return false;
+	const block = source.slice(openIdx, closeEnd);
+	return /@tool-opt-out\b/.test(block);
+}
+
+/**
+ * Recursively yield every `.ts` file under `dir` (excludes `node_modules`,
+ * `dist`).
+ */
+function* walkTsFiles(dir: string): Generator<string> {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			yield* walkTsFiles(full);
+		} else if (entry.isFile() && entry.name.endsWith('.ts')) {
+			yield full;
+		}
+	}
 }
 
 function main(): void {

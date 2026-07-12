@@ -14,10 +14,10 @@ Added guidance to the architect prompt's Stage A section documenting `pre_check_
 
 ### 3. Retired deprecated knowledge_ack tool (Issue #1323)
 
-The deprecated single-outcome `knowledge_ack` tool has been retired in favor of its batched successor `knowledge_receipt`. The retirement is additive-only:
+The deprecated single-outcome `knowledge_ack` tool has been retired in favor of its batched successor `knowledge_receipt`:
 
-- **Removed from:** tool registration, barrel exports, manifest, plugin registration, and architect prompt references.
-- **Preserved:** legacy reader paths in `knowledge-events.ts` and `state.ts` so existing `.swarm/knowledge-application.jsonl` records in user projects remain readable. The source file (`knowledge-ack.ts`) is retained but no longer exported.
+- **Removed from:** tool registration, barrel exports, manifest, plugin registration, and architect prompt references. The source file (`knowledge-ack.ts`) and its dedicated test (`tests/unit/tools/knowledge-ack.test.ts`) are deleted entirely (issue #1781 E4) — the tool is gone, not merely unexported.
+- **Preserved:** legacy reader paths in `knowledge-events.ts` and `state.ts` so existing `.swarm/knowledge-application.jsonl` records in user projects remain readable.
 - `knowledge_receipt` is now the sole knowledge-acknowledgment mechanism, supporting batched applied/ignored/contradicted entries plus new-lesson persistence.
 
 The architect base tool count is now **66** (was 78 before this PR — 11 tools gated behind feature flags + 1 retired).

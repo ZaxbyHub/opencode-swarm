@@ -51,6 +51,15 @@ function classifyToolError(error: unknown): ToolFailureClass {
 /**
  * Creates a swarm tool with automatic working directory injection.
  * Wraps the @opencode-ai/plugin/tool factory to always inject `directory` and `ctx` into tool execute callbacks.
+ *
+ * Registration contract (issue #1781 E4): every `export const NAME = createSwarmTool({...})`
+ * in `src/tools/**` MUST have a corresponding entry in `TOOL_METADATA`
+ * (`src/tools/tool-metadata.ts`). The reverse-direction CI guard in
+ * `scripts/check-tool-registration.ts` enumerates all exported `createSwarmTool`
+ * bindings and fails on any without a metadata entry. If a tool definition is
+ * intentionally internal (an unpublished helper), mark it with a
+ * `/** @tool-opt-out <reason> *\/` JSDoc tag directly above its `export const`
+ * so the guard skips it — silence is a failure, not an opt-out.
  */
 export function createSwarmTool<Args extends Record<string, unknown>>(
 	opts: SwarmToolOptions<Args>,

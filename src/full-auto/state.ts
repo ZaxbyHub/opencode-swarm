@@ -73,6 +73,19 @@ export interface FullAutoRunState {
 	terminateReason?: string;
 	/** Consecutive oversight dispatch failures for auto-degrade. */
 	consecutiveOversightFailures?: number;
+	/**
+	 * Issue #1781 E2: the most recent oversight-escalation detail, persisted so
+	 * `/swarm status` can surface the reason + interaction/deadlock counts +
+	 * phase without parsing the human-readable `.swarm/escalation-report.md`.
+	 * Updated atomically by `recordFullAutoEscalation` at escalation time.
+	 */
+	lastEscalation?: {
+		reason: string;
+		interactionCount: number;
+		deadlockCount: number;
+		phase?: number;
+		escalatedAt: string;
+	};
 }
 
 export interface FullAutoPersistedState {
@@ -764,6 +777,41 @@ export function recordFullAutoOversight(
 		state.lastOversightVerdict = verdict;
 		state.lastOversightReason = reason;
 		state.counters.oversightChecks += 1;
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
+		return state;
+	});
+}
+
+/**
+ * Issue #1781 E2: persist the most recent oversight-escalation detail
+ * (reason, interaction/deadlock counts, phase) to the durable run state so
+ * `/swarm status` can surface it. Called from `handleEscalation` in
+ * `src/hooks/full-auto-intercept.ts` alongside the existing pause/terminate
+ * state writes — those writes spread `...state`, so this field survives them.
+ */
+export function recordFullAutoEscalation(
+	directory: string,
+	sessionID: string,
+	detail: {
+		reason: string;
+		interactionCount: number;
+		deadlockCount: number;
+		phase?: number;
+	},
+): FullAutoRunState | undefined {
+	return withStateLock(directory, () => {
+		const persisted = readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return undefined;
+		state.lastEscalation = {
+			reason: detail.reason,
+			interactionCount: detail.interactionCount,
+			deadlockCount: detail.deadlockCount,
+			phase: detail.phase,
+			escalatedAt: nowISO(),
+		};
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);

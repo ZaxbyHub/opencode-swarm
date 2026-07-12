@@ -452,7 +452,10 @@ describe('status-service Lean Turbo integration', () => {
 		expect(status.leanTurboPhase).toBeUndefined();
 		expect(status.leanActiveLaneCount).toBeUndefined();
 		expect(status.leanDegradedTasks).toBeUndefined();
-		expect(status.fullAutoActive).toBeUndefined();
+		// Issue #1781 E2: fullAutoActive is now always populated (hoisted out
+		// of the lean-turbo-only branch). The test's `_internals.hasActiveFullAuto`
+		// override returns false, so the field is `false`, not `undefined`.
+		expect(status.fullAutoActive).toBe(false);
 
 		const markdown = formatStatusMarkdown(status);
 		expect(markdown).toContain('**Turbo**: standard');
