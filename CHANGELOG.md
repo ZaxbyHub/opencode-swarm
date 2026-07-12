@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.113.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.2...v7.113.3) (2026-07-12)
+
+
+### Bug Fixes
+
+* apply already-established cross-platform patterns to 2 missed tests ([d47d4e4](https://github.com/ZaxbyHub/opencode-swarm/commit/d47d4e4e5cbeae4d98b534cd1f0ce81c8b309d4e))
+* apply macOS /var-symlink fix to duplicate test in sibling file ([2d9e274](https://github.com/ZaxbyHub/opencode-swarm/commit/2d9e27477ea52f14d4cf857c69410804b7e35f3e))
+* resolve critical + high audit defects ([#1778](https://github.com/ZaxbyHub/opencode-swarm/issues/1778)) ([deabc8a](https://github.com/ZaxbyHub/opencode-swarm/commit/deabc8a5ec18be4aa756b1d05fa3a72836af50c6))
+
 ## [7.113.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.1...v7.113.2) (2026-07-11)
 
 
