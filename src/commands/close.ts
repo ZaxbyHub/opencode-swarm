@@ -369,7 +369,17 @@ const ACTIVE_STATE_TO_CLEAN = [
  * below agree on the set; otherwise the "Preserved …" warning would contradict the
  * removal that always follows for these files.
  */
-const TERMINAL_STATE_FILES = ['plan.json', 'plan-ledger.jsonl'] as const;
+const TERMINAL_STATE_FILES = [
+	'plan.json',
+	'plan-ledger.jsonl',
+	// spec-staleness.json / spec-snapshot.md are unconditionally removed even when
+	// archive fails. They are the existence-only drift-gate input for
+	// enforceSpecDriftGate; if archive-failed the file would survive and
+	// hard-block save_plan etc. in the next session. Mirror coverage in
+	// tests/unit/commands/close-cleanup.test.ts.
+	'spec-staleness.json',
+	'spec-snapshot.md',
+] as const;
 
 /**
  * Knowledge-family artifacts whose backing store redirects to a shared link
