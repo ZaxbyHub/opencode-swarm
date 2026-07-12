@@ -3,13 +3,15 @@
  *
  * Verifies the flat-file and directory archiving/deletion behavior:
  *   - 21 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 17 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
+ *   - 20 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
  *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
  *     are recursively copied to the archive and then deleted. (locks/ is
  *     intentionally excluded — per-run locks are managed via proper-lockfile,
  *     not archived/cleaned by close.)
  *   - Archive-first-guard: directories are only deleted if they were successfully archived
- *   - close-summary.md and spec.md are NOT in ACTIVE_STATE_TO_CLEAN — survive the clean stage
+ *   - close-summary.md is NOT in ACTIVE_STATE_TO_CLEAN — survives the clean stage.
+ *     spec.md IS in ACTIVE_STATE_TO_CLEAN — it is archived AND then cleaned, so a
+ *     stale spec never survives into the next session.
  *   - .swarm/archive/ itself survives the close
  *   - context.md is rewritten with "Session closed" content
  *   - Idempotent: running close twice produces no errors
@@ -48,6 +50,13 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 // exports beyond curateAndStoreSwarm (e.g. enrichLessonToV3), so spread the
 // real module and only override the entry point this suite mocks.
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
+// Same rationale as above: enforceSpecDriftGate (used by the regression test
+// below) lives in src/hooks/guardrails/index.ts, which transitively imports
+// src/state.js for exports beyond the ones this suite overrides (e.g.
+// getAgentSession, advanceTaskState, getActiveWindow). Spread the real module
+// and only override the entry points this suite needs deterministic/no-op
+// behavior for.
+import * as actualState from '../../../src/state.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -83,6 +92,7 @@ mock.module('../../../src/session/snapshot-writer.js', () => ({
 }));
 
 mock.module('../../../src/state.js', () => ({
+	...actualState,
 	swarmState: {
 		activeToolCalls: new Map(),
 		toolAggregates: new Map(),
@@ -858,9 +868,9 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 	});
 
-	// ── Test 8: close-summary.md and spec.md NOT in ACTIVE_STATE_TO_CLEAN ──
+	// ── Test 8: close-summary.md survives; spec.md is archived and cleaned ──
 
-	describe('close-summary.md and spec.md survive the clean stage', () => {
+	describe('close-summary.md survives; spec.md is archived and cleaned', () => {
 		it('close-summary.md is NOT deleted after close', async () => {
 			writePlan();
 
@@ -871,7 +881,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'close-summary.md'))).toBe(true);
 		});
 
-		it('spec.md (when present) is NOT deleted after close', async () => {
+		it('spec.md is archived then removed after close', async () => {
 			writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec.md'),
@@ -880,11 +890,72 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			await handleCloseCommand(testDir, []);
 
-			// spec.md is in ARCHIVE_ARTIFACTS but NOT in ACTIVE_STATE_TO_CLEAN.
-			// It should be archived but NOT deleted from .swarm/.
+			// spec.md is in both ARCHIVE_ARTIFACTS and ACTIVE_STATE_TO_CLEAN: it is
+			// archived first (forensic copy preserved in the bundle), then removed
+			// from .swarm/ so the next session starts spec-free instead of picking
+			// up a stale spec.
 			const archivePath = getLatestArchivePath();
 			expect(existsSync(path.join(archivePath, 'spec.md'))).toBe(true);
-			expect(existsSync(path.join(swarmDir(), 'spec.md'))).toBe(true);
+			expect(existsSync(path.join(swarmDir(), 'spec.md'))).toBe(false);
+		});
+
+		it('spec-staleness.json is archived then removed after close', async () => {
+			writePlan();
+			writeFileSync(
+				path.join(swarmDir(), 'spec-staleness.json'),
+				'{"type":"spec_stale_detected"}',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			// spec-staleness.json is in both ARCHIVE_ARTIFACTS and
+			// ACTIVE_STATE_TO_CLEAN: archived first (forensic copy preserved in
+			// the bundle), then removed from .swarm/ so a stale drift gate never
+			// survives into the next session.
+			const archivePath = getLatestArchivePath();
+			expect(existsSync(path.join(archivePath, 'spec-staleness.json'))).toBe(
+				true,
+			);
+			expect(existsSync(path.join(swarmDir(), 'spec-staleness.json'))).toBe(
+				false,
+			);
+		});
+
+		it('spec-snapshot.md is archived then removed after close', async () => {
+			writePlan();
+			writeFileSync(
+				path.join(swarmDir(), 'spec-snapshot.md'),
+				'# Spec snapshot\n',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			const archivePath = getLatestArchivePath();
+			expect(existsSync(path.join(archivePath, 'spec-snapshot.md'))).toBe(true);
+			expect(existsSync(path.join(swarmDir(), 'spec-snapshot.md'))).toBe(false);
+		});
+
+		it('after close, a stale spec-staleness.json no longer blocks the core write tools', async () => {
+			writePlan();
+			writeFileSync(
+				path.join(swarmDir(), 'spec-staleness.json'),
+				'{"type":"spec_stale_detected"}',
+			);
+
+			const { enforceSpecDriftGate } = await import(
+				'../../../src/hooks/guardrails/index.js'
+			);
+
+			// Sanity: before close, the gate blocks save_plan against the stale marker.
+			expect(() => enforceSpecDriftGate(testDir, 'save_plan')).toThrow();
+
+			await handleCloseCommand(testDir, []);
+
+			expect(existsSync(path.join(swarmDir(), 'spec-staleness.json'))).toBe(
+				false,
+			);
+			// After close, the marker is gone, so the gate no longer blocks.
+			expect(() => enforceSpecDriftGate(testDir, 'save_plan')).not.toThrow();
 		});
 
 		it('events.jsonl IS deleted (in ACTIVE_STATE_TO_CLEAN)', async () => {
@@ -894,6 +965,39 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			await handleCloseCommand(testDir, []);
 
 			expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(false);
+		});
+
+		it('after close, a stale spec.md is gone and no longer resolves as the effective spec', async () => {
+			writePlan();
+			writeFileSync(
+				path.join(swarmDir(), 'spec.md'),
+				'# Specification\n\nStale spec that must not survive close.',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			expect(existsSync(path.join(swarmDir(), 'spec.md'))).toBe(false);
+
+			const { readEffectiveSpecSync } = await import(
+				'../../../src/sdd/effective-spec.js'
+			);
+			expect(readEffectiveSpecSync(testDir)).toBeNull();
+		});
+
+		it('does not warn "Preserved" for optional ACTIVE_STATE_TO_CLEAN files that were never present', async () => {
+			// No spec.md, handoff.md, etc. are written — these are optional files
+			// that simply don't exist. The archive stage silently skips them
+			// (ENOENT), recording no failure reason. The clean stage must not
+			// mistake "never archived because absent" for "archive failed" and
+			// must not emit a spurious "Preserved <file> because it was not
+			// successfully archived" warning for them.
+			writePlan();
+
+			const result = await handleCloseCommand(testDir, []);
+
+			expect(result).not.toContain('Preserved spec.md');
+			expect(result).not.toContain('Preserved handoff.md');
+			expect(result).not.toContain('because it was not successfully archived');
 		});
 	});
 

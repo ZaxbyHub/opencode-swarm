@@ -35,7 +35,17 @@ export async function handleResetCommand(
 	const filesToReset = [
 		'plan.md',
 		'plan.json',
+		// Plan backing-state: a surviving ledger gets replayed by replayFromLedger()
+		// on the next loadPlan(), resurrecting the wiped plan back into plan.json.
+		'plan-ledger.jsonl',
 		'context.md',
+		// Single-session spec-drift state. spec-staleness.json is an existence-only
+		// gate (enforceSpecDriftGate) that hard-blocks the core write tools
+		// (save_plan, update_task_status, phase_complete, lean_turbo_run_phase,
+		// lean_turbo_acquire_locks) — a survivor mis-routes or blocks the next session.
+		'spec.md',
+		'spec-staleness.json',
+		'spec-snapshot.md',
 		'SWARM_PLAN.md',
 		'SWARM_PLAN.json',
 		'plan-export/SWARM_PLAN.md',
