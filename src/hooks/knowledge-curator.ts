@@ -1682,6 +1682,10 @@ export function createKnowledgeCuratorHook(
 						},
 					);
 					recordSeenRetroSection(evidenceKey, batch.identity, Date.now());
+				} catch (err) {
+					warn(
+						`Evidence curation failed for entry ${batch.identity}, will retry on next trigger: ${err instanceof Error ? err.message : String(err)}`,
+					);
 				} finally {
 					inFlightEvidenceEntries.delete(evidenceKey);
 				}

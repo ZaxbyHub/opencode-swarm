@@ -217,7 +217,7 @@ describe('curator recommendation persistence — regression: issue #1769', () =>
 		expect(loaded?.knowledge_recommendations).toHaveLength(3);
 		expect(
 			loaded?.knowledge_recommendations.map((entry) => entry.entry_id),
-		).toEqual(expect.arrayContaining(['entry-0', 'entry-2']));
+		).toEqual(expect.arrayContaining(['entry-0', 'entry-1', 'entry-2']));
 	});
 
 	test('a concurrent phase merge and hive append both survive', async () => {

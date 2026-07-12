@@ -120,9 +120,11 @@ describe('knowledge curator evidence concurrency — regression: issue #1769', (
 		);
 		const hook = createKnowledgeCuratorHook('/project', defaultConfig);
 
-		await expect(hook(trigger(), {})).rejects.toThrow(
-			'simulated second-entry failure',
-		);
+		// Per-entry error isolation: the hook resolves instead of throwing.
+		// Entry 1 succeeds (marked seen), entry 2 fails (warned, not marked seen).
+		await hook(trigger(), {});
+
+		// Second trigger retries entry 2 (entry 1 was already marked seen).
 		await hook(trigger(), {});
 
 		expect(curate).toHaveBeenCalledTimes(3);
