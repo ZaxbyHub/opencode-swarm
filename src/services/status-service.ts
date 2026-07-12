@@ -3,6 +3,10 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import {
+	type FullAutoRunState,
+	loadFullAutoRunState,
+} from '../full-auto/state';
+import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
 } from '../hooks/extractors';
@@ -13,10 +17,6 @@ import {
 import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
-import {
-	type FullAutoRunState,
-	loadFullAutoRunState,
-} from '../full-auto/state';
 import {
 	getActiveFullAutoSessionID,
 	hasActiveFullAuto,
@@ -425,8 +425,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push('**Full-Auto**: active');
 		if (status.fullAutoEscalation) {
 			const e = status.fullAutoEscalation;
-			const phaseStr =
-				e.phase !== undefined ? ` | Phase ${e.phase}` : '';
+			const phaseStr = e.phase !== undefined ? ` | Phase ${e.phase}` : '';
 			lines.push(
 				`  - Escalation: ${e.reason} (interactions=${e.interactionCount}, deadlocks=${e.deadlockCount}${phaseStr})`,
 			);

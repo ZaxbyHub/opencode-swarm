@@ -11,11 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const SCRIPT = path.resolve(
-	process.cwd(),
-	'scripts',
-	'check-test-file-cap.sh',
-);
+const SCRIPT = path.resolve(process.cwd(), 'scripts', 'check-test-file-cap.sh');
 
 interface SpawnResult {
 	exitCode: number;
@@ -23,7 +19,10 @@ interface SpawnResult {
 	stderr: string;
 }
 
-async function runScript(repoDir: string, env?: Record<string, string>): Promise<SpawnResult> {
+async function runScript(
+	repoDir: string,
+	env?: Record<string, string>,
+): Promise<SpawnResult> {
 	const proc = Bun.spawn({
 		cmd: ['bash', SCRIPT],
 		cwd: repoDir,

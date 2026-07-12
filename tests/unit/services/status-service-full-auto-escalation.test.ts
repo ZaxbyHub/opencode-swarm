@@ -21,13 +21,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { FullAutoRunState } from '../../../src/full-auto/state';
 import {
-	_internals as statusInternals,
 	formatStatusMarkdown,
 	getStatusData,
 	type StatusData,
+	_internals as statusInternals,
 } from '../../../src/services/status-service';
-import type { FullAutoRunState } from '../../../src/full-auto/state';
 
 function baseStatus(overrides: Partial<StatusData> = {}): StatusData {
 	return {

@@ -29,7 +29,8 @@ describe('check-tool-registration reverse: pure helpers', () => {
 		});
 
 		test('matches `export const x: Type =` with type annotation', () => {
-			const src = 'export const actionlint_scan: ToolDefinition = createSwarmTool({';
+			const src =
+				'export const actionlint_scan: ToolDefinition = createSwarmTool({';
 			const bindings = findExportedBindings(src);
 			expect(bindings).toHaveLength(1);
 			expect(bindings[0]?.name).toBe('actionlint_scan');
@@ -43,8 +44,9 @@ describe('check-tool-registration reverse: pure helpers', () => {
 			expect(bindings[0]?.name).toBe('dispatch_lanes_async');
 			// The equalsPosition must point past the `=` so the call finder can
 			// attribute the createSwarmTool( on the next line to this binding.
-			expect(src.slice(bindings[0]!.declStart, bindings[0]!.equalsPosition))
-				.toInclude('createSwarmTool>');
+			expect(
+				src.slice(bindings[0]!.declStart, bindings[0]!.equalsPosition),
+			).toInclude('createSwarmTool>');
 		});
 
 		test('does NOT match non-exported const (factory-internal)', () => {
@@ -174,9 +176,7 @@ describe('collectExportedCreateSwarmToolBindings — orphan + opt-out fixtures',
 	}
 
 	test('enumerates an orphan createSwarmTool binding with no opt-out tag', () => {
-		tmpToolsDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'tools-orphan-1781-'),
-		);
+		tmpToolsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tools-orphan-1781-'));
 		// An orphan: exported createSwarmTool, no TOOL_METADATA entry, no opt-out.
 		writeToolFile(
 			'orphan.ts',
@@ -199,9 +199,7 @@ describe('collectExportedCreateSwarmToolBindings — orphan + opt-out fixtures',
 	});
 
 	test('enumerates a @tool-opt-out-tagged binding with hasOptOut=true', () => {
-		tmpToolsDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'tools-optout-1781-'),
-		);
+		tmpToolsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tools-optout-1781-'));
 		writeToolFile(
 			'internal.ts',
 			[
@@ -224,9 +222,7 @@ describe('collectExportedCreateSwarmToolBindings — orphan + opt-out fixtures',
 	});
 
 	test('factory-internal createSwarmTool call is NOT enumerated', () => {
-		tmpToolsDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'tools-factory-1781-'),
-		);
+		tmpToolsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tools-factory-1781-'));
 		writeToolFile(
 			'factory.ts',
 			[

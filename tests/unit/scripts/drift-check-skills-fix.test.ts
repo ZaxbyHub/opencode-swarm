@@ -49,9 +49,7 @@ describe('drift:fix skill-mirror — env-guard (AGENTS.md invariant 4)', () => {
 	test('throws when SWARM_SKILL_SYNC_CONFIRM is not set', () => {
 		delete process.env.SWARM_SKILL_SYNC_CONFIRM;
 		const root = makeTempRoot();
-		expect(() => fixSkillMirrorDrift(root)).toThrow(
-			/SWARM_SKILL_SYNC_CONFIRM/,
-		);
+		expect(() => fixSkillMirrorDrift(root)).toThrow(/SWARM_SKILL_SYNC_CONFIRM/);
 	});
 
 	test('does not throw when SWARM_SKILL_SYNC_CONFIRM=1', () => {
@@ -100,11 +98,7 @@ describe('drift:fix skill-mirror — MIRRORED pairs (canonical .opencode)', () =
 	test('detectSkillMirrorDrift returns zero findings after fix', () => {
 		process.env.SWARM_SKILL_SYNC_CONFIRM = '1';
 		const root = makeTempRoot();
-		writeFile(
-			root,
-			'.opencode/skills/clarify/SKILL.md',
-			'CANONICAL\n',
-		);
+		writeFile(root, '.opencode/skills/clarify/SKILL.md', 'CANONICAL\n');
 		writeFile(root, '.claude/skills/clarify/SKILL.md', 'STALE\n');
 
 		expect(
@@ -144,9 +138,7 @@ describe('drift:fix skill-mirror — divergent pairs are untouched', () => {
 
 		const synced = fixSkillMirrorDrift(root);
 		expect(
-			synced.find((f) =>
-				f.message.includes('engineering-conventions'),
-			),
+			synced.find((f) => f.message.includes('engineering-conventions')),
 		).toBeUndefined();
 		// Both sides unchanged.
 		expect(
@@ -168,9 +160,7 @@ describe('drift:fix skill-mirror — ADDITIONAL identical pairs', () => {
 		writeFile(root, '.opencode/skills/commit-pr/SKILL.md', staleOpencode);
 
 		const synced = fixSkillMirrorDrift(root);
-		const commitPrSync = synced.find((f) =>
-			f.message.includes('"commit-pr"'),
-		);
+		const commitPrSync = synced.find((f) => f.message.includes('"commit-pr"'));
 		expect(commitPrSync).toBeDefined();
 		expect(commitPrSync?.message).toInclude('.claude canonical');
 		// .opencode now mirrors the .claude canonical.

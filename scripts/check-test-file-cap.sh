@@ -66,16 +66,6 @@ get_pr_changed_files() {
     echo "$pr_files"
 }
 
-is_pr_file() {
-    local file="$1"
-    local pr_files="$2"
-    if [ -z "$pr_files" ]; then
-        return 1  # No PR context → treat as pre-existing (non-blocking).
-    fi
-    echo "$pr_files" | grep -qF "$file"
-    return $?
-}
-
 # Resolve base branch once (used for both changed-file list and added-file list).
 base_branch=""
 for branch in origin/main origin/master main master; do
@@ -137,7 +127,7 @@ while IFS= read -r file; do
     # Modified file over the cap: ratchet arm. Compare against base line count.
     if [ -n "$base_branch" ]; then
         base_lines=$(git show "${base_branch}:${file}" 2>/dev/null \
-            | tr -d '\r' | wc -l | tr -d ' ' || echo "0")
+            | tr -d '\r' | wc -l | tr -d ' ' || true)
     else
         base_lines=0
     fi
