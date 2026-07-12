@@ -18,45 +18,117 @@ Argument handling:
 
 ### SWARM-NAMESPACED subcommands — DO NOT confuse with Claude Code built-in commands
 
-These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`:
+These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list below is generated from the `COMMAND_REGISTRY` (`src/commands/registry.ts`) and includes all registered non-deprecated base commands and subcommands:
 
-- `/swarm status` — show current swarm status
-- `/swarm plan` — view or manage implementation plan
-- `/swarm agents` — list available swarm agents
-- `/swarm history` — view swarm execution history
-- `/swarm config` — view swarm configuration
-- `/swarm evidence` — view evidence files
-- `/swarm handoff` — hand off to another agent
-- `/swarm archive` — archive swarm sessions
-- `/swarm diagnose` / `/swarm diagnosis` — diagnose swarm issues
-- `/swarm preflight` — run preflight checks
-- `/swarm sync-plan` — sync plan with repository
-- `/swarm benchmark` — run benchmarks
-- `/swarm export` — export swarm data
-- `/swarm reset` — reset swarm state
-- `/swarm rollback` — rollback to previous state
-- `/swarm retrieve` — retrieve swarm data
-- `/swarm clarify` — clarify swarm task
-- `/swarm analyze` — analyze swarm execution
-- `/swarm specify` — specify swarm requirements
-- `/swarm brainstorm` — brainstorm swarm tasks
-- `/swarm qa-gates` — manage QA gates
-- `/swarm dark-matter` — detect hidden couplings
-- `/swarm knowledge` — manage knowledge base
-- `/swarm curate` — curate knowledge
-- `/swarm turbo` — enable turbo mode
-- `/swarm full-auto` — enable full auto mode
-- `/swarm write-retro` — write retrospective
-- `/swarm reset-session` — reset session
-- `/swarm simulate` — simulate swarm execution
-- `/swarm promote` — promote knowledge
-- `/swarm issue` — create issue
-- `/swarm pr-review` — review pull request
+**Core / state**
+
+- `/swarm status` — show current swarm state
+- `/swarm show-plan` — show current plan (optionally filter by phase number)
+- `/swarm plan` — deprecated alias for `/swarm show-plan`
+- `/swarm agents` — list registered agents
+- `/swarm help` — show help for swarm commands (optionally `[command]`)
+- `/swarm history` — show completed phases summary
+- `/swarm config` — show current resolved configuration
+- `/swarm export` — export plan and context as JSON
+- `/swarm evidence` — show evidence bundles `[taskId]`
+- `/swarm evidence summary` — generate evidence summary with completion ratio and blockers
+- `/swarm evidence-summary` — deprecated alias for `/swarm evidence summary`
+- `/swarm handoff` — prepare state for clean model switch
+- `/swarm archive` — archive old evidence bundles `[--dry-run]`
+- `/swarm retrieve` — retrieve full output from a summary `<id>`
+- `/swarm rollback` — restore swarm state or project files to a checkpoint
+- `/swarm reset` — clear swarm state files `[--confirm]`
+- `/swarm reset-session` — clear session state, preserve plan/evidence/knowledge
+- `/swarm checkpoint` — manage project checkpoints `[save|restore|delete|list] <label>`
+- `/swarm finalize` — finalize the swarm project and archive evidence
+- `/swarm close` — deprecated alias for `/swarm finalize`
+- `/swarm auto-proceed` — toggle or set auto-proceed override `[on|off]`
+- `/swarm concurrency` — manage runtime concurrency override `[set|status|reset]`
+
+**Diagnostics / health**
+
+- `/swarm diagnose` / `/swarm diagnosis` — run health check on swarm state (`diagnosis` is a deprecated alias)
+- `/swarm config doctor` — run config doctor checks
+- `/swarm config-doctor` — deprecated alias for `/swarm config doctor`
+- `/swarm doctor` — deprecated alias for `/swarm config doctor`
+- `/swarm doctor tools` — run tool registration coherence check
+- `/swarm doctor-tools` — deprecated alias for `/swarm doctor tools`
+- `/swarm preflight` — run preflight automation checks
+- `/swarm lanes` — list active, awaiting-merge, and conflicted worktree lanes
+- `/swarm sync-plan` — ensure plan.json and plan.md are synced
+- `/swarm benchmark` — show performance metrics `[--cumulative] [--ci-gate] [--max-cost-usd <n>]`
+- `/swarm costs` — show per-agent and per-task token/cost telemetry `[--json]`
+- `/swarm learning` — show learning metrics and violation trends
+- `/swarm guardrail explain` — dry-run: show what guardrails would do (executes nothing)
+- `/swarm guardrail-explain` — deprecated alias for `/swarm guardrail explain`
+- `/swarm guardrail-log` — read the guardrail decision log
+- `/swarm coupling` — measure plan coupling and rank modules driving conflicts
+- `/swarm dark-matter` — detect hidden file couplings via co-change NPMI analysis
+- `/swarm simulate` — dry-run hidden coupling analysis with configurable thresholds
+- `/swarm ci-simulate` — create a temporary merge-result worktree and run CI pre-merge
+- `/swarm qa-gates` — view or modify QA gate profile for the current plan
+- `/swarm acknowledge-spec-drift` — acknowledge spec drift and suppress further warnings
+
+**Knowledge / memory / curation**
+
+- `/swarm knowledge` — list knowledge entries
+- `/swarm knowledge migrate` — migrate knowledge entries to the current format
+- `/swarm knowledge quarantine` — move a knowledge entry to quarantine
+- `/swarm knowledge restore` — restore a quarantined or archived knowledge entry
+- `/swarm knowledge unactionable` — list unactionable knowledge entries pending hardening
+- `/swarm knowledge retry-hardening` — reset retire candidates for re-hardening
+- `/swarm memory` — show Swarm memory commands
+- `/swarm memory status` — show Swarm memory provider, JSONL, and migration status
+- `/swarm memory pending` — show pending Swarm memory proposals
+- `/swarm memory recall-log` — summarize Swarm memory recall usage
+- `/swarm memory value-log` — show Swarm memory Q-value and reward updates
+- `/swarm memory compact` — compact deleted/superseded/expired scratch memories
+- `/swarm memory stale` — list stale and low-utility Swarm memories
+- `/swarm memory export` — export current Swarm memory to JSONL files
+- `/swarm memory evaluate` — run golden Swarm memory recall evaluation fixtures
+- `/swarm memory import` — import legacy JSONL memory into SQLite
+- `/swarm memory migrate` — run the one-time legacy JSONL to SQLite migration
+- `/swarm memory consolidation-log` — summarize recent memory consolidation passes
+- `/swarm curate` — run knowledge curation and hive promotion review
+- `/swarm consolidate` — run quota-bounded skill-improver consolidation
+- `/swarm promote` — manually promote a lesson to hive knowledge
+- `/swarm link` — tie this worktree to a shared swarm knowledge store
+- `/swarm link status` — show whether this worktree shares knowledge via a link
+- `/swarm unlink` — stop sharing swarm knowledge for this worktree
+- `/swarm write-retro` — write a retrospective evidence bundle for a completed phase
+
+**Architect MODE workflows**
+
+- `/swarm brainstorm` — enter architect MODE: BRAINSTORM (seven-phase planning)
+- `/swarm loop` — enter architect MODE: LOOP (compound-engineering loop)
+- `/swarm council` — enter architect MODE: COUNCIL (multi-model deliberation)
+- `/swarm clarify` — clarify and refine an existing feature specification
+- `/swarm specify` — generate or import a feature specification
+- `/swarm analyze` — analyze spec.md vs plan.md for requirement coverage gaps
+- `/swarm sdd` — manage OpenSpec-compatible SDD artifacts
+- `/swarm sdd status` — show OpenSpec-compatible SDD status
+- `/swarm sdd validate` — validate OpenSpec-compatible artifacts
+- `/swarm sdd project` — materialize the effective spec into `.swarm/spec.md`
+- `/swarm epic` — toggle Epic Mode (autonomous coupling-aware parallel activation)
+- `/swarm turbo` — toggle Turbo Mode strategy `[on|off|lean|standard|epic|status]`
+- `/swarm full-auto` — toggle Full-Auto Mode `[on [mode]|off|status]`
+- `/swarm post-mortem` — run the post-mortem agent (project-end synthesis)
+
+**Read-only audits / research**
+
+- `/swarm deep-dive` / `/swarm deep dive` — launch deep codebase audit (parallel explorers, dual reviewers, critic)
+- `/swarm deep-research` / `/swarm deep research` — launch cited multi-source deep research pass
+- `/swarm codebase-review` / `/swarm codebase review` — run codebase-review-swarm
+- `/swarm design-docs` / `/swarm design docs` — generate or sync language-agnostic design docs
+
+**PR / issue workflows**
+
+- `/swarm issue` — ingest a GitHub issue (intake → localization → resolution spec) [--plan] [--trace] [--no-repro]
+- `/swarm pr-review` — launch deep PR review with multi-lane analysis
 - `/swarm pr-feedback` — ingest and close known PR feedback (review comments, CI failures, conflicts)
-- `/swarm deep-dive` — read-only deep codebase audit (parallel explorers, dual reviewers, critic)
-- `/swarm codebase-review` — run codebase-review-swarm
-- `/swarm checkpoint` — checkpoint session state
-- `/swarm close` — close swarm session
+- `/swarm pr subscribe` / `/swarm pr-subscribe` — subscribe session to PR state-change notifications
+- `/swarm pr unsubscribe` / `/swarm pr-unsubscribe` — unsubscribe session from PR notifications
+- `/swarm pr status` / `/swarm pr-status` — show PR monitor subscription status
 
 ### CRITICAL NAMING CONFLICTS
 
@@ -68,6 +140,7 @@ Invoking the bare form instead of `/swarm <name>` causes irreversible damage:
 | `/swarm plan` | CC `/plan` | Enters CC plan mode — blocks execution |
 | `/swarm reset` | CC `/reset` | Wipes entire conversation context |
 | `/swarm checkpoint` | CC `/checkpoint` | Reverts conversation history |
+| `/swarm history` | CC `/history` | Shows CC conversation history instead of swarm phase history |
 
 All swarm commands: `/swarm <subcommand>`. Never the bare name.
 

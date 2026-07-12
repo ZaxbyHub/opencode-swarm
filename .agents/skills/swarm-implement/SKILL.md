@@ -11,7 +11,7 @@ Read and follow `../../../.opencode/skills/swarm-implement/SKILL.md` as the cano
 Codex-specific execution notes:
 
 - Use `update_plan` for substantial multi-step work.
-- Use `multi_tool_use.parallel` for independent repo reads and searches.
+- Use the runtime's parallel-execution capability for independent repo reads and searches.
 - Use `apply_patch` for manual edits.
 - Use focused shell validation after each meaningful change.
 - Bring in narrower skills as needed: `$engineering-conventions`,

@@ -2,7 +2,7 @@
 name: issue-ingest
 audience: swarm-plugin
 description: >
-  Full execution protocol for MODE: ISSUE_INGEST -- GitHub issue intake, localization, spec generation, and transition to planning or tracing.
+  Full execution protocol for MODE: ISSUE_INGEST -- GitHub issue intake, localization, spec generation, and transition to the full fix workflow.
 ---
 
 # Issue Ingest Protocol
@@ -16,19 +16,21 @@ Purpose: ingest a GitHub issue, localize root cause, and produce a resolution sp
 
 Flags parsed from signal:
 - `plan=true` → after spec generation, transition to MODE: PLAN (create implementation plan)
-- `trace=true` → after plan, delegate to swarm-implement skill for full fix-and-PR workflow (implies plan=true)
-- `noRepro=true` → skip reproduction verification step
+- `trace=true` → after plan, delegate to swarm-implement skill for the fix workflow; the user invokes commit-pr to publish (implies plan=true)
+- `noRepro=true` → skip the reproduction step below
 
 #### Phase 1: INTAKE
 1. Fetch the issue body using the GitHub CLI (`gh issue view <N> --repo <owner>/<repo> --json title,body,labels,assignees,comments`) or web fetch.
+   - If the issue cannot be fetched (404, private repo, no `gh` auth, or the argument resolves to a PR not an issue), report the blocked operation explicitly and do not proceed on empty intake; fall back to any pasted issue text the user provided. Closed-issue cases proceed but note the closed state.
 2. Parse the issue into a normalized **Intake Note** with four required fields:
    - **Observed behavior**: what the issue reports
    - **Expected behavior**: what should happen instead
    - **Reproduction steps**: how to trigger the issue (may be absent; flag with `[NEEDS REPRO]` if missing)
    - **Environment**: platform, version, configuration context
 3. If any required field is missing and cannot be inferred from context, flag as `[NEEDS REPRO]`.
-4. If `--no-repro` flag is set, skip reproduction verification and proceed with available information.
-5. Exit when the Intake Note is complete or all missing fields are flagged.
+4. Attempt a minimal reproduction of the reported issue: record the exact commands and their output. Skip this step when `noRepro=true` (set via `--no-repro`); in that case, note that reproduction was skipped and proceed on the issue text alone.
+5. Ask the user clarifying questions one at a time, max 6 per intake, when the issue text is ambiguous; otherwise flag the item with markers like `[NEEDS REPRO]` or `[NEEDS CLARIFICATION]` and proceed.
+6. Exit when the Intake Note is complete or all missing fields are flagged.
 
 #### Phase 2: LOCALIZATION
 1. Delegate to `the active swarm's explorer agent` to scan the codebase for code areas related to the issue's observed behavior.
@@ -41,23 +43,25 @@ Flags parsed from signal:
 5. Exit when a root cause is identified with ≥70% confidence, or when all hypotheses are exhausted (report ambiguity).
 
 #### Phase 3: SPEC GENERATION
-0. Include a **Root Cause** section derived from Phase 2 localization results: concise statement of the identified root cause, location, and confidence score. Include a **Fix Strategy** section at product/behavior level (what the fix must accomplish, not how to implement it).
-1. Generate `.swarm/spec.md` using the same SPEC CONTENT RULES as MODE: SPECIFY:
+0. Include a **Root Cause** section derived from Phase 2 localization results: concise statement of the identified root cause, location, and confidence score; the `location` field (file/function from Phase 2 localization) is the sole exception to the no-implementation-detail rule. Include a **Fix Strategy** section at product/behavior level (what the fix must accomplish, not how to implement it).
+1. If `.swarm/spec.md` already exists, route through MODE: SPECIFY step 1's classification (overwrite / refine / archive / non-shadowing check) before writing — do not clobber an existing spec. (This protects the drift-gate which consumes spec.md.)
+2. Generate `.swarm/spec.md` using the same SPEC CONTENT RULES as MODE: SPECIFY:
    - WHAT users need and WHY — never HOW to implement
    - FR-### / SC-### numbering, Given/When/Then scenarios
    - No technology stack, APIs, or code structure
-     - `[NEEDS CLARIFICATION]` markers only for items that survive the clarification funnel: inventory all material uncertainties without numeric cap → classify each (self_resolved/critic_resolved/research_needed/user_decision/deferred_nonblocking) — **Overconfidence guard:** if the default is not directly supported by user request, spec, or recorded context, classify as `user_decision` rather than `self_resolved` → consult critic_sounding_board — critic responds per SoundingBoardVerdict: UNNECESSARY→DROP, RESOLVE→RESOLVE, REPHRASE→REPHRASE, APPROVED→ASK_USER — **always-surface protection:** always-surface categories must not receive UNNECESSARY/DROP; override to APPROVED/ASK_USER → record resolved items as assumptions → surface only survivors as markers with decision packet format (grouped by category, recommended defaults, blocking vs optional markers)
-     - **Important:** If research is ongoing, monitor the timeout configured in `.swarm/config.json` under `research_needed_timeout_ms` (default: 300000ms / 5 minutes). If research does not complete before the timeout expires, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user. This prevents the clarification funnel from stalling while waiting for external research.
- 2. Cross-reference the spec against the issue's expected behavior to ensure alignment.
-3. If the issue is a bug: spec must describe the correct behavior, not the broken behavior.
-4. If the issue is a feature: spec must describe the user-facing outcome, not the implementation.
-5. QA GATE SELECTION: Ask user which QA gates to enable (same dialogue as MODE: SPECIFY). Write to `.swarm/context.md` under `## Pending QA Gate Selection`.
+   - `[NEEDS CLARIFICATION]` markers only for items that survive the clarification funnel: inventory all material uncertainties without numeric cap → classify each (self_resolved/critic_resolved/research_needed/user_decision/deferred_nonblocking) — **Overconfidence guard:** if the default is not directly supported by user request, spec, or recorded context, classify as `user_decision` rather than `self_resolved` → consult critic_sounding_board — critic responds per SoundingBoardVerdict: UNNECESSARY→DROP, RESOLVE→RESOLVE, REPHRASE→REPHRASE, APPROVED→ASK_USER — **always-surface protection:** always-surface categories must not receive UNNECESSARY/DROP; override to APPROVED/ASK_USER → record resolved items as assumptions → surface only survivors as markers with decision packet format (grouped by category, recommended defaults, blocking vs optional markers)
+   - **Important:** Apply a fixed 5-minute protocol budget to `research_needed`. If research does not complete within 5 minutes, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user.
+3. Cross-reference the spec against the issue's expected behavior to ensure alignment.
+4. If the issue is a bug: spec must describe the correct behavior, not the broken behavior.
+5. If the issue is a feature: spec must describe the user-facing outcome, not the implementation.
+6. Carry forward any `[NEEDS REPRO]` / `[NEEDS CLARIFICATION]` flags from Phase 1 into the spec as open questions; do not silently drop them.
+7. QA GATE SELECTION: Ask user which QA gates to enable (same dialogue as MODE: SPECIFY). Write to `.swarm/context.md` under `## Pending QA Gate Selection`.
 
 #### Phase 4: TRANSITION
 Based on flags:
 - No flags → report spec summary and suggest `PLAN` or `CLARIFY-SPEC`
 - `plan=true` → transition to MODE: PLAN using the generated spec
-- `trace=true` → transition to MODE: PLAN, then delegate to swarm-implement skill for full fix workflow
+- `trace=true` → transition to MODE: PLAN, then delegate to swarm-implement skill for the fix workflow; the user invokes commit-pr to publish
 
 RULES:
 - One question per message in INTAKE dialogue (max 6 questions)

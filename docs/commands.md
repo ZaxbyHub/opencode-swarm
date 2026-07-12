@@ -395,7 +395,7 @@ Ingest a GitHub issue into the swarm workflow for root-cause localization and re
 | `owner/repo#N` | Shorthand format â€” resolves owner and repo from the reference |
 | `N` | Bare issue number â€” resolves owner and repo from the git remote `origin` |
 | `--plan` | Transition to plan creation after spec generation |
-| `--trace` | Run full fix-and-PR workflow (implies `--plan`) |
+| `--trace` | Run the fix workflow end-to-end (implies `--plan`); compose commit-pr to publish |
 | `--no-repro` | Skip reproduction verification step |
 
 **URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames.
@@ -404,7 +404,7 @@ Ingest a GitHub issue into the swarm workflow for root-cause localization and re
 1. **Intake** â€” Fetch issue body via GitHub CLI, normalize into structured intake note (observed behavior, expected behavior, repro steps, environment)
 2. **Localization** â€” Build 2â€“5 root-cause hypotheses with composite scoring (stack-trace 0.4, recency 0.25, call-graph 0.2, test-failure 0.15), validate top-3 in parallel, prune to single root cause
 3. **Spec Generation** â€” Output resolution spec with root cause, fix strategy, FR/SC numbering, Given/When/Then scenarios
-4. **Transition** â€” Based on flags: report spec (`no flags`), create plan (`--plan`), or run full fix workflow (`--trace`)
+4. **Transition** â€” Based on flags: report spec (`no flags`), create plan (`--plan`), or run the fix workflow end-to-end (compose commit-pr to publish) (`--trace`)
 
 **Flag interactions:** `--trace` implies `--plan`. Both flags can be combined with `--no-repro`.
 

@@ -97,7 +97,6 @@ export interface TestRunnerArgs {
 	files?: string[];
 	coverage?: boolean;
 	timeout_ms?: number;
-	allow_full_suite?: boolean;
 	bail?: boolean;
 }
 
@@ -2342,12 +2341,6 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.number()
 			.optional()
 			.describe('Timeout in milliseconds (default 60000, max 300000)'),
-		allow_full_suite: z
-			.boolean()
-			.optional()
-			.describe(
-				'Explicit opt-in for scope "all". Required because full-suite output can destabilize SSE streaming.',
-			),
 		working_directory: z
 			.string()
 			.optional()
@@ -2445,7 +2438,8 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		//
 		// IMPORTANT: The error message must NOT instruct the caller how to bypass.
 		// LLMs follow such instructions literally, defeating the guard entirely.
-		// Use SWARM_ALLOW_FULL_SUITE=1 env var only — do not rely on args.allow_full_suite.
+		// Use SWARM_ALLOW_FULL_SUITE=1 env var only — the legacy allow_full_suite
+		// arg was removed (it was never read by this guard).
 		if (scope === 'all') {
 			if (!process.env.SWARM_ALLOW_FULL_SUITE) {
 				const errorResult: TestErrorResult = {

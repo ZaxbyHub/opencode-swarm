@@ -73,7 +73,7 @@ readCuratorSummary reads file back successfully`), while the same tests pass
 on `ubuntu-latest` and `windows-latest`.
 
 **Canonical patterns:** See
-`file:.swarm/bundled-skills/writing-tests/SKILL.md`
+`file:.opencode/skills/writing-tests/SKILL.md`
 § Cross-Platform Requirements → "macOS rename-visibility race" for the
 full three-layer fix pattern (bunWrite + ENOENT retry + Node FileHandle.sync()
 not fsync()). This skill is a triage pointer; the canonical technical
@@ -85,7 +85,7 @@ or path, the security test `ADVERSARIAL: Command Services Attack Vectors >
 Attack Vector 1: Malformed Arguments > EVIDENCE: extremely long task ID
 (buffer overflow) - ACCEPTED by regex but no crash` requires a path length
 guard BEFORE `validateSwarmPath` in `src/evidence/manager.ts:loadEvidence`.
-See `file:.swarm/bundled-skills/engineering-conventions/SKILL.md`
+See `file:.opencode/skills/engineering-conventions/SKILL.md`
 for the evidence file flow that this gate check triggers on macOS CI.
 
 ## Step 3 — Diagnose with logs

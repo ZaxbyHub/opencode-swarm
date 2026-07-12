@@ -12,7 +12,7 @@ Use this skill to take a GitHub issue or bug report from intake to a verified fi
 
 This is the Codex-native version. Use Codex tools and workflow defaults:
 
-- Use `shell_command` for repository commands, `rg`, `git`, `gh`, tests, builds, and local validation.
+- Use the available shell execution tool for repository commands, `rg`, `git`, `gh`, tests, builds, and local validation.
 - Use `apply_patch` for manual file edits.
 - Use `update_plan` for phase tracking on substantial work.
 - Use the GitHub app or `gh` for issue and PR metadata when available.
@@ -41,7 +41,7 @@ For `opencode-swarm`, read the repo contract before meaningful work:
 4. `.opencode/skills/engineering-conventions/SKILL.md` before architecture, plugin init, subprocess, tool registration, plan durability, `.swarm` storage, runtime portability, session/global state, guardrails/retry, chat/system hook, or release/cache work
 5. `.agents/skills/commit-pr/SKILL.md` before commit, push, or PR creation; use `.claude/skills/commit-pr/SKILL.md` as the underlying repo protocol it points to
 
-If `.Codex/session/swarm-mode.md` exists, read it before complex work and follow its quality gates.
+If `.codex/session/swarm-mode.md` exists, read it before complex work and follow its quality gates.
 
 Every PR for this repo must include an invariant audit for touched areas. Evidence must be concrete: commands, test output, source inspection, or grep results.
 

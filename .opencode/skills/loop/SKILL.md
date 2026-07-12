@@ -256,8 +256,7 @@ When a stop condition fires:
    - Learnings captured this run and where they live.
    - Suggested next steps (e.g., open a PR via `/swarm pr-review` or the
      commit-pr flow — do NOT open a PR unless the user asks).
-3. Emit a machine-detectable completion marker on its own line so callers /
-   automation can detect terminal state:
+3. Emit a completion marker on its own line to summarize terminal state for human readers:
 
    `<loop-complete reason="objective-met|budget-exhausted|plateau|oscillation|unrecoverable-error|user-stop" cycles="N"/>`
 
@@ -293,8 +292,8 @@ A minimal, append-friendly shape — extend as needed but keep these fields:
 
 | Behavior | `auto` (default) | `checkpoint` |
 | --- | --- | --- |
-| Pause at phase gates | Yes — wait for user approval | No |
-| Confirm before next cycle | Yes | No |
+| Pause at phase gates | No | Yes — wait for user approval |
+| Confirm before next cycle | No | Yes |
 | Mandatory review + critic gates | Enforced | Enforced |
 | Hard stop conditions (budget, plateau, oscillation, errors) | Enforced | Enforced |
 | Weaken/mock/skip a failing test | Never | Never |

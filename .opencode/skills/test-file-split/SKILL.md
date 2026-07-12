@@ -1,7 +1,7 @@
 ---
 name: test-file-split
 audience: swarm-plugin
-description: Protocol for splitting test files that exceed the FR-006 500-line hard limit. Covers describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, and cascading-split detection. Load when a test file approaches or exceeds 500 lines.
+description: Protocol for splitting test files that approach or exceed the FR-006 500-line limit (enforced in CI by scripts/check-test-file-cap.sh as a diff-scoped ratchet). Covers describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, and cascading-split detection. Load when a test file approaches or exceeds 500 lines.
 ---
 
 # Test File Split Protocol (FR-006)
@@ -88,9 +88,7 @@ After splitting, evaluate whether internal utility functions in the source modul
 
 If a previously split file exceeds 500 lines **again**, the test suite is structurally too large for a single module. Do not split a third time — reorganize the tests by source module boundaries instead. Repeated splitting produces fragmented test suites that are hard to navigate and maintain.
 
-## Real-world example (PR #1762 — pending merge)
-
-> **Note:** This example references functions and files from PR #1762's branch. These do not exist on `main` until the PR is merged. The pattern is still valid as an illustration of the splitting protocol.
+## Real-world example (PR #1762)
 
 `tests/unit/scripts/release-notes-fragments.test.ts` exceeded 500 lines. It was split into:
 

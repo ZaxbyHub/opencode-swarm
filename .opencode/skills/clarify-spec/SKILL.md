@@ -10,7 +10,7 @@ description: >
 This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CLARIFY-SPEC
-Activates when: `/swarm sdd status` reports a **single resolved EFFECTIVE spec** (non-null) AND it contains `[NEEDS CLARIFICATION]` markers; OR user says "clarify", "refine spec", "review spec", or "/swarm clarify" is invoked; OR architect transitions from MODE: SPECIFY with open markers.
+Activates when: `/swarm sdd status` reports a **single resolved EFFECTIVE spec** (non-null) AND it contains `[NEEDS CLARIFICATION]` markers; OR user says "clarify", "refine spec", "review spec", or "/swarm clarify" is invoked; OR architect transitions from MODE: SPECIFY or MODE: BRAINSTORM with open markers.
 
 `/swarm sdd status` reflects `readEffectiveSpecSync`, which returns **null** (NO effective spec) for: no sources at all, multiple competing sources (e.g. `openspec/` AND `.specify/`), multi-feature Spec-Kit without a selected feature, or any other unresolvable state. CLARIFY-SPEC does NOT activate in these null cases — tell the user: "No resolved effective spec exists. Disambiguate with `/swarm sdd project --source <source>` or `--feature <feature>`, or run `/swarm specify` to generate one first." and stop.
 
@@ -31,7 +31,7 @@ CONSTRAINT: CLARIFY-SPEC must NEVER create a spec. Always consult `/swarm sdd st
    - Offer 2–4 multiple-choice options for each question
    - Mark the recommended option with reasoning (e.g., "Recommended: Option 2 because…")
    - Allow free-form input as an alternative to the options
-5. After each accepted answer, write the resolution to the **resolved effective source** (source-aware write-back):
+6. After each accepted answer, write the resolution to the **resolved effective source** (source-aware write-back):
     - **NATIVE effective spec** (`.swarm/spec.md` exists): update `.swarm/spec.md` with the resolution directly.
     - **NON-NATIVE effective spec** (openspec/specify-only, NO native `.swarm/spec.md`): do NOT write `.swarm/spec.md` — this would silently shadow the non-native source. Instead:
       - (a) If the resolved source supports in-place edits (e.g., OpenSpec sections), update the source artifacts directly.
@@ -39,8 +39,8 @@ CONSTRAINT: CLARIFY-SPEC must NEVER create a spec. Always consult `/swarm sdd st
       - (c) If neither (a) nor (b) applies, stop and tell the user the clarification cannot be auto-written to a non-native source without a projection step.
     - Replace the relevant `[NEEDS CLARIFICATION]` marker or vague language with the accepted answer.
     - If the answer invalidates an earlier requirement, update it to remove the contradiction.
-6. Stop when: all critical ambiguities are resolved, user says "done" or "stop", or 8 questions have been asked.
-7. Report a ## Clarification Summary: total questions asked, requirements added/modified/removed, remaining open ambiguities (if any), and suggest next step (`PLAN` if spec is clear, or continue clarifying).
+7. Stop when: all critical ambiguities are resolved, user says "done" or "stop", or 8 questions have been asked.
+8. Report a ## Clarification Summary: total questions asked, requirements added/modified/removed, remaining open ambiguities (if any), and suggest next step (`PLAN` if spec is clear, or continue clarifying).
 
 CLARIFY-SPEC RULES:
 - FR-ID increment rule: When adding new requirements, find the highest existing FR-ID and increment from there (FR-001 → FR-002). Never reuse or skip FR-IDs.

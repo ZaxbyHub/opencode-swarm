@@ -91,47 +91,6 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    7. If verdict is PASS: proceed to step 5.6.
    NOTE: This step is enforced by the plugin. If `mutation_test` is enabled and `.swarm/evidence/{phase}/mutation-gate.json` is missing or has a 'fail' verdict, phase_complete will be BLOCKED.
 5.58. **Design-doc sync (conditional on `design_docs.enabled` — issue #1080)**: If `design_docs.enabled` is not true, skip silently. Otherwise: `phase_complete` runs a deterministic, non-blocking design-doc drift check and writes `.swarm/doc-drift-phase-{phase}.json`. If its verdict is `DOC_STALE`, enter MODE: DESIGN_DOCS in sync mode for the stale sections only — delegate to the active swarm's `docs_design` agent (NOT the standard `docs` agent) with the changed files + the stale section IDs, and have it update the affected docs and append a `design-changelog.md` entry. This is advisory and NON-BLOCKING — never hold up phase_complete on design-doc lag, and never write `.swarm/spec.md`, `CHANGELOG.md`, or `docs/releases/pending/*` here.
-5.6. **Mandatory gate evidence**: Before calling phase_complete, ensure:
-   - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate)
-    - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when an effective spec exists
-   - `.swarm/evidence/{phase}/hallucination-guard.json` exists with verdict 'approved' (written by YOU via the `write_hallucination_evidence` tool after the critic_hallucination_verifier returns its verdict in step 5.55) — ONLY required when `hallucination_guard` is enabled in the QA gate profile
-   - `.swarm/evidence/{phase}/mutation-gate.json` exists with verdict 'pass' or 'warn' (written by YOU via the `write_mutation_evidence` tool after step 5.56) — ONLY required when `mutation_test` is enabled in the QA gate profile
-    - regression-test falsification evidence exists for at least one regression
-      test added or modified in this phase: fix removed/bypassed -> test fails
-      for the expected reason -> fix restored -> test passes. If the phase
-      changed no regression tests, record `not applicable` with the changed-file
-      evidence.
-    If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
-   NOTE: Steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If `hallucination_guard` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call `write_hallucination_evidence`), phase_complete will be BLOCKED by the plugin. Similarly, if `mutation_test` is enabled and you skip step 5.56 (or fail to call `write_mutation_evidence`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
-5.65. **Phase Council (conditional on QA gate — `phase_council`)**: Check whether `phase_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled, skip silently and proceed to step 5.7.
-   This gate is triggered by the `phase_council` QA gate, NOT by `council_mode`. (`council_mode` controls per-task Stage B replacement in MODE: EXECUTE; `phase_council` controls holistic phase-level review here in MODE: PHASE-WRAP.)
-   If `phase_council` is enabled:
-   1. Build a PHASE DOSSIER from all completed tasks in this phase, their evidence artifacts, changed-file summaries, and any drift/hallucination/mutation evidence.
-   2. Dispatch the full 5-member council (`the active swarm's critic agent`, `the active swarm's reviewer agent`, `the active swarm's sme agent`, `the active swarm's test_engineer agent`, and `the active swarm's explorer agent`) in PARALLEL with phase-scoped context. Each member reviews the entire phase's work holistically and returns a `CouncilMemberVerdict` JSON object.
-   3. Collect all 5 verdict objects. Do NOT fabricate or substitute verdicts.
-   4. Act on the verdict: APPROVE → proceed. CONCERNS with `success: false` + `reason: 'blocking_concerns_unresolved'` → HIGH/CRITICAL findings are blocking, no evidence written, must resolve requiredFixes and re-council. CONCERNS with `success: true` → only MEDIUM/LOW advisory findings, phase may proceed per `phaseConcernsAllowComplete` flag. REJECT → surface required fixes to the user before proceeding.
-   Requires council.enabled: true in config.
-
-5.7. **Final Council (conditional on QA gate - last phase only)**: Check whether `final_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled, skip silently and proceed to step 6.
-   If enabled AND this is the LAST phase in the plan (all other phases have status 'complete' and no more phases remain):
-   1. Build a PROJECT DOSSIER from the completed plan, all phase summaries, changed-file summaries, and all relevant evidence artifacts. This is the full 5-member council (NOT the General Council) running a completed-project review.
-   2. Dispatch the full 5-member council (`the active swarm's critic agent`, `the active swarm's reviewer agent`, `the active swarm's sme agent`, `the active swarm's test_engineer agent`, and `the active swarm's explorer agent`) in PARALLEL with project-scoped context. Each member must review the entire completed body of work and return a `CouncilMemberVerdict` JSON object using `agent`, `verdict` (APPROVE|CONCERNS|REJECT), `confidence`, `findings[]`, `criteriaAssessed[]`, `criteriaUnmet[]`, and `durationMs`.
-   3. Collect the five returned verdict objects. Do NOT fabricate, infer, or substitute verdicts. If a member does not return valid JSON, re-dispatch that member.
-   4. Call `write_final_council_evidence` with `phase`, `projectSummary`, `roundNumber`, and the collected `verdicts` array. This writes `.swarm/evidence/final-council.json` with plan binding, member verdicts, and quorum metadata.
-   ⚠️ **GOTCHA**: `write_final_council_evidence` normalizes CONCERNS verdicts to "rejected" internally. A CONCERNS verdict in the **final council** still blocks `phase_complete` even with zero required fixes. You MUST either address the concerns and get APPROVE on a second council round, or surface the non-blocking advisory to the user before proceeding. (Note: the **phase-level** council has a `phaseConcernsAllowComplete` flag that makes CONCERNS advisory; the final council does not.)
-   5. Do NOT call `convene_general_council`, do NOT dispatch `council_generalist`, `council_skeptic`, or `council_domain_expert`, and do NOT require `council.general.enabled` for this gate. `final_council` is the full 5-member council (NOT the General Council) rerun at project scope.
-   6. Do NOT call `phase_complete` or `/swarm close` until `.swarm/evidence/final-council.json` exists with an approved, plan-bound, quorumed final-council verdict. When `final_council` is enabled, `phase_complete` will block until that evidence exists.
-   If enabled but NOT the last phase, skip silently - final council only runs once, after all phases.
-6. Summarize to user
-7. Check the AUTO_PROCEED STATUS banner (injected into your context by the system-enhancer). The banner shows:
-   - `auto-proceed: <on|off>` — the current effective value
-   - `source: <session|plan-or-default>` — which side it came from
-   - `nudge: <true|false>` — whether the FR-004 first-boundary nudge has already been done
-   Then branch:
-   - If `auto-proceed: on`: call `phase_complete`, then advance to the first task of the next phase. Do NOT ask the user.
-   - If `auto-proceed: off` AND `nudge: false`: after the user confirms the phase transition, suggest enabling auto-proceed. Use the swarm_command tool to record the user's answer: `swarm_command({ command: "auto-proceed", args: ["on"] })` for yes, `swarm_command({ command: "auto-proceed", args: ["off"] })` for no. Either call sets nudge to true and prevents re-nudging.
-   - If `auto-proceed: off` AND `nudge: true`: Ask "Ready for Phase [N+1]?" and wait for user confirmation before proceeding.
-
 5.59. **Required agent dispatch for phase_complete**: Before calling `phase_complete`, the architect MUST have dispatched each of the active swarm's standard agents at least once during this phase. By default, `phase_complete` requires these agents:
 
 | Agent | When required | Where dispatched during normal task execution |
@@ -158,5 +117,48 @@ All code changes in this phase are unreviewed/untested/undocumented. Recommend r
 This is not optional. Missing required-agent calls in a phase is always a violation.
 There is no project where code ships without review, tests, and required documentation.
 
+5.6. **Mandatory gate evidence**: Before calling phase_complete, ensure:
+   - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate)
+    - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when an effective spec exists
+   - `.swarm/evidence/{phase}/hallucination-guard.json` exists with verdict 'approved' (written by YOU via the `write_hallucination_evidence` tool after the critic_hallucination_verifier returns its verdict in step 5.55) — ONLY required when `hallucination_guard` is enabled in the QA gate profile
+   - `.swarm/evidence/{phase}/mutation-gate.json` exists with verdict 'pass' or 'warn' (written by YOU via the `write_mutation_evidence` tool after step 5.56) — ONLY required when `mutation_test` is enabled in the QA gate profile
+   - `.swarm/evidence/{phase}/phase-council.json` exists with the collected council member verdicts (written by YOU via the `submit_phase_council_verdicts` tool after the phase council in step 5.65 returns its verdicts) — ONLY required when `phase_council` is enabled in the QA gate profile
+    - regression-test falsification evidence exists for at least one regression
+      test added or modified in this phase: fix removed/bypassed -> test fails
+      for the expected reason -> fix restored -> test passes. If the phase
+      changed no regression tests, record `not applicable` with the changed-file
+      evidence.
+    If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
+   NOTE: Steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If `hallucination_guard` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call `write_hallucination_evidence`), phase_complete will be BLOCKED by the plugin. Similarly, if `mutation_test` is enabled and you skip step 5.56 (or fail to call `write_mutation_evidence`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
+5.65. **Phase Council (conditional on QA gate — `phase_council`)**: Check whether `phase_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled, skip silently and proceed to step 5.7.
+   This gate is triggered by the `phase_council` QA gate, NOT by `council_mode`. (`council_mode` controls per-task Stage B replacement in MODE: EXECUTE; `phase_council` controls holistic phase-level review here in MODE: PHASE-WRAP.)
+   If `phase_council` is enabled:
+   1. Build a PHASE DOSSIER from all completed tasks in this phase, their evidence artifacts, changed-file summaries, and any drift/hallucination/mutation evidence.
+   2. Dispatch the full 5-member council (`the active swarm's critic agent`, `the active swarm's reviewer agent`, `the active swarm's sme agent`, `the active swarm's test_engineer agent`, and `the active swarm's explorer agent`) in PARALLEL with phase-scoped context. Each member reviews the entire phase's work holistically and returns a `CouncilMemberVerdict` JSON object.
+   3. Collect all 5 verdict objects. Do NOT fabricate or substitute verdicts.
+   4. Act on the verdict: APPROVE → proceed. CONCERNS with `success: false` + `reason: 'blocking_concerns_unresolved'` → HIGH/CRITICAL findings are blocking, no evidence written, must resolve requiredFixes and re-council. CONCERNS with `success: true` → only MEDIUM/LOW advisory findings, phase may proceed per `phaseConcernsAllowComplete` flag. REJECT → surface required fixes to the user before proceeding.
+   5. YOU (the architect) call the `submit_phase_council_verdicts` tool with the phase number and the collected council verdicts to persist the phase-council evidence. The council members do NOT write files — they are read-only. Only the `submit_phase_council_verdicts` tool writes `.swarm/evidence/{phase}/phase-council.json` (with plan binding, member verdicts, and quorum metadata). Do this BEFORE calling `phase_complete`.
+   Requires council.enabled: true in config.
+
+5.7. **Final Council (conditional on QA gate - last phase only)**: Check whether `final_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled, skip silently and proceed to step 6.
+   If enabled AND this is the LAST phase in the plan (all other phases have status 'complete' and no more phases remain):
+   1. Build a PROJECT DOSSIER from the completed plan, all phase summaries, changed-file summaries, and all relevant evidence artifacts. This is the full 5-member council (NOT the General Council) running a completed-project review.
+   2. Dispatch the full 5-member council (`the active swarm's critic agent`, `the active swarm's reviewer agent`, `the active swarm's sme agent`, `the active swarm's test_engineer agent`, and `the active swarm's explorer agent`) in PARALLEL with project-scoped context. Each member must review the entire completed body of work and return a `CouncilMemberVerdict` JSON object using `agent`, `verdict` (APPROVE|CONCERNS|REJECT), `confidence`, `findings[]`, `criteriaAssessed[]`, `criteriaUnmet[]`, and `durationMs`.
+   3. Collect the five returned verdict objects. Do NOT fabricate, infer, or substitute verdicts. If a member does not return valid JSON, re-dispatch that member.
+   4. Call `write_final_council_evidence` with `phase`, `projectSummary`, `roundNumber`, and the collected `verdicts` array. This writes `.swarm/evidence/final-council.json` with plan binding, member verdicts, and quorum metadata.
+   ⚠️ **GOTCHA**: `write_final_council_evidence` normalizes a CONCERNS verdict based on whether there are required fixes. CONCERNS with `requiredFixes > 0` → the tool writes NO evidence file (early-return `blocking_concerns_unresolved`) and `phase_complete` then blocks on the MISSING `final-council.json`. CONCERNS with zero required fixes → the tool writes a `concerns` verdict which is NON-blocking (advisory warning only). So: you MUST address required fixes from a CONCERNS verdict and re-council, or you will block on a missing evidence file. (Note: the **phase-level** council's `phaseConcernsAllowComplete` flag makes CONCERNS advisory at phase scope; the final council does not have that flag.)
+   5. Do NOT call `convene_general_council`, do NOT dispatch `council_generalist`, `council_skeptic`, or `council_domain_expert`, and do NOT require `council.general.enabled` for this gate. `final_council` is the full 5-member council (NOT the General Council) rerun at project scope.
+   6. Do NOT call `phase_complete` or `/swarm close` until `.swarm/evidence/final-council.json` exists with an approved, plan-bound, quorumed final-council verdict. When `final_council` is enabled, `phase_complete` will block until that evidence exists.
+   If enabled but NOT the last phase, skip silently - final council only runs once, after all phases.
+6. Summarize to user
+7. Check the AUTO_PROCEED STATUS banner (injected into your context by the system-enhancer). The banner shows:
+   - `auto-proceed: <on|off>` — the current effective value
+   - `source: <session|plan-or-default>` — which side it came from
+   - `nudge: <true|false>` — whether the FR-004 first-boundary nudge has already been done
+   Then branch:
+   - If `auto-proceed: on`: call `phase_complete`, then advance to the first task of the next phase. Do NOT ask the user.
+   - If `auto-proceed: off` AND `nudge: false`: after the user confirms the phase transition, suggest enabling auto-proceed. Use the swarm_command tool to record the user's answer: `swarm_command({ command: "auto-proceed", args: ["on"] })` for yes, `swarm_command({ command: "auto-proceed", args: ["off"] })` for no. Either call sets nudge to true and prevents re-nudging.
+   - If `auto-proceed: off` AND `nudge: true`: Ask "Ready for Phase [N+1]?" and wait for user confirmation before proceeding.
+
 ### Blockers
-Mark [BLOCKED] in plan.md, skip to next unblocked task, inform user.
+Mark the task [BLOCKED] via `update_task_status` (do not hand-edit plan.md — it is a derived projection), skip to next unblocked task, inform user.

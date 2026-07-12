@@ -263,7 +263,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		slug: 'engineering-conventions',
 		kind: 'divergent',
 		reason:
-			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source.',
+			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source. The `.claude` tree additionally carries the "Bounded is not free" nuance in invariant 1; `.opencode` now mirrors it.',
 	},
 	{
 		slug: 'swarm-implement',

@@ -1,7 +1,7 @@
 ---
 name: gate-attribution
 audience: swarm-plugin
-description: Per-task gate dispatch protocol. Documents single-task attribution plus parseable set-dispatch reviewer/test_engineer rows.
+description: Per-task gate dispatch protocol for reviewer/test_engineer set-dispatch attribution. Activates when dispatch_lanes returns set-dispatch verdict rows that must be attributed to plan tasks. Documents single-task attribution plus parseable set-dispatch reviewer/test_engineer rows.
 ---
 
 # Gate Attribution
@@ -14,17 +14,20 @@ output includes parseable per-task rows:
 
 ```
 [REVIEWED] | task-2.1 | APPROVED | ...
-[REVIEWED] | 2.2 | PASS | ...
+[TESTED] | 2.1 | PASS | ...
 ```
 
-Rows with `task-X.Y` are normalized to `X.Y`; unsafe or non-plan IDs are ignored.
-Only passing verdicts (`APPROVED`, `PASS`, or `PASSED`) create gate evidence.
-Rows such as `NEEDS_REVISION` are reviewed rows but do not satisfy the gate. If
-no reviewed rows are parseable, attribution falls back to the single-task rule.
+`[REVIEWED]` verdicts are `APPROVED | REJECTED | CONCERNS`; `[TESTED]` verdicts
+are `PASS | FAIL | SKIPPED`. Rows with `task-X.Y` are normalized to `X.Y`;
+unsafe or non-plan IDs are ignored.
+Each parseable per-task verdict row creates gate evidence (regardless of verdict
+value); the gate's pass/fail decision is made elsewhere from the accumulated
+evidence. If no rows are parseable, attribution falls back to the single-task
+rule.
 
 ## Protocol
 1. **For unrelated or high-risk tasks:** Dispatch separate reviewer and/or test_engineer lanes with exactly ONE taskId.
-2. **For a true set-dispatch:** Require one `[REVIEWED] | task-id | verdict | ...` row per task in the returned output. Only passing verdict rows count.
+2. **For a true set-dispatch:** Require one `[REVIEWED] | task-id | verdict | ...` (or `[TESTED] | ...`) row per task in the returned output. Each parseable row creates gate evidence; the gate decision is made from the accumulated evidence.
 3. **Minimize overhead via parallel dispatch when set-dispatch is not appropriate:**
    ```
    dispatch_lanes_async with:
@@ -35,7 +38,7 @@ no reviewed rows are parseable, attribution falls back to the single-task rule.
 4. **Collect + attribute:** Single-task lanes auto-attribute to their taskId; set-dispatch rows auto-attribute per parsed row.
 5. **Do NOT rely on prose summaries:** A batched dispatch without parseable rows is ambiguous and does not count per-task.
 
-Gate evidence is persisted independently as `.swarm/evidence/{taskId}.json` for each task. Passing set-dispatch rows cause the hook to write one task-scoped file per task; a single multi-task evidence file cannot satisfy any task.
+Gate evidence is persisted independently as `.swarm/evidence/{taskId}.json` for each task. Each parseable set-dispatch row causes the hook to write one task-scoped evidence file for that task (regardless of verdict value); a single multi-task evidence file cannot satisfy any task.
 
 ## Optimization for trivial tasks
 For pure ceremony gates (1-line doc fix):

@@ -9,7 +9,6 @@ describe('handleCouncilCommand', () => {
 	test('no args → returns usage string', async () => {
 		const result = await handleCouncilCommand('/tmp', []);
 		expect(result).toContain('Usage: /swarm council');
-		expect(result).toContain('--preset');
 		expect(result).toContain('--spec-review');
 	});
 

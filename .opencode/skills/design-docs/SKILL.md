@@ -28,8 +28,9 @@ If the header is malformed, report the error and stop.
 ## Step 1 — Preconditions
 
 1. Confirm `design_docs.enabled` is true (the `docs_design` agent only exists when enabled). If it is not, tell the user to set `design_docs.enabled: true` in `opencode-swarm.json` and stop.
-2. If a spec-staleness block is active (`.swarm/spec-staleness.json` present), resolve/acknowledge spec staleness FIRST — otherwise design-doc writes may be blocked by the guardrail. Do not blindly retry on `SPEC_STALENESS_BLOCK`.
+2. If a spec-staleness block is active (`.swarm/spec-staleness.json` present), resolve/acknowledge spec staleness FIRST — otherwise design-doc writes may be blocked by the guardrail, which emits `SPEC_DRIFT_BLOCK`. Do not blindly retry on `SPEC_DRIFT_BLOCK`.
 3. Read `.swarm/spec.md` if present — it is the authoritative requirements source (FR-### IDs). The design docs must be consistent with it.
+   Run `/swarm sdd status` to resolve the effective spec before reading.
 
 ## Step 2 — Index Existing State (always)
 

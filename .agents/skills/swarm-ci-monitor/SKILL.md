@@ -11,16 +11,20 @@ canonical workflow.
 
 ## Codex Execution Notes
 
+- MCP tool names (`mcp__github__*`) are injected by the runtime harness and
+  may differ across environments; verify availability via `ToolSearch` before
+  first use in a session.
 - No `gh` CLI in the remote/MCP environment. Use MCP tools instead:
   - PR checks → `mcp__github__pull_request_read` method `get_check_runs`
   - Failure logs → `mcp__github__get_job_logs` with `job_id`, `return_content: true`
   - PR mergeable/mergeStateStatus/reviewDecision → `mcp__github__pull_request_read` method `get`
 - **Merge is new surface area.** There is no `mcp__github__merge_pull_request`
   reference anywhere else in the repo. Verify availability via `ToolSearch`
-  before first use in a session; if unavailable, fall back to `gh pr merge <N>`
-  (no merge-strategy flag) via the bash tool. "`ToolSearch` didn't confirm the
+  before first use in a session. If the tool is unavailable, do not attempt a
+  fallback that contradicts the "no `gh` CLI" premise above — surface to the
+  user that the merge must be done manually. "`ToolSearch` didn't confirm the
   tool but I'll try it anyway" is not acceptable for the one action in this
-  skill that cannot be safely undone — fall back instead.
+  skill that cannot be safely undone — surface to the user instead.
 - Do not soften Step 1's pre-flight gates or Step 3's pre-merge re-check —
   this is the first skill in the repo authorized to execute a merge.
 - Load `../commit-pr/SKILL.md` before committing or pushing any fix, and

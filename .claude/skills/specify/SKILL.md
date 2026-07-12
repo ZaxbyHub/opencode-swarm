@@ -48,7 +48,7 @@ Activates when: user asks to "specify", "define requirements", "write a spec", o
    - Key entities if data is involved (no schema or field definitions — entity names only)
    - Edge cases and known failure modes
     - `[NEEDS CLARIFICATION]` markers for items where uncertainty could change scope, security, or core behavior, BUT ONLY after running the clarification funnel: (1) inventory all material uncertainties without numeric cap, (2) classify each as self_resolved/critic_resolved/research_needed/user_decision/deferred_nonblocking — **Overconfidence guard:** if the default is not directly supported by user request, spec, or recorded context, classify as `user_decision` rather than `self_resolved`, (3) consult critic_sounding_board with candidate items — critic responds per SoundingBoardVerdict: UNNECESSARY→DROP, RESOLVE→RESOLVE, REPHRASE→REPHRASE, APPROVED→ASK_USER — **always-surface protection:** always-surface categories must not receive UNNECESSARY/DROP; override to APPROVED/ASK_USER, (4) record all resolved items as explicit assumptions in the spec, (5) use markers only for items that survive the funnel (ASK_USER or unresolved after critic consultation). Decision packet format: grouped by category, recommended defaults, blocking vs optional markers, impact of accepting default. Prefer informed defaults over asking
-     - **Important:** If research is ongoing, monitor the timeout configured in `.swarm/config.json` under `research_needed_timeout_ms` (default: 300000ms / 5 minutes). If research does not complete before the timeout expires, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user. This prevents the clarification funnel from stalling while waiting for external research.
+     - **Important:** If research is ongoing, apply a fixed 5-minute protocol budget to `research_needed`. If research does not complete before the budget expires, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user. This prevents the clarification funnel from stalling while waiting for external research.
  5. Write the spec to `.swarm/spec.md`.
 5b. **QA GATE SELECTION, PARALLEL CODERS, COMMIT FREQUENCY, AND AUTO_PROCEED (dialogue only).**
 Ask the user which QA gates to enable for this plan, how many parallel coders to use, the commit frequency, and auto_proceed -- do not select on their behalf. Present all four items together as one unified exchange. Exception: when SPECIFY is running inside MODE: LOOP with `autonomy=auto`, write the balanced-speed default `## Pending QA Gate Selection` instead (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, drift_check ON; council_mode, hallucination_guard, mutation_test, phase_council, final_council OFF), keep phase-level commits, and let MODE: PLAN choose safe parallelism after task scopes exist.
@@ -130,6 +130,7 @@ Do NOT call `set_qa_gates` yet — `plan.json` does not exist at this point. Onc
 - phase_council: <true|false>
 - drift_check: <true|false>
 - final_council: <true|false>
+- auto_proceed: <true|false>
 - recorded_at: <ISO timestamp>
 ```
 MODE: PLAN will read this section after `save_plan` succeeds and persist via `set_qa_gates`.

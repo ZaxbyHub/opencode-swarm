@@ -97,12 +97,12 @@ Explorers generate CANDIDATE FINDINGS only — they do NOT make verdicts. All fi
 1. Collect all candidate findings from all explorer missions.
 2. Deduplicate: merge findings that reference the same location and issue.
 3. Assign DD-C001 through DD-CNNN identifiers to unique findings.
-4. Cap at 10 findings per shard (see Step 5 for sharding).
-5. Sort by severity (CRITICAL → HIGH → MEDIUM → LOW → INFO).
+4. Sort candidates by severity (CRITICAL → HIGH → MEDIUM → LOW → INFO).
+5. Shard into ≤10-candidate shards until all candidates are assigned to a shard.
 
 ## Step 5 — Always 2 Parallel Reviewers
 
-Split the verified candidates into 2 shards of ≤10 candidates each. Dispatch 2 parallel `the active swarm's reviewer agent` calls.
+Split the candidates into shards of ≤10 each and dispatch 2 parallel `the active swarm's reviewer agent` calls.
 
 Each reviewer receives:
 - Their shard of candidates (up to 10)

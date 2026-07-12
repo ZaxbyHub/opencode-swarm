@@ -115,7 +115,7 @@ describe('History integration - unit style tests', () => {
 		}
 	});
 
-	test('3. execute requires allow_full_suite for all scope', async () => {
+	test('3. execute requires SWARM_ALLOW_FULL_SUITE env for all scope', async () => {
 		const tmpBase = process.env.TEMP || process.env.TMP || '/tmp';
 		const tempDir = fs.mkdtempSync(path.join(tmpBase, 'test-runner-hist-'));
 
@@ -132,17 +132,15 @@ describe('History integration - unit style tests', () => {
 			const execute = getExecute();
 			const args = {
 				scope: 'all' as const,
-				// No allow_full_suite
 			};
 
 			const result = await execute(args, tempDir);
 			const parsed = parseResult(result);
 
 			expect(parsed.success).toBe(false);
-			// scope "all" is gated behind the SWARM_ALLOW_FULL_SUITE env opt-in
-			// (args.allow_full_suite is intentionally ignored — see test-runner.ts
-			// "do not rely on args.allow_full_suite"). Without the env var it is
-			// blocked. The message deliberately omits bypass instructions.
+			// scope "all" is gated behind the SWARM_ALLOW_FULL_SUITE env opt-in only.
+			// Without the env var it is blocked. The message deliberately omits
+			// bypass instructions (LLMs follow such hints literally).
 			expect(parsed.error).toContain('scope "all" is blocked');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });

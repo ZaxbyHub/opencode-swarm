@@ -102,13 +102,9 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			);
 			expect(source).toContain('canonical workflow');
 			expect(source).toContain('read-only');
-			expect(source).toContain('dispatch_lanes_async');
-			expect(source).toContain('collect_lane_results');
-			expect(source).toContain('Task-tool dispatch is the final fallback');
 			expect(source).toContain('same agent type, same prompt, same scope');
 			expect(source).toContain('BLOCKED');
 			expect(source).toContain('degraded review');
-			expect(source).toContain('retrieve_lane_output');
 			expect(source).toContain('output_ref');
 			expect(source).not.toContain('## Phase 0A:');
 			expect(source).not.toContain('## Phase 0B:');
@@ -118,4 +114,32 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			expect(source).not.toContain('<!--');
 		});
 	}
+
+	// GPT-17 (issue #1804): the Codex (.agents) adapter must use runtime-agnostic
+	// capability phrasing rather than OpenCode-specific lane-tool names. The
+	// .claude adapter is owned by PR-2 and retains its existing tool-name wording
+	// until that PR lands; it is intentionally NOT asserted here for capability
+	// phrasing.
+	test('.agents/skills/swarm-pr-review/SKILL.md uses capability phrasing, not runtime-specific tool names', () => {
+		const source = readSkill('.agents/skills/swarm-pr-review/SKILL.md');
+		expect(source).toContain("runtime's parallel-execution capability");
+		expect(source).toContain('verified-equivalent subagent dispatch');
+		// Adapter must not leak runtime-specific tool names.
+		expect(source).not.toContain('dispatch_lanes_async');
+		expect(source).not.toContain('collect_lane_results');
+		expect(source).not.toContain('retrieve_lane_output');
+		expect(source).not.toContain('parse_lane_candidates');
+		expect(source).not.toContain('dispatch_lanes');
+		expect(source).not.toContain('Task-tool dispatch');
+	});
+
+	// The .claude adapter is owned by PR-2; assert its CURRENT shape is preserved
+	// so this PR does not silently drift it. PR-2 will update these assertions.
+	test('.claude/skills/swarm-pr-review/SKILL.md preserves its current tool-name wording (PR-2 owns changes)', () => {
+		const source = readSkill('.claude/skills/swarm-pr-review/SKILL.md');
+		expect(source).toContain('dispatch_lanes_async');
+		expect(source).toContain('collect_lane_results');
+		expect(source).toContain('Task-tool dispatch is the final fallback');
+		expect(source).toContain('retrieve_lane_output');
+	});
 });

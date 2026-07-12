@@ -6,7 +6,6 @@
  * Deliberation → Moderator Pass → Output).
  *
  * Flag parsing:
- *   --preset <name>   → emits "[MODE: COUNCIL preset=<name>] <question>"
  *   --spec-review     → emits "[MODE: COUNCIL spec_review] <question>"
  *   default           → emits "[MODE: COUNCIL] <question>"
  *   no args           → returns usage string (no throw)
@@ -71,10 +70,9 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 const USAGE = [
-	'Usage: /swarm council <question> [--preset <name>] [--spec-review]',
+	'Usage: /swarm council <question> [--spec-review]',
 	'',
 	'  question         The question to put to the council',
-	'  --preset <name>  Use a named member preset from council.general.presets',
 	'  --spec-review    Use spec_review mode (single advisory pass on a draft spec)',
 	'',
 	'Requires council.general.enabled: true and a configured search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',

@@ -28,20 +28,20 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   disproves it with file:line evidence or explicit counter-evidence.
 - Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
   comments, review threads, checks, conflicts, and head SHA.
-- Use the canonical deterministic lane flow: `dispatch_lanes_async` plus
-  incremental `collect_lane_results` polling (without `wait`) to process
-  settled lanes while continuing independent work; fall back to `wait: true`
-  only when no independent work remains, and to blocking `dispatch_lanes`
-  only when async collection is unavailable. All lanes must be settled
-  before synthesis or phase transitions.
-- If lane tools cannot close required coverage after retry/re-collection,
-  Task-tool dispatch is the final fallback, but only as a verified equivalent:
-  same agent type, same prompt, same scope, same isolation. If equivalence cannot
-  be proven, stop and surface the lane failure as BLOCKED; do not produce a
-  degraded review or partial verdict.
-- When lane results include `output_ref`, call `retrieve_lane_output` for
-  full text, then `parse_lane_candidates` to extract structured candidates
-  for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
+- Use the runtime's parallel-execution capability for the deterministic lane
+  flow: dispatch the review lanes in parallel, poll settled lanes incrementally
+  to process results while continuing independent work, and wait on the
+  remainder only when no independent work remains. All lanes must be settled
+  before synthesis or phase transitions. If the runtime has no
+  parallel-execution capability, run the lanes sequentially.
+- If lanes cannot close required coverage after retry/re-collection, a
+  verified-equivalent subagent dispatch is the final fallback, but only as a
+  verified equivalent: same agent type, same prompt, same scope, same
+  isolation. If equivalence cannot be proven, stop and surface the lane
+  failure as BLOCKED; do not produce a degraded review or partial verdict.
+- When lane results include an `output_ref`, retrieve the full text, then
+  extract structured candidates for reviewer dispatch; degraded or incomplete
+  outputs are coverage gaps.
 - If actionable findings remain, write the handoff artifact described by the
   canonical skill and ask the user whether to continue with `swarm-pr-feedback`.
 

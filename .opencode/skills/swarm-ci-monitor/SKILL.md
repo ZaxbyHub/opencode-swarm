@@ -130,9 +130,9 @@ job/step — pick the one matching where the flake actually failed:
 
 | Quarantine file | Consumed by |
 |---|---|
-| `scripts/ci/quarantined-tests.txt` | unit + coverage jobs, all OSes |
-| `scripts/ci/quarantined-tests-macos.txt` | unit + coverage jobs, macOS runner only |
-| `scripts/ci/quarantined-tests-windows.txt` | unit + coverage jobs, Windows runner only |
+| `scripts/ci/quarantined-tests.txt` | unit (all OSes) + coverage (ubuntu) |
+| `scripts/ci/quarantined-tests-macos.txt` | unit on macOS runner only |
+| `scripts/ci/quarantined-tests-windows.txt` | unit on Windows runner only |
 | `scripts/ci/quarantined-integration-tests.txt` | the `merge_group`-only integration step — **never** reads the base file above |
 
 Using the wrong file is a real failure mode, not a formality: appending an
@@ -254,7 +254,7 @@ gh pr merge <N>
   a merge queue, no merge strategy is required" — this skill must work
   correctly whether or not the base branch requires a merge queue, so let
   branch protection determine the method rather than assuming squash.
-  `contributing.md`'s squash-merge guidance may describe a different (or
+  `contributing.md`'s merge-queue/merge-commit guidance may describe a different (or
   stale) configuration for a given deployment of this repo; do not assume it
   applies without checking the actual outcome below.
 - **No `--admin`.** Never bypass required checks, review, or a merge queue.

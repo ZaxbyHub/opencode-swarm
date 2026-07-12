@@ -353,7 +353,7 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 **Anti-pattern:**
 
 ```ts
-test_runner({ scope: 'all', allow_full_suite: true });
+test_runner({ scope: 'all' }); // blocked unless SWARM_ALLOW_FULL_SUITE=1 is set
 // or: scope: 'graph' on a 10k-file repo without explicit files
 ```
 

@@ -880,12 +880,11 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) =>
 			handleModeCommandWithBundledSkills(ctx, handleCouncilCommand),
 		description:
-			'Enter architect MODE: COUNCIL — multi-model deliberation [question] [--preset <name>] [--spec-review]',
-		args: '<question> [--preset <name>] [--spec-review]',
+			'Enter architect MODE: COUNCIL — multi-model deliberation [question] [--spec-review]',
+		args: '<question> [--spec-review]',
 		details:
 			'Triggers the architect to convene a three-agent General Council: ' +
 			'Generalist (reviewer model), Skeptic (critic model), and Domain Expert (SME model). ' +
-			'Use --preset <name> to choose a named member preset from council.general.presets. ' +
 			'The architect first runs 1–3 targeted web searches and passes a compiled RESEARCH CONTEXT ' +
 			'to all three agents before dispatching them in parallel. ' +
 			'Agents deliberate using the NSED peer-review protocol (Round 1 independent analysis, ' +
@@ -1089,7 +1088,7 @@ export const COMMAND_REGISTRY = {
 			'Ingest a GitHub issue into the swarm workflow [url] [--plan] [--trace] [--no-repro]',
 		args: '<issue-url|owner/repo#N|N> [--plan] [--trace] [--no-repro]',
 		details:
-			'Triggers the architect to enter MODE: ISSUE_INGEST — ingests a GitHub issue, restructures it into a normalized intake note, localizes root cause through hypothesis-driven tracing, and outputs a resolution spec. --plan transitions to plan creation after spec generation. --trace runs the full fix-and-PR workflow (implies --plan). --no-repro skips the reproduction step. Supports full GitHub URL, owner/repo#N shorthand, or bare issue number (resolves against origin remote).',
+			'Triggers the architect to enter MODE: ISSUE_INGEST — ingests a GitHub issue, restructures it into a normalized intake note, localizes root cause through hypothesis-driven tracing, and outputs a resolution spec. --plan transitions to plan creation after spec generation. --trace runs the fix workflow end-to-end (implies --plan); compose commit-pr to publish. --no-repro skips the reproduction step. Supports full GitHub URL, owner/repo#N shorthand, or bare issue number (resolves against origin remote).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},

@@ -78,8 +78,7 @@ Do you need to run tests?
 | `'convention'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before fan-out; direct test file paths exempt |
 | `'graph'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
 | `'impact'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
-| `'all'` | ❌ Never | ❌ Never | Requires `allow_full_suite: true`; CI mirror only |
-| `'all'` | ❌ Never | ❌ Never | Requires `allow_full_suite: true`; CI mirror only |
+| `'all'` | ❌ Never | ❌ Never | Env-gated (`SWARM_ALLOW_FULL_SUITE=1`); CI mirror only |
 
 **Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
 
@@ -234,7 +233,7 @@ Not all failures are equal. Before deciding what to do, classify the failure:
 |-------|-----------|---------|------------|
 | **Stale assertion** | Test checks for text/value that was deliberately removed | `expect(prompt).toContain('CONSTRAINT: [what NOT to do]')` — template removed in refactor | Update the assertion to match current state |
 | **Soft regression indicator** | Test checks a threshold the codebase has since exceeded | `expect(tokenCount).toBeLessThan(35000)` — prompt grew past limit | Fix the threshold or reduce the prompt; do not just document and ignore |
-| **Genuine pre-existing** | Failure exists on `main` unrelated to any recent change | `full-auto-intercept.test.ts` logger gating issue | Document in PR body; do not fix unless scoped |
+| **Genuine pre-existing** | Failure exists on `main` unrelated to any recent change | See the quarantine ledgers (`scripts/ci/quarantined-tests*.txt`) | Document in PR body; do not fix unless scoped |
 | **New regression** | Failure introduced by your changes | Tests for prompt text you removed without updating tests | Fix before pushing |
 
 **Stale assertions and soft regression indicators are actionable** — they signal drift between
@@ -281,7 +280,7 @@ bun --smol test tests/unit/agents/some-file.test.ts --timeout 30000
 | `Select-String -Last N` error | Invalid PowerShell parameter | Use `Select-Object -Last N` |
 | Token budget test failure | Prompt grew past hardcoded threshold | Treat as soft regression; update threshold |
 | CONSTRAINT assertion fails after refactor | Test checks for removed format template | Update assertion to match current prompt |
-| `package-check` CI failure | `package-check` validates the npm tarball (`npm pack` + tarball contents) — a source/build/package-manifest problem, not generated-file drift. `dist/` is generated and NOT committed — do not stage it; run `bun run build` locally only when you need the bundle. There is no longer a committed-dist drift check. |
+| `package-check` CI failure | `package-check` validates the npm tarball (`npm pack` + tarball contents) — a source/build/package-manifest problem, not generated-file drift | `dist/` is generated and NOT committed — do not stage it; run `bun run build` locally only when you need the bundle. There is no longer a committed-dist drift check. |
 
 ## Tree-sitter / WASM test timeouts
 
