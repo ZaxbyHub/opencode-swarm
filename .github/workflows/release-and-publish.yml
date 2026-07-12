@@ -93,7 +93,13 @@ jobs:
 
   update-pr-notes:
     needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created != 'true' }}
+    # Always run. release-please can both cut a prior release (releases_created
+    # == 'true') AND open/update the next pending release PR in the same run —
+    # gating on `releases_created != 'true'` skipped the PR-body aggregation in
+    # exactly that case (the pending PR was left without its custom-release-notes
+    # block). modeUpdatePr already no-ops gracefully when no
+    # `autorelease: pending` PR exists.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     # Serialize this job across concurrent merges to main. Two updates
     # would otherwise race on read-modify-write of the release PR body
