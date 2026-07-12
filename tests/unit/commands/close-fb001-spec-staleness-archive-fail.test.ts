@@ -17,7 +17,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { type CloseStageContext, runCleanStage } from '../../../src/commands/close';
+import {
+	type CloseStageContext,
+	runCleanStage,
+} from '../../../src/commands/close';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 let dir: string;
@@ -86,96 +89,86 @@ describe('FB-001 falsification probe: spec-staleness.json and spec-snapshot.md',
 		cleanupFn();
 	});
 
-	test(
-		'FB-001: spec-staleness.json is removed even when archive fails with EACCES',
-		async () => {
-			const specStalenessPath = path.join(swarmDir(), 'spec-staleness.json');
-			writeFileSync(specStalenessPath, '{"specHash":"abc","planHash":"def"}');
+	test('FB-001: spec-staleness.json is removed even when archive fails with EACCES', async () => {
+		const specStalenessPath = path.join(swarmDir(), 'spec-staleness.json');
+		writeFileSync(specStalenessPath, '{"specHash":"abc","planHash":"def"}');
 
-			const ctx = makeCtx();
-			await runCleanStage(ctx);
+		const ctx = makeCtx();
+		await runCleanStage(ctx);
 
-			// The file must be GONE — this is the core of FB-001.
-			// Before the fix: spec-staleness.json would be "Preserved" (not deleted)
-			// because it was not in TERMINAL_STATE_FILES.
-			// After the fix: it is in TERMINAL_STATE_FILES and the unconditional
-			// removal loop (close.ts:1524) deletes it regardless of archive failure.
-			expect(existsSync(specStalenessPath)).toBe(false);
+		// The file must be GONE — this is the core of FB-001.
+		// Before the fix: spec-staleness.json would be "Preserved" (not deleted)
+		// because it was not in TERMINAL_STATE_FILES.
+		// After the fix: it is in TERMINAL_STATE_FILES and the unconditional
+		// removal loop (close.ts:1524) deletes it regardless of archive failure.
+		expect(existsSync(specStalenessPath)).toBe(false);
 
-			// Confirm we actually hit the archive-failure path (not silently skipped).
-			const acccesWarning = ctx.warnings.find((w) =>
-				w.includes('spec-staleness.json was not archived'),
-			);
-			expect(acccesWarning).toBeDefined();
-			expect(acccesWarning).toContain('EACCES');
-			expect(acccesWarning).toContain('resurrection'); // confirms it is the correct warning
-		},
-	);
+		// Confirm we actually hit the archive-failure path (not silently skipped).
+		const acccesWarning = ctx.warnings.find((w) =>
+			w.includes('spec-staleness.json was not archived'),
+		);
+		expect(acccesWarning).toBeDefined();
+		expect(acccesWarning).toContain('EACCES');
+		expect(acccesWarning).toContain('resurrection'); // confirms it is the correct warning
+	});
 
-	test(
-		'FB-001: spec-snapshot.md is removed even when archive fails with EBUSY',
-		async () => {
-			const specSnapshotPath = path.join(swarmDir(), 'spec-snapshot.md');
-			writeFileSync(specSnapshotPath, '# Snapshot\nSome spec content');
+	test('FB-001: spec-snapshot.md is removed even when archive fails with EBUSY', async () => {
+		const specSnapshotPath = path.join(swarmDir(), 'spec-snapshot.md');
+		writeFileSync(specSnapshotPath, '# Snapshot\nSome spec content');
 
-			const ctx = makeCtx();
-			await runCleanStage(ctx);
+		const ctx = makeCtx();
+		await runCleanStage(ctx);
 
-			// The file must be GONE — same fix as spec-staleness.json.
-			expect(existsSync(specSnapshotPath)).toBe(false);
+		// The file must be GONE — same fix as spec-staleness.json.
+		expect(existsSync(specSnapshotPath)).toBe(false);
 
-			// Confirm we actually hit the archive-failure path.
-			const busyWarning = ctx.warnings.find((w) =>
-				w.includes('spec-snapshot.md was not archived'),
-			);
-			expect(busyWarning).toBeDefined();
-			expect(busyWarning).toContain('EBUSY');
-			expect(busyWarning).toContain('resurrection');
-		},
-	);
+		// Confirm we actually hit the archive-failure path.
+		const busyWarning = ctx.warnings.find((w) =>
+			w.includes('spec-snapshot.md was not archived'),
+		);
+		expect(busyWarning).toBeDefined();
+		expect(busyWarning).toContain('EBUSY');
+		expect(busyWarning).toContain('resurrection');
+	});
 
-	test(
-		'FB-001: NO "Preserved <spec file>" warning is emitted for spec-staleness.json or spec-snapshot.md',
-		async () => {
-			writeFileSync(
-				path.join(swarmDir(), 'spec-staleness.json'),
-				'{"specHash":"abc"}',
-			);
-			writeFileSync(path.join(swarmDir(), 'spec-snapshot.md'), '# Snapshot');
+	test('FB-001: NO "Preserved <spec file>" warning is emitted for spec-staleness.json or spec-snapshot.md', async () => {
+		writeFileSync(
+			path.join(swarmDir(), 'spec-staleness.json'),
+			'{"specHash":"abc"}',
+		);
+		writeFileSync(path.join(swarmDir(), 'spec-snapshot.md'), '# Snapshot');
 
-			const ctx = makeCtx();
-			await runCleanStage(ctx);
+		const ctx = makeCtx();
+		await runCleanStage(ctx);
 
-			// The original bug emitted "Preserved spec-staleness.json because it was
-			// not successfully archived: EACCES." — which was misleading because the
-			// unconditional removal would delete it anyway.
-			// The fix replaces this with the "was not archived; removing it anyway"
-			// message, so no "Preserved" diagnostic should appear.
-			const preservedWarnings = ctx.warnings.filter((w) =>
-				/Preserved spec-(staleness|snapshot)/.test(w),
-			);
-			expect(preservedWarnings).toHaveLength(0);
-		},
-	);
+		// The original bug emitted "Preserved spec-staleness.json because it was
+		// not successfully archived: EACCES." — which was misleading because the
+		// unconditional removal would delete it anyway.
+		// The fix replaces this with the "was not archived; removing it anyway"
+		// message, so no "Preserved" diagnostic should appear.
+		const preservedWarnings = ctx.warnings.filter((w) =>
+			/Preserved spec-(staleness|snapshot)/.test(w),
+		);
+		expect(preservedWarnings).toHaveLength(0);
+	});
 
-	test(
-		'FB-001: both spec files removed together in one close run',
-		async () => {
-			const specStalenessPath = path.join(swarmDir(), 'spec-staleness.json');
-			const specSnapshotPath = path.join(swarmDir(), 'spec-snapshot.md');
-			writeFileSync(specStalenessPath, '{"specHash":"abc"}');
-			writeFileSync(specSnapshotPath, '# Snapshot');
+	test('FB-001: both spec files removed together in one close run', async () => {
+		const specStalenessPath = path.join(swarmDir(), 'spec-staleness.json');
+		const specSnapshotPath = path.join(swarmDir(), 'spec-snapshot.md');
+		writeFileSync(specStalenessPath, '{"specHash":"abc"}');
+		writeFileSync(specSnapshotPath, '# Snapshot');
 
-			const ctx = makeCtx();
-			await runCleanStage(ctx);
+		const ctx = makeCtx();
+		await runCleanStage(ctx);
 
-			// Both must be gone.
-			expect(existsSync(specStalenessPath)).toBe(false);
-			expect(existsSync(specSnapshotPath)).toBe(false);
+		// Both must be gone.
+		expect(existsSync(specStalenessPath)).toBe(false);
+		expect(existsSync(specSnapshotPath)).toBe(false);
 
-			// Both warnings present.
-			expect(ctx.warnings.some((w) => w.includes('spec-staleness.json'))).toBe(true);
-			expect(ctx.warnings.some((w) => w.includes('spec-snapshot.md'))).toBe(true);
-		},
-	);
+		// Both warnings present.
+		expect(ctx.warnings.some((w) => w.includes('spec-staleness.json'))).toBe(
+			true,
+		);
+		expect(ctx.warnings.some((w) => w.includes('spec-snapshot.md'))).toBe(true);
+	});
 });
