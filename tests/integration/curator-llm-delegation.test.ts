@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test, vi } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { CuratorConfigSchema } from '../../src/config/schema';
 import {
+	_internals,
 	type CuratorLLMDelegate,
 	parseKnowledgeRecommendations,
 	runCuratorInit,
@@ -26,14 +27,42 @@ vi.mock('../../src/hooks/knowledge-store', () => ({
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	transactFile: async (
+		_filePath: string,
+		_read: (filePath: string) => Promise<unknown>,
+		_write: (filePath: string, data: unknown) => Promise<void>,
+		mutate: (data: unknown) => unknown,
+	) => {
+		mutate({ summary: null, dirty: false });
+		return true;
+	},
 }));
 vi.mock('../../src/background/event-bus', () => ({
 	getGlobalEventBus: vi.fn().mockReturnValue({ publish: vi.fn() }),
 }));
 
 const defaultConfig: CuratorConfig = CuratorConfigSchema.parse({});
+const defaultTransactFile = _internals.transactFile;
+
+const transactFileStub = async (
+	_filePath: string,
+	_read: (filePath: string) => Promise<unknown>,
+	_write: (filePath: string, data: unknown) => Promise<void>,
+	mutate: (data: unknown) => unknown,
+): Promise<boolean> => {
+	mutate({ summary: null, dirty: false });
+	return true;
+};
 
 describe('curator LLM delegation', () => {
+	beforeEach(() => {
+		_internals.transactFile =
+			transactFileStub as typeof _internals.transactFile;
+	});
+	afterEach(() => {
+		_internals.transactFile = defaultTransactFile;
+	});
+
 	test('runCuratorPhase invokes llmDelegate in CURATOR_PHASE mode', async () => {
 		const delegate: CuratorLLMDelegate = vi
 			.fn()

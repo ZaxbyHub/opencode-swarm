@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import {
+	freezeClock,
+	type Restore,
+} from '../../../tests/helpers/test-clock.js';
 import type {
 	MutationOutcome,
 	MutationPatch,
@@ -306,26 +310,36 @@ describe('computeReport adversarial tests', () => {
 					'diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n-old\n+new\n',
 			},
 		];
-		// With budgetMs = 0, first patch runs (0 > 0 is false), second is skipped
-		const report = await executeMutationSuite(
-			patches,
-			['node', '-e', 'process.exit(1)'],
-			[],
-			'/tmp',
-			0,
-		);
-		expect(report.totalMutants).toBe(2);
-		expect(report.skipped).toBe(1);
-		// First patch outcome: error (git apply fails on non-existent file) or killed (if it works)
-		// Either way exactly 1 is skipped — the key invariant
-		expect(
-			report.killed +
-				report.errors +
-				report.survived +
-				report.timeout +
-				report.equivalent,
-		).toBe(1);
-		expect(report.budgetExceeded).toBe(true);
+		let restoreClock: Restore = freezeClock({ fixedNow: 0 });
+		try {
+			// Hold elapsed time at zero through the first mutation, then restore the
+			// real clock so the second iteration deterministically exceeds the budget.
+			const report = await executeMutationSuite(
+				patches,
+				['node', '-e', 'process.exit(1)'],
+				[],
+				'/tmp',
+				0,
+				() => {
+					restoreClock();
+					restoreClock = () => {};
+				},
+			);
+			expect(report.totalMutants).toBe(2);
+			expect(report.skipped).toBe(1);
+			// First patch outcome: error (git apply fails on non-existent file) or killed (if it works)
+			// Either way exactly 1 is skipped — the key invariant
+			expect(
+				report.killed +
+					report.errors +
+					report.survived +
+					report.timeout +
+					report.equivalent,
+			).toBe(1);
+			expect(report.budgetExceeded).toBe(true);
+		} finally {
+			restoreClock();
+		}
 	});
 
 	// 9. Budget = Infinity — no patches should be skipped

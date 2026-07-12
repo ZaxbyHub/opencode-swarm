@@ -1,8 +1,7 @@
 /** Hive promoter hook for opencode-swarm v6.17 two-tier knowledge system. */
 
 import path from 'node:path';
-import { readCuratorSummary, writeCuratorSummary } from './curator.js';
-import type { CuratorSummary } from './curator-types.js';
+import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {
 	appendKnowledge,
 	enforceKnowledgeCap,
@@ -367,6 +366,14 @@ export async function checkHivePromotions(
 	};
 }
 
+export const _internals = {
+	readSwarmEntries: (directory: string) =>
+		readKnowledge<SwarmKnowledgeEntry>(resolveSwarmKnowledgePath(directory)),
+	checkHivePromotions,
+	readCuratorSummary,
+	appendCuratorRecommendation,
+};
+
 /**
  * Create a hook that promotes swarm entries to the hive.
  * The hook fires unconditionally - the caller decides when to invoke it.
@@ -377,45 +384,36 @@ export function createHivePromoterHook(
 ): (input: unknown, output: unknown) => Promise<void> {
 	const hook = async (_input: unknown, _output: unknown): Promise<void> => {
 		// Read swarm entries from the project directory
-		const swarmEntries = await readKnowledge<SwarmKnowledgeEntry>(
-			resolveSwarmKnowledgePath(directory),
-		);
+		const swarmEntries = await _internals.readSwarmEntries(directory);
 
 		// Run promotion logic and get summary
-		const promotionSummary = await checkHivePromotions(swarmEntries, config);
+		const promotionSummary = await _internals.checkHivePromotions(
+			swarmEntries,
+			config,
+		);
 
-		// Integrate with existing curator summary state
-		const curatorSummary = await readCuratorSummary(directory);
+		// Read first even on a no-op: this is the one-time migration path for
+		// legacy bloated curator summaries when a project is reopened.
+		const curatorSummary = await _internals.readCuratorSummary(directory);
+		if (!curatorSummary) return;
 
-		if (curatorSummary) {
-			// Defensive: ensure knowledge_recommendations is a valid array
-			const existingRecommendations = Array.isArray(
-				curatorSummary.knowledge_recommendations,
-			)
-				? curatorSummary.knowledge_recommendations
-				: [];
+		const hasActivity =
+			promotionSummary.new_promotions > 0 ||
+			promotionSummary.encounters_incremented > 0 ||
+			promotionSummary.advancements > 0;
+		if (!hasActivity) return;
 
-			// Add hive promotion summary as a knowledge recommendation
-			const recommendation = {
-				action: 'promote' as const,
-				lesson: `Hive promotion: ${promotionSummary.new_promotions} new, ${promotionSummary.encounters_incremented} encounters, ${promotionSummary.advancements} advancements, ${promotionSummary.total_hive_entries} total entries`,
-				reason: JSON.stringify({
-					timestamp: promotionSummary.timestamp,
-					new_promotions: promotionSummary.new_promotions,
-					encounters_incremented: promotionSummary.encounters_incremented,
-					advancements: promotionSummary.advancements,
-					total_hive_entries: promotionSummary.total_hive_entries,
-				}),
-			};
-
-			const updatedSummary: CuratorSummary = {
-				...curatorSummary,
-				knowledge_recommendations: [...existingRecommendations, recommendation],
-				last_updated: new Date().toISOString(),
-			};
-
-			await writeCuratorSummary(directory, updatedSummary);
-		}
+		await _internals.appendCuratorRecommendation(directory, {
+			action: 'promote',
+			lesson: `Hive promotion: ${promotionSummary.new_promotions} new, ${promotionSummary.encounters_incremented} encounters, ${promotionSummary.advancements} advancements, ${promotionSummary.total_hive_entries} total entries`,
+			reason: JSON.stringify({
+				timestamp: promotionSummary.timestamp,
+				new_promotions: promotionSummary.new_promotions,
+				encounters_incremented: promotionSummary.encounters_incremented,
+				advancements: promotionSummary.advancements,
+				total_hive_entries: promotionSummary.total_hive_entries,
+			}),
+		});
 	};
 
 	// Wrap in safeHook for fire-and-forget error suppression

@@ -377,7 +377,7 @@ The init call is wrapped in try/catch — if the Curator fails to initialize, th
 After each phase completes (and after the standard `curateAndStoreSwarm()` call), the Curator pipeline runs:
 
 1. **`runCuratorPhase`** — Collects phase events from the event bus, runs compliance checks, and produces a `CuratorPhaseResult`.
-2. **`applyCuratorKnowledgeUpdates`** — Merges the phase result's knowledge recommendations into `.swarm/curator-summary.json`, capped at `max_summary_tokens`.
+2. **`applyCuratorKnowledgeUpdates`** — Merges the phase result's knowledge recommendations into `.swarm/curator-summary.json`. Recommendation persistence deduplicates the complete stable semantic payload, keeps the newest occurrence, and caps the array at 200 entries.
 3. **`runCriticDriftCheck`** — Compares planned vs. actual decisions, writes a drift report to `.swarm/drift-report-phase-N.json`.
 4. **Compliance surfacing** — If compliance observations exist and `suppress_warnings` is false, they are added to the return value's warnings array (max 5).
 
