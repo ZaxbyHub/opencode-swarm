@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.114.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.4...v7.114.0) (2026-07-12)
+
+
+### Features
+
+* **audit-1781:** test-cap ratchet, status escalation, drift:fix, tool-registration reverse guard ([f643e47](https://github.com/ZaxbyHub/opencode-swarm/commit/f643e479bd0349cfad1c0030bdedc8b019ac2b87))
+
+
+### Bug Fixes
+
+* **pr-feedback:** resolve Biome CI + fix pipefail ratchet bug ([e596541](https://github.com/ZaxbyHub/opencode-swarm/commit/e5965410f0416c5f67055c0154aa604b18bbbcf5))
+
 ## [7.113.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.3...v7.113.4) (2026-07-12)
 
 
