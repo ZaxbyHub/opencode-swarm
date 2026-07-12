@@ -388,9 +388,7 @@ describe('knowledge curator multi-entry evidence — regression: issue #1769', (
 				normalized.endsWith('/evidence/alias-one.json') ||
 				normalized.endsWith('/evidence/alias-two.json')
 			) {
-				return process.platform === 'win32'
-					? 'C:\\project\\.swarm\\evidence\\physical.json'
-					: '/project/.swarm/evidence/physical.json';
+				return candidate.replace(/alias-(?:one|two)\.json$/i, 'physical.json');
 			}
 			return candidate;
 		});
