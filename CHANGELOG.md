@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.113.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.3...v7.113.4) (2026-07-12)
+
+
+### Bug Fixes
+
+* **curator:** bound hive promotion recommendations ([9300a0e](https://github.com/ZaxbyHub/opencode-swarm/commit/9300a0e2655486da325bf0ba5c7e894f15007a0a))
+
 ## [7.113.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.2...v7.113.3) (2026-07-12)
 
 
