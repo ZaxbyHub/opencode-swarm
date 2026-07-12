@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.114.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.0...v7.114.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **skills:** truth-sweep — correct drifted skill prose to match code (PR-1/6, [#1804](https://github.com/ZaxbyHub/opencode-swarm/issues/1804)) ([873105b](https://github.com/ZaxbyHub/opencode-swarm/commit/873105b494b152cc41c30ef49f3e1a7c7f8cc7a7))
+* **skills:** truth-sweep — correct drifted skill prose to match code (PR-1/6) ([4860f68](https://github.com/ZaxbyHub/opencode-swarm/commit/4860f68e28f5b6b41131c53db7697cbebc1862d3))
+
 ## [7.114.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.113.4...v7.114.0) (2026-07-12)
 
 
