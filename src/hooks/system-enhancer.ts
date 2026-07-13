@@ -644,6 +644,17 @@ export function createSystemEnhancerHook(
 				_input: { sessionID?: string; model?: unknown },
 				output: { system: string[] },
 			): Promise<void> => {
+				// FR-004: hoisted above the try/catch so the finally block below
+				// can always write the actual injected demand to the unified
+				// budget ledger, even if an exception is thrown after injection
+				// has already mutated output.system but before the normal
+				// finalize call sites (Path A / Path B) are reached. Without
+				// this, a mid-turn throw silently skips the ledger write and
+				// getSystemEnhancerDemand() fails open to 0 on the next read,
+				// letting combined injected tokens exceed a configured
+				// unified_injection_tokens ceiling.
+				let actualDemand = 0;
+				let unifiedBudget: number | undefined;
 				try {
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents
@@ -675,13 +686,13 @@ export function createSystemEnhancerHook(
 					const maxInjectionTokens =
 						config.context_budget?.max_injection_tokens ?? 4000;
 					let injectedTokens = 0;
-					let actualDemand = 0;
 
 					// FR-002: unified injection budget — use pure allocation so
 					// system-enhancer (system.transform) and knowledge-injector
 					// (messagesTransform) share a single ceiling.
+					// (actualDemand / unifiedBudget are declared outside the
+					// try/catch above — see FR-004 comment there.)
 					let seAllocation: number;
-					let unifiedBudget: number | undefined;
 					if (
 						config.context_budget?.unified_injection_tokens !== undefined &&
 						_input.sessionID
@@ -2487,6 +2498,17 @@ ${scopedHandoff.body}`;
 					}
 				} catch (error) {
 					warn('System enhancer failed:', error);
+				} finally {
+					// FR-004: guarantee the unified budget ledger reflects the actual
+					// injected demand for this turn even if the try block above threw
+					// after tryInject() already mutated output.system but before either
+					// the Path A or Path B finalize call sites were reached. Runs on
+					// every exit (normal return, Path A's early return, or exception)
+					// so knowledge-injector never reads a stale/absent demand entry.
+					if (unifiedBudget !== undefined && _input.sessionID) {
+						resetUnifiedBudget(_input.sessionID, unifiedBudget);
+						setSystemEnhancerDemand(_input.sessionID, actualDemand);
+					}
 				}
 			},
 		),

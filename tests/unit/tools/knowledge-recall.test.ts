@@ -84,29 +84,18 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 		}
 	}
 
+	// Must resolve to exactly the same path the mocked `resolveHiveKnowledgePath`
+	// below returns (tmpDir/.swarm/shared-learnings.jsonl). The retrieval code
+	// under test reads via that mocked resolver, not the real platform-specific
+	// resolution (LOCALAPPDATA/Library/XDG) — a previous version of this helper
+	// computed the real per-platform path here, which silently diverged from the
+	// mock and caused every hive-tier entry written by `writeHiveKnowledge` to be
+	// invisible to `knowledge_recall` (wrong file, so `readKnowledge` saw ENOENT
+	// and returned []). The HOME/LOCALAPPDATA/XDG_* env overrides set in
+	// beforeEach remain as defense-in-depth in case some code path resolves the
+	// real hive location instead of going through the mock.
 	function hiveKnowledgePath(): string {
-		if (process.platform === 'win32') {
-			return path.join(
-				process.env.LOCALAPPDATA ?? tmpDir,
-				'opencode-swarm',
-				'Data',
-				'shared-learnings.jsonl',
-			);
-		}
-		if (process.platform === 'darwin') {
-			return path.join(
-				process.env.HOME ?? tmpDir,
-				'Library',
-				'Application Support',
-				'opencode-swarm',
-				'shared-learnings.jsonl',
-			);
-		}
-		return path.join(
-			process.env.XDG_DATA_HOME ?? path.join(tmpDir, '.local', 'share'),
-			'opencode-swarm',
-			'shared-learnings.jsonl',
-		);
+		return path.join(tmpDir, '.swarm', 'shared-learnings.jsonl');
 	}
 
 	// Mock resolveHiveKnowledgePath to return a path inside tmpDir so hive knowledge
@@ -970,8 +959,13 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 			const parsed = JSON.parse(result);
 
 			const ids = parsed.results.map((r: { id: string }) => r.id);
-			// established should be first (highest boost + base score)
-			expect(ids[0]).toBe('e1');
+			// `promoted` is the lifecycle apex and outranks `established`, which in
+			// turn outranks a lower-confidence `established` entry (G7 / #1716's
+			// boost-table correction: promoted +0.15 > established +0.10 > none).
+			// This assertion previously expected `e1` (established) first, which
+			// matched the pre-#1716 boost table (established +0.10 > promoted
+			// +0.05) — an inversion #1716 fixed but never updated this test for.
+			expect(ids).toEqual(['p1', 'e1', 'c1']);
 		});
 
 		it('Both tiers together, all active entries returned', async () => {

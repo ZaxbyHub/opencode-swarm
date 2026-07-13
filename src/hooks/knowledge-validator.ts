@@ -1113,6 +1113,7 @@ export async function unarchiveEntry(
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 	const swarmDir = storeDir;
 
+	// Ensure .swarm store dir exists
 	await mkdir(swarmDir, { recursive: true });
 
 	let release: (() => Promise<void>) | undefined;
