@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.114.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.3...v7.114.4) (2026-07-13)
+
+
+### Bug Fixes
+
+* **skills:** correct injection-recording attribution + extract testable unit ([e92bd0f](https://github.com/ZaxbyHub/opencode-swarm/commit/e92bd0fb623f1f2779cc1475521bc2f541fe8a9b))
+
 ## [7.114.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.2...v7.114.3) (2026-07-13)
 
 
