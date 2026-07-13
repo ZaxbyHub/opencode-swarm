@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.114.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.1...v7.114.2) (2026-07-12)
+
+
+### Bug Fixes
+
+* **ci:** always run update-pr-notes so release PRs get rich fragment notes ([c21bd84](https://github.com/ZaxbyHub/opencode-swarm/commit/c21bd8476bfdb8533bb29887cffc484e7841c8b2))
+* **security:** correct drive-letter asymmetry in validateSymlinkBoundary ([aed1382](https://github.com/ZaxbyHub/opencode-swarm/commit/aed13825d52e4031ac0285646749593f1c316a37))
+
 ## [7.114.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.0...v7.114.1) (2026-07-12)
 
 
