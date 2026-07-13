@@ -476,6 +476,15 @@ const SPIRAL_COOLDOWN_MS = 60 * 1000; // 1 minute between spiral triggers per se
 const MAX_TRACKED_SESSIONS = 500; // evict oldest entry to bound memory usage
 
 /**
+ * Test seam: current number of distinct sessions tracked for spiral detection.
+ * Used by unit tests to assert the FIFO key-count cap holds; the map itself stays
+ * module-private so production callers cannot mutate it.
+ */
+export function recentToolCallSessionCount(): number {
+	return recentToolCallsBySession.size;
+}
+
+/**
  * Record a tool call for debugging spiral detection.
  * Call this from toolAfter to track repetitive patterns.
  */
@@ -492,6 +501,14 @@ export function recordToolCall(
 	if (!calls) {
 		calls = [];
 		recentToolCallsBySession.set(sessionId, calls);
+		// FIFO-cap the KEY count to bound memory (mirrors lastSpiralTimestampBySession).
+		// The per-session array is already bounded by MAX_RECENT_CALLS; this bounds the
+		// number of distinct session keys. Skip evicting the entry we just created.
+		while (recentToolCallsBySession.size > MAX_TRACKED_SESSIONS) {
+			const oldest = recentToolCallsBySession.keys().next().value;
+			if (oldest === undefined || oldest === sessionId) break;
+			recentToolCallsBySession.delete(oldest);
+		}
 	}
 	calls.push({ tool, argsHash, timestamp: Date.now() });
 	if (calls.length > MAX_RECENT_CALLS) {

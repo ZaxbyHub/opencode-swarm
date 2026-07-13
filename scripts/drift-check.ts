@@ -279,6 +279,7 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 				}
 			}
 		} else if (kind === 'divergent') {
+			const existingDivergentPaths: string[] = [];
 			for (const p of [opencodePath, claudePath]) {
 				if (!fileExists(p)) {
 					findings.push({
@@ -287,6 +288,28 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 						file: p,
 						message: `divergent skill "${slug}" missing required file ${p}`,
 					});
+				} else {
+					existingDivergentPaths.push(p);
+				}
+			}
+			// Safety-section parity (M13 fix): a divergent pair may differ in
+			// runtime-specific prose, but any heading it declares in
+			// `sharedSafetyHeadings` must be present in EVERY existing tree.
+			// Without this, the existence-only checks above let a whole safety
+			// section (e.g. "### Critical safety guard") live in one tree and be
+			// silently absent from the other. Match is a substring test so a
+			// heading may omit a trailing parenthetical (e.g. "(differential
+			// scanning)").
+			for (const heading of contract.sharedSafetyHeadings ?? []) {
+				for (const p of existingDivergentPaths) {
+					if (!readFile(p).includes(heading)) {
+						findings.push({
+							category,
+							severity: 'error',
+							file: p,
+							message: `divergent skill "${slug}" is missing required safety section "${heading}" in ${p} — designated safety headings are parity-enforced across every tree`,
+						});
+					}
 				}
 			}
 		} else if (kind === 'opencode-only') {

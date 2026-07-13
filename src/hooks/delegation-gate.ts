@@ -14,6 +14,7 @@ import {
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
+import { ALL_AGENT_NAMES } from '../config/agent-names.js';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
@@ -396,7 +397,75 @@ export function validateDelegationEnvelope(
 		return { valid: false, reason: 'acceptanceCriteria_required' };
 	}
 
+	// M15: OPTIONAL specCriteria field. A MISSING field passes silently — it is
+	// never a rejection reason and never produces advisory noise. Only a
+	// POPULATED-but-malformed value is flagged: specCriteria must be a plain
+	// object, and each present member (fr/sc/acceptance) must be a string[].
+	if (
+		'specCriteria' in e &&
+		e.specCriteria !== undefined &&
+		e.specCriteria !== null
+	) {
+		const spec = e.specCriteria;
+		if (typeof spec !== 'object' || Array.isArray(spec)) {
+			return { valid: false, reason: 'specCriteria_malformed' };
+		}
+		const specObj = spec as Record<string, unknown>;
+		for (const member of ['fr', 'sc', 'acceptance'] as const) {
+			const value = specObj[member];
+			if (value === undefined || value === null) continue;
+			if (
+				!Array.isArray(value) ||
+				!value.every((entry) => typeof entry === 'string')
+			) {
+				return { valid: false, reason: `specCriteria_${member}_malformed` };
+			}
+		}
+	}
+
 	return { valid: true };
+}
+
+/**
+ * M15 advisory-only delegation-envelope check. NON-BLOCKING by contract: it
+ * NEVER throws and NEVER rejects a delegation. It runs
+ * {@link validateDelegationEnvelope} (previously reachable only from tests) on a
+ * delegation prompt that ALREADY parses as a structured `DelegationEnvelope`,
+ * and on validation failure appends a concise advisory to
+ * `session.pendingAdvisoryMessages` — the existing non-blocking channel.
+ *
+ * A real, minimal free-text delegation (TASK:/FILE:/... with no structured
+ * envelope) is a no-op: {@link parseDelegationEnvelope} returns `null`, so no
+ * advisory is produced and nothing is rejected. The new optional `specCriteria`
+ * field is OPTIONAL in the validator — a missing field passes silently; only a
+ * populated-but-malformed field surfaces an advisory.
+ *
+ * @returns the validation result when an envelope was parsed, or `null` when the
+ *   prompt was not a structured envelope. Return value is for tests/telemetry;
+ *   the side effect (advisory push) is the production purpose.
+ */
+export function appendDelegationEnvelopeAdvisory(
+	session: AgentSessionState,
+	promptText: string,
+	context: ValidationContext,
+): EnvelopeValidationResult | null {
+	try {
+		const envelope = parseDelegationEnvelope(promptText);
+		if (!envelope) return null; // free-text / non-envelope → no advisory, no block
+		const result = validateDelegationEnvelope(envelope, context);
+		if (!result.valid) {
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(
+				`DELEGATION ENVELOPE ADVISORY: a parsed delegation envelope failed validation (${result.reason}). ` +
+					`This is advisory-only — the delegation was NOT blocked. Review the envelope's structured ` +
+					`fields (including the optional specCriteria acceptance/FR/SC arrays) before the next dispatch.`,
+			);
+		}
+		return result;
+	} catch {
+		// The advisory path must never throw into the caller (fail-open).
+		return null;
+	}
 }
 
 interface MessageInfo {
@@ -1875,6 +1944,26 @@ export function createDelegationGateHook(
 					logger.warn(
 						`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
+				}
+			}
+
+			// M15 advisory-only: surface delegation-envelope validation issues
+			// WITHOUT blocking. toolAfter runs POST-execution (the tool already ran),
+			// so this can never reject a delegation. appendDelegationEnvelopeAdvisory
+			// runs validateDelegationEnvelope — formerly dead production code — only
+			// when the prompt parses as a STRUCTURED envelope; a real free-text
+			// delegation is a no-op. planTasks is left empty so an off-plan taskId is
+			// never advised; validAgents covers the canonical role set so a genuinely
+			// unknown target agent (or a populated-but-malformed specCriteria field)
+			// is surfaced.
+			if (typeof subagentType === 'string') {
+				const advisoryArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+				const advisoryPrompt = advisoryArgs.prompt;
+				if (typeof advisoryPrompt === 'string' && advisoryPrompt.length > 0) {
+					appendDelegationEnvelopeAdvisory(session, advisoryPrompt, {
+						planTasks: [],
+						validAgents: [...ALL_AGENT_NAMES],
+					});
 				}
 			}
 

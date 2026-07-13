@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
+	appendDelegationEnvelopeAdvisory,
 	parseDelegationEnvelope,
 	validateDelegationEnvelope,
 } from '../../../src/hooks/delegation-gate';
-import { resetSwarmState } from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 describe('delegation envelope validation', () => {
 	beforeEach(() => {
@@ -371,6 +372,175 @@ acceptanceCriteria: User can login`;
 
 			// Missing action field
 			expect(result).toBeNull();
+		});
+	});
+
+	// ── M15: OPTIONAL specCriteria field + advisory-only wiring ──────────────
+	describe('M15 specCriteria validation (optional field)', () => {
+		const baseEnvelope = {
+			taskId: '1.1',
+			targetAgent: 'coder',
+			action: 'implement',
+			commandType: 'task' as const,
+			files: ['src/auth.ts'],
+			acceptanceCriteria: ['User can login'],
+			technicalContext: 'Using Express.js',
+		};
+		const validContext = {
+			planTasks: ['1.1'],
+			validAgents: ['architect', 'coder', 'reviewer', 'test_engineer'],
+		};
+
+		it('MISSING specCriteria passes silently (no rejection)', () => {
+			// The critical no-regression case: a delegation without the new field
+			// must remain valid. A missing optional field is never a failure reason.
+			const result = validateDelegationEnvelope(baseEnvelope, validContext);
+			expect(result.valid).toBe(true);
+		});
+
+		it('undefined specCriteria passes silently', () => {
+			const result = validateDelegationEnvelope(
+				{ ...baseEnvelope, specCriteria: undefined },
+				validContext,
+			);
+			expect(result.valid).toBe(true);
+		});
+
+		it('fully-populated valid specCriteria validates clean', () => {
+			const result = validateDelegationEnvelope(
+				{
+					...baseEnvelope,
+					specCriteria: {
+						fr: ['FR-006'],
+						sc: ['SC-111'],
+						acceptance: ['User can login', 'User can logout'],
+					},
+				},
+				validContext,
+			);
+			expect(result.valid).toBe(true);
+		});
+
+		it('non-object specCriteria produces failure reason (advisory-eligible)', () => {
+			const result = validateDelegationEnvelope(
+				{ ...baseEnvelope, specCriteria: 'not-an-object' },
+				validContext,
+			);
+			expect(result.valid).toBe(false);
+			expect((result as { valid: false; reason: string }).reason).toBe(
+				'specCriteria_malformed',
+			);
+		});
+
+		it('specCriteria.acceptance that is not a string[] is flagged per-member', () => {
+			const result = validateDelegationEnvelope(
+				{ ...baseEnvelope, specCriteria: { acceptance: 'nope' } },
+				validContext,
+			);
+			expect(result.valid).toBe(false);
+			expect((result as { valid: false; reason: string }).reason).toBe(
+				'specCriteria_acceptance_malformed',
+			);
+		});
+
+		it('specCriteria.fr with a non-string entry is flagged', () => {
+			const result = validateDelegationEnvelope(
+				{ ...baseEnvelope, specCriteria: { fr: ['FR-1', 42] } },
+				validContext,
+			);
+			expect(result.valid).toBe(false);
+			expect((result as { valid: false; reason: string }).reason).toBe(
+				'specCriteria_fr_malformed',
+			);
+		});
+
+		it('parseDelegationEnvelope round-trips specCriteria from a JSON envelope', () => {
+			const json = JSON.stringify({
+				...baseEnvelope,
+				specCriteria: { acceptance: ['User can login'], fr: ['FR-006'] },
+			});
+			const parsed = parseDelegationEnvelope(json);
+			expect(parsed).not.toBeNull();
+			expect(parsed?.specCriteria?.acceptance).toEqual(['User can login']);
+			expect(parsed?.specCriteria?.fr).toEqual(['FR-006']);
+		});
+	});
+
+	describe('M15 appendDelegationEnvelopeAdvisory (non-blocking wiring)', () => {
+		const context = {
+			planTasks: [] as string[],
+			validAgents: ['architect', 'coder', 'reviewer', 'test_engineer'],
+		};
+
+		it('a real free-text delegation produces NO advisory and returns null', () => {
+			// No envelope structure → parseDelegationEnvelope returns null → no-op.
+			// This is the ~100%-rejection-regression guard: a minimal delegation is
+			// neither rejected nor even advised.
+			const session = ensureAgentSession('m15-freetext');
+			const result = appendDelegationEnvelopeAdvisory(
+				session,
+				'coder\nTASK: implement login\nFILE: src/auth.ts\nINPUT: add a login handler',
+				context,
+			);
+			expect(result).toBeNull();
+			expect(session.pendingAdvisoryMessages ?? []).toEqual([]);
+		});
+
+		it('a valid full envelope produces NO advisory and validates clean', () => {
+			const session = ensureAgentSession('m15-valid');
+			const json = JSON.stringify({
+				taskId: '1.1',
+				targetAgent: 'coder',
+				action: 'implement',
+				commandType: 'task',
+				files: ['src/auth.ts'],
+				acceptanceCriteria: ['User can login'],
+				technicalContext: 'x',
+				specCriteria: { acceptance: ['User can login'], sc: ['SC-1'] },
+			});
+			const result = appendDelegationEnvelopeAdvisory(session, json, context);
+			expect(result?.valid).toBe(true);
+			expect(session.pendingAdvisoryMessages ?? []).toEqual([]);
+		});
+
+		it('a populated-but-malformed specCriteria yields an advisory, NOT a throw', () => {
+			const session = ensureAgentSession('m15-malformed');
+			const json = JSON.stringify({
+				taskId: '1.1',
+				targetAgent: 'coder',
+				action: 'implement',
+				commandType: 'task',
+				files: ['src/auth.ts'],
+				acceptanceCriteria: ['User can login'],
+				technicalContext: 'x',
+				specCriteria: { acceptance: 'should-be-an-array' },
+			});
+			// Must not throw.
+			const result = appendDelegationEnvelopeAdvisory(session, json, context);
+			expect(result?.valid).toBe(false);
+			expect(session.pendingAdvisoryMessages?.length).toBe(1);
+			expect(session.pendingAdvisoryMessages?.[0]).toContain(
+				'DELEGATION ENVELOPE ADVISORY',
+			);
+			expect(session.pendingAdvisoryMessages?.[0]).toContain(
+				'specCriteria_acceptance_malformed',
+			);
+		});
+
+		it('an unknown target agent in a structured envelope yields an advisory (never throws)', () => {
+			const session = ensureAgentSession('m15-badagent');
+			const json = JSON.stringify({
+				taskId: '1.1',
+				targetAgent: 'totally_unknown_agent',
+				action: 'implement',
+				commandType: 'task',
+				files: ['src/auth.ts'],
+				acceptanceCriteria: ['User can login'],
+				technicalContext: 'x',
+			});
+			const result = appendDelegationEnvelopeAdvisory(session, json, context);
+			expect(result?.valid).toBe(false);
+			expect(session.pendingAdvisoryMessages?.length).toBe(1);
 		});
 	});
 });

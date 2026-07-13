@@ -40,7 +40,11 @@ import { createReviewerAgent } from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
 import { createSpecWriterAgent } from './spec-writer';
-import { emptyProjectContext, type ProjectContext } from './template';
+import {
+	assertNoUnresolvedPlaceholders,
+	emptyProjectContext,
+	type ProjectContext,
+} from './template';
 import { createTestEngineerAgent } from './test-engineer';
 
 export type { AgentDefinition } from './architect';
@@ -766,6 +770,42 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		designer.name = prefixName('designer');
 		agents.push(applyOverrides(designer, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// Dead-safety-net fix (M12): the three uncoordinated `.replace()` chains
+	// that assemble agent prompts — Chain A in src/agents/architect.ts and
+	// Chain B above (architect: {{SWARM_ID}}, {{AGENT_PREFIX}}, project-context,
+	// etc.) — never validated for leftover placeholders. Assert over EACH
+	// agent's FINAL prompt, after every substitution chain has run, so a
+	// renamed/mistyped/newly-added `{{KEY}}` fails init loudly instead of
+	// leaking raw template text to the model. Runs here (before return) rather
+	// than inside createArchitectAgent so it sees Chain B's output — Chain B
+	// resolves tokens that Chain A injected (e.g. {{AGENT_PREFIX}} inside the
+	// adversarial-test step).
+	//
+	// FAIL-OPEN (invariant 1): a user-authored custom agent prompt
+	// (`<config>/opencode-swarm/<agent>.md`) is passed through verbatim by
+	// resolvePrompt with no substitution, so it can legitimately contain a
+	// literal `{{UPPER_KEY}}` in prose. Letting the assertion throw here would
+	// propagate out of getAgentConfigs → initializeOpenCodeSwarm, whose outer
+	// catch is fail-CLOSED (re-throws) — the whole plugin would be dropped and
+	// the user would see "no agents". Instead, downgrade a leftover-placeholder
+	// to a deferred warning and register the agent anyway. The assertion stays
+	// a hard throw (unit tests depend on it), and built-in-prompt regressions
+	// are still caught in CI by a test that drains the warning buffer after
+	// getAgentConfigs() over the default prompts.
+	for (const agent of agents) {
+		if (typeof agent.config.prompt === 'string') {
+			try {
+				assertNoUnresolvedPlaceholders(agent.config.prompt, agent.name);
+			} catch (err) {
+				addDeferredWarning(
+					`[opencode-swarm] ${
+						err instanceof Error ? err.message : String(err)
+					} (agent "${agent.name}" was registered anyway; plugin init not aborted).`,
+				);
+			}
+		}
 	}
 
 	return agents;

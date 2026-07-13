@@ -352,7 +352,7 @@ The path ../../../etc/shadow contains sensitive data.`;
 	});
 
 	describe('5. Null Bytes in Handoff Content', () => {
-		it('should handle null bytes in handoff.md content', async () => {
+		it('should strip null bytes from handoff.md content (M10 sanitization)', async () => {
 			// Create content with null bytes
 			const contentWithNulls = 'Before null\x00After null\x00End';
 
@@ -378,11 +378,17 @@ The path ../../../etc/shadow contains sensitive data.`;
 			const output = { system: [] as string[] };
 			await transformFn({ sessionID: 'test-session' }, output);
 
-			// Null bytes are NOT stripped - injected as-is
+			// sanitizeContextText (issue #1779 M10) now wraps every raw
+			// learned-content injection site, including the handoff body. It
+			// filters control characters other than tab/LF/CR (charCode > 31),
+			// which strips null bytes (charCode 0) — this used to be a
+			// documented vulnerability (null bytes injected as-is into the
+			// system message); it is now closed. The surrounding readable text
+			// still reaches the injected context.
 			const injectedContent = output.system.join('\n');
-			expect(injectedContent).toContain('\x00');
-
-			// This documents the vulnerability - null bytes in content not sanitized
+			expect(injectedContent).not.toContain('\x00');
+			expect(injectedContent).toContain('Before null');
+			expect(injectedContent).toContain('After null');
 		});
 
 		it('should reject null bytes in FILENAME (via validateSwarmPath)', () => {

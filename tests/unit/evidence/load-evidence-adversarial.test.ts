@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadEvidence } from '../../../src/evidence/manager.js';
 
@@ -9,11 +16,7 @@ describe('loadEvidence - adversarial tests', () => {
 
 	beforeEach(() => {
 		// Create temp directory for each test
-		tempDir = path.join(
-			process.cwd(),
-			'.temp-test-' + Date.now() + '-' + Math.random().toString(36).slice(2),
-		);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(path.join(os.tmpdir(), 'load-evidence-adv-'));
 		// Create .swarm subdirectory (required by validateSwarmPath)
 		swarmDir = path.join(tempDir, '.swarm');
 		mkdirSync(swarmDir, { recursive: true });
@@ -120,8 +123,8 @@ describe('loadEvidence - adversarial tests', () => {
 		const invalidContent = JSON.stringify({
 			task_id: taskId,
 			entries: [],
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: '2026-06-01T00:00:00.000Z',
+			updated_at: '2026-06-01T00:00:00.000Z',
 		});
 		writeFileSync(evidencePath, invalidContent, 'utf-8');
 
@@ -156,7 +159,7 @@ describe('loadEvidence - adversarial tests', () => {
 				{
 					task_id: taskId,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: '2026-06-01T00:00:00.000Z',
 					agent: 'test-agent',
 					verdict: 'info',
 					summary: 'Test retrospective',
@@ -171,8 +174,8 @@ describe('loadEvidence - adversarial tests', () => {
 					task_complexity: 'medium', // Invalid! Should be trivial/simple/moderate/complex
 				},
 			],
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: '2026-06-01T00:00:00.000Z',
+			updated_at: '2026-06-01T00:00:00.000Z',
 		});
 		writeFileSync(evidencePath, invalidContent, 'utf-8');
 

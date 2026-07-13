@@ -302,36 +302,9 @@ function isInDeclaredScope(
 
 /**
  * Redacts sensitive values from a shell command string before audit logging.
+ * Single-sourced from ./helpers (which additionally redacts home paths).
  */
-export function redactShellCommand(cmd: string): string {
-	if (typeof cmd !== 'string') return '';
-	let out = cmd.replace(
-		/\b([A-Z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_]?KEY|APIKEY|AUTH|CREDENTIAL|PRIVATE[_]?KEY|ACCESS[_]?KEY|_KEY)[A-Z_0-9]*)\s*=\s*(\S+)/gi,
-		'$1=[REDACTED]',
-	);
-
-	out = out.replace(
-		/--([a-zA-Z-]*(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]*)=(\S+)/gi,
-		'--$1=[REDACTED]',
-	);
-
-	out = out.replace(
-		/(--[a-zA-Z-]*(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]*)(\s+)(?!--)(\S+)/gi,
-		'$1$2[REDACTED]',
-	);
-
-	out = out.replace(
-		/\b(Bearer|Basic)\s+[A-Za-z0-9+/=._-]{4,}/gi,
-		'$1 [REDACTED]',
-	);
-
-	out = out.replace(
-		/(-H\s+['"]?(?:Authorization|X-API-Key|X-Auth-Token|[A-Za-z][A-Za-z-]*-(?:key|token|secret|auth|credential)):\s*)([^'">\s][^'">\n]*)(['"]?)/gi,
-		'$1[REDACTED]$3',
-	);
-
-	return out;
-}
+export { redactShellCommand } from './helpers';
 
 /**
  * v6.12: Detects if a tool is a Stage A automated gate tool

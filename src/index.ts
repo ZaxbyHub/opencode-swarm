@@ -144,6 +144,23 @@ import { truncateToolOutput } from './utils/tool-output';
  */
 // Heartbeat throttle map: sessionId -> last heartbeat timestamp
 const _heartbeatTimers = new Map<string, number>();
+// Upper bound on distinct session keys tracked for heartbeat throttling. Values are
+// timestamps (not timer handles), so eviction needs no clearInterval/clearTimeout.
+const MAX_TRACKED_HEARTBEAT_SESSIONS = 500;
+
+/**
+ * FIFO-cap a session-keyed Map to at most `max` entries, evicting oldest first.
+ * Values tracked by these maps are plain data (timestamps/usage snapshots), never
+ * timer handles, so eviction requires no clearInterval/clearTimeout. Exported for
+ * unit testing of the cap invariant; used by the heartbeat throttle path below.
+ */
+export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
+	while (map.size > max) {
+		const oldest = map.keys().next().value;
+		if (oldest === undefined) break;
+		map.delete(oldest);
+	}
+}
 
 import {
 	addDeferredWarning,
@@ -1921,6 +1938,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						const lastTime = _heartbeatTimers.get(sessionID);
 						if (Date.now() - (lastTime ?? 0) > 30_000) {
 							_heartbeatTimers.set(sessionID, Date.now());
+							// FIFO-cap the KEY count to bound memory (mirrors
+							// latestAssistantUsageBySession). Values are timestamps, so no
+							// clearInterval/clearTimeout is needed on eviction.
+							capSessionMap(_heartbeatTimers, MAX_TRACKED_HEARTBEAT_SESSIONS);
 							telemetry.heartbeat(sessionID);
 						}
 					} catch {

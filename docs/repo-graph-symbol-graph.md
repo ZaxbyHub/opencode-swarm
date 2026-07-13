@@ -23,13 +23,13 @@ server claims to break through:
    The graph can say "file A references symbol `foo` from file B" but not
    "function `bar()` calls `foo()`". Agents still open whole files to act, which
    is where context burden actually accrues.
-2. **Coverage is TS/JS/Python only**, while the repo documents **12 first-class
-   languages** in `src/lang/profiles.ts` (TypeScript, Python, Rust, Go, Java,
-   Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) and already ships tree-sitter
+2. **Coverage is TS/JS/Python only**, while the repo documents **13 first-class
+   languages** in `src/lang/profiles.ts` (TypeScript, JavaScript, Python, Rust, Go,
+   Java, Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) and already ships tree-sitter
    grammars for every one of them (`src/lang/runtime.ts:99`).
 
 This document specifies schema **1.2.0**: a **symbol-level call graph** built on the
-existing tree-sitter language layer, covering all 12 documented languages, plus a
+existing tree-sitter language layer, covering all 13 documented languages, plus a
 `context_pack` query that returns a token-budgeted slice of source instead of a
 file list.
 
@@ -38,7 +38,7 @@ file list.
 **Goals**
 - Re-platform repo-graph symbol/import extraction onto `src/lang/` tree-sitter,
   retiring the private TS/JS/Python regex scanner.
-- Cover all **12** documented profile languages.
+- Cover all **13** documented profile languages.
 - Add per-symbol source ranges (`exportRanges`) and **symbol→symbol edges**.
 - Add `repo_map action="context_pack"`: a minimal, deduped, budgeted bundle of
   source spans for a target symbol (definition + transitive callers/callees,
@@ -69,9 +69,9 @@ first-class, **on-demand** dependency used at tool time:
 coalesced, and 10 s-bounded. Crucially, **`src/index.ts` never imports the
 tree-sitter runtime** — init is triggered only by query-time tools, so this work
 adds **zero** init-path cost. Regex cannot give reliable declaration boundaries or
-reference attribution across 12 languages; tree-sitter is both the accuracy upgrade
+reference attribution across 13 languages; tree-sitter is both the accuracy upgrade
 and the only sane way to hit the documented-language contract without hand-writing
-12 parsers (which would also duplicate `src/lang/backends/*.extractImports`).
+13 parsers (which would also duplicate `src/lang/backends/*.extractImports`).
 
 ## Architecture
 
@@ -232,7 +232,7 @@ async-only symbol extraction.
 
 ## Language coverage
 
-All **12** profile languages, resolved via `getProfileForFile(path)` →
+All **13** profile languages, resolved via `getProfileForFile(path)` →
 `profile.treeSitter.grammarId` (`src/lang/profiles.ts`), each with a grammar in
 `LANGUAGE_WASM_MAP` (`runtime.ts:99`). Each language needs a `.scm` query set in
 `symbol-graph.ts`. `SUPPORTED_EXTENSIONS`/`EXTENSION_TO_LANGUAGE`/`getLanguage` in
@@ -275,7 +275,7 @@ never crashing the build.
 
 ## Milestones
 
-1. `src/lang/symbol-graph.ts` + `.scm` query sets for all 12 grammars (defs +
+1. `src/lang/symbol-graph.ts` + `.scm` query sets for all 13 grammars (defs +
    imports + refs), with per-language tests. Behind a flag; nothing else changes.
 2. Rewire the async builder's `scanFile` onto `symbol-graph.ts`; reconcile
    `usedSymbols`/`exportLines`; keep TS/JS/Python output equivalent-or-better.

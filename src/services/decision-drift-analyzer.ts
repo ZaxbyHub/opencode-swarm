@@ -181,6 +181,41 @@ function isDecisionStale(
 }
 
 /**
+ * Polarity of a decision with respect to a single contradiction category.
+ * - `positive` → the decision affirms the category (e.g. "use X", "keep X")
+ * - `negative` → the decision negates the category (e.g. "do not use X", "remove X")
+ * - `null`     → the category does not apply to this decision
+ */
+type Polarity = 'positive' | 'negative' | null;
+
+/**
+ * Classify a decision's polarity for a single contradiction category.
+ *
+ * Negative keywords are checked FIRST and take precedence because several of
+ * them are multi-word negation phrases that literally contain the positive
+ * verb as a substring (e.g. "do not use" / "not use" / "don't use" all contain
+ * "use"). Raw substring matching would otherwise mark a negated decision as
+ * BOTH positive and negative, which is exactly the false-positive that made two
+ * agreeing "do not use Redis" decisions look contradictory.
+ *
+ * We intentionally keep `includes()` (not tokenized matching) so the multi-word
+ * negation phrases continue to match and true negatives are preserved.
+ */
+function classifyPolarity(
+	textLower: string,
+	positiveKeywords: string[],
+	negativeKeywords: string[],
+): Polarity {
+	if (negativeKeywords.some((k) => textLower.includes(k))) {
+		return 'negative';
+	}
+	if (positiveKeywords.some((k) => textLower.includes(k))) {
+		return 'positive';
+	}
+	return null;
+}
+
+/**
  * Simple keyword-based contradiction detection
  * Looks for decisions that express opposite intentions
  */
@@ -225,24 +260,31 @@ export function findContradictions(decisions: Decision[]): DriftSignal[] {
 			const textBLower = decisionB.text.toLowerCase();
 
 			for (const [positiveKeywords, negativeKeywords] of contradictionPairs) {
-				const hasPositiveInA = positiveKeywords.some((k) =>
-					textLower.includes(k),
+				// Compute ONE polarity per decision for this category. This is
+				// negation-aware: a decision is positive OR negative (or neutral),
+				// never both, so a negation phrase that contains the positive verb
+				// (e.g. "do not use" contains "use") no longer double-matches, and
+				// two agreeing negated decisions are not flagged as contradictory.
+				const polarityA = classifyPolarity(
+					textLower,
+					positiveKeywords,
+					negativeKeywords,
 				);
-				const hasNegativeInA = negativeKeywords.some((k) =>
-					textLower.includes(k),
-				);
-				const hasPositiveInB = positiveKeywords.some((k) =>
-					textBLower.includes(k),
-				);
-				const hasNegativeInB = negativeKeywords.some((k) =>
-					textBLower.includes(k),
+				const polarityB = classifyPolarity(
+					textBLower,
+					positiveKeywords,
+					negativeKeywords,
 				);
 
-				// Contradiction: one positive, one negative
-				if (
-					(hasPositiveInA && hasNegativeInB) ||
-					(hasNegativeInA && hasPositiveInB)
-				) {
+				// Contradiction only when the two decisions have OPPOSITE
+				// polarity on the same category. Two agreeing decisions (both
+				// positive or both negative) - and any decision neutral for this
+				// category - are never flagged.
+				const isOpposite =
+					(polarityA === 'positive' && polarityB === 'negative') ||
+					(polarityA === 'negative' && polarityB === 'positive');
+
+				if (isOpposite) {
 					// Check if they're about the same subject (very simple heuristic)
 					// Extract potential subject words (first few words or key terms)
 					const wordsA = textLower.split(/\s+/).slice(0, 4).join(' ');
