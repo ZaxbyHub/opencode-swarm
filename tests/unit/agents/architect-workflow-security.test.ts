@@ -109,7 +109,7 @@ describe('ARCHITECT WORKFLOW: Gate Skipping Prevention', () => {
 	});
 
 	test('SECURITY: Cannot skip adversarial tests (Phase 5m)', () => {
-		expect(prompt).toContain('5m. ADVERSARIAL TEST STEP (config-specific)');
+		expect(prompt).toContain('5m. **ADVERSARIAL TEST STEP** (config-specific)');
 		expect(prompt).toContain('FAIL → return to coder');
 
 		// Verify adversarial tests run AFTER verification tests
