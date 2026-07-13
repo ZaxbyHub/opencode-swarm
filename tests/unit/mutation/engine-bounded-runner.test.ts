@@ -173,6 +173,77 @@ describe('bounded mutation command runner', () => {
 		expect(legacyCalled).toBe(false);
 	});
 
+	test('untouched compatibility seam keeps executeMutation on the bounded async runner', async () => {
+		const calls: string[][] = [];
+		expect(_internals.spawnSync).toBe(realLegacySpawn);
+		_internals.resolveExecutableFromPath = ([executable]) =>
+			`C:\\tools\\${executable}.exe`;
+		_internals.runExternalTool = mock(async (args) => {
+			calls.push(args.args);
+			return {
+				status: 'completed',
+				exitCode: 0,
+				stdout: '',
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		});
+
+		const result = await executeMutation(patch(), ['bun', 'test'], [], root());
+
+		expect(result.outcome).toBe('survived');
+		expect(calls).toHaveLength(3);
+		expect(calls[0][0]).toBe('apply');
+		expect(calls[2]).toContain('-R');
+	});
+
+	test('normalizes a missing production git executable', async () => {
+		_internals.resolveExecutableFromPath = () => null;
+		_internals.runExternalTool = mock(async () => ({
+			status: 'spawn-error',
+			exitCode: null,
+			stdout: '',
+			stderr: '',
+			message: 'Executable not found in $PATH',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		}));
+
+		const result = await runMutationCommand({
+			executable: 'git',
+			args: ['--version'],
+			cwd: root(),
+			timeoutMs: 1000,
+		});
+
+		expect(result.status).toBe('spawn-error');
+		expect(result.message).toBe('git is not installed or not found in PATH');
+	});
+
+	test('preserves unrelated production git spawn errors', async () => {
+		_internals.resolveExecutableFromPath = () => null;
+		_internals.runExternalTool = mock(async () => ({
+			status: 'spawn-error',
+			exitCode: null,
+			stdout: '',
+			stderr: '',
+			message: 'external tool cwd must be absolute',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		}));
+
+		const result = await runMutationCommand({
+			executable: 'git',
+			args: ['--version'],
+			cwd: root(),
+			timeoutMs: 1000,
+		});
+
+		expect(result.status).toBe('spawn-error');
+		expect(result.message).toBe('external tool cwd must be absolute');
+	});
+
 	test('stops scheduling remaining mutants after cancellation', async () => {
 		const controller = new AbortController();
 		controller.abort();

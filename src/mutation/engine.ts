@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
@@ -128,17 +129,7 @@ const TOTAL_BUDGET_MS = 300_000;
 const GIT_APPLY_TIMEOUT_MS = 5_000;
 const MAX_MUTATION_OUTPUT_BYTES = 1024 * 1024;
 
-type LegacySpawnResult = {
-	status: number | null;
-	stdout?: Uint8Array | string | null;
-	stderr?: Uint8Array | string | null;
-	error?: Error;
-};
-type LegacySpawnSyncFn = (
-	executable: string,
-	args: string[],
-	options: { cwd: string; timeout: number; stdio: 'pipe' },
-) => LegacySpawnResult;
+type LegacySpawnSyncFn = typeof spawnSync;
 
 export type MutationCommandResult = {
 	status: 'completed' | 'timeout' | 'cancelled' | 'spawn-error';
@@ -161,15 +152,33 @@ export type MutationExecutionOptions = {
 	runner?: MutationCommandRunner;
 };
 
-const legacySpawnSyncUnavailable: LegacySpawnSyncFn = () => {
-	throw new Error('legacy mutation spawnSync seam is test-only');
-};
+const defaultLegacySpawnSync = spawnSync;
+
+function formatSpawnError(
+	executable: string,
+	error: NodeJS.ErrnoException,
+): string {
+	if (error.code === 'ENOENT') {
+		return `${executable} is not installed or not found in PATH`;
+	}
+	return `${executable} command failed: ${error.message}`;
+}
+
+function isMissingExecutableFailure(message: string | undefined): boolean {
+	if (!message) return false;
+	return (
+		/\bENOENT\b/i.test(message) ||
+		/\bexecutable\b[^\r\n]*\bnot found\b/i.test(message) ||
+		/\bnot found in (?:the )?\$?PATH\b/i.test(message)
+	);
+}
 
 export const runMutationCommand: MutationCommandRunner = async (args) => {
-	const executable =
-		_internals.resolveExecutableFromPath([args.executable]) ?? args.executable;
-	return _internals.runExternalTool({
-		executable,
+	const resolvedExecutable = _internals.resolveExecutableFromPath([
+		args.executable,
+	]);
+	const result = await _internals.runExternalTool({
+		executable: resolvedExecutable ?? args.executable,
 		args: args.args,
 		cwd: args.cwd,
 		timeoutMs: args.timeoutMs,
@@ -177,6 +186,18 @@ export const runMutationCommand: MutationCommandRunner = async (args) => {
 		maxStderrBytes: MAX_MUTATION_OUTPUT_BYTES,
 		abortSignal: args.abortSignal,
 	});
+	if (
+		resolvedExecutable === null &&
+		args.executable === 'git' &&
+		result.status === 'spawn-error' &&
+		isMissingExecutableFailure(result.message)
+	) {
+		return {
+			...result,
+			message: 'git is not installed or not found in PATH',
+		};
+	}
+	return result;
 };
 
 const runLegacyTestSeam: MutationCommandRunner = async (args) => {
@@ -193,7 +214,10 @@ const runLegacyTestSeam: MutationCommandRunner = async (args) => {
 				exitCode: result.status,
 				stdout: result.stdout?.toString() ?? '',
 				stderr: result.stderr?.toString() ?? '',
-				message: result.error.message,
+				message: formatSpawnError(
+					args.executable,
+					result.error as NodeJS.ErrnoException,
+				),
 			};
 		}
 		return {
@@ -219,8 +243,7 @@ function selectRunner(
 	if (options.runner) return options.runner;
 	// Compatibility for existing DI-based unit tests only. The production seam
 	// is never replaced and therefore always selects the bounded async runner.
-	if (_internals.spawnSync !== legacySpawnSyncUnavailable)
-		return runLegacyTestSeam;
+	if (_internals.spawnSync !== defaultLegacySpawnSync) return runLegacyTestSeam;
 	return _internals.runCommand;
 }
 
@@ -236,7 +259,7 @@ export const _internals: {
 	executeMutation,
 	computeReport,
 	executeMutationSuite,
-	spawnSync: legacySpawnSyncUnavailable,
+	spawnSync: defaultLegacySpawnSync,
 	runCommand: runMutationCommand,
 	runExternalTool,
 	resolveExecutableFromPath,
