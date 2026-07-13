@@ -5,12 +5,21 @@
 #
 # Merge-group flaky tests — surface only in the broader Windows/macOS/coverage
 # matrix (PR-branch ubuntu-only CI doesn't hit them). Pre-existing, unrelated
-# to any specific PR. Tracked for a dedicated test-stability sprint.
+# to any specific PR. Tracked under #1737 (test quarantine debt) pending a
+# dedicated test-stability sprint.
+# swarm-artifact-cache.test.ts: all assertions pass, but bun can exit
+# non-zero on Windows CI runners (e.g. AV holding a handle on the tmpdir
+# during afterEach's recursive rm) — a platform quirk, not a test-logic bug.
 tests/unit/utils/swarm-artifact-cache.test.ts
+# skill-scoring-workflow.test.ts: root-cause clock-freeze fix already applied
+# (see file header). Un-quarantine is intentionally gated on a confirmed-green
+# merge-group run across all 3 OSes per #1782, not just local passing —
+# tracked under #1737.
 tests/unit/hooks/skill-scoring-workflow.test.ts
 # Merge-group flaky test: test-runner.test.ts runs the real test-runner
 # tool against a fake Pester project (line 559-565 asserts parsed.success===true).
 # In the coverage context the subprocess behavior can return success=false
 # (environment-sensitive). Pre-existing, unrelated to any specific PR.
-# Tracked for a dedicated test-stability sprint.
+# Tracked under #1737 (test quarantine debt) pending a dedicated
+# test-stability sprint.
 tests/unit/tools/test-runner.test.ts

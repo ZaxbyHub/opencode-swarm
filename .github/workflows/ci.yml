@@ -118,6 +118,24 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: chmod +x scripts/check-test-file-cap.sh && bash scripts/check-test-file-cap.sh
+      # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
+      # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
+      # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope
+      # decision — retrofitting the ~250 pre-existing occurrences is out of
+      # scope). Prefer tests/helpers/tmpdir.ts (canonicalTmpDir/canonicalMkdtemp).
+      - name: Test tmpdir canonicalization lint (FR-011)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-test-tmpdir.sh && bash scripts/check-test-tmpdir.sh
+      # Not diff-scoped (unlike the sibling checks above): a bash4+-only
+      # construct is exactly as broken on macOS as it was the day it was
+      # added, so this scans full current file content in scripts/, not just
+      # the diff (issue #1737 FR-012 — prevents recurrence of the
+      # check-invariants.sh `declare -A` incident, issue #1729).
+      - name: Bash portability lint (FR-012)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-bash-portability.sh && bash scripts/check-bash-portability.sh
 
   # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback.
   # On merge_group (merge queue), run the full 3-OS matrix for merge safety.

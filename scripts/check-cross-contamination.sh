@@ -33,7 +33,7 @@ for pair in "${PAIRS[@]}"; do
   bun --smol test "$file_a" "$file_b" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
 
   if [ $exit_code -ne 0 ]; then
-    actual=$(grep -oP '^\s*\d+ pass' "$tmp" | grep -oP '\d+' || echo "0")
+    actual=$(grep -oE '^[[:space:]]*[0-9]+ pass' "$tmp" | grep -oE '[0-9]+' || echo "0")
 
     if [ "$actual" -lt "$known_expected" ]; then
       # Pass count dropped below the known baseline — this is a NEW regression
