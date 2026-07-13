@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ApplyPatchResult } from './apply-patch';
-import { swarmApplyPatch } from './apply-patch';
+import { _internals, swarmApplyPatch } from './apply-patch';
 
 // Helper: create a temp directory
 function createTempDir(): string {
@@ -843,5 +843,185 @@ describe('swarm_apply_patch tool', () => {
 		expect(result.files[0]?.errors?.[0]?.message).toContain(
 			'Unsupported patch format',
 		);
+	});
+});
+
+// =============================================================================
+// Opt-in fuzzy matching fallback (issue #1718)
+//
+// These tests prove the opt-in contract: with the config flags off (default),
+// behavior is byte-identical to the B3 exact-match decision. With
+// `apply_patch.fuzzy_match: true`, applyHunks retries the fuzzy chain on
+// exact-match failure. Strategy 9 is separately gated by
+// `apply_patch.fuzzy_match_context_aware`.
+//
+// Config is injected hermetically via the `_internals.loadPluginConfigWithMeta`
+// DI seam (AGENTS.md invariant 7) — no real config files are written, so the
+// tests are immune to the user-config merge path in `loadPluginConfig`.
+// =============================================================================
+
+describe('swarm_apply_patch fuzzy-match fallback', () => {
+	let workspace: string;
+	const originalLoader = _internals.loadPluginConfigWithMeta;
+
+	beforeEach(() => {
+		workspace = createTempDir();
+	});
+
+	afterEach(() => {
+		_internals.loadPluginConfigWithMeta = originalLoader;
+		try {
+			rmSync(workspace, { recursive: true, force: true });
+		} catch {
+			// Ignore cleanup errors
+		}
+	});
+
+	/** Override the config loader to return a config with the given fuzzy flags. */
+	function setFuzzyConfig(fuzzyMatch: boolean, fuzzyMatchContextAware = false): void {
+		_internals.loadPluginConfigWithMeta = (() => ({
+			config: {
+				apply_patch: {
+					fuzzy_match: fuzzyMatch,
+					fuzzy_match_context_aware: fuzzyMatchContextAware,
+				},
+			},
+			loadedFromFile: true,
+			configHadErrors: false,
+		})) as typeof _internals.loadPluginConfigWithMeta;
+	}
+
+	test('default-off: exact-match patch still applies (no regression on default path)', async () => {
+		// Flags off → exact match only → a clean patch must still succeed.
+		setFuzzyConfig(false);
+		const targetFile = 'clean.txt';
+		createFile(workspace, targetFile, 'line1\nline2\nline3\n');
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-modified\n line3\n`;
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch, files: [targetFile] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+		expect(result.success).toBe(true);
+		expect(result.files[0]?.status).toBe('applied');
+	});
+
+	test('fuzzy-on: indentation drift (2-line block) is tolerated via a fuzzy strategy', async () => {
+		setFuzzyConfig(true);
+		const targetFile = 'drift.txt';
+		// File uses 4-space indent for the body. The patch's context+removal
+		// lines use 2-space body indent — this is NOT a substring of the file
+		// (because `\n  return` ≠ `\n    return`), so strategyExact cannot
+		// match; line_trimmed / indentation_flexible must handle it.
+		createFile(workspace, targetFile, 'def foo():\n    return x + y\n');
+		// Patch: context "def foo():" (exact), removal "  return x + y" (2-space,
+		// drifted from 4), addition "  return x + z".
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,2 +1,2 @@\n def foo():\n-  return x + y\n+  return x + z\n`;
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch, files: [targetFile] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+		expect(result.success).toBe(true);
+		expect(result.files[0]?.status).toBe('applied');
+		const finalContent = readFileContent(workspace, targetFile);
+		expect(finalContent).toContain('return x + z');
+		expect(finalContent).not.toContain('return x + y');
+	});
+
+	test('default-off: same drifting patch fails (proves fuzzy is the cause of success)', async () => {
+		setFuzzyConfig(false);
+		const targetFile = 'drift2.txt';
+		createFile(workspace, targetFile, 'def foo():\n    return x + y\n');
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,2 +1,2 @@\n def foo():\n-  return x + y\n+  return x + z\n`;
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch, files: [targetFile] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+		expect(result.success).toBe(false);
+		expect(result.files[0]?.errors?.[0]?.type).toBe('context-mismatch');
+	});
+
+	test('strategy 9 gated: block only context_aware matches — fails without the flag, succeeds with it', async () => {
+		// A block where strategies 1-8 all reject (anchor lines differ,
+		// whitespace/indent/escape/unicode cannot salvage, middle similarity
+		// below block_anchor's 0.50 threshold) but strategy 9 (50% per-line
+		// similarity ≥0.80) accepts. Verified: each pair of lines is ≥0.80
+		// similar via SequenceMatcher, so context_aware matches all 3.
+		const targetFile = 'ctx9.txt';
+		createFile(workspace, targetFile, 'def foo():\n    x = 1\n    return x\n');
+		// Old context: same structure, x→y rename + value change. Each line is
+		// highly similar to its counterpart (def foo() ==, "x = 1" vs "y = 2",
+		// "return x" vs "return y"). block_anchor fails because the anchor lines
+		// ("def foo():" / "return x") — first matches, last ("return x" vs
+		// "return y") stripped-equality fails the anchor. context_aware succeeds.
+		const oldBlock = 'def foo():\n    y = 2\n    return y';
+		const newBlock = 'def foo():\n    x = 1\n    return x';
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,3 +1,3 @@\n-${oldBlock.split('\n').join('\n-')}\n+${newBlock.split('\n').join('\n+')}\n`;
+
+		// With context_aware OFF: must fail (strategies 1-8 reject).
+		setFuzzyConfig(true, false);
+		const offResult = parseResult(
+			await swarmApplyPatch.execute(
+				{ patch, files: [targetFile] },
+				workspaceOf(workspace) as any,
+			),
+		);
+		expect(offResult.success).toBe(false);
+		expect(offResult.files[0]?.errors?.[0]?.type).toBe('context-mismatch');
+
+		// Fresh file, then with context_aware ON: must succeed (strategy 9 accepts).
+		createFile(workspace, targetFile, 'def foo():\n    x = 1\n    return x\n');
+		setFuzzyConfig(true, true);
+		const onResult = parseResult(
+			await swarmApplyPatch.execute(
+				{ patch, files: [targetFile] },
+				workspaceOf(workspace) as any,
+			),
+		);
+		expect(onResult.success).toBe(true);
+	});
+
+	test('fuzzy-fail appends a "did you mean?" hint to the diagnostic', async () => {
+		// Fuzzy enabled, but the patch context is genuinely absent from the file
+		// (no strategy can match). The error message should include the hint.
+		setFuzzyConfig(true);
+		const targetFile = 'hint.txt';
+		// File has a similar-but-different line so findClosestLines returns content.
+		createFile(workspace, targetFile, 'def bar():\n    return 1\n');
+		// Patch looks for "def foo():" which does not exist.
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,1 +1,1 @@\n-def foo():\n+def baz():\n`;
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch, files: [targetFile] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+		expect(result.success).toBe(false);
+		const message = result.files[0]?.errors?.[0]?.message ?? '';
+		expect(message).toContain('Did you mean one of these sections?');
+	});
+
+	test('multi-hunk: first hunk fuzzy, second hunk exact (non-overlapping)', async () => {
+		setFuzzyConfig(true);
+		const targetFile = 'multi.txt';
+		// Two well-separated regions. First has whitespace drift; second is exact.
+		createFile(workspace, targetFile, 'header  line\nbody1\nMIDDLE\nbody2\nfooter  line\n');
+		// Hunk 1: context "header line" (single space) vs file "header  line" → fuzzy.
+		// Hunk 2: exact context "footer  line" → exact match.
+		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,1 +1,1 @@\n-header line\n+HEADER LINE\n@@ -5,1 +5,1 @@\n-footer  line\n+FOOTER LINE\n`;
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch, files: [targetFile] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+		expect(result.success).toBe(true);
+		const finalContent = readFileContent(workspace, targetFile);
+		expect(finalContent).toContain('HEADER LINE');
+		expect(finalContent).toContain('FOOTER LINE');
 	});
 });

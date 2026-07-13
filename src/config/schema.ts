@@ -1017,6 +1017,29 @@ export const CheckpointConfigSchema = z
 
 export type CheckpointConfig = z.infer<typeof CheckpointConfigSchema>;
 
+// Apply-patch configuration (issue #1718 opt-in fuzzy matching fallback)
+//
+// Ports hermes-agent's 9-strategy fuzzy text-matching chain as an OPT-IN
+// fallback for `apply-patch`. The exact-match default (the "B3 decision") is
+// preserved when both flags are false. Strategy 9 (`context_aware`) is the
+// loosest/most-false-positive-prone strategy and is gated behind a SEPARATE
+// flag so users opt into it independently of the broader fuzzy fallback.
+export const ApplyPatchConfigSchema = z
+	.object({
+		// Opt-in fuzzy text-matching fallback for apply-patch hunks. When true,
+		// applyHunks retries strategies 1-8 (whitespace, indent, escape, unicode,
+		// block-anchor tolerance) when exact positional match fails. Default
+		// false preserves the B3 exact-match decision.
+		fuzzy_match: z.boolean().default(false),
+		// Separately opts in to strategy 9 (context_aware) — the loosest,
+		// most-false-positive-prone strategy (50% line similarity threshold).
+		// Only effective when `fuzzy_match` is also true.
+		fuzzy_match_context_aware: z.boolean().default(false),
+	})
+	.strict();
+
+export type ApplyPatchConfig = z.infer<typeof ApplyPatchConfigSchema>;
+
 // Automation mode enum: controls background-first automation rollout
 // - manual: No background automation, all actions via slash commands (v6.6 behavior)
 // - hybrid: Background automation for safe operations, slash commands for sensitive ones
@@ -2633,6 +2656,9 @@ export const PluginConfigSchema = z.object({
 
 	// Checkpoint configuration
 	checkpoint: CheckpointConfigSchema.optional(),
+
+	// Apply-patch opt-in fuzzy matching fallback (issue #1718)
+	apply_patch: ApplyPatchConfigSchema.optional(),
 
 	// Automation configuration (v6.7 background-first rollout)
 	// Controls background automation mode and per-feature toggles
