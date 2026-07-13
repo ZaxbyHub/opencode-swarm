@@ -103,13 +103,12 @@ import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
+import { injectSkillsIntoDelegation } from './hooks/skill-injection.js';
 import {
 	parseDelegationArgs,
 	skillPropagationGateBefore,
 	skillPropagationTransformScan,
 } from './hooks/skill-propagation-gate.js';
-import { readSkillMetadata } from './hooks/skill-scoring.js';
-import { appendSkillUsageEntry } from './hooks/skill-usage-log.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
@@ -2100,100 +2099,25 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 			// 8. Skill injection: auto-inject recommended skills when SKILLS field
 			//    is missing from the delegation prompt. Preserves explicit
-			//    SKILLS: none and architect-set SKILLS fields.
-			if (
-				skillResult.recommendedSkills &&
-				skillResult.recommendedSkills.length > 0
-			) {
-				const argsRecord = input.args as Record<string, unknown>;
-				const promptRaw = argsRecord.prompt;
-				if (typeof promptRaw === 'string') {
-					// Parse the prompt to check for existing SKILLS field
-					const parsedDelegation = parseDelegationArgs(input.args);
-					if (parsedDelegation) {
-						const existingSkills = parsedDelegation.skillsField.trim();
-						// Skip injection if SKILLS field already exists or is explicitly "none"
-						if (!existingSkills) {
-							// Filter by relevance score threshold (0.5)
-							const qualified = skillResult.recommendedSkills.filter(
-								(s) => s.score >= 0.5,
-							);
-
-							if (qualified.length === 0) {
-								// No skills above threshold — inject SKILLS: none
-								argsRecord.prompt = `SKILLS: none\n\n${promptRaw}`;
-								if (!config.quiet) {
-									console.warn(
-										'[skill-propagation-gate] No skills above threshold 0.5 — injected SKILLS: none',
-									);
-								}
-							} else {
-								// Take top 5 by score
-								const topSkills = qualified.slice(0, 5);
-
-								// Dynamic skill description from SKILL.md frontmatter
-								const skillPaths = topSkills
-									.map((s) => {
-										const meta = readSkillMetadata(s.skillPath, ctx.directory);
-										let desc = meta.description || '';
-										if (!desc || desc === 'No description provided') {
-											desc = path.basename(path.dirname(s.skillPath));
-										}
-										// Strip commas to prevent corruption of comma-delimited SKILLS: parsing
-										desc = desc.replace(/,/g, ';');
-										return `file:${s.skillPath} (-- ${desc})`;
-									})
-									.join(', ');
-
-								const skillsLine = `SKILLS: ${skillPaths}`;
-
-								// Inject at the beginning of the prompt
-								const newPrompt = `${skillsLine}\n\n${promptRaw}`;
-								argsRecord.prompt = newPrompt;
-
-								// Log the injection
-								const skillNames = topSkills
-									.map(
-										(s) =>
-											`${path.basename(s.skillPath)} (score: ${s.score.toFixed(2)})`,
-									)
-									.join(', ');
-								if (!config.quiet) {
-									console.warn(
-										`[skill-propagation-gate] Injected skills: ${skillNames}`,
-									);
-								}
-
-								// Record each injected skill to skill-usage.jsonl
-								for (const skill of topSkills) {
-									try {
-										appendSkillUsageEntry(ctx.directory, {
-											skillPath: skill.skillPath,
-											agentName: String(input.agent),
-											taskID: 'injection',
-											timestamp: new Date().toISOString(),
-											complianceVerdict: 'not_checked',
-											sessionID: input.sessionID,
-										});
-									} catch {
-										// Non-blocking: best-effort audit logging
-									}
-								}
-
-								// SKILLS_USED_BY_CODER forwarding for reviewer delegations
-								// When auto-injecting skills and the target is a reviewer,
-								// append SKILLS_USED_BY_CODER so the compliance feedback loop
-								// can track injected skills back to the scoring system.
-								const targetAgent = parsedDelegation.targetAgent.toLowerCase();
-								if (targetAgent.includes('reviewer')) {
-									const usedByCoderLine = `SKILLS_USED_BY_CODER: ${topSkills.map((s) => `file:${s.skillPath}`).join(', ')}`;
-									argsRecord.prompt = `${newPrompt}\n${usedByCoderLine}`;
-								}
-							}
-						}
-					}
-				}
-			}
+			//    SKILLS: none and architect-set SKILLS fields. Implemented in
+			//    src/hooks/skill-injection.ts (issue #1770) so the injection +
+			//    usage-recording path is testable against the REAL implementation.
+			//    The function mutates `input.args.prompt` in place and records
+			//    usage with the TARGET subagent (canonicalized via
+			//    stripKnownSwarmPrefix so 'mega_coder' and 'coder' produce the
+			//    same usage attribution as the gate's site 4a) + real taskID
+			//    (not the architect + synthetic 'injection' literal the inline
+			//    block used).
+			injectSkillsIntoDelegation(
+				ctx.directory,
+				input.args as Record<string, unknown>,
+				skillResult.recommendedSkills,
+				stripKnownSwarmPrefix(
+					parseDelegationArgs(input.args)?.targetAgent ?? '',
+				) || String(input.agent),
+				input.sessionID,
+				{ quiet: config.quiet },
+			);
 			// ---------------------------------------------------------------
 
 			// 9. Per-delegate knowledge directive injection (Change 1, Task 1.4).
