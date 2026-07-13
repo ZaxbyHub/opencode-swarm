@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.114.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.2...v7.114.3) (2026-07-13)
+
+
+### Bug Fixes
+
+* **swarm-close:** remove stale spec-drift state on finalize and reset ([9e37e71](https://github.com/ZaxbyHub/opencode-swarm/commit/9e37e71e17d8a092baec16a835e115fff7a7689a))
+
 ## [7.114.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.1...v7.114.2) (2026-07-12)
 
 
