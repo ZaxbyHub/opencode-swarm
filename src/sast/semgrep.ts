@@ -6,6 +6,7 @@
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as logger from '../utils/logger.js';
 import type { SastFinding } from './rules/index.js';
 
 /**
@@ -279,7 +280,7 @@ async function executeWithTimeout(
 				} catch (e) {
 					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
 					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						console.error('[semgrep] child.kill failed:', e.message);
+						logger.log('[semgrep] child.kill failed:', e.message);
 					}
 				}
 				escalation = setTimeout(() => {
@@ -288,7 +289,7 @@ async function executeWithTimeout(
 					} catch (e) {
 						// Only log non-ESRCH errors (ESRCH = process already gone, expected)
 						if (e instanceof Error && !e.message.includes('ESRCH')) {
-							console.error('[semgrep] child.kill failed:', e.message);
+							logger.log('[semgrep] child.kill failed:', e.message);
 						}
 					}
 				}, KILL_GRACE_MS);
@@ -339,7 +340,7 @@ async function executeWithTimeout(
 				} catch (e) {
 					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
 					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						console.error('[semgrep] child.kill failed:', e.message);
+						logger.log('[semgrep] child.kill failed:', e.message);
 					}
 				}
 			} else {
@@ -371,7 +372,7 @@ async function executeWithTimeout(
 				} catch (e) {
 					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
 					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						console.error('[semgrep] child.kill failed:', e.message);
+						logger.log('[semgrep] child.kill failed:', e.message);
 					}
 				}
 			} else {

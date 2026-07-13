@@ -10,6 +10,7 @@ import { type BuildCommand, discoverBuildCommands } from '../build/discovery';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { bunSpawn } from '../utils/bun-compat';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -322,7 +323,7 @@ export const build_check: ReturnType<typeof tool> = createSwarmTool({
 		try {
 			await saveEvidence(workingDir, 'build', evidence);
 		} catch (error) {
-			console.error(
+			logger.log(
 				'Failed to save build evidence:',
 				error instanceof Error ? error.message : String(error),
 			);

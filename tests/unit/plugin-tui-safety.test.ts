@@ -131,6 +131,61 @@ const TUI_SAFETY_SCOPES: Array<{
 		label: 'prm-trajectory-store.ts',
 		quietTokens: [],
 	},
+	// PR4 of epic #1752 migrated these tool-execute-path modules (the tool
+	// handler bodies in src/tools/*, plus the mutation generator and semgrep
+	// SAST runner) to logger.log. Same contract as the PR2/PR3 blocks above:
+	// zero raw console.warn/error/log. This is the interim regression guard
+	// until PR5 enables Biome `noConsole` globally.
+	{
+		file: 'src/tools/build-check.ts',
+		label: 'build-check.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/convene-general-council.ts',
+		label: 'convene-general-council.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/dispatch-lanes.ts',
+		label: 'dispatch-lanes.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/lean-turbo-run-phase.ts',
+		label: 'lean-turbo-run-phase.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/req-coverage.ts',
+		label: 'req-coverage.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/sbom-generate.ts',
+		label: 'sbom-generate.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/update-task-status.ts',
+		label: 'update-task-status.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/tools/write-drift-evidence.ts',
+		label: 'write-drift-evidence.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/mutation/generator.ts',
+		label: 'mutation-generator.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/sast/semgrep.ts',
+		label: 'semgrep.ts',
+		quietTokens: [],
+	},
 ];
 
 function readScope(file: string): string {
@@ -241,22 +296,29 @@ describe('Plugin TUI safety', () => {
 		}
 	});
 
-	test('PR2/PR3-migrated modules have zero raw console.warn (epic #1752)', () => {
-		// PR2 (loader.ts, architect.ts, snapshot-reader.ts, project-init.ts)
-		// and PR3 (delegation-gate, worktree-isolation, knowledge-store,
+	test('PR2/PR3/PR4-migrated modules have zero raw console.* (epic #1752)', () => {
+		// PR2 (loader.ts, architect.ts, snapshot-reader.ts, project-init.ts),
+		// PR3 (delegation-gate, worktree-isolation, knowledge-store,
 		// skill-usage-log, council-evidence-writer, ast-diff,
-		// context-budget-service, worktree-link-suggestion, prm/*) were
-		// migrated to advisoryWarn/log. They must contain ZERO raw
-		// console.warn so the bubbletea TUI is never corrupted on the init
-		// and hook paths (issue #1249 class). This is the interim regression
-		// guard until PR5 enables Biome `noConsole` globally.
+		// context-budget-service, worktree-link-suggestion, prm/*), and PR4
+		// (build-check, convene-general-council, dispatch-lanes,
+		// lean-turbo-run-phase, req-coverage, sbom-generate, update-task-status,
+		// write-drift-evidence, mutation/generator, sast/semgrep) were migrated
+		// to advisoryWarn/log. They must contain ZERO raw console.warn/error/log
+		// so the bubbletea TUI is never corrupted on the init, hook, and tool
+		// execute paths (issue #1249 class). This is the interim regression
+		// guard until PR5 enables Biome `noConsole` globally. The regex covers
+		// all three console channels because PR4 migrated `console.error` sites
+		// (semgrep kill-failed, build-check evidence, lean-turbo cleanup) in
+		// addition to `console.warn`.
 		for (const scope of TUI_SAFETY_SCOPES) {
 			if (scope.quietTokens.length > 0) continue; // skip guarded-scope files
 			const src = readScope(scope.file);
-			const warnCount = (src.match(/console\.warn\(/g) || []).length;
+			const consoleCount = (src.match(/console\.(warn|error|log)\(/g) || [])
+				.length;
 			expect(
-				warnCount,
-				`${scope.file} must contain zero raw console.warn after epic #1752 PR2/PR3 migration`,
+				consoleCount,
+				`${scope.file} must contain zero raw console.warn/error/log after epic #1752 PR2/PR3/PR4 migration`,
 			).toBe(0);
 		}
 	});

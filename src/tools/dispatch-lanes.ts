@@ -19,6 +19,7 @@ import {
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_LANES = 8;
@@ -1542,7 +1543,7 @@ function applyExplorerFormatSuffix(
 		if (lane.prompt.includes('[CANDIDATE]')) return lane;
 		const prompt = `${lane.prompt}${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
-			console.warn(
+			logger.log(
 				`[dispatch-lanes] applyExplorerFormatSuffix: lane "${lane.id}" prompt too long ` +
 					`(${lane.prompt.length} chars + suffix = ${prompt.length}, max ${MAX_PROMPT_CHARS}); ` +
 					`format enforcement skipped — explorer may not emit [CANDIDATE] rows`,

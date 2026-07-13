@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -548,7 +549,7 @@ export const req_coverage: ReturnType<typeof tool> = createSwarmTool({
 			fs.writeFileSync(reportPath, JSON.stringify(result, null, 2), 'utf-8');
 		} catch (writeError) {
 			// Non-blocking - return result even if report write fails
-			console.warn(
+			logger.log(
 				`Failed to write coverage report: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 			);
 		}

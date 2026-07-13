@@ -28,6 +28,7 @@ import {
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
+import * as logger from '../utils/logger.js';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -311,7 +312,7 @@ export function checkReviewerGate(
 			}
 		} catch (error) {
 			// Malformed JSON, permission error, or other non-ENOENT issue — BLOCK
-			console.warn(
+			logger.log(
 				`[gate-evidence] Evidence file for task ${taskId} is corrupt or unreadable:`,
 				error instanceof Error ? error.message : String(error),
 			);
@@ -1009,7 +1010,7 @@ export async function executeUpdateTaskStatus(
 	}
 
 	if (args.status === 'in_progress' && args.force === true) {
-		console.warn(
+		logger.log(
 			`[update-task-status] Force-override: re-opening settled task ${args.task_id} to in_progress`,
 		);
 	}
@@ -1231,10 +1232,7 @@ export async function executeUpdateTaskStatus(
 				await lockResult.lock._release();
 			} catch (releaseError) {
 				// Log but don't propagate - original error/context takes precedence
-				console.error(
-					'[update-task-status] Lock release failed:',
-					releaseError,
-				);
+				logger.log('[update-task-status] Lock release failed:', releaseError);
 			}
 		}
 	}

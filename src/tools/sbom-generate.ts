@@ -17,6 +17,7 @@ import {
 	type SbomComponent,
 } from '../sbom/detectors/index';
 import { simpleGlobToRegex } from '../utils';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -410,7 +411,7 @@ export const sbom_generate: ReturnType<typeof tool> = createSwarmTool({
 			});
 		} catch (error) {
 			// Log warning but don't fail - SBOM file was still written
-			console.warn(
+			logger.log(
 				`Warning: Failed to save SBOM evidence: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}

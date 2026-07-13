@@ -7,6 +7,7 @@
 
 import type { ToolContext } from '@opencode-ai/plugin';
 import { swarmState } from '../state.js';
+import * as logger from '../utils/logger.js';
 import type { MutationPatch } from './engine.js';
 
 /** Slugify a string for use in mutation IDs */
@@ -61,7 +62,7 @@ export async function generateMutants(
 ): Promise<MutationPatch[]> {
 	// Graceful fallback: no ToolContext means no LLM access
 	if (!ctx) {
-		console.warn(
+		logger.log(
 			'[generateMutants] No ToolContext — cannot call LLM; returning empty patch set',
 		);
 		return [];
@@ -70,7 +71,7 @@ export async function generateMutants(
 	// Graceful fallback: no opencodeClient available
 	const client = swarmState.opencodeClient;
 	if (!client) {
-		console.warn(
+		logger.log(
 			'[generateMutants] opencodeClient not available; returning empty patch set',
 		);
 		return [];
@@ -108,7 +109,7 @@ export async function generateMutants(
 			query: { directory },
 		});
 		if (!createResult.data) {
-			console.warn(
+			logger.log(
 				`[generateMutants] Failed to create session: ${JSON.stringify(createResult.error)}; returning empty patch set`,
 			);
 			return [];
@@ -149,7 +150,7 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 		});
 
 		if (!promptResult.data) {
-			console.warn(
+			logger.log(
 				`[generateMutants] LLM prompt failed: ${JSON.stringify(promptResult.error)}; returning empty patch set`,
 			);
 			return [];
@@ -171,7 +172,7 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 				msg.includes('EOF') || msg.includes('Unexpected end')
 					? ' (response appears truncated — LLM may have hit an output token limit)'
 					: '';
-			console.warn(
+			logger.log(
 				`[generateMutants] Failed to parse LLM response as MutationPatch[]: ${msg}${hint}; returning empty patch set`,
 			);
 			return [];
@@ -220,7 +221,7 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 
 		return patches;
 	} catch (error) {
-		console.warn(
+		logger.log(
 			`[generateMutants] LLM call failed: ${error instanceof Error ? error.message : String(error)}; returning empty patch set`,
 		);
 		return [];

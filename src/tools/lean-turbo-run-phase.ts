@@ -9,6 +9,7 @@ import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../
 import { swarmState } from '../state';
 import type { LaneResult, MergeBackFailureInfo } from '../turbo/lean/runner';
 import { LeanTurboRunner as LeanTurboRunner_import } from '../turbo/lean/runner';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -95,7 +96,7 @@ export async function executeLeanTurboRunPhase(
 			}
 		} catch (cleanupError) {
 			// Log cleanup error but do not throw
-			console.error('[lean_turbo_run_phase] Cleanup failed:', cleanupError);
+			logger.log('[lean_turbo_run_phase] Cleanup failed:', cleanupError);
 		}
 	}
 
