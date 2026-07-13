@@ -44,6 +44,7 @@ export type {
 
 import { getAgentSession } from '../state';
 import { telemetry } from '../telemetry';
+import * as logger from '../utils/logger.js';
 import {
 	formatCourseCorrectionForInjection,
 	generateCourseCorrection,
@@ -379,7 +380,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 			}
 		} catch (err) {
 			// Non-blocking: log error and continue
-			console.warn(`[prm] toolAfter error for session ${sessionID}: ${err}`);
+			logger.log(`[prm] toolAfter error for session ${sessionID}: ${err}`);
 		}
 	}
 

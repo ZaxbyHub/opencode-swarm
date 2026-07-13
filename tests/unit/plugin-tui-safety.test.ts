@@ -71,6 +71,66 @@ const TUI_SAFETY_SCOPES: Array<{
 		label: 'project-init.ts',
 		quietTokens: [],
 	},
+	// PR3 of epic #1752 migrated these hook-path modules (chat/tool/system
+	// message hooks + their service deps + the prm subsystem) to
+	// advisoryWarn/log. Same contract as the PR2 block above: zero raw
+	// console.warn. This is the interim regression guard until PR5 enables
+	// Biome `noConsole` globally.
+	{
+		file: 'src/hooks/delegation-gate.ts',
+		label: 'delegation-gate.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/hooks/delegation-gate/worktree-isolation.ts',
+		label: 'worktree-isolation.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/hooks/knowledge-store.ts',
+		label: 'knowledge-store.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/hooks/skill-usage-log.ts',
+		label: 'skill-usage-log.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/council/council-evidence-writer.ts',
+		label: 'council-evidence-writer.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/diff/ast-diff.ts',
+		label: 'ast-diff.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/services/context-budget-service.ts',
+		label: 'context-budget-service.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/session/worktree-link-suggestion.ts',
+		label: 'worktree-link-suggestion.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/prm/index.ts',
+		label: 'prm-index.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/prm/replay.ts',
+		label: 'prm-replay.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/prm/trajectory-store.ts',
+		label: 'prm-trajectory-store.ts',
+		quietTokens: [],
+	},
 ];
 
 function readScope(file: string): string {
@@ -181,19 +241,22 @@ describe('Plugin TUI safety', () => {
 		}
 	});
 
-	test('PR2-migrated init-path modules have zero raw console.warn (epic #1752)', () => {
-		// loader.ts, architect.ts, snapshot-reader.ts, project-init.ts were
-		// migrated to advisoryWarn/log in PR2. They must contain ZERO raw
+	test('PR2/PR3-migrated modules have zero raw console.warn (epic #1752)', () => {
+		// PR2 (loader.ts, architect.ts, snapshot-reader.ts, project-init.ts)
+		// and PR3 (delegation-gate, worktree-isolation, knowledge-store,
+		// skill-usage-log, council-evidence-writer, ast-diff,
+		// context-budget-service, worktree-link-suggestion, prm/*) were
+		// migrated to advisoryWarn/log. They must contain ZERO raw
 		// console.warn so the bubbletea TUI is never corrupted on the init
-		// path (issue #1249 class). This is the interim regression guard until
-		// PR5 enables Biome `noConsole` globally.
+		// and hook paths (issue #1249 class). This is the interim regression
+		// guard until PR5 enables Biome `noConsole` globally.
 		for (const scope of TUI_SAFETY_SCOPES) {
 			if (scope.quietTokens.length > 0) continue; // skip guarded-scope files
 			const src = readScope(scope.file);
 			const warnCount = (src.match(/console\.warn\(/g) || []).length;
 			expect(
 				warnCount,
-				`${scope.file} must contain zero raw console.warn after epic #1752 PR2 migration`,
+				`${scope.file} must contain zero raw console.warn after epic #1752 PR2/PR3 migration`,
 			).toBe(0);
 		}
 	});

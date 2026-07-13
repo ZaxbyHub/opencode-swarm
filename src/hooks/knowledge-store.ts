@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import * as logger from '../utils/logger.js';
 import { readCachedParsedFile } from '../utils/swarm-artifact-cache.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import { reinforceSwarmKnowledgeEntry } from './knowledge-reinforcement.js';
@@ -130,7 +131,7 @@ function parseKnowledgeContent<T>(content: string, max: number): T[] {
 		try {
 			results.push(normalizeEntry(JSON.parse(trimmed) as T));
 		} catch {
-			console.warn(
+			logger.log(
 				`[knowledge-store] Skipping corrupted JSONL line: ${trimmed.slice(
 					0,
 					80,
@@ -971,13 +972,13 @@ export async function bumpKnowledgeConfidenceBatch(
 			[...touchedSwarm, ...touchedHive],
 			options,
 		).catch((err) => {
-			console.warn(
+			logger.log(
 				'[knowledge-store] confidence-floor action sweep failed (best-effort):',
 				err instanceof Error ? err.message : String(err),
 			);
 		});
 	} catch (err) {
-		console.warn(
+		logger.log(
 			'[knowledge-store] bumpKnowledgeConfidenceBatch failed (fail-open):',
 			err instanceof Error ? err.message : String(err),
 		);
@@ -1075,7 +1076,7 @@ async function applyConfidenceFloorAction(
 		}
 		return swarmEntries;
 	}).catch((err) => {
-		console.warn(
+		logger.log(
 			'[knowledge-store] confidence-floor swarm flag transaction failed (best-effort):',
 			err instanceof Error ? err.message : String(err),
 		);
@@ -1109,7 +1110,7 @@ async function applyConfidenceFloorAction(
 			}
 			return hiveEntries;
 		}).catch((err) => {
-			console.warn(
+			logger.log(
 				'[knowledge-store] confidence-floor hive flag transaction failed (best-effort):',
 				err instanceof Error ? err.message : String(err),
 			);
@@ -1128,7 +1129,7 @@ async function applyConfidenceFloorAction(
 				'confidence_floor_negative_outcome',
 				'auto',
 			).catch((err) => {
-				console.warn(
+				logger.log(
 					'[knowledge-store] confidence-floor quarantine failed (best-effort):',
 					err instanceof Error ? err.message : String(err),
 				);
@@ -1207,7 +1208,7 @@ async function applyConfidenceDeltas(
 			await atomicWriteFile(filePath, content);
 		}
 	} catch (err) {
-		console.warn(
+		logger.log(
 			`[knowledge-store] applyConfidenceDeltas failed on ${filePath} (fail-open):`,
 			err instanceof Error ? err.message : String(err),
 		);

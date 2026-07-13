@@ -15,6 +15,7 @@
 
 import { execFile } from 'node:child_process';
 import { isLinked } from '../hooks/knowledge-link.js';
+import { advisoryWarn } from '../services/warning-buffer.js';
 
 const GIT_TIMEOUT_MS = 1_500;
 
@@ -95,7 +96,7 @@ export async function maybeSuggestWorktreeLink(
 
 		const worktrees = await countWorktrees(directory);
 		if (worktrees > 1) {
-			console.warn(
+			advisoryWarn(
 				`[opencode-swarm] Detected ${worktrees} git worktrees of this repo. ` +
 					'Run `/swarm link` in each to share swarm knowledge across them ' +
 					'(or `/swarm link <name>` to share with similar projects).',

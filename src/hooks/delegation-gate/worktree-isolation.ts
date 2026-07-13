@@ -16,6 +16,7 @@ import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { isValidEnvKey } from '../../sandbox/executor';
 import { ensureAgentSession, swarmState } from '../../state';
 import { bunSpawn } from '../../utils/bun-compat';
+import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
 import {
 	attemptMergeBackFromDirty,
@@ -365,7 +366,7 @@ function rememberStandardWorktreeSerializationSession(
 		}
 		if (!evicted) {
 			// All 256 entries are active — log and REFUSE to add rather than break isolation
-			console.warn(
+			logger.log(
 				`[worktree-isolation] serialization set at cap with all sessions active; refusing eviction for ${sessionID}`,
 			);
 			return false;
@@ -441,7 +442,7 @@ export async function preProvisionCollisionCheck(
 		if (exitCode !== 0) {
 			// git worktree list failed — fail open with no collision detected.
 			// The actual provisioning will report the error if needed.
-			console.warn(
+			logger.log(
 				`[swarm] preProvisionCollisionCheck: git worktree list failed (exit ${exitCode}): ${stderr}`,
 			);
 			return { collision: false };
@@ -599,7 +600,7 @@ export async function precreateStandardWorktreeSession(args: {
 			args.parentSessionID,
 		]);
 	} catch (recoveryError) {
-		console.warn(`[swarm] startup orphan recovery failed: ${recoveryError}`);
+		logger.log(`[swarm] startup orphan recovery failed: ${recoveryError}`);
 	}
 
 	// SC-004.2: Also delete stale lane branches from inactive sessions so
@@ -611,7 +612,7 @@ export async function precreateStandardWorktreeSession(args: {
 			args.parentSessionID,
 		]);
 	} catch (cleanupError) {
-		console.warn(`[swarm] orphaned branch cleanup failed: ${cleanupError}`);
+		logger.log(`[swarm] orphaned branch cleanup failed: ${cleanupError}`);
 	}
 
 	// FR-001b SC-004/SC-005: Pre-provision collision check — detect a stale lane
@@ -706,7 +707,7 @@ export async function precreateStandardWorktreeSession(args: {
 					);
 				}
 			} catch (cleanupError) {
-				console.warn(
+				logger.log(
 					`[swarm] preProvision collision cleanup failed: ${cleanupError}; proceeding with provisioning anyway`,
 				);
 			}
@@ -905,7 +906,7 @@ export async function preserveDirtyWorktreeForCallId(
 		statusStdout = await statusProc.stdout.text();
 		statusStderr = await statusProc.stderr.text();
 		if (exitCode !== 0) {
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeForCallId: git status failed for ${callID}: ${statusStderr}`,
 			);
 			return {
@@ -941,7 +942,7 @@ export async function preserveDirtyWorktreeForCallId(
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
 			const addErr = await addProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeForCallId: git add failed for ${callID}: ${addErr}`,
 			);
 			return {
@@ -977,7 +978,7 @@ export async function preserveDirtyWorktreeForCallId(
 		const commitExit = await commitProc.exited;
 		if (commitExit !== 0) {
 			const commitErr = await commitProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeForCallId: git commit failed for ${callID}: ${commitErr}`,
 			);
 			return {
@@ -1008,7 +1009,7 @@ export async function preserveDirtyWorktreeForCallId(
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
 			const hashErr = await hashProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeForCallId: git rev-parse failed for ${callID}: ${hashErr}`,
 			);
 			return {
@@ -1051,7 +1052,7 @@ export async function preserveDirtyWorktreeForCallId(
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
 			const tagErr = await tagProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeForCallId: git tag failed for ${callID}: ${tagErr}`,
 			);
 			return {
@@ -1122,7 +1123,7 @@ export async function preserveDirtyWorktreeAtPath(
 		statusStdout = await statusProc.stdout.text();
 		statusStderr = await statusProc.stderr.text();
 		if (exitCode !== 0) {
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeAtPath: git status failed for ${worktreePath}: ${statusStderr}`,
 			);
 			return {
@@ -1158,7 +1159,7 @@ export async function preserveDirtyWorktreeAtPath(
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
 			const addErr = await addProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeAtPath: git add failed for ${worktreePath}: ${addErr}`,
 			);
 			return {
@@ -1199,7 +1200,7 @@ export async function preserveDirtyWorktreeAtPath(
 		const commitExit = await commitProc.exited;
 		if (commitExit !== 0) {
 			const commitErr = await commitProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeAtPath: git commit failed for ${worktreePath}: ${commitErr}`,
 			);
 			return {
@@ -1230,7 +1231,7 @@ export async function preserveDirtyWorktreeAtPath(
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
 			const hashErr = await hashProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeAtPath: git rev-parse failed for ${worktreePath}: ${hashErr}`,
 			);
 			return {
@@ -1273,7 +1274,7 @@ export async function preserveDirtyWorktreeAtPath(
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
 			const tagErr = await tagProc.stderr.text();
-			console.warn(
+			logger.log(
 				`[swarm] preserveDirtyWorktreeAtPath: git tag failed for ${worktreePath}: ${tagErr}`,
 			);
 			return {
@@ -1352,7 +1353,7 @@ export async function cleanupStandardWorktreeForCallId(
 				worktree_dir,
 			);
 		} catch (err) {
-			console.warn(
+			logger.log(
 				`[swarm] cleanupStandardWorktreeForCallId: preserveDirtyWorktreeForCallId threw for ${callID}: ${err}`,
 			);
 			preserveResult = {
@@ -1374,7 +1375,7 @@ export async function cleanupStandardWorktreeForCallId(
 					worktree_dir,
 				);
 			} catch (err) {
-				console.warn(
+				logger.log(
 					`[swarm] cleanupStandardWorktreeForCallId: final preservation check threw for ${callID}: ${err}`,
 				);
 				preserveResult = {
@@ -1412,7 +1413,7 @@ export async function cleanupStandardWorktreeForCallId(
 			worktreeDir: worktree_dir,
 		})
 		.catch((err) =>
-			console.warn(
+			logger.log(
 				`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
 			),
 		);
@@ -1425,7 +1426,7 @@ export async function cleanupStandardWorktreeForCallId(
 	await _internals
 		.postMergeCleanup(directory, branchName)
 		.catch((err) =>
-			console.warn(
+			logger.log(
 				`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
 			),
 		);
@@ -1631,7 +1632,7 @@ export async function readLaneEnvFileFromDisk(
 			return {};
 		}
 		// Other errors: warn and return empty so spawns degrade gracefully.
-		console.warn(
+		logger.log(
 			`[worktree-isolation] failed to read lane env file ${envPath}: ${(err as Error).message}`,
 		);
 		return {};

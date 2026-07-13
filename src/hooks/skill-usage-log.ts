@@ -8,6 +8,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as logger from '../utils/logger.js';
 import type { ConfidenceFloorOptions } from './knowledge-store.js';
 import { bumpKnowledgeConfidenceBatch } from './knowledge-store.js';
 import { validateSwarmPath } from './utils.js';
@@ -690,7 +691,7 @@ export async function resolveSourceKnowledgeIds(
 		const content = _internals.readFileSync(absolute, 'utf-8');
 		return parseGeneratedFromKnowledge(content);
 	} catch (err) {
-		console.warn(
+		logger.log(
 			'[skill-usage-log] resolveSourceKnowledgeIds failed (fail-open):',
 			err instanceof Error ? err.message : String(err),
 		);
@@ -856,7 +857,7 @@ export async function applySkillUsageFeedback(
 			appendFeedbackAppliedMarker(directory, processedEntryIds);
 		}
 	} catch (err) {
-		console.warn(
+		logger.log(
 			'[skill-usage-log] applySkillUsageFeedback failed (fail-open):',
 			err instanceof Error ? err.message : String(err),
 		);

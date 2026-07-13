@@ -729,48 +729,60 @@ describe('evidence writer — round-history audit log', () => {
 		});
 	});
 
-	test('appendFileSync failure does not break primary evidence write and console.warn is called', async () => {
-		// Spy on console.warn to verify it gets called on audit failure.
-		const warnings: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (msg: string) => warnings.push(msg);
+	test('appendFileSync failure does not break primary evidence write and audit failure is logged', async () => {
+		// Epic #1752 PR3: the audit-failure site now routes through logger.log
+		// (debug-gated via OPENCODE_SWARM_DEBUG=1) instead of raw console.warn.
+		// Enable debug to observe the call, then capture console.log output.
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logs: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => logs.push(String(args[0]));
 
-		// Mock appendFileSync to throw on audit log paths — simulating permission error.
-		// The primary evidence write uses atomicWriteFile (bunWrite + rename), not
-		// appendFileSync, so mocking appendFileSync only affects the audit log path.
-		const realFs = await import('node:fs');
-		const mockAppendFileSync = mock((path: string, data: string) => {
-			if (path.includes('.rounds.jsonl')) {
-				throw new Error('EPERM: permission denied');
+		try {
+			// Mock appendFileSync to throw on audit log paths — simulating permission error.
+			// The primary evidence write uses atomicWriteFile (bunWrite + rename), not
+			// appendFileSync, so mocking appendFileSync only affects the audit log path.
+			const realFs = await import('node:fs');
+			const mockAppendFileSync = mock((path: string, data: string) => {
+				if (path.includes('.rounds.jsonl')) {
+					throw new Error('EPERM: permission denied');
+				}
+				// Delegate non-audit writes to the real implementation.
+				return realFs.appendFileSync(path, data);
+			});
+			mock.module('node:fs', () => ({
+				...realFs,
+				appendFileSync: mockAppendFileSync,
+			}));
+
+			// Primary evidence write must succeed even when audit log fails.
+			await expect(
+				writeCouncilEvidence(tempDir, makeRoundSynthesis()),
+			).resolves.toBeUndefined();
+
+			// Verify the primary evidence file was written correctly.
+			const evidence = JSON.parse(
+				readFileSync(join(tempDir, '.swarm', 'evidence', '1.1.json'), 'utf-8'),
+			);
+			expect(evidence.gates.council).toBeDefined();
+			expect(evidence.gates.council.verdict).toBe('APPROVE');
+
+			// Verify the audit failure was logged via the debug-gated logger.
+			expect(
+				logs.some((w) =>
+					w.includes('failed to append round-history audit log'),
+				),
+			).toBe(true);
+		} finally {
+			// Restore env + console.
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
 			}
-			// Delegate non-audit writes to the real implementation.
-			return realFs.appendFileSync(path, data);
-		});
-		mock.module('node:fs', () => ({
-			...realFs,
-			appendFileSync: mockAppendFileSync,
-		}));
-
-		// Primary evidence write must succeed even when audit log fails.
-		await expect(
-			writeCouncilEvidence(tempDir, makeRoundSynthesis()),
-		).resolves.toBeUndefined();
-
-		// Verify the primary evidence file was written correctly.
-		const evidence = JSON.parse(
-			readFileSync(join(tempDir, '.swarm', 'evidence', '1.1.json'), 'utf-8'),
-		);
-		expect(evidence.gates.council).toBeDefined();
-		expect(evidence.gates.council.verdict).toBe('APPROVE');
-
-		// Verify console.warn was called with the audit failure message.
-		expect(
-			warnings.some((w) =>
-				w.includes('failed to append round-history audit log'),
-			),
-		).toBe(true);
-
-		console.warn = originalWarn;
-		mock.restore();
+			console.log = originalLog;
+			mock.restore();
+		}
 	});
 });
