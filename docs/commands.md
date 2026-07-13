@@ -274,6 +274,8 @@ Drive an already human-reviewed, approved PR to green and merged: monitors CI, e
 
 **URL sanitization:** identical to `pr-review`/`pr-feedback` — `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames.
 
+**No trailing instructions:** unlike `pr-review`/`pr-feedback`, this command accepts only the PR reference. Any text after it is rejected with an explicit error rather than forwarded — this mode performs a merge and has no review/feedback instructions to act on.
+
 **Workflow** (`MODE: CI_MONITOR`, loads `swarm-ci-monitor/SKILL.md`):
 1. **Pre-flight gates** — user named the PR explicitly, `reviewDecision: APPROVED`, and `mergeable: MERGEABLE` with an acceptable `mergeStateStatus`
 2. **Monitor → fix loop** (max 5 iterations) — fetch check runs, classify failures, fix, push, wait for the new run
