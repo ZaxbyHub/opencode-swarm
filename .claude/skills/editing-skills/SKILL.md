@@ -44,11 +44,13 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   `running-tests` (an `opencode-only` ADDITIONAL contract) — do **not**
   create `.claude` mirrors (a `.claude/skills/loop` would shadow Claude
   Code's built-in `/loop`).
-- **ADDITIONAL contracts**: `commit-pr` is `identical` with `.claude`
-  canonical (CI's pr-standards workflow declares it the source of truth —
-  mirror any edit to `.opencode` byte-for-byte). It also has discovery shims
-  in `.agents/skills/commit-pr/` and `.github/skills/commit-pr/` that point
-  at the `.claude` file as canonical.
+- **ADDITIONAL contracts**: `commit-pr` is `divergent` (#1692). The `.claude`
+  copy is the repo-INTERNAL publication protocol (CI's pr-standards workflow
+  declares it the source of truth); the `.opencode` copy is the PORTABLE,
+  project-agnostic version bundled into end-user projects, so the two trees
+  intentionally differ — do **not** sync them byte-for-byte. The discovery
+  shims in `.agents/skills/commit-pr/` and `.github/skills/commit-pr/` point
+  at the repo-internal `.claude` file as canonical.
 - **No skill-mirrors.ts entry** (qa-sweep, research-first, swarm, unswarm,
   tech-debt-ci-review, issue-tracer,
   rust-crate-ci, orchestrating-subagents, durable-session-state,

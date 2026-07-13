@@ -451,8 +451,9 @@ function evaluateDestructiveDecision(
 			};
 		}
 
-		// Git destructive operations
-		if (/^git\s+push\b.*?(--force|-f)\b/.test(seg)) {
+		// Git destructive operations. Mirror tool-before.ts: `--force-with-lease`
+		// is exempt (safe force push); bare `--force`/`-f` stay blocked. (#1692)
+		if (/^git\s+push\b.*?(--force(?!-with-lease)|-f)\b/.test(seg)) {
 			return {
 				decision: 'block',
 				firingRule: 'destructive_block: git push --force',

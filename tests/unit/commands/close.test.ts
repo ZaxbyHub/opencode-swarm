@@ -333,6 +333,38 @@ describe('handleCloseCommand', () => {
 		mock.restore();
 	});
 
+	describe('teardown resilience (#1692)', () => {
+		it('returns success (not a generic error) when teardown throws after stages succeed', async () => {
+			await writeCanonicalPlan(testDir, {
+				title: 'Teardown Project',
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'complete',
+						tasks: [{ id: '1.1', status: 'complete' }],
+					},
+				],
+			});
+
+			const original = _internals.resetSwarmStatePreservingSingletons;
+			_internals.resetSwarmStatePreservingSingletons = () => {
+				throw new Error('teardown boom');
+			};
+			try {
+				const result = await handleCloseCommand(testDir, []);
+				// The run still reports success — all four stages + summary succeeded.
+				expect(result).toContain('✅');
+				// And it surfaces the teardown failure as a warning rather than
+				// letting it escape as a generic dispatcher error.
+				expect(result).toContain('teardown');
+				expect(result).toContain('teardown boom');
+			} finally {
+				_internals.resetSwarmStatePreservingSingletons = original;
+			}
+		});
+	});
+
 	describe('Writes retrospective for in-progress phases', () => {
 		it('should call executeWriteRetro for each in-progress phase', async () => {
 			await writeCanonicalPlan(testDir, {

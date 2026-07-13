@@ -707,8 +707,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Use /swarm finalize to finalize the swarm project and archive evidence',
 		details:
-			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode.',
-		args: '--prune-branches, --skill-review',
+			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
+		args: '--prune-branches, --skill-review, --dry-run',
 		category: 'core',
 		toolPolicy: 'none',
 	},
@@ -720,8 +720,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Use /swarm close (deprecated alias) to finalize and archive swarm state',
 		details:
-			'Deprecated alias for /swarm finalize. Preserved for backward compatibility.',
-		args: '--prune-branches, --skill-review',
+			'Deprecated alias for /swarm finalize. Preserved for backward compatibility. Supports the same flags, including --dry-run.',
+		args: '--prune-branches, --skill-review, --dry-run',
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,
@@ -1141,7 +1141,7 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleResetCommand(ctx.directory, ctx.args),
 		description: 'Clear swarm state files [--confirm]',
 		details:
-			'DELETES plan.md, context.md, and summaries/ directory from .swarm/. Stops background automation and clears in-memory queues. SAFETY: requires --confirm flag — without it, displays a warning and tips to export first.',
+			'DELETES plan.md, context.md, and summaries/ directory from .swarm/. Stops background automation and clears in-memory queues. SAFETY: requires --confirm flag — without it, displays a warning and tips to export first. Before deleting, auto-backs up the state it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept) so it can be restored by copying the files back.',
 		args: '--confirm (required)',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/reset',
@@ -1152,7 +1152,7 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions and delegation chains. Preserves plan, evidence, and knowledge for cross-session continuity.',
+			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions and delegation chains. Preserves plan, evidence, and knowledge for cross-session continuity. Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
 		args: '',
 		category: 'utility',
 		toolPolicy: 'restricted',

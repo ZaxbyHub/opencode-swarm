@@ -794,11 +794,11 @@ See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery st
 
 ### `/swarm reset --confirm`
 
-DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` â€” without it, shows a warning and a tip to export first.**
+DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` â€” without it, shows a warning.** Before deleting, the state it removes is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept); restore by copying the files back into `.swarm/`.
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project.
+Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
 
 ### `/swarm checkpoint <save|restore|delete|list> <label>`
 
@@ -813,7 +813,7 @@ Named git checkpoints for project files.
 
 Restore legacy `.swarm/` phase checkpoints (`checkpoints/phase-<N>`) when present. Otherwise restore named git checkpoints from `.swarm/checkpoints.json` by label or list number. Writes a rollback event to `events.jsonl`. Without an argument, lists available checkpoints.
 
-### `/swarm finalize [--prune-branches] [--skill-review]`
+### `/swarm finalize [--prune-branches] [--skill-review] [--dry-run]`
 
 Idempotent 4-stage project finalization:
 1. **Finalize** â€” write retrospectives for in-progress phases.
@@ -825,16 +825,19 @@ Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 Finalize also runs the curator post-mortem when curator postmortems are enabled; existing reports are reused unless regeneration is forced through `/swarm post-mortem --force`.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
 Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
-Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
+Use `--force` to label the run as a forced closure and adjust the retrospective wording; finalize does not otherwise gate on in-progress phases (there is no active-work guard to bypass).
+Use `--dry-run` to preview what finalize would archive, clean, and align — it takes no lock and changes nothing.
 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
 cycles â€” cumulative project knowledge survives and is not deleted. Deleted files
 include `plan.json`, `plan.md`, `plan-ledger.jsonl`, `events.jsonl`, `handoff.*`,
 `escalation-report.md`, `knowledge-rejected.jsonl`, `repo-graph.json`,
-`doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db` (and
-shm/wal variants), generated `post-mortem-*.md` reports,
-`drift-report-phase-*.json`, and the `evidence/`, `session/`, `scopes/`,
-`locks/`, `spec-archive/` directories.
+`doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db`, generated
+`post-mortem-*.md` reports, `drift-report-phase-*.json`, and the `evidence/`,
+`session/`, `scopes/`, `spec-archive/` directories. The SQLite WAL sidecars
+`swarm.db-shm`/`swarm.db-wal` are intentionally preserved (transient internals
+SQLite recreates on next open); `locks/` is not cleaned (per-run locks are
+managed via proper-lockfile).
 
 **Hive promotion:** During finalize, lessons in `knowledge.jsonl` are evaluated
 against a three-route eligibility gate before promotion to hive:

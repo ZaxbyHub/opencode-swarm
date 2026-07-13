@@ -346,10 +346,11 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
  *    a developer tool, never a plugin-runtime sync, and never runs under
  *    `DRIFT_CHECK_ENFORCE`. The env-guard below enforces explicit confirmation.
  *  - Reads `canonical` per pair to decide copy direction (`.opencode` for the
- *    15 MIRRORED pairs and ADDITIONAL identical pairs whose canonical is
- *    `.opencode`; `.claude` for `commit-pr` whose canonical is `.claude` per
- *    `.github/workflows/pr-standards.yml`). A wrong direction would corrupt
- *    the operative side, so this MUST read the field, not assume `.opencode`.
+ *    MIRRORED pairs and ADDITIONAL identical pairs whose canonical is
+ *    `.opencode`). A wrong direction would corrupt the operative side, so this
+ *    MUST read the field, not assume `.opencode`. (`commit-pr` is `divergent`
+ *    since #1692 — its `.opencode` portable copy and `.claude` repo-internal
+ *    copy intentionally differ — so it is a no-op here.)
  *  - No-op on `divergent` and `opencode-only` pairs and on already-in-sync
  *    pairs.
  *  - Returns `DriftFinding[]` with severity `'notice'` describing what was

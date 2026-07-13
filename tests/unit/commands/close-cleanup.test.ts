@@ -2,8 +2,8 @@
  * Tests for handleCloseCommand — expanded artifact cleanup (Phase 1 sub-task 1.2).
  *
  * Verifies the flat-file and directory archiving/deletion behavior:
- *   - 21 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 20 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
+ *   - 22 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
+ *   - 18 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
  *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
  *     are recursively copied to the archive and then deleted. (locks/ is
  *     intentionally excluded — per-run locks are managed via proper-lockfile,
@@ -214,7 +214,7 @@ function getLatestArchivePath(): string {
 // assertions below ("checkpoint succeeds -> swarm.db archived and removed")
 // non-deterministic if we let the real spawnSync run. Spy on just the
 // `spawnSync` named export (kept live via spyOn — NOT a full
-// mock.module('node:child_process', ...) replacement, since that risks
+// node:child_process module replacement, since that risks
 // dropping other exports this test's reachable import graph needs; see
 // issue #1683) and make the sqlite3 invocation deterministically report a
 // completed checkpoint (busy=0). Non-sqlite3 invocations, if any ever occur

@@ -151,25 +151,29 @@ describe('drift:fix skill-mirror — divergent pairs are untouched', () => {
 });
 
 describe('drift:fix skill-mirror — ADDITIONAL identical pairs', () => {
-	test('respects canonical .claude for commit-pr (copies .claude → .opencode)', () => {
+	// #1692: commit-pr is now `divergent` — .claude is the repo-internal
+	// publication protocol and .opencode is the portable version bundled into
+	// user projects. drift:fix MUST NOT sync them, or it would clobber the
+	// generic bundled copy with this repo's internal one (or vice versa).
+	test('does NOT sync divergent commit-pr (portable .opencode vs repo-internal .claude preserved)', () => {
 		process.env.SWARM_SKILL_SYNC_CONFIRM = '1';
 		const root = makeTempRoot();
-		const claudeCanonical = 'CLAUDE CANONICAL (pr-standards.yml wins)\n';
-		const staleOpencode = 'OPENCODE STALE\n';
-		writeFile(root, '.claude/skills/commit-pr/SKILL.md', claudeCanonical);
-		writeFile(root, '.opencode/skills/commit-pr/SKILL.md', staleOpencode);
+		const claudeInternal = 'CLAUDE repo-internal protocol\n';
+		const opencodePortable = 'OPENCODE portable, project-agnostic\n';
+		writeFile(root, '.claude/skills/commit-pr/SKILL.md', claudeInternal);
+		writeFile(root, '.opencode/skills/commit-pr/SKILL.md', opencodePortable);
 
 		const synced = fixSkillMirrorDrift(root);
-		const commitPrSync = synced.find((f) => f.message.includes('"commit-pr"'));
-		expect(commitPrSync).toBeDefined();
-		expect(commitPrSync?.message).toInclude('.claude canonical');
-		// .opencode now mirrors the .claude canonical.
+		// No sync finding for commit-pr — divergent pairs are left alone.
+		expect(
+			synced.find((f) => f.message.includes('"commit-pr"')),
+		).toBeUndefined();
+		// Both sides untouched — the intentional divergence is preserved.
 		expect(readFile(root, '.opencode/skills/commit-pr/SKILL.md')).toBe(
-			claudeCanonical,
+			opencodePortable,
 		);
-		// .claude canonical is untouched.
 		expect(readFile(root, '.claude/skills/commit-pr/SKILL.md')).toBe(
-			claudeCanonical,
+			claudeInternal,
 		);
 	});
 
