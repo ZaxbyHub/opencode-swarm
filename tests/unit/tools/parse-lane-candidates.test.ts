@@ -232,6 +232,14 @@ describe('parse_lane_candidates', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.failure_class).toBe('invalid_args');
 		});
+
+		test('expected_family: unknown value → invalid_args', async () => {
+			const result = await callTool(makeTempDir(), {
+				output_ref: `L1:${'a'.repeat(64)}:${'b'.repeat(64)}:${'c'.repeat(64)}`,
+				expected_family: 'unknown',
+			});
+			expect(JSON.parse(result).failure_class).toBe('invalid_args');
+		});
 	});
 
 	// -----------------------------------------------------------------------
@@ -378,6 +386,55 @@ describe('parse_lane_candidates', () => {
 			expect(parsed.invocation_envelope.source_lane_id).toBe(laneId);
 			expect(parsed.diagnostics).toBeDefined();
 			expect(parsed.diagnostics.candidate_count).toBe(1);
+		});
+
+		test('expected_family propagates through the public tool for marker-prefixed micro rows', async () => {
+			const dir = makeTempDir();
+			const text =
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n' +
+				'[CANDIDATE] | M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | HIGH';
+			const artifact = buildArtifact({
+				batchId: 'micro-public-batch',
+				laneId: 'micro-public-lane',
+				text,
+			});
+			writeLaneArtifact(dir, artifact);
+			const parsed = JSON.parse(
+				await callTool(dir, {
+					output_ref: artifact.ref,
+					expected_family: 'micro_lane',
+					expected_micro_lane: 'subprocess',
+				}),
+			);
+			expect(parsed.candidates[0]).toMatchObject({
+				candidate_id: 'M-1',
+				row_format_family: 'micro_lane',
+				micro_lane: 'subprocess',
+				invariant_violated: 'invariant 3',
+				confidence: 'HIGH',
+			});
+		});
+
+		test('expected_micro_lane rejects a provenance-linked CLEAN identity mismatch', async () => {
+			const dir = makeTempDir();
+			const text =
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n' +
+				'[CLEAN] | wrong-lane | checked scope | no findings';
+			const artifact = buildArtifact({
+				batchId: 'micro-clean-public-batch',
+				laneId: 'micro-clean-public-lane',
+				text,
+			});
+			writeLaneArtifact(dir, artifact);
+			const parsed = JSON.parse(
+				await callTool(dir, {
+					output_ref: artifact.ref,
+					expected_family: 'micro_lane',
+					expected_micro_lane: 'subprocess',
+				}),
+			);
+			expect(parsed.error_code).toBe('expected-micro-lane-mismatch');
+			expect(parsed.clean_attestation).toBeUndefined();
 		});
 
 		test('response includes all ParseResultWithSidecar fields', async () => {
@@ -808,7 +865,7 @@ describe('parse_lane_candidates', () => {
 			expect(env).toHaveProperty('row_format_version', 1);
 			expect(env).toHaveProperty('produced_at');
 			expect(env).toHaveProperty('record_version');
-			expect(env.record_version).toEqual({ major: 1, minor: 0 });
+			expect(env.record_version).toEqual({ major: 1, minor: 1 });
 			expect(env).toHaveProperty('format_families_detected');
 			expect(env).toHaveProperty('candidate_count');
 			expect(env).toHaveProperty('parse_errors');
@@ -819,7 +876,7 @@ describe('parse_lane_candidates', () => {
 			expect(c).toHaveProperty('record_type', 'candidate');
 			expect(c).toHaveProperty('row_format_family');
 			expect(c).toHaveProperty('row_format_version', 1);
-			expect(c).toHaveProperty('record_version', { major: 1, minor: 0 });
+			expect(c).toHaveProperty('record_version', { major: 1, minor: 1 });
 			expect(c).toHaveProperty('source_output_ref');
 			expect(c).toHaveProperty('source_batch_id');
 			expect(c).toHaveProperty('source_lane_id');

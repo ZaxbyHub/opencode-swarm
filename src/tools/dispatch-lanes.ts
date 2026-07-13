@@ -43,8 +43,8 @@ const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
 
 IMPORTANT — OUTPUT FORMAT REQUIREMENT:
-You MUST emit your findings as pipe-delimited [CANDIDATE] rows.
-Header row first, then one row per finding.
+You MUST emit your findings as a pipe-delimited [CANDIDATE] table.
+Emit the marker-bearing header first, then one unprefixed data row per finding.
 
 Standard explorer format (use unless the prompt specifies micro-lane work):
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
@@ -52,7 +52,10 @@ Standard explorer format (use unless the prompt specifies micro-lane work):
 Micro-lane format (use when the prompt references invariant checking or micro_lane):
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
 
-If you find zero issues, emit only the header row with no data rows.
+If a standard explorer finds zero issues, emit only the header row. If a
+micro-lane finds zero issues, emit its header followed by exactly:
+[CLEAN] | micro_lane | coverage_scope | evidence
+Fill every CLEAN field; bare header-only micro output is UNATTESTED.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
 
 const READ_ONLY_LANE_ROLES: ReadonlySet<string> = new Set([

@@ -187,4 +187,9 @@ export { write_drift_evidence } from './write-drift-evidence';
 export { write_final_council_evidence } from './write-final-council-evidence';
 export { write_hallucination_evidence } from './write-hallucination-evidence';
 export { write_mutation_evidence } from './write-mutation-evidence';
+export {
+	executeWritePrReviewTriggerEval,
+	PR_REVIEW_TRIGGER_DEFINITIONS,
+	write_pr_review_trigger_eval,
+} from './write-pr-review-trigger-eval';
 export { executeWriteRetro, write_retro } from './write-retro';

@@ -194,6 +194,11 @@ export const TOOL_METADATA = {
 			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
 		agents: ['architect'],
 	},
+	write_pr_review_trigger_eval: {
+		description:
+			'persist the complete PR-review trigger evaluation with exact-set validation and dispatch provenance',
+		agents: ['architect'],
+	},
 	test_runner: {
 		description: 'auto-detect and run tests',
 		agents: ['architect', 'reviewer', 'test_engineer'],

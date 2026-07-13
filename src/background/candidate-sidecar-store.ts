@@ -50,6 +50,32 @@ const SidecarEnvelopeSchema = z
 		candidate_count: z.number().int().nonnegative(),
 		parse_errors: z.number().int().nonnegative(),
 		malformed_rows: z.number().int().nonnegative(),
+		clean_attestation_count: z.number().int().nonnegative().optional(),
+	})
+	.strict();
+
+/** Schema for CLEAN attestation records written to the sidecar. */
+const SidecarCleanAttestationSchema = z
+	.object({
+		record_type: z.literal('clean_attestation'),
+		row_format_family: z.literal('micro_lane'),
+		row_format_version: z.number().int().nonnegative(),
+		record_version: z.object({
+			major: z.number().int().nonnegative(),
+			minor: z.number().int().nonnegative(),
+		}),
+		source_output_ref: z.string().min(1),
+		source_batch_id: z.string().min(1),
+		source_lane_id: z.string().min(1),
+		source_agent: z.string().min(1),
+		source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+		extracted_from_partial_source: z.literal(false),
+		sessionId: z.string().min(1).optional(),
+		parentSessionId: z.string().min(1).optional(),
+		producer: z.string().optional(),
+		micro_lane: z.string().min(1),
+		coverage_scope: z.string().min(1),
+		evidence: z.string().min(1),
 	})
 	.strict();
 
@@ -349,8 +375,8 @@ function withLockfile<T>(lockDir: string, write: () => T): T {
 // ---------------------------------------------------------------------------
 
 /**
- * Append an invocation envelope followed by zero or more candidate records
- * to the sidecar JSONL file for the given batch.
+ * Append an invocation envelope, an optional CLEAN attestation, and zero or
+ * more candidate records to the sidecar JSONL file for the given batch.
  *
  * The envelope is always the first record in the append batch (SC-015).
  * Cross-skill coexistence is enabled via the `producer` field on the
@@ -370,6 +396,7 @@ function withLockfile<T>(lockDir: string, write: () => T): T {
  * @param batchId  The batch identifier (used to derive batchDigest when not provided).
  * @param envelope The invocation envelope record (validated before write).
  * @param candidates Candidate records to append after the envelope (validated before write).
+ * @param cleanAttestation Optional CLEAN attestation written after the envelope.
  * @throws If schema validation fails, lock acquisition fails, or the filesystem write fails.
  */
 export function appendToSidecar(
@@ -377,6 +404,7 @@ export function appendToSidecar(
 	batchId: string,
 	envelope: unknown,
 	candidates: unknown[],
+	cleanAttestation?: unknown,
 ): void {
 	const batchDigest = options.batchDigest ?? computeBatchDigest(batchId);
 	const relPath = sidecarRelativePath(batchDigest);
@@ -386,6 +414,13 @@ export function appendToSidecar(
 	validateRecord(envelope, SidecarEnvelopeSchema, 'envelope');
 	for (let i = 0; i < candidates.length; i++) {
 		validateRecord(candidates[i], SidecarCandidateSchema, `candidate[${i}]`);
+	}
+	if (cleanAttestation !== undefined) {
+		validateRecord(
+			cleanAttestation,
+			SidecarCleanAttestationSchema,
+			'clean_attestation',
+		);
 	}
 
 	// Ensure parent directory exists.
@@ -399,9 +434,18 @@ export function appendToSidecar(
 	const sanitizedCandidates = candidates.map((c) =>
 		sanitizeRecord(structuredClone(c) as Record<string, unknown>),
 	);
+	const sanitizedCleanAttestation =
+		cleanAttestation === undefined
+			? undefined
+			: sanitizeRecord(
+					structuredClone(cleanAttestation) as Record<string, unknown>,
+				);
 
 	// JSONL: one JSON object per line, no trailing commas, envelope first.
 	const lines: string[] = [JSON.stringify(sanitizedEnvelope)];
+	if (sanitizedCleanAttestation) {
+		lines.push(JSON.stringify(sanitizedCleanAttestation));
+	}
 	for (const candidate of sanitizedCandidates) {
 		lines.push(JSON.stringify(candidate));
 	}

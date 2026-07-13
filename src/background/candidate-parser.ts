@@ -32,6 +32,8 @@ const ParseFlagsSchema = z
 		degraded: z.boolean(),
 		row_format_version: z.number().int().nonnegative(),
 		producer: z.string().optional(),
+		expected_family: z.enum(['base_explorer', 'micro_lane']).optional(),
+		expected_micro_lane: z.string().trim().min(1).optional(),
 	})
 	.strict();
 
@@ -82,6 +84,26 @@ export interface CandidateRecord {
 	confidence: string | null;
 }
 
+/** A machine-readable attestation that a complete micro-lane found no candidates. */
+export interface CleanAttestationRecord {
+	record_type: 'clean_attestation';
+	row_format_family: 'micro_lane';
+	row_format_version: number;
+	record_version: { major: number; minor: number };
+	source_output_ref: string;
+	source_batch_id: string;
+	source_lane_id: string;
+	source_agent: string;
+	source_digest: string;
+	extracted_from_partial_source: false;
+	sessionId?: string;
+	parentSessionId?: string;
+	producer?: string;
+	micro_lane: string;
+	coverage_scope: string;
+	evidence: string;
+}
+
 /**
  * One invocation-envelope record per parseCandidates call.
  * Part of the return value but not persisted to a sidecar in this phase.
@@ -103,6 +125,7 @@ export interface InvocationEnvelope {
 	candidate_count: number;
 	parse_errors: number;
 	malformed_rows: number;
+	clean_attestation_count: number;
 }
 
 /**
@@ -135,6 +158,7 @@ export interface DiagnosticsSummary {
 	degraded_source_count: number;
 	incomplete_source_count: number;
 	format_families_detected: string[];
+	clean_attestation_count: number;
 	format_mismatch_hint?: string;
 }
 
@@ -145,6 +169,7 @@ export interface ParseResult {
 	error?: string;
 	error_code?: string;
 	candidates: CandidateRecord[];
+	clean_attestation?: CleanAttestationRecord;
 	invocation_envelope: InvocationEnvelope;
 	diagnostics: DiagnosticsSummary;
 }
@@ -208,7 +233,7 @@ const BASE_EXPLORER_DISCRIMINATOR = 'impact_context';
 const MICRO_LANE_DISCRIMINATOR = 'invariant_violated';
 
 const EXPECTED_FIELD_COUNT = 9;
-const RECORD_VERSION = { major: 1, minor: 0 };
+const RECORD_VERSION = { major: 1, minor: 1 };
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -376,6 +401,7 @@ function buildInvocationEnvelope(
 	candidateCount: number,
 	parseErrors: number,
 	malformedRows: number,
+	cleanAttestationCount = 0,
 ): InvocationEnvelope {
 	return {
 		record_type: 'invocation',
@@ -394,6 +420,7 @@ function buildInvocationEnvelope(
 		candidate_count: candidateCount,
 		parse_errors: parseErrors,
 		malformed_rows: malformedRows,
+		clean_attestation_count: cleanAttestationCount,
 	};
 }
 
@@ -411,6 +438,7 @@ function buildEmptyDiagnostics(
 		degraded_source_count: flags.degraded ? 1 : 0,
 		incomplete_source_count: input.transcriptIncomplete ? 1 : 0,
 		format_families_detected: [],
+		clean_attestation_count: 0,
 	};
 }
 
@@ -586,7 +614,8 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		return emptyTextResult(input, flags);
 	}
 
-	// Header family is informational only; format family is detected per-row (FR-017).
+	// The asserted batch family is authoritative only when it agrees with a
+	// recognizable header. A mismatch is a contract failure, not a remapping hint.
 	let headerFamily: RowFormatFamily | undefined;
 	try {
 		headerFamily = detectFormatFamily(headerFields);
@@ -596,6 +625,18 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		} else {
 			throw e;
 		}
+	}
+	if (
+		flags.expected_family !== undefined &&
+		headerFamily !== undefined &&
+		flags.expected_family !== headerFamily
+	) {
+		return refusalResult(
+			'expected-family-mismatch',
+			`Expected ${flags.expected_family} rows but header declares ${headerFamily}`,
+			input,
+			flags,
+		);
 	}
 
 	const bothDiscriminators =
@@ -620,6 +661,11 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	const formatFamiliesDetected = new Set<RowFormatFamily>();
 	let malformedRows = 0;
 	let currentCandidate: Partial<CandidateRecord> | null = null;
+	let pendingClean:
+		| { micro_lane: string; coverage_scope: string; evidence: string }
+		| undefined;
+	let cleanErrorCode: string | undefined;
+	let cleanErrorMessage: string | undefined;
 
 	for (let i = headerIndex + 1; i < lines.length; i++) {
 		const rawLine = lines[i];
@@ -628,7 +674,59 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		// Skip blank lines — continuation is preserved across blank lines per FR-007.
 		if (trimmed === '') continue;
 
-		const fields = splitRow(trimmed);
+		let fields = splitRow(trimmed);
+
+		// A CLEAN sentinel is a distinct record, not a short continuation row.
+		if (fields[0]?.trim() === '[CLEAN]') {
+			const cleanFamily = flags.expected_family ?? headerFamily;
+			const cleanFields = fields.map((field) => field.trim());
+			if (cleanFamily !== 'micro_lane') {
+				cleanErrorCode = 'invalid-clean-attestation';
+				cleanErrorMessage =
+					'CLEAN attestation is valid only for micro_lane output';
+			} else if (
+				cleanFields.length !== 4 ||
+				cleanFields.slice(1).some((field) => field.length === 0)
+			) {
+				cleanErrorCode = 'invalid-clean-attestation';
+				cleanErrorMessage =
+					'CLEAN attestation requires micro_lane, coverage_scope, and evidence';
+			} else if (pendingClean !== undefined) {
+				cleanErrorCode = 'invalid-clean-attestation';
+				cleanErrorMessage =
+					'Only one CLEAN attestation is allowed per artifact';
+			} else if (flags.degraded || input.transcriptIncomplete === true) {
+				cleanErrorCode = 'untrusted-clean-attestation';
+				cleanErrorMessage =
+					'CLEAN attestation cannot come from a degraded or partial artifact';
+			} else if (
+				flags.expected_micro_lane !== undefined &&
+				cleanFields[1] !== flags.expected_micro_lane
+			) {
+				cleanErrorCode = 'expected-micro-lane-mismatch';
+				cleanErrorMessage = `Expected CLEAN attestation for ${flags.expected_micro_lane}, received ${cleanFields[1]}`;
+			} else {
+				pendingClean = {
+					micro_lane: cleanFields[1],
+					coverage_scope: cleanFields[2],
+					evidence: cleanFields[3],
+				};
+			}
+			if (cleanErrorCode) {
+				parseErrorDetails.push({
+					row_index: i,
+					field: 'clean_attestation',
+					message: cleanErrorMessage ?? 'Invalid CLEAN attestation',
+				});
+				malformedRows++;
+			}
+			continue;
+		}
+
+		// Compatibility: older prompt text put the marker on every data row.
+		if (fields[0]?.trim() === '[CANDIDATE]') {
+			fields = fields.slice(1);
+		}
 
 		// Continuation line: fewer fields than the format family expects (FR-007).
 		if (fields.length < EXPECTED_FIELD_COUNT) {
@@ -645,22 +743,33 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		// Complete row — take exactly the expected number of fields.
 		const rowFields = fields.slice(0, EXPECTED_FIELD_COUNT);
 
-		// Per-row format family detection (FR-017).
+		// Resolve family from the asserted batch, then the recognized header. Only
+		// legacy/unknown-header callers use positional inference.
 		let rowFamily: RowFormatFamily;
-		try {
-			rowFamily = detectRowFormatFamily(rowFields);
-		} catch (e) {
-			if (e instanceof UnknownFormatFamilyError) {
-				malformedRows++;
-				continue;
+		if (flags.expected_family ?? headerFamily) {
+			rowFamily = (flags.expected_family ?? headerFamily) as RowFormatFamily;
+		} else {
+			try {
+				rowFamily = detectRowFormatFamily(rowFields);
+			} catch (e) {
+				if (e instanceof UnknownFormatFamilyError) {
+					malformedRows++;
+					continue;
+				}
+				throw e;
 			}
-			throw e;
 		}
 
 		// Emit parse_error when both discriminators are present on this row (FR-017).
 		const rowHasImpact = rowFields[7].trim() !== '';
 		const rowHasInvariant = rowFields[6].trim() !== '';
-		if (rowHasImpact && rowHasInvariant && rowFamily === 'base_explorer') {
+		if (
+			rowHasImpact &&
+			rowHasInvariant &&
+			rowFamily === 'base_explorer' &&
+			flags.expected_family === undefined &&
+			headerFamily === undefined
+		) {
 			parseErrorDetails.push({
 				row_index: i,
 				field: 'row',
@@ -670,6 +779,19 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		}
 
 		const mapped = mapFields(rowFields, rowFamily);
+		if (
+			rowFamily === 'micro_lane' &&
+			flags.expected_micro_lane !== undefined &&
+			mapped.micro_lane !== flags.expected_micro_lane
+		) {
+			parseErrorDetails.push({
+				row_index: i,
+				field: 'micro_lane',
+				message: `Expected micro_lane ${flags.expected_micro_lane}, received ${mapped.micro_lane ?? '<missing>'}`,
+			});
+			malformedRows++;
+			continue;
+		}
 		const requiredFields =
 			rowFamily === 'base_explorer'
 				? getRequiredFields('base_explorer')
@@ -765,19 +887,68 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		}
 	}
 
+	if (pendingClean && candidates.length > 0) {
+		cleanErrorCode = 'conflicting-clean-attestation';
+		cleanErrorMessage = 'CLEAN attestation cannot appear with candidate rows';
+		parseErrorDetails.push({
+			row_index: headerIndex,
+			field: 'clean_attestation',
+			message: cleanErrorMessage,
+		});
+	}
+	if (
+		pendingClean &&
+		!cleanErrorCode &&
+		(malformedRows > 0 || parseErrorDetails.length > 0)
+	) {
+		cleanErrorCode = 'untrusted-clean-attestation';
+		cleanErrorMessage =
+			'CLEAN attestation requires zero malformed rows and zero parse errors';
+		parseErrorDetails.push({
+			row_index: headerIndex,
+			field: 'clean_attestation',
+			message: cleanErrorMessage,
+		});
+	}
+
+	const cleanAttestation: CleanAttestationRecord | undefined =
+		pendingClean && !cleanErrorCode && candidates.length === 0
+			? {
+					record_type: 'clean_attestation',
+					row_format_family: 'micro_lane',
+					row_format_version: flags.row_format_version,
+					record_version: RECORD_VERSION,
+					source_output_ref: input.output_ref,
+					source_batch_id: input.batchId,
+					source_lane_id: input.laneId,
+					source_agent: input.agent,
+					source_digest: input.digest,
+					extracted_from_partial_source: false,
+					sessionId: input.sessionId,
+					parentSessionId: input.parentSessionId,
+					producer: flags.producer,
+					micro_lane: pendingClean.micro_lane,
+					coverage_scope: pendingClean.coverage_scope,
+					evidence: pendingClean.evidence,
+				}
+			: undefined;
+	if (cleanAttestation) formatFamiliesDetected.add('micro_lane');
+
+	const acceptedCandidates = cleanErrorCode ? [] : candidates;
 	const parseErrors = parseErrorDetails.length;
 
 	const envelope = buildInvocationEnvelope(
 		input,
 		flags,
 		Array.from(formatFamiliesDetected),
-		candidates.length,
+		acceptedCandidates.length,
 		parseErrors,
 		malformedRows,
+		cleanAttestation ? 1 : 0,
 	);
 
 	const diagnostics: DiagnosticsSummary = {
-		candidate_count: candidates.length,
+		candidate_count: acceptedCandidates.length,
 		parse_errors: parseErrors,
 		parse_error_details: parseErrorDetails,
 		malformed_rows: malformedRows,
@@ -786,15 +957,23 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		degraded_source_count: flags.degraded ? 1 : 0,
 		incomplete_source_count: input.transcriptIncomplete ? 1 : 0,
 		format_families_detected: Array.from(formatFamiliesDetected),
+		clean_attestation_count: cleanAttestation ? 1 : 0,
 	};
-	if (candidates.length === 0) {
+	if (acceptedCandidates.length === 0 && !cleanAttestation) {
 		const hint = detectFormatMismatchHint(input.text);
 		if (hint) {
 			diagnostics.format_mismatch_hint = hint;
 		}
 	}
 	return {
-		candidates,
+		...(cleanErrorCode
+			? {
+					error: cleanErrorMessage ?? 'Invalid CLEAN attestation',
+					error_code: cleanErrorCode,
+				}
+			: {}),
+		candidates: acceptedCandidates,
+		...(cleanAttestation ? { clean_attestation: cleanAttestation } : {}),
 		invocation_envelope: envelope,
 		diagnostics,
 	};
@@ -835,6 +1014,7 @@ export function parseAndPersist(
 			input.batchId,
 			result.invocation_envelope,
 			result.candidates,
+			result.clean_attestation,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
