@@ -5,8 +5,12 @@
  * human-reviewed, approved PR to green and merged. Accepts a PR reference in
  * the same three formats as /swarm pr-review and /swarm pr-feedback (full
  * URL, owner/repo#N, or a bare PR number resolved against the origin
- * remote). No free-text instructions are forwarded: this is a mechanical,
- * deliberately-invoked closeout flow, not a review or feedback session.
+ * remote). No free-text instructions are accepted: this is a mechanical,
+ * deliberately-invoked closeout flow, not a review or feedback session, and
+ * it performs a merge — trailing tokens after the PR reference are rejected
+ * with an explicit error rather than silently forwarded into the MODE
+ * signal, closing off any accidental or injected free-text channel into a
+ * merge-capable mode.
  *
  * PR-reference parsing and sanitization are shared with /swarm pr-review and
  * /swarm pr-feedback via ./pr-ref.ts.
@@ -42,6 +46,9 @@ export function handleCiMonitorCommand(
 		return `Error: ${resolved.error}\n\n${USAGE}`;
 	}
 
-	const signal = `[MODE: CI_MONITOR pr="${resolved.prUrl}"]`;
-	return resolved.instructions ? `${signal} ${resolved.instructions}` : signal;
+	if (resolved.instructions) {
+		return `Error: /swarm ci-monitor takes only a PR reference — no trailing instructions. Got: "${resolved.instructions}"\n\n${USAGE}`;
+	}
+
+	return `[MODE: CI_MONITOR pr="${resolved.prUrl}"]`;
 }

@@ -131,6 +131,18 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 					expect(existsSync(opencodePath)).toBe(true);
 					expect(existsSync(claudePath)).toBe(false);
 				});
+			} else if (contract.kind === 'adapter') {
+				it(`${contract.slug}: canonical exists and every adapter shim references it`, () => {
+					expect(existsSync(opencodePath)).toBe(true);
+					const expectedRef = contract.expectedCanonicalRef ?? opencodePath;
+					for (const adapterPath of contract.adapterPaths ?? []) {
+						const resolvedAdapterPath = join(process.cwd(), adapterPath);
+						expect(existsSync(resolvedAdapterPath)).toBe(true);
+						expect(readFileSync(resolvedAdapterPath, 'utf-8')).toContain(
+							expectedRef,
+						);
+					}
+				});
 			}
 		}
 	});
