@@ -37,6 +37,27 @@ const OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
 //   4. Require the canonical OpenCode plugin structure as the parent chain:
 //      .../opencode/{packages|node_modules}/<leaf>. This prevents any pattern
 //      that happens to have a recognized leaf but isn't the actual cache.
+/**
+ * Count path components BELOW the filesystem root, platform-agnostically.
+ *
+ * `path.resolve()` prefixes a drive letter on Windows (e.g. `C:\`), which a
+ * plain `resolved.split(path.sep).filter(Boolean)` would count as an extra
+ * segment — inflating a POSIX-style `/opencode/opencode-swarm` (2 real
+ * components) to 3 on Windows and silently defeating a "too shallow" depth
+ * floor there (Windows-only merge-queue CI failure, PR #1831). Stripping
+ * `path.parse().root` (which is `/` on POSIX and e.g. `C:\` on Windows) makes
+ * both platforms count the same real components. On POSIX this returns exactly
+ * what the old filter produced (the leading empty segment was already dropped),
+ * so it is behavior-preserving there.
+ */
+function segmentDepthBelowRoot(resolved: string): number {
+	const { root } = path.parse(resolved);
+	return resolved
+		.slice(root.length)
+		.split(path.sep)
+		.filter((s) => s.length > 0).length;
+}
+
 // Issue #675 hardening — round 3 (depth-based guard replaces home-containment
 // after critic's cross-platform CI regression finding).
 export function isSafeCachePath(p: string): boolean {
@@ -46,11 +67,11 @@ export function isSafeCachePath(p: string): boolean {
 	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
 		return false;
 	}
-	// 2. Require ≥ 4 path components from root. This rejects pathological
-	// XDG_CACHE_HOME='/' (3 components) while accepting any legitimate cache
-	// layout including non-default XDG_CACHE_HOME=/var/cache and tmpdir paths.
-	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
-	if (segments.length < 4) {
+	// 2. Require ≥ 4 path components below the filesystem root. This rejects
+	// pathological XDG_CACHE_HOME='/' (3 components) while accepting any
+	// legitimate cache layout including non-default XDG_CACHE_HOME=/var/cache
+	// and tmpdir paths — cross-platform (drive letter excluded, see helper).
+	if (segmentDepthBelowRoot(resolved) < 4) {
 		return false;
 	}
 	// 3. Must end in a known cache leaf.
@@ -90,8 +111,7 @@ export function isSafeLockFilePath(p: string): boolean {
 	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
 		return false;
 	}
-	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
-	if (segments.length < 4) {
+	if (segmentDepthBelowRoot(resolved) < 4) {
 		return false;
 	}
 	const leaf = path.basename(resolved);
@@ -145,8 +165,7 @@ export function isSafePromptsDir(p: string): boolean {
 	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
 		return false;
 	}
-	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
-	if (segments.length < 3) {
+	if (segmentDepthBelowRoot(resolved) < 3) {
 		return false;
 	}
 	if (path.basename(resolved) !== 'opencode-swarm') {
@@ -178,6 +197,12 @@ export function isSafePluginConfigPath(p: string): boolean {
 	const resolved = path.resolve(canonical);
 	const home = path.resolve(os.homedir());
 	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+		return false;
+	}
+	// Depth floor (parity with isSafePromptsDir): reject a pathological
+	// XDG_CONFIG_HOME='/' which yields '/opencode/opencode-swarm.json'
+	// (2 components below root). Cross-platform via segmentDepthBelowRoot.
+	if (segmentDepthBelowRoot(resolved) < 3) {
 		return false;
 	}
 	if (path.basename(resolved) !== 'opencode-swarm.json') {

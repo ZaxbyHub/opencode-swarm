@@ -704,6 +704,13 @@ describe('isSafePluginConfigPath', () => {
 		).toBe(false);
 	});
 
+	test('rejects pathological XDG_CONFIG_HOME=/ layout (too few segments)', () => {
+		// XDG_CONFIG_HOME='/' → CONFIG_DIR='/opencode' → PLUGIN_CONFIG_PATH
+		// '/opencode/opencode-swarm.json', only 2 components below the root.
+		// Cross-platform: the drive letter is excluded on Windows too.
+		expect(isSafePluginConfigPath('/opencode/opencode-swarm.json')).toBe(false);
+	});
+
 	test('rejects root and home', () => {
 		expect(isSafePluginConfigPath('/')).toBe(false);
 		expect(isSafePluginConfigPath(process.env.HOME || '/home/user')).toBe(
