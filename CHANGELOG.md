@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.114.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.6...v7.114.7) (2026-07-13)
+
+
+### Bug Fixes
+
+* **tui:** migrate tool-path console.warn/error to logger.log (PR4/5 [#1755](https://github.com/ZaxbyHub/opencode-swarm/issues/1755)) ([a5ed1f1](https://github.com/ZaxbyHub/opencode-swarm/commit/a5ed1f12495233cd08801fb3940d9f4e5923bb2b))
+
 ## [7.114.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.5...v7.114.6) (2026-07-13)
 
 
