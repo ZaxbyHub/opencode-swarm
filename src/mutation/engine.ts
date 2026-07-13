@@ -1,9 +1,10 @@
-import { spawnSync } from 'node:child_process';
-
-type SpawnSyncFn = typeof spawnSync;
-
 import { unlinkSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+
+import {
+	resolveExecutableFromPath,
+	runExternalTool,
+} from '../utils/external-tool-runner.js';
 
 import {
 	batchCheckEquivalence,
@@ -14,6 +15,7 @@ export type MutationOutcome =
 	| 'killed'
 	| 'survived'
 	| 'timeout'
+	| 'cancelled'
 	| 'error'
 	| 'equivalent'
 	| 'skipped';
@@ -96,6 +98,7 @@ export interface MutationReport {
 	killed: number;
 	survived: number;
 	timeout: number;
+	cancelled: number;
 	equivalent: number;
 	skipped: number;
 	errors: number;
@@ -123,17 +126,120 @@ export const MAX_MUTATIONS_PER_FUNCTION = 10;
 const MUTATION_TIMEOUT_MS = 30_000;
 const TOTAL_BUDGET_MS = 300_000;
 const GIT_APPLY_TIMEOUT_MS = 5_000;
+const MAX_MUTATION_OUTPUT_BYTES = 1024 * 1024;
+
+type LegacySpawnResult = {
+	status: number | null;
+	stdout?: Uint8Array | string | null;
+	stderr?: Uint8Array | string | null;
+	error?: Error;
+};
+type LegacySpawnSyncFn = (
+	executable: string,
+	args: string[],
+	options: { cwd: string; timeout: number; stdio: 'pipe' },
+) => LegacySpawnResult;
+
+export type MutationCommandResult = {
+	status: 'completed' | 'timeout' | 'cancelled' | 'spawn-error';
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+	message?: string;
+};
+
+export type MutationCommandRunner = (args: {
+	executable: string;
+	args: string[];
+	cwd: string;
+	timeoutMs: number;
+	abortSignal?: AbortSignal;
+}) => Promise<MutationCommandResult>;
+
+export type MutationExecutionOptions = {
+	abortSignal?: AbortSignal;
+	runner?: MutationCommandRunner;
+};
+
+const legacySpawnSyncUnavailable: LegacySpawnSyncFn = () => {
+	throw new Error('legacy mutation spawnSync seam is test-only');
+};
+
+export const runMutationCommand: MutationCommandRunner = async (args) => {
+	const executable =
+		_internals.resolveExecutableFromPath([args.executable]) ?? args.executable;
+	return _internals.runExternalTool({
+		executable,
+		args: args.args,
+		cwd: args.cwd,
+		timeoutMs: args.timeoutMs,
+		maxStdoutBytes: MAX_MUTATION_OUTPUT_BYTES,
+		maxStderrBytes: MAX_MUTATION_OUTPUT_BYTES,
+		abortSignal: args.abortSignal,
+	});
+};
+
+const runLegacyTestSeam: MutationCommandRunner = async (args) => {
+	try {
+		const result = _internals.spawnSync(args.executable, args.args, {
+			cwd: args.cwd,
+			timeout: args.timeoutMs,
+			stdio: 'pipe',
+		});
+		if (result.error) {
+			const code = (result.error as NodeJS.ErrnoException).code;
+			return {
+				status: code === 'ETIMEDOUT' ? 'timeout' : 'spawn-error',
+				exitCode: result.status,
+				stdout: result.stdout?.toString() ?? '',
+				stderr: result.stderr?.toString() ?? '',
+				message: result.error.message,
+			};
+		}
+		return {
+			status: 'completed',
+			exitCode: result.status,
+			stdout: result.stdout?.toString() ?? '',
+			stderr: result.stderr?.toString() ?? '',
+		};
+	} catch (error) {
+		return {
+			status: 'spawn-error',
+			exitCode: null,
+			stdout: '',
+			stderr: '',
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+};
+
+function selectRunner(
+	options: MutationExecutionOptions,
+): MutationCommandRunner {
+	if (options.runner) return options.runner;
+	// Compatibility for existing DI-based unit tests only. The production seam
+	// is never replaced and therefore always selects the bounded async runner.
+	if (_internals.spawnSync !== legacySpawnSyncUnavailable)
+		return runLegacyTestSeam;
+	return _internals.runCommand;
+}
 
 export const _internals: {
 	executeMutation: typeof executeMutation;
 	computeReport: typeof computeReport;
 	executeMutationSuite: typeof executeMutationSuite;
-	spawnSync: SpawnSyncFn;
+	spawnSync: LegacySpawnSyncFn;
+	runCommand: MutationCommandRunner;
+	runExternalTool: typeof runExternalTool;
+	resolveExecutableFromPath: typeof resolveExecutableFromPath;
 } = {
 	executeMutation,
 	computeReport,
 	executeMutationSuite,
-	spawnSync,
+	spawnSync: legacySpawnSyncUnavailable,
+	runCommand: runMutationCommand,
+	runExternalTool,
+	resolveExecutableFromPath,
 } as const;
 
 export async function executeMutation(
@@ -141,6 +247,7 @@ export async function executeMutation(
 	testCommand: string[],
 	testFiles: string[],
 	workingDir: string,
+	options: MutationExecutionOptions = {},
 ): Promise<MutationResult> {
 	const startTime = Date.now();
 	let outcome: MutationOutcome = 'survived';
@@ -148,6 +255,7 @@ export async function executeMutation(
 	let error: string | undefined;
 	let revertError: Error | undefined;
 	let patchFile: string | undefined;
+	const runner = selectRunner(options);
 
 	try {
 		const safeId = patch.id.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -169,29 +277,29 @@ export async function executeMutation(
 		}
 
 		try {
-			const applyResult = _internals.spawnSync(
-				'git',
-				['apply', '--', patchFile],
-				{
-					cwd: workingDir,
-					timeout: GIT_APPLY_TIMEOUT_MS,
-					stdio: 'pipe',
-				},
-			);
-			if (applyResult.error) {
-				const code = (applyResult.error as NodeJS.ErrnoException).code;
-				if (code === 'ENOENT') {
-					throw new Error('git is not installed or not found in PATH');
-				}
-				throw new Error(`git command failed: ${applyResult.error.message}`);
+			const applyResult = await runner({
+				executable: 'git',
+				args: ['apply', '--', patchFile],
+				cwd: workingDir,
+				timeoutMs: GIT_APPLY_TIMEOUT_MS,
+				abortSignal: options.abortSignal,
+			});
+			if (applyResult.status === 'cancelled') {
+				outcome = 'cancelled';
+				throw new Error('Mutation cancelled while applying patch');
 			}
-			if (applyResult.status !== 0) {
+			if (applyResult.status !== 'completed') {
 				throw new Error(
-					`git apply failed with status ${applyResult.status}: ${applyResult.stderr?.toString() || ''}`,
+					applyResult.message ?? `git apply ${applyResult.status}`,
+				);
+			}
+			if (applyResult.exitCode !== 0) {
+				throw new Error(
+					`git apply failed with status ${applyResult.exitCode}: ${applyResult.stderr}`,
 				);
 			}
 		} catch (applyErr) {
-			outcome = 'error';
+			if (outcome !== 'cancelled') outcome = 'error';
 			return {
 				patchId: patch.id,
 				filePath: patch.filePath,
@@ -213,24 +321,29 @@ export async function executeMutation(
 				safeTestFiles.length > 0
 					? [...testCommand.slice(1), ...safeTestFiles]
 					: testCommand.slice(1);
-			const spawnResult = _internals.spawnSync(testCommand[0], testArgs, {
+			const spawnResult = await runner({
+				executable: testCommand[0],
+				args: testArgs,
 				cwd: workingDir,
-				timeout: MUTATION_TIMEOUT_MS,
-				stdio: 'pipe',
+				timeoutMs: MUTATION_TIMEOUT_MS,
+				abortSignal: options.abortSignal,
 			});
-			if (spawnResult.error) {
-				if ((spawnResult.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+			if (spawnResult.status !== 'completed') {
+				if (spawnResult.status === 'timeout') {
 					outcome = 'timeout';
 					error = 'Test command timed out';
+				} else if (spawnResult.status === 'cancelled') {
+					outcome = 'cancelled';
+					error = 'Test command cancelled';
 				} else {
 					outcome = 'error';
-					error = `Test command failed: ${spawnResult.error}`;
+					error = `Test command failed: ${spawnResult.message ?? spawnResult.status}`;
 				}
-			} else if (spawnResult.status !== 0) {
+			} else if (spawnResult.exitCode !== 0) {
 				outcome = 'killed';
-				testOutput = spawnResult.stdout?.toString() || '';
+				testOutput = spawnResult.stdout;
 			} else {
-				testOutput = spawnResult.stdout?.toString();
+				testOutput = spawnResult.stdout;
 				testPassed = true;
 			}
 		} catch (execErr: unknown) {
@@ -247,29 +360,19 @@ export async function executeMutation(
 	} finally {
 		if (patchFile) {
 			try {
-				const revertResult = _internals.spawnSync(
-					'git',
-					['apply', '-R', '--', patchFile],
-					{
-						cwd: workingDir,
-						timeout: GIT_APPLY_TIMEOUT_MS,
-						stdio: 'pipe',
-					},
-				);
-				if (revertResult.error) {
-					const code = (revertResult.error as NodeJS.ErrnoException).code;
-					if (code === 'ENOENT') {
-						revertError = new Error(
-							'git is not installed or not found in PATH',
-						);
-					} else {
-						revertError = new Error(
-							`git command failed: ${revertResult.error.message}`,
-						);
-					}
-				} else if (revertResult.status !== 0) {
+				const revertResult = await runner({
+					executable: 'git',
+					args: ['apply', '-R', '--', patchFile],
+					cwd: workingDir,
+					timeoutMs: GIT_APPLY_TIMEOUT_MS,
+				});
+				if (revertResult.status !== 'completed') {
 					revertError = new Error(
-						`Failed to revert mutation ${patch.id}: git apply -R failed with status ${revertResult.status}: ${revertResult.stderr?.toString() || ''}. Working tree may be dirty.`,
+						`git revert failed: ${revertResult.message ?? revertResult.status}`,
+					);
+				} else if (revertResult.exitCode !== 0) {
+					revertError = new Error(
+						`Failed to revert mutation ${patch.id}: git apply -R failed with status ${revertResult.exitCode}: ${revertResult.stderr}. Working tree may be dirty.`,
 					);
 				}
 			} catch (revertErr) {
@@ -309,6 +412,7 @@ export function computeReport(
 	let killed = 0;
 	let survived = 0;
 	let timeout = 0;
+	let cancelled = 0;
 	let equivalent = 0;
 	let skipped = 0;
 	let errors = 0;
@@ -323,6 +427,9 @@ export function computeReport(
 				break;
 			case 'timeout':
 				timeout++;
+				break;
+			case 'cancelled':
+				cancelled++;
 				break;
 			case 'equivalent':
 				equivalent++;
@@ -390,6 +497,7 @@ export function computeReport(
 		killed,
 		survived,
 		timeout,
+		cancelled,
 		equivalent,
 		skipped,
 		errors,
@@ -416,6 +524,7 @@ export async function executeMutationSuite(
 		result: MutationResult,
 	) => void,
 	sourceFiles?: Map<string, string>,
+	options: MutationExecutionOptions = {},
 ): Promise<MutationReport> {
 	const startTime = Date.now();
 	const effectiveBudget = budgetMs ?? TOTAL_BUDGET_MS;
@@ -474,6 +583,20 @@ export async function executeMutationSuite(
 
 	// Phase 2: Execution loop
 	for (let i = 0; i < patches.length; i++) {
+		if (options.abortSignal?.aborted) {
+			for (const patch of patches.slice(i)) {
+				results.push({
+					patchId: patch.id,
+					filePath: patch.filePath,
+					functionName: patch.functionName,
+					mutationType: patch.mutationType,
+					outcome: 'cancelled',
+					durationMs: 0,
+					error: 'Mutation suite cancelled before scheduling',
+				});
+			}
+			break;
+		}
 		const elapsed = Date.now() - startTime;
 		if (elapsed > effectiveBudget) {
 			const remaining = patches.slice(i);
@@ -514,6 +637,7 @@ export async function executeMutationSuite(
 			testCommand,
 			testFiles,
 			workingDir,
+			options,
 		);
 		results.push(result);
 

@@ -39,9 +39,8 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries.
-		expect(commandKeys.length).toBe(75);
+		expect(commandKeys.length).toBe(77);
 
-		// Verify catch-all exists
 		expect(commands.swarm).toBeDefined();
 	});
 
@@ -99,6 +98,8 @@ describe('Swarm subcommand registration', () => {
 			'swarm-preflight',
 			'swarm-sync-plan',
 			'swarm-benchmark',
+			'swarm-gate-audit',
+			'swarm-gate-stats',
 			'swarm-costs',
 			'swarm-export',
 			'swarm-reset',
@@ -161,7 +162,6 @@ describe('Swarm subcommand registration', () => {
 			'swarm-ci-simulate',
 		];
 
-		// Verify all expected subcommands exist
 		for (const subcommand of expectedSubcommands) {
 			expect(
 				commands[subcommand],

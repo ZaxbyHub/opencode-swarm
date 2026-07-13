@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 // @ts-expect-error - .mjs script exports runtime helpers without declarations.
 import {
+	REQUIRED_EVALUATION_FIXTURE_IDS,
 	REQUIRED_PROJECT_SKILL_SLUGS,
 	validatePackageFiles,
 } from '../../../scripts/package-smoke.mjs';
@@ -72,6 +73,13 @@ const baseFiles = [
 	'LICENSE',
 	'package.json',
 	...expectedGrammars,
+	...REQUIRED_EVALUATION_FIXTURE_IDS.flatMap((id: string) => [
+		`evaluation-fixtures/tier1/${id}/manifest.json`,
+		`evaluation-fixtures/tier1/${id}/instruction.md`,
+		`evaluation-fixtures/tier1/${id}/environment/baseline.ts`,
+		`evaluation-fixtures/tier1/${id}/environment/defect.ts`,
+		`evaluation-fixtures/tier1/${id}/environment/defect.test.ts`,
+	]),
 ].map((path) => ({ path }));
 
 describe('package-smoke skill-list sync', () => {
@@ -90,6 +98,36 @@ describe('package-smoke skill-list sync', () => {
 		expect([...requiredProjectSkillSlugs].sort()).toEqual(
 			[...REQUIRED_PROJECT_SKILL_SLUGS].sort(),
 		);
+	});
+});
+
+describe('package-smoke generated evaluation probe subprocess safety', () => {
+	test('regression P2: every generated Git call is bounded and fully non-interactive', () => {
+		// Previous code generated three execFileSync calls with inherited timeout
+		// behavior. The outer probe timeout could not guarantee bounded Git children.
+		const script = fs.readFileSync(
+			path.join(process.cwd(), 'scripts', 'package-smoke.mjs'),
+			'utf8',
+		);
+		const start = script.indexOf(
+			"path.join(installDir, 'evaluation-api-probe.mjs')",
+		);
+		const end = script.indexOf(
+			"runCommand(process.execPath, ['evaluation-api-probe.mjs']",
+			start,
+		);
+		expect(start).toBeGreaterThanOrEqual(0);
+		expect(end).toBeGreaterThan(start);
+		const gitCalls = script
+			.slice(start, end)
+			.split(/\r?\n/)
+			.filter((line) => line.includes("execFileSync('git'"));
+
+		expect(gitCalls).toHaveLength(3);
+		for (const call of gitCalls) {
+			expect(call).toContain('timeout: 30_000');
+			expect(call).toContain("stdio: ['ignore', 'ignore', 'ignore']");
+		}
 	});
 });
 

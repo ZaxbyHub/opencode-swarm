@@ -1,5 +1,10 @@
 import type { QualityBudgetEvidence } from '../config/evidence-schema';
 import {
+	computeGateStatistics,
+	type GateStatisticsReport,
+} from '../evaluation/gate-stats.js';
+import { readGateAuditResult } from '../evaluation/store.js';
+import {
 	isValidEvidenceType,
 	listEvidenceTaskIds,
 	loadEvidence,
@@ -20,6 +25,53 @@ const CI = {
 	min_test_to_code_ratio: 30, // percentage (30%)
 };
 
+const GATE_AUDIT_MIN_SAMPLES = 6;
+
+function summarizeGateAuditStatistics(report: GateStatisticsReport) {
+	const caught = report.models.reduce(
+		(total, model) => total + model.caught,
+		0,
+	);
+	const missed = report.models.reduce(
+		(total, model) => total + model.missed,
+		0,
+	);
+	const falseRejections = report.models.reduce(
+		(total, model) => total + model.falseRejections,
+		0,
+	);
+	const negativeControls = report.models.reduce(
+		(total, model) => total + model.negativeControls,
+		0,
+	);
+	const regressions = caught + missed;
+	const insufficientData =
+		report.models.length === 0 ||
+		report.models.some((model) => model.insufficientData);
+	const truthAvailable =
+		report.runs === 1 &&
+		report.corruptRuns.length === 0 &&
+		report.groundTruth.parsed > 0 &&
+		report.groundTruth.malformed === 0 &&
+		report.groundTruth.ambiguous === 0 &&
+		report.groundTruth.unjoined === 0 &&
+		!insufficientData;
+	return {
+		caught,
+		missed,
+		regressions,
+		falseRejections,
+		negativeControls,
+		catchRate: regressions === 0 ? null : (caught / regressions) * 100,
+		falseRejectionRate:
+			negativeControls === 0
+				? null
+				: (falseRejections / negativeControls) * 100,
+		insufficientData,
+		truthAvailable,
+	};
+}
+
 export async function handleBenchmarkCommand(
 	directory: string,
 	args: string[],
@@ -27,6 +79,23 @@ export async function handleBenchmarkCommand(
 	let cumulative = args.includes('--cumulative');
 	if (args.includes('--ci-gate')) cumulative = true;
 	const maxCostUsd = parseMaxCostUsd(args);
+	const gateAuditRunId = parseGateAuditRunId(args);
+	const gateAudit = gateAuditRunId
+		? await readGateAuditResult(directory, gateAuditRunId)
+		: undefined;
+	if (gateAuditRunId && !gateAudit) {
+		throw new Error(`Gate-audit result not found: ${gateAuditRunId}`);
+	}
+	const gateAuditStatistics = gateAuditRunId
+		? await computeGateStatistics(
+				directory,
+				GATE_AUDIT_MIN_SAMPLES,
+				gateAuditRunId,
+			)
+		: undefined;
+	const gateAuditSummary = gateAuditStatistics
+		? summarizeGateAuditStatistics(gateAuditStatistics)
+		: undefined;
 	const mode: 'in-memory' | 'cumulative' = cumulative
 		? 'cumulative'
 		: 'in-memory';
@@ -315,6 +384,41 @@ export async function handleBenchmarkCommand(
 				passed: (costSummary?.total_cost_usd ?? 0) <= maxCostUsd,
 			});
 		}
+		if (gateAudit && gateAuditSummary) {
+			const catchRate = gateAuditSummary.catchRate ?? 0;
+			checks.push(
+				{
+					name: 'Gate audit complete',
+					value: gateAudit.status === 'complete' ? 1 : 0,
+					threshold: 1,
+					operator: '>=',
+					passed: gateAudit.status === 'complete',
+				},
+				{
+					name: 'Gate audit ground truth',
+					value: gateAuditSummary.truthAvailable ? 1 : 0,
+					threshold: 1,
+					operator: '>=',
+					passed: gateAuditSummary.truthAvailable,
+				},
+				{
+					name: 'Gate audit catch rate',
+					value: Math.round(catchRate * 10) / 10,
+					threshold: 100,
+					operator: '>=',
+					passed: gateAuditSummary.truthAvailable && catchRate === 100,
+				},
+				{
+					name: 'Gate audit clean-control rejections',
+					value: gateAuditSummary.falseRejections,
+					threshold: 0,
+					operator: '<=',
+					passed:
+						gateAuditSummary.truthAvailable &&
+						gateAuditSummary.falseRejections === 0,
+				},
+			);
+		}
 		ciGate = { passed: checks.every((c) => c.passed), checks: checks };
 	}
 
@@ -407,6 +511,19 @@ export async function handleBenchmarkCommand(
 		lines.push('');
 	}
 
+	if (gateAudit && gateAuditStatistics && gateAuditSummary) {
+		lines.push(
+			'### Gate Audit',
+			`- Run: ${gateAudit.runId}`,
+			`- Status: ${gateAudit.status}`,
+			`- Ground truth: ${gateAuditSummary.truthAvailable ? 'available' : 'unavailable'} (parsed ${gateAuditStatistics.groundTruth.parsed}; malformed ${gateAuditStatistics.groundTruth.malformed}; ambiguous ${gateAuditStatistics.groundTruth.ambiguous}; unjoined ${gateAuditStatistics.groundTruth.unjoined}; insufficient ${gateAuditSummary.insufficientData})`,
+			`- Regression catches: ${gateAuditSummary.caught}/${gateAuditSummary.regressions}`,
+			`- Clean-control rejections: ${gateAuditSummary.falseRejections}/${gateAuditSummary.negativeControls}`,
+			'- complexity_delta/public_api_delta: unavailable (#1655; excluded)',
+			'',
+		);
+	}
+
 	if (ciGate) {
 		lines.push('### CI Gate', ciGate.passed ? '✅ PASSED' : '❌ FAILED');
 		for (const c of ciGate.checks) {
@@ -480,6 +597,25 @@ export async function handleBenchmarkCommand(
 			delegations: costSummary.delegations,
 			unavailable_delegations: costSummary.unavailable_delegations,
 		};
+	if (gateAudit && gateAuditStatistics && gateAuditSummary)
+		json.gate_audit = {
+			run_id: gateAudit.runId,
+			status: gateAudit.status,
+			manifest_hash: gateAudit.manifestHash,
+			cells: gateAudit.cells.length,
+			caught: gateAuditSummary.caught,
+			missed: gateAuditSummary.missed,
+			regressions: gateAuditSummary.regressions,
+			catch_rate: gateAuditSummary.catchRate,
+			clean_control_rejections: gateAuditSummary.falseRejections,
+			negative_controls: gateAuditSummary.negativeControls,
+			false_rejection_rate: gateAuditSummary.falseRejectionRate,
+			ground_truth_available: gateAuditSummary.truthAvailable,
+			insufficient_data: gateAuditSummary.insufficientData,
+			ground_truth: gateAuditStatistics.groundTruth,
+			corrupt_runs: gateAuditStatistics.corruptRuns,
+			quality_metric_availability: gateAudit.qualityMetricAvailability,
+		};
 	if (ciGate)
 		json.ci_gate = {
 			passed: ciGate.passed,
@@ -515,4 +651,14 @@ function parseMaxCostUsd(args: string[]): number | null {
 		);
 	}
 	return parsed;
+}
+
+function parseGateAuditRunId(args: string[]): string | null {
+	const index = args.indexOf('--gate-audit-run');
+	if (index === -1) return null;
+	const value = args[index + 1];
+	if (!value || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value)) {
+		throw new Error('Invalid --gate-audit-run value: expected a safe run id.');
+	}
+	return value;
 }

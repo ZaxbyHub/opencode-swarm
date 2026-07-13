@@ -172,6 +172,65 @@ describe('external-tool-runner', () => {
 		resolveExit(143);
 	});
 
+	test('kills and reports cancellation without converting it to timeout', async () => {
+		let killCount = 0;
+		const controller = new AbortController();
+		_internals.bunSpawn = (() => ({
+			stdout: streamFromText(''),
+			stderr: streamFromText(''),
+			exited: new Promise<number>(() => {}),
+			exitCode: null,
+			kill: () => {
+				killCount++;
+			},
+		})) as typeof realBunSpawn;
+
+		const pending = runExternalTool({
+			executable: 'slow-tool',
+			args: [],
+			cwd: realpathSync(os.tmpdir()),
+			timeoutMs: 10_000,
+			maxStdoutBytes: 100,
+			maxStderrBytes: 100,
+			abortSignal: controller.signal,
+		});
+		controller.abort();
+		const result = await pending;
+
+		expect(result.status).toBe('cancelled');
+		expect(killCount).toBeGreaterThanOrEqual(1);
+	});
+
+	test('closes the abort race when cancellation happens during spawn', async () => {
+		const controller = new AbortController();
+		let killCount = 0;
+		_internals.bunSpawn = (() => {
+			controller.abort();
+			return {
+				stdout: streamFromText(''),
+				stderr: streamFromText(''),
+				exited: new Promise<number>(() => {}),
+				exitCode: null,
+				kill: () => {
+					killCount++;
+				},
+			};
+		}) as typeof realBunSpawn;
+
+		const result = await runExternalTool({
+			executable: 'race-tool',
+			args: [],
+			cwd: realpathSync(os.tmpdir()),
+			timeoutMs: 25,
+			maxStdoutBytes: 100,
+			maxStderrBytes: 100,
+			abortSignal: controller.signal,
+		});
+
+		expect(result.status).toBe('cancelled');
+		expect(killCount).toBeGreaterThanOrEqual(1);
+	});
+
 	test('truncates stdout across multiple chunks', async () => {
 		_internals.bunSpawn = (() => ({
 			stdout: streamFromChunks(['abc', 'defgh']),

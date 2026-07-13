@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
@@ -67,18 +68,23 @@ function getLockFilePath(directory: string, filePath: string): string {
 		throw new Error('Invalid file path: path traversal not allowed');
 	}
 
-	// Hash the normalized file path to create a safe lock filename
-	// On Windows, lowercase the normalized path to match planner normalization from Phase 4
+	// Hash the normalized file path to create a fixed-length, filesystem-safe lock
+	// filename. Encoding the full path grows past Windows component limits for
+	// ordinary deep project roots.
+	// On Windows, lowercase the normalized path to match planner normalization from Phase 4.
 	const pathForHash =
 		process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-	const hash = Buffer.from(pathForHash)
-		.toString('base64')
-		.replace(/[/+=]/g, '_');
+	const hash = crypto.createHash('sha256').update(pathForHash).digest('hex');
 	const lockPath = path.join(directory, LOCKS_DIR, `${hash}.lock`);
 
-	// Windows: probe for existing lock at old case-preserving hash for backward compatibility
-	if (process.platform === 'win32') {
-		const oldHash = Buffer.from(normalized) // case-preserving
+	// Honor sentinels created by versions that encoded the complete path so an
+	// upgrade cannot acquire a second lock for the same target.
+	const legacyPaths = [pathForHash];
+	if (process.platform === 'win32' && normalized !== pathForHash) {
+		legacyPaths.push(normalized);
+	}
+	for (const legacyPath of legacyPaths) {
+		const oldHash = Buffer.from(legacyPath)
 			.toString('base64')
 			.replace(/[/+=]/g, '_');
 		const oldLockPath = path.join(directory, LOCKS_DIR, `${oldHash}.lock`);

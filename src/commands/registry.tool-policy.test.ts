@@ -36,6 +36,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'diagnose',
 		'preflight',
 		'benchmark',
+		'gate-audit',
+		'gate-stats',
 		'costs',
 		'knowledge',
 		'memory',
@@ -417,6 +419,22 @@ describe('cost command argument policies', () => {
 			allowed: true,
 		});
 		expect(classifySwarmCommandToolUse(badResolved!).allowed).toBe(false);
+	});
+});
+
+describe('gate-audit command argument policy', () => {
+	test('allows an explicit swarm preference through swarm_command', () => {
+		const resolved = _internals.resolveCommand([
+			'gate-audit',
+			'--model',
+			'provider/model',
+			'--swarm',
+			'mega',
+			'--json',
+		]);
+
+		expect(resolved).not.toBeNull();
+		expect(classifySwarmCommandToolUse(resolved!)).toEqual({ allowed: true });
 	});
 });
 

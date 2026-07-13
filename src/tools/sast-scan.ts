@@ -30,6 +30,12 @@ import {
 export interface SastScanInput {
 	/** List of files to scan */
 	changed_files: string[];
+	/**
+	 * Restrict execution to built-in Tier A rules. This is used by isolated,
+	 * reproducible evaluation runs where PATH discovery and Semgrep execution
+	 * (including remote `--config=auto`) are forbidden.
+	 */
+	offline_only?: boolean;
 	/** Minimum severity that causes failure (default: 'medium') */
 	severity_threshold?: 'low' | 'medium' | 'high' | 'critical';
 	/**
@@ -241,6 +247,7 @@ export async function sastScan(
 		severity_threshold = 'medium',
 		capture_baseline = false,
 		phase,
+		offline_only = false,
 	} = input;
 
 	// Check feature flag
@@ -269,8 +276,9 @@ export async function sastScan(
 	/** Paths of files that were successfully scanned (for baseline capture). */
 	const scannedFilePaths: string[] = [];
 
-	// Check Semgrep availability once
-	const semgrepAvailable = isSemgrepAvailable();
+	// Offline evaluation must not even probe PATH for Semgrep. In particular,
+	// this keeps the profile-driven `--config=auto` path unreachable.
+	const semgrepAvailable = !offline_only && _internals.isSemgrepAvailable();
 	const engine: 'tier_a' | 'tier_a+tier_b' = semgrepAvailable
 		? 'tier_a+tier_b'
 		: 'tier_a';
@@ -390,14 +398,14 @@ export async function sastScan(
 				if (bucketKey.startsWith('auto:')) {
 					// Profile-driven auto mode: --config auto --lang <lang>
 					const lang = bucketKey.slice('auto:'.length);
-					semgrepResult = await runSemgrep({
+					semgrepResult = await _internals.runSemgrep({
 						files: bucketFiles,
 						lang,
 						useAutoConfig: true,
 					});
 				} else {
 					// Existing local-rules mode
-					semgrepResult = await runSemgrep({
+					semgrepResult = await _internals.runSemgrep({
 						files: bucketFiles,
 					});
 				}
@@ -788,7 +796,13 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 export const _internals: {
 	sastScan: typeof sastScan;
 	sast_scan: typeof sast_scan;
+	isSemgrepAvailable: typeof isSemgrepAvailable;
+	runSemgrep: typeof runSemgrep;
 } = {
 	sastScan,
 	sast_scan,
+	// Keep live imported bindings for legacy file-scoped module mocks while
+	// exposing a local DI seam for new isolation-safe tests.
+	isSemgrepAvailable: () => isSemgrepAvailable(),
+	runSemgrep: (options) => runSemgrep(options),
 } as const;

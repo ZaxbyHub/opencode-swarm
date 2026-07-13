@@ -1,4 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
+import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import { _internals, type CommandEntry, resolveCommand } from './registry.js';
 
 export type ResolvedSwarmCommand = NonNullable<
@@ -71,6 +72,7 @@ export async function executeSwarmCommand(args: {
 	packageRoot?: string;
 	buildHelpText?: () => string;
 	policy?: SwarmCommandPolicy;
+	evaluationModelDispatcher?: EvaluationModelDispatcher;
 }): Promise<SwarmCommandExecutionResult> {
 	const {
 		directory,
@@ -80,6 +82,7 @@ export async function executeSwarmCommand(args: {
 		packageRoot,
 		buildHelpText,
 		policy,
+		evaluationModelDispatcher,
 	} = args;
 
 	let text: string;
@@ -103,6 +106,7 @@ export async function executeSwarmCommand(args: {
 					agents,
 					packageRoot,
 					source: 'chat',
+					evaluationModelDispatcher,
 				});
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';

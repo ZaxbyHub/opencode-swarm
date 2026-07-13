@@ -23,6 +23,10 @@ import {
 	type SecretscanEvidence,
 	type SyntaxEvidence,
 } from '../config/evidence-schema';
+import {
+	archiveEvaluationArtifacts,
+	type EvaluationRetentionResult,
+} from '../evaluation/retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
@@ -641,31 +645,67 @@ export async function checkRequirementCoverage(
  * If maxBundles is provided, enforces a maximum bundle count by deleting oldest first.
  * Returns array of archived (deleted) task IDs.
  */
+export type EvidenceArchiveReport = {
+	inventoryEvidence: string[];
+	selectedEvidence: string[];
+	selectedEvidenceByAge: string[];
+	selectedEvidenceByCount: string[];
+	archivedEvidence: string[];
+	failedEvidence: string[];
+	evaluation: EvaluationRetentionResult;
+};
+
+export type EvidenceArchiveReportOptions = {
+	report: true;
+	dryRun?: boolean;
+	now?: Date;
+};
+
+export function archiveEvidence(
+	directory: string,
+	maxAgeDays: number,
+	maxBundles?: number,
+): Promise<string[]>;
+export function archiveEvidence(
+	directory: string,
+	maxAgeDays: number,
+	maxBundles: number | undefined,
+	options: EvidenceArchiveReportOptions,
+): Promise<EvidenceArchiveReport>;
 export async function archiveEvidence(
 	directory: string,
 	maxAgeDays: number,
 	maxBundles?: number,
-): Promise<string[]> {
+	options?: EvidenceArchiveReportOptions,
+): Promise<string[] | EvidenceArchiveReport> {
 	const taskIds = await _internals.listEvidenceTaskIds(directory);
-	const cutoffDate = new Date();
+	const cutoffDate = options?.now ? new Date(options.now) : new Date();
 	cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
 	const cutoffIso = cutoffDate.toISOString();
 
+	const selected = new Set<string>();
+	const selectedByAge = new Set<string>();
+	const selectedByCount = new Set<string>();
 	const archived: string[] = [];
+	const failed: string[] = [];
 	const remainingBundles: Array<{ taskId: string; updatedAt: string }> = [];
 
 	for (const taskId of taskIds) {
-		const result = await _internals.loadEvidence(directory, taskId);
+		let result: LoadEvidenceResult;
+		try {
+			result = await _internals.loadEvidence(directory, taskId);
+		} catch {
+			warn('archive: skipping corrupt or unreadable evidence for task', taskId);
+			continue;
+		}
 		if (result.status !== 'found') {
 			continue;
 		}
 
 		// Archive if the bundle hasn't been updated since the cutoff
 		if (result.bundle.updated_at < cutoffIso) {
-			const deleted = await deleteEvidence(directory, taskId);
-			if (deleted) {
-				archived.push(taskId);
-			}
+			selected.add(taskId);
+			selectedByAge.add(taskId);
 		} else {
 			// Track remaining bundles for maxBundles enforcement
 			remainingBundles.push({
@@ -680,20 +720,42 @@ export async function archiveEvidence(
 		// Sort by updated_at ascending (oldest first)
 		remainingBundles.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
 
-		// Delete oldest bundles until we're within the limit
+		// Select oldest bundles until we're within the limit
 		const toDelete = remainingBundles.length - maxBundles;
 		for (let i = 0; i < toDelete; i++) {
-			const deleted = await deleteEvidence(
-				directory,
-				remainingBundles[i].taskId,
-			);
-			if (deleted) {
-				archived.push(remainingBundles[i].taskId);
-			}
+			selected.add(remainingBundles[i].taskId);
+			selectedByCount.add(remainingBundles[i].taskId);
 		}
 	}
 
-	return archived;
+	if (!options?.dryRun) {
+		for (const taskId of [...selected].sort()) {
+			const deleted = await _internals.deleteEvidence(directory, taskId);
+			if (deleted) archived.push(taskId);
+			else failed.push(taskId);
+		}
+	}
+
+	const evaluation = await archiveEvaluationArtifacts({
+		directory,
+		maxAgeDays,
+		maxBundles,
+		dryRun: options?.dryRun,
+		now: options?.now,
+	});
+
+	if (options?.report) {
+		return {
+			inventoryEvidence: [...taskIds].sort(),
+			selectedEvidence: [...selected].sort(),
+			selectedEvidenceByAge: [...selectedByAge].sort(),
+			selectedEvidenceByCount: [...selectedByCount].sort(),
+			archivedEvidence: archived.sort(),
+			failedEvidence: failed.sort(),
+			evaluation,
+		};
+	}
+	return archived.sort();
 }
 
 /**
@@ -714,6 +776,7 @@ export const _internals: {
 	validateProjectRoot: typeof validateProjectRoot;
 	validateEvidence: typeof validateEvidence;
 	saveEvidence: typeof saveEvidence;
+	deleteEvidence: typeof deleteEvidence;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
@@ -721,4 +784,5 @@ export const _internals: {
 	validateProjectRoot,
 	validateEvidence,
 	saveEvidence,
+	deleteEvidence,
 } as const;

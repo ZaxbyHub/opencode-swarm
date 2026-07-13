@@ -1096,7 +1096,9 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm export` | Export plan and context as portable JSON |
 | `/swarm evidence [task]` | Evidence bundles for a task or all tasks |
 | `/swarm archive [--dry-run]` | Archive old evidence with retention policy |
-| `/swarm benchmark` | Performance benchmarks |
+| `/swarm benchmark` | Performance benchmarks; optionally consume a stored gate audit with `--gate-audit-run <id>` |
+| `/swarm gate-audit` | Run the bounded 12-fixture reviewer/test/SAST/mutation/quality evaluation matrix |
+| `/swarm gate-stats` | Aggregate offline catch, false-reject, retry, cost, and reviewer-fallback statistics |
 | `/swarm costs [--json]` | Per-agent, per-task, per-gate, and per-retry token/cost totals from telemetry |
 | `/swarm retrieve [id]` | Retrieve auto-summarized tool outputs (supports offset/limit pagination) |
 | `/swarm reset --confirm` | Clear swarm state files |

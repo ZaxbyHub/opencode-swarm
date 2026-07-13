@@ -4,11 +4,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Evidence } from '../../../src/config/evidence-schema';
 import {
+	_internals,
 	archiveEvidence,
 	deleteEvidence,
 	loadEvidence,
 	saveEvidence,
 } from '../../../src/evidence/manager';
+
+const realLoadEvidence = _internals.loadEvidence;
 
 describe('archiveEvidence', () => {
 	let tempDir: string;
@@ -19,12 +22,26 @@ describe('archiveEvidence', () => {
 	});
 
 	afterEach(() => {
+		_internals.loadEvidence = realLoadEvidence;
 		cleanup(tempDir);
 	});
 
 	test('archiveEvidence with no evidence returns empty array', async () => {
 		const archived = await archiveEvidence(tempDir, 90);
 		expect(archived).toEqual([]);
+	});
+
+	test('skips a bundle whose read throws without aborting retention', async () => {
+		const taskId = 'unreadable';
+		await saveEvidence(
+			tempDir,
+			taskId,
+			createNoteEvidence(taskId, 'Unreadable note'),
+		);
+		_internals.loadEvidence = async () => {
+			throw new Error('simulated read failure');
+		};
+		expect(await archiveEvidence(tempDir, 90)).toEqual([]);
 	});
 
 	test('archiveEvidence deletes bundles older than maxAgeDays', async () => {
