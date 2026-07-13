@@ -1203,9 +1203,36 @@ export async function quarantineLedgerSuffix(
 			.update(badSuffix, 'utf8')
 			.digest('hex')
 			.slice(0, 12);
+		const swarmDir = path.join(directory, '.swarm');
+
+		// Dedup (F-002/F-009): the startup ledger check runs once per process, so
+		// the SAME corruption is re-quarantined on every process restart while the
+		// poison line persists. Each write used a fresh `Date.now()` prefix, so an
+		// unchanged corrupted tail accumulated one duplicate file per restart. If a
+		// quarantine file for this exact content (same `.<hash>` suffix, verified by
+		// byte-comparing the content) already exists, reuse it instead of writing a
+		// new one. Distinct corruptions still get their own file (different hash).
+		try {
+			const existing = fs
+				.readdirSync(swarmDir)
+				.filter(
+					(name) =>
+						name.startsWith('plan-ledger.quarantine.') &&
+						name.endsWith(`.${hash}`),
+				);
+			for (const name of existing) {
+				const existingPath = path.join(swarmDir, name);
+				if (fs.readFileSync(existingPath, 'utf8') === badSuffix) {
+					return { path: existingPath, salvagedCount };
+				}
+			}
+		} catch {
+			// readdir/read failure (dir missing, permission) — fall through and
+			// attempt a fresh write below.
+		}
+
 		const quarantinePath = path.join(
-			directory,
-			'.swarm',
+			swarmDir,
 			`plan-ledger.quarantine.${Date.now()}.${hash}`,
 		);
 		fs.writeFileSync(quarantinePath, badSuffix, 'utf8');

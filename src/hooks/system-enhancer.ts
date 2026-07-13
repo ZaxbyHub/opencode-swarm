@@ -1019,7 +1019,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 										config.hooks?.agent_awareness_max_chars ?? 300,
 									);
 									if (agentContext) {
-										tryInject(`[SWARM AGENT CONTEXT] ${agentContext}`);
+										// Sanitize for parity with the sibling `decisions`
+										// inject above (:1006): both read from context.md,
+										// whose `## Agent Activity` section is auto-populated
+										// from recorded tool activity and can echo tool
+										// output / file content.
+										tryInject(
+											`[SWARM AGENT CONTEXT] ${sanitizeContextText(agentContext)}`,
+										);
 									}
 								}
 							}
@@ -1868,7 +1875,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									config.hooks?.agent_awareness_max_chars ?? 300,
 								);
 								if (agentContext) {
-									const text = `[SWARM AGENT CONTEXT] ${agentContext}`;
+									// Sanitize for parity with the sibling `decisions`
+									// candidate (:1850) — both derive from context.md.
+									const text = `[SWARM AGENT CONTEXT] ${sanitizeContextText(agentContext)}`;
 									candidates.push({
 										id: `candidate-${idCounter++}`,
 										kind: 'agent_context',

@@ -247,4 +247,64 @@ describe('quarantineLedgerSuffix', () => {
 
 		expect(result.salvagedCount).toBe(2);
 	});
+
+	test('F-002: identical corruption is deduped — repeated quarantine of the same content reuses one file (no per-restart accumulation)', async () => {
+		// The startup ledger check runs once per process, so the SAME corruption
+		// is re-quarantined on every process restart while the poison line
+		// persists. Without dedup, each call wrote a fresh Date.now()-prefixed
+		// file — unbounded accumulation for an unchanged corrupted tail.
+		const sameContent = '{ broken: "corruption" }\ntrailing line';
+
+		const first = await quarantineLedgerSuffix(testDir, sameContent);
+		const second = await quarantineLedgerSuffix(testDir, sameContent);
+		const third = await quarantineLedgerSuffix(testDir, sameContent);
+
+		expect(first.path).not.toBeNull();
+		// Repeated identical corruption reuses the first file's path.
+		expect(second.path).toBe(first.path);
+		expect(third.path).toBe(first.path);
+
+		// Exactly one quarantine file on disk for this corruption.
+		const quarantineFiles = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(quarantineFiles.length).toBe(1);
+		expect(fs.readFileSync(first.path!, 'utf8')).toBe(sameContent);
+
+		// A genuinely different corruption still gets its own file.
+		const distinct = await quarantineLedgerSuffix(
+			testDir,
+			'{ a different corruption }',
+		);
+		expect(distinct.path).not.toBe(first.path);
+		const afterDistinct = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(afterDistinct.length).toBe(2);
+	});
+
+	test('F-002 falsification: concurrent quarantine of identical content still yields ONE file (no readdir/write race)', async () => {
+		// quarantineLedgerSuffix is `async` but contains no `await` — its
+		// readdir→byte-compare→write body is fully synchronous, so even
+		// Promise.all-dispatched calls run to completion one-at-a-time and the
+		// second observes the first's file. This guards against a future refactor
+		// that introduces an await between the dedup scan and the write.
+		const sameContent = '{ concurrent: "corruption" }\nrace tail';
+		const results = await Promise.all([
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+		]);
+
+		const paths = new Set(results.map((r) => r.path));
+		expect(paths.size).toBe(1);
+		// salvagedCount is recomputed per call from the same content — stays consistent.
+		for (const r of results) expect(r.salvagedCount).toBe(0);
+
+		const quarantineFiles = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(quarantineFiles.length).toBe(1);
+	});
 });

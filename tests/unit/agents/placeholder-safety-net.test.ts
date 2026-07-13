@@ -1,7 +1,14 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { getAgentConfigs } from '../../../src/agents';
 import { assertNoUnresolvedPlaceholders } from '../../../src/agents/template';
 import type { PluginConfig } from '../../../src/config';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 
 // M12 dead-safety-net fix: the hand-rolled `.replace()` chains that assemble
 // each agent's final system prompt never validated for leftover `{{KEY}}`
@@ -150,5 +157,63 @@ describe('assertNoUnresolvedPlaceholders — unit behavior (M12)', () => {
 				'explorer',
 			),
 		).not.toThrow();
+	});
+});
+
+describe('placeholder safety net — fail-open at init (F-001)', () => {
+	let prevXdg: string | undefined;
+	let cfgDir: string;
+
+	beforeEach(() => {
+		prevXdg = process.env.XDG_CONFIG_HOME;
+		cfgDir = mkdtempSync(join(tmpdir(), 'swarm-f001-'));
+		// loadAgentPrompt reads $XDG_CONFIG_HOME/opencode/opencode-swarm/<agent>.md
+		mkdirSync(join(cfgDir, 'opencode', 'opencode-swarm'), { recursive: true });
+		process.env.XDG_CONFIG_HOME = cfgDir;
+		clearDeferredWarnings();
+	});
+
+	afterEach(() => {
+		if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = prevXdg;
+		rmSync(cfgDir, { recursive: true, force: true });
+		clearDeferredWarnings();
+	});
+
+	test('default (built-in) prompts produce NO placeholder warning — regression guard for our own prompts', () => {
+		// No custom prompt files written → all agents use built-in prompts.
+		clearDeferredWarnings();
+		getAgentConfigs();
+		const placeholderWarnings = getDeferredWarnings().filter((w) =>
+			/unresolved placeholder/i.test(w),
+		);
+		expect(placeholderWarnings).toEqual([]);
+	});
+
+	test('a user custom prompt with a literal {{UPPER_KEY}} does NOT crash init — it warns and registers the agent anyway', () => {
+		// A user-authored custom prompt is used verbatim (no substitution for
+		// Type-A agents), so a literal {{WARNING}} in prose would reach the
+		// assertion. Before the fail-open fix this threw out of getAgentConfigs →
+		// initializeOpenCodeSwarm (fail-closed outer catch) → whole plugin dropped.
+		writeFileSync(
+			join(cfgDir, 'opencode', 'opencode-swarm', 'coder.md'),
+			'You are the coder.\nNote: a field like {{WARNING}} is unresolved.\n',
+			'utf8',
+		);
+		clearDeferredWarnings();
+
+		let configs: ReturnType<typeof getAgentConfigs> | undefined;
+		expect(() => {
+			configs = getAgentConfigs();
+		}).not.toThrow();
+
+		// The coder agent is still registered (init not aborted).
+		expect(configs?.coder).toBeDefined();
+
+		// And the leftover placeholder surfaced as a deferred warning naming the
+		// key and the agent.
+		const warnings = getDeferredWarnings();
+		expect(warnings.some((w) => /\{\{WARNING\}\}/.test(w))).toBe(true);
+		expect(warnings.some((w) => /coder/.test(w))).toBe(true);
 	});
 });

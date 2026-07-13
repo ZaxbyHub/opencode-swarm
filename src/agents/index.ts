@@ -782,9 +782,29 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	// than inside createArchitectAgent so it sees Chain B's output — Chain B
 	// resolves tokens that Chain A injected (e.g. {{AGENT_PREFIX}} inside the
 	// adversarial-test step).
+	//
+	// FAIL-OPEN (invariant 1): a user-authored custom agent prompt
+	// (`<config>/opencode-swarm/<agent>.md`) is passed through verbatim by
+	// resolvePrompt with no substitution, so it can legitimately contain a
+	// literal `{{UPPER_KEY}}` in prose. Letting the assertion throw here would
+	// propagate out of getAgentConfigs → initializeOpenCodeSwarm, whose outer
+	// catch is fail-CLOSED (re-throws) — the whole plugin would be dropped and
+	// the user would see "no agents". Instead, downgrade a leftover-placeholder
+	// to a deferred warning and register the agent anyway. The assertion stays
+	// a hard throw (unit tests depend on it), and built-in-prompt regressions
+	// are still caught in CI by a test that drains the warning buffer after
+	// getAgentConfigs() over the default prompts.
 	for (const agent of agents) {
 		if (typeof agent.config.prompt === 'string') {
-			assertNoUnresolvedPlaceholders(agent.config.prompt, agent.name);
+			try {
+				assertNoUnresolvedPlaceholders(agent.config.prompt, agent.name);
+			} catch (err) {
+				addDeferredWarning(
+					`[opencode-swarm] ${
+						err instanceof Error ? err.message : String(err)
+					} (agent "${agent.name}" was registered anyway; plugin init not aborted).`,
+				);
+			}
 		}
 	}
 

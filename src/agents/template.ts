@@ -6,10 +6,17 @@
  * `.replace()` chains in `src/agents/index.ts` (Chain B) and
  * `src/agents/architect.ts` (Chain A). `assertNoUnresolvedPlaceholders` is the
  * post-substitution safety net that guarantees a typo never leaks a raw
- * `{{KEY}}` to the model — it runs over each agent's FINAL prompt at the
- * pinned call site `src/index.ts:initializeOpenCodeSwarm` immediately before
- * `getAgentConfigs(...)` (see the `withTimeout(2000ms)` wrapping there to
- * honor invariant 1 — plugin init bounded + fail-open).
+ * `{{KEY}}` to the model — it runs over each agent's FINAL prompt inside the
+ * `createSwarmAgents` loop (`src/agents/index.ts`), after every substitution
+ * chain has run, before the agents are returned.
+ *
+ * Invariant 1 (fail-open): the assertion itself throws (unit tests depend on
+ * it), but its production call site in `createSwarmAgents` wraps it in a
+ * try/catch that downgrades a leftover placeholder to a deferred warning and
+ * registers the agent anyway — a user-authored custom prompt may legitimately
+ * contain a literal `{{UPPER_KEY}}` in prose, and plugin init must never abort.
+ * Built-in-prompt regressions stay caught in CI by a test that drains the
+ * warning buffer after `getAgentConfigs()` over the default prompts.
  *
  * Phase 4b of language-agnostic plugin work.
  */

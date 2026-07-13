@@ -205,6 +205,53 @@ describe('sanitizeContextText', () => {
 			expect(result).not.toContain('\ufeff');
 			expect(result).toBe('hello');
 		});
+
+		// F-005: coverage widened to match knowledge-validator INVISIBLE_FORMAT_CHARS.
+		it('strips U+00AD (soft hyphen)', () => {
+			const result = sanitizeContextText('hel\u00adlo');
+			expect(result).not.toContain('\u00ad');
+			expect(result).toBe('hello');
+		});
+
+		it('strips U+200E and U+200F (LRM / RLM BiDi marks)', () => {
+			const result = sanitizeContextText('a\u200eb\u200fc');
+			expect(result).not.toContain('\u200e');
+			expect(result).not.toContain('\u200f');
+			expect(result).toBe('abc');
+		});
+
+		it('strips U+2060 (word joiner) and U+2064 (invisible plus)', () => {
+			const result = sanitizeContextText('x\u2060y\u2064z');
+			expect(result).not.toContain('\u2060');
+			expect(result).not.toContain('\u2064');
+			expect(result).toBe('xyz');
+		});
+
+		// F-005 falsification: the widened ranges (\u00ad, \u200b-\u200f,
+		// \u2060-\u2064) must NOT over-strip visible printables that sit just
+		// outside the boundaries. Regression guard against an off-by-one range.
+		it('does NOT over-strip printable chars adjacent to the new ranges', () => {
+			// \u00ac \u00ac (just below \u00ad), \u00ae \u00ae (just above), \u2065
+			// (gap between \u2064 and \u2066), \u205f medium math space,
+			// \u2010 hyphen \u2014 all must survive verbatim.
+			const input = '\u00ac\u00ae\u2065\u205f\u2010';
+			const result = sanitizeContextText(input);
+			expect(result).toBe(input);
+			expect(result).toContain('\u00ac');
+			expect(result).toContain('\u00ae');
+			expect(result).toContain('\u2065');
+			expect(result).toContain('\u205f');
+			expect(result).toContain('\u2010');
+		});
+
+		// F-005 falsification: idempotency must still hold across the new chars.
+		it('is idempotent on a string mixing new invisible chars and printables', () => {
+			const input = 'a\u00adb\u200ec\u2060d\u00ace';
+			const once = sanitizeContextText(input);
+			const twice = sanitizeContextText(once);
+			expect(twice).toBe(once);
+			expect(once).toBe('abcd\u00ace');
+		});
 	});
 
 	// ─── 6. BiDi override chars ───────────────────────────────────────────────
