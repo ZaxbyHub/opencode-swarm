@@ -96,6 +96,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'codebase-review',
 		'concurrency',
 		'council',
+		'ci-monitor',
 		'coupling',
 		'curate',
 		'dark-matter',
