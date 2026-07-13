@@ -210,7 +210,7 @@ describe('delegation-gate evidence recording', () => {
 		expect(await hasPassedAllGates(tmpDir, '3.1')).toBe(true);
 	});
 
-	it('11. evidence-write failure emits console.warn but does not block delegation', async () => {
+	it('11. evidence-write failure is logged but does not block delegation', async () => {
 		startAgentSession('sess-11', 'architect');
 		const session = ensureAgentSession('sess-11');
 		session.currentTaskId = '1.11';
@@ -222,28 +222,37 @@ describe('delegation-gate evidence recording', () => {
 		rmSync(swarmDir, { recursive: true, force: true });
 		writeFileSync(swarmDir, 'blocked'); // Make it a file instead of directory
 
-		// Spy on console.warn
-		const originalWarn = console.warn;
-		const warnCalls: string[] = [];
-		console.warn = (...args: unknown[]) => {
-			warnCalls.push(args.map(String).join(' '));
+		// Epic #1752 PR3: the evidence-record-failure diagnostic now routes
+		// through logger.log (debug-gated via OPENCODE_SWARM_DEBUG=1) instead
+		// of raw console.warn. Enable debug to observe the call.
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const originalLog = console.log;
+		const logCalls: string[] = [];
+		console.log = (...args: unknown[]) => {
+			logCalls.push(args.map(String).join(' '));
 		};
 
 		try {
 			// This should NOT throw - evidence write failure should be non-blocking
 			await fireToolAfter('sess-11', 'reviewer', 'call-1');
 
-			// Verify console.warn was called with task context
+			// Verify the failure was logged via the debug-gated logger.
 			expect(
-				warnCalls.some(
+				logCalls.some(
 					(msg) =>
 						msg.includes('evidence recording failed') ||
 						msg.includes('evidence write failed'),
 				),
 			).toBe(true);
 		} finally {
-			// Restore console.warn
-			console.warn = originalWarn;
+			// Restore env + console.
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+			console.log = originalLog;
 		}
 	});
 

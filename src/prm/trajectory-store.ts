@@ -11,6 +11,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
+import * as logger from '../utils/logger.js';
 import type { TrajectoryEntry } from './types';
 
 const MAX_TRACKED_TRAJECTORY_SESSIONS = 500;
@@ -94,9 +95,7 @@ export async function appendTrajectoryEntry(
 		setTrajectoryCache(sessionId, [...cached, entry], maxLines);
 	} catch (err) {
 		// Non-blocking: swallow errors to prevent PRM from breaking main flow
-		console.warn(
-			`[trajectory-store] Failed to append trajectory entry: ${err}`,
-		);
+		logger.log(`[trajectory-store] Failed to append trajectory entry: ${err}`);
 	}
 }
 
@@ -132,7 +131,7 @@ export async function readTrajectory(
 		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
 			return [];
 		}
-		console.warn(`[trajectory-store] Failed to read trajectory: ${err}`);
+		logger.log(`[trajectory-store] Failed to read trajectory: ${err}`);
 		return [];
 	}
 }
@@ -183,7 +182,7 @@ export async function truncateTrajectoryIfNeeded(
 		await fs.writeFile(trajectoryPath, `${keptLines.join('\n')}\n`, 'utf-8');
 	} catch (err) {
 		// Non-blocking: swallow errors
-		console.warn(`[trajectory-store] Failed to truncate trajectory: ${err}`);
+		logger.log(`[trajectory-store] Failed to truncate trajectory: ${err}`);
 	}
 }
 
@@ -225,7 +224,7 @@ export async function getCurrentStep(
 		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
 			return 0;
 		}
-		console.warn(`[trajectory-store] Failed to get current step: ${err}`);
+		logger.log(`[trajectory-store] Failed to get current step: ${err}`);
 		return 0;
 	}
 }

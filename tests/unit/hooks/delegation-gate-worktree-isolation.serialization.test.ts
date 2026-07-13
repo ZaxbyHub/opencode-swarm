@@ -335,10 +335,16 @@ describe('FR-104 SC-113: FIFO eviction must not remove active sessions', () => {
 		// Approach: Call rememberStandardWorktreeSerializationSession via _internals
 		// directly. This bypasses the handleStandardWorktreeFailure collision issue
 		// and directly exercises the FIFO cap check.
+		//
+		// Epic #1752 PR3: the cap-refusal diagnostic now routes through logger.log
+		// (debug-gated via OPENCODE_SWARM_DEBUG=1) instead of raw console.warn.
+		// Enable debug to observe the call, then capture console.log output.
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
 		const consoleWarnings: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (msg: string) => {
-			consoleWarnings.push(msg);
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => {
+			consoleWarnings.push(String(args[0]));
 		};
 
 		try {
@@ -386,7 +392,13 @@ describe('FR-104 SC-113: FIFO eviction must not remove active sessions', () => {
 				),
 			).toBe(true);
 		} finally {
-			console.warn = originalWarn;
+			// Restore env + console.
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+			console.log = originalLog;
 		}
 	});
 

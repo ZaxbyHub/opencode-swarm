@@ -9,6 +9,8 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
+import * as logger from '../utils/logger.js';
 
 /**
  * Validates that a path is within a base directory using canonical path resolution.
@@ -106,7 +108,12 @@ export async function startReplayRecording(
 
 		// Validate path is within .swarm/replays/
 		if (!isPathSafe(filepath, replayDir)) {
-			console.warn(
+			// Defense-in-depth signal: under normal flow this is unreachable
+			// (sanitizeFilename neutralizes traversal first), but if the guard
+			// fires it signals an internal-invariant violation. Surface via
+			// /swarm diagnose + debug log; never raw stderr (the attempt is
+			// blocked, not corrupting — Invariant 10).
+			advisoryWarn(
 				`[replay] Invalid path detected - path traversal attempt blocked for session ${sessionID}`,
 			);
 			return null;
@@ -118,7 +125,7 @@ export async function startReplayRecording(
 		return filepath;
 	} catch (err) {
 		// Non-blocking: log error and return null
-		console.warn(
+		logger.log(
 			`[replay] Failed to start recording for session ${sessionID}: ${err}`,
 		);
 		return null;
@@ -141,7 +148,7 @@ export async function recordReplayEntry(
 	try {
 		// Validate artifactPath is within .swarm/replays/ using path segment validation
 		if (!isWithinReplaysDir(artifactPath)) {
-			console.warn(
+			logger.log(
 				`[replay] Invalid artifact path - not within .swarm/replays/: ${artifactPath}`,
 			);
 			return;
@@ -156,7 +163,7 @@ export async function recordReplayEntry(
 		await fs.appendFile(artifactPath, line, 'utf-8');
 	} catch (err) {
 		// Non-blocking: log error and continue
-		console.warn(`[replay] Failed to record entry: ${err}`);
+		logger.log(`[replay] Failed to record entry: ${err}`);
 	}
 }
 

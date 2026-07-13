@@ -1737,7 +1737,7 @@ export function createDelegationGateHook(
 					}
 				}
 			} catch (err) {
-				console.warn(
+				logger.log(
 					`[delegation-gate] toolAfter submit_council_verdicts: failed to parse output: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
@@ -2261,7 +2261,7 @@ export function createDelegationGateHook(
 					}
 				} catch (err) {
 					/* non-fatal — evidence is additive, never blocks delegation */
-					console.warn(
+					logger.log(
 						`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				} finally {
@@ -2468,7 +2468,7 @@ export function createDelegationGateHook(
 					}
 				} catch (err) {
 					/* non-fatal — evidence is additive, never blocks delegation */
-					console.warn(
+					logger.log(
 						`[delegation-gate] fallback evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}

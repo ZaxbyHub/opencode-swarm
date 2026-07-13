@@ -5,6 +5,7 @@ import {
 	type LanguageDefinition,
 } from '../lang/registry.js';
 import { loadGrammar } from '../lang/runtime.js';
+import * as logger from '../utils/logger.js';
 
 export interface ASTChange {
 	type: 'added' | 'modified' | 'removed' | 'renamed';
@@ -236,7 +237,7 @@ export async function computeASTDiff(
 		// On timeout or error, fall back to raw diff
 		const errorMsg = error instanceof Error ? error.message : 'Unknown error';
 		if (errorMsg === 'AST_TIMEOUT') {
-			console.warn(
+			logger.log(
 				`[ast-diff] Timeout for ${filePath}, falling back to raw diff`,
 			);
 		}

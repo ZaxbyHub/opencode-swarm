@@ -1,0 +1,93 @@
+# TUI pollution sweep — hook path (PR3 of epic #1752)
+
+## What
+
+Migrates every remaining raw `console.warn` on the plugin-host hook path
+(chat/tool/system message hooks and their service dependencies, plus the
+`prm` recording subsystem) to the PR1 foundation helpers:
+
+- **43 diagnostic fail-open catches** → `logger.log(msg)` — debug-gated
+  (`OPENCODE_SWARM_DEBUG=1`), NOT buffered. These are best-effort evidence
+  records, git provisioning fallbacks, confidence-floor sweeps, JSONL-parse
+  skips, budget-state writes, and PRM recording failures. They would flood
+  `/swarm diagnose` if buffered.
+- **2 operator-actionable / security-adjacent signals** → `advisoryWarn(msg)`
+  — buffered for `/swarm diagnose` + emitted under debug. Never raw stderr.
+
+Migrated files (`src/`):
+
+- `hooks/delegation-gate.ts` — 3 evidence-record / parse-failure catches.
+- `hooks/delegation-gate/worktree-isolation.ts` — 20 provisioning-fallback
+  catches (serialization cap, git worktree/add/commit/rev-parse/tag failures,
+  orphan recovery, collision cleanup, lane-env read).
+- `hooks/knowledge-store.ts` — 7 confidence-floor sweep / JSONL-parse /
+  delta-apply fail-open catches.
+- `hooks/skill-usage-log.ts` — 2 usage-feedback fail-open catches.
+- `council/council-evidence-writer.ts` — 1 round-history audit-log append catch.
+- `diff/ast-diff.ts` — 1 AST-timeout fallback.
+- `services/context-budget-service.ts` — 1 budget-state write catch.
+- `session/worktree-link-suggestion.ts` — 1 actionable advisory (>1 worktree
+  → run `/swarm link`).
+- `prm/index.ts` — 1 toolAfter error catch.
+- `prm/replay.ts` — 4 sites (1 path-traversal-blocked defense-in-depth signal
+  → `advisoryWarn`; 3 recording-failure catches → `log`).
+- `prm/trajectory-store.ts` — 4 non-blocking swallow-error catches.
+
+## Why
+
+Raw `console.warn` writes to stderr corrupt the OpenCode bubbletea TUI when
+it owns the terminal (issue #1249 class). The hook path fires these on any
+diagnostic fail-open condition mid-turn — with no error surfaced to the user.
+PR1 built the `advisoryWarn` helper; PR2 closed the init path; this PR closes
+the hook path so the TUI stays clean during delegation, evidence recording,
+confidence-floor sweeps, council rounds, AST diffing, context-budget writes,
+worktree provisioning, and PRM trajectory recording.
+
+## Behavior changes
+
+- The 43 diagnostic catches are now silent unless `OPENCODE_SWARM_DEBUG=1`.
+  Previously they wrote raw stderr on every fail-open. No operational
+  information is lost — operators debugging a specific failure set the env
+  var or inspect the return values (the catches already fail open).
+- The worktree-link suggestion and the replay path-traversal-blocked signal
+  are now discoverable in `/swarm diagnose` (buffered) instead of polluting
+  stderr. The worktree-link suggestion remains once-per-session (deduped).
+- The replay path-traversal signal is defense-in-depth: under normal flow it
+  is unreachable (`sanitizeFilename` neutralizes traversal before the
+  `isPathSafe` guard runs), but if it ever fires it signals an internal-
+  invariant violation worth surfacing via `/swarm diagnose`.
+- No breaking API changes. All function signatures, return values, and
+  default fail-open behavior are preserved; only the warning delivery channel
+  changed.
+
+## Regression guard
+
+Extended `tests/unit/plugin-tui-safety.test.ts` to cover the 11 migrated
+files (matching the PR2 precedent). The scan asserts each file contains zero
+raw `console.warn`. This is the interim guard until PR5 of epic #1752 enables
+Biome `suspicious/noConsole` globally.
+
+## Testing
+
+- Updated `tests/unit/session/worktree-link-suggestion.test.ts` to assert via
+  `getDeferredWarnings()` / `clearDeferredWarnings()` (PR2 buffer pattern)
+  instead of `spyOn(console, 'warn')`, with `clearDeferredWarnings()` in
+  `beforeEach`/`afterEach` (AGENTS.md Invariant 7).
+- Updated 3 test files whose assertions observed `console.warn`/`console.log`
+  output from migrated diagnostic sites (`council/evidence-writer-gaps`,
+  `hooks/delegation-gate-worktree-isolation.serialization`,
+  `hooks/delegation-gate.evidence`) to set `OPENCODE_SWARM_DEBUG='1'` and
+  capture via `console.log`, restoring env + console in `finally`.
+- The 4 other test files the issue listed (`curator-atomic-write`,
+  `delegation-tracker`, `guardrails-directory`, `diagnose-buffered-warning`)
+  were verified by direct grep + import inspection to assert on non-migrated
+  source or inline test logic; no edits were needed.
+
+## Scope notes
+
+- Biome `suspicious/noConsole` enforcement remains deferred to PR5 of epic
+  #1752.
+- `src/agents/index.ts` (hand-rolled `if (!quiet) console.warn` pattern),
+  `src/commands/dark-matter.ts`, and the ~85 other `TUI_POLLUTING_UNGUARDED`
+  sites identified in the broader sweep are explicitly out of scope for PR3
+  and belong to PR4/PR5.

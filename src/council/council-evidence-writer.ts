@@ -23,6 +23,7 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from '../evidence/task-file.js';
+import * as logger from '../utils/logger.js';
 import type { CouncilSynthesis } from './types';
 
 const EVIDENCE_DIR = '.swarm/evidence';
@@ -190,7 +191,7 @@ export async function writeCouncilEvidence(
 		);
 	} catch (auditError) {
 		// Audit log failure must not break the primary evidence write.
-		console.warn(
+		logger.log(
 			`writeCouncilEvidence: failed to append round-history audit log: ${auditError instanceof Error ? auditError.message : String(auditError)}`,
 		);
 	}

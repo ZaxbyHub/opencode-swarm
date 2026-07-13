@@ -9,6 +9,7 @@
 import { resolveSwarmKnowledgePath } from '../hooks/knowledge-store';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { bunFile, bunWrite } from '../utils/bun-compat';
+import * as logger from '../utils/logger.js';
 import { validateDirectory } from '../utils/path-security';
 import { readCachedTextFile } from '../utils/swarm-artifact-cache';
 
@@ -177,7 +178,7 @@ async function writeBudgetState(
 		const content = JSON.stringify(state, null, 2);
 		await bunWrite(resolvedPath, content);
 	} catch (error) {
-		console.warn(
+		logger.log(
 			'[context-budget] Failed to write budget state:',
 			error instanceof Error ? error.message : String(error),
 		);

@@ -7,6 +7,10 @@ import {
 	type LinkPointer,
 	writeLinkPointer,
 } from '../../../src/hooks/knowledge-link.js';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer.js';
 import { _internals } from '../../../src/session/worktree-link-suggestion.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
@@ -36,10 +40,17 @@ describe('worktree-link-suggestion', () => {
 	beforeEach(() => {
 		_internals.resetSuggested();
 		invalidateKnowledgeStoreDirCache();
+		// Epic #1752 PR3: the worktree-link advisory now routes through
+		// advisoryWarn (buffered for /swarm diagnose) instead of raw
+		// console.warn. Clear the module-level deferred-warning buffer between
+		// tests (AGENTS.md Invariant 7 — no cross-test pollution in the shared
+		// bun test-runner process).
+		clearDeferredWarnings();
 	});
 	afterEach(() => {
 		_internals.resetSuggested();
 		invalidateKnowledgeStoreDirCache();
+		clearDeferredWarnings();
 	});
 
 	test('countWorktrees returns 0 for a non-git directory (fail-open)', async () => {
@@ -72,6 +83,8 @@ describe('worktree-link-suggestion', () => {
 			const warn = spyOn(console, 'warn').mockImplementation(() => {});
 			await _internals.maybeSuggestWorktreeLink(dir, 'sess-single');
 			expect(warn).not.toHaveBeenCalled();
+			// Single-worktree repo: no advisory buffered.
+			expect(getDeferredWarnings()).toHaveLength(0);
 			warn.mockRestore();
 		} finally {
 			cleanup();
@@ -104,16 +117,26 @@ describe('worktree-link-suggestion', () => {
 			// Unlinked + 2 worktrees → suggestion fires once.
 			const warn = spyOn(console, 'warn').mockImplementation(() => {});
 			await _internals.maybeSuggestWorktreeLink(main.dir, 'sess-multi');
-			expect(warn).toHaveBeenCalledTimes(1);
-			expect(String(warn.mock.calls[0]?.[0])).toContain('/swarm link');
+			// Epic #1752 PR3: the advisory now routes through advisoryWarn
+			// (buffered), NOT raw console.warn. Prove no raw stderr is emitted.
+			expect(warn).not.toHaveBeenCalled();
+			expect(getDeferredWarnings().some((m) => m.includes('/swarm link'))).toBe(
+				true,
+			);
 
-			// Same session again → deduped (no second warning).
+			// Same session again → deduped (no second warning). The source's
+			// _suggestedSessions.has() check returns early before advisoryWarn,
+			// so the buffer still holds exactly one /swarm link entry.
 			await _internals.maybeSuggestWorktreeLink(main.dir, 'sess-multi');
-			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn).not.toHaveBeenCalled();
+			expect(
+				getDeferredWarnings().filter((m) => m.includes('/swarm link')).length,
+			).toBe(1);
 			warn.mockRestore();
 
 			// Once linked, a fresh session does not suggest.
 			_internals.resetSuggested();
+			clearDeferredWarnings();
 			const pointer: LinkPointer = {
 				version: 1,
 				linkId: 'linked-proj',
@@ -124,6 +147,7 @@ describe('worktree-link-suggestion', () => {
 			const warn2 = spyOn(console, 'warn').mockImplementation(() => {});
 			await _internals.maybeSuggestWorktreeLink(main.dir, 'sess-after-link');
 			expect(warn2).not.toHaveBeenCalled();
+			expect(getDeferredWarnings()).toHaveLength(0);
 			warn2.mockRestore();
 
 			// Clean up the linked worktree to avoid leaking git worktree registrations.
