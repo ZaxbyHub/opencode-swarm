@@ -17,8 +17,16 @@
 #
 # Flagged constructs (each verified to be genuinely unsupported in bash 3.2,
 # the macOS system bash — not guessed):
-#   - `declare -A` — associative arrays, added in bash 4.0.
-#   - `grep -P` — PCRE support; BSD grep (macOS) has no -P flag at all.
+#   - Associative arrays — `declare -A`/`typeset -A`/`local -A`/`readonly -A`
+#     (and flag-combined forms like `declare -gA`), added in bash 4.0. All
+#     four declaration keywords accept `-A`; catching only `declare -A` (the
+#     original cycle 1 implementation) missed `local -A`/`typeset -A`, which
+#     are equally common and equally broken on macOS's bash 3.2.
+#   - `grep -P` / `grep -Po` / `grep --perl-regexp` — PCRE support; BSD grep
+#     (macOS) has no -P flag at all, in any position or combination. Cycle 1's
+#     `-[a-zA-Z]*P\b` required P to be the LAST flag character, missing
+#     `-Po`/`-Pn`-style combinations where flags follow the P — verified via
+#     reviewer's independent re-derivation during issue #1737 review.
 #   - `coproc` — coprocess keyword, added in bash 4.0.
 #   - `mapfile` / `readarray` — builtins added in bash 4.0 (synonyms).
 # NOT flagged: hex escapes like `\x27`. bash 3.2 DOES support `\xHH` inside
@@ -55,14 +63,14 @@ while IFS= read -r file; do
     # but that's not a realistic authoring pattern for these constructs.
     code_only="$(grep -vE '^[[:space:]]*#' "$file" || true)"
 
-    if echo "$code_only" | grep -qE 'declare[[:space:]]+-A'; then
-        echo "ERROR: $file uses \`declare -A\` (bash 4+ associative arrays) — not supported on macOS's bash 3.2."
+    if echo "$code_only" | grep -qE '\b(declare|typeset|local|readonly)\b[[:space:]]+-[a-zA-Z]*A[a-zA-Z]*\b'; then
+        echo "ERROR: $file uses an associative array (declare/typeset/local/readonly -A) — bash 4+ only, not supported on macOS's bash 3.2."
         echo "       Use a plain indexed array or parallel files instead (see scripts/check-invariants.sh for the established pattern)."
         file_has_violation=1
     fi
 
-    if echo "$code_only" | grep -qE '\bgrep\b[^|&;]*-[a-zA-Z]*P\b'; then
-        echo "ERROR: $file uses \`grep -P\` (PCRE support) — BSD grep on macOS has no -P flag."
+    if echo "$code_only" | grep -qE '\bgrep\b[^|&;]*(-[a-zA-Z]*P[a-zA-Z]*\b|--perl-regexp\b)'; then
+        echo "ERROR: $file uses \`grep -P\`/PCRE mode (any flag combination, or --perl-regexp) — BSD grep on macOS has no -P support at all."
         echo "       Use \`grep -E\` with explicit alternation instead (see scripts/check-invariants.sh for the established pattern)."
         file_has_violation=1
     fi
