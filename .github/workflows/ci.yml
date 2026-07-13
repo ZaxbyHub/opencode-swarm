@@ -86,8 +86,15 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: github.event_name == 'pull_request'
         with:
-          # Full history needed to diff base...head reliably (shallow clones
-          # can miss the merge-base). Matches drift-check.yml's convention.
+          # Full history needed so both BASE_SHA and HEAD_SHA below are
+          # guaranteed present locally for a plain two-dot `git diff` (a
+          # shallow clone can miss one of them, especially BASE_SHA on a
+          # long-lived PR). Two-dot, not three-dot/merge-base: this only
+          # needs "what changed between these two exact commits," and
+          # two-dot's tendency to also include unrelated upstream churn is
+          # the safe-direction failure mode here — it can only make this
+          # detector MORE likely to opt into the fuller matrix, never less.
+          # Matches drift-check.yml's fetch-depth: 0 convention.
           fetch-depth: 0
       # Single unconditional step (not split by event type) so the job-level
       # `outputs:` above always resolves from this one step's ID, regardless
