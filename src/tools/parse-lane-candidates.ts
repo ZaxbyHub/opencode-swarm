@@ -53,6 +53,20 @@ const ParseLaneCandidatesArgsSchema = z
 			.optional()
 			.default('swarm-pr-review')
 			.describe('Producer label for cross-skill filtering in the sidecar.'),
+		expected_family: z
+			.enum(['base_explorer', 'micro_lane'])
+			.optional()
+			.describe(
+				'Assert the row family for this dispatch batch. A recognizable conflicting header is refused.',
+			),
+		expected_micro_lane: z
+			.string()
+			.trim()
+			.min(1)
+			.optional()
+			.describe(
+				'Assert the micro-lane label linked to this dispatch provenance. Mismatched candidates and CLEAN attestations are refused.',
+			),
 		use_lockfile: z
 			.boolean()
 			.default(false)
@@ -102,6 +116,9 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 			row_format_version:
 				ParseLaneCandidatesArgsSchema.shape.row_format_version,
 			producer: ParseLaneCandidatesArgsSchema.shape.producer,
+			expected_family: ParseLaneCandidatesArgsSchema.shape.expected_family,
+			expected_micro_lane:
+				ParseLaneCandidatesArgsSchema.shape.expected_micro_lane,
 			use_lockfile: ParseLaneCandidatesArgsSchema.shape.use_lockfile,
 			project_root: ParseLaneCandidatesArgsSchema.shape.project_root,
 		},
@@ -129,6 +146,8 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				degraded,
 				row_format_version,
 				producer,
+				expected_family,
+				expected_micro_lane,
 				use_lockfile,
 				project_root,
 			} = parsed.data;
@@ -259,6 +278,8 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				degraded,
 				row_format_version,
 				...(producer ? { producer } : {}),
+				...(expected_family ? { expected_family } : {}),
+				...(expected_micro_lane ? { expected_micro_lane } : {}),
 			};
 
 			// -------------------------------------------------------------------

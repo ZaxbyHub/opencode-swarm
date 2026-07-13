@@ -70,6 +70,7 @@ Council mode applies only when the user explicitly says one of:
 - `N-agent review`
 - `/council`
 - `[COUNCIL MODE]`
+- `[MODE: PR_REVIEW … council=true]`
 - `assume all work is wrong`
 
 Council mode is mutually exclusive with the default layered workflow. Do not blend them.
@@ -153,7 +154,7 @@ Before deeper analysis, verify the PR meets the commit-pr skill's publication co
 - **Title format:** `<type>(<scope>): <description>` — lowercase description, no trailing period, allowed types: `feat`, `fix`, `perf`, `revert`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`.
 - **Body contract:** `Closes #<issue-number>` as the first line (when the PR resolves an issue), followed by `## Summary`, `## Invariant audit` (all 12 invariants), and `## Test plan` sections.
 
-**`Closes #N` claim integrity (apply the COVERAGE GATE):** if the PR body claims `Closes #<issue-number>`, verify (a) the issue is currently open (`gh issue view <N> --json state`), and (b) the diff addresses the issue's acceptance criteria (read the issue, map each criterion to changed files/symbols, and inspect the diff for those areas). If the issue is already closed by another merged PR, do NOT re-close it — the duplicate `Closes #N` reference is misleading and will confuse release-please aggregation. If the issue is open but the diff does not address the acceptance criteria, mark the claim as `UNVERIFIED — claim integrity` in the validation provenance and surface the unresolved claim-integrity gap to the user before synthesis.
+**`Closes #N` claim-integrity check:** if the PR body claims `Closes #<issue-number>`, verify (a) the issue is currently open (`gh issue view <N> --json state`), and (b) the diff addresses the issue's acceptance criteria (read the issue, map each criterion to changed files/symbols, and inspect the diff for those areas). If the issue is already closed by another merged PR, do NOT re-close it — the duplicate `Closes #N` reference is misleading and will confuse release-please aggregation. If the issue is open but the diff does not address the acceptance criteria, mark the claim as `UNVERIFIED — claim integrity` in the validation provenance and surface the unresolved claim-integrity gap to the user before synthesis.
 
 Non-compliance is a ledger item (advisory, not blocking — CI will catch it). If the PR is from an external contributor, note the compliance gap for the maintainer to address before merge.
 
@@ -173,23 +174,24 @@ If GraphQL is unavailable, keep the signal and mark
 
 ```bash
 # Issue comments (general PR thread)
-gh pr view <PR_NUMBER> --json comments
+gh api --paginate repos/{owner}/{repo}/issues/{PR_NUMBER}/comments
 
 # Review comments (inline code comments)
-gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
+gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
 
 # Review summaries (approve/request-changes/comment events)
-gh pr view <PR_NUMBER> --json reviews
+gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/reviews
 
 # Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
 # Inline review comments — use REST API for reliable bot detection via user.type
-gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
 ```
 
-For general PR comments (not inline), use the issue comments endpoint:
-```bash
-gh api repos/{owner}/{repo}/issues/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
-```
+`--paginate` requests every REST page; with `--jq`, `gh` applies the filter to
+the combined page stream. Filter bot identities from the complete issue-comment
+result using the same predicate when needed. `gh pr view --json comments,reviews`
+is convenience-only because those fields have item caps; never use it as the
+authoritative “all signals” intake.
 
 ### Step 2 — Classify each comment
 
@@ -562,7 +564,7 @@ Tool candidate rules:
 
 Launch all base lanes with `dispatch_lanes_async` when available. Pass the six lane specs together, set `max_concurrent` to `6`, record the returned `batch_id`, and continue only non-dependent architect work: refine the obligation ledger, inspect PR metadata, prepare micro-lane trigger checks, and run deterministic read-only local tools. Do not synthesize findings from running lanes. Keep each lane `prompt` compact: send the shared review context (PR diff, obligation ledger, scope) ONCE via the `common_prompt` field, or have lanes read it from a file by absolute path, instead of inlining the same large blob into all six prompts — oversized inline prompts produce malformed or truncated tool-call JSON and force clumsy file workarounds.
 
-**Incremental collection:** While base lanes are running, poll with `collect_lane_results` (without `wait` or `wait: false`) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains.
+**Incremental collection:** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains.
 
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
@@ -581,22 +583,20 @@ After `collect_lane_results` returns for base lanes, process each lane result
 that carries an `output_ref`. The orchestrator MUST use the candidate parser
 rather than preview-text extraction:
 
-1. For each `output_ref` (or batched), call `parse_lane_candidates` (or the
-   internal `parseAndPersist` module function) with `output_ref` and `producer`
-   flags; the parser auto-detects the format family per row. The parser reads
+1. For each `output_ref`, call `parse_lane_candidates` with `output_ref`,
+   `producer: "swarm-pr-review"`, and `expected_family: "base_explorer"`. The parser reads
    the full artifact from disk (no preview truncation issue) and returns
    structured `ParseResultWithSidecar` records.
-2. Filter the returned `candidates[]` array by `producer: "swarm-pr-review"` and
-   the relevant `row_format_family` (e.g., `base_explorer` for base lanes,
-   `micro_lane` for micro-lanes). Filtering happens on the parsed results, NOT
-   on the tool input.
+2. Filter the returned `candidates[]` by `producer: "swarm-pr-review"` plus the
+   exact `source_batch_id` and `source_lane_id` from the base dispatch. Treat a
+   family mismatch or parse error as a lane-output failure; family metadata is
+   not the acceptance boundary.
 3. Group the filtered candidates into reviewer-sized chunks:
    - by file area (group by the directory or module of the `file_line` field),
    - by category (group by the `category` field),
    - by count (target max 50 candidates per chunk; smaller chunks are fine).
-4. Dispatch reviewer lanes (one per chunk) with bounded in-context candidate
-   lists. Each reviewer lane receives only the candidates from its assigned
-   chunk.
+4. Stage reviewer-sized chunks, but do not dispatch reviewers yet. Phase 4 must
+   complete trigger accounting and settle every launched micro-lane first.
 
 If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE from Phase 3: retry (max 2) with materially different parameters, then use blocking `dispatch_lanes` or the Task tool as verified-equivalent fallbacks when lane tools do not work. If the gap cannot be closed, stop and surface the lane failure to the user as BLOCKED. Do not mark affected candidates UNVERIFIED to proceed past the gap. Never infer candidate absence from a preview.
 
@@ -660,9 +660,48 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After base lanes are settled, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed (`dispatch_lanes_async` accepts max 8 lanes per call — micro-lanes are dispatched in a separate batch from base lanes). Use the same incremental collection pattern: poll with `collect_lane_results` (without `wait`) to process settled micro-lanes while continuing independent work, falling back to `wait: true` only when no independent work remains. All micro-lanes must be settled before reviewer classification. Do not launch irrelevant micro-lanes.
+After base lanes settle, evaluate every row in the trigger map and print a
+mandatory ledger with one row per trigger-map row:
 
-Apply the same parser-based extraction to micro-lanes: call `parse_lane_candidates` on each micro-lane `output_ref` (filter the returned `candidates[]` array by `row_format_family === "micro_lane"` after parsing). Apply the COVERAGE GATE from Phase 3 to micro-lanes: degraded, incomplete, or candidate-less lane artifacts are coverage gaps that must be closed by retry, blocking `dispatch_lanes`, or Task-tool dispatch as a verified-equivalent fallback when lane tools do not work. If the gap cannot be closed, stop and surface it to the user as BLOCKED before reviewer classification — never treat it as clean negative evidence and never proceed with a degraded review.
+```text
+[TRIGGER-EVAL] | trigger_row | MATCHED/NO-MATCH | evidence
+```
+
+Evidence must name the diff/context keywords checked. The generic trigger rows
+still apply in non-Swarm repositories: schema, config, URL/fetch, git,
+shell/write, tests, and metrics cannot be marked `NO-MATCH` merely because the
+repository is not the Swarm plugin.
+
+Launch one focused micro-lane for each `MATCHED` row, using
+`dispatch_lanes_async` when more than one lane is needed and a separate batch
+from base lanes. Poll incrementally, then settle every launched lane. Persist
+the complete ledger with `write_pr_review_trigger_eval`; its rows use the stable
+trigger IDs below, and every `MATCHED` row includes its returned
+`source_batch_id` and `source_lane_id`. Missing, extra, duplicate, or unmatched
+rows make persistence fail and Phase 4 BLOCKED. The tool atomically writes
+`.swarm/pr-review/<run_id>/trigger-eval.json`, separate from `findings.jsonl`;
+do not add trigger results to the finding-status enum.
+
+For each micro `output_ref`, call `parse_lane_candidates` with
+`producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
+`expected_micro_lane` set to the launch-micro-lane value from the
+provenance-linked trigger row. Accept a candidate only when its `producer`,
+`source_batch_id`, and `source_lane_id` match an allow-listed tuple from the
+original or retry micro dispatch and its `micro_lane` matches that trigger row;
+never filter acceptance by `row_format_family`. A zero-candidate artifact is
+clean only when the parser returns exactly one provenance-matching persisted
+`clean_attestation` whose `micro_lane` matches the trigger row, zero parse
+errors, zero malformed rows, and a complete, non-degraded source:
+
+```text
+[CLEAN] | micro_lane | coverage_scope | evidence
+```
+
+Header-only or malformed zero output is `UNATTESTED` and must follow the
+canonical COVERAGE GATE retry path. Async and blocking lane dispatch both
+produce auditable `L1` artifacts. Task output has no `L1` artifact provenance,
+so Task-derived findings or CLEAN prose cannot satisfy Phase 4; if bounded lane
+dispatch retries cannot produce an artifact, the phase is BLOCKED.
 
 Each micro-lane receives:
 
@@ -677,26 +716,27 @@ Each micro-lane receives:
 
 ### Swarm plugin risk trigger map
 
-| Trigger in diff or context pack | Launch micro-lane | Invariants to check |
-|---|---|---|
-| `agents`, `prompts`, `templates`, prompt interpolation, role text | Architect prompt integrity | no scope escape, no system prompt leakage, safe `{{variable}}` interpolation, untrusted text isolated from instructions |
-| `council`, `verdict`, `quorum`, `veto`, synthesis | Council orchestration | quorum math correct, veto enforced, evidence not lost, dissent preserved, no explorer result treated as final |
-| `guardrail`, `gate`, `delegation`, `rate limit`, approval checks | Guardrail bypass paths | gates cannot be skipped, delegation cannot bypass policy, rate limits cannot be reset by user-controlled state |
-| `schema`, `evidence`, JSONL, migrations, serializers | Evidence schema drift | backward compatibility, required fields preserved, version migration safe, malformed evidence rejected |
-| `knowledge`, `curator`, `hive`, `quarantine`, memory | Knowledge base contract | project vs hive tiers not confused, quarantine honored, CRUD semantics stable, stale knowledge not injected as fact |
-| `phase`, `state`, `plan`, `.swarm/state`, completion markers | Phase transition validation | ordering enforced, retro requirements handled, no premature completion, rollback safe |
-| `model`, `role`, `prefix`, `tool`, agent config | Model-to-role mapping | role prefix enforced, tool permissions least-privilege, unauthorized tools impossible, model fallback safe |
-| `config`, defaults, ratchet, locks, policy flags | Config ratchet semantics | once-enabled gates cannot silently disable, downgrade attempts detected, lock-state integrity preserved |
-| `url`, `fetch`, `http`, GitHub PR/issue parsing, package fetch | URL sanitization and external fetch | scheme allowlist, credential stripping, private IP / localhost / metadata IP blocking, redirect handling, timeout safe |
-| `git`, branch, checkout, reset, worktree, `.git` | Git safety | branch detection reliable, no unsafe `reset --hard`, .git protected, path normalization cross-platform, worktree state preserved |
-| `shell`, `exec`, command parser, file writes, delete/move/copy | Shell/write authority and path containment | destructive commands gated, dry-run preferred, symlink/path escape blocked, writes scoped, command injection impossible |
-| `test`, `bun`, mocks, fixtures, CI matrix | Test infrastructure | `bun:test` API correct, mock isolation, cross-platform paths, no hidden dependency on test order, fixtures reset |
-| `metrics`, telemetry, logs, serialized traces | Metrics and evidence privacy | no secrets in logs, evidence reproducible, privacy preserved, counts cannot be gamed, metrics schema stable |
+| Trigger ID | Trigger in diff or context pack | Launch micro-lane | Invariants to check |
+|---|---|---|---|
+| `architect-prompts` | `agents`, `prompts`, `templates`, prompt interpolation, role text | Architect prompt integrity | no scope escape, no system prompt leakage, safe `{{variable}}` interpolation, untrusted text isolated from instructions |
+| `council-orchestration` | `council`, `verdict`, `quorum`, `veto`, synthesis | Council orchestration | quorum math correct, veto enforced, evidence not lost, dissent preserved, no explorer result treated as final |
+| `guardrail-bypass` | `guardrail`, `gate`, `delegation`, `rate limit`, approval checks | Guardrail bypass paths | gates cannot be skipped, delegation cannot bypass policy, rate limits cannot be reset by user-controlled state |
+| `evidence-schema` | `schema`, `evidence`, JSONL, migrations, serializers | Evidence schema drift | backward compatibility, required fields preserved, version migration safe, malformed evidence rejected |
+| `knowledge-contract` | `knowledge`, `curator`, `hive`, `quarantine`, memory | Knowledge base contract | project vs hive tiers not confused, quarantine honored, CRUD semantics stable, stale knowledge not injected as fact |
+| `phase-transitions` | `phase`, `state`, `plan`, `.swarm/state`, completion markers | Phase transition validation | ordering enforced, retro requirements handled, no premature completion, rollback safe |
+| `model-role-mapping` | `model`, `role`, `prefix`, `tool`, agent config | Model-to-role mapping | role prefix enforced, tool permissions least-privilege, unauthorized tools impossible, model fallback safe |
+| `config-ratchet` | `config`, defaults, ratchet, locks, policy flags | Config ratchet semantics | once-enabled gates cannot silently disable, downgrade attempts detected, lock-state integrity preserved |
+| `url-fetch` | `url`, `fetch`, `http`, GitHub PR/issue parsing, package fetch | URL sanitization and external fetch | scheme allowlist, credential stripping, private IP / localhost / metadata IP blocking, redirect handling, timeout safe |
+| `git-safety` | `git`, branch, checkout, reset, worktree, `.git` | Git safety | branch detection reliable, no unsafe `reset --hard`, .git protected, path normalization cross-platform, worktree state preserved |
+| `shell-write` | `shell`, `exec`, command parser, file writes, delete/move/copy | Shell/write authority and path containment | destructive commands gated, dry-run preferred, symlink/path escape blocked, writes scoped, command injection impossible |
+| `test-infrastructure` | `test`, `bun`, mocks, fixtures, CI matrix | Test infrastructure | `bun:test` API correct, mock isolation, cross-platform paths, no hidden dependency on test order, fixtures reset |
+| `metrics-privacy` | `metrics`, telemetry, logs, serialized traces | Metrics and evidence privacy | no secrets in logs, evidence reproducible, privacy preserved, counts cannot be gamed, metrics schema stable |
 
 Micro-lane output format:
 
 ```text
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+[CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
 ---
@@ -711,16 +751,20 @@ Use Swarm-native agents and artifacts when available. If exact agent names are u
 | `critic_hallucination_verifier` | external APIs, package claims, URLs, CLI flags, GitHub behavior, model/tool names | verify claims against source or mark as unverified |
 | `curator_phase` | before exploration and after synthesis | retrieve relevant lessons; write back confirmed true positives / false positives |
 | `test_engineer` | confirmed/borderline correctness, security, state, schema, or config findings | propose or run falsification probes and regression tests |
-| `prm_scorer` | long or contentious reviews | score whether review trajectory is drifting toward unsupported speculation |
 | `.swarm/repo-graph.json` | all nontrivial code changes | build impact cones and sibling-pattern checks |
 | `.swarm/evidence/` | schema, phase, state, council, and guardrail changes | verify evidence compatibility and serialized provenance |
-| `/swarm metrics` or stored metrics | after synthesis | record review quality and recurring false positives |
+| Tool-returned `.swarm/evidence/` artifacts | after synthesis | record review quality only at paths actually returned by invoked evidence tools; never invent a metrics path |
 
 Verifier output is advisory until incorporated by the independent reviewer or critic.
 
 ---
 
 ## Phase 6: Independent Reviewer Confirmation
+
+**Reviewer-dispatch join barrier:** reviewer dispatch MUST NOT begin until the trigger ledger is
+complete and persisted, every launched micro-lane is settled, and every
+accepted micro result has parser-derived provenance or a valid CLEAN
+attestation.
 
 Route candidates to reviewer subagents. The orchestrator routes candidates
 in bounded chunks produced by the parser-based extraction in Phase 3-4. Each
@@ -731,7 +775,7 @@ directly.
 
 ### Noise budget and universal validation
 
-Before reviewer dispatch, the orchestrator may suppress candidates that are ALL of:
+Before reviewer dispatch, the orchestrator may suppress candidates that match ANY of the following (each suppression still requires mandatory disclosure):
 - purely stylistic without correctness, security, test, maintainability, or user-impact implications,
 - exact duplicates of a candidate already queued for validation,
 - explorer-stated confidence=LOW with zero structural evidence (no file:line, no code path, no invariant reference).
@@ -778,6 +822,11 @@ Reviewer output format:
 ```text
 [REVIEWED] | candidate_id | classification | evidence_type | final_severity | introduced_by_pr: YES/NO/UNKNOWN | file:line | rationale | falsification_probe | reviewer_id
 ```
+
+Every reviewer response must end with one parseable `[REVIEWED]` row per
+assigned candidate. A malformed `[REVIEWED]` row is not a verdict: re-dispatch
+with the exact contract (max 2), then mark the reviewer dimension BLOCKED if no
+valid row returns.
 
 `DISPROVED` findings must include the reason. `PRE_EXISTING` findings must include the base-branch evidence if available.
 
@@ -899,7 +948,11 @@ F-001 | severity | category | root cause | affected file:line refs | reviewer | 
 
 ## Phase 10: Metrics and Knowledge Writeback
 
-At the end of the review, record review quality metrics when Swarm metrics or local evidence storage is available.
+At the end of the review, include review quality metrics in the final report's
+validation provenance. Persist them only through an invoked evidence tool and
+record the exact `.swarm/evidence/` path returned by that tool; if no invoked
+tool supports metrics, state `NOT PERSISTED — no metrics evidence writer` rather
+than naming a nonexistent command or path.
 
 Record:
 
@@ -979,13 +1032,13 @@ The batch completed and `collect_lane_results` returned:
     {
       "lane_id": "pr_review_lane1_correctness",
       "status": "completed",
-      "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "output_degraded": false
     },
     {
       "lane_id": "pr_review_lane2_security",
       "status": "completed",
-      "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-2/out-def456.json",
+      "output_ref": "L1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "output_degraded": false
     }
   ]
@@ -1000,8 +1053,9 @@ The orchestrator calls `parse_lane_candidates` for each `output_ref`:
 {
   "tool": "parse_lane_candidates",
   "arguments": {
-    "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
-    "producer": "swarm-pr-review"
+    "output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "producer": "swarm-pr-review",
+    "expected_family": "base_explorer"
   }
 }
 ```
@@ -1017,8 +1071,8 @@ The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_co
       "record_type": "candidate",
       "row_format_family": "base_explorer",
       "row_format_version": 1,
-      "record_version": { "major": 1, "minor": 0 },
-      "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "record_version": { "major": 1, "minor": 1 },
+      "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "source_batch_id": "B-2025-06-22-001",
       "source_lane_id": "explorer-1",
       "source_agent": "paid_explorer",
@@ -1043,8 +1097,8 @@ The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_co
       "record_type": "candidate",
       "row_format_family": "base_explorer",
       "row_format_version": 1,
-      "record_version": { "major": 1, "minor": 0 },
-      "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "record_version": { "major": 1, "minor": 1 },
+      "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "source_batch_id": "B-2025-06-22-001",
       "source_lane_id": "explorer-1",
       "source_agent": "paid_explorer",
@@ -1068,47 +1122,42 @@ The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_co
   ],
   "invocation_envelope": {
     "record_type": "invocation",
-    "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+    "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "source_batch_id": "B-2025-06-22-001",
     "source_lane_id": "explorer-1",
     "source_agent": "paid_explorer",
     "source_digest": "sha256:abc123def456...",
     "row_format_version": 1,
-    "record_version": { "major": 1, "minor": 0 },
+    "record_version": { "major": 1, "minor": 1 },
     "sessionId": "ses_01HXYZ...",
     "parentSessionId": "ses_01HABC...",
     "producer": "swarm-pr-review",
     "produced_at": "2025-06-22T14:30:00.000Z",
      "format_families_detected": ["base_explorer"],
      "candidate_count": 2,
-     "parse_errors": 2,
-     "malformed_rows": 0
+     "parse_errors": 0,
+     "malformed_rows": 0,
+     "clean_attestation_count": 0
   },
   "diagnostics": {
     "candidate_count": 2,
-    "parse_errors": 2,
-    "parse_error_details": [
-      {
-        "row_index": 0,
-        "field": "row",
-        "message": "Both format-family discriminators present; defaulting to base_explorer"
-      },
-      {
-        "row_index": 1,
-        "field": "row",
-        "message": "Both format-family discriminators present; defaulting to base_explorer"
-      }
-    ],
+    "parse_errors": 0,
+    "parse_error_details": [],
     "malformed_rows": 0,
     "duplicate_id_count": 0,
     "duplicate_id_warnings": [],
     "degraded_source_count": 0,
     "incomplete_source_count": 0,
-     "format_families_detected": ["base_explorer"]
+     "format_families_detected": ["base_explorer"],
+     "clean_attestation_count": 0
    }
 }
 ```
-> **Note**: `parse_errors: 2` reflects FR-017/SC-017 position-based detection: when a `[CANDIDATE]` row has both `evidence_summary` and `impact_context` populated, the parser emits a `parse_error_details` entry per row with `field: "row"` and `message: "Both format-family discriminators present; defaulting to base_explorer"`. This is documented behavior, not a parser bug. To get `parse_errors: 0` with the row format, leave one of the two fields empty; to silence the warning entirely, emit structured JSON candidate records.
+> **Note**: callers pass `expected_family` for each dispatch batch. A recognizable
+> conflicting header fails closed with `expected-family-mismatch`; when the flag
+> is absent, the recognized header controls the mapping and positional detection
+> is only a legacy unknown-header fallback. Marker-prefixed data rows remain
+> accepted for compatibility. Valid canonical rows produce `parse_errors: 0`.
 
 On refusal (e.g. `output_ref` does not exist), `error` and `error_code` are present; `candidates` is `[]`; `invocation_envelope` and `diagnostics` are populated with empty fields for traceability:
 
@@ -1119,18 +1168,19 @@ On refusal (e.g. `output_ref` does not exist), `error` and `error_code` are pres
   "candidates": [],
   "invocation_envelope": {
     "record_type": "invocation",
-    "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/missing.json",
+    "source_output_ref": "L1:1111111111111111111111111111111111111111111111111111111111111111:2222222222222222222222222222222222222222222222222222222222222222:3333333333333333333333333333333333333333333333333333333333333333",
     "source_batch_id": "",
     "source_lane_id": "",
     "source_agent": "",
     "source_digest": "",
     "row_format_version": 1,
-    "record_version": { "major": 1, "minor": 0 },
+    "record_version": { "major": 1, "minor": 1 },
     "produced_at": "2025-06-22T14:30:00.000Z",
     "format_families_detected": [],
     "candidate_count": 0,
     "parse_errors": 0,
-    "malformed_rows": 0
+    "malformed_rows": 0,
+    "clean_attestation_count": 0
   },
   "diagnostics": {
     "candidate_count": 0,
@@ -1141,14 +1191,15 @@ On refusal (e.g. `output_ref` does not exist), `error` and `error_code` are pres
     "duplicate_id_warnings": [],
     "degraded_source_count": 0,
     "incomplete_source_count": 0,
-     "format_families_detected": []
+    "format_families_detected": [],
+    "clean_attestation_count": 0
    }
 }
 ```
 
 ### Step 3 — Filter and group
 
-The orchestrator filters the returned `candidates[]` array by `producer: "swarm-pr-review"` and `row_format_family` (e.g. `base_explorer` or `micro_lane`), then groups
+The orchestrator filters the returned `candidates[]` array by `producer: "swarm-pr-review"` and the exact allowed `source_batch_id` / `source_lane_id` tuples, then groups
 the candidates. In this synthetic example, the two candidates above are grouped
 by file area:
 
@@ -1287,12 +1338,12 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] deterministic lane dispatcher used: YES/NO — ___
 [VALIDATION] base explorer lanes dispatched: ___ / 6
 [VALIDATION] base explorer lanes returned: ___ / 6
-[VALIDATION] triggered micro-lanes: ___
+[VALIDATION] trigger map evaluated: ___ rows (X MATCHED → X micro-lanes dispatched) OR BLOCKED — <unevaluated rows>
 [VALIDATION] Swarm verifier routing used: ___
 [VALIDATION] raw candidates: ___
 [VALIDATION] tool candidates: ___
-[VALIDATION] reviewer dispatched: ___ (agent type, task description)
-[VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
+[VALIDATION] reviewer lanes dispatched: ___
+[VALIDATION] reviewer lanes returned with parseable `[REVIEWED]` rows: ___ / ___
 [VALIDATION] findings confirmed by reviewer: ___
 [VALIDATION] findings rejected by reviewer as false positive: ___
 [VALIDATION] findings marked PRE_EXISTING: ___
@@ -1311,7 +1362,9 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] all non-suppressed candidates routed to reviewer: YES/NO
 ```
 
-If the reviewer returned `REJECTED` or `CONCERNS`, route the issue back to implementation context or mark the candidate invalid with reason. Do not silently downgrade a rejection.
+If any reviewer lane lacks a parseable `[REVIEWED]` row after bounded
+re-dispatch, the reviewer dimension is BLOCKED. Do not infer or silently
+downgrade a verdict.
 
 **COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage (lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry), the Pre-Synthesis Gate FAILS. Do not proceed to final output. Surface the unclosed gaps to the user as BLOCKED with exact failing dimensions and retry/equivalence evidence. Do not include partial findings from successful dimensions, do not issue a review verdict, and do not silently accept reduced coverage.
 
@@ -1491,6 +1544,8 @@ Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
 
 Lane:
 Scope:
+base_ref:
+head_ref:
 Obligations:
 Changed files/hunks:
 Impact cone:
@@ -1505,10 +1560,13 @@ You must inspect or mark unavailable:
 4. sibling implementation or prior pattern,
 5. nearest test or missing-test location,
 6. deterministic signals,
-7. Swarm artifacts/knowledge.
+7. Swarm artifacts/knowledge,
+8. the exact `base_ref..head_ref` commit range and both endpoint revisions.
 
 Return:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+Emit the marker-bearing header once, then unprefixed data rows.
+For a clean micro-lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
 ```
 
 The orchestrator extracts candidates from the full lane artifact via

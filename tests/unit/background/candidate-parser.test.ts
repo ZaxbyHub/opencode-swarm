@@ -81,13 +81,6 @@ function buildMlText(rows: string[]): string {
 // ---------------------------------------------------------------------------
 
 describe('SC-001 — well-formed base_explorer artifact', () => {
-	// NOTE: Due to the position-based detection heuristic, ANY non-empty value at
-	// position 6 (evidence_summary) triggers hasInvariantViolated=true, and when
-	// impact_context (position 7) is also non-empty, the "both discriminators"
-	// parse_error is emitted. This means parse_errors >= 1 for any base_explorer
-	// row that has both evidence_summary and impact_context non-empty.
-	// We test the core invariants (candidate_count, malformed_rows, etc.) and
-	// accept parse_errors >= 1 as a consequence of the detection design.
 	test('5 rows → candidate_count:5, malformed_rows:0, format_families_detected:["base_explorer"]', () => {
 		const rows = [
 			beRow(
@@ -384,7 +377,7 @@ describe('SC-012 — record_version {major, minor} on all output records', () =>
 		};
 		const result = parseCandidates(input, BASE_FLAGS);
 		for (const c of result.candidates) {
-			expect(c.record_version).toEqual({ major: 1, minor: 0 });
+			expect(c.record_version).toEqual({ major: 1, minor: 1 });
 		}
 	});
 
@@ -396,7 +389,7 @@ describe('SC-012 — record_version {major, minor} on all output records', () =>
 		const result = parseCandidates(input, BASE_FLAGS);
 		expect(result.invocation_envelope.record_version).toEqual({
 			major: 1,
-			minor: 0,
+			minor: 1,
 		});
 	});
 });
@@ -418,20 +411,13 @@ describe('SC-013 — both format families parsed correctly', () => {
 		);
 	});
 
-	// NOTE: Due to position-based detection, micro_lane rows with non-empty evidence_summary
-	// at position 7 are detected as base_explorer (hasImpactContext=true from evidence_summary
-	// at pos 7, hasInvariantViolated=true from invariant_violated at pos 6).
-	// This is a detection design limitation.
-	test('micro_lane rows are parsed (detected as base_explorer due to evidence_summary at pos 7)', () => {
+	test('micro_lane rows use their recognized header family', () => {
 		const rows = [mlRow('c1')];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildMlText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
 
 		expect(result.candidates.length).toBe(1);
-		// format_families_detected reflects the row-level detection
-		expect(result.diagnostics.format_families_detected).toContain(
-			'base_explorer',
-		);
+		expect(result.diagnostics.format_families_detected).toContain('micro_lane');
 	});
 
 	test('base_explorer candidate has lane set; micro_lane field mapping works', () => {
@@ -449,13 +435,8 @@ describe('SC-013 — both format families parsed correctly', () => {
 
 		expect(beRes.candidates[0].lane).toBe('my-lane');
 		expect(beRes.candidates[0].micro_lane).toBeNull();
-		// NOTE: micro_lane rows with non-empty evidence_summary (pos 7) are detected as
-		// base_explorer due to position-based detection, so mapFields applies
-		// base_explorer field mapping (pos1 → lane). The micro_lane field value
-		// 'my-micro-lane' therefore appears in the 'lane' field.
-		expect(mlRes.candidates[0].lane).toBe('my-micro-lane');
-		// micro_lane field is null because format family detection returned base_explorer
-		expect(mlRes.candidates[0].micro_lane).toBeNull();
+		expect(mlRes.candidates[0].lane).toBeNull();
+		expect(mlRes.candidates[0].micro_lane).toBe('my-micro-lane');
 	});
 });
 
@@ -465,10 +446,6 @@ describe('SC-013 — both format families parsed correctly', () => {
 
 describe('SC-017 — format-family auto-detection', () => {
 	test('impact_context non-empty → base_explorer', () => {
-		// base_explorer: pos7=impact_context non-empty, pos6=evidence_summary non-empty
-		// Due to position-based detection, evidence_summary at pos 6 triggers hasInvariantViolated,
-		// and impact_context at pos 7 triggers hasImpactContext → both discriminators → parse_error
-		// but format remains base_explorer (FR-017 both-discriminator precedence).
 		const rows = [
 			beRow(
 				'c1',
@@ -485,22 +462,18 @@ describe('SC-017 — format-family auto-detection', () => {
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
 		expect(result.candidates[0].row_format_family).toBe('base_explorer');
-		expect(result.diagnostics.parse_errors).toBeGreaterThan(0);
+		expect(result.diagnostics.parse_errors).toBe(0);
 	});
 
-	// NOTE: The "invariant_violated only" case is not achievable with well-formed micro_lane
-	// rows because evidence_summary (at position 7 in micro_lane) is a required field and
-	// non-empty evidence_summary triggers hasImpactContext, causing both-discriminators.
-	// We test that micro_lane rows with both discriminators produce base_explorer + parse_error.
-	test('micro_lane row with both discriminators → base_explorer with parse_error', () => {
+	test('recognized micro header selects micro_lane without positional ambiguity', () => {
 		const rows = [mlRow('c1')];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildMlText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
-		expect(result.candidates[0].row_format_family).toBe('base_explorer');
-		expect(result.diagnostics.parse_errors).toBeGreaterThan(0);
+		expect(result.candidates[0].row_format_family).toBe('micro_lane');
+		expect(result.diagnostics.parse_errors).toBe(0);
 	});
 
-	test('neither discriminator non-empty → malformed', () => {
+	test('recognized header preserves rows with empty family-specific fields as diagnostics', () => {
 		// base_explorer with evidence_summary='' AND impact_context='' → neither non-empty
 		const rows = [
 			beRow(
@@ -517,17 +490,18 @@ describe('SC-017 — format-family auto-detection', () => {
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
-		expect(result.diagnostics.malformed_rows).toBe(1);
-		expect(result.candidates.length).toBe(0);
+		expect(result.diagnostics.malformed_rows).toBe(0);
+		expect(result.diagnostics.parse_errors).toBe(2);
+		expect(result.candidates.length).toBe(1);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// SC-019 — Row with neither discriminator is malformed
+// SC-019 — Recognized headers remain authoritative when row fields are empty
 // ---------------------------------------------------------------------------
 
-describe('SC-019 — row with neither discriminator is malformed', () => {
-	test('row with all 9 fields but both discriminators empty → malformed', () => {
+describe('SC-019 — recognized header with empty family fields', () => {
+	test('row with all 9 fields produces required-field diagnostics', () => {
 		const rows = [
 			beRow(
 				'c1',
@@ -543,8 +517,9 @@ describe('SC-019 — row with neither discriminator is malformed', () => {
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
-		expect(result.diagnostics.malformed_rows).toBe(1);
-		expect(result.candidates.length).toBe(0);
+		expect(result.diagnostics.malformed_rows).toBe(0);
+		expect(result.diagnostics.parse_errors).toBe(2);
+		expect(result.candidates.length).toBe(1);
 	});
 });
 
@@ -830,9 +805,7 @@ describe('SC-018 — invocation envelope present for every call', () => {
 		expect(env.produced_at).toBe(BASE_INPUT.produced_at);
 		expect(env.format_families_detected).toContain('base_explorer');
 		expect(env.candidate_count).toBe(1);
-		// parse_errors reflects per-row detection: evidence_summary at pos 6 causes hasInvariantViolated,
-		// and with impact_context at pos 7 non-empty, both-discriminators condition applies
-		expect(env.parse_errors).toBeGreaterThanOrEqual(1);
+		expect(env.parse_errors).toBe(0);
 		expect(env.malformed_rows).toBe(0);
 	});
 
@@ -970,17 +943,13 @@ describe('SC-021 — format_families_detected on invocation envelope', () => {
 		]);
 	});
 
-	test('micro_lane row → format_families_detected reflects row-level detection', () => {
+	test('micro_lane row → format_families_detected reflects header family', () => {
 		const input: ArtifactInput = {
 			...BASE_INPUT,
 			text: buildMlText([mlRow('c1')]),
 		};
 		const result = parseCandidates(input, BASE_FLAGS);
-		// Due to position-based detection, evidence_summary at pos 7 triggers hasImpactContext=true
-		// for micro_lane rows with non-empty evidence_summary, resulting in base_explorer detection
-		expect(result.diagnostics.format_families_detected).toContain(
-			'base_explorer',
-		);
+		expect(result.diagnostics.format_families_detected).toContain('micro_lane');
 	});
 });
 
@@ -1074,9 +1043,7 @@ describe('FR-011 — row_format_version:1 supports both families', () => {
 		const resML = parseCandidates(mlInput, BASE_FLAGS);
 
 		expect(resBE.candidates[0].row_format_family).toBe('base_explorer');
-		// micro_lane detection: evidence_summary at pos 7 triggers hasImpactContext,
-		// causing both-discriminators detection → base_explorer format
-		expect(resML.candidates[0].row_format_family).toBe('base_explorer');
+		expect(resML.candidates[0].row_format_family).toBe('micro_lane');
 	});
 });
 

@@ -1,6 +1,6 @@
 /**
  * Tests verifying that the parser produces the exact response shapes
- * documented in the swarm-pr-review SKILL.md dry-run example (lines 866-1050).
+ * documented in the swarm-pr-review SKILL.md dry-run example.
  *
  * These tests are NOT about the parser's internal logic (covered by
  * candidate-parser.test.ts). They verify field-by-field alignment
@@ -24,7 +24,7 @@ import {
 } from '../../../src/background/candidate-parser';
 
 // ---------------------------------------------------------------------------
-// Dry-run artifact text matching the SKILL.md example (lines 866-1014).
+// Dry-run artifact text matching the SKILL.md example.
 // The example shows two candidates: C-001 (null-safety/HIGH) and
 // C-002 (async-ordering/MEDIUM) parsed from a base_explorer artifact.
 // ---------------------------------------------------------------------------
@@ -45,7 +45,8 @@ const DRY_RUN_TEXT = `[CANDIDATE] | ${DRY_RUN_HEADER}\n${DRY_RUN_C001_LINE}\n${D
 // ---------------------------------------------------------------------------
 
 const DRY_RUN_INPUT: ArtifactInput = {
-	output_ref: '.swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json',
+	output_ref:
+		'L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
 	batchId: 'B-2025-06-22-001',
 	laneId: 'explorer-1',
 	agent: 'paid_explorer',
@@ -65,6 +66,7 @@ const DRY_RUN_FLAGS: ParseFlags = {
 	degraded: false,
 	row_format_version: 1,
 	producer: 'swarm-pr-review',
+	expected_family: 'base_explorer',
 };
 
 // ---------------------------------------------------------------------------
@@ -132,13 +134,13 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 			expect(c.row_format_version).toBe(1);
 		});
 
-		test('record_version is { major: 1, minor: 0 }', () => {
-			expect(c.record_version).toEqual({ major: 1, minor: 0 });
+		test('record_version is { major: 1, minor: 1 }', () => {
+			expect(c.record_version).toEqual({ major: 1, minor: 1 });
 		});
 
 		test('source_output_ref matches input', () => {
 			expect(c.source_output_ref).toBe(
-				'.swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json',
+				'L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
 			);
 		});
 
@@ -294,7 +296,7 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 
 		test('source_output_ref matches input', () => {
 			expect(env.source_output_ref).toBe(
-				'.swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json',
+				'L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
 			);
 		});
 
@@ -318,8 +320,8 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 			expect(env.row_format_version).toBe(1);
 		});
 
-		test('record_version is { major: 1, minor: 0 }', () => {
-			expect(env.record_version).toEqual({ major: 1, minor: 0 });
+		test('record_version is { major: 1, minor: 1 }', () => {
+			expect(env.record_version).toEqual({ major: 1, minor: 1 });
 		});
 
 		test('sessionId matches input', () => {
@@ -346,17 +348,8 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 			expect(env.candidate_count).toBe(2);
 		});
 
-		test('parse_errors is 2 (both-discriminators parse_error per row)', () => {
-			// DOCUMENTED VALUE (SKILL.md lines 988, 991): parse_errors: 0
-			// ACTUAL VALUE: parse_errors: 2 (one "both discriminators" error per row)
-			//
-			// Root cause: position-based row detection treats any non-empty value at
-			// position 6 (evidence_summary) as hasInvariantViolated=true, AND any
-			// non-empty value at position 7 (impact_context) as hasImpactContext=true.
-			// When both are non-empty (as in the dry-run example's C-001 and C-002),
-			// the "both discriminators" parse_error is emitted per row.
-			// This is documented in the parser test suite (SC-017).
-			expect(env.parse_errors).toBe(2);
+		test('parse_errors is 0 for an asserted base batch', () => {
+			expect(env.parse_errors).toBe(0);
 		});
 
 		test('malformed_rows is 0', () => {
@@ -374,20 +367,12 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 			expect(diag.candidate_count).toBe(2);
 		});
 
-		test('parse_errors is 2 (both-discriminators per row)', () => {
-			// DOCUMENTED (SKILL.md): parse_errors: 0
-			// ACTUAL: parse_errors: 2 (same root cause as invocation_envelope.parse_errors)
-			expect(diag.parse_errors).toBe(2);
+		test('parse_errors is 0', () => {
+			expect(diag.parse_errors).toBe(0);
 		});
 
-		test('parse_error_details contains two "both discriminators" errors', () => {
-			// DOCUMENTED (SKILL.md): parse_error_details: []
-			// ACTUAL: two "both discriminators" errors, one per row
-			expect(diag.parse_error_details).toHaveLength(2);
-			for (const err of diag.parse_error_details) {
-				expect(err.field).toBe('row');
-				expect(err.message).toContain('Both format-family discriminators');
-			}
+		test('parse_error_details is empty', () => {
+			expect(diag.parse_error_details).toEqual([]);
 		});
 
 		test('malformed_rows is 0', () => {
@@ -435,39 +420,24 @@ describe('Dry-run success case — two base_explorer candidates', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dry-run parse_errors scenario — evidence_summary at position 6 triggers
-// the "both discriminators" parse_error in base_explorer rows.
-// The skill example uses evidence_summary='' for parse_errors:0, but we
-// also verify the parse_error case is documented correctly.
+// Asserted/header-selected families do not use the legacy positional fallback.
 // ---------------------------------------------------------------------------
 
-describe('Parse errors case — both discriminators present', () => {
-	test('non-empty evidence_summary at pos 6 triggers parse_error in base_explorer', () => {
-		// evidence_summary (pos 6) non-empty → hasInvariantViolated = true
-		// impact_context (pos 7) non-empty → hasImpactContext = true
-		// → both discriminators → parse_error emitted
+describe('Asserted family avoids positional ambiguity', () => {
+	test('non-empty evidence and impact remain a valid base row', () => {
 		const textWithEvidence = `[CANDIDATE] | ${DRY_RUN_HEADER}\nC-001 | Lane 1 | HIGH | sec | src/foo.ts:1 | claim | has-evidence | has-impact | HIGH`;
 		const input: ArtifactInput = { ...DRY_RUN_INPUT, text: textWithEvidence };
 		const result = parseCandidates(input, DRY_RUN_FLAGS);
 
-		expect(result.diagnostics.parse_errors).toBeGreaterThan(0);
-		expect(result.diagnostics.parse_error_details.length).toBeGreaterThan(0);
-		const bothError = result.diagnostics.parse_error_details.find((e) =>
-			e.message.includes('Both format-family discriminators'),
-		);
-		expect(bothError).toBeDefined();
+		expect(result.diagnostics.parse_errors).toBe(0);
+		expect(result.candidates[0]?.row_format_family).toBe('base_explorer');
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Failure case: artifact_status: ref-not-found → refusal result
-// The dry-run example (lines 1006-1014) shows:
-//   { error, error_code, candidates:[], invocation_envelope: null, diagnostics: null }
-//
-// The actual parser (refusalResult) produces:
+// Failure case: artifact_status: ref-not-found → refusal result.
+// The documented and runtime parser shapes both produce:
 //   { error, error_code, candidates:[], invocation_envelope: {...}, diagnostics: {...} }
-//
-// This test documents the ACTUAL behavior vs the DOCUMENTED behavior.
 // ---------------------------------------------------------------------------
 
 describe('Failure case — artifact_status: ref-not-found', () => {
@@ -491,41 +461,46 @@ describe('Failure case — artifact_status: ref-not-found', () => {
 		expect(result.candidates).toEqual([]);
 	});
 
-	/**
-	 * DOCUMENTED BEHAVIOR (SKILL.md lines 1006-1014):
-	 *   invocation_envelope: null
-	 * ACTUAL BEHAVIOR (refusalResult in candidate-parser.ts):
-	 *   invocation_envelope: { record_type: 'invocation', ... }
-	 *
-	 * The refusalResult function (line 421) builds a real invocation envelope
-	 * even when refusing. The example in the skill shows null.
-	 * This test asserts the ACTUAL behavior.
-	 */
-	test('ACTUAL: invocation_envelope is present (not null) in refusal result', () => {
+	test('invocation_envelope is present in refusal result', () => {
 		const input: ArtifactInput = {
 			...DRY_RUN_INPUT,
 			artifact_status: 'ref-not-found',
 		};
 		const result = parseCandidates(input, DRY_RUN_FLAGS);
-		// The actual implementation returns an envelope, not null
 		expect(result.invocation_envelope).not.toBeNull();
 		expect(result.invocation_envelope.record_type).toBe('invocation');
+		expect(result.invocation_envelope.clean_attestation_count).toBe(0);
 	});
 
-	/**
-	 * DOCUMENTED BEHAVIOR: diagnostics: null
-	 * ACTUAL BEHAVIOR: buildEmptyDiagnostics returns a DiagnosticsSummary object
-	 */
-	test('ACTUAL: diagnostics is present (not null) in refusal result', () => {
+	test('diagnostics is present in refusal result', () => {
 		const input: ArtifactInput = {
 			...DRY_RUN_INPUT,
 			artifact_status: 'ref-not-found',
 		};
 		const result = parseCandidates(input, DRY_RUN_FLAGS);
-		// The actual implementation returns diagnostics, not null
 		expect(result.diagnostics).not.toBeNull();
 		expect(result.diagnostics.candidate_count).toBe(0);
 		expect(result.diagnostics.parse_errors).toBe(0);
+		expect(result.diagnostics.clean_attestation_count).toBe(0);
+	});
+
+	test('documented refusal JSON includes both CLEAN counters', () => {
+		const skill = fs.readFileSync(
+			path.join(process.cwd(), '.opencode/skills/swarm-pr-review/SKILL.md'),
+			'utf-8',
+		);
+		const refusalStart = skill.indexOf(
+			'On refusal (e.g. `output_ref` does not exist)',
+		);
+		const refusalSection = skill.slice(
+			refusalStart,
+			skill.indexOf('### Step 3', refusalStart),
+		);
+		const json = refusalSection.match(/```json\s*([\s\S]*?)```/)?.[1];
+		expect(json).toBeDefined();
+		const documented = JSON.parse(json ?? '{}');
+		expect(documented.invocation_envelope.clean_attestation_count).toBe(0);
+		expect(documented.diagnostics.clean_attestation_count).toBe(0);
 	});
 
 	/**

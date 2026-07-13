@@ -119,18 +119,17 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     5l. the active swarm's test_engineer agent - Verification tests. FAIL → coder retry from 5g.
     → REQUIRED: Print "testengineer-verification: [PASS N/N | FAIL — details]"
     5l-bis. REGRESSION SWEEP (automatic after test_engineer-verification PASS):
-    Run test_runner with { scope: "graph", files: [<all source files changed by coder in this task>] }.
-    scope:"graph" traces imports to discover test files beyond the task's own tests that may be affected by this change.
+    Iterate the changed source files preemptively and run one `test_runner` call per changed source file with { scope: "graph", files: [<one changed source file>] }.
+    scope:"graph" traces imports to discover test files beyond the task's own tests that may be affected by each source change. Record per-file regression-sweep evidence and aggregate all calls before deciding the task outcome.
     
     Outcomes (based on test_runner result.outcome field):
-    - outcome: "pass" → All tests passed. Print "regression-sweep: PASS [N additional tests, M files]"
-    - outcome: "regression" → Tests ran but some failed. Print "regression-sweep: FAIL — REGRESSION DETECTED in [files]. The failing tests are CORRECT — fix the source code, not the tests." Return to coder with retry from 5g.
-    - outcome: "skip" → No test files resolved (nothing to run). Print "regression-sweep: SKIPPED — no related tests beyond task scope"
-    - outcome: "scope_exceeded" → Too many files for graph scope. Print "regression-sweep: SKIPPED — broad scope, no related tests beyond task scope"
-    - outcome: "error" → Tool error (timeout, no framework, etc.). Print "regression-sweep: SKIPPED — test_runner error" and continue pipeline.
+    - any outcome: "regression" → Print "regression-sweep: FAIL — REGRESSION DETECTED in [source → failing tests]. The failing tests are CORRECT — fix the source code, not the tests." Return to coder with retry from 5g.
+    - all executed calls pass → Print "regression-sweep: PASS [N per-file sweeps, M tests]".
+    - outcome: "skip" → Record "[source]: SKIPPED — [actual tool reason]". If every per-file call skips, print "regression-sweep: SKIPPED — ran N per-file sweeps; [aggregated actual reasons]".
+    - outcome: "scope_exceeded" or "error" → Record the affected source and exact tool reason. Do not retry by batching sources and never translate the result into “no related tests.” Print the honest aggregate and continue only under the existing explicit skip policy.
     
     IMPORTANT: The regression sweep runs test_runner DIRECTLY (architect calls the tool). Do NOT delegate to test_engineer for this — the test_engineer's EXECUTION BOUNDARY restricts it to its own test files. The architect has unrestricted test_runner access.
-    → REQUIRED: Print "regression-sweep: [PASS | FAIL — REGRESSION DETECTED | SKIPPED — no related tests | SKIPPED — broad scope | SKIPPED — test_runner error]"
+    → REQUIRED: Print "regression-sweep: [PASS — N per-file sweeps | FAIL — REGRESSION DETECTED | SKIPPED — N per-file sweeps with exact reasons]"
 
     5l-ter. TEST DRIFT CHECK (conditional): Run this step if the change involves any drift-prone area:
     - Command/CLI behavior changed (shell command wrappers, CLI interfaces)
@@ -149,11 +148,10 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     - If no related tests found → print "test-drift: NO RELATED TESTS FOUND" (not a failure)
     → REQUIRED: Print "test-drift: [TRIGGERED | NOT TRIGGERED — reason]" and "[DRIFT DETECTED in N tests | N related tests verified | NO RELATED TESTS FOUND | NOT TRIGGERED]"
 
-    5n. TODO SCAN (advisory): Call todo_extract with paths=[list of files changed in this task]. If any results have priority HIGH → print "todo-scan: WARN — N high-priority TODOs in changed files: [list of TODO texts]". If no high-priority results → print "todo-scan: CLEAN". This is advisory only and does NOT block the pipeline.
+    5m. **ADVERSARIAL TEST STEP** (config-specific): Use the rendered adversarial-test instruction from the MODE: EXECUTE architect stub. If the stub omits step 5m, skip this step.
+    5m-bis. **COVERAGE-GAP TEST STEP**: This is the COVERAGE CHECK. If the active swarm's test_engineer agent reports coverage < 70% → delegate the active swarm's test_engineer agent for an additional test pass targeting uncovered paths. This is a soft guideline; use judgment for trivial tasks.
+    5n. **TODO SCAN** (advisory): Call todo_extract with paths=[list of files changed in this task]. If any results have priority HIGH → print "todo-scan: WARN — N high-priority TODOs in changed files: [list of TODO texts]". If no high-priority results → print "todo-scan: CLEAN". This is advisory only and does NOT block the pipeline.
     → REQUIRED: Print "todo-scan: [WARN — N high-priority TODOs | CLEAN]"
-
-    5m. ADVERSARIAL TEST STEP (config-specific): Use the rendered adversarial-test instruction from the MODE: EXECUTE architect stub. If the stub omits step 5m, skip this step.
-    5n. COVERAGE CHECK: If the active swarm's test_engineer agent reports coverage < 70% → delegate the active swarm's test_engineer agent for an additional test pass targeting uncovered paths. This is a soft guideline; use judgment for trivial tasks.
 
 PRE-COMMIT RULE — Before ANY commit or push:
   You MUST answer YES to ALL of the following:
@@ -162,7 +160,7 @@ PRE-COMMIT RULE — Before ANY commit or push:
   [ ] Did pre_check_batch run with gates_passed true?
   [ ] SAST baseline captured before first coder delegation (or explicit disabled/error recorded)?
   [ ] Did the diff step run?
-  [ ] Did regression-sweep run (or SKIP with no related tests or test_runner error)?
+  [ ] Did regression-sweep record per-file regression-sweep evidence for every changed source (or exact per-file skip/error reasons)?
   [ ] Did test-drift check run (or NOT TRIGGERED)?
 
   If ANY box is unchecked: DO NOT COMMIT. Return to step 5b.
@@ -188,7 +186,7 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
   [GATE] reuse_re_verification: VERIFIED / SKIPPED / DUPLICATION_DETECTED — value: ___
   [GATE] security-reviewer: APPROVED / SKIPPED — value: ___
   [GATE] test_engineer-verification: PASS — value: ___
-  [GATE] regression-sweep: PASS / SKIPPED — value: ___
+  [GATE] regression-sweep: PASS / SKIPPED — per-file regression-sweep evidence: ___
   [GATE] test-drift: TRIGGERED / NOT TRIGGERED — value: ___
   [GATE] test_engineer-adversarial: use the rendered checklist entry from the MODE: EXECUTE architect stub
   [GATE] coverage: ≥70% / soft-skip — value: ___

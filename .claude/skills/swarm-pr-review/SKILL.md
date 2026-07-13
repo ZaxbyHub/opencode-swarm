@@ -2,8 +2,8 @@
 name: swarm-pr-review
 audience: swarm-plugin
 description: >
-  Claude Code adapter for deep PR review in opencode-swarm. Use when the user
-  wants a broad, read-only PR review with low false-positive tolerance. The
+  Use when asked to review a pull request, PR URL, or PR #N with a broad,
+  read-only review and low false-positive tolerance. This Claude Code adapter's
   canonical protocol lives in .opencode and owns comment ingestion,
   CI/conflict/staleness intake, parallel explorer lanes, independent reviewer
   validation, critic challenge, and the explicit handoff into

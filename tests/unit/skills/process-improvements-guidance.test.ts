@@ -76,6 +76,8 @@ describe('process-improvement skill guidance', () => {
 		expect(source).toContain('persist the post-explorer');
 		expect(source).toContain('persist the post-reviewer');
 		expect(source).toContain('persist the post-critic');
+		expect(source).toContain('.swarm/pr-review/<run_id>/trigger-eval.json');
+		expect(source).toContain('separate from `findings.jsonl`');
 	});
 
 	test('review and implementation workflows require local PR checkout and commit-range context', () => {

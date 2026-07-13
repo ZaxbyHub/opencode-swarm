@@ -69,6 +69,19 @@ describe('EXPLORER_PROMPT Output Contract Verification', () => {
 	});
 
 	describe('OUTPUT FORMAT section requirements', () => {
+		test('candidate mode uses one marker-bearing header and an explicit micro CLEAN sentinel', () => {
+			const candidateSection = extractSection(
+				EXPLORER_PROMPT,
+				'CANDIDATE REPORTING MODE',
+			);
+			expect(candidateSection).not.toBeNull();
+			expect(candidateSection).toContain('one unprefixed data row per finding');
+			expect(candidateSection).toContain(
+				'[CLEAN] | micro_lane | coverage_scope | evidence',
+			);
+			expect(candidateSection).toContain('negative evidence');
+		});
+
 		test('3. EXPLORER_PROMPT contains "OBSERVED CHANGES" section in OUTPUT FORMAT', () => {
 			const outputFormatIndex = EXPLORER_PROMPT.indexOf(
 				'OUTPUT FORMAT (MANDATORY',

@@ -129,6 +129,7 @@ import { write_drift_evidence } from './write-drift-evidence';
 import { write_final_council_evidence } from './write-final-council-evidence';
 import { write_hallucination_evidence } from './write-hallucination-evidence';
 import { write_mutation_evidence } from './write-mutation-evidence';
+import { write_pr_review_trigger_eval } from './write-pr-review-trigger-eval';
 import { write_retro } from './write-retro';
 
 /**
@@ -171,6 +172,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	checkpoint: () => checkpoint,
 	pkg_audit: () => pkg_audit,
 	parse_lane_candidates: () => parse_lane_candidates,
+	write_pr_review_trigger_eval: () => write_pr_review_trigger_eval,
 	test_runner: () => test_runner,
 	test_impact: () => test_impact,
 	mutation_test: () => mutation_test,

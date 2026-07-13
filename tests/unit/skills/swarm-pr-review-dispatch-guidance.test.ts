@@ -42,6 +42,16 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'## Phase 3: Parallel Base Explorer Lanes',
 			'## Phase 4: Triggered Swarm Plugin Micro-Lanes',
 		);
+		const phase4Section = sectionBetween(
+			source,
+			'## Phase 4: Triggered Swarm Plugin Micro-Lanes',
+			'## Phase 5: Swarm-Native Verifier Routing',
+		);
+		const phase6Section = sectionBetween(
+			source,
+			'## Phase 6: Independent Reviewer Confirmation',
+			'## Phase 7: Falsification Probe Requirement',
+		);
 
 		expect(phase3Section).toContain('dispatch_lanes_async');
 		expect(phase3Section).toContain('collect_lane_results');
@@ -66,6 +76,27 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).not.toContain('run_in_background');
 		expect(phase3Section).not.toContain(
 			'single message with multiple Agent tool calls',
+		);
+		expect(phase3Section).toContain('do not dispatch reviewers yet');
+		expect(phase4Section).toContain('[TRIGGER-EVAL]');
+		expect(phase4Section).toContain('one row per trigger-map row');
+		expect(phase4Section).toContain('write_pr_review_trigger_eval');
+		expect(phase4Section).toContain('source_batch_id');
+		expect(phase4Section).toContain('source_lane_id');
+		expect(phase4Section).toContain('expected_family: "micro_lane"');
+		expect(phase4Section).toContain('`expected_micro_lane`');
+		expect(phase4Section).toContain('zero malformed rows');
+		expect(phase4Section).toContain('matches the trigger row');
+		expect(phase4Section).toContain('[CLEAN]');
+		expect(phase4Section).toContain('UNATTESTED');
+		expect(phase4Section).toContain(
+			'Task output has no `L1` artifact provenance',
+		);
+		expect(phase4Section).toContain('generic trigger rows');
+		expect(phase6Section).toContain('join barrier');
+		expect(phase6Section).toContain('malformed `[REVIEWED]`');
+		expect(source).toContain(
+			'[VALIDATION] trigger map evaluated: ___ rows (X MATCHED → X micro-lanes dispatched) OR BLOCKED — <unevaluated rows>',
 		);
 		expect(source).toContain(
 			'review comments, review summaries, requested changes',

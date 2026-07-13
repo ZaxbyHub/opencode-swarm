@@ -107,7 +107,8 @@ src/tools/declare-scope.ts — function has 12 parameters, consider splitting; t
 Activates when your prompt contains "[CANDIDATE]" anywhere in its text.
 
 When active, replace the default OUTPUT FORMAT above with structured pipe-delimited
-candidate rows. Emit exactly one row per finding:
+candidate rows. Emit the marker-bearing header, then exactly one unprefixed data
+row per finding:
 
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 
@@ -122,11 +123,14 @@ Field rules:
 - impact_context: who or what is affected downstream
 - confidence: LOW | MEDIUM | HIGH
 
-Emit a header row first, then one [CANDIDATE] row per finding. Use pipe (|) to
+Emit a header row first, then one unprefixed data row per finding. Use pipe (|) to
 separate fields; escape literal pipe characters inside field values as \\|.
 
-If you find zero issues, emit the header row with no data rows. Do NOT fall back
-to the default PROJECT/STRUCTURE format when in candidate reporting mode.
+If a standard explorer finds zero issues, emit the header row with no data rows.
+If a micro-lane finds zero issues, emit the header followed by exactly:
+[CLEAN] | micro_lane | coverage_scope | evidence
+Fill every CLEAN field with the assigned micro-lane, checks completed, and the
+negative evidence. Do NOT fall back to the default PROJECT/STRUCTURE format.
 
 For micro-lane dispatches, use the micro-lane variant:
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence

@@ -66,9 +66,34 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('Any blank "value: ___" field');
 		});
 
+		it('runs graph regression sweeps once per changed source file with honest outcomes', () => {
+			expect(skillContent).toContain(
+				'one `test_runner` call per changed source file',
+			);
+			expect(skillContent).toContain('per-file regression-sweep evidence');
+			expect(skillContent).not.toContain(
+				'files:[<all source files changed by coder>]',
+			);
+			expect(skillContent).not.toContain(
+				'SKIPPED — broad scope, no related tests beyond task scope',
+			);
+		});
+
+		it('keeps load-bearing adversarial step ordering without duplicate labels', () => {
+			const adversarial = skillContent.indexOf('5m. **ADVERSARIAL TEST STEP**');
+			const coverage = skillContent.indexOf(
+				'5m-bis. **COVERAGE-GAP TEST STEP**',
+			);
+			const todo = skillContent.indexOf('5n. **TODO SCAN**');
+			expect(adversarial).toBeGreaterThan(-1);
+			expect(coverage).toBeGreaterThan(adversarial);
+			expect(todo).toBeGreaterThan(coverage);
+			expect(skillContent.match(/^\s*5n\./gm)).toHaveLength(1);
+		});
+
 		it('does not contain raw config-renderer placeholders', () => {
 			expect(skillContent).not.toContain('{{ADVERSARIAL_TEST_STEP}}');
-			expect(skillContent).not.toContain('{{ADVERSARIAL_TEST_CHECKLIST}}');
+			expect(skillContent).not.toContain(`{{ADVERSARIAL_${'TEST_CHECKLIST'}}}`);
 			expect(skillContent).toContain('MODE: EXECUTE architect stub');
 		});
 
