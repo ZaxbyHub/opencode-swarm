@@ -243,6 +243,29 @@ describe('candidate parser Phase 4 contract', () => {
 		});
 	}
 
+	test('rejects CLEAN from an incomplete transcript even when partial candidates are allowed', () => {
+		const result = parseCandidates(
+			input(`${microHeader}\n[CLEAN] | subprocess | scope | evidence`, {
+				transcriptIncomplete: true,
+			}),
+			flags({
+				accept_partial: true,
+				expected_family: 'micro_lane',
+				expected_micro_lane: 'subprocess',
+			}),
+		);
+
+		expect(result.error_code).toBe('untrusted-clean-attestation');
+		expect(result.clean_attestation).toBeUndefined();
+		expect(result.diagnostics.parse_error_details).toContainEqual(
+			expect.objectContaining({
+				field: 'clean_attestation',
+				message:
+					'CLEAN attestation cannot come from a degraded or partial artifact',
+			}),
+		);
+	});
+
 	test('header-only zero output remains unattested', () => {
 		const result = parseCandidates(
 			input(microHeader),
