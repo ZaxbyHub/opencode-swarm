@@ -18,6 +18,7 @@ import { validateSwarmPath } from '../hooks/utils';
 import { takeSnapshotEvent } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -205,7 +206,7 @@ export async function executeWriteDriftEvidence(
 						// A missing profile is expected when gates were never configured.
 						if (!/No QA gate profile/i.test(msg)) {
 							qaProfileLockError = msg;
-							console.warn(
+							logger.log(
 								'[write_drift_evidence] QA gate profile lock failed:',
 								msg,
 							);
@@ -216,7 +217,7 @@ export async function executeWriteDriftEvidence(
 				}
 			} catch (err) {
 				snapshotError = err instanceof Error ? err.message : String(err);
-				console.warn(
+				logger.log(
 					'[write_drift_evidence] critic-approved snapshot failed:',
 					snapshotError,
 				);

@@ -1,0 +1,99 @@
+# TUI pollution sweep — tool execute path (PR4 of epic #1752)
+
+## What
+
+Migrates every remaining raw `console.warn` / `console.error` on the tool
+execute path (the tool handler bodies in `src/tools/*`, plus the mutation
+patch generator and the Semgrep SAST runner) to the PR1 foundation helper:
+
+- **21 diagnostic fail-open catches** → `logger.log(msg)` — debug-gated
+  (`OPENCODE_SWARM_DEBUG=1`), NOT buffered. These are best-effort evidence
+  saves, coverage/SBOM report writes, cleanup failures, lock releases,
+  explorer-format-suffix skips, LLM-call/session-create/parse fallbacks,
+  force-override operational modes, corrupt-evidence gate blocks, and
+  Semgrep `child.kill` failures (ESRCH-guarded). They would flood
+  `/swarm diagnose` if buffered.
+
+All 21 are purely diagnostic — the operator cannot act on any of them at
+runtime (the catches already fail open and return a result), so none use
+`advisoryWarn`.
+
+Migrated files (`src/`):
+
+- `tools/build-check.ts` — 1 build-evidence save catch.
+- `tools/convene-general-council.ts` — 1 council-evidence write catch.
+- `tools/dispatch-lanes.ts` — 1 explorer-format-suffix overflow skip.
+- `tools/lean-turbo-run-phase.ts` — 1 runner cleanup-failure catch.
+- `tools/req-coverage.ts` — 1 coverage-report write catch.
+- `tools/sbom-generate.ts` — 1 SBOM-evidence save catch.
+- `tools/update-task-status.ts` — 3 sites (corrupt-evidence gate block,
+  force-override re-open notice, lock-release failure catch).
+- `tools/write-drift-evidence.ts` — 2 sites (QA-gate-profile lock failure,
+  critic-approved snapshot failure).
+- `mutation/generator.ts` — 6 graceful-fallback catches (no ToolContext,
+  no opencodeClient, session-create failed, LLM prompt failed, JSON parse
+  failed, LLM call threw).
+- `sast/semgrep.ts` — 4 `child.kill` failure catches (SIGTERM/SIGKILL on
+  normal settle, stdout-overflow kill, stderr-overflow kill; all
+  ESRCH-guarded).
+
+## Why
+
+Raw `console.warn` / `console.error` writes to stderr corrupt the OpenCode
+bubbletea TUI when it owns the terminal (issue #1249 class). The tool
+execute path fires these on any diagnostic fail-open condition during an
+agent turn — with no error surfaced to the user. PR1 built the
+`advisoryWarn` helper; PR2 closed the init path; PR3 closed the hook path;
+this PR closes the tool execute path so the TUI stays clean during build
+checks, council convening, lane dispatch, Lean Turbo phases, coverage
+reporting, SBOM generation, task-status updates, drift-evidence writes,
+mutation generation, and Semgrep scans.
+
+## Behavior changes
+
+- The 21 diagnostic catches are now silent unless `OPENCODE_SWARM_DEBUG=1`.
+  Previously they wrote raw stderr on every fail-open. No operational
+  information is lost — operators debugging a specific failure set the env
+  var or inspect the return values (the catches already fail open).
+- No breaking API changes. All function signatures, return values, and
+  default fail-open behavior are preserved; only the warning delivery
+  channel changed.
+
+## Regression guard
+
+Extended `tests/unit/plugin-tui-safety.test.ts` to cover the 10 migrated
+files (matching the PR2/PR3 precedent). The scan now asserts each file
+contains zero raw `console.warn`, `console.error`, **and** `console.log`
+(the regex was widened from `console.warn(` to `console.(warn|error|log)(`
+so the 3 `.error`-only files — `build-check`, `lean-turbo-run-phase`,
+`semgrep` — are actually enforced). This is the interim guard until PR5 of
+epic #1752 enables Biome `suspicious/noConsole` globally.
+
+## Testing
+
+- Updated `tests/unit/tools/update-task-status.test.ts` `adversarial warn`
+  describe block to use the PR3 debug-capture pattern: set
+  `OPENCODE_SWARM_DEBUG='1'`, capture `console.log`, and assert the
+  corrupt-evidence diagnostic fires (2 positive assertions: 10000-char
+  taskId → 1, null/undefined taskId → 2). The 6 negative assertions in the
+  same block assert zero matching debug-logs, preserving the ENOENT-vs-
+  corrupt coverage. Env + console restored in `afterEach`.
+- The Issue #81 and Task 2.2 describe blocks in the same file are left
+  unchanged: they guard a different, already-removed idle-state regression
+  warn and remain valid.
+- The 4 test files the issue listed as potentially impacted
+  (`save-plan-snapshot-retry`, `save-plan-snapshot-retry.adversarial`,
+  `pre-check-batch.adversarial`, `pre-check-batch-cwd.adversarial`) were
+  verified by direct grep + import inspection to assert on non-migrated
+  source modules (`save-plan`, `plan/manager`, `pre-check-batch`); no edits
+  were needed.
+
+## Scope notes
+
+- Biome `suspicious/noConsole` enforcement remains deferred to PR5 of epic
+  #1752. A repo-wide `src/` sweep confirms zero remaining raw
+  `console.warn`/`error`/`log` in non-test, non-logger source outside
+  `src/cli/index.ts` (the standalone CLI installer UX, intentionally raw).
+- `update-task-status.ts:1012` (force-override re-open) defaults to `log()`
+  as an expected operational mode (matches the issue's triage
+  recommendation), not `advisoryWarn()`.

@@ -35,6 +35,7 @@ import type {
 	GeneralCouncilMemberResponse,
 } from '../council/general-council-types';
 import { getAgentSession } from '../state';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -260,7 +261,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 			} catch (err) {
 				// Evidence write is best-effort; surface but do not abort.
 				const message = err instanceof Error ? err.message : String(err);
-				console.warn(
+				logger.log(
 					`[convene_general_council] Failed to write evidence to ${evidencePath}: ${message}`,
 				);
 			}

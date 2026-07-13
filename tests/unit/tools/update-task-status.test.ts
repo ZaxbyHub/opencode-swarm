@@ -1321,8 +1321,9 @@ describe('checkReviewerGate — adversarial warn', () => {
 	let tempDir: string;
 	let originalCwd: string;
 	let originalAgentSessions: typeof swarmState.agentSessions;
-	let originalConsoleWarn: typeof console.warn;
-	let warnCalls: string[];
+	let originalConsoleLog: typeof console.log;
+	let originalDebug: string | undefined;
+	let logCalls: string[];
 
 	beforeEach(() => {
 		// Create isolated temp directory for test isolation
@@ -1375,10 +1376,15 @@ describe('checkReviewerGate — adversarial warn', () => {
 
 		originalAgentSessions = new Map(swarmState.agentSessions);
 		swarmState.agentSessions.clear();
-		warnCalls = [];
-		originalConsoleWarn = console.warn;
-		console.warn = (...args: any[]) => {
-			warnCalls.push(args.join(' '));
+		// Epic #1752 PR4: the corrupt-evidence diagnostic now routes through
+		// logger.log (debug-gated via OPENCODE_SWARM_DEBUG=1) instead of raw
+		// console.warn. Enable debug and capture console.log to observe it.
+		originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		logCalls = [];
+		originalConsoleLog = console.log;
+		console.log = (...args: any[]) => {
+			logCalls.push(args.join(' '));
 		};
 	});
 
@@ -1387,7 +1393,13 @@ describe('checkReviewerGate — adversarial warn', () => {
 		for (const [key, value] of originalAgentSessions) {
 			swarmState.agentSessions.set(key, value);
 		}
-		console.warn = originalConsoleWarn;
+		// Restore env + console.
+		if (originalDebug === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+		}
+		console.log = originalConsoleLog;
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -1405,8 +1417,8 @@ describe('checkReviewerGate — adversarial warn', () => {
 
 	// ====== Attack Vector 2: taskId with very long string (10,000 chars) ======
 	test('does not throw with extremely long taskId (10000 chars)', () => {
-		// Reset warnCalls to ensure clean state - there may be leftover warns from previous tests
-		warnCalls = [];
+		// Reset logCalls to ensure clean state - there may be leftover logs from previous tests
+		logCalls = [];
 
 		const longTaskId = 'a'.repeat(10000);
 		const session = createWorkflowTestSession();
@@ -1414,11 +1426,14 @@ describe('checkReviewerGate — adversarial warn', () => {
 		swarmState.agentSessions.clear();
 		swarmState.agentSessions.set('ses_abc', session);
 
-		// Should not throw, and warn should be suppressed (not fired)
+		// Should not throw, and the corrupt-evidence diagnostic should fire once
+		// (long taskId causes readTaskEvidenceRaw to throw → catch → logger.log).
 		const result = checkReviewerGate(longTaskId, tempDir);
 		expect(result.blocked).toBe(true);
-		// Should fire warn because taskId validation fails
-		expect(warnCalls.length).toBe(1);
+		// Should fire the corrupt-evidence diagnostic once (now debug-gated via logger.log).
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(1);
 	});
 
 	// ====== Attack Vector 3: taskId is empty string ======
@@ -1447,8 +1462,11 @@ describe('checkReviewerGate — adversarial warn', () => {
 
 		const result = checkReviewerGate('1.1', tempDir);
 		expect(result.blocked).toBe(true);
-		// Should NOT fire warn because state is coder_delegated, not idle
-		expect(warnCalls.length).toBe(0);
+		// Should NOT fire the corrupt-evidence diagnostic because the evidence path
+		// reads cleanly (no throw) for this taskId.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 
 	// ====== Attack Vector 5: Mixed case status ======
@@ -1462,8 +1480,10 @@ describe('checkReviewerGate — adversarial warn', () => {
 		const result = checkReviewerGate('1.1', tempDir);
 		// Should still be blocked (not tests_run or complete)
 		expect(result.blocked).toBe(true);
-		// Should NOT fire warn because 'IDLE' (uppercase) doesn't end with ': idle' (lowercase)
-		expect(warnCalls.length).toBe(0);
+		// Should NOT fire the corrupt-evidence diagnostic for this taskId.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 
 	// ====== Attack Vector 6: 100 sessions all idle ======
@@ -1477,8 +1497,10 @@ describe('checkReviewerGate — adversarial warn', () => {
 		const result = checkReviewerGate('1.1', tempDir);
 		expect(result.blocked).toBe(true);
 
-		// Should NOT fire any warn - regression warning is now suppressed
-		expect(warnCalls.length).toBe(0);
+		// Should NOT fire the corrupt-evidence diagnostic for this taskId.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 
 	// ====== Attack Vector 7: Session state advances during check (mutation) ======
@@ -1490,14 +1512,16 @@ describe('checkReviewerGate — adversarial warn', () => {
 		// the function uses a snapshot of stateEntries collected synchronously
 		const result = checkReviewerGate('1.1', tempDir);
 		expect(result.blocked).toBe(true);
-		// Should NOT fire warn - regression warning is suppressed when all sessions idle
-		expect(warnCalls.length).toBe(0);
+		// Should NOT fire the corrupt-evidence diagnostic for this taskId.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 
 	// ====== Attack Vector 8: Null/undefined taskId injection ======
 	test('handles null/undefined taskId gracefully (getTaskState returns idle)', () => {
-		// Reset warnCalls to ensure clean state
-		warnCalls = [];
+		// Reset logCalls to ensure clean state
+		logCalls = [];
 
 		const session = createWorkflowTestSession();
 		swarmState.agentSessions.clear();
@@ -1516,8 +1540,11 @@ describe('checkReviewerGate — adversarial warn', () => {
 		expect(resultNull.blocked).toBe(true);
 		expect(resultUndefined.blocked).toBe(true);
 
-		// Should fire 2 warnings - one for null and one for undefined taskId
-		expect(warnCalls.length).toBe(2);
+		// Should fire the corrupt-evidence diagnostic twice (one per invalid taskId),
+		// now debug-gated via logger.log.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(2);
 	});
 
 	// ====== Additional edge case: Zero sessions should not warn ======
@@ -1527,7 +1554,9 @@ describe('checkReviewerGate — adversarial warn', () => {
 		const result = checkReviewerGate('1.1', tempDir);
 		// Returns early with blocked: false
 		expect(result.blocked).toBe(false);
-		expect(warnCalls.length).toBe(0);
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 
 	// ====== Additional edge case: Empty stateEntries should not warn ======
@@ -1540,8 +1569,10 @@ describe('checkReviewerGate — adversarial warn', () => {
 		// Even with a session, the allIdle check requires length > 0
 		const result = checkReviewerGate('1.1', tempDir);
 		expect(result.blocked).toBe(true);
-		// Should NOT fire warn - regression warning is suppressed when all sessions idle
-		expect(warnCalls.length).toBe(0);
+		// Should NOT fire the corrupt-evidence diagnostic for this taskId.
+		expect(
+			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
+		).toBe(0);
 	});
 });
 
