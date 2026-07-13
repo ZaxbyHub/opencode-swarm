@@ -40,7 +40,11 @@ import { createReviewerAgent } from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
 import { createSpecWriterAgent } from './spec-writer';
-import { emptyProjectContext, type ProjectContext } from './template';
+import {
+	assertNoUnresolvedPlaceholders,
+	emptyProjectContext,
+	type ProjectContext,
+} from './template';
 import { createTestEngineerAgent } from './test-engineer';
 
 export type { AgentDefinition } from './architect';
@@ -766,6 +770,22 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		designer.name = prefixName('designer');
 		agents.push(applyOverrides(designer, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// Dead-safety-net fix (M12): the three uncoordinated `.replace()` chains
+	// that assemble agent prompts — Chain A in src/agents/architect.ts and
+	// Chain B above (architect: {{SWARM_ID}}, {{AGENT_PREFIX}}, project-context,
+	// etc.) — never validated for leftover placeholders. Assert over EACH
+	// agent's FINAL prompt, after every substitution chain has run, so a
+	// renamed/mistyped/newly-added `{{KEY}}` fails init loudly instead of
+	// leaking raw template text to the model. Runs here (before return) rather
+	// than inside createArchitectAgent so it sees Chain B's output — Chain B
+	// resolves tokens that Chain A injected (e.g. {{AGENT_PREFIX}} inside the
+	// adversarial-test step).
+	for (const agent of agents) {
+		if (typeof agent.config.prompt === 'string') {
+			assertNoUnresolvedPlaceholders(agent.config.prompt, agent.name);
+		}
 	}
 
 	return agents;

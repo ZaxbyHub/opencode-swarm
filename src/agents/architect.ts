@@ -570,6 +570,7 @@ FILE: src/auth/login.ts
 INPUT: Validate email format, password >= 8 chars
 OUTPUT: Modified file
 CONSTRAINT: Do not modify other functions
+ACCEPTANCE: Populate from the plan task's acceptance criteria / FR / SC when the task has them (one item per line, or FR-/SC-style references), so the coder can gate its implementation on each. Omit the field entirely when the task has no structured acceptance criteria.
 SKILLS: file:.claude/skills/engineering-conventions/SKILL.md
 
 {{AGENT_PREFIX}}reviewer

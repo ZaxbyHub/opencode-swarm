@@ -72,22 +72,7 @@ describe('createFullAutoPermissionHook', () => {
 		).resolves.toBeUndefined();
 	});
 
-	test.skip('regression F1: the run state mode overrides config mode — on strict enforces strict policy', async () => {
-		// Skipped: this test pins behavior from the original PR #1319 first-class
-		// toggle and F5 fix (runState.mode overrides config.mode; invalid modes
-		// fail-safe to 'strict'). The follow-up commits on the PR branch
-		// (a4bdda12 et al.) reverted the first-class toggle on the permission
-		// hook and the safeMode validation in full-auto-permission.ts. The
-		// classifier now uses fullAutoConfig?.mode (init-time) rather than
-		// runState.mode, so the strict-mode escalation no longer fires for a
-		// `startFullAutoRun(..., { mode: 'strict' })` call when the config says
-		// 'supervised'. Restore this test when the mode-overrides-init-mode
-		// behavior is re-introduced.
-		//
-		// Previous code passed the init-time config to the classifier, so the
-		// mode argument of `/swarm full-auto on <mode>` was cosmetic: the run
-		// recorded mode 'strict' while enforcement stayed 'supervised'. The
-		// classifier must receive runState.mode.
+	test('regression F1: the run state mode overrides config mode — on strict enforces strict policy', async () => {
 		// Config says supervised; the run was started strict.
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
 		const hook = createFullAutoPermissionHook({
@@ -133,17 +118,7 @@ describe('createFullAutoPermissionHook', () => {
 		).resolves.toBeUndefined();
 	});
 
-	test.skip('regression: first-class toggle — enforces a running run even when config has enabled: false', async () => {
-		// Skipped: this test pins behavior from the original PR #1319 first-class
-		// toggle (durable run state is the sole runtime gate for the permission
-		// hook; `enabled: false` does NOT short-circuit to noop when a run is
-		// active). The follow-up commits on the PR branch (a4bdda12 et al.)
-		// re-introduced the `if (!fullAutoConfig?.enabled) return noop` early
-		// return at the top of the hook factory, so a config with `enabled:
-		// false` makes the hook a permanent no-op regardless of the durable run
-		// state. Restore this test when the first-class toggle is re-introduced
-		// on the permission hook.
-		//
+	test('regression: first-class toggle — enforces a running run even when config has enabled: false', async () => {
 		// Previous code returned a permanent no-op hook when
 		// config.full_auto.enabled was false, so a durable running run was
 		// silently unenforced. The hook is now always armed and the durable

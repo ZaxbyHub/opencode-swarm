@@ -104,7 +104,9 @@ const READ_ONLY_TOOLS = new Set<string>([
 	'detect_domains',
 	// extract_code_blocks removed (issue #1778 C1): it writes files and must not
 	// be auto-allowed as a read-only tool by the full-auto permission hook.
-	'gitingest',
+	// gitingest removed (M4): it performs a network fetch (gitingest.com) and
+	// must NOT short-circuit as safe/allow. It now lives in NETWORK_TOOLS so
+	// full-auto escalates it to the critic instead of auto-approving.
 	'lint',
 	'lint_spec',
 	'pkg_audit',
@@ -163,6 +165,10 @@ const NETWORK_TOOLS = new Set<string>([
 	'fetch',
 	'http',
 	'request',
+	// M4: gitingest fetches an external repository over the network
+	// (gitingest.com). Classify it as a network tool so full-auto escalates
+	// it to the critic rather than auto-allowing it as read-only.
+	'gitingest',
 ]);
 
 const SUBAGENT_TOOLS = new Set<string>(['task', 'agent', 'delegate']);

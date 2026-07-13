@@ -91,6 +91,50 @@ export const INJECTION_PATTERNS: RegExp[] = [
 	/\.prototype\[/,
 ];
 
+/**
+ * Layer-2 content-safety scan for a single string value. Runs the same
+ * *blocking* pattern sets {@link validateLesson}'s Layer-2 block uses —
+ * dangerous-command errors, security-degrading instructions, and
+ * prompt-injection patterns — over an arbitrary short string (e.g. a
+ * directive-action field value such as `triggers` / `required_actions` /
+ * `forbidden_actions` / `verification_checks`).
+ *
+ * Returns a blocking reason string on the first match, or `null` when the value
+ * is content-safe. Mirrors validateLesson's normalization exactly: NFKC +
+ * invisible-format-char stripping + whitespace collapse + lowercase for the
+ * dangerous/security scans, and tests the RAW string for the injection patterns
+ * (normalization would strip the very control/invisible characters those
+ * patterns are meant to detect).
+ *
+ * The warning-severity dangerous-command patterns are intentionally NOT applied
+ * here: validateLesson treats them as non-blocking warnings (they match benign
+ * shell snippets like backticks and `$(...)` that legitimately appear in
+ * actionable directives), so promoting them to hard rejections on field values
+ * would create false positives without a corresponding safety gain.
+ */
+export function scanContentSafety(text: string): string | null {
+	if (typeof text !== 'string' || text.length === 0) return null;
+	const normalized = text
+		.normalize('NFKC')
+		.replace(INVISIBLE_FORMAT_CHARS, ' ')
+		.replace(/\s+/g, ' ')
+		.toLowerCase();
+	for (const pattern of DANGEROUS_COMMAND_ERROR_PATTERNS) {
+		if (pattern.test(normalized)) return 'dangerous command pattern detected';
+	}
+	for (const pattern of SECURITY_DEGRADING_PATTERNS) {
+		if (pattern.test(normalized)) {
+			return 'security-degrading instruction detected';
+		}
+	}
+	for (const pattern of INJECTION_PATTERNS) {
+		// Test the RAW string — normalization above removes the control/invisible
+		// characters the leading injection patterns are meant to catch.
+		if (pattern.test(text)) return 'injection pattern detected';
+	}
+	return null;
+}
+
 // ============================================================================
 // Internal Helpers
 // ============================================================================
@@ -550,6 +594,16 @@ export function validateActionableFields(
 		for (const item of list) {
 			if (!isCleanShortString(item)) {
 				errors.push(`${name} contains invalid string`);
+				return;
+			}
+			// M10: directive-action field values are injected into agent context
+			// verbatim (via the delegate/architect directive blocks), so they must
+			// pass the same Layer-2 content-safety scan validateLesson runs on the
+			// lesson text. Structural checks above (length/count/control-char) are
+			// preserved; this is an added gate, not a replacement.
+			const unsafe = scanContentSafety(item);
+			if (unsafe) {
+				errors.push(`${name} contains unsafe content: ${unsafe}`);
 				return;
 			}
 		}

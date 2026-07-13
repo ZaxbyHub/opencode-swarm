@@ -123,6 +123,97 @@ describe('drift-check: skill-mirror detection', () => {
 		expect(hit).toBeDefined();
 	});
 
+	test('detects a divergent pair missing a declared shared safety section (M13)', () => {
+		const root = makeTempRoot();
+		// engineering-conventions is a `divergent` ADDITIONAL contract that
+		// declares `sharedSafetyHeadings`. Both trees exist and may diverge in
+		// prose, but the .claude copy here omits "### Critical safety guard".
+		writeFile(
+			root,
+			'.opencode/skills/engineering-conventions/SKILL.md',
+			[
+				'# Engineering Conventions',
+				'',
+				'## SAST baseline capturing (differential scanning)',
+				'',
+				'### Critical safety guard',
+				'',
+				'NEVER capture a baseline after code changes.',
+				'',
+				'## Agent prompt strings — escaping pitfalls',
+				'',
+				'Escape backticks.',
+				'',
+			].join('\n'),
+		);
+		writeFile(
+			root,
+			'.claude/skills/engineering-conventions/SKILL.md',
+			[
+				'# Engineering Conventions (Claude Code)',
+				'',
+				'## SAST baseline capturing (differential scanning)',
+				'',
+				// "### Critical safety guard" intentionally REMOVED here.
+				'## Agent prompt strings — escaping pitfalls',
+				'',
+				'Escape backticks.',
+				'',
+			].join('\n'),
+		);
+
+		const findings = detectSkillMirrorDrift(root);
+		const hit = findings.find(
+			(f) =>
+				f.severity === 'error' &&
+				f.file === '.claude/skills/engineering-conventions/SKILL.md' &&
+				f.message.includes('engineering-conventions') &&
+				f.message.includes('### Critical safety guard') &&
+				f.message.includes('safety section'),
+		);
+		expect(hit).toBeDefined();
+	});
+
+	test('accepts a divergent pair when every declared safety section is present in both trees', () => {
+		const root = makeTempRoot();
+		const bodyWithAllHeadings = [
+			'# Engineering Conventions',
+			'',
+			'## SAST baseline capturing (differential scanning)',
+			'',
+			'### Critical safety guard',
+			'',
+			'NEVER capture a baseline after code changes.',
+			'',
+			'## Agent prompt strings — escaping pitfalls',
+			'',
+			'Escape backticks.',
+			'',
+		].join('\n');
+		writeFile(
+			root,
+			'.opencode/skills/engineering-conventions/SKILL.md',
+			bodyWithAllHeadings,
+		);
+		writeFile(
+			root,
+			'.claude/skills/engineering-conventions/SKILL.md',
+			// Intentionally different prose in the title, but all safety headings present.
+			bodyWithAllHeadings.replace(
+				'# Engineering Conventions',
+				'# Engineering Conventions (Claude Code)',
+			),
+		);
+
+		const findings = detectSkillMirrorDrift(root);
+		const safetyHits = findings.filter(
+			(f) =>
+				f.file?.includes('engineering-conventions') &&
+				f.message.includes('safety section'),
+		);
+		expect(safetyHits).toEqual([]);
+	});
+
 	test('does not flag the generated/ directory as an unclassified pair', () => {
 		const root = makeTempRoot();
 		writeFile(root, '.opencode/skills/generated/x/SKILL.md', 'a\n');

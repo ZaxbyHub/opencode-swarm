@@ -10,6 +10,7 @@ import {
 	getPluginLockFilePaths,
 } from '../config/cache-paths.js';
 import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
+import { safeRealpathSync } from '../tools/repo-graph/safe-realpath.js';
 
 const { version } = packageJson;
 
@@ -109,6 +110,80 @@ export function isSafeLockFilePath(p: string): boolean {
 	// misconfigured nested paths like opencode/opencode/filename.
 	const grandparent = path.basename(path.dirname(path.dirname(resolved)));
 	if (grandparent === 'opencode') {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Safety guard for the `uninstall --clean` deletion of PROMPTS_DIR
+ * (`<CONFIG_DIR>/opencode-swarm`, a DIRECTORY removed recursively).
+ *
+ * This is a SEPARATE guard from isSafeCachePath — it is NOT reused because
+ * isSafeCachePath's layer-4 requires parent ∈ {packages, node_modules} and
+ * grandparent === 'opencode', which the prompts directory (parent basename is
+ * the config dir's basename, typically 'opencode') does not satisfy, so
+ * isSafeCachePath would false-REJECT a legitimate PROMPTS_DIR.
+ *
+ * Defense in depth:
+ *   1. Canonicalize via safeRealpathSync (realpathSync with ENOENT→fallback)
+ *      so the path a symlinked leaf actually resolves to is what we validate.
+ *   2. Refuse root, home, or shorter-than-home paths.
+ *   3. Require ≥ 3 non-empty segments (rejects pathological
+ *      XDG_CONFIG_HOME='/' which yields '/opencode/opencode-swarm', 2 segments).
+ *   4. Require basename === 'opencode-swarm' AND the parent directory's
+ *      basename to equal the config dir's basename (canonical layout is
+ *      `<CONFIG_DIR>/opencode-swarm`).
+ */
+export function isSafePromptsDir(p: string): boolean {
+	const canonical = safeRealpathSync(p, p);
+	if (canonical === null) {
+		return false;
+	}
+	const resolved = path.resolve(canonical);
+	const home = path.resolve(os.homedir());
+	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+		return false;
+	}
+	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
+	if (segments.length < 3) {
+		return false;
+	}
+	if (path.basename(resolved) !== 'opencode-swarm') {
+		return false;
+	}
+	if (path.basename(path.dirname(resolved)) !== path.basename(CONFIG_DIR)) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Safety guard for the `uninstall --clean` deletion of PLUGIN_CONFIG_PATH
+ * (`<CONFIG_DIR>/opencode-swarm.json`, a FILE removed with unlinkSync).
+ *
+ * File-oriented sibling of isSafePromptsDir. isSafePromptsDir would
+ * false-REJECT this path because the leaf here is the `.json` FILE, not the
+ * `opencode-swarm` directory — hence a dedicated guard.
+ *
+ * Defense in depth: canonicalize via safeRealpathSync; refuse root/home/
+ * shorter-than-home; require basename === 'opencode-swarm.json' AND the
+ * parent directory's basename to equal the config dir's basename.
+ */
+export function isSafePluginConfigPath(p: string): boolean {
+	const canonical = safeRealpathSync(p, p);
+	if (canonical === null) {
+		return false;
+	}
+	const resolved = path.resolve(canonical);
+	const home = path.resolve(os.homedir());
+	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+		return false;
+	}
+	if (path.basename(resolved) !== 'opencode-swarm.json') {
+		return false;
+	}
+	if (path.basename(path.dirname(resolved)) !== path.basename(CONFIG_DIR)) {
 		return false;
 	}
 	return true;
@@ -381,16 +456,25 @@ export function evictPluginCaches(): { cleared: string[]; failed: string[] } {
 	const failed: string[] = [];
 	for (const cachePath of OPENCODE_PLUGIN_CACHE_PATHS) {
 		if (!fs.existsSync(cachePath)) continue;
-		if (!isSafeCachePath(cachePath)) {
-			failed.push(`${cachePath} (refused: failed safety check)`);
+		// M6: canonicalize first, then validate AND delete the SAME canonical
+		// string so there is no re-resolution gap on the final component
+		// between the safety check and the syscall. This closes a final-
+		// component symlink swap. NOTE (residual TOCTOU): an intermediate-
+		// directory symlink swap performed by an attacker between this
+		// realpath and the rmSync syscall is NOT closeable via the rmSync
+		// string API, which takes a path rather than an already-opened fd.
+		const canonical = safeRealpathSync(cachePath, cachePath);
+		if (canonical === null || !fs.existsSync(canonical)) continue;
+		if (!isSafeCachePath(canonical)) {
+			failed.push(`${canonical} (refused: failed safety check)`);
 			continue;
 		}
 		try {
-			fs.rmSync(cachePath, { recursive: true, force: true });
-			cleared.push(cachePath);
+			fs.rmSync(canonical, { recursive: true, force: true });
+			cleared.push(canonical);
 		} catch (err) {
 			failed.push(
-				`${cachePath} (${err instanceof Error ? err.message : String(err)})`,
+				`${canonical} (${err instanceof Error ? err.message : String(err)})`,
 			);
 		}
 	}
@@ -411,20 +495,29 @@ export function evictLockFiles(): { cleared: string[]; failed: string[] } {
 	const failed: string[] = [];
 	for (const lockPath of OPENCODE_PLUGIN_LOCK_FILE_PATHS) {
 		if (!fs.existsSync(lockPath)) continue;
-		if (!isSafeLockFilePath(lockPath)) {
-			failed.push(`${lockPath} (refused: failed safety check)`);
+		// M6: canonicalize first, then validate AND delete the SAME canonical
+		// string so there is no re-resolution gap on the final component
+		// between the safety check and the syscall. This closes a final-
+		// component symlink swap. NOTE (residual TOCTOU): an intermediate-
+		// directory symlink swap performed by an attacker between this
+		// realpath and the unlinkSync syscall is NOT closeable via the
+		// unlinkSync string API, which takes a path rather than an fd.
+		const canonical = safeRealpathSync(lockPath, lockPath);
+		if (canonical === null || !fs.existsSync(canonical)) continue;
+		if (!isSafeLockFilePath(canonical)) {
+			failed.push(`${canonical} (refused: failed safety check)`);
 			continue;
 		}
 		try {
-			fs.unlinkSync(lockPath);
-			cleared.push(lockPath);
+			fs.unlinkSync(canonical);
+			cleared.push(canonical);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException)?.code;
 			if (code === 'EISDIR') {
-				failed.push(`${lockPath} (path is a directory, not a file)`);
+				failed.push(`${canonical} (path is a directory, not a file)`);
 			} else {
 				failed.push(
-					`${lockPath} (${err instanceof Error ? err.message : String(err)})`,
+					`${canonical} (${err instanceof Error ? err.message : String(err)})`,
 				);
 			}
 		}
@@ -497,18 +590,35 @@ async function uninstall(): Promise<number> {
 		if (process.argv.includes('--clean')) {
 			let cleaned = false;
 
-			// If PLUGIN_CONFIG_PATH exists: delete it
+			// If PLUGIN_CONFIG_PATH exists: canonicalize, safety-check, delete.
 			if (fs.existsSync(PLUGIN_CONFIG_PATH)) {
-				fs.unlinkSync(PLUGIN_CONFIG_PATH);
-				console.log(`✓ Removed plugin config: ${PLUGIN_CONFIG_PATH}`);
-				cleaned = true;
+				const canonical = safeRealpathSync(
+					PLUGIN_CONFIG_PATH,
+					PLUGIN_CONFIG_PATH,
+				);
+				if (canonical === null || !isSafePluginConfigPath(canonical)) {
+					console.log(
+						`✗ Refused to remove plugin config (failed safety check): ${canonical ?? PLUGIN_CONFIG_PATH}`,
+					);
+				} else {
+					fs.unlinkSync(canonical);
+					console.log(`✓ Removed plugin config: ${canonical}`);
+					cleaned = true;
+				}
 			}
 
-			// If PROMPTS_DIR exists: delete it recursively
+			// If PROMPTS_DIR exists: canonicalize, safety-check, delete recursively.
 			if (fs.existsSync(PROMPTS_DIR)) {
-				fs.rmSync(PROMPTS_DIR, { recursive: true });
-				console.log(`✓ Removed custom prompts: ${PROMPTS_DIR}`);
-				cleaned = true;
+				const canonical = safeRealpathSync(PROMPTS_DIR, PROMPTS_DIR);
+				if (canonical === null || !isSafePromptsDir(canonical)) {
+					console.log(
+						`✗ Refused to remove custom prompts (failed safety check): ${canonical ?? PROMPTS_DIR}`,
+					);
+				} else {
+					fs.rmSync(canonical, { recursive: true });
+					console.log(`✓ Removed custom prompts: ${canonical}`);
+					cleaned = true;
+				}
 			}
 
 			// If neither exists

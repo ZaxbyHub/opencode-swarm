@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
 	detectAdversarialPatterns,
 	detectDebuggingSpiral,
+	recentToolCallSessionCount,
 	recordToolCall,
 } from '../../../src/hooks/adversarial-detector';
 
@@ -76,5 +77,41 @@ describe('adversarial detector wiring', () => {
 		}
 		const second = await detectDebuggingSpiral('/tmp/test', sessionId);
 		expect(second).toBeNull();
+	});
+});
+
+describe('adversarial detector memory cap (invariant-8)', () => {
+	test('recentToolCallsBySession key count is FIFO-capped at 500', async () => {
+		// Seed an early session with a spiral-ready buffer (6 identical calls).
+		const oldest = 'cap-oldest-session';
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('bash', { command: 'npm test' }, oldest);
+		}
+
+		// Insert 600 further DISTINCT session keys. Each new key triggers the FIFO cap
+		// in recordToolCall's new-entry branch, which must evict the oldest keys —
+		// including `oldest` — while never letting the map exceed the 500 bound.
+		for (let i = 0; i < 600; i++) {
+			recordToolCall('read', { path: `/tmp/f${i}` }, `cap-filler-${i}`);
+			expect(recentToolCallSessionCount()).toBeLessThanOrEqual(500);
+		}
+
+		// KEY count is pinned at the cap (we inserted far more than 500 distinct keys).
+		expect(recentToolCallSessionCount()).toBe(500);
+
+		// The oldest session's buffer was evicted, so its would-be spiral no longer
+		// fires — direct proof the KEY was dropped (without the cap it would spiral).
+		const evicted = await detectDebuggingSpiral('/tmp/test', oldest);
+		expect(evicted).toBeNull();
+
+		// The current (newest) session is preserved: the self-guard keeps the entry
+		// being inserted, so a fresh spiral on the latest key still detects.
+		const current = 'cap-current-session';
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('bash', { command: 'npm run build' }, current);
+		}
+		expect(recentToolCallSessionCount()).toBe(500);
+		const detected = await detectDebuggingSpiral('/tmp/test', current);
+		expect(detected).not.toBeNull();
 	});
 });

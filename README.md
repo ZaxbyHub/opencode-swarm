@@ -39,7 +39,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
 - 🖥️ **PR Monitor** — GitHub PR subscription and background polling via `gh` CLI; delivers real-time CI, review, and merge status updates via the AutomationEventBus (FR-001, opt-in via `pr_monitor.enabled: true`). Subscribe with `/swarm pr subscribe <pr-url|owner/repo#N|N>`; unsubscribe with `/swarm pr unsubscribe <pr-url|owner/repo#N|N>`; check status with `/swarm pr status`. Enable `auto_pr_feedback: true` in `pr_monitor` config to inject `[MODE: PR_FEEDBACK pr="URL"]` on CI failures and merge conflicts automatically.
-- 🌐 **12 full language profiles** (TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP) with **tree-sitter parse validation across 20 grammars** (adds JavaScript, CSS, Bash, PowerShell, INI, Regex — and `.tsx` / `.c` aliases) — extending: see [docs/adding-a-language.md](docs/adding-a-language.md)
+- 🌐 **13 full language profiles** (TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP) with **tree-sitter parse validation across 20 grammars** (adds CSS, Bash, PowerShell, INI, Regex — and `.tsx` / `.c` aliases) — extending: see [docs/adding-a-language.md](docs/adding-a-language.md)
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
 - 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence, TTL expiry, and scope-aware destructive command blocking. **Handles both single-string and array-based path arguments** (`files[]`, `paths[]`, `targetFiles[]`) to prevent scope bypass via multi-file tool calls.
 - 📝 **Shell write detection** — Static analysis of POSIX/PowerShell/cmd commands to detect file writes (redirects, builtins, in-place editors, network downloads, archive extraction, git destructive ops) before execution
@@ -550,14 +550,14 @@ These quality gates run locally. No Docker is required. Config-gated features su
 
 ### Context Budget Guard
 
-The Context Budget Guard monitors how much context Swarm is injecting into the conversation. It helps prevent context overflow before it becomes a problem.
+The Context Budget Guard monitors how full the model's context window is getting across the whole conversation. It helps prevent context overflow before it becomes a problem.
 
 ### Default Behavior
 
 - **Enabled automatically** — No setup required. Swarm starts tracking context usage right away.
-- **What it measures** — Only the context that Swarm injects (plan, context, evidence, retrospectives). It does **not** count your chat history or the model's responses.
-- **Warning threshold (0.7 ratio)** — When swarm-injected context reaches ~2800 tokens (70% of 4000), the architect receives a one-time advisory warning. This is informational — execution continues normally.
-- **Critical threshold (0.9 ratio)** — When context reaches ~3600 tokens (90% of 4000), the architect receives a critical alert with a recommendation to run `/swarm handoff`. This is also one-time only.
+- **What it measures** — The estimated total tokens across **all** messages in the conversation (every text part of every message — your prompts, the model's responses, and injected content alike), divided by the model's context window. The window comes from `context_budget.model_limits` (default `128000`), resolved per model/provider. It does **not** measure only swarm-injected content, and it does **not** read `max_injection_tokens`.
+- **Warning threshold (0.7 ratio)** — When total conversation tokens reach 70% of the model context window (e.g. ~89,600 of 128,000), the architect receives a one-time advisory warning. This is informational — execution continues normally.
+- **Critical threshold (0.9 ratio)** — When total conversation tokens reach 90% of the model context window (e.g. ~115,200 of 128,000), the architect receives a critical alert with a recommendation to run `/swarm handoff`. This is also one-time only.
 - **Non-nagging** — Alerts fire once per session, not repeatedly. You won't be pestered every turn.
 - **Who sees warnings** — Only the architect receives these warnings. Other agents are unaware of the budget.
 
@@ -588,16 +588,17 @@ Swarm includes an intelligent skill propagation system that tracks, validates, a
 
 ```json
 {
-  "skill_propagation": {
+  "skillPropagation": {
     "enabled": true,
     "enforce": false,
-    "scoring": {
-      "threshold": 0.5,
-      "max_recommendations": 5
-    }
+    "audiences": []
   }
 }
 ```
+
+- **`enabled`** (boolean, default `true`) — turns skill-propagation scoring, recommendations, and warnings on or off. The mandatory explicit-skill-reference integrity check still runs even when this is `false`.
+- **`enforce`** (boolean, default `false`) — when `true`, blocks delegations that omit the `SKILLS:` field instead of only warning.
+- **`audiences`** (string array, default `[]`, max 16 entries, de-duplicated) — extra audience tokens to broaden which skills are considered in scope for this project, in addition to the active runner's own audience. Each entry must be a lowercase domain token matching `^[a-z0-9]+(?:[._-][a-z0-9]+)*$`; the reserved value `swarm-plugin` and any `runner:*` prefix are rejected.
 
 **Skill routing file format** (`.opencode/skill-routing.yaml`):
 
@@ -695,9 +696,9 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `context_budget.enabled` | boolean | `true` | Enable or disable the context budget guard entirely |
-| `context_budget.max_injection_tokens` | number | `4000` | Token budget for swarm-injected context per turn. This is NOT the model's context window — it's the swarm plugin's own contribution |
-| `context_budget.warn_threshold` | number | `0.7` | Ratio (0.0-1.0) of `max_injection_tokens` that triggers a warning advisory |
-| `context_budget.critical_threshold` | number | `0.9` | Ratio (0.0-1.0) of `max_injection_tokens` that triggers a critical alert with handoff recommendation |
+| `context_budget.max_injection_tokens` | number | `4000` | Separate per-turn cap on system-enhancer injection. It is NOT the guard's budget — the guard measures total conversation tokens against `model_limits`, not this value |
+| `context_budget.warn_threshold` | number | `0.7` | Ratio (0.0-1.0) of the model context window (`model_limits`, default `128000`) at which total conversation tokens trigger a warning advisory |
+| `context_budget.critical_threshold` | number | `0.9` | Ratio (0.0-1.0) of the model context window (`model_limits`, default `128000`) at which total conversation tokens trigger a critical alert with handoff recommendation |
 | `context_budget.enforce` | boolean | `true` | When true, enforces budget limits and may trigger handoffs |
 | `context_budget.prune_target` | number | `0.7` | Ratio (0.0-1.0) of context to preserve when pruning occurs |
 | `context_budget.preserve_last_n_turns` | number | `4` | Number of recent turns to preserve when pruning |
@@ -846,7 +847,7 @@ Swarm uses file locking to protect shared state files from concurrent write corr
 
 ### Locking Implementation
 
-- **Library**: `proper-lockfile` with `retries: 0` (fail-fast — no polling retries)
+- **Library**: `proper-lockfile` with automatic retries (F-09): 5 retries with exponential backoff (10ms→500ms, factor 2); a held lock is treated as stale after `LOCK_TIMEOUT_MS` (5 minutes)
 - **Scope**: Each tool acquires an exclusive lock on the target file before writing
 - **Agents**: Lock is tagged with the current agent name and task context for diagnostics
 

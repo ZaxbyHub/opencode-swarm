@@ -8,14 +8,24 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	mkdtemp,
+	realpath,
+	rm,
+	symlink,
+	writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	evictLockFiles,
 	isSafeCachePath,
 	isSafeLockFilePath,
+	isSafePluginConfigPath,
+	isSafePromptsDir,
 } from '../../../src/cli/index.js';
+import { safeRealpathSync } from '../../../src/tools/repo-graph/safe-realpath.js';
 
 const CLI_PATH = join(
 	import.meta.dir,
@@ -545,5 +555,159 @@ describe('isSafeCachePath cross-platform path acceptance', () => {
 		const darwinPkg =
 			'/Users/testuser/Library/Caches/opencode/packages/opencode-swarm@latest';
 		expect(isSafeCachePath(darwinPkg)).toBe(true);
+	});
+});
+
+describe('M6 realpath canonicalization at delete sites', () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-swarm-m6-')),
+		);
+	});
+
+	afterEach(async () => {
+		if (existsSync(tempDir)) {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('canonicalized symlinked cache leaf is refused after realpath (final-component swap)', async () => {
+		// The symlink lives at a path whose LEXICAL shape passes isSafeCachePath
+		// (.../opencode/node_modules/opencode-swarm) but points at an
+		// unsafe-shaped real target. This is exactly the final-component swap
+		// M6 closes: the lexical guard is fooled, the canonicalized guard is not.
+		const evilTarget = join(tempDir, 'evil', 'target');
+		await mkdir(evilTarget, { recursive: true });
+		const linkDir = join(tempDir, 'opencode', 'node_modules');
+		await mkdir(linkDir, { recursive: true });
+		const symlinkPath = join(linkDir, 'opencode-swarm');
+		await symlink(evilTarget, symlinkPath);
+
+		// Lexical guard (pre-M6 behavior) is fooled by the canonical-looking name.
+		expect(isSafeCachePath(symlinkPath)).toBe(true);
+
+		// M6: canonicalize first, then validate the SAME canonical string.
+		const canonical = safeRealpathSync(symlinkPath, symlinkPath);
+		expect(canonical).toBe(evilTarget);
+		// The canonicalized guard refuses the swapped-out real target.
+		expect(isSafeCachePath(canonical as string)).toBe(false);
+	});
+
+	test('canonicalized symlinked lock leaf is refused after realpath (final-component swap)', async () => {
+		// Lock-file analogue: a symlink named bun.lock in a lexically-valid
+		// .../opencode/ dir that points at an unsafe real file.
+		const evilFileDir = join(tempDir, 'evil');
+		await mkdir(evilFileDir, { recursive: true });
+		const evilFile = join(evilFileDir, 'not-a-lock');
+		await writeFile(evilFile, '{}');
+		const linkDir = join(tempDir, 'cache', 'opencode');
+		await mkdir(linkDir, { recursive: true });
+		const symlinkPath = join(linkDir, 'bun.lock');
+		await symlink(evilFile, symlinkPath);
+
+		// Lexical guard is fooled: leaf bun.lock, parent opencode, grandparent cache.
+		expect(isSafeLockFilePath(symlinkPath)).toBe(true);
+
+		const canonical = safeRealpathSync(symlinkPath, symlinkPath);
+		expect(canonical).toBe(evilFile);
+		// Canonicalized guard refuses: leaf is 'not-a-lock'.
+		expect(isSafeLockFilePath(canonical as string)).toBe(false);
+	});
+});
+
+describe('isSafePromptsDir', () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-swarm-prompts-')),
+		);
+	});
+
+	afterEach(async () => {
+		if (existsSync(tempDir)) {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('accepts a legitimate <config>/opencode/opencode-swarm directory', async () => {
+		const promptsDir = join(tempDir, 'opencode', 'opencode-swarm');
+		await mkdir(promptsDir, { recursive: true });
+		expect(isSafePromptsDir(promptsDir)).toBe(true);
+	});
+
+	test('rejects pathological XDG_CONFIG_HOME=/ layout (too few segments)', () => {
+		// XDG_CONFIG_HOME='/' → CONFIG_DIR='/opencode' → PROMPTS_DIR
+		// '/opencode/opencode-swarm', only 2 segments.
+		expect(isSafePromptsDir('/opencode/opencode-swarm')).toBe(false);
+	});
+
+	test('rejects a non-opencode-swarm leaf', () => {
+		expect(isSafePromptsDir(join(tempDir, 'opencode', 'something-else'))).toBe(
+			false,
+		);
+	});
+
+	test('rejects when parent basename is not the config dir basename', () => {
+		// Parent 'wrongparent' ≠ basename(CONFIG_DIR) ('opencode').
+		expect(
+			isSafePromptsDir(join(tempDir, 'wrongparent', 'opencode-swarm')),
+		).toBe(false);
+	});
+
+	test('rejects root and home', () => {
+		expect(isSafePromptsDir('/')).toBe(false);
+		expect(isSafePromptsDir(process.env.HOME || '/home/user')).toBe(false);
+	});
+});
+
+describe('isSafePluginConfigPath', () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await realpath(
+			await mkdtemp(join(tmpdir(), 'opencode-swarm-cfg-')),
+		);
+	});
+
+	afterEach(async () => {
+		if (existsSync(tempDir)) {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('accepts a legitimate <config>/opencode/opencode-swarm.json file', async () => {
+		const cfgDir = join(tempDir, 'opencode');
+		await mkdir(cfgDir, { recursive: true });
+		const cfgFile = join(cfgDir, 'opencode-swarm.json');
+		await writeFile(cfgFile, '{}');
+		expect(isSafePluginConfigPath(cfgFile)).toBe(true);
+	});
+
+	test('rejects a different leaf filename', () => {
+		expect(
+			isSafePluginConfigPath(join(tempDir, 'opencode', 'other.json')),
+		).toBe(false);
+		// The prompts DIRECTORY leaf is also rejected by the file-oriented guard.
+		expect(
+			isSafePluginConfigPath(join(tempDir, 'opencode', 'opencode-swarm')),
+		).toBe(false);
+	});
+
+	test('rejects when parent basename is not the config dir basename', () => {
+		expect(
+			isSafePluginConfigPath(
+				join(tempDir, 'wrongparent', 'opencode-swarm.json'),
+			),
+		).toBe(false);
+	});
+
+	test('rejects root and home', () => {
+		expect(isSafePluginConfigPath('/')).toBe(false);
+		expect(isSafePluginConfigPath(process.env.HOME || '/home/user')).toBe(
+			false,
+		);
 	});
 });
