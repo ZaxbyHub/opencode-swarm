@@ -244,10 +244,17 @@ export const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
  *    byte-identity contract to additional runtime mirrors when present.
  *  - `divergent`: both must exist; content intentionally differs per runtime.
  *  - `opencode-only`: `.opencode` exists; no `.claude` mirror expected.
+ *  - `adapter`: a non-architect-MODE skill whose `.opencode` copy is
+ *    canonical and has no `.claude` copy at all, but does have one or more
+ *    thin adapter shims (e.g. `.agents/skills/<slug>/`) that reference the
+ *    canonical file by a fixed substring (`expectedCanonicalRef`). Mirrors
+ *    the `ADAPTER_ARCHITECT_MODE_SKILLS` check, generalized to skills that
+ *    are not architect MODE skills (so `identical`/`divergent`, which both
+ *    require a `.claude` copy to exist, do not fit).
  */
 export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	slug: string;
-	kind: 'identical' | 'divergent' | 'opencode-only';
+	kind: 'identical' | 'divergent' | 'opencode-only' | 'adapter';
 	canonical?: '.claude' | '.opencode';
 	extraIdenticalPaths?: string[];
 	/**
@@ -262,6 +269,8 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	 * previously did existence-only checks with no content comparison.
 	 */
 	sharedSafetyHeadings?: string[];
+	adapterPaths?: string[];
+	expectedCanonicalRef?: string;
 	reason: string;
 }> = [
 	{
@@ -322,6 +331,14 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		extraIdenticalPaths: ['.agents/skills/fork-pr-operations/SKILL.md'],
 		reason:
 			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
+	},
+	{
+		slug: 'ci-fix-monitor',
+		kind: 'adapter',
+		adapterPaths: ['.agents/skills/ci-fix-monitor/SKILL.md'],
+		expectedCanonicalRef: '.opencode/skills/ci-fix-monitor/SKILL.md',
+		reason:
+			'.opencode is the canonical protocol (a static, non-architect-MODE support skill composed by swarm-ci-monitor); .agents/skills/ci-fix-monitor is a thin Codex adapter shim that reads "Read .opencode/skills/ci-fix-monitor/SKILL.md for the full protocol." There is no .claude copy, so identical/divergent (which both require one) do not fit — same "adapter shim not yet modeled by ADDITIONAL contracts" situation as swarm-implement/writing-tests, generalized here into an explicit adapter kind (issue #1806).',
 	},
 ];
 

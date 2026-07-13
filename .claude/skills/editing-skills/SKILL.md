@@ -109,15 +109,18 @@ and do not expect them to auto-trigger.
 
 ## Step 5 — Validate and publish
 
-1. `bun run drift:check` — must not introduce new warnings (soft-warn in CI,
+1. If the edit changed content wording (not just whitespace/formatting), read
+   `file:.swarm/bundled-skills/skill-edit-validation/SKILL.md` and run its
+   content-assertion sweep to catch stale test assertions before proceeding.
+2. `bun run drift:check` — must not introduce new warnings (soft-warn in CI,
    but treat a new warning as a failure).
-2. If you touched a byte-identical pair, `diff` the two files to prove
+3. If you touched a byte-identical pair, `diff` the two files to prove
    identity.
-3. Skill-only diffs (no `src/`, `scripts/`, or test changes) count as
+4. Skill-only diffs (no `src/`, `scripts/`, or test changes) count as
    docs/meta-only for PR gating — no release-notes fragment required. The
    moment you also touch `src/config/skill-mirrors.ts`,
    `bundled-skills.ts`, or `package.json`, a
    `docs/releases/pending/<slug>.md` fragment becomes mandatory
    (see commit-pr skill, Step 2).
-4. Skill edits are still "changed work" under the swarm-mode contract:
+5. Skill edits are still "changed work" under the swarm-mode contract:
    independent reviewer + critic gates apply before completion.

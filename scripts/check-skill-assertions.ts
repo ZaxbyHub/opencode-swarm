@@ -259,7 +259,7 @@ function checkAssertionsAgainstSkill(
 		const strMatch = firstStringRe.exec(callBody);
 		if (!strMatch) continue;
 		const filePath = strMatch[2]!;
-		if (filePath.includes(slug) && filePath.endsWith('.md')) {
+		if (referencesSkillPath(filePath, slug) && filePath.endsWith('.md')) {
 			// Direct readFileSync: always a valid skill variable
 			confirmedSkillVariables.set(varName, true);
 		}
@@ -306,7 +306,7 @@ function checkAssertionsAgainstSkill(
 		}
 		// i is now one past the closing ')'; slice excludes it: [callStart, i-1]
 		const callBody = fileContent.slice(callStart, i - 1);
-		if (callBody.includes(slug)) {
+		if (referencesSkillPath(callBody, slug)) {
 			pathExprVariables.set(varName, true);
 		}
 	}
@@ -318,7 +318,7 @@ function checkAssertionsAgainstSkill(
 	while ((fnMatch = litPathRe.exec(fileContent)) !== null) {
 		const varName = fnMatch[1]!;
 		const rhs = fnMatch[2] ?? '';
-		if (rhs.includes(slug)) {
+		if (referencesSkillPath(rhs, slug)) {
 			pathExprVariables.set(varName, true);
 		}
 	}
@@ -396,6 +396,25 @@ function checkAssertionsAgainstSkill(
 /** Escape special RegExp characters in a string. */
 function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * True if `text` references skill `slug` via an actual `skills/<slug>` path
+ * segment or a `'skills', '<slug>'`-style multi-arg join/resolve call — not
+ * merely as a bare substring. A bare-substring match (`text.includes(slug)`)
+ * false-positives whenever a slug collides with an unrelated common
+ * substring: slug "swarm" matches the ubiquitous runtime directory
+ * `.swarm/` (e.g. `.swarm/close-summary.md`), which is not the skill file
+ * `.claude/skills/swarm/SKILL.md` at all.
+ */
+function referencesSkillPath(text: string, slug: string): boolean {
+	const escapedSlug = escapeRegExp(slug);
+	const normalized = text.replace(/\\/g, '/');
+	if (new RegExp(`skills/${escapedSlug}(?:/|$)`).test(normalized)) return true;
+	if (new RegExp(`skills['"\`]\\s*,\\s*['"\`]${escapedSlug}['"\`]`).test(text)) {
+		return true;
+	}
+	return false;
 }
 
 /**

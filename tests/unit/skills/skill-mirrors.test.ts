@@ -145,14 +145,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		// belongs in ADAPTER_ARCHITECT_MODE_SKILLS so its .claude/.agents shims
 		// are held to the adapter contract. If a /swarm command ever gains a
 		// MODE stub for it, remove this exemption.
-		// swarm-ci-monitor is likewise directly user-invoked by name (e.g.
-		// `$swarm-ci-monitor` / "use swarm-ci-monitor on PR #123") rather than
-		// dispatched via a [MODE: ...] signal from a /swarm command handler, so
-		// no architect.ts MODE stub references it either.
-		const eventDrivenAdapterSkills = new Set([
-			'swarm-pr-subscribe',
-			'swarm-ci-monitor',
-		]);
+		const eventDrivenAdapterSkills = new Set(['swarm-pr-subscribe']);
 		const stubSlugs = [
 			...architectSource.matchAll(
 				/bundledProjectSkillFileReference\('([^']+)'\)/g,

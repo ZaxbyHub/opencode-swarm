@@ -79,6 +79,8 @@ git status --short
 
 On Windows, prefer temporary save branches over `git stash`. If you must stash, use `git stash push --include-untracked` and verify the stash contents.
 
+If this changeset edited any SKILL.md file's wording, also run `file:.swarm/bundled-skills/skill-edit-validation/SKILL.md`'s content-assertion sweep before committing, to catch stale test assertions.
+
 ## Step 1 - Commit and PR titles
 
 Use `<type>(<scope>): <description>` exactly.
@@ -548,6 +550,8 @@ If you edit the PR body after checks are green, expect PR Standards / title
 checks to rerun. Re-check before claiming final green or merge-readiness.
 
 ### Merge queue (current-base validation)
+
+Read `file:.swarm/bundled-skills/merge-queue-readiness/SKILL.md` for the full pre-queue merge-group CI simulation protocol.
 
 When `main` has a GitHub **merge queue** enabled, do not rebase or force-push a PR
 *solely because `main` advanced*. Once required checks and review are green, add the
