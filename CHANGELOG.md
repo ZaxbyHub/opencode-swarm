@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.114.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.7...v7.114.8) (2026-07-13)
+
+
+### Bug Fixes
+
+* **audit:** resolve medium and low severity defects from the 2026-07-09 audit ([2d96efd](https://github.com/ZaxbyHub/opencode-swarm/commit/2d96efd884c2ecfecfae9264a0a3f6adfacbe96b))
+* **cli:** make path-guard depth checks cross-platform ([39c9786](https://github.com/ZaxbyHub/opencode-swarm/commit/39c978665830975efe2679320bdab86a9e4aff05))
+
 ## [7.114.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.6...v7.114.7) (2026-07-13)
 
 
