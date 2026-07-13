@@ -289,6 +289,8 @@ const ARCHIVE_ARTIFACTS = [
 	'close-summary.md',
 	'session-reflection.md',
 	'spec.md',
+	'spec-staleness.json',
+	'spec-snapshot.md',
 ];
 
 /**
@@ -317,10 +319,24 @@ const ARCHIVE_ARTIFACTS = [
  * Note: knowledge.jsonl is intentionally NOT cleaned because it contains cumulative
  * project knowledge (lessons learned) that should persist across sessions and finalize
  * cycles. The archive step still creates a backup for safety.
- * close-summary.md and spec.md are NOT cleaned because close-summary.md
- * is written as the final close output after cleanup and spec.md may not exist.
+ * close-summary.md is NOT cleaned because it is written as the final close output
+ * AFTER the clean stage runs. spec.md IS cleaned: it is single-session state coupled
+ * to the plan lifecycle (the plan it produced is removed above), so leaving it behind
+ * makes the next session pick up a stale spec via readEffectiveSpecSync and mis-route
+ * the architect into CLARIFY-SPEC/overwrite prompts. It is archived first (archive-first
+ * guard), so the forensic copy is preserved in the bundle. The earlier "spec.md may not
+ * exist" rationale was wrong — handoff.md is equally optional and is cleaned the same way.
  * session-reflection.md is a single-session snapshot (not cumulative like
  * knowledge.jsonl) so it IS cleaned to maintain the clean-slate invariant.
+ * spec-staleness.json and spec-snapshot.md are the same class of single-session
+ * spec-drift state as spec.md. spec-staleness.json is an existence-only gate
+ * checked unconditionally by enforceSpecDriftGate, which hard-blocks the core
+ * write tools (save_plan, update_task_status, phase_complete,
+ * lean_turbo_run_phase, lean_turbo_acquire_locks) with SPEC_DRIFT_BLOCK — a
+ * survivor would block the NEXT session against drift that no longer applies.
+ * spec-snapshot.md is its companion diff source, feeding the mismatch shown in
+ * the SPEC_DRIFT_BLOCK message. Both are archived first (archive-first guard),
+ * then cleaned so the next session starts drift-free.
  */
 const ACTIVE_STATE_TO_CLEAN = [
 	'plan.json',
@@ -337,6 +353,9 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'dark-matter.md',
 	'telemetry.jsonl',
 	'session-reflection.md',
+	'spec.md',
+	'spec-staleness.json',
+	'spec-snapshot.md',
 	'swarm.db',
 	'swarm.db-shm',
 	'swarm.db-wal',
@@ -350,7 +369,17 @@ const ACTIVE_STATE_TO_CLEAN = [
  * below agree on the set; otherwise the "Preserved …" warning would contradict the
  * removal that always follows for these files.
  */
-const TERMINAL_STATE_FILES = ['plan.json', 'plan-ledger.jsonl'] as const;
+const TERMINAL_STATE_FILES = [
+	'plan.json',
+	'plan-ledger.jsonl',
+	// spec-staleness.json / spec-snapshot.md are unconditionally removed even when
+	// archive fails. They are the existence-only drift-gate input for
+	// enforceSpecDriftGate; if archive-failed the file would survive and
+	// hard-block save_plan etc. in the next session. Mirror coverage in
+	// tests/unit/commands/close-cleanup.test.ts.
+	'spec-staleness.json',
+	'spec-snapshot.md',
+] as const;
 
 /**
  * Knowledge-family artifacts whose backing store redirects to a shared link
@@ -1277,13 +1306,17 @@ export async function runCleanStage(
 					continue;
 				}
 				// This file was NOT successfully archived — do not delete it.
-				// Include the failure reason when one was recorded (e.g. EBUSY,
+				// Only warn when a genuine archive failure was recorded (e.g. EBUSY,
 				// EPERM, ENOSPC) so operators can diagnose without digging into logs.
-				ctx.warnings.push(
-					reason
-						? `Preserved ${artifact} because it was not successfully archived: ${reason}.`
-						: `Preserved ${artifact} because it was not successfully archived.`,
-				);
+				// Absent optional files (ENOENT during the archive stage) have no
+				// recorded reason — they were simply never present, so we skip
+				// silently rather than spuriously warning about a "preserved" file
+				// that never existed.
+				if (reason) {
+					ctx.warnings.push(
+						`Preserved ${artifact} because it was not successfully archived: ${reason}.`,
+					);
+				}
 				continue;
 			}
 			const filePath = path.join(ctx.swarmDir, artifact);

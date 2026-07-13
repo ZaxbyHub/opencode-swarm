@@ -1,0 +1,24 @@
+# `fix(swarm-close)`: remove stale spec-drift state on finalize and reset
+
+## Summary
+
+- `/swarm close` archived `.swarm/spec.md` but never deleted it from the active `.swarm/` directory, so the **next** session's `readEffectiveSpecSync` picked up the stale file as the current spec, mis-routing the architect into `CLARIFY-SPEC` / overwrite prompts against the prior session's task.
+- The same gap applied to two related single-session spec-drift artifacts, neither previously cleaned by close or reset:
+  - `.swarm/spec-staleness.json` — an existence-only marker checked unconditionally by `enforceSpecDriftGate`. A survivor **hard-blocked** `save_plan`, `update_task_status`, `phase_complete`, `lean_turbo_run_phase`, and `lean_turbo_acquire_locks` in the next session against drift that no longer applied.
+  - `.swarm/spec-snapshot.md` — the diff source feeding the `SPEC_DRIFT_BLOCK` error message.
+- `/swarm reset --confirm` had the identical three-file gap, plus omitted `.swarm/plan-ledger.jsonl`. A surviving ledger is replayed by `replayFromLedger()` on the next `loadPlan()`, risking resurrection of a plan that `reset` was supposed to wipe.
+- Fixed a companion issue in the close clean stage: the "Preserved `<artifact>` because it was not successfully archived" warning now fires only when a genuine archive failure was recorded, not for optional files that were simply absent (`ENOENT`).
+
+## User-facing changes
+
+- `/swarm close` now archives-then-removes `spec.md`, `spec-staleness.json`, and `spec-snapshot.md` from `.swarm/` (forensic copies remain in the archive bundle via the existing archive-first guard). Fresh sessions after a close no longer see a stale spec or a phantom drift block.
+- `/swarm reset --confirm` now also deletes `spec.md`, `spec-staleness.json`, `spec-snapshot.md`, and `plan-ledger.jsonl`, matching its "delete all swarm state" description and eliminating the plan-resurrection risk.
+- Close no longer emits spurious "Preserved ... not successfully archived" warnings for optional artifacts that were never present.
+
+## Migration notes
+
+None required. No schema or config changes; existing `.swarm/` directories are cleaned up automatically on the next `/swarm close` or `/swarm reset --confirm`.
+
+## Discovery context
+
+Root-caused via the `issue-tracer` skill in response to a report that "swarm finalize is not removing stale spec.md," which caused future sessions to be confused and ask for permission to overwrite or archive old plan state. A full writer/reader audit of every `.swarm/` artifact (parallel explorer sweep) confirmed `spec.md` was not an isolated case — `spec-staleness.json` and `spec-snapshot.md` shared the same single-session-state-survives-cleanup defect class, and `/swarm reset` had a parallel, independently-discovered gap. Every fix was fault-injection-proven (new/inverted tests fail without the corresponding code change) and independently verified by a fresh-context adversarial reviewer.

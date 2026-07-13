@@ -311,6 +311,58 @@ describe('handleResetCommand', () => {
 		expect(result).toContain('⏭️ events.jsonl not found (skipped)');
 	});
 
+	// ── SPEC-DRIFT + PLAN-LEDGER STATE (resurrection guard) ──────────────────────
+	// Verifies reset wipes single-session spec-drift state (spec.md,
+	// spec-staleness.json, spec-snapshot.md) and plan-ledger.jsonl, matching the
+	// fix applied to /swarm close. Without this, spec-staleness.json survives as
+	// an existence-only gate that hard-blocks core write tools, and a surviving
+	// plan-ledger.jsonl gets replayed by replayFromLedger() on the next
+	// loadPlan(), resurrecting the wiped plan back into plan.json.
+	test('With --confirm - deletes spec-drift state files (spec.md, spec-staleness.json, spec-snapshot.md)', async () => {
+		await writeFile(join(tempDir, '.swarm', 'spec.md'), '# Spec');
+		await writeFile(
+			join(tempDir, '.swarm', 'spec-staleness.json'),
+			JSON.stringify({ stale: true }),
+		);
+		await writeFile(join(tempDir, '.swarm', 'spec-snapshot.md'), '# Snapshot');
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted spec.md');
+		expect(result).toContain('✅ Deleted spec-staleness.json');
+		expect(result).toContain('✅ Deleted spec-snapshot.md');
+		expect(existsSync(join(tempDir, '.swarm', 'spec.md'))).toBe(false);
+		expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
+			false,
+		);
+		expect(existsSync(join(tempDir, '.swarm', 'spec-snapshot.md'))).toBe(false);
+	});
+
+	test('With --confirm - deletes plan-ledger.jsonl and prevents plan resurrection via replayFromLedger', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify({ swarm: 'test', title: 'Test Plan', phases: [] }),
+		);
+		await writeFile(
+			join(tempDir, '.swarm', 'plan-ledger.jsonl'),
+			`${JSON.stringify({ op: 'create', title: 'Test Plan' })}\n`,
+		);
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted plan-ledger.jsonl');
+		expect(result).toContain('✅ Deleted plan.json');
+
+		// Resurrection guard: both plan.json and plan-ledger.jsonl must be absent
+		// so a subsequent loadPlan()/replayFromLedger() has nothing to resurrect.
+		expect(existsSync(join(tempDir, '.swarm', 'plan.json'))).toBe(false);
+		expect(existsSync(join(tempDir, '.swarm', 'plan-ledger.jsonl'))).toBe(
+			false,
+		);
+	});
+
 	// ── SINGLETON PRESERVATION (FR-001d) ─────────────────────────────────
 	// Verifies that the reset command path does not disturb the 7 module-scoped
 	// singletons that are preserved by resetSwarmStatePreservingSingletons (used by close).
