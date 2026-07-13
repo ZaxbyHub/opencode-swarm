@@ -3,6 +3,7 @@ import {
 	copyFileSync,
 	existsSync,
 	fsyncSync,
+	mkdirSync,
 	openSync,
 	readdirSync,
 	renameSync,
@@ -1737,6 +1738,13 @@ export async function rebuildPlan(
 	const swarmDir = path.join(directory, '.swarm');
 	const planPath = path.join(swarmDir, 'plan.json');
 	const mdPath = path.join(swarmDir, 'plan.md');
+
+	// rebuildPlan is a recovery path and may run before anything else has
+	// created .swarm/ in this directory (e.g. a fresh workspace whose only
+	// prior write was the ledger itself). The previous bunWrite-based
+	// implementation auto-created parent directories; the raw fd write below
+	// does not, so create it explicitly to preserve that contract.
+	mkdirSync(swarmDir, { recursive: true });
 
 	// Atomic write for plan.json. rebuildPlan is a recovery-path writer of the
 	// canonical projection, so it must be crash-durable: use a Node fd write with
