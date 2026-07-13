@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.114.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.5...v7.114.6) (2026-07-13)
+
+
+### Bug Fixes
+
+* **tui:** migrate hook-path console.warn to advisoryWarn/log (PR3/5 [#1754](https://github.com/ZaxbyHub/opencode-swarm/issues/1754)) ([4c20f70](https://github.com/ZaxbyHub/opencode-swarm/commit/4c20f70193f4916cd5ae146c1e93528745cfd8c8))
+
 ## [7.114.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.4...v7.114.5) (2026-07-13)
 
 
