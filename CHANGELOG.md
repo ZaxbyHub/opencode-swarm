@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.114.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.4...v7.114.5) (2026-07-13)
+
+
+### Bug Fixes
+
+* **pr-review:** repair phase 4 and regression sweeps ([b0f88a9](https://github.com/ZaxbyHub/opencode-swarm/commit/b0f88a9090d63b83ddeb32a98215bce57c9550fa))
+
 ## [7.114.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.3...v7.114.4) (2026-07-13)
 
 
