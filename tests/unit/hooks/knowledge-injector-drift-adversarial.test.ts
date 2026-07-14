@@ -132,6 +132,7 @@ mock.module('../../../src/config/schema.js', () => ({
 	AdversarialTestingConfigSchema: zodStub,
 	AgentAuthorityRuleSchema: zodStub,
 	AgentOverrideConfigSchema: zodStub,
+	ApplyPatchConfigSchema: zodStub,
 	AgentReasoningConfigSchema: zodStub,
 	AgentThinkingConfigSchema: zodStub,
 	ArchitecturalSupervisionConfigSchema: zodStub,

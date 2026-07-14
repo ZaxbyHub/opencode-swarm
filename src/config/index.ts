@@ -84,6 +84,7 @@ export {
 } from './plan-schema';
 export type {
 	AgentOverrideConfig,
+	ApplyPatchConfig,
 	AutomationCapabilities,
 	AutomationConfig,
 	AutomationMode,
@@ -102,6 +103,7 @@ export type {
 } from './schema';
 export {
 	AgentOverrideConfigSchema,
+	ApplyPatchConfigSchema,
 	AutomationCapabilitiesSchema,
 	AutomationConfigSchema,
 	AutomationModeSchema,
