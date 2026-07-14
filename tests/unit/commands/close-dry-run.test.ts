@@ -87,6 +87,68 @@ describe('handleCloseCommand --dry-run', () => {
 		expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(true);
 	});
 
+	it('lists a terminal file only under "Would remove unconditionally", not also under "Would clean"', async () => {
+		// plan.json is a member of both ACTIVE_STATE_TO_CLEAN and
+		// TERMINAL_STATE_FILES; the report must not show it under both
+		// sections with two different removal rationales.
+		writePlan();
+
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		const wouldClean = out
+			.split('### Would clean')[1]
+			.split('### Would remove unconditionally')[0];
+		const wouldRemoveUnconditionally = out.split(
+			'### Would remove unconditionally',
+		)[1];
+
+		expect(wouldRemoveUnconditionally).toContain('plan.json');
+		expect(wouldClean).not.toContain('plan.json');
+	});
+
+	it('lists every TERMINAL_STATE_FILES member exactly once across Would clean + Would remove unconditionally, even with all four present', async () => {
+		// Generalizes the single-file regression above: create all four
+		// TERMINAL_STATE_FILES members (not just plan.json) plus a
+		// non-terminal ACTIVE_STATE_TO_CLEAN control file, and confirm the
+		// fix holds for the whole set — each terminal file appears exactly
+		// once (under "Would remove unconditionally" only), while the
+		// non-terminal control file still appears under "Would clean".
+		writePlan();
+		writeFileSync(path.join(swarmDir(), 'plan-ledger.jsonl'), '{}\n');
+		writeFileSync(path.join(swarmDir(), 'spec-staleness.json'), '{}');
+		writeFileSync(path.join(swarmDir(), 'spec-snapshot.md'), '# spec');
+		writeFileSync(path.join(swarmDir(), 'events.jsonl'), '{"e":1}\n');
+
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		const wouldClean = out
+			.split('### Would clean')[1]
+			.split('### Would remove unconditionally')[0];
+		const wouldRemoveUnconditionally = out
+			.split('### Would remove unconditionally')[1]
+			.split('### Git')[0];
+
+		const terminalFiles = [
+			'plan.json',
+			'plan-ledger.jsonl',
+			'spec-staleness.json',
+			'spec-snapshot.md',
+		];
+		for (const file of terminalFiles) {
+			// Exactly once overall, and only in the unconditional-removal section.
+			const cleanCount = wouldClean.split(file).length - 1;
+			const terminalCount = wouldRemoveUnconditionally.split(file).length - 1;
+			expect(cleanCount).toBe(0);
+			expect(terminalCount).toBe(1);
+		}
+
+		// Control: a file present in ACTIVE_STATE_TO_CLEAN but absent from
+		// TERMINAL_STATE_FILES must still surface under "Would clean" and
+		// must not be swallowed by the exclusion.
+		expect(wouldClean).toContain('events.jsonl');
+		expect(wouldRemoveUnconditionally).not.toContain('events.jsonl');
+	});
+
 	it('never tears down session state (endAgentSession / resetSwarmStatePreservingSingletons not called)', async () => {
 		// Locks the docblock's "no tearing down session state" claim: a future
 		// refactor that moves teardown earlier must not silently regress this.

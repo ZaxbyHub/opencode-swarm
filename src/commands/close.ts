@@ -1693,10 +1693,18 @@ export async function runFinalizeDryRun(
 			/^drift-report-phase-\d+\.json$/.test(name),
 	);
 	const wouldArchiveDirs = ACTIVE_STATE_DIRS_TO_CLEAN.filter(existsInSwarm);
-	const wouldCleanFiles = ACTIVE_STATE_TO_CLEAN.filter(existsInSwarm);
 	const wouldRemoveTerminal = (
 		TERMINAL_STATE_FILES as readonly string[]
 	).filter(existsInSwarm);
+	// TERMINAL_STATE_FILES is a subset of ACTIVE_STATE_TO_CLEAN (both cover
+	// plan.json/plan-ledger.jsonl/spec-staleness.json/spec-snapshot.md); list
+	// those only once, under "Would remove unconditionally", so the report
+	// doesn't show the same file under two different removal rationales.
+	const wouldCleanFiles = ACTIVE_STATE_TO_CLEAN.filter(
+		(f) =>
+			existsInSwarm(f) &&
+			!(TERMINAL_STATE_FILES as readonly string[]).includes(f),
+	);
 
 	const gitStatus = _internals.getGitRepositoryStatus(directory);
 	const gitNote = gitStatus.isRepo
