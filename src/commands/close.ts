@@ -2108,7 +2108,7 @@ export async function handleCloseCommand(
 			ctx.warnings.push(
 				`Session teardown encountered an error after finalization completed (state may not be fully reset): ${msg}`,
 			);
-			console.warn('[close-command] teardown error:', teardownError);
+			log('[close-command] teardown error:', teardownError);
 		}
 
 		// Separate retro-specific warnings for prominent display

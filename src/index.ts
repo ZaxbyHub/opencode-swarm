@@ -394,6 +394,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			const warning =
 				'[opencode-swarm] Full-auto mode warning: critic model matches architect model. Model validation is advisory-only; full-auto remains enabled. (Runtime architect model is determined by the orchestrator)';
 			if (!config.quiet) {
+				// biome-ignore lint/suspicious/noConsole: Full-auto mode warning — user must see when critic/architect models match
 				console.warn(warning);
 			} else {
 				addDeferredWarning(warning);
@@ -435,6 +436,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				noFallback.join(', ') +
 				'. Add "fallback_models": ["model-a"] to each agent config for reliability.';
 			if (!config.quiet) {
+				// biome-ignore lint/suspicious/noConsole: User-facing warning about missing fallback_models — must reach user even when config.quiet=false
 				console.warn(msg);
 			} else {
 				addDeferredWarning(msg);
@@ -591,6 +593,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			if (config.quiet) {
 				addDeferredWarning(msg);
 			} else {
+				// biome-ignore lint/suspicious/noConsole: Version check warning — must surface to user when not quiet
 				console.warn(msg);
 			}
 		});
@@ -1251,6 +1254,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							if (!enableAutofix && autoFixableCount > 0) {
 								const msg = `[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`;
 								if (!config.quiet) {
+									// biome-ignore lint/suspicious/noConsole: Config Doctor auto-fixable warning — user must see to run --fix
 									console.warn(msg);
 								} else {
 									addDeferredWarning(msg);
@@ -1261,6 +1265,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							) {
 								const msg = `[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`;
 								if (!config.quiet) {
+									// biome-ignore lint/suspicious/noConsole: Config Doctor applied fixes confirmation — user must see what was auto-fixed
 									console.warn(msg);
 								} else {
 									addDeferredWarning(msg);
@@ -1857,6 +1862,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// Delegation ledger: inject summary when architect session resumes
 				(input: unknown, _output: unknown): Promise<void> => {
 					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 						console.error(`[DIAG] messagesTransform START`);
 					const p = input as { sessionID?: string };
 					if (p.sessionID) {
@@ -1932,6 +1938,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						output.messages = consolidateSystemMessages(output.messages);
 					}
 					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 						console.error(`[DIAG] messagesTransform DONE`);
 					return Promise.resolve();
 				},
@@ -1944,11 +1951,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			...([
 				async (_input: unknown, _output: unknown): Promise<void> => {
 					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 						console.error(`[DIAG] systemTransform START`);
 				},
 				systemEnhancerHook['experimental.chat.system.transform'],
 				async (_input: unknown, _output: unknown): Promise<void> => {
 					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 						console.error(`[DIAG] systemTransform enhancer DONE`);
 				},
 				contextCapsuleInjectHook['experimental.chat.system.transform'],
@@ -2016,6 +2025,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		'tool.execute.before': (async (input: any, output: any) => {
 			if (process.env.DEBUG_SWARM)
+				// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 				console.error(
 					`[DIAG] toolBefore tool=${normalizeToolName(input.tool) ?? input.tool} session=${input.sessionID}`,
 				);
@@ -2363,15 +2373,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					await safeHook(knowledgeCuratorHook)(input, output);
 				if (hivePromoterHook) await safeHook(hivePromoterHook)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter knowledge done tool=${_toolName}`);
 				await safeHook(steeringConsumedHook)(input, output);
 				await safeHook(coChangeSuggesterHook)(input, output);
 				await safeHook(darkMatterDetectorHook)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter intelligence done tool=${_toolName}`);
 				await snapshotWriterHook(input, output);
 				await toolSummarizerHook?.(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(
 						`[DIAG] toolAfter snapshot+summarizer done tool=${_toolName}`,
 					);
@@ -2465,6 +2478,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			} catch (err) {
 				const warning = `[swarm] toolAfter hook chain error tool=${_toolName}: ${err instanceof Error ? err.message : String(err)}`;
 				if (!config.quiet) {
+					// biome-ignore lint/suspicious/noConsole: toolAfter hook chain error — user must see to debug hook failures
 					console.warn(warning);
 				} else {
 					addDeferredWarning(warning);
@@ -2553,13 +2567,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					}
 				}
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(
 						`[DIAG] Task handoff DONE session=${sessionId} activeAgent=${swarmState.activeAgent.get(sessionId)}`,
 					);
 			}
 
 			deleteStoredInputArgs(input.callID);
-			if (_dbg) console.error(`[DIAG] toolAfter COMPLETE tool=${_toolName}`);
+			if (_dbg)
+				// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
+				console.error(`[DIAG] toolAfter COMPLETE tool=${_toolName}`);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
 
