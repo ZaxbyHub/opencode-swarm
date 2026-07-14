@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.114.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.8...v7.114.9) (2026-07-14)
+
+
+### Bug Fixes
+
+* **skills:** address implementation review findings for ci-monitor wiring ([e003295](https://github.com/ZaxbyHub/opencode-swarm/commit/e003295431d050c01492043e43ce40f73f52e2e7))
+* **skills:** wire 7 unreachable bundled skills into consumer runtimes ([d2b989f](https://github.com/ZaxbyHub/opencode-swarm/commit/d2b989f1b7d103d281ff0c8f104b0a3b37dbde6a))
+* **skills:** wire 7 unreachable bundled skills into consumer runtimes ([8985bc6](https://github.com/ZaxbyHub/opencode-swarm/commit/8985bc63ed761beef3a4bc4e00da1bae65059140)), closes [#1806](https://github.com/ZaxbyHub/opencode-swarm/issues/1806)
+* **tests:** add ci-monitor to registry.tool-policy EXPECTED_NONE set ([a4b7cc0](https://github.com/ZaxbyHub/opencode-swarm/commit/a4b7cc0b6c3ed02383dfb17294ddd8cdade46935))
+
 ## [7.114.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.7...v7.114.8) (2026-07-13)
 
 
