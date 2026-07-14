@@ -443,10 +443,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				);
 			}
 
-			// Git destructive operations
-			if (/^git\s+push\b.*?(--force|-f)\b/.test(seg)) {
+			// Git destructive operations.
+			// `--force-with-lease` is exempt: it refuses to overwrite work the
+			// remote gained since your last fetch, so it is the safe force-push the
+			// publication protocol (commit-pr) mandates for fork/rebase flows. This
+			// matches full-auto/policy.ts, which already exempts it. Bare `--force`
+			// and `-f` remain blocked. (#1692)
+			if (/^git\s+push\b.*?(--force(?!-with-lease)|-f)\b/.test(seg)) {
 				throw new Error(
-					`BLOCKED: Force push detected — git push --force is not allowed`,
+					`BLOCKED: Force push detected — git push --force is not allowed (use --force-with-lease instead)`,
 				);
 			}
 			if (/^git\s+reset\s+--hard/.test(seg)) {

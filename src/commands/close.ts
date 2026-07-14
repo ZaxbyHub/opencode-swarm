@@ -284,8 +284,10 @@ const ARCHIVE_ARTIFACTS = [
 	'dark-matter.md',
 	'telemetry.jsonl',
 	'swarm.db',
-	'swarm.db-shm',
-	'swarm.db-wal',
+	// swarm.db-shm / swarm.db-wal are intentionally NOT listed: they are
+	// transient SQLite sidecars recreated on next open. They are never archived
+	// and never cleaned (preserved on disk). See the ACTIVE_STATE_TO_CLEAN
+	// docblock below.
 	'close-summary.md',
 	'session-reflection.md',
 	'spec.md',
@@ -311,10 +313,16 @@ const ARCHIVE_ARTIFACTS = [
  * copied to the archive bundle, so the audit trail is preserved in the bundle.
  *
  * knowledge-rejected.jsonl, repo-graph.json, doc-manifest.json,
- * dark-matter.md, telemetry.jsonl, swarm.db, swarm.db-shm, and swarm.db-wal are
+ * dark-matter.md, telemetry.jsonl, and swarm.db are
  * session-generated artifacts that do not persist meaningfully across sessions —
  * they are recreated on next session init and must be removed to avoid stale-state
  * interference.
+ *
+ * The SQLite WAL sidecars swarm.db-shm and swarm.db-wal are deliberately NOT in
+ * either list: they are transient internals that SQLite recreates on next open,
+ * so they are neither archived nor cleaned — they are left in place. (An earlier
+ * revision listed them here as "must be removed"; that was never true — the
+ * archive stage skipped them, so the clean stage never reached them.)
  *
  * Note: knowledge.jsonl is intentionally NOT cleaned because it contains cumulative
  * project knowledge (lessons learned) that should persist across sessions and finalize
@@ -357,8 +365,8 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'spec-staleness.json',
 	'spec-snapshot.md',
 	'swarm.db',
-	'swarm.db-shm',
-	'swarm.db-wal',
+	// swarm.db-shm / swarm.db-wal intentionally omitted — preserved on disk
+	// (transient SQLite sidecars, recreated on next open). See docblock above.
 ];
 
 /**
@@ -1054,11 +1062,11 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 		// Tracks per-artifact failures so the clean-stage "Preserved …" message
 		// can distinguish "file absent" (ENOENT, silent) from lock/perm/space
 		// errors (surfaced as warnings with the actual errno code).
-		// WAL sidecar files (-shm/-wal) are transient SQLite internals.
-		// They are NOT archived (SQLite recreates them on next open) and
-		// are NOT cleaned (the clean-stage "Preserved" warning is correct).
-		// swarm.db itself is handled by copySqliteSafe below.
-		const WAL_SIDECAR_FILES = new Set(['swarm.db-shm', 'swarm.db-wal']);
+		// WAL sidecar files (swarm.db-shm/-wal) are transient SQLite internals
+		// that SQLite recreates on next open; they are deliberately absent from
+		// ARCHIVE_ARTIFACTS/ACTIVE_STATE_TO_CLEAN, so they are neither archived
+		// nor cleaned (left in place). swarm.db itself is handled by
+		// copySqliteSafe below, which copies only the .db file.
 
 		// When linked, the knowledge family lives in the shared link store, which
 		// is cohort-owned. Do not archive or clean it from a single worktree's
@@ -1071,11 +1079,6 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 		}
 
 		for (const artifact of ARCHIVE_ARTIFACTS) {
-			// Skip WAL sidecars — they are ephemeral and not user data.
-			if (WAL_SIDECAR_FILES.has(artifact)) {
-				continue;
-			}
-
 			// Skip cohort-shared knowledge artifacts when linked (see note above).
 			if (linkedKnowledgeShared && KNOWLEDGE_FAMILY_ARTIFACTS.has(artifact)) {
 				continue;
@@ -1087,9 +1090,8 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			if (artifact === 'swarm.db') {
 				// SQLite-safe path: checkpoint WAL first, then copy only the .db file.
 				// Sidecar files (-shm/-wal) are transient SQLite internals and are
-				// intentionally NOT archived or cleaned — SQLite recreates them on
-				// next open. The user will see benign "Preserved" warnings for these
-				// files in the clean stage, which is correct and informational.
+				// intentionally neither archived nor cleaned — SQLite recreates them
+				// on next open, so they are left in place (no warning is emitted).
 				const result = await copySqliteSafe(srcPath, destPath, undefined);
 				if (result.skipped) {
 					// ENOENT — file absent; treat as silent skip, same as other artifacts.
@@ -1168,7 +1170,9 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			}
 		}
 
-		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
+		// Archive directories (evidence/, session/, scopes/, spec-archive/).
+		// locks/ is intentionally excluded — per-run locks are managed via
+		// proper-lockfile, not archived or cleaned by close.
 		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
 			const srcDir = path.join(ctx.swarmDir, dirName);
 			const destDir = path.join(ctx.archiveDir, dirName);
@@ -1651,6 +1655,114 @@ export async function runAlignStage(
 }
 
 /**
+ * Builds the `/swarm finalize --dry-run` report. Purely READ-ONLY: inspects the
+ * plan and the filesystem and describes what a real finalize WOULD do, without
+ * acquiring the finalize lock, creating an archive bundle, deleting any file,
+ * running git, or tearing down session state. (#1692)
+ *
+ * The archive-first guard means the clean stage only removes files it first
+ * archived successfully; this report approximates that by listing existing
+ * clean-set members as "would remove" and notes the approximation.
+ */
+export async function runFinalizeDryRun(
+	directory: string,
+	swarmDir: string,
+	planData: PlanData,
+	planExists: boolean,
+): Promise<string> {
+	const existsInSwarm = (name: string): boolean =>
+		fsSync.existsSync(path.join(swarmDir, name));
+
+	const phases = planData.phases ?? [];
+	const nonTerminalPhases = phases.filter(
+		(p) =>
+			p.status !== 'complete' &&
+			p.status !== 'completed' &&
+			p.status !== 'blocked' &&
+			p.status !== 'closed',
+	);
+	const planAlreadyDone =
+		planExists && phases.length > 0 && nonTerminalPhases.length === 0;
+
+	const wouldArchive = ARCHIVE_ARTIFACTS.filter(existsInSwarm);
+	const dynamicArchive = (
+		await fs.readdir(swarmDir).catch(() => [] as string[])
+	).filter(
+		(name) =>
+			/^post-mortem-[^/\\]+\.md$/.test(name) ||
+			/^drift-report-phase-\d+\.json$/.test(name),
+	);
+	const wouldArchiveDirs = ACTIVE_STATE_DIRS_TO_CLEAN.filter(existsInSwarm);
+	const wouldRemoveTerminal = (
+		TERMINAL_STATE_FILES as readonly string[]
+	).filter(existsInSwarm);
+	// TERMINAL_STATE_FILES is a subset of ACTIVE_STATE_TO_CLEAN (both cover
+	// plan.json/plan-ledger.jsonl/spec-staleness.json/spec-snapshot.md); list
+	// those only once, under "Would remove unconditionally", so the report
+	// doesn't show the same file under two different removal rationales.
+	const wouldCleanFiles = ACTIVE_STATE_TO_CLEAN.filter(
+		(f) =>
+			existsInSwarm(f) &&
+			!(TERMINAL_STATE_FILES as readonly string[]).includes(f),
+	);
+
+	const gitStatus = _internals.getGitRepositoryStatus(directory);
+	const gitNote = gitStatus.isRepo
+		? 'would align the working tree to main/remote (git reset), pruning merged branches only with --prune-branches'
+		: 'would skip git alignment (not a git repository / git unavailable)';
+
+	const lines: string[] = [
+		'## /swarm finalize — DRY RUN (no changes made)',
+		'',
+		'No lock is taken, no files are archived or deleted, no git command runs.',
+		'',
+		'### Plan',
+		planExists
+			? planAlreadyDone
+				? '- Plan is already terminal — no phases/tasks would be force-closed.'
+				: nonTerminalPhases.length > 0
+					? `- Would mark ${nonTerminalPhases.length} non-terminal phase(s) as closed: ${nonTerminalPhases.map((p) => `#${p.id} ${p.name}`).join(', ')}`
+					: '- No phases present; nothing to close.'
+			: '- No plan.json — plan-free session; cleanup-only.',
+		'',
+		'### Would archive',
+		wouldArchive.length > 0 ||
+		dynamicArchive.length > 0 ||
+		wouldArchiveDirs.length > 0
+			? [
+					...wouldArchive.map((f) => `- ${f}`),
+					...dynamicArchive.map((f) => `- ${f}`),
+					...wouldArchiveDirs.map((d) => `- ${d}/`),
+				].join('\n')
+			: '- (nothing present to archive)',
+		'',
+		'### Would clean (removed after successful archive)',
+		wouldCleanFiles.length > 0 || wouldArchiveDirs.length > 0
+			? [
+					...wouldCleanFiles.map((f) => `- ${f}`),
+					...wouldArchiveDirs.map((d) => `- ${d}/`),
+				].join('\n')
+			: '- (nothing present to clean)',
+		...(wouldRemoveTerminal.length > 0
+			? [
+					'',
+					'### Would remove unconditionally (terminal plan-state)',
+					...wouldRemoveTerminal.map((f) => `- ${f}`),
+				]
+			: []),
+		'',
+		'### Git',
+		`- ${gitNote}`,
+		'',
+		'_Note: swarm.db-shm / swarm.db-wal are transient SQLite sidecars — they are never archived or cleaned. The clean list is an approximation of the archive-first guard._',
+		'',
+		'Run `/swarm finalize` (without `--dry-run`) to apply.',
+	];
+
+	return lines.join('\n');
+}
+
+/**
  * Handles /swarm close command - performs full terminal session finalization:
  * 0. Guarantee: mark all incomplete phases/tasks as closed
  * 1. Finalize: write retrospectives, produce terminal summary
@@ -1705,6 +1817,18 @@ export async function handleCloseCommand(
 			return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
 		}
 		// .swarm/ exists but plan.json is absent — valid plan-free session, continue with cleanup
+	}
+
+	// --dry-run: describe what finalize WOULD do and return WITHOUT taking the
+	// finalize lock or mutating anything. Kept before lock acquisition so a
+	// dry-run is fully read-only and can never contend with a real run. (#1692)
+	if (args.includes('--dry-run')) {
+		return _internals.runFinalizeDryRun(
+			directory,
+			swarmDir,
+			planData,
+			planExists,
+		);
 	}
 
 	// FR-012: acquire finalize lock before any destructive work
@@ -1963,13 +2087,31 @@ export async function handleCloseCommand(
 		// the explicit per-session teardown contract required by FR-007. Double-calls are safe
 		// because Map.delete is a no-op for missing keys (FR-010).
 		// Collect keys first to avoid mutating the Map during iteration.
-		const sessionIdsToEnd = [...swarmState.agentSessions.keys()];
-		for (const sessionId of sessionIdsToEnd) {
-			_internals.endAgentSession(sessionId);
-		}
+		//
+		// This teardown runs AFTER all four pipeline stages and the close-summary
+		// file have already succeeded. A throw here (e.g. from endAgentSession or
+		// resetSwarmStatePreservingSingletons) must not escape uncaught and be
+		// reported by the dispatcher as a generic "finalize failed" — that would
+		// misrepresent an otherwise-successful run. Wrap it and surface any failure
+		// as a warning so the success return below still fires. (#1692)
+		try {
+			const sessionIdsToEnd = [...swarmState.agentSessions.keys()];
+			for (const sessionId of sessionIdsToEnd) {
+				_internals.endAgentSession(sessionId);
+			}
 
-		// Preserve plugin-init singletons through state reset
-		_internals.resetSwarmStatePreservingSingletons();
+			// Preserve plugin-init singletons through state reset
+			_internals.resetSwarmStatePreservingSingletons();
+		} catch (teardownError) {
+			const msg =
+				teardownError instanceof Error
+					? teardownError.message
+					: String(teardownError);
+			ctx.warnings.push(
+				`Session teardown encountered an error after finalization completed (state may not be fully reset): ${msg}`,
+			);
+			console.warn('[close-command] teardown error:', teardownError);
+		}
 
 		// Separate retro-specific warnings for prominent display
 		const retroWarnings = ctx.warnings.filter(
@@ -2077,6 +2219,7 @@ export const _internals = {
 	runArchiveEvidenceRetention,
 	runCleanStage,
 	runAlignStage,
+	runFinalizeDryRun,
 	archiveEvidence,
 	closePlanTerminalState,
 	endAgentSession,

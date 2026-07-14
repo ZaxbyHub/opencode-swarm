@@ -127,6 +127,36 @@ describe('destructive command guard', () => {
 			);
 		});
 
+		// #1692: --force-with-lease is the safe force push (refuses to overwrite
+		// work the remote gained since the last fetch). It is exempt from the
+		// force-push block, matching full-auto/policy.ts.
+		test('git push --force-with-lease → ALLOWED', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const cmd = 'git push --force-with-lease -u origin feature-branch';
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('git push origin br --force-with-lease → ALLOWED', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const cmd = 'git push origin my-branch --force-with-lease';
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('git push --force-with-lease=origin/br → ALLOWED (adversarial)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const cmd = 'git push --force-with-lease=origin/br origin br';
+			const input = makeBashInput('test-session', cmd);
+			const output = makeBashOutput(cmd);
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
 		test('git reset --hard → BLOCKED', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);

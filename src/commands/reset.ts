@@ -2,6 +2,25 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resetAutomationManager } from '../background/manager';
 import { validateSwarmPath } from '../hooks/utils';
+import {
+	backupSwarmStateBeforeReset,
+	type ResetBackupResult,
+} from './reset-backup';
+
+/**
+ * _internals DI seam so tests can stub the pre-deletion backup without touching
+ * the real filesystem-copy helper. Mutations are file-scoped and restorable in
+ * afterEach.
+ */
+export const _internals: {
+	backupSwarmStateBeforeReset: (
+		directory: string,
+		kind: 'reset' | 'reset-session',
+		relEntries: string[],
+	) => ResetBackupResult;
+} = {
+	backupSwarmStateBeforeReset,
+};
 
 /**
  * Handles the /swarm reset command.
@@ -25,7 +44,7 @@ export async function handleResetCommand(
 			'',
 			'⚠️ This will delete all swarm state from .swarm/ (plan, context, checkpoints, SWARM_PLAN artifacts including .swarm/plan-export/)',
 			'',
-			'**Tip**: Run `/swarm export` first to backup your state.',
+			'A timestamped backup of the deleted state is saved to `.swarm/reset-backups/` automatically (restore by copying files back). Run `/swarm export` first if you also want a portable JSON snapshot.',
 			'',
 			'To confirm, run: `/swarm reset --confirm`',
 		].join('\n');
@@ -54,6 +73,30 @@ export async function handleResetCommand(
 		'events.jsonl',
 	];
 	const results: string[] = [];
+
+	// Auto-backup the state we are about to delete BEFORE any deletion, so the
+	// user can recover by copying files back (replaces the old "run /swarm export
+	// first" manual-only safety). Fail-open: a backup failure never blocks reset.
+	// #1692
+	try {
+		const backup = _internals.backupSwarmStateBeforeReset(directory, 'reset', [
+			...filesToReset,
+			'summaries',
+		]);
+		if (backup.backupDir && backup.copied.length > 0) {
+			const rel = path.relative(directory, backup.backupDir);
+			results.push(
+				`- 📦 Backed up ${backup.copied.length} item(s) to ${rel}/ (restore by copying files back into .swarm/)`,
+			);
+		}
+		for (const w of backup.warnings) {
+			results.push(`- ⚠️ Backup warning: ${w}`);
+		}
+	} catch (err) {
+		results.push(
+			`- ⚠️ Auto-backup failed (continuing with reset): ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 
 	for (const filename of filesToReset) {
 		try {

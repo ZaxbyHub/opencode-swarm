@@ -275,10 +275,9 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 }> = [
 	{
 		slug: 'commit-pr',
-		kind: 'identical',
-		canonical: '.claude',
+		kind: 'divergent',
 		reason:
-			'.github/workflows/pr-standards.yml declares .claude/skills/commit-pr/SKILL.md canonical ("it wins on any conflict"); .opencode must mirror it byte-for-byte (PR #1480 / #1497).',
+			"Intentional per-tree divergence (#1692): .claude/skills/commit-pr is the repo-INTERNAL publication protocol enforced by .github/workflows/pr-standards.yml (invariant audit, release fragments, bun/biome tiers, canonical-remote heuristic). .opencode/skills/commit-pr is the PORTABLE, project-agnostic version bundled into end-user projects via BUNDLED_PROJECT_SKILLS — it must NOT carry this repo's internal references (AGENTS.md, bun/biome, docs/releases/pending, ZaxbyHub), so the two trees intentionally differ.",
 	},
 	{
 		slug: 'engineering-conventions',

@@ -8,6 +8,10 @@ import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
 } from '../worktree/merge';
+import {
+	backupSwarmStateBeforeReset,
+	type ResetBackupResult,
+} from './reset-backup';
 
 /**
  * _internals DI seam for testing reset-session without spawning real git processes.
@@ -20,8 +24,14 @@ export const _internals: {
 		directory: string,
 		activeSessionIds: string[],
 	) => Promise<OrphanCleanupResult>;
+	backupSwarmStateBeforeReset: (
+		directory: string,
+		kind: 'reset' | 'reset-session',
+		relEntries: string[],
+	) => ResetBackupResult;
 } = {
 	cleanupOrphanedBranches,
+	backupSwarmStateBeforeReset,
 };
 
 function errorMessage(err: unknown): string {
@@ -40,6 +50,29 @@ export async function handleResetSessionCommand(
 	_args: string[],
 ): Promise<string> {
 	const results: string[] = [];
+
+	// Auto-backup the session state we are about to delete BEFORE deletion, so it
+	// can be recovered by copying files back. Fail-open. #1692
+	try {
+		const backup = _internals.backupSwarmStateBeforeReset(
+			directory,
+			'reset-session',
+			['session'],
+		);
+		if (backup.backupDir && backup.copied.length > 0) {
+			const rel = path.relative(directory, backup.backupDir);
+			results.push(
+				`📦 Backed up session state to ${rel}/ (restore by copying files back into .swarm/session/)`,
+			);
+		}
+		for (const w of backup.warnings) {
+			results.push(`⚠️ Backup warning: ${w}`);
+		}
+	} catch (err) {
+		results.push(
+			`⚠️ Auto-backup failed (continuing with reset): ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 
 	// Resolve the state.json path once and reuse it below. Previously this
 	// path was validated a second time (unguarded) to derive sessionDir,

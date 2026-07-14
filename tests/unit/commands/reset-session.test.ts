@@ -46,6 +46,35 @@ describe('handleResetSessionCommand', () => {
 		expect(result).toContain('Deleted .swarm/session/state.json');
 	});
 
+	it('auto-backs up session state before deletion (#1692)', async () => {
+		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
+		writeFileSync(stateFile, JSON.stringify({ keep: 'me' }));
+
+		const result = await handleResetSessionCommand(testDir, []);
+
+		expect(result).toContain('📦 Backed up session state');
+		// Original deleted, but a backup copy exists.
+		expect(existsSync(stateFile)).toBe(false);
+		const backupsRoot = path.join(testDir, '.swarm', 'reset-backups');
+		expect(existsSync(backupsRoot)).toBe(true);
+	});
+
+	it('reset-session still completes when the auto-backup throws (fail-open, #1692)', async () => {
+		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
+		writeFileSync(stateFile, JSON.stringify({ a: 1 }));
+		const original = _internals.backupSwarmStateBeforeReset;
+		_internals.backupSwarmStateBeforeReset = () => {
+			throw new Error('boom');
+		};
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+			expect(result).toContain('Auto-backup failed');
+			expect(existsSync(stateFile)).toBe(false);
+		} finally {
+			_internals.backupSwarmStateBeforeReset = original;
+		}
+	});
+
 	it('handles missing state.json gracefully', async () => {
 		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
 		expect(existsSync(stateFile)).toBe(false);

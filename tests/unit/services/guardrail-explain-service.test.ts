@@ -372,6 +372,15 @@ describe('Guardrail explain accuracy — destructive commands', () => {
 		expect(firingRule.toLowerCase()).toContain('force');
 	});
 
+	// #1692: explain must mirror real enforcement — --force-with-lease is exempt.
+	test('git push --force-with-lease origin br → decision === allow', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'git push --force-with-lease origin feature-branch',
+		]);
+		const decision = extractDecision(result);
+		expect(decision).toBe('allow');
+	});
+
 	test('git clean -fd → decision === block', async () => {
 		const result = await handleGuardrailExplain(tempDir, ['git clean -fd']);
 		const decision = extractDecision(result);
