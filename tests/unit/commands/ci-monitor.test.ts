@@ -93,6 +93,27 @@ describe('handleCiMonitorCommand', () => {
 			expect(result).toContain('Error:');
 			expect(result).not.toContain('MODE: CI_MONITOR pr=');
 		});
+
+		test('a trailing URL-shaped token is rejected, not merged into the PR reference', () => {
+			const result = handleCiMonitorCommand(tempDir, [
+				'https://github.com/owner/repo/pull/42',
+				'https://evil.example.com/pull/1',
+			]);
+			expect(result).toContain('Error:');
+			expect(result).not.toContain('MODE: CI_MONITOR pr=');
+		});
+
+		test('tab and newline whitespace-only trailing tokens are dropped, not treated as instructions', () => {
+			const result = handleCiMonitorCommand(tempDir, [
+				'https://github.com/owner/repo/pull/42',
+				'\t',
+				'\n',
+				'  \t\n  ',
+			]);
+			expect(result).toBe(
+				'[MODE: CI_MONITOR pr="https://github.com/owner/repo/pull/42"]',
+			);
+		});
 	});
 
 	describe('MODE header injection stripping', () => {
