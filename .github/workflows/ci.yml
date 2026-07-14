@@ -62,6 +62,86 @@ jobs:
           BRANCH: ${{ github.head_ref }}
           EVENT: ${{ github.event_name }}
 
+  # Issue #1737 FR-013: closes the root cause of the #1729 debt-accumulation
+  # episode — pull_request CI ran ubuntu-only, so macOS/Windows-only failures
+  # were invisible until a merge_group bounce. This job detects whether the PR
+  # diff touches platform-sensitive paths and, if so, the `unit` job below
+  # automatically runs the full 3-OS matrix on pull_request too (previously
+  # only merge_group did). Modeled on the detect-release job above (fast,
+  # single ubuntu-latest job producing a boolean output the matrix consumes).
+  # No job-level `if:` here (unlike detect-release's own guard on its
+  # checkout step, not itself) — matching the established quality/unit
+  # pattern where downstream jobs never skip at the job level, only steps
+  # skip individually. A job-level `if:` here would report this job as
+  # "skipped" (not "success") on release-please branches, and by default
+  # `needs:` treats a skipped dependency as not-satisfied, which would
+  # cascade to skip the entire `unit` job on every release branch — release
+  # branches would then never even report the required `unit (*, N)` checks.
+  detect-paths:
+    needs: [detect-release]
+    runs-on: ubuntu-latest
+    outputs:
+      touches-platform-paths: ${{ steps.check.outputs.touches-platform-paths }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          # Full history needed so both BASE_SHA and HEAD_SHA below are
+          # guaranteed present locally for a plain two-dot `git diff` (a
+          # shallow clone can miss one of them, especially BASE_SHA on a
+          # long-lived PR). Two-dot, not three-dot/merge-base: this only
+          # needs "what changed between these two exact commits," and
+          # two-dot's tendency to also include unrelated upstream churn is
+          # the safe-direction failure mode here — it can only make this
+          # detector MORE likely to opt into the fuller matrix, never less.
+          # Matches drift-check.yml's fetch-depth: 0 convention.
+          fetch-depth: 0
+      # Single unconditional step (not split by event type) so the job-level
+      # `outputs:` above always resolves from this one step's ID, regardless
+      # of event — a prior split-step version left `steps.check` unset (and
+      # the job output empty) on non-pull_request events, since a step whose
+      # own `if:` is false produces no outputs at all, not empty-string ones.
+      - name: Detect platform-sensitive path changes
+        id: check
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Only pull_request has a meaningful base...head diff to inspect
+          # here; merge_group already gets the full 3-OS matrix unconditionally
+          # via the separate github.event_name == 'merge_group' branch in the
+          # unit job's matrix expression, so this output doesn't need to (and
+          # can't, without a PR base/head pair) do anything for that event.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "touches-platform-paths=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Platform-sensitive: worktree/sandbox/plan isolation logic, the lean
+          # turbo runner (where issue #1737's A1 macOS-only bug lives),
+          # src/parallel (lock-directory creation / EACCES semantics — the
+          # confirmed root cause of A2a's read-only-.swarm cross-platform
+          # bug, added after a test-engineer review caught it missing from
+          # the original 5-prefix list), CI scripts, and the workflow files
+          # themselves. Piped directly rather than captured into a variable
+          # first. Deliberately grep -E redirected to /dev/null below, and
+          # NOT grep -q: under set -o pipefail, grep -q exits as soon as it
+          # sees the first match and closes its stdin, which can send
+          # SIGPIPE to a still-writing git diff upstream on a large diff —
+          # pipefail then reports that SIGPIPE (128+13=141) as the
+          # pipeline's exit status, making this if silently false even
+          # though a match occurred (the unsafe direction — it would drop
+          # platform-path PRs to the ubuntu-only matrix). grep without -q
+          # or -m reads its input to EOF before exiting, so git diff always
+          # finishes writing normally and no SIGPIPE is possible.
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|scripts/|\.github/workflows/)' >/dev/null; then
+            echo "touches-platform-paths=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches-platform-paths=false" >> "$GITHUB_OUTPUT"
+          fi
+
   quality:
     needs: [detect-release]
     runs-on: ubuntu-latest
@@ -118,19 +198,40 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: chmod +x scripts/check-test-file-cap.sh && bash scripts/check-test-file-cap.sh
+      # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
+      # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
+      # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope
+      # decision — retrofitting the ~250 pre-existing occurrences is out of
+      # scope). Prefer tests/helpers/tmpdir.ts (canonicalTmpDir/canonicalMkdtemp).
+      - name: Test tmpdir canonicalization lint (FR-011)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-test-tmpdir.sh && bash scripts/check-test-tmpdir.sh
+      # Not diff-scoped (unlike the sibling checks above): a bash4+-only
+      # construct is exactly as broken on macOS as it was the day it was
+      # added, so this scans full current file content in scripts/, not just
+      # the diff (issue #1737 FR-012 — prevents recurrence of the
+      # check-invariants.sh `declare -A` incident, issue #1729).
+      - name: Bash portability lint (FR-012)
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: chmod +x scripts/check-bash-portability.sh && bash scripts/check-bash-portability.sh
 
-  # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback.
-  # On merge_group (merge queue), run the full 3-OS matrix for merge safety.
-  # On release-please branches, all steps are skipped via detect-release job
-  # (version bumps don't need tests — applies to both PR and merge-queue tiers).
-  # Test files are discovered automatically via find and distributed round-robin
-  # across shards — no hardcoded file lists, no duplication.
+  # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback
+  # UNLESS the diff touches a platform-sensitive path (issue #1737 FR-013,
+  # detect-paths job above), in which case the full 3-OS matrix runs on
+  # pull_request too. On merge_group (merge queue), the full 3-OS matrix
+  # always runs for merge safety. On release-please branches, all steps are
+  # skipped via detect-release job (version bumps don't need tests — applies
+  # to both PR and merge-queue tiers). Test files are discovered automatically
+  # via find and distributed round-robin across shards — no hardcoded file
+  # lists, no duplication.
   unit:
-    needs: [detect-release, quality]
+    needs: [detect-release, quality, detect-paths]
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'merge_group' && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: ${{ matrix.os }}
     # 40m: was 90m before sharding (PR #1245). Issue #1778 H4 wired the
@@ -286,11 +387,33 @@ jobs:
       # budget — ~30-35 min in practice, intermittently timing out and blocking
       # the merge queue (PR #1573). It now lives in the dedicated `coverage` job
       # below so the full-suite run gets its own timeout and the unit cells stay
-      # fast. Blocking power is NOT automatic: nothing here `needs: coverage`, so
-      # the gate only blocks the queue once `coverage` is added to ruleset
-      # 17809658's required status checks. That must happen AFTER this lands on
-      # main (adding it earlier blocks other open PRs whose merge groups don't
-      # yet define this job). Until then the gate runs but does not block.
+      # fast. `coverage` is already enforced: it's a required status check in
+      # branch-protection ruleset 17809658 (confirmed active — issue #1737
+      # FR-014, correcting this comment, which previously and incorrectly
+      # described enforcement as still-pending).
+
+  # Issue #1737 FR-013: aggregate job so branch-protection ruleset 17809658 can
+  # require a single stable check name regardless of which OS cells the
+  # path-scoped conditional matrix above actually ran for a given PR — a
+  # per-cell required check (e.g. "unit (macos-latest, 1)") would never
+  # report at all on a PR where detect-paths decided macOS/Windows weren't
+  # needed, permanently blocking the merge queue for that PR. always() so this
+  # still runs (and can fail) even if a `unit` matrix cell failed upstream.
+  unit-passed:
+    needs: [unit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check unit job result
+        shell: bash
+        env:
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: |
+          if [ "$UNIT_RESULT" != "success" ]; then
+            echo "::error::unit job result was '$UNIT_RESULT', not 'success'"
+            exit 1
+          fi
+          echo "All unit matrix cells that ran succeeded."
 
   # Merge-queue-only coverage gate. Runs the full unit suite once with coverage
   # and enforces the line-coverage threshold. Isolated from the `unit` job so the

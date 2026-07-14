@@ -15,6 +15,14 @@ const mockQuarantineEntry = mock(
 	async (_dir: string, _id: string, _reason: string, _by: string) => undefined,
 );
 const mockRestoreEntry = mock(async (_dir: string, _id: string) => undefined);
+const mockUnarchiveEntry = mock(
+	async (_dir: string, _id: string) =>
+		({ restored: false, reason: 'not_found' }) as {
+			restored: boolean;
+			restored_to?: string;
+			reason?: 'not_found' | 'not_archived' | 'invalid_lesson';
+		},
+);
 const mockMigrateContextToKnowledge = mock(
 	async (_dir: string, _config: unknown) => ({
 		entriesMigrated: 5,
@@ -44,6 +52,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
+	unarchiveEntry: mockUnarchiveEntry,
 	resolveUnactionablePath: (dir: string) =>
 		`${dir}/.swarm/knowledge-unactionable.jsonl`,
 }));
@@ -80,6 +89,7 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 	beforeEach(() => {
 		mockQuarantineEntry.mockClear();
 		mockRestoreEntry.mockClear();
+		mockUnarchiveEntry.mockClear();
 		mockMigrateContextToKnowledge.mockClear();
 		mockReadKnowledge.mockClear();
 	});
@@ -255,6 +265,10 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 			const error = new Error(
 				'EACCES: permission denied, open /etc/sensitive-config',
 			);
+			// handleKnowledgeRestoreCommand (G6 #1716) reads the swarm store first to
+			// check for an archived entry, then falls through to the quarantine store.
+			// No match in the swarm store routes this through the restoreEntry path.
+			mockReadKnowledge.mockResolvedValueOnce([]);
 			mockReadKnowledge.mockResolvedValueOnce([{ id: 'valid-id' }]);
 			mockRestoreEntry.mockImplementationOnce(async () => {
 				throw error;

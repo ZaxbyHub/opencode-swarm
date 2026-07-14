@@ -327,7 +327,7 @@ describe('phase_complete integration — adversarial scenarios', () => {
 	});
 
 	describe('4. Read-only .swarm directory', () => {
-		it('should add warning, not crash when .swarm directory is read-only', async () => {
+		it('should not crash, but split behavior per lock: events.jsonl soft-fails with a warning, plan.json lock fail-closes to success:false', async () => {
 			// Skip on Windows as file permissions are different
 			if (process.platform === 'win32') {
 				return; // Test skipped on Windows
@@ -378,6 +378,9 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			}
 
 			try {
+				// Does not throw — a read-only .swarm directory must not crash
+				// phase_complete, regardless of which write path ultimately
+				// reports success:false.
 				const result = await executePhaseComplete(
 					{
 						phase: 1,
@@ -388,17 +391,45 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				);
 
 				const parsed = JSON.parse(result);
+				const diagnostic = () => JSON.stringify(parsed, null, 2);
 
-				// Should still succeed (write failure is non-blocking)
-				expect(parsed.success).toBe(true);
+				// phase_complete acquires two SEPARATE locks against .swarm, and
+				// neither writeRetro() nor writeGateEvidence() pre-creates
+				// .swarm/locks/, so both lock acquisitions attempt to mkdir it
+				// under the now-read-only .swarm and hit EACCES:
+				//
+				//   1. events.jsonl lock (append-only) — soft-fail by design.
+				//      The lock failure and the subsequent write failure are
+				//      both recorded as non-blocking warnings.
+				//   2. plan.json lock (read-modify-write) — fail-closed by
+				//      design (src/tools/phase-complete.ts, F-002 comment):
+				//      writing plan state without a lock risks a lost update /
+				//      corruption, so the EACCES here is NOT swallowed — it
+				//      aborts the call with success:false.
+				//
+				// The sibling test above (same fixture, writable .swarm)
+				// proves this fixture clears every earlier success:false gate
+				// (autonomous-oversight, missing agents, etc.) with
+				// success:true, so the only new differentiator when .swarm is
+				// read-only is the lock failure — attributing success:false
+				// here to the plan.json lock, not to an earlier gate.
 
-				// Should have a warning about write failure
-				expect(parsed.warnings.length).toBeGreaterThan(0);
+				// events.jsonl path: soft-fail, recorded as a warning.
+				expect(parsed.warnings.length, diagnostic()).toBeGreaterThan(0);
 				expect(
 					parsed.warnings.some((w: string) =>
 						w.includes('failed to write phase complete event'),
 					),
+					diagnostic(),
 				).toBe(true);
+
+				// plan.json path: fail-closed, success:false with a specific
+				// lock-acquisition-failure message (not a generic crash).
+				expect(parsed.success, diagnostic()).toBe(false);
+				expect(parsed.status, diagnostic()).toBe('incomplete');
+				expect(parsed.message, diagnostic()).toContain(
+					'Failed to acquire lock for plan.json',
+				);
 			} finally {
 				// Restore permissions for cleanup
 				fs.chmodSync(swarmDir, 0o755);

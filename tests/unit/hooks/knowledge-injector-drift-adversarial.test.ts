@@ -45,9 +45,11 @@ mock.module('../../../src/hooks/curator-drift.js', () => ({
 }));
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	readMergedKnowledge,
+	recordLessonsShown: async () => {},
 }));
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons,
+	confirmEntriesPhase: async () => {},
 	readKnowledge: async () => [],
 	readRetractionRecords: async () => [],
 	appendRetractionRecord: async () => {},

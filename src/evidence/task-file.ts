@@ -21,6 +21,7 @@
 import { renameSync, unlinkSync } from 'node:fs';
 import * as path from 'node:path';
 import { bunWrite } from '../utils/bun-compat';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { withEvidenceLock } from './lock.js';
 
 /**
@@ -51,6 +52,13 @@ export const _internals = {
  * Atomic write: write to a unique temp file, then rename over the target.
  * The rename is atomic on POSIX and Windows, so readers never observe a torn
  * file. The temp file is cleaned up in `finally` (no-op once renamed away).
+ *
+ * Invalidates any swarm-artifact-cache entry for `targetPath` after a
+ * successful rename: the cache's stat-based staleness check can collide on a
+ * same-size rewrite that lands within one filesystem timestamp tick (issue
+ * #1729), which would otherwise let a read immediately following this write
+ * (e.g. a second locked transaction in the same logical operation) observe
+ * the pre-write content instead of what was just committed.
  */
 export async function atomicWriteFile(
 	targetPath: string,
@@ -67,6 +75,7 @@ export async function atomicWriteFile(
 			/* already renamed or never created */
 		}
 	}
+	invalidateCachedArtifact(targetPath);
 }
 
 /**
