@@ -138,6 +138,17 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   - **Cross-platform proof is mandatory.** Linux/macOS `repro-704` passing does **not** prove Windows; cold-FS op latency is several× higher there. The T1 400 ms assertion (`scripts/repro-704.mjs:42`) runs on the Windows runner in the `smoke` matrix (`.github/workflows/ci.yml`); the CI step's summary comment mentions the looser 10 s `BUDGET_MS` (T2/T3), but T1 is the tight bound that catches this class of regression. Green locally is necessary, not sufficient.
 - **Maps to AGENTS.md:** invariant 1 (plugin init).
 
+### PR #1841 — new `PluginConfigSchema` key broke config-doctor coverage gate + `mock.module` enumerations
+
+- **Context:** PR #1841 added a new top-level config key `apply_patch` (`ApplyPatchConfigSchema`) to `PluginConfigSchema` (`src/config/schema.ts`). Both `quality` and `pr-standards` CI passed, but the `unit (ubuntu-latest, 1)` shard failed with two distinct sibling-file registration gaps that only the full sharded unit suite catches — they do not surface when running individual test files locally.
+- **Symptom A (config-doctor coverage gate):** `src/services/config-doctor.test.ts` has an authoritative introspection test (SC-001) that enumerates `PluginConfigSchema.shape` and asserts every top-level key has a `case` in `validateConfigKey`'s switch (`src/services/config-doctor.ts`). Adding `apply_patch` to the schema bumped the key count without adding the corresponding `case`, so the test reported a coverage gap and failed.
+- **Symptom B (`mock.module` enumeration drift):** two adversarial test files (`tests/unit/hooks/knowledge-injector.adversarial.test.ts`, `tests/unit/hooks/knowledge-injector-drift-adversarial.test.ts`) use `mock.module('../../../src/config/schema.js', () => ({ ... every named export stubbed ... }))`. `mock.module` replaces ALL named exports, so every export that transitive imports may reference must be stubbed. Adding `ApplyPatchConfigSchema` as a new named export broke ESM named-import resolution at module-load time: `Export named 'ApplyPatchConfigSchema' not found`.
+- **Invariants established:**
+  - **Adding a top-level `PluginConfigSchema` key is a multi-surface change.** It requires: (1) the schema definition + `PluginConfigSchema` registration; (2) a `case` in `config-doctor.ts:validateConfigKey` (the SC-001 gate introspects the schema shape and fails closed on any gap); (3) a stub in every `mock.module('.../config/schema.js', ...)` enumeration in tests. `KNOWN_TOP_LEVEL_KEYS` picks up the key automatically (it derives from `PluginConfigSchema.shape`), but the switch and the mocks do not.
+  - **`mock.module` enumerations must be audited when adding any named export to a mocked module.** `grep -rln "mock.module.*config/schema" tests/ src/` finds the files; each enumeration must list the new export. This is the same class of invariant-7 footgun as the `_internals` seam and the spread-real-exports rule — `mock.module` is not partial, it is total.
+  - **Local `bun test <file>` does NOT catch these.** The failures surface only when the full sharded unit suite runs in CI. `bun run typecheck` and `bun run lint`/`lint:ci` also miss them (they are runtime import-resolution failures, not type or lint errors).
+- **Maps to AGENTS.md:** invariants 7 (test writing — `mock.module` enumeration) and 11 (tool registration coherence — the config-doctor gate is the config-schema analogue of the tool-registration parity tests).
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### Skill ownership and audience routing
@@ -497,6 +508,13 @@ Split criteria: one behavioral aspect per file, shared test utilities extracted 
 - [ ] `bun --smol test tests/unit/config --timeout 60000` passed
 - [ ] `/swarm doctor tools` (or its test equivalent) passed
 ```
+
+## Pre-push validation (always run)
+- [ ] **`bun run lint:ci`** (not `bun run lint`) — `bun run lint` maps to `biome lint .` which does NOT enforce formatting; CI runs `bunx biome ci .` which does. `lint:ci` runs the same `biome ci .` CI uses. A clean local `bun run lint` gives false confidence; CI `quality` will fail on formatting that `biome lint` silently accepts.
+- [ ] **`bun test` (full suite, not just changed files)** — sibling-file registration failures (config-doctor coverage gates, `mock.module` enumeration drift) only surface when the full sharded suite runs. Running only the directly-changed test files hides them.
+
+## PR body structure (enforced by `pr-standards` CI)
+- [ ] Sections appear in this exact order: `## Summary`, then `## Invariant audit`, then `## Test plan`. The `pr-standards` job (`.github/workflows/pr-standards.yml`) greps line numbers and fails if any of the three is missing or out of order. See `.claude/skills/commit-pr/SKILL.md` (the canonical source per `src/config/skill-mirrors.ts`).
 
 ## Drift detection across parallel surfaces (issue #1497)
 
