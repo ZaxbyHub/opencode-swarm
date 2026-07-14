@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
 	_internals,
 	normalizeGitRemote,
@@ -54,9 +57,9 @@ describe('normalizeGitRemote', () => {
 	});
 
 	test('backslashes normalize to forward slashes', () => {
-		expect(
-			normalizeGitRemote('https://github.com\\owner\\repo.git'),
-		).toBe('github.com/owner/repo');
+		expect(normalizeGitRemote('https://github.com\\owner\\repo.git')).toBe(
+			'github.com/owner/repo',
+		);
 	});
 
 	test('scp shorthand without user converges', () => {
@@ -66,15 +69,15 @@ describe('normalizeGitRemote', () => {
 	});
 
 	test('ssh:// with port and userinfo converges', () => {
-		expect(
-			normalizeGitRemote('ssh://user@github.com:22/owner/repo.git'),
-		).toBe('github.com/owner/repo');
+		expect(normalizeGitRemote('ssh://user@github.com:22/owner/repo.git')).toBe(
+			'github.com/owner/repo',
+		);
 	});
 
 	test('https default port stripped', () => {
-		expect(
-			normalizeGitRemote('https://github.com:443/owner/repo.git'),
-		).toBe('github.com/owner/repo');
+		expect(normalizeGitRemote('https://github.com:443/owner/repo.git')).toBe(
+			'github.com/owner/repo',
+		);
 	});
 
 	test('NFC/NFD Unicode spellings converge', () => {
@@ -104,8 +107,12 @@ describe('normalizeGitRemote', () => {
 		// intentionally preserved because they may identify a distinct endpoint.
 		// This test documents the boundary so a future change can't silently
 		// regress the convergence contract without making a deliberate decision.
-		const standard = normalizeGitRemote('ssh://git@github.com:22/owner/repo.git');
-		const custom = normalizeGitRemote('ssh://git@github.com:2222/owner/repo.git');
+		const standard = normalizeGitRemote(
+			'ssh://git@github.com:22/owner/repo.git',
+		);
+		const custom = normalizeGitRemote(
+			'ssh://git@github.com:2222/owner/repo.git',
+		);
 		expect(standard).toBe('github.com/owner/repo');
 		// Non-default port is preserved — different identity (documented, not a bug).
 		expect(custom).not.toBe(standard);
@@ -180,6 +187,127 @@ describe('resolveCohortId', () => {
 			b.cleanup();
 		}
 	});
+
+	// --- Real-git tests (branches 1 + 2) — addresses swarm-pr-review F1: the
+	// primary resolution branches were previously untested. ---
+
+	/** Init a git repo in `dir` (optionally with an origin remote). */
+	function gitInit(dir: string, remote?: string): void {
+		// `git -C` + array form (no shell). Bounded; a fresh init is fast.
+		const git = (args: string[]): void =>
+			execFileSync('git', ['-C', dir, ...args], {
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 5000,
+				encoding: 'utf-8',
+			});
+		git(['init']);
+		git(['config', 'user.email', 'test@example.com']);
+		git(['config', 'user.name', 'Test']);
+		if (remote) {
+			git(['remote', 'add', 'origin', remote]);
+		}
+	}
+
+	test('branch 1 (remote): a git repo with an origin resolves via remote and is NOT degraded', async () => {
+		const { dir, cleanup } = createSafeTestDir('cohort-remote-');
+		try {
+			gitInit(dir, 'git@github.com:owner/repo.git');
+			const id = await resolveCohortId(dir);
+			expect(id.source).toBe('remote');
+			expect(id.degraded).toBe(false);
+			expect(id.normalizedRemote).toBe('github.com/owner/repo');
+			// The cohort id is the hash of the normalized remote.
+			expect(id.cohortId).toBe(_internals.cohortHash('github.com/owner/repo'));
+		} finally {
+			cleanup();
+		}
+	});
+
+	test('branch 1 (remote): equivalent remotes in two repos resolve to the SAME cohort id', async () => {
+		const a = createSafeTestDir('cohort-remote-a-');
+		const b = createSafeTestDir('cohort-remote-b-');
+		try {
+			gitInit(a.dir, 'git@github.com:owner/repo.git');
+			// Same repo, HTTPS spelling — must converge with the SSH spelling.
+			gitInit(b.dir, 'https://github.com/owner/repo.git');
+			const [ida, idb] = await Promise.all([
+				resolveCohortId(a.dir),
+				resolveCohortId(b.dir),
+			]);
+			expect(ida.source).toBe('remote');
+			expect(idb.source).toBe('remote');
+			expect(ida.cohortId).toBe(idb.cohortId);
+		} finally {
+			a.cleanup();
+			b.cleanup();
+		}
+	});
+
+	test('branch 2 (git-common-dir): a repo WITHOUT origin falls back to git-common-dir (degraded)', async () => {
+		const { dir, cleanup } = createSafeTestDir('cohort-no-origin-');
+		try {
+			gitInit(dir); // no origin remote
+			const id = await resolveCohortId(dir);
+			expect(id.source).toBe('git-common-dir');
+			expect(id.degraded).toBe(true);
+			expect(id.cohortId).toMatch(/^[0-9a-f]{12}$/);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test('branch 2 (git-common-dir): a git worktree shares the same cohort id as its main repo (no origin)', async () => {
+		// This is the load-bearing acceptance test: two sibling worktrees of one
+		// repo (no origin) must converge via the shared git-common-dir.
+		const main = createSafeTestDir('cohort-wt-main-');
+		const wt = createSafeTestDir('cohort-wt-linked-');
+		try {
+			gitInit(main.dir);
+			// Create a real linked worktree pointing at `wt.dir`.
+			fs.writeFileSync(path.join(main.dir, 'README.md'), 'x');
+			execFileSync('git', ['-C', main.dir, 'add', '-A'], {
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 5000,
+				encoding: 'utf-8',
+			});
+			execFileSync('git', ['-C', main.dir, 'commit', '-m', 'init'], {
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 5000,
+				encoding: 'utf-8',
+			});
+			execFileSync('git', ['-C', main.dir, 'worktree', 'add', wt.dir], {
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 10000,
+				encoding: 'utf-8',
+			});
+
+			const [idMain, idWt] = await Promise.all([
+				resolveCohortId(main.dir),
+				resolveCohortId(wt.dir),
+			]);
+			// Both resolve via git-common-dir and converge on the same cohort id.
+			expect(idMain.source).toBe('git-common-dir');
+			expect(idWt.source).toBe('git-common-dir');
+			expect(idMain.cohortId).toBe(idWt.cohortId);
+		} finally {
+			// Remove the worktree link before cleanup to avoid git state warnings.
+			try {
+				execFileSync(
+					'git',
+					['-C', main.dir, 'worktree', 'remove', '--force', wt.dir],
+					{
+						stdio: ['ignore', 'pipe', 'pipe'],
+						timeout: 5000,
+						encoding: 'utf-8',
+					},
+				);
+			} catch {
+				/* best-effort */
+			}
+			main.cleanup();
+			wt.cleanup();
+		}
+	});
 });
 
 describe('subprocess contract (invariant 3)', () => {
@@ -201,6 +329,8 @@ describe('subprocess contract (invariant 3)', () => {
 	});
 
 	test('cohortHash produces a 12-hex id', () => {
-		expect(_internals.cohortHash('github.com/owner/repo')).toMatch(/^[0-9a-f]{12}$/);
+		expect(_internals.cohortHash('github.com/owner/repo')).toMatch(
+			/^[0-9a-f]{12}$/,
+		);
 	});
 });

@@ -123,7 +123,7 @@ describe('two-worktree bidirectional cohort sharing', () => {
 		expect(fromA.map((e) => e.id)).toContain('bi-2');
 	});
 
-	test('link migrates A\'s local family before sharing, so B sees pre-link lessons', async () => {
+	test("link migrates A's local family before sharing, so B sees pre-link lessons", async () => {
 		const a = createSafeTestDir('bi3-a-');
 		const b = createSafeTestDir('bi3-b-');
 		cleanupFns.push(a.cleanup, b.cleanup);
@@ -174,7 +174,10 @@ describe('two-worktree bidirectional cohort sharing', () => {
 		expect(localA.map((e) => e.id)).toContain('keep-after-unlink');
 
 		// The shared cohort is NOT deleted — B is still linked and still sees it.
-		const sharedPath = path.join(resolveLinkDir('unlink-team'), 'knowledge.jsonl');
+		const sharedPath = path.join(
+			resolveLinkDir('unlink-team'),
+			'knowledge.jsonl',
+		);
 		expect(fs.existsSync(sharedPath)).toBe(true);
 		invalidateKnowledgeStoreDirCache();
 		const fromB = await readKnowledge<SwarmKnowledgeEntry>(

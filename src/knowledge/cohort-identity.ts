@@ -22,9 +22,11 @@
  *   3. Only then fall back to a normalized absolute path (also `degraded`).
  *
  * Subprocess contract (AGENTS.md invariant 3): array-form `execFile('git', …)`,
- * explicit `git -C <dir>`, `stdin: 'ignore'`, `timeout`, bounded stdout, and a
- * best-effort `child.kill()` in `finally` — mirroring the compliant precedent
- * in `src/session/worktree-link-suggestion.ts`.
+ * explicit `git -C <dir>`, `stdin` closed immediately, bounded `maxBuffer`, and
+ * a `timeout` — Node's `execFile` sends SIGTERM (then SIGKILL) on timeout, so
+ * the child is terminated without a manual `kill()`. A defensive `child.on('error')`
+ * guard resolves the promise rather than hanging on a spawn failure. This
+ * mirrors the compliant precedent in `src/session/worktree-link-suggestion.ts`.
  *
  * This module performs NO writes and holds NO module-level state (invariant 8).
  * It is NOT imported on the plugin-init path (invariant 1); the only caller is
@@ -189,8 +191,12 @@ export function normalizeGitRemote(rawUrl: string): string | null {
 
 /**
  * Run `git -C <dir> <args...>` and return stdout (trimmed) or null on any
- * failure/timeout. Compliant subprocess contract: array form, explicit cwd via
- * `-C`, stdin ignored, bounded timeout, and kill in finally (invariant 3).
+ * failure/timeout. Compliant subprocess contract (invariant 3): array form,
+ * explicit cwd via `-C`, stdin closed immediately, bounded `maxBuffer`, and a
+ * bounded `timeout` — Node's `execFile` sends SIGTERM (then SIGKILL) on
+ * timeout, so the child is terminated without a manual `kill()`. A defensive
+ * `child.on('error')` guard resolves the promise rather than hanging on a
+ * spawn failure.
  */
 function runGit(directory: string, args: string[]): Promise<string | null> {
 	return new Promise((resolve) => {

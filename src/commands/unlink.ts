@@ -87,6 +87,6 @@ export async function handleUnlinkCommand(
 		`🔓 Unlinked this worktree from shared knowledge store "${pointer.linkId}".`,
 		`  copied the shared knowledge family back to local (${totalMerged} new, ${totalSkipped} already present).`,
 		'This worktree now uses its local `.swarm/` knowledge again.',
-		'The shared store is retained for any still-linked worktrees.' + familyNote,
+		`The shared store is retained for any still-linked worktrees.${familyNote}`,
 	].join('\n');
 }

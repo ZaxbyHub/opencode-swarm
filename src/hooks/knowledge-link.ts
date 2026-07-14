@@ -223,8 +223,7 @@ export function readLinkPointer(directory: string): LinkPointer | null {
 		if (!safeId) return null;
 		// Version: read from disk (do NOT hard-stamp 1). Default missing → 1.
 		const rawVersion = obj.version;
-		const version: 1 | 2 =
-			rawVersion === 2 ? 2 : 1; // unknown/missing → v1 (lenient, forward-compat)
+		const version: 1 | 2 = rawVersion === 2 ? 2 : 1; // unknown/missing → v1 (lenient, forward-compat)
 		return {
 			version,
 			linkId: safeId,
@@ -247,7 +246,8 @@ export function readLinkPointer(directory: string): LinkPointer | null {
 				typeof obj.configFingerprint === 'string'
 					? obj.configFingerprint
 					: undefined,
-			generation: typeof obj.generation === 'number' ? obj.generation : undefined,
+			generation:
+				typeof obj.generation === 'number' ? obj.generation : undefined,
 		};
 	} catch {
 		return null;
@@ -399,11 +399,7 @@ export function resolveKnowledgeStoreDir(directory: string): string {
 
 	const cached = _resolutionCache.get(directory);
 	const currentStat = pointerStatFingerprint(directory);
-	if (
-		cached &&
-		now < cached.expires &&
-		cached.pointerStat === currentStat
-	) {
+	if (cached && now < cached.expires && cached.pointerStat === currentStat) {
 		return cached.linkDir ?? localSwarm;
 	}
 

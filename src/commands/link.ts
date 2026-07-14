@@ -20,11 +20,7 @@
  * after the migration commits.
  */
 
-import {
-	type CohortIdentity,
-	resolveCohortId,
-} from '../knowledge/cohort-identity.js';
-import { migrateKnowledgeFamily } from '../knowledge/family-migration.js';
+import * as path from 'node:path';
 import {
 	type LinkPointer,
 	readLinkPointer,
@@ -32,7 +28,11 @@ import {
 	sanitizeLinkId,
 	writeLinkPointer,
 } from '../hooks/knowledge-link.js';
-import * as path from 'node:path';
+import {
+	type CohortIdentity,
+	resolveCohortId,
+} from '../knowledge/cohort-identity.js';
+import { migrateKnowledgeFamily } from '../knowledge/family-migration.js';
 import { criticalWarn } from '../utils/logger.js';
 
 function formatStatus(directory: string): string {

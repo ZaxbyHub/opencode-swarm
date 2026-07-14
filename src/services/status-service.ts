@@ -14,8 +14,8 @@ import {
 	type RecentEscalation,
 	readRecentEscalations,
 } from '../hooks/knowledge-escalator';
-import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readLinkPointer, resolveLinkDir } from '../hooks/knowledge-link';
+import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {

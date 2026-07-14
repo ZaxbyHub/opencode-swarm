@@ -16,6 +16,11 @@ import {
 	resolveKnowledgeEventsPath,
 } from '../hooks/knowledge-events.js';
 import {
+	getLinkedLocalKnowledgeStatus,
+	readLinkPointer,
+	resolveLinkDir,
+} from '../hooks/knowledge-link.js';
+import {
 	readKnowledge,
 	readRejectedLessons,
 	resolveHiveKnowledgePath,
@@ -26,11 +31,6 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator.js';
-import {
-	getLinkedLocalKnowledgeStatus,
-	readLinkPointer,
-	resolveLinkDir,
-} from '../hooks/knowledge-link.js';
 import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
 import { readSynonymMap } from './synonym-map.js';
 import { compareVersions, readVersionCache } from './version-check.js';

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
-	cohortConfigFingerprint,
 	type CohortConfigFingerprintInput,
+	cohortConfigFingerprint,
 } from '../../../src/knowledge/config-fingerprint.js';
 
 /**

@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-	type LinkPointer,
 	invalidateKnowledgeStoreDirCache,
+	type LinkPointer,
 	readLinkPointer,
 	removeLinkPointer,
 	resolveKnowledgeStoreDir,

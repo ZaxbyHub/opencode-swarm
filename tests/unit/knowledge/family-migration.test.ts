@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { migrateKnowledgeFamily, _internals } from '../../../src/knowledge/family-migration.js';
-import { KNOWLEDGE_FAMILY } from '../../../src/knowledge/family-manifest.js';
-import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
-import type {
-	CounterRollup,
-} from '../../../src/hooks/knowledge-events.js';
+import type { CounterRollup } from '../../../src/hooks/knowledge-events.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
+import { KNOWLEDGE_FAMILY } from '../../../src/knowledge/family-manifest.js';
+import {
+	_internals,
+	migrateKnowledgeFamily,
+} from '../../../src/knowledge/family-migration.js';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 /**
  * Issue #1846 family-migration tests.
@@ -210,7 +211,9 @@ describe('migrateKnowledgeFamily (manifest-driven migration)', () => {
 				id: 'shared-1',
 				lesson: 'always run focused tests before claiming done',
 				confidence: 0.7,
-				confirmed_by: [{ phase_number: 1, confirmed_at: '2026-01-01', project_name: 'p' }],
+				confirmed_by: [
+					{ phase_number: 1, confirmed_at: '2026-01-01', project_name: 'p' },
+				],
 				tags: ['testing'],
 			}),
 		]);
@@ -220,7 +223,9 @@ describe('migrateKnowledgeFamily (manifest-driven migration)', () => {
 				id: 'local-1',
 				lesson: 'always run focused tests before claiming done',
 				confidence: 0.9,
-				confirmed_by: [{ phase_number: 2, confirmed_at: '2026-01-02', project_name: 'p' }],
+				confirmed_by: [
+					{ phase_number: 2, confirmed_at: '2026-01-02', project_name: 'p' },
+				],
 				tags: ['testing', 'ci'],
 			}),
 		]);
@@ -252,11 +257,15 @@ describe('migrateKnowledgeFamily (manifest-driven migration)', () => {
 		// Both sides have a baseline for the same entry id with different counts.
 		fs.writeFileSync(
 			path.join(shared.dir, 'knowledge-counter-baseline.json'),
-			JSON.stringify({ k1: makeRollup({ shown_count: 5, applied_explicit_count: 2 }) }),
+			JSON.stringify({
+				k1: makeRollup({ shown_count: 5, applied_explicit_count: 2 }),
+			}),
 		);
 		fs.writeFileSync(
 			path.join(local.dir, 'knowledge-counter-baseline.json'),
-			JSON.stringify({ k1: makeRollup({ shown_count: 3, applied_explicit_count: 1 }) }),
+			JSON.stringify({
+				k1: makeRollup({ shown_count: 3, applied_explicit_count: 1 }),
+			}),
 		);
 
 		await migrateKnowledgeFamily(shared.dir, local.dir);
@@ -403,7 +412,9 @@ describe('validateSerialized integrity gate (critic MED-1)', () => {
 	});
 
 	test('rejects an unparseable line', () => {
-		expect(_internals.validateSerialized(storeMember, 'NOT-JSON\n')).toBe(false);
+		expect(_internals.validateSerialized(storeMember, 'NOT-JSON\n')).toBe(
+			false,
+		);
 	});
 
 	test('rejects a counter baseline that is not a JSON object', () => {

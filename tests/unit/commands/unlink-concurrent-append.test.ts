@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
 import { handleLinkCommand } from '../../../src/commands/link.js';
 import { handleUnlinkCommand } from '../../../src/commands/unlink.js';
 import {
@@ -87,9 +87,15 @@ describe('concurrent append vs unlink (no lost append)', () => {
 
 		// Link, then add a pre-existing shared lesson.
 		await handleLinkCommand(a.dir, ['race-cohort']);
-		const sharedPath = path.join(resolveLinkDir('race-cohort'), 'knowledge.jsonl');
+		const sharedPath = path.join(
+			resolveLinkDir('race-cohort'),
+			'knowledge.jsonl',
+		);
 		// Write a baseline lesson directly into the shared store.
-		const baseline = makeEntry({ id: 'baseline', lesson: 'baseline shared lesson' });
+		const baseline = makeEntry({
+			id: 'baseline',
+			lesson: 'baseline shared lesson',
+		});
 		fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
 		fs.appendFileSync(sharedPath, `${JSON.stringify(baseline)}\n`);
 
@@ -110,9 +116,13 @@ setTimeout(() => {
   process.exit(0);
 }, 20);
 `;
-		const child = spawn(process.execPath, ['--input-type=module', '-e', childScript], {
-			stdio: 'ignore',
-		});
+		const child = spawn(
+			process.execPath,
+			['--input-type=module', '-e', childScript],
+			{
+				stdio: 'ignore',
+			},
+		);
 		const childDone = new Promise<void>((resolve) => {
 			child.on('close', () => resolve());
 		});
@@ -129,15 +139,15 @@ setTimeout(() => {
 		//  (b) it landed after → still in the shared store (which is NOT deleted).
 		invalidateKnowledgeStoreDirCache();
 		const localPath = path.join(a.dir, '.swarm', 'knowledge.jsonl');
-		const localIds = (
-			await readKnowledge<SwarmKnowledgeEntry>(localPath)
-		).map((e) => e.id);
+		const localIds = (await readKnowledge<SwarmKnowledgeEntry>(localPath)).map(
+			(e) => e.id,
+		);
 		const sharedStillExists = fs.existsSync(sharedPath);
 		let sharedIds: string[] = [];
 		if (sharedStillExists) {
-			sharedIds = (
-				await readKnowledge<SwarmKnowledgeEntry>(sharedPath)
-			).map((e) => e.id);
+			sharedIds = (await readKnowledge<SwarmKnowledgeEntry>(sharedPath)).map(
+				(e) => e.id,
+			);
 		}
 		const cohortIds = [...localIds, ...sharedIds];
 		expect(cohortIds).toContain(appendedId);

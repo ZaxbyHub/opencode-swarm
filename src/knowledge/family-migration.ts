@@ -26,16 +26,19 @@
  * critical section (invariant 3, critic C9).
  */
 
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
-import lockfile from 'proper-lockfile';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
-import { findNearDuplicate } from '../hooks/knowledge-store.js';
-import { _internals as eventsInternals } from '../hooks/knowledge-events.js';
 import type { CounterRollup } from '../hooks/knowledge-events.js';
+import { _internals as eventsInternals } from '../hooks/knowledge-events.js';
+import { findNearDuplicate } from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
-import { KNOWLEDGE_FAMILY, type KnowledgeFamilyMember } from './family-manifest.js';
+import {
+	KNOWLEDGE_FAMILY,
+	type KnowledgeFamilyMember,
+} from './family-manifest.js';
 
 const DEDUP_THRESHOLD = 0.6;
 
@@ -147,7 +150,9 @@ function mergeEntryFields(
 	// confirmed_by: array union by a stable key.
 	target.confirmed_by = unionConfirmedBy(target.confirmed_by, src.confirmed_by);
 	// tags: array union (case-sensitive, ordered).
-	target.tags = Array.from(new Set([...(target.tags ?? []), ...(src.tags ?? [])]));
+	target.tags = Array.from(
+		new Set([...(target.tags ?? []), ...(src.tags ?? [])]),
+	);
 	// source_refs is optional on some shapes; union if present.
 	const tRefs = tAny.source_refs;
 	const sRefs = sAny.source_refs;
@@ -166,10 +171,16 @@ function mergeEntryFields(
 	if (!trail.includes(src.id)) trail.push(src.id);
 	tAny.merged_from = trail;
 	// created_at: keep the earliest; updated_at: keep the latest.
-	if (src.created_at && src.created_at < (target.created_at ?? src.created_at)) {
+	if (
+		src.created_at &&
+		src.created_at < (target.created_at ?? src.created_at)
+	) {
 		target.created_at = src.created_at;
 	}
-	if (src.updated_at && src.updated_at > (target.updated_at ?? src.updated_at)) {
+	if (
+		src.updated_at &&
+		src.updated_at > (target.updated_at ?? src.updated_at)
+	) {
 		target.updated_at = src.updated_at;
 	}
 	// Keep the richer (longer) lesson text.
@@ -231,11 +242,15 @@ function sumRetrievalOutcomes(
 		const tv = tAny[k];
 		const sv = sAny[k];
 		if (typeof tv === 'number' || typeof sv === 'number') {
-			tAny[k] = (typeof tv === 'number' ? tv : 0) + (typeof sv === 'number' ? sv : 0);
+			tAny[k] =
+				(typeof tv === 'number' ? tv : 0) + (typeof sv === 'number' ? sv : 0);
 		}
 	}
 	// Timestamps: keep the latest.
-	if (s.last_applied_at && (!t.last_applied_at || s.last_applied_at > t.last_applied_at)) {
+	if (
+		s.last_applied_at &&
+		(!t.last_applied_at || s.last_applied_at > t.last_applied_at)
+	) {
 		t.last_applied_at = s.last_applied_at;
 	}
 }
@@ -250,7 +265,11 @@ function weightedConfidence(
 			| undefined;
 		let n = 0;
 		if (o) {
-			for (const k of ['shown_count', 'acknowledged_count', 'applied_explicit_count'] as const) {
+			for (const k of [
+				'shown_count',
+				'acknowledged_count',
+				'applied_explicit_count',
+			] as const) {
 				const v = o[k];
 				if (typeof v === 'number') n += v;
 			}
@@ -274,7 +293,9 @@ function appendUnionById<T>(
 	source: T[],
 ): { merged: T[]; added: number; skipped: number } {
 	const result = [...destination];
-	const seen = new Set(result.map(lineId).filter((x): x is string => x !== null));
+	const seen = new Set(
+		result.map(lineId).filter((x): x is string => x !== null),
+	);
 	let added = 0;
 	let skipped = 0;
 	for (const src of source) {
@@ -305,7 +326,10 @@ function sumCounters(
 		const existing = result[id];
 		if (existing) {
 			// Merge srcRollup INTO existing (mutates a shallow copy).
-			const merged = { ...existing, violation_timestamps: [...existing.violation_timestamps] };
+			const merged = {
+				...existing,
+				violation_timestamps: [...existing.violation_timestamps],
+			};
 			eventsInternals.mergeRollupInto(merged, srcRollup);
 			result[id] = merged;
 			skipped++; // id already present (merged, not added)
@@ -325,7 +349,7 @@ function serialize(member: KnowledgeFamilyMember, data: unknown): string {
 	// JSONL member
 	const arr = data as unknown[];
 	if (arr.length === 0) return '';
-	return arr.map((e) => JSON.stringify(e)).join('\n') + '\n';
+	return `${arr.map((e) => JSON.stringify(e)).join('\n')}\n`;
 }
 
 /**
@@ -450,9 +474,15 @@ async function snapshotSourceFamily(
 			stale: MIGRATION_LOCK_STALE_MS,
 		});
 	} catch {
-		/* If the lock cannot be acquired (e.g. dir doesn't exist), read unlocked.
-		   Source files are read-only here; the destination write is the serialized
-		   boundary. A missing source dir simply yields an empty snapshot. */
+		/* If the lock cannot be acquired (e.g. dir doesn't exist yet), read
+		   unlocked. Source files are read-only here; the destination write is
+		   the serialized boundary. A missing source dir simply yields an empty
+		   snapshot. During UNLINK the source is the shared store a peer may be
+		   appending to: a concurrent append could be absent from this snapshot,
+		   but (1) atomicWriteFile means reads never see torn files, (2) the
+		   shared cohort is never deleted, so the append survives for still-
+		   linked peers, and (3) the migration is id-keyed and idempotent, so a
+		   retry recovers. No data is lost to the cohort. */
 	}
 	for (const member of KNOWLEDGE_FAMILY) {
 		snapshot[member.filename] = readSourceMember(member, storeDir);
@@ -503,14 +533,21 @@ export async function migrateKnowledgeFamily(
 	// 2. Snapshot source under a brief lock (released before long work).
 	const sourceSnapshot = await snapshotSourceFamily(sourceDir);
 
-	const perMember: Array<{ filename: string; merged: number; skipped: number }> = [];
-	const staged: Array<{ member: KnowledgeFamilyMember; serialized: string }> = [];
+	const perMember: Array<{
+		filename: string;
+		merged: number;
+		skipped: number;
+	}> = [];
+	const staged: Array<{ member: KnowledgeFamilyMember; serialized: string }> =
+		[];
 
 	try {
 		// 3. Read current destination + merge each member in memory.
 		for (const member of KNOWLEDGE_FAMILY) {
 			const destData = readSourceMember(member, destinationDir);
-			const srcData = sourceSnapshot[member.filename] ?? (member.mergeStrategy === 'sum-counters' ? {} : []);
+			const srcData =
+				sourceSnapshot[member.filename] ??
+				(member.mergeStrategy === 'sum-counters' ? {} : []);
 			const { merged, added, skipped } = mergeMember(member, destData, srcData);
 			perMember.push({
 				filename: member.filename,
