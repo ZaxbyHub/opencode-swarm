@@ -6,6 +6,7 @@ import {
 	classifySwarmCommandToolUse,
 	SWARM_COMMAND_TOOL_COMMANDS,
 } from '../commands/tool-policy.js';
+import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import { createSwarmTool } from './create-tool.js';
 
 type SwarmCommandArgs = {
@@ -15,6 +16,7 @@ type SwarmCommandArgs = {
 
 export function createSwarmCommandTool(
 	agents: Record<string, AgentDefinition>,
+	evaluationModelDispatcher?: EvaluationModelDispatcher,
 ): ReturnType<typeof createSwarmTool> {
 	return createSwarmTool({
 		description:
@@ -40,6 +42,7 @@ export function createSwarmCommandTool(
 				sessionID: ctx?.sessionID ?? '',
 				tokens: [args.command, ...(args.args ?? [])],
 				policy: classifySwarmCommandToolUse,
+				evaluationModelDispatcher,
 			});
 			return result.text;
 		},

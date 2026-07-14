@@ -48,6 +48,7 @@ import {
 	WatchdogConfigSchema,
 } from './config/schema';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
+import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
@@ -120,7 +121,6 @@ import { buildDelegationCostFields } from './services/cost-accounting.js';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
-
 import { ensureAgentSession, getActiveWindow, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
@@ -677,6 +677,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const contextBudgetHandler = createContextBudgetHandler(config);
+	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
 		agentDefinitionMap,
@@ -684,6 +685,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
 			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
+			evaluationModelDispatcher,
 		},
 	);
 	const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(
@@ -1307,7 +1309,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		agent: agents,
 
 		// Register tools, respecting knowledge.enabled config
-		tool: buildPluginToolObject(agentDefinitionMap, config),
+		tool: buildPluginToolObject(
+			agentDefinitionMap,
+			config,
+			evaluationModelDispatcher,
+		),
 
 		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
 		// ADVISORY/observer-only - catches locally so it can never block event delivery or
@@ -1536,6 +1542,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				'swarm-benchmark': {
 					template: '/swarm benchmark',
 					description: 'Use /swarm benchmark to show performance metrics',
+				},
+				'swarm-gate-audit': {
+					template: '/swarm gate-audit $ARGUMENTS',
+					description:
+						'Use /swarm gate-audit to run the bounded Tier-1 production gate matrix',
+				},
+				'swarm-gate-stats': {
+					template: '/swarm gate-stats $ARGUMENTS',
+					description:
+						'Use /swarm gate-stats to summarize stored gate-audit evidence',
 				},
 				'swarm-costs': {
 					template: '/swarm costs $ARGUMENTS',
@@ -2613,3 +2629,15 @@ export type {
 	PluginConfig,
 	QAAgentName,
 } from './config';
+export { loadTier1EvaluationTasks } from './evaluation/fixtures.js';
+export { recordTestImpactGateGroundTruth } from './evaluation/gate-ground-truth.js';
+export type {
+	EvaluateCandidateV1Options,
+	EvaluateCandidateV1Result,
+} from './evaluation/public-api.js';
+// Public evaluation API used by package-smoke and external optimizer tooling.
+// These exports are pure until invoked and add no plugin-initialization work.
+export {
+	evaluateCandidateV1,
+	evaluationV1,
+} from './evaluation/public-api.js';

@@ -2,21 +2,37 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleArchiveCommand } from '../../../src/commands/archive';
+import {
+	_internals as archiveCommandInternals,
+	handleArchiveCommand,
+} from '../../../src/commands/archive';
 import type { Evidence } from '../../../src/config/evidence-schema';
-import { saveEvidence } from '../../../src/evidence/manager';
+import {
+	_internals as evidenceInternals,
+	saveEvidence,
+} from '../../../src/evidence/manager';
+
+const realDeleteEvidence = evidenceInternals.deleteEvidence;
+const realArchiveNow = archiveCommandInternals.now;
+const FIXED_NOW = Date.UTC(2026, 6, 14, 12);
 
 describe('handleArchiveCommand', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
+		archiveCommandInternals.now = () => new Date(FIXED_NOW);
 		tempDir = mkdtemp();
 		mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 	});
 
 	afterEach(() => {
-		cleanup(tempDir);
+		try {
+			cleanup(tempDir);
+		} finally {
+			evidenceInternals.deleteEvidence = realDeleteEvidence;
+			archiveCommandInternals.now = realArchiveNow;
+		}
 	});
 
 	test('No evidence bundles → "No evidence bundles to archive."', async () => {
@@ -79,6 +95,17 @@ describe('handleArchiveCommand', () => {
 
 		// Should indicate no bundles to archive
 		expect(result).toBe('No evidence bundles older than 90 days found.');
+	});
+
+	test('reports only actual deletions when a selected deletion fails', async () => {
+		const taskId = 'undeletable';
+		await saveEvidence(tempDir, taskId, createNoteEvidence(taskId, 'Old note'));
+		await makeBundleOld(tempDir, taskId, 100);
+		evidenceInternals.deleteEvidence = async () => false;
+		const result = await handleArchiveCommand(tempDir, []);
+		expect(result).toBe(
+			'No evidence bundles were archived; 1 selected deletion(s) failed and remain on disk.',
+		);
 	});
 
 	test('--dry-run with max_bundles exceeded → shows max_bundles section', async () => {
@@ -214,7 +241,7 @@ async function makeBundleOld(
 	const bundle = result.bundle;
 
 	// Set updated_at and created_at to old date
-	const oldDate = new Date();
+	const oldDate = new Date(FIXED_NOW);
 	oldDate.setDate(oldDate.getDate() - daysOld);
 	const oldIso = oldDate.toISOString();
 
@@ -237,7 +264,7 @@ function createNoteEvidence(taskId: string, summary: string): Evidence {
 	return {
 		type: 'note',
 		task_id: taskId,
-		timestamp: new Date().toISOString(),
+		timestamp: new Date(FIXED_NOW).toISOString(),
 		agent: 'test-agent',
 		verdict: 'info',
 		summary,

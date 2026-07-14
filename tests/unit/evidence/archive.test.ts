@@ -4,27 +4,51 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Evidence } from '../../../src/config/evidence-schema';
 import {
+	_internals,
 	archiveEvidence,
 	deleteEvidence,
 	loadEvidence,
 	saveEvidence,
 } from '../../../src/evidence/manager';
 
+const realLoadEvidence = _internals.loadEvidence;
+const realNow = _internals.now;
+const FIXED_NOW = Date.UTC(2026, 6, 14, 12);
+
 describe('archiveEvidence', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
+		_internals.now = () => new Date(FIXED_NOW);
 		tempDir = mkdtemp();
 		mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	});
 
 	afterEach(() => {
-		cleanup(tempDir);
+		try {
+			cleanup(tempDir);
+		} finally {
+			_internals.loadEvidence = realLoadEvidence;
+			_internals.now = realNow;
+		}
 	});
 
 	test('archiveEvidence with no evidence returns empty array', async () => {
 		const archived = await archiveEvidence(tempDir, 90);
 		expect(archived).toEqual([]);
+	});
+
+	test('skips a bundle whose read throws without aborting retention', async () => {
+		const taskId = 'unreadable';
+		await saveEvidence(
+			tempDir,
+			taskId,
+			createNoteEvidence(taskId, 'Unreadable note'),
+		);
+		_internals.loadEvidence = async () => {
+			throw new Error('simulated read failure');
+		};
+		expect(await archiveEvidence(tempDir, 90)).toEqual([]);
 	});
 
 	test('archiveEvidence deletes bundles older than maxAgeDays', async () => {
@@ -270,7 +294,7 @@ async function makeBundleOld(
 	const bundle = result.bundle;
 
 	// Set updated_at and created_at to old date
-	const oldDate = new Date();
+	const oldDate = new Date(FIXED_NOW);
 	oldDate.setDate(oldDate.getDate() - daysOld);
 	const oldIso = oldDate.toISOString();
 
@@ -293,7 +317,7 @@ function createNoteEvidence(taskId: string, summary: string): Evidence {
 	return {
 		type: 'note',
 		task_id: taskId,
-		timestamp: new Date().toISOString(),
+		timestamp: new Date(FIXED_NOW).toISOString(),
 		agent: 'test-agent',
 		verdict: 'info',
 		summary,

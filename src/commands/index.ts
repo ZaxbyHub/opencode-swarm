@@ -5,6 +5,7 @@ import {
 	ORCHESTRATOR_NAME,
 } from '../config/constants.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	canonicalCommandKey,
 	executeSwarmCommand,
@@ -61,6 +62,8 @@ export {
 } from './evidence';
 export { handleExportCommand } from './export';
 export { handleFullAutoCommand } from './full-auto';
+export { handleGateAuditCommand } from './gate-audit';
+export { handleGateStatsCommand } from './gate-stats';
 export { handleGuardrailExplain } from './guardrail-explain';
 export { handleGuardrailLog } from './guardrail-log';
 export { handleHandoffCommand } from './handoff';
@@ -285,6 +288,7 @@ export function createSwarmCommandHandler(
 		getActiveAgentName?: (sessionID: string) => string | undefined;
 		packageRoot?: string;
 		registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
+		evaluationModelDispatcher?: EvaluationModelDispatcher;
 	} = {},
 ): (
 	input: { command: string; sessionID: string; arguments: string },
@@ -308,6 +312,7 @@ export function createSwarmCommandHandler(
 				activeAgentName: options.getActiveAgentName?.(input.sessionID),
 				packageRoot: options.packageRoot,
 				registeredAgents: options.registeredAgents,
+				evaluationModelDispatcher: options.evaluationModelDispatcher,
 			}),
 		} as unknown as (typeof output.parts)[number]);
 		return;
@@ -322,6 +327,7 @@ async function buildSwarmCommandPrompt(args: {
 	activeAgentName?: string;
 	packageRoot?: string;
 	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
+	evaluationModelDispatcher?: EvaluationModelDispatcher;
 }): Promise<string> {
 	const {
 		directory,
@@ -331,6 +337,7 @@ async function buildSwarmCommandPrompt(args: {
 		activeAgentName,
 		packageRoot,
 		registeredAgents,
+		evaluationModelDispatcher,
 	} = args;
 	const resolved = _internals.resolveCommand(tokens);
 	if (!resolved) {
@@ -380,6 +387,7 @@ async function buildSwarmCommandPrompt(args: {
 		sessionID,
 		tokens,
 		packageRoot,
+		evaluationModelDispatcher,
 	});
 
 	return formatCanonicalPromptFallback({

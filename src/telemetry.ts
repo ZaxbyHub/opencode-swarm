@@ -18,6 +18,7 @@ export type TelemetryEvent =
 	| 'gate_passed'
 	| 'gate_failed'
 	| 'gate_parse_error'
+	| 'reviewer_gate_decision'
 	| 'phase_changed'
 	| 'budget_updated'
 	| 'model_fallback'
@@ -42,6 +43,34 @@ export type TelemetryEvent =
 	| 'prm_course_correction_injected'
 	| 'prm_escalation_triggered'
 	| 'prm_hard_stop';
+
+/** Stable classification for how a reviewer-gate decision was established. */
+export type ReviewerGateEvidenceKind =
+	| 'genuine'
+	| 'fallback'
+	| 'data_quality'
+	| 'block';
+
+/**
+ * Stable reason codes for reviewer-gate decision telemetry.
+ *
+ * These values are persisted in telemetry.jsonl and consumed by offline gate
+ * analytics, so additions are allowed but existing values must not be renamed.
+ */
+export type ReviewerGateReasonCode =
+	| 'lean_turbo_completed_lane'
+	| 'standard_turbo_non_tier3'
+	| 'durable_evidence_complete'
+	| 'workflow_state_complete'
+	| 'stage_b_parallel_complete'
+	| 'no_active_sessions'
+	| 'zero_valid_sessions'
+	| 'restart_recovery_complete'
+	| 'scoped_delegation_complete'
+	| 'unscoped_delegation_complete'
+	| 'corrupt_evidence'
+	| 'required_gates_missing'
+	| 'inspection_error';
 
 export type TelemetryListener = (
 	event: TelemetryEvent,
@@ -323,6 +352,24 @@ export const telemetry = {
 		reason: string,
 	): void {
 		_internals.emit('gate_failed', { sessionId, gate, taskId, reason });
+	},
+
+	reviewerGateDecision(
+		sessionId: string,
+		taskId: string,
+		blocked: boolean,
+		reasonCode: ReviewerGateReasonCode,
+		evidenceKind: ReviewerGateEvidenceKind,
+	): void {
+		_internals.emit('reviewer_gate_decision', {
+			sessionId,
+			gate: 'qa_gate',
+			taskId,
+			blocked,
+			allowed: !blocked,
+			reasonCode,
+			evidenceKind,
+		});
 	},
 
 	phaseChanged(sessionId: string, oldPhase: number, newPhase: number): void {

@@ -42,16 +42,11 @@ describe('packaging smoke tests', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// Original cap: 4.6 × 1024 × 1024 = 4,823,449.6 bytes, set against a
-		// 4,481,025-byte baseline (General Council, #1582; decided against full
-		// identifier mangling + source maps to preserve debuggability). Organic
-		// growth across unrelated merged PRs had pushed the baseline to
-		// 4,820,337 bytes (measured on origin/main directly), leaving ~3 KB of
-		// headroom — issue #1806's PR (a small new command + architect stub,
-		// ~3.7 KB) tipped the actual bundle to 4,824,030 bytes, 580 bytes over
-		// the old cap. Raised to 4.9 × 1024 × 1024 = 5,138,022.4 bytes to
-		// restore ~300 KB of headroom (comparable to the original design's
-		// margin) while still keeping unbounded growth visible.
+		// Main had grown to 4,824,030 bytes before #1820. After integrating current
+		// main plus the evaluation substrate, the measured bundle is 4,960,550
+		// bytes. The 4.9 MiB cap preserves about 177 KB of cross-platform headroom,
+		// while a further 10% increase still exceeds the limit. The exact merged
+		// size is rechecked by this smoke test after every build.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

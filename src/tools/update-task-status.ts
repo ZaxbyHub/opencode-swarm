@@ -26,7 +26,11 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../state';
-import { telemetry } from '../telemetry.js';
+import {
+	type ReviewerGateEvidenceKind,
+	type ReviewerGateReasonCode,
+	telemetry,
+} from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
@@ -43,7 +47,13 @@ export const _internals = {
 	updateTaskStatus,
 	resolveWorkingDirectory,
 	loadPlan,
-} as const;
+	readTaskEvidenceRaw,
+	hasActiveLeanTurbo,
+	hasActiveTurboMode,
+	verifyLeanTurboTaskCompletion,
+	hasPassedDurableGateEvidence,
+	emitReviewerGateDecision: telemetry.reviewerGateDecision,
+};
 
 /**
  * Arguments for the update_task_status tool
@@ -111,6 +121,31 @@ export function validateTaskId(taskId: string): string | undefined {
 export interface ReviewerGateResult {
 	blocked: boolean;
 	reason: string;
+}
+
+/**
+ * Emit one reason-coded terminal reviewer-gate decision without allowing
+ * telemetry failures to change the pre-existing gate result.
+ */
+function reviewerGateDecision(
+	taskId: string,
+	sessionID: string | undefined,
+	result: ReviewerGateResult,
+	reasonCode: ReviewerGateReasonCode,
+	evidenceKind: ReviewerGateEvidenceKind,
+): ReviewerGateResult {
+	try {
+		_internals.emitReviewerGateDecision(
+			sessionID ?? '',
+			taskId,
+			result.blocked,
+			reasonCode,
+			evidenceKind,
+		);
+	} catch {
+		// Reviewer-gate telemetry is observational and must remain fail-open.
+	}
+	return result;
 }
 
 /**
@@ -185,19 +220,25 @@ export function checkReviewerGate(
 		// === Lean Turbo bypass check ===
 		// If Lean Turbo is active and task is in a completed lane, bypass Stage B
 		let skipStandardTurboBypass = false;
-		if (hasActiveLeanTurbo()) {
+		if (_internals.hasActiveLeanTurbo()) {
 			const resolvedDir = workingDirectory!;
 			try {
-				const leanCheck = verifyLeanTurboTaskCompletion(
+				const leanCheck = _internals.verifyLeanTurboTaskCompletion(
 					resolvedDir,
 					taskId,
 					sessionID,
 				);
 				if (leanCheck.ok) {
-					return {
-						blocked: false,
-						reason: `Lean Turbo bypass: ${leanCheck.reason}`,
-					};
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: false,
+							reason: `Lean Turbo bypass: ${leanCheck.reason}`,
+						},
+						'lean_turbo_completed_lane',
+						'fallback',
+					);
 				}
 				// Only allow standard Turbo bypass if we CONFIRMED the task is NOT in any lane
 				if (leanCheck.laneFound !== false) {
@@ -210,7 +251,7 @@ export function checkReviewerGate(
 				skipStandardTurboBypass = true;
 			}
 		}
-		if (!skipStandardTurboBypass && hasActiveTurboMode()) {
+		if (!skipStandardTurboBypass && _internals.hasActiveTurboMode()) {
 			// === Standard Turbo Mode bypass check ===
 			// If Turbo Mode is active AND task does not touch Tier 3 patterns, bypass Stage B
 			const resolvedDir = workingDirectory!;
@@ -232,10 +273,16 @@ export function checkReviewerGate(
 						if (task.id === taskId && task.files_touched) {
 							// If no Tier 3 patterns matched, bypass Stage B
 							if (!matchesTier3Pattern(task.files_touched)) {
-								return {
-									blocked: false,
-									reason: 'Turbo Mode bypass',
-								};
+								return reviewerGateDecision(
+									taskId,
+									sessionID,
+									{
+										blocked: false,
+										reason: 'Turbo Mode bypass',
+									},
+									'standard_turbo_non_tier3',
+									'fallback',
+								);
 							}
 							// Task touches Tier 3 patterns - fall through to normal gate check
 							break;
@@ -277,7 +324,7 @@ export function checkReviewerGate(
 			if (!resolvedDir) {
 				// No safe directory for evidence lookup — skip to session state
 			} else {
-				const evidence = readTaskEvidenceRaw(resolvedDir, taskId);
+				const evidence = _internals.readTaskEvidenceRaw(resolvedDir, taskId);
 
 				if (evidence === null) {
 					// No evidence file (ENOENT) — fall through to session state
@@ -292,7 +339,13 @@ export function checkReviewerGate(
 							(gate: string) => evidence.gates![gate] != null,
 						)
 					) {
-						return { blocked: false, reason: '' };
+						return reviewerGateDecision(
+							taskId,
+							sessionID,
+							{ blocked: false, reason: '' },
+							'durable_evidence_complete',
+							'genuine',
+						);
 					}
 					// Evidence file shows incomplete gates — save the reason and fall through to
 					// session state. The session state check below may still allow completion if
@@ -322,12 +375,18 @@ export function checkReviewerGate(
 				taskId,
 				`Evidence file corrupt or unreadable`,
 			);
-			return {
-				blocked: true,
-				reason:
-					`Evidence file for task ${taskId} is corrupt or unreadable. ` +
-					`Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`,
-			};
+			return reviewerGateDecision(
+				taskId,
+				sessionID,
+				{
+					blocked: true,
+					reason:
+						`Evidence file for task ${taskId} is corrupt or unreadable. ` +
+						`Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`,
+				},
+				'corrupt_evidence',
+				'data_quality',
+			);
 		}
 
 		// === session state check (fallback for pre-evidence tasks) ===
@@ -336,7 +395,13 @@ export function checkReviewerGate(
 		// incomplete/invalid gate state. This preserves test-context behavior for
 		// missing evidence while preventing empty evidence from vacuously passing.
 		if (swarmState.agentSessions.size === 0 && !evidenceIncompleteReason) {
-			return { blocked: false, reason: '' };
+			return reviewerGateDecision(
+				taskId,
+				sessionID,
+				{ blocked: false, reason: '' },
+				'no_active_sessions',
+				'fallback',
+			);
 		}
 
 		// Check each session for state machine state.
@@ -352,21 +417,39 @@ export function checkReviewerGate(
 
 			// If task has reached tests_run or complete state, allow through
 			if (state === 'tests_run' || state === 'complete') {
-				return { blocked: false, reason: '' };
+				return reviewerGateDecision(
+					taskId,
+					sessionID,
+					{ blocked: false, reason: '' },
+					'workflow_state_complete',
+					'genuine',
+				);
 			}
 
 			// PR 2 Stage B parallel barrier: both completion markers present is sufficient
 			// even if state machine advancement was delayed (e.g., non-fatal exception
 			// in toolAfter). Only active when flag is on.
 			if (stageBParallelEnabled && hasBothStageBCompletions(session, taskId)) {
-				return { blocked: false, reason: '' };
+				return reviewerGateDecision(
+					taskId,
+					sessionID,
+					{ blocked: false, reason: '' },
+					'stage_b_parallel_complete',
+					'genuine',
+				);
 			}
 		}
 
 		// If all sessions had corrupt workflow state, allow through —
 		// we cannot make a reliable gate assertion without valid state.
 		if (validSessionCount === 0 && !evidenceIncompleteReason) {
-			return { blocked: false, reason: '' };
+			return reviewerGateDecision(
+				taskId,
+				sessionID,
+				{ blocked: false, reason: '' },
+				'zero_valid_sessions',
+				'data_quality',
+			);
 		}
 
 		// No session has this task in tests_run or complete state
@@ -395,9 +478,15 @@ export function checkReviewerGate(
 						if (
 							task.id === taskId &&
 							task.status === 'completed' &&
-							hasPassedDurableGateEvidence(resolvedDir, taskId)
+							_internals.hasPassedDurableGateEvidence(resolvedDir, taskId)
 						) {
-							return { blocked: false, reason: '' };
+							return reviewerGateDecision(
+								taskId,
+								sessionID,
+								{ blocked: false, reason: '' },
+								'restart_recovery_complete',
+								'genuine',
+							);
 						}
 					}
 				}
@@ -432,7 +521,13 @@ export function checkReviewerGate(
 
 			// If both reviewer and test_engineer are confirmed in delegation chains, allow through
 			if (hasReviewer && hasTestEngineer) {
-				return { blocked: false, reason: '' };
+				return reviewerGateDecision(
+					taskId,
+					sessionID,
+					{ blocked: false, reason: '' },
+					'scoped_delegation_complete',
+					'genuine',
+				);
 			}
 
 			// Pass 2: unscoped scan — covers pure-verification / docs tasks where the
@@ -471,7 +566,13 @@ export function checkReviewerGate(
 					}
 				}
 				if (hasReviewer && hasTestEngineer) {
-					return { blocked: false, reason: '' };
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{ blocked: false, reason: '' },
+						'unscoped_delegation_complete',
+						'genuine',
+					);
 				}
 			}
 		}
@@ -519,13 +620,25 @@ export function checkReviewerGate(
 				? `Missing gates: evidence incomplete`
 				: `Missing state: tests_run or complete`,
 		);
-		return {
-			blocked: true,
-			reason: finalReason,
-		};
+		return reviewerGateDecision(
+			taskId,
+			sessionID,
+			{
+				blocked: true,
+				reason: finalReason,
+			},
+			'required_gates_missing',
+			'block',
+		);
 	} catch {
 		// If state inspection throws, allow through
-		return { blocked: false, reason: '' };
+		return reviewerGateDecision(
+			taskId,
+			sessionID,
+			{ blocked: false, reason: '' },
+			'inspection_error',
+			'fallback',
+		);
 	}
 }
 

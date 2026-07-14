@@ -1,50 +1,36 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	_internals,
+	executeMutation,
+	type MutationPatch,
+} from '../../../src/mutation/engine.ts';
 
-// Mock the entire child_process module to track spawnSync calls
 const mockSpawnSync = mock(() => ({
 	status: 0,
 	stderr: Buffer.from(''),
 	stdout: Buffer.from(''),
 }));
-const realChildProcess = await import('node:child_process');
-
-// Inline realChildProcess to avoid circular import issues
-const realSpawnSync = realChildProcess.spawnSync;
-
-mock.module('node:child_process', () => ({
-	...realChildProcess,
-	spawnSync: mockSpawnSync,
-}));
-
-// We need to import the module AFTER mocking
-const { executeMutation, MutationPatch } = await import(
-	'../../../src/mutation/engine.ts'
-);
+const realSpawnSync = _internals.spawnSync;
 
 describe('executeMutation — shell injection adversarial tests', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-adversarial-'));
-		mockSpawnSync.mockImplementation(
-			(cmd: string, args: string[], opts: Record<string, unknown>) => {
-				// Record the call for verification
-				const result = realSpawnSync?.(cmd, args, opts) ?? {
-					status: 0,
-					stderr: Buffer.from(''),
-					stdout: Buffer.from(''),
-				};
-				return result;
-			},
-		);
+		_internals.spawnSync =
+			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		mockSpawnSync.mockReturnValue({
+			status: 0,
+			stderr: Buffer.from(''),
+			stdout: Buffer.from(''),
+		});
 	});
 
 	afterEach(() => {
-		mock.restore();
+		_internals.spawnSync = realSpawnSync;
 		mockSpawnSync.mockClear();
 		// Clean up temp directory
 		try {

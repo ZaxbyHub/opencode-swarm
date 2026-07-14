@@ -1,0 +1,33 @@
+# Evaluation substrate
+
+The evaluation substrate measures candidate skills, harness changes, and production gates without changing the active project checkout. It is an evidence and proposal boundary: it records promotion decisions, but it never edits a skill or promotes a candidate automatically.
+
+## Versioned contracts and storage
+
+`EvaluationTaskV1`, `EvaluationRunV1`, and `PromotionDecisionV1` are strict, content-addressed contracts. Task admission freezes validation and test tasks; trace-derived tasks require an explicit human review receipt. A durable split registry keys the underlying instruction, environment, scorer, and provenance independently of mutable task IDs and split labels. Derived variants declare `derivedFromTaskId` and must inherit the admitted parent's split. A held-out test-set hash may be consumed only once; an interrupted run resumes by immutable run/task-set/baseline/candidate identity and preserves the ledger's original claim timestamp. Runs, decisions, manifests, and task-set snapshots are written immutably under `.swarm/evolution/`.
+
+Missing scores and costs stay unavailable. They are never imputed as zero. Promotion becomes inconclusive when evidence is malformed, incomplete, incompatible, below coverage, or missing required cost data.
+
+## Execution and promotion
+
+Each baseline/candidate pair runs in a fresh temporary copy with bounded concurrency, retries, time, output, and optional spend. A project scorer entrypoint must live inside the content-hashed task environment so its sibling modules, package metadata, and relative data are materialized together. JavaScript entrypoints run through the current absolute Node/Bun runtime for Windows portability; other reviewed executable entrypoints run directly. Scorers receive artifacts through a bounded protocol and cannot escape through relative paths or symlink components. The active checkout is fingerprinted before and after execution.
+
+Promotion uses deterministic paired bootstrap intervals (10,000 resamples, 95% confidence), a configurable deadband, minimum valid-pair coverage, protected-category tolerances, and comparisons against both the declared baseline and a compatible historical best. The decision artifact records full lineage and policy hashes.
+
+Package consumers use the versioned callable `evaluationV1` function namespace. Its `evaluateCandidate` boundary admits and freezes the task set, runs the immutable baseline/candidate pairs, evaluates the promotion policy, and persists the resulting decision before returning; calling `evaluationV1(options)` is equivalent. `runEvaluation` and `decidePromotion` remain attached for consumers that need the lower-level phases. `hashTaskInput` and `hashCandidateInput` are asynchronous so bounded package hashing yields while reading task trees. The package default export remains the OpenCode v1 plugin object.
+
+`complexity_delta` and `public_api_delta` remain explicitly unavailable until the separate quality-metric work in #1655 exists. They are excluded from promotion rather than fabricated.
+
+## Tier-1 production gate audit
+
+The npm package includes `evaluation-fixtures/tier1/`: six canonical mutation-class fixtures and six independently curated Tier-1 defects. Every package contains a green `baseline.ts` and a reviewed defective `defect.ts`. The mutation adapter proves the baseline test is green, applies the real baseline-to-defect patch, runs the test, and reverts through the bounded asynchronous runner. A red baseline is data quality, never a killed mutant.
+
+`/swarm gate-audit` runs defect and clean-control candidates across reviewer, test-engineer, offline SAST, mutation, and quality gates. Model gates use read-only child sessions; local gates use bounded in-process or array-form subprocess adapters. `--swarm <id>` selects a prefixed reviewer/test-engineer role when multiple swarms are registered, and stored cells use the model identity returned by the runtime. Container fixtures are reported as unsupported until a safe container runner is available.
+
+Results live under `.swarm/evidence/gate-audit/<run-id>/results.json`; historical integration/test-impact classifications live in the sibling `ground-truth.jsonl`. The stable join key is exactly `(run, task, candidate, model, gate, repetition)`. The audit runs three bounded green baseline probes, feeds the actual defect-test output and baseline history through the production test-impact failure classifier, and persists its exact-key classification beside the integration observation. Infrastructure, flaky, unknown, missing, malformed, and conflicting classifications remain unavailable for rate calculation. Other test-impact producers can append corroborating sidecars through `evaluationV1.recordTestImpactGroundTruth(...)` (also exported as `recordTestImpactGateGroundTruth`). Same-key/same-classification evidence is one corroborated truth for measurement; missing legacy keys remain unavailable, malformed lines are counted, and conflicting classifications are excluded as ambiguous.
+
+`/swarm gate-stats` computes catch and measurable clean-control false-rejection rates only from exact joins and includes Wilson confidence intervals, retries, costs, unsupported cells, infrastructure failures, malformed/ambiguous/unjoined ground truth, and reviewer fallback telemetry. `/swarm benchmark --ci-gate --gate-audit-run <id>` consumes those same run-scoped statistics rather than cell labels. It requires a complete audit, sufficient exact-joined regression and clean-control samples, no corrupt/malformed/ambiguous/unjoined truth, a 100% joined new-regression catch rate, and zero clean-control rejections.
+
+## Retention and recovery
+
+`/swarm archive --dry-run` previews ordinary evidence, generic `.swarm/evolution/runs/` artifacts, and gate-audit detail through the same retention inventory. Age-based selection runs before count-based selection across the two evaluation namespaces. Explicit `evaluation-run/<id>` and `gate-audit/<id>` references prevent an unrelated audit ID from acquiring promotion/test protection. Promotion, historical-best, and permanent test-consumption lineage preserve referenced evaluation runs; corrupt artifacts remain for data-quality review. Execution rechecks protection before deletion and reports only deletions that actually succeeded, including partial failures without claiming the preserved artifact was archived. Manifest and result writes are idempotent for identical content and reject conflicting reuse of a run ID.

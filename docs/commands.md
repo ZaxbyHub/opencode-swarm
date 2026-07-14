@@ -581,13 +581,24 @@ Generate an evidence summary showing completion ratio across all tasks, blockers
 
 Archive old evidence bundles. Two-tier retention: age-based (`max_age_days`, default 90) then count-based (`max_bundles`, default 1000). Use `--dry-run` to preview.
 
-### `/swarm benchmark [--cumulative] [--ci-gate] [--max-cost-usd <n>]`
+### `/swarm benchmark [--cumulative] [--ci-gate] [--max-cost-usd <n>] [--gate-audit-run <id>]`
 
 Show performance metrics: tool call rates, delegation chains, evidence pass rates, and cumulative cost signals.
 
 - `--cumulative`: aggregate across sessions.
 - `--ci-gate`: return non-zero exit if thresholds exceeded (for CI).
 - `--max-cost-usd <n>`: with `--ci-gate`, fail the benchmark when cumulative telemetry cost exceeds the threshold.
+- `--gate-audit-run <id>`: include a stored gate-audit result. With `--ci-gate`, the audit must be complete; its run-scoped exact joins must be sufficient and free of corrupt, malformed, ambiguous, or unjoined truth; every joined Tier-1 regression must be caught; and no joined clean control may be rejected. Cell-provided labels never substitute for ground truth.
+
+### `/swarm gate-audit [options]`
+
+Run the bounded Tier-1 defect and clean-control matrix across reviewer, test-engineer, offline SAST, mutation, and quality gates. The packed corpus contains six canonical mutation-class fixtures and six independently curated Tier-1 defects, each with a green baseline. Each cell runs in a disposable copy, has explicit concurrency/retry/time/cost ceilings, and writes an immutable result below `.swarm/evidence/gate-audit/<run-id>/`.
+
+Use `--model`, `--swarm`, `--gates`, `--tasks`, `--runs`, `--max-concurrency`, `--max-retries`, `--max-time-ms`, `--max-cost-usd`, `--seed`, `--run-id`, and `--json` to bound and identify a run. `--swarm <id>` selects prefixed reviewer/test-engineer agents when multiple swarms are registered. If a cost ceiling is requested while a provider does not report cost, the run is inconclusive rather than silently treating the cost as zero.
+
+### `/swarm gate-stats [--json] [--min-samples <n>]`
+
+Aggregate stored audit cells by model and gate using exact run/task/candidate/model/gate/repetition ground-truth joins. Reports catch and clean-control false-rejection rates with Wilson confidence intervals, malformed/ambiguous/unjoined history, retries, unavailable cost, infrastructure failures, and reviewer-gate fallback versus genuine evidence telemetry. See [Evaluation Substrate](evaluation-substrate.md).
 
 ### `/swarm costs [--json]`
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Check that test files using the real clock (Date.now / new Date / spyOn(Date))
+# Check that test files using the real clock (Date.now / new Date() / spyOn(Date))
 # also use the freezeClock helper, so time-sensitive assertions don't flake
 # under coverage instrumentation (issue #1782, root-cause class 1).
 #
 # A test file is a VIOLATION if it contains a raw time read
-# (Date.now() / new Date( / spyOn(Date) ) AND does NOT reference the helper
+# (Date.now() / no-argument new Date() / spyOn(Date) ) AND does not reference
+# the helper. Date constructors with explicit inputs are deterministic fixtures
+# and are intentionally excluded.
 # (freezeClock / withFrozenClock / withFrozenClockAsync).
 #
 # The helper reference is a proxy for "the author considered time-sensitivity."
@@ -73,7 +75,7 @@ while IFS= read -r file; do
         continue
     fi
     if is_pr_file "$file" "$PR_CHANGED_FILES"; then
-        echo "ERROR: $file uses the real clock (Date.now / new Date / spyOn(Date)) but does not import or call the freezeClock helper."
+        echo "ERROR: $file uses the real clock (Date.now / new Date() / spyOn(Date)) but does not import or call the freezeClock helper."
         echo "       Import from '../../helpers/test-clock.js' (adjust depth) and wrap"
         echo "       time-sensitive assertions in withFrozenClock(() => { ... })."
         echo "       (A comment mentioning the helper does NOT satisfy this check —"
@@ -84,7 +86,7 @@ while IFS= read -r file; do
     else
         pre_existing_violations=$((pre_existing_violations + 1))
     fi
-done < <(grep -rlE "Date\.now\(\)|new Date\(|spyOn\(Date" tests/ --include="*.test.ts" \
+done < <(grep -rlE "Date\.now\(\)|new Date[[:space:]]*\([[:space:]]*\)|spyOn\(Date" tests/ --include="*.test.ts" \
     --exclude-dir=node_modules --exclude-dir=dist 2>/dev/null || true)
 
 echo ""

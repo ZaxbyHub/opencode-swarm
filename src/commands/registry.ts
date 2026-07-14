@@ -3,6 +3,7 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
+import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import { warn } from '../utils/logger.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
@@ -37,6 +38,8 @@ import {
 } from './evidence.js';
 import { handleExportCommand } from './export.js';
 import { handleFullAutoCommand } from './full-auto.js';
+import { handleGateAuditCommand } from './gate-audit.js';
+import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
 import { handleIssueCommand } from './issue.js';
@@ -255,6 +258,7 @@ export type CommandContext = {
 	 * with existing callers.
 	 */
 	source?: 'cli' | 'chat';
+	evaluationModelDispatcher?: EvaluationModelDispatcher;
 };
 
 export type CommandResult = Promise<string>;
@@ -530,8 +534,31 @@ export const COMMAND_REGISTRY = {
 	benchmark: {
 		handler: (ctx) => handleBenchmarkCommand(ctx.directory, ctx.args),
 		description:
-			'Show performance metrics [--cumulative] [--ci-gate] [--max-cost-usd <n>]',
-		args: '--cumulative, --ci-gate, --max-cost-usd <n>',
+			'Show performance metrics [--cumulative] [--ci-gate] [--max-cost-usd <n>] [--gate-audit-run <id>]',
+		args: '--cumulative, --ci-gate, --max-cost-usd <n>, --gate-audit-run <id>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'gate-audit': {
+		handler: (ctx) =>
+			handleGateAuditCommand(ctx.directory, ctx.args, {
+				packageRoot: ctx.packageRoot,
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Run the bounded Tier-1 reviewer/test/SAST/mutation/quality gate matrix',
+		args: '--model <id>, --swarm <id>, --gates <csv>, --tasks <csv>, --runs <n>, --max-concurrency <n>, --max-retries <n>, --max-time-ms <n>, --max-cost-usd <n>, --seed <value>, --run-id <id>, --json',
+		details:
+			'Runs immutable curated defects only in disposable copies, records unavailable data honestly, and writes versioned results below .swarm/evidence/gate-audit/. Container tasks are unsupported until a safe array-form runner exists.',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'gate-stats': {
+		handler: (ctx) => handleGateStatsCommand(ctx.directory, ctx.args),
+		description:
+			'Show offline per-model gate catch, false-reject, retry, cost, and reviewer fallback statistics',
+		args: '--json, --min-samples <n>',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

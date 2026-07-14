@@ -10,10 +10,11 @@ export interface ExternalToolRunOptions {
 	maxStdoutBytes: number;
 	maxStderrBytes: number;
 	env?: Record<string, string | undefined>;
+	abortSignal?: AbortSignal;
 }
 
 export interface ExternalToolRunResult {
-	status: 'completed' | 'timeout' | 'spawn-error';
+	status: 'completed' | 'timeout' | 'cancelled' | 'spawn-error';
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
@@ -29,7 +30,10 @@ interface BoundedStreamResult {
 
 const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
 
-type ExitRaceResult = { kind: 'exit'; exitCode: number } | { kind: 'timeout' };
+type ExitRaceResult =
+	| { kind: 'exit'; exitCode: number }
+	| { kind: 'timeout' }
+	| { kind: 'cancelled' };
 
 function isExecutableFile(candidate: string): boolean {
 	try {
@@ -169,9 +173,21 @@ export async function runExternalTool(
 			message: 'external tool cwd must be absolute',
 		};
 	}
+	if (options.abortSignal?.aborted) {
+		return {
+			status: 'cancelled',
+			exitCode: null,
+			stdout: '',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+			message: 'external tool execution cancelled before spawn',
+		};
+	}
 
 	let proc: BunCompatSubprocess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let abortListener: (() => void) | undefined;
 	let exitSettled = false;
 	let settledExitCode: number | null = null;
 
@@ -205,6 +221,22 @@ export async function runExternalTool(
 				resolve({ kind: 'timeout' });
 			}, options.timeoutMs);
 		});
+		const cancelled = new Promise<ExitRaceResult>((resolve) => {
+			if (!options.abortSignal) return;
+			let handled = false;
+			abortListener = () => {
+				if (handled) return;
+				handled = true;
+				killProcess(proc);
+				resolve({ kind: 'cancelled' });
+			};
+			options.abortSignal.addEventListener('abort', abortListener, {
+				once: true,
+			});
+			// Close the race where the signal aborts inside bunSpawn, after the
+			// pre-spawn check but before the listener is registered.
+			if (options.abortSignal.aborted) abortListener();
+		});
 
 		const stdoutPromise = readBoundedStream(
 			proc.stdout,
@@ -214,7 +246,7 @@ export async function runExternalTool(
 			proc.stderr,
 			options.maxStderrBytes,
 		);
-		const exitResult = await Promise.race([exitPromise, timeout]);
+		const exitResult = await Promise.race([exitPromise, timeout, cancelled]);
 		if (exitResult.kind === 'timeout') {
 			return {
 				status: 'timeout',
@@ -223,6 +255,17 @@ export async function runExternalTool(
 				stderr: '',
 				stdoutTruncated: false,
 				stderrTruncated: false,
+			};
+		}
+		if (exitResult.kind === 'cancelled') {
+			return {
+				status: 'cancelled',
+				exitCode: proc.exitCode,
+				stdout: '',
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+				message: 'external tool execution cancelled',
 			};
 		}
 		const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
@@ -247,6 +290,9 @@ export async function runExternalTool(
 		};
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		if (abortListener && options.abortSignal) {
+			options.abortSignal.removeEventListener('abort', abortListener);
+		}
 		if (proc) {
 			try {
 				proc.kill();

@@ -53,6 +53,21 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'ci-fix-monitor',
 ];
 
+export const REQUIRED_EVALUATION_FIXTURE_IDS = [
+	'mutation-off-by-one',
+	'null-substitution',
+	'operator-swap',
+	'guard-removal',
+	'branch-swap',
+	'side-effect-deletion',
+	'curated-off-by-one',
+	'missing-await',
+	'swallowed-error',
+	'injection-prone-string',
+	'missing-auth-check',
+	'boundary-error',
+];
+
 const REQUIRED_PACKAGE_FILES = [
 	'dist/index.js',
 	'dist/index.d.ts',
@@ -60,6 +75,13 @@ const REQUIRED_PACKAGE_FILES = [
 	...REQUIRED_PROJECT_SKILL_SLUGS.map(
 		(slug) => `.opencode/skills/${slug}/SKILL.md`,
 	),
+	...REQUIRED_EVALUATION_FIXTURE_IDS.flatMap((id) => [
+		`evaluation-fixtures/tier1/${id}/manifest.json`,
+		`evaluation-fixtures/tier1/${id}/instruction.md`,
+		`evaluation-fixtures/tier1/${id}/environment/baseline.ts`,
+		`evaluation-fixtures/tier1/${id}/environment/defect.ts`,
+		`evaluation-fixtures/tier1/${id}/environment/defect.test.ts`,
+	]),
 	'README.md',
 	'LICENSE',
 	'package.json',
@@ -316,7 +338,7 @@ async function main() {
 			[
 				"import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';",
 				"import path from 'node:path';",
-				"import plugin from 'opencode-swarm';",
+				"import plugin, { loadTier1EvaluationTasks } from 'opencode-swarm';",
 				"const projectDir = path.join(process.cwd(), 'probe-project');",
 				"const nativePlan = path.join(projectDir, '.opencode', 'skills', 'plan', 'SKILL.md');",
 				"const privatePlan = path.join(projectDir, '.swarm', 'bundled-skills', 'plan', 'SKILL.md');",
@@ -325,6 +347,8 @@ async function main() {
 				"const privateCiFix = path.join(projectDir, '.swarm', 'bundled-skills', 'ci-fix-monitor', 'SKILL.md');",
 				"const packageRoot = path.join(process.cwd(), 'node_modules', 'opencode-swarm');",
 				"const packagedPlan = path.join(packageRoot, '.opencode', 'skills', 'plan', 'SKILL.md');",
+				"const evaluationTasks = await loadTier1EvaluationTasks(packageRoot);",
+				"if (evaluationTasks.length !== 12) throw new Error('packed Tier-1 evaluation fixtures did not resolve');",
 				"const sentinel = '---\\nname: plan\\naudience: ragappv3\\ndescription: repository-owned sentinel\\n---\\n';",
 				"mkdirSync(path.dirname(nativePlan), { recursive: true });",
 				"writeFileSync(nativePlan, sentinel);",
@@ -353,6 +377,45 @@ async function main() {
 			].join('\n'),
 		);
 		runCommand(process.execPath, ['materialization-probe.mjs'], {
+			cwd: installDir,
+		});
+
+		// Execute the supported package-level evaluation API from the extracted
+		// tarball. This is a real disposable-git-worktree run and verifies that the
+		// immutable promotion decision is persisted, not merely exported by name.
+		writeFileSync(
+			path.join(installDir, 'evaluation-api-probe.mjs'),
+			[
+				"import { execFileSync } from 'node:child_process';",
+				"import { existsSync, mkdirSync, writeFileSync } from 'node:fs';",
+				"import path from 'node:path';",
+				"import { evaluationV1 } from 'opencode-swarm';",
+				"const root = path.join(process.cwd(), 'evaluation-api-project');",
+				"mkdirSync(path.join(root, 'fixture'), { recursive: true });",
+				"writeFileSync(path.join(root, 'fixture', 'subject.ts'), 'export const value = 1;\\n');",
+				"writeFileSync(path.join(root, 'instruction.md'), 'Return a verdict.\\n');",
+				"writeFileSync(path.join(root, 'baseline.md'), 'baseline\\n');",
+				"writeFileSync(path.join(root, 'candidate.md'), 'candidate\\n');",
+				"execFileSync('git', ['init'], { cwd: root, timeout: 30_000, stdio: ['ignore', 'ignore', 'ignore'] });",
+				"execFileSync('git', ['add', '.'], { cwd: root, timeout: 30_000, stdio: ['ignore', 'ignore', 'ignore'] });",
+				"execFileSync('git', ['-c', 'user.name=Package Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-m', 'fixture'], { cwd: root, timeout: 30_000, stdio: ['ignore', 'ignore', 'ignore'] });",
+				"const taskDraft = { v: 1, id: 'package-smoke-task', source: 'curated', split: 'validation', category: 'correctness', protected: true, instructionPath: 'instruction.md', environment: { kind: 'fixture', path: 'fixture' }, scorer: { kind: 'builtin', argv: ['builtin'], timeoutMs: 1000, scoreRange: [0, 1] }, provenance: { origin: 'package-smoke', license: 'MIT' } };",
+				"const baselineDraft = { v: 1, id: 'baseline', kind: 'baseline', payloadPath: 'baseline.md', model: 'configured' };",
+				"const candidateDraft = { v: 1, id: 'candidate', kind: 'skill', payloadPath: 'candidate.md', model: 'configured' };",
+				"const task = { ...taskDraft, contentHash: await evaluationV1.hashTaskInput(root, taskDraft) };",
+				"const baseline = { ...baselineDraft, contentHash: await evaluationV1.hashCandidateInput(root, baselineDraft) };",
+				"const candidate = { ...candidateDraft, contentHash: await evaluationV1.hashCandidateInput(root, candidateDraft) };",
+				"const result = await evaluationV1.evaluateCandidate({ projectRoot: root, tasks: [task], baseline, candidate, split: 'validation', seed: 'package-smoke', models: ['configured'], budgets: { maxTasks: 1, maxRepetitions: 1, maxConcurrency: 2, maxTaskTimeMs: 1000, maxRetries: 0, maxOutputBytes: 1024 }, executor: async () => ({ status: 'completed', text: '{\\\"v\\\":1,\\\"caught\\\":true}', durationMs: 1, cost: { source: 'reported', usd: 0 } }) });",
+				"const replay = await evaluationV1.evaluateCandidate({ projectRoot: root, tasks: [task], baseline, candidate, split: 'validation', seed: 'package-smoke', models: ['configured'], budgets: { maxTasks: 1, maxRepetitions: 1, maxConcurrency: 2, maxTaskTimeMs: 1000, maxRetries: 0, maxOutputBytes: 1024 }, executor: async () => ({ status: 'completed', text: '{\\\"v\\\":1,\\\"caught\\\":true}', durationMs: 1, cost: { source: 'reported', usd: 0 } }) });",
+				"if (result.run.status !== 'complete') throw new Error('package evaluation run did not complete');",
+				"if (!result.decision.decisionId) throw new Error('package evaluation decision missing');",
+				"if (replay.decision.decidedAt !== result.decision.decidedAt) throw new Error('package evaluation replay was not idempotent');",
+				"const decisionPath = path.join(root, '.swarm', 'evolution', 'decisions', `${result.decision.decisionId}.json`);",
+				"if (!existsSync(decisionPath)) throw new Error('package evaluation decision was not persisted');",
+				"console.log('installed package evaluation API OK');",
+			].join('\n'),
+		);
+		runCommand(process.execPath, ['evaluation-api-probe.mjs'], {
 			cwd: installDir,
 		});
 

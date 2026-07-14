@@ -66,7 +66,7 @@ Config keys (`src/config/schema.ts:179`):
 | `max_bundles` | `1000` | **10** | 10–10000 | Count cap |
 | `auto_archive` | `false` | `false` | — | Future gate (config-only) |
 
-`/swarm archive` applies two-tier retention: age first, then count. `/swarm finalize` applies tighter retention (30 days / 10 bundles) to keep only recent evidence. Configure via `evidence.max_age_days` and `evidence.max_bundles` in your project config. Use `--dry-run` to preview.
+`/swarm archive` applies two-tier retention: age first, then count. The same execution report includes ordinary evidence, generic evaluation runs, and gate-audit detail, and lists only successful deletions. `/swarm finalize` applies tighter retention (30 days / 10 bundles) to keep only recent evidence. Configure via `evidence.max_age_days` and `evidence.max_bundles` in your project config. Use `--dry-run` to preview.
 
 ---
 
@@ -259,6 +259,9 @@ When spec requirements are present, `injection_summary` includes a coverage note
 /swarm benchmark --cumulative      # scan all evidence, compute pass rates
 /swarm benchmark --ci-gate         # non-zero exit if thresholds exceeded
 /swarm benchmark --ci-gate --max-cost-usd 1.50
+/swarm gate-audit --gates sast,mutation --max-time-ms 120000
+/swarm gate-stats --min-samples 6
+/swarm benchmark --ci-gate --gate-audit-run audit-abc123
 /swarm costs                       # per-agent/task/gate/retry token/cost totals
 /swarm costs --json                # machine-readable cost summary
 ```
@@ -268,6 +271,12 @@ When spec requirements are present, `injection_summary` includes a coverage note
 - `review_pass_rate`
 - `test_pass_rate`
 - Quality metrics: complexity delta, public API delta, duplication ratio, test-to-code ratio
+
+Gate-audit artifacts are immutable, versioned evaluation evidence under
+`.swarm/evidence/gate-audit/`. `/swarm archive` applies the configured age and
+count retention policy to these nested bundles. Reviewer gate decisions emit a
+typed `reviewer_gate_decision` telemetry event so `/swarm gate-stats` can
+separate genuine review evidence from fallback, data-quality, and blocked paths.
 
 ### Direct Inspection
 

@@ -1,114 +1,110 @@
 import { loadPluginConfig } from '../config/loader';
-import {
-	archiveEvidence,
-	listEvidenceTaskIds,
-	loadEvidence,
-} from '../evidence/manager';
-import { warn } from '../utils';
+import { archiveEvidence } from '../evidence/manager';
 
-/**
- * Handles the /swarm archive command.
- * Archives old evidence bundles based on retention policy.
- */
+export const _internals: { now: () => Date } = {
+	now: () => new Date(),
+};
+
+function artifactLabel(artifact: {
+	namespace: 'evaluation-run' | 'gate-audit';
+	id: string;
+}): string {
+	return `${artifact.namespace}/${artifact.id}`;
+}
+
+/** Handles `/swarm archive` with a truthful preview/execution report. */
 export async function handleArchiveCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
-	// Load config to get retention settings
 	const config = loadPluginConfig(directory);
 	const maxAgeDays = config?.evidence?.max_age_days ?? 90;
 	const maxBundles = config?.evidence?.max_bundles ?? 1000;
-
-	// Check for --dry-run flag
 	const dryRun = args.includes('--dry-run');
+	const report = await archiveEvidence(directory, maxAgeDays, maxBundles, {
+		report: true,
+		dryRun,
+		now: _internals.now(),
+	});
 
-	// Get current evidence count
-	const beforeTaskIds = await listEvidenceTaskIds(directory);
-
-	if (beforeTaskIds.length === 0) {
-		return 'No evidence bundles to archive.';
-	}
+	const evaluationSelected = report.evaluation.selected.map(artifactLabel);
+	const evaluationArchived = report.evaluation.archived.map(artifactLabel);
+	const selectedCount =
+		report.selectedEvidence.length + evaluationSelected.length;
+	const archivedCount =
+		report.archivedEvidence.length + evaluationArchived.length;
+	const corruptCount = report.evaluation.corrupt.length;
+	const inventoryCount =
+		report.inventoryEvidence.length + report.evaluation.inventory.length;
 
 	if (dryRun) {
-		// In dry-run mode, just report what would be archived
-		const cutoffDate = new Date();
-		cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
-		const cutoffIso = cutoffDate.toISOString();
-
-		const wouldArchiveAge: string[] = [];
-		const remainingBundles: Array<{ taskId: string; updatedAt: string }> = [];
-		for (const taskId of beforeTaskIds) {
-			let result: Awaited<ReturnType<typeof loadEvidence>>;
-			try {
-				result = await loadEvidence(directory, taskId);
-			} catch (_evidenceErr) {
-				warn(
-					'archive: skipping corrupt or unreadable evidence for task',
-					taskId,
-				);
-				continue;
+		if (selectedCount === 0) {
+			if (corruptCount > 0) {
+				return `No valid evidence bundles to archive. Preserved ${corruptCount} corrupt evaluation artifact(s) for data-quality review.`;
 			}
-			if (result.status !== 'found') {
-				continue;
-			}
-			if (result.bundle.updated_at < cutoffIso) {
-				wouldArchiveAge.push(taskId);
-			} else {
-				remainingBundles.push({ taskId, updatedAt: result.bundle.updated_at });
-			}
+			if (inventoryCount === 0) return 'No evidence bundles to archive.';
+			return `No evidence bundles older than ${maxAgeDays} days found, and bundle count (${inventoryCount}) is within max_bundles limit (${maxBundles}).`;
 		}
-
-		// Check if maxBundles would trigger additional archival
-		const wouldArchiveMaxBundles: string[] = [];
-		const remainingAfterAge = beforeTaskIds.length - wouldArchiveAge.length;
-		if (remainingAfterAge > maxBundles) {
-			// Sort by updated_at ascending (oldest first)
-			remainingBundles.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
-			// Oldest bundles beyond the limit would be archived
-			const excessCount = remainingAfterAge - maxBundles;
-			wouldArchiveMaxBundles.push(
-				...remainingBundles.slice(0, excessCount).map((b) => b.taskId),
-			);
-		}
-
-		const totalWouldArchive =
-			wouldArchiveAge.length + wouldArchiveMaxBundles.length;
-
-		if (totalWouldArchive === 0) {
-			return `No evidence bundles older than ${maxAgeDays} days found, and bundle count (${beforeTaskIds.length}) is within max_bundles limit (${maxBundles}).`;
-		}
-
 		const lines = [
 			'## Archive Preview (dry run)',
 			'',
 			`**Retention**: ${maxAgeDays} days`,
 			`**Max bundles**: ${maxBundles}`,
-			`**Would archive**: ${totalWouldArchive} bundle(s)`,
+			`**Would archive**: ${selectedCount} bundle(s)`,
 		];
-
-		if (wouldArchiveAge.length > 0) {
+		if (report.selectedEvidenceByAge.length > 0) {
 			lines.push(
 				'',
-				`**Age-based (${wouldArchiveAge.length})**:`,
-				...wouldArchiveAge.map((id) => `- ${id}`),
+				`**Age-based (${report.selectedEvidenceByAge.length})**:`,
+				...report.selectedEvidenceByAge.map((id) => `- ${id}`),
 			);
 		}
-
-		if (wouldArchiveMaxBundles.length > 0) {
+		if (report.selectedEvidenceByCount.length > 0) {
 			lines.push(
 				'',
-				`**Max bundles limit (${wouldArchiveMaxBundles.length})**:`,
-				...wouldArchiveMaxBundles.map((id) => `- ${id}`),
+				`**Max bundles limit (${report.selectedEvidenceByCount.length})**:`,
+				...report.selectedEvidenceByCount.map((id) => `- ${id}`),
 			);
 		}
-
+		const selectedRuns = report.evaluation.selected.filter(
+			(artifact) => artifact.namespace === 'evaluation-run',
+		);
+		const selectedAudits = report.evaluation.selected.filter(
+			(artifact) => artifact.namespace === 'gate-audit',
+		);
+		if (selectedRuns.length > 0) {
+			lines.push(
+				'',
+				`**Evaluation runs (${selectedRuns.length})**:`,
+				...selectedRuns.map((artifact) => `- ${artifactLabel(artifact)}`),
+			);
+		}
+		if (selectedAudits.length > 0) {
+			lines.push(
+				'',
+				`**Gate-audit runs (${selectedAudits.length})**:`,
+				...selectedAudits.map((artifact) => `- ${artifactLabel(artifact)}`),
+			);
+		}
+		if (report.evaluation.protected.length > 0 || corruptCount > 0) {
+			lines.push(
+				'',
+				`**Evaluation artifacts preserved**: ${report.evaluation.protected.length} lineage-protected, ${corruptCount} corrupt/data-quality`,
+			);
+		}
 		return lines.join('\n');
 	}
 
-	// Actually archive
-	const archived = await archiveEvidence(directory, maxAgeDays, maxBundles);
-
-	if (archived.length === 0) {
+	if (archivedCount === 0) {
+		const failedCount =
+			report.failedEvidence.length + report.evaluation.failed.length;
+		if (failedCount > 0) {
+			return `No evidence bundles were archived; ${failedCount} selected deletion(s) failed and remain on disk.`;
+		}
+		if (corruptCount > 0) {
+			return `No valid evidence bundles were archived. Preserved ${corruptCount} corrupt evaluation artifact(s) for data-quality review.`;
+		}
+		if (inventoryCount === 0) return 'No evidence bundles to archive.';
 		return `No evidence bundles older than ${maxAgeDays} days found.`;
 	}
 
@@ -116,9 +112,15 @@ export async function handleArchiveCommand(
 		'## Evidence Archived',
 		'',
 		`**Retention**: ${maxAgeDays} days`,
-		`**Archived**: ${archived.length} bundle(s)`,
+		`**Archived**: ${archivedCount} bundle(s)`,
 		'',
-		...archived.map((id) => `- ${id}`),
+		...report.archivedEvidence.map((id) => `- ${id}`),
+		...evaluationArchived.map((id) => `- ${id}`),
 	];
+	const failedCount =
+		report.failedEvidence.length + report.evaluation.failed.length;
+	if (failedCount > 0) {
+		lines.push('', `**Failed deletions preserved**: ${failedCount}`);
+	}
 	return lines.join('\n');
 }

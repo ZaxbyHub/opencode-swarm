@@ -2,25 +2,18 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	_internals,
+	executeMutation,
+	type MutationPatch,
+} from '../../../src/mutation/engine.ts';
 
-// Mock the entire child_process module to track spawnSync calls
 const mockSpawnSync = mock(() => ({
 	status: 0,
 	stderr: Buffer.from(''),
 	stdout: Buffer.from(''),
 }));
-const realChildProcess = await import('node:child_process');
-const realSpawnSync = realChildProcess.spawnSync;
-
-mock.module('node:child_process', () => ({
-	...realChildProcess,
-	spawnSync: mockSpawnSync,
-}));
-
-// Import after mocking
-const { executeMutation, MutationPatch } = await import(
-	'../../../src/mutation/engine.ts'
-);
+const realSpawnSync = _internals.spawnSync;
 
 const mockPatch: MutationPatch = {
 	id: 'test-patch-001',
@@ -37,6 +30,8 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-enoent-'));
+		_internals.spawnSync =
+			mockSpawnSync as unknown as typeof _internals.spawnSync;
 		mockSpawnSync.mockImplementation(
 			(cmd: string, args: string[], opts: Record<string, unknown>) => {
 				if (cmd === 'git' && args[0] === 'apply' && !args.includes('-R')) {
@@ -66,7 +61,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 	});
 
 	afterEach(() => {
-		mock.restore();
+		_internals.spawnSync = realSpawnSync;
 		mockSpawnSync.mockClear();
 		try {
 			const entries = fs.readdirSync(tempDir);

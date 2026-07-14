@@ -11,6 +11,7 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import type { AgentDefinition } from '../agents/index.js';
 import type { PluginConfig } from '../config/index.js';
+import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import { TOOL_MANIFEST } from './manifest';
 import { createSwarmCommandTool } from './swarm-command';
 
@@ -27,6 +28,7 @@ import { createSwarmCommandTool } from './swarm-command';
 export function buildPluginToolObject(
 	agents: Record<string, AgentDefinition>,
 	config?: PluginConfig,
+	evaluationModelDispatcher?: EvaluationModelDispatcher,
 ): Record<string, ToolDefinition> {
 	const tools: Record<string, ToolDefinition> = {};
 	const knowledgeEnabled = config?.knowledge?.enabled !== false;
@@ -47,6 +49,9 @@ export function buildPluginToolObject(
 		// Each manifest value is a lazy thunk — resolve it here, at call time.
 		tools[name] = handler();
 	}
-	tools.swarm_command = createSwarmCommandTool(agents);
+	tools.swarm_command = createSwarmCommandTool(
+		agents,
+		evaluationModelDispatcher,
+	);
 	return tools;
 }

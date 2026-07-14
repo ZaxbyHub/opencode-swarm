@@ -41,6 +41,7 @@
 		"dist",
 		"dist/lang/grammars",
 		"binaries",
+		"evaluation-fixtures",
 		".opencode/skills/brainstorm",
 		".opencode/skills/specify",
 		".opencode/skills/clarify-spec",

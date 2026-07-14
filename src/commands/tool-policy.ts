@@ -252,9 +252,11 @@ export function classifySwarmCommandToolUse(
 			const arg = args[i];
 			if (arg === '--cumulative' || arg === '--ci-gate') continue;
 			if (
-				arg === '--max-cost-usd' &&
+				(arg === '--max-cost-usd' || arg === '--gate-audit-run') &&
 				i + 1 < args.length &&
-				/^\d+(\.\d+)?$/.test(args[i + 1])
+				(arg === '--max-cost-usd'
+					? /^\d+(\.\d+)?$/.test(args[i + 1])
+					: /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(args[i + 1]))
 			) {
 				i++;
 				continue;
@@ -262,9 +264,61 @@ export function classifySwarmCommandToolUse(
 			return {
 				allowed: false,
 				message:
-					'Only `--cumulative`, `--ci-gate`, and `--max-cost-usd <n>` are supported for `/swarm benchmark` through swarm_command.',
+					'Only `--cumulative`, `--ci-gate`, `--max-cost-usd <n>`, and `--gate-audit-run <id>` are supported for `/swarm benchmark` through swarm_command.',
 			};
 		}
+	}
+
+	if (canonicalKey === 'gate-audit') {
+		const valueFlags = new Set([
+			'--run-id',
+			'--model',
+			'--swarm',
+			'--gates',
+			'--tasks',
+			'--runs',
+			'--max-concurrency',
+			'--max-retries',
+			'--max-time-ms',
+			'--max-cost-usd',
+			'--seed',
+		]);
+		for (let index = 0; index < args.length; index++) {
+			if (args[index] === '--json') continue;
+			if (!valueFlags.has(args[index]) || index + 1 >= args.length) {
+				return {
+					allowed: false,
+					message:
+						'Usage through swarm_command: `/swarm gate-audit [--model <id>] [--swarm <id>] [--gates <csv>] [--tasks <csv>] [--runs <n>] [--max-concurrency <n>] [--max-retries <n>] [--max-time-ms <n>] [--max-cost-usd <n>] [--seed <value>] [--run-id <id>] [--json]`.',
+				};
+			}
+			index++;
+		}
+	}
+
+	if (canonicalKey === 'gate-stats') {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		if (
+			args.length === 2 &&
+			args[0] === '--min-samples' &&
+			/^\d+$/.test(args[1])
+		) {
+			return { allowed: true };
+		}
+		if (
+			args.length === 3 &&
+			args[0] === '--json' &&
+			args[1] === '--min-samples' &&
+			/^\d+$/.test(args[2])
+		) {
+			return { allowed: true };
+		}
+		return {
+			allowed: false,
+			message:
+				'Usage through swarm_command: `/swarm gate-stats [--json] [--min-samples <n>]`.',
+		};
 	}
 
 	if (canonicalKey === 'costs') {
