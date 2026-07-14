@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.116.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.116.0...v7.116.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **swarm:** finalize/reset lifecycle fixes, finalize --dry-run, portable commit-pr ([#1692](https://github.com/ZaxbyHub/opencode-swarm/issues/1692)) ([9d2e87d](https://github.com/ZaxbyHub/opencode-swarm/commit/9d2e87d5be922fddbf475d9be69e1c262a803d1e))
+* **tests:** pay down knowledge-test quarantine debt and add CI portability lints ([#1737](https://github.com/ZaxbyHub/opencode-swarm/issues/1737)) ([4704e94](https://github.com/ZaxbyHub/opencode-swarm/commit/4704e9448e870d300780e79b1d7d3c9da271857c))
+
 ## [7.116.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.115.0...v7.116.0) (2026-07-14)
 
 
