@@ -1,93 +1,23 @@
 /**
- * Tests for ledger integrity functions: readLedgerEventsWithIntegrity,
- * quarantineLedgerSuffix, and replayWithIntegrity
+ * Tests for ledger integrity functions: readLedgerEventsWithIntegrity and
+ * quarantineLedgerSuffix.
+ *
+ * NOTE: the former `replayWithIntegrity` function was folded into
+ * `replayFromLedgerWithStatus` (M1 fix) and deleted; its integrity/quarantine
+ * value is now exercised via that path and the M1 truncation regression tests
+ * (ledger-m1-truncation.test.ts). Only the reader/quarantine unit tests remain
+ * here.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Plan } from '../../src/config/plan-schema';
 import {
-	appendLedgerEvent,
-	initLedger,
 	type LedgerEvent,
 	quarantineLedgerSuffix,
 	readLedgerEventsWithIntegrity,
-	replayWithIntegrity,
-	takeSnapshotEvent,
 } from '../../src/plan/ledger';
-
-function createTestPlan(): Plan {
-	return {
-		schema_version: '1.0.0',
-		title: 'Test Plan',
-		swarm: 'test-swarm',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				required_agents: undefined,
-				tasks: [
-					{
-						id: '1.1',
-						phase: 1,
-						status: 'pending',
-						size: 'small' as const,
-						description: 'Task 1',
-						depends: [],
-						files_touched: [],
-						evidence_path: undefined,
-						blocked_reason: undefined,
-					},
-				],
-			},
-		],
-	};
-}
-
-function createTestPlanWithTwoTasks(): Plan {
-	return {
-		schema_version: '1.0.0',
-		title: 'Test Plan',
-		swarm: 'test-swarm',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				required_agents: undefined,
-				tasks: [
-					{
-						id: '1.1',
-						phase: 1,
-						status: 'pending',
-						size: 'small' as const,
-						description: 'Task 1',
-						depends: [],
-						files_touched: [],
-						evidence_path: undefined,
-						blocked_reason: undefined,
-					},
-					{
-						id: '1.2',
-						phase: 1,
-						status: 'pending',
-						size: 'small' as const,
-						description: 'Task 2',
-						depends: [],
-						files_touched: [],
-						evidence_path: undefined,
-						blocked_reason: undefined,
-					},
-				],
-			},
-		],
-	};
-}
 
 describe('readLedgerEventsWithIntegrity', () => {
 	let testDir: string;
@@ -265,186 +195,116 @@ describe('quarantineLedgerSuffix', () => {
 		fs.rmSync(testDir, { force: true, recursive: true });
 	});
 
-	test('6. quarantineLedgerSuffix writes correct file content', async () => {
+	test('6. quarantineLedgerSuffix writes correct file content to a unique path', async () => {
 		const badContent = '{ broken: "json" }\nsecond line\nthird line';
 
-		await quarantineLedgerSuffix(testDir, badContent);
+		const result = await quarantineLedgerSuffix(testDir, badContent);
 
-		const quarantinePath = path.join(
-			testDir,
-			'.swarm',
-			'plan-ledger.quarantine',
-		);
-		expect(fs.existsSync(quarantinePath)).toBe(true);
+		// Unique-path contract: filename is prefixed plan-ledger.quarantine.* and
+		// the write reports the path it landed at.
+		expect(result.path).not.toBeNull();
+		expect(path.basename(result.path!)).toMatch(/^plan-ledger\.quarantine\./);
+		expect(fs.existsSync(result.path!)).toBe(true);
 
-		const content = fs.readFileSync(quarantinePath, 'utf8');
+		const content = fs.readFileSync(result.path!, 'utf8');
 		expect(content).toBe(badContent);
 	});
 
-	test('quarantineLedgerSuffix overwrites existing quarantine file', async () => {
-		const quarantinePath = path.join(
+	test('quarantineLedgerSuffix does NOT overwrite a prior quarantine (distinct suffixes → distinct files)', async () => {
+		const first = await quarantineLedgerSuffix(
 			testDir,
-			'.swarm',
-			'plan-ledger.quarantine',
+			'{ first: "corruption" }',
 		);
-		fs.writeFileSync(quarantinePath, 'old content', 'utf8');
-
-		const newContent = '{ new: "content" }';
-		await quarantineLedgerSuffix(testDir, newContent);
-
-		const content = fs.readFileSync(quarantinePath, 'utf8');
-		expect(content).toBe(newContent);
-	});
-});
-
-describe('replayWithIntegrity', () => {
-	let testDir: string;
-
-	beforeEach(async () => {
-		testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-integrity-'));
-		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
-	});
-
-	afterEach(() => {
-		fs.rmSync(testDir, { force: true, recursive: true });
-	});
-
-	test('7. replayWithIntegrity on clean ledger returns correct plan state', async () => {
-		// Create plan.json with initial state
-		const planPath = path.join(testDir, '.swarm', 'plan.json');
-		const initialPlan = createTestPlan();
-		fs.writeFileSync(planPath, JSON.stringify(initialPlan), 'utf8');
-
-		// Initialize ledger with plan_created event
-		await initLedger(testDir, 'test-plan-1');
-
-		// Append a task_status_changed event
-		await appendLedgerEvent(testDir, {
-			plan_id: 'test-plan-1',
-			event_type: 'task_status_changed',
-			task_id: '1.1',
-			from_status: 'pending',
-			to_status: 'in_progress',
-			source: 'test',
-		});
-
-		const result = await replayWithIntegrity(testDir);
-
-		expect(result).not.toBeNull();
-		expect(result!.phases[0].tasks[0].status).toBe('in_progress');
-	});
-
-	test('8. replayWithIntegrity on corrupted ledger returns plan state from valid events only', async () => {
-		// Create plan.json with initial state
-		const planPath = path.join(testDir, '.swarm', 'plan.json');
-		const initialPlan = createTestPlanWithTwoTasks();
-		fs.writeFileSync(planPath, JSON.stringify(initialPlan), 'utf8');
-
-		// Initialize ledger
-		await initLedger(testDir, 'test-plan-1');
-
-		// Append valid event: task 1.1 -> in_progress
-		await appendLedgerEvent(testDir, {
-			plan_id: 'test-plan-1',
-			event_type: 'task_status_changed',
-			task_id: '1.1',
-			from_status: 'pending',
-			to_status: 'in_progress',
-			source: 'test',
-		});
-
-		// Append valid event: task 1.2 -> in_progress
-		await appendLedgerEvent(testDir, {
-			plan_id: 'test-plan-1',
-			event_type: 'task_status_changed',
-			task_id: '1.2',
-			from_status: 'pending',
-			to_status: 'in_progress',
-			source: 'test',
-		});
-
-		// Now corrupt the ledger by appending a bad line
-		const ledgerPath = path.join(testDir, '.swarm', 'plan-ledger.jsonl');
-		fs.appendFileSync(ledgerPath, '\n{ BROKEN JSON LINE }\n', 'utf8');
-
-		const result = await replayWithIntegrity(testDir);
-
-		// Should get plan state with only valid events applied
-		expect(result).not.toBeNull();
-		expect(result!.phases[0].tasks[0].status).toBe('in_progress');
-		expect(result!.phases[0].tasks[1].status).toBe('in_progress');
-
-		// Verify quarantine file was created
-		const quarantinePath = path.join(
+		const second = await quarantineLedgerSuffix(
 			testDir,
-			'.swarm',
-			'plan-ledger.quarantine',
+			'{ second: "corruption" }',
 		);
-		expect(fs.existsSync(quarantinePath)).toBe(true);
+
+		// Two different corruptions must land in two different files — the second
+		// must not clobber the first.
+		expect(first.path).not.toBeNull();
+		expect(second.path).not.toBeNull();
+		expect(second.path).not.toBe(first.path);
+		expect(fs.readFileSync(first.path!, 'utf8')).toBe(
+			'{ first: "corruption" }',
+		);
+		expect(fs.readFileSync(second.path!, 'utf8')).toBe(
+			'{ second: "corruption" }',
+		);
+
+		// Both quarantine files coexist on disk.
+		const quarantineFiles = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(quarantineFiles.length).toBe(2);
 	});
 
-	test('9. replayWithIntegrity on corrupted ledger with snapshot uses snapshot+valid delta', async () => {
-		// Create plan.json with initial state
-		const planPath = path.join(testDir, '.swarm', 'plan.json');
-		const initialPlan = createTestPlanWithTwoTasks();
-		fs.writeFileSync(planPath, JSON.stringify(initialPlan), 'utf8');
+	test('quarantineLedgerSuffix reports the count of salvageable (parseable) lines', async () => {
+		// Two valid JSON lines behind a poison line — salvage count must be 2.
+		const suffix = `{ not valid json\n${JSON.stringify({ seq: 5, event_type: 'task_added' })}\n${JSON.stringify({ seq: 6, event_type: 'task_added' })}\n`;
 
-		// Initialize ledger
-		await initLedger(testDir, 'test-plan-1');
+		const result = await quarantineLedgerSuffix(testDir, suffix);
 
-		// Append event for task 1.1 -> in_progress
-		await appendLedgerEvent(testDir, {
-			plan_id: 'test-plan-1',
-			event_type: 'task_status_changed',
-			task_id: '1.1',
-			from_status: 'pending',
-			to_status: 'in_progress',
-			source: 'test',
-		});
+		expect(result.salvagedCount).toBe(2);
+	});
 
-		// Take a snapshot after seq 1
-		await takeSnapshotEvent(testDir, initialPlan);
+	test('F-002: identical corruption is deduped — repeated quarantine of the same content reuses one file (no per-restart accumulation)', async () => {
+		// The startup ledger check runs once per process, so the SAME corruption
+		// is re-quarantined on every process restart while the poison line
+		// persists. Without dedup, each call wrote a fresh Date.now()-prefixed
+		// file — unbounded accumulation for an unchanged corrupted tail.
+		const sameContent = '{ broken: "corruption" }\ntrailing line';
 
-		// Append another valid event: task 1.2 -> in_progress
-		await appendLedgerEvent(testDir, {
-			plan_id: 'test-plan-1',
-			event_type: 'task_status_changed',
-			task_id: '1.2',
-			from_status: 'pending',
-			to_status: 'in_progress',
-			source: 'test',
-		});
+		const first = await quarantineLedgerSuffix(testDir, sameContent);
+		const second = await quarantineLedgerSuffix(testDir, sameContent);
+		const third = await quarantineLedgerSuffix(testDir, sameContent);
 
-		// Now corrupt the ledger
-		const ledgerPath = path.join(testDir, '.swarm', 'plan-ledger.jsonl');
-		fs.appendFileSync(ledgerPath, '\n{ CORRUPTED LINE }\n', 'utf8');
+		expect(first.path).not.toBeNull();
+		// Repeated identical corruption reuses the first file's path.
+		expect(second.path).toBe(first.path);
+		expect(third.path).toBe(first.path);
 
-		const result = await replayWithIntegrity(testDir);
+		// Exactly one quarantine file on disk for this corruption.
+		const quarantineFiles = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(quarantineFiles.length).toBe(1);
+		expect(fs.readFileSync(first.path!, 'utf8')).toBe(sameContent);
 
-		// Should use snapshot + delta replay and apply only valid events
-		expect(result).not.toBeNull();
-		expect(result!.phases[0].tasks[0].status).toBe('pending');
-		expect(result!.phases[0].tasks[1].status).toBe('in_progress');
-
-		// Verify quarantine file was created
-		const quarantinePath = path.join(
+		// A genuinely different corruption still gets its own file.
+		const distinct = await quarantineLedgerSuffix(
 			testDir,
-			'.swarm',
-			'plan-ledger.quarantine',
+			'{ a different corruption }',
 		);
-		expect(fs.existsSync(quarantinePath)).toBe(true);
+		expect(distinct.path).not.toBe(first.path);
+		const afterDistinct = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(afterDistinct.length).toBe(2);
 	});
 
-	test('replayWithIntegrity returns null for empty ledger', async () => {
-		const result = await replayWithIntegrity(testDir);
-		expect(result).toBeNull();
-	});
+	test('F-002 falsification: concurrent quarantine of identical content still yields ONE file (no readdir/write race)', async () => {
+		// quarantineLedgerSuffix is `async` but contains no `await` — its
+		// readdir→byte-compare→write body is fully synchronous, so even
+		// Promise.all-dispatched calls run to completion one-at-a-time and the
+		// second observes the first's file. This guards against a future refactor
+		// that introduces an await between the dedup scan and the write.
+		const sameContent = '{ concurrent: "corruption" }\nrace tail';
+		const results = await Promise.all([
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+			quarantineLedgerSuffix(testDir, sameContent),
+		]);
 
-	test('replayWithIntegrity returns null when plan.json does not exist', async () => {
-		// Create a ledger but no plan.json
-		await initLedger(testDir, 'test-plan-1');
+		const paths = new Set(results.map((r) => r.path));
+		expect(paths.size).toBe(1);
+		// salvagedCount is recomputed per call from the same content — stays consistent.
+		for (const r of results) expect(r.salvagedCount).toBe(0);
 
-		const result = await replayWithIntegrity(testDir);
-		expect(result).toBeNull();
+		const quarantineFiles = fs
+			.readdirSync(path.join(testDir, '.swarm'))
+			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
+		expect(quarantineFiles.length).toBe(1);
 	});
 });

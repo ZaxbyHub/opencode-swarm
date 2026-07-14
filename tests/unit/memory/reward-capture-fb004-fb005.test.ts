@@ -19,6 +19,7 @@ import {
 } from '../../../src/memory';
 import { DEFAULT_QLEARNING_CONFIG } from '../../../src/memory/config';
 import { applyCouncilReward } from '../../../src/memory/reward-capture';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 type Provider = {
 	close?: () => void;
@@ -26,8 +27,14 @@ type Provider = {
 
 let tmpDir: string;
 let openProviders: Provider[];
+let restoreClock: (() => void) | undefined;
 
 beforeEach(async () => {
+	// Freeze Date.now deterministically. The FB-005 block builds recall-event
+	// timestamps from explicit fixed dates (`new Date('2026-06-15...')`), which
+	// are unaffected; this pins any incidental now-reads so time-sensitive
+	// assertions never flake (invariant 7 / test-clock).
+	restoreClock = freezeClock({ fixedNow: 1_781_740_800_000 });
 	tmpDir = await fs.realpath(
 		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-fb-fix-')),
 	);
@@ -37,6 +44,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	for (const p of openProviders.splice(0)) p.close?.();
 	await fs.rm(tmpDir, { recursive: true, force: true });
+	restoreClock?.();
 });
 
 function track(p: Provider): Provider {
@@ -344,5 +352,143 @@ describe('FB-005 — buildRetrievalRecency bounded by `since` filter', () => {
 		for (const ev of events ?? []) {
 			expect(ev.timestamp >= since).toBe(true);
 		}
+	});
+});
+
+// -----------------------------------------------------------------------
+// M2 — withTransaction is async-safe (real BEGIN/COMMIT/ROLLBACK atomicity)
+// -----------------------------------------------------------------------
+
+describe('M2 — withTransaction async-safe atomicity', () => {
+	test('rolls back an awaited write when the async callback throws', async () => {
+		const root = await providerRoot('m2-rollback');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		) as any;
+		await provider.initialize();
+		const db = provider.requireDb();
+		db.run('CREATE TABLE IF NOT EXISTS m2_scratch (id TEXT PRIMARY KEY)');
+
+		await expect(
+			provider.withTransaction(async () => {
+				db.run("INSERT INTO m2_scratch (id) VALUES ('rollback-me')");
+				// Async boundary: with the old sync db.transaction() impl this INSERT
+				// would have COMMITTED before the throw was ever observed, so the row
+				// would persist. The manual BEGIN/COMMIT/ROLLBACK must revert it.
+				await Promise.resolve();
+				throw new Error('m2-boom');
+			}),
+		).rejects.toThrow('m2-boom');
+
+		const count = db.query('SELECT COUNT(*) AS c FROM m2_scratch').get()
+			.c as number;
+		expect(count).toBe(0);
+		// Transaction was fully unwound (no dangling open transaction).
+		expect(db.inTransaction).toBe(false);
+	});
+
+	test('commits an awaited write when the async callback resolves', async () => {
+		const root = await providerRoot('m2-commit');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		) as any;
+		await provider.initialize();
+		const db = provider.requireDb();
+		db.run('CREATE TABLE IF NOT EXISTS m2_scratch (id TEXT PRIMARY KEY)');
+
+		const returned = await provider.withTransaction(async () => {
+			db.run("INSERT INTO m2_scratch (id) VALUES ('commit-me')");
+			await Promise.resolve();
+			return 'ok';
+		});
+
+		expect(returned).toBe('ok');
+		const count = db.query('SELECT COUNT(*) AS c FROM m2_scratch').get()
+			.c as number;
+		expect(count).toBe(1);
+		expect(db.inTransaction).toBe(false);
+	});
+});
+
+// -----------------------------------------------------------------------
+// M14 — SQLite handle is closed and nulled when init fails after open
+// -----------------------------------------------------------------------
+
+describe('M14 — init-failure closes and nulls the db handle', () => {
+	test('closes the opened handle and nulls this.db when a post-open step throws, and retry re-opens without leaking', async () => {
+		const root = await providerRoot('m14-init-throw');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		) as any;
+
+		// Force a post-open init step (runMigrations) to throw, capturing the
+		// exact native handle doInitialize opened and spying its close() so we can
+		// prove the leaked handle was actually closed (not just nulled).
+		let openedHandle: unknown = null;
+		let closedHandle: unknown = null;
+		provider.runMigrations = function (this: any) {
+			const db = this.db;
+			openedHandle = db;
+			const origClose = db.close.bind(db);
+			db.close = () => {
+				closedHandle = db;
+				return origClose();
+			};
+			throw new Error('m14-migration-boom');
+		};
+
+		await expect(provider.initialize()).rejects.toThrow('m14-migration-boom');
+
+		// The just-opened native handle was closed (no leak) and this.db nulled.
+		expect(openedHandle).not.toBeNull();
+		expect(closedHandle).toBe(openedHandle);
+		expect(provider.db).toBeNull();
+		expect(provider.ftsAvailable).toBe(false);
+
+		// Retry with the real runMigrations restored: must open a FRESH handle and
+		// succeed — proving the earlier failure did not leave a leaked/leftover
+		// handle and did not double-open.
+		delete provider.runMigrations; // fall back to the prototype implementation
+		await provider.initialize();
+		expect(provider.db).not.toBeNull();
+		expect(provider.db).not.toBe(openedHandle);
+
+		// Provider is fully usable after recovery.
+		const mem = makeRecord('Recovered after init failure.');
+		await provider.upsert(mem);
+		expect((await provider.get(mem.id))?.id).toBe(mem.id);
+	});
+
+	test('resets initialized when a throw occurs AFTER initialized=true, so retry re-opens (no permanent wedge)', async () => {
+		const root = await providerRoot('m14-post-init-throw');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		) as any;
+
+		// Force the post-`initialized = true` telemetry path to throw: make
+		// loadMemories report an invalid row (so the `invalid_load` event fires)
+		// and make event() throw at that point. This reproduces a SQLITE_BUSY/IOERR
+		// on the telemetry insert that runs AFTER this.initialized = true.
+		provider.loadMemories = () => ({ records: [], invalidCount: 1 });
+		provider.event = async () => {
+			throw new Error('m14-post-init-boom');
+		};
+
+		await expect(provider.initialize()).rejects.toThrow('m14-post-init-boom');
+
+		// The handle is closed/nulled AND initialized is reset — otherwise the
+		// `if (this.initialized) return;` short-circuit would wedge the provider.
+		expect(provider.db).toBeNull();
+		expect(provider.initialized).toBe(false);
+
+		// Retry with the real implementations restored: must re-open and succeed.
+		delete provider.loadMemories;
+		delete provider.event;
+		await provider.initialize();
+		expect(provider.db).not.toBeNull();
+
+		const mem = makeRecord('Recovered after post-init failure.');
+		await provider.upsert(mem);
+		expect((await provider.get(mem.id))?.id).toBe(mem.id);
 	});
 });

@@ -34,7 +34,7 @@ import {
 import {
 	WindowsSandboxExecutor,
 	_internals as winInternals,
-} from '../../../src/sandbox/win32/restricted-token-executor';
+} from '../../../src/sandbox/win32/restricted-environment-executor';
 
 // ---------------------------------------------------------------------------
 // Platform guards ΓÇö save/restore _internals probe functions

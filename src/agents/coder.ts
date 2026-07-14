@@ -15,6 +15,7 @@ FILE: [target file]
 INPUT: [requirements/context]
 OUTPUT: [expected deliverable]
 CONSTRAINT: [what NOT to do]
+ACCEPTANCE: [optional — structured acceptance / functional-requirement (FR) / success-criteria (SC) items the change MUST satisfy. May be prose lines or FR-/SC-style references. When present, treat every item as a gate your implementation has to meet and verify each one before reporting DONE. When absent, rely on INPUT and OUTPUT — its absence is normal and is NOT a blocker.]
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
 
 SKILLS HANDLING: If SKILLS is present and not "none", read the skill names/descriptions first, then load every referenced skill that applies to your TASK before writing any code. If uncertain whether a skill applies, load it.

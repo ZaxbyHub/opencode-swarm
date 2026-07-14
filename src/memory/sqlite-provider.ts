@@ -436,73 +436,98 @@ export class SQLiteMemoryProvider
 		mkdirSync(path.dirname(dbPath), { recursive: true });
 		const Db = loadDatabaseCtor();
 		this.db = new Db(dbPath);
-		this.db.run('PRAGMA journal_mode = WAL;');
-		this.db.run('PRAGMA synchronous = NORMAL;');
-		const busyTimeoutMs = Math.min(
-			60000,
-			Math.max(0, Math.trunc(this.config.sqlite.busyTimeoutMs)),
-		);
-		this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
-		this.db.run('PRAGMA foreign_keys = ON;');
-		this.runMigrations();
-		this.backfillScopeKeys();
-		this.backfillRecallRunIds();
-		this.ftsAvailable = this.initializeFtsIndex();
-		this.initializeVecExtension();
-		if (this.config.embeddings.enabled && !this.embeddingProvider) {
-			try {
-				this.embeddingProvider = new LocalEmbeddingProvider({
-					model: this.config.embeddings.model,
-					dimension: this.config.embeddings.dimension,
-					version: this.config.embeddings.version,
-				});
-			} catch (err) {
-				this.embeddingProvider = null;
-				warn(
-					'Failed to construct embedding provider — dense retrieval disabled',
-					{
-						reason: err instanceof Error ? err.message : String(err),
-					},
+		// M14: everything after the native handle is opened can throw
+		// (migrations, backfills, JSONL migration, loads). On ANY failure we
+		// must close the just-opened handle and null it, otherwise initialize()'s
+		// catch nulls initPromise and a retry re-opens a second native handle —
+		// leaking the first one. A narrow wrap around only runMigrations() would
+		// miss the later throw sites, so the entire post-open body is guarded.
+		try {
+			this.db.run('PRAGMA journal_mode = WAL;');
+			this.db.run('PRAGMA synchronous = NORMAL;');
+			const busyTimeoutMs = Math.min(
+				60000,
+				Math.max(0, Math.trunc(this.config.sqlite.busyTimeoutMs)),
+			);
+			this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+			this.db.run('PRAGMA foreign_keys = ON;');
+			this.runMigrations();
+			this.backfillScopeKeys();
+			this.backfillRecallRunIds();
+			this.ftsAvailable = this.initializeFtsIndex();
+			this.initializeVecExtension();
+			if (this.config.embeddings.enabled && !this.embeddingProvider) {
+				try {
+					this.embeddingProvider = new LocalEmbeddingProvider({
+						model: this.config.embeddings.model,
+						dimension: this.config.embeddings.dimension,
+						version: this.config.embeddings.version,
+					});
+				} catch (err) {
+					this.embeddingProvider = null;
+					warn(
+						'Failed to construct embedding provider — dense retrieval disabled',
+						{
+							reason: err instanceof Error ? err.message : String(err),
+						},
+					);
+				}
+				try {
+					this.embeddingCache = new EmbeddingCache(
+						this.config.embeddings.cacheSize,
+					);
+				} catch (err) {
+					this.embeddingCache = null;
+					warn(
+						'Failed to construct embedding cache — recall works without cache',
+						{
+							reason: err instanceof Error ? err.message : String(err),
+						},
+					);
+				}
+			}
+			this.lastAutomaticJsonlMigration = null;
+			await this.migrateLegacyJsonlIfNeeded();
+			const memoryLoad = this.loadMemories();
+			const proposalLoad = this.loadProposals();
+			this.memories = new Map(
+				memoryLoad.records.map((record) => [record.id, record]),
+			);
+			this.proposals = new Map(
+				proposalLoad.records.map((proposal) => [proposal.id, proposal]),
+			);
+			this.initialized = true;
+			if (memoryLoad.invalidCount > 0) {
+				await this.event(
+					'invalid_load',
+					'memory_items',
+					`${memoryLoad.invalidCount} invalid SQLite memory row(s) skipped`,
 				);
 			}
-			try {
-				this.embeddingCache = new EmbeddingCache(
-					this.config.embeddings.cacheSize,
-				);
-			} catch (err) {
-				this.embeddingCache = null;
-				warn(
-					'Failed to construct embedding cache — recall works without cache',
-					{
-						reason: err instanceof Error ? err.message : String(err),
-					},
+			if (proposalLoad.invalidCount > 0) {
+				await this.event(
+					'invalid_load',
+					'memory_proposals',
+					`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
 				);
 			}
-		}
-		this.lastAutomaticJsonlMigration = null;
-		await this.migrateLegacyJsonlIfNeeded();
-		const memoryLoad = this.loadMemories();
-		const proposalLoad = this.loadProposals();
-		this.memories = new Map(
-			memoryLoad.records.map((record) => [record.id, record]),
-		);
-		this.proposals = new Map(
-			proposalLoad.records.map((proposal) => [proposal.id, proposal]),
-		);
-		this.initialized = true;
-		if (memoryLoad.invalidCount > 0) {
-			await this.event(
-				'invalid_load',
-				'memory_items',
-				`${memoryLoad.invalidCount} invalid SQLite memory row(s) skipped`,
-			);
-		}
-		if (proposalLoad.invalidCount > 0) {
-			await this.event(
-				'invalid_load',
-				'memory_proposals',
-				`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
-			);
+		} catch (err) {
+			try {
+				this.db?.close();
+			} catch {
+				// Ignore close failures on the half-initialized handle; the
+				// original init error below is what matters.
+			}
+			this.db = null;
+			this.ftsAvailable = false;
+			// Reset initialized so a retry re-opens a fresh handle. A throw AFTER
+			// `this.initialized = true` (e.g. the `invalid_load` telemetry inserts
+			// above) would otherwise leave initialized===true with db===null, and
+			// initialize()'s `if (this.initialized) return;` short-circuit would
+			// wedge the provider permanently (every requireDb() throws). initPromise
+			// is reset by initialize()'s own .catch.
+			this.initialized = false;
+			throw err;
 		}
 	}
 
@@ -537,7 +562,31 @@ export class SQLiteMemoryProvider
 		fn: (tx: MemoryTransaction) => Promise<T> | T,
 	): Promise<T> {
 		const db = this.requireDb();
-		return db.transaction(() => fn({}))();
+		// bun:sqlite's db.transaction() commits at the end of the SYNCHRONOUS
+		// frame, so an async callback's awaited writes would run AFTER COMMIT —
+		// silently outside any transaction. Use a manual BEGIN/COMMIT/ROLLBACK
+		// and await the callback so, in this single-threaded process, every
+		// awaited write runs sequentially between BEGIN and COMMIT (real
+		// atomicity). See M2.
+		if (db.inTransaction) {
+			// Already inside a transaction (nested call): SQLite has no nested
+			// BEGIN, so just run the callback within the outer transaction.
+			return await fn({});
+		}
+		db.run('BEGIN IMMEDIATE');
+		try {
+			const result = await fn({});
+			db.run('COMMIT');
+			return result;
+		} catch (err) {
+			try {
+				db.run('ROLLBACK');
+			} catch {
+				// Ignore rollback failures (e.g. transaction already aborted);
+				// surface the original error below.
+			}
+			throw err;
+		}
 	}
 
 	async delete(id: string, reason?: string): Promise<void> {

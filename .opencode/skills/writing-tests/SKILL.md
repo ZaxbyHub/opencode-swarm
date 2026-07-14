@@ -617,6 +617,8 @@ authority checks:
 
 `scripts/check-test-file-cap.sh` enforces the **500-line cap** per test file (FR-006) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns (use only for a deliberate growth PR).
 
+For the full splitting protocol (describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, cascading-split detection), read `file:.swarm/bundled-skills/test-file-split/SKILL.md`.
+
 ### Checking file length
 
 ```bash

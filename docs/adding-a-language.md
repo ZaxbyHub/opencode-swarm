@@ -8,7 +8,7 @@ This guide explains how to add first-class language support to opencode-swarm. T
 - A new language with **custom behavior** (e.g., a project-specific framework heuristic, custom import-graph extractor): also add a file under `src/lang/backends/<id>.ts` and one import line in `src/lang/backends/index.ts`.
 
 The repo already ships:
-- 12 profiles (TypeScript, Python, Rust, Go, Java, Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) in `src/lang/profiles.ts`.
+- 13 profiles (TypeScript, JavaScript, Python, Rust, Go, Java, Kotlin, C#, C/C++, Swift, Dart, Ruby, PHP) in `src/lang/profiles.ts`.
 - 20 tree-sitter parser entries in `src/lang/registry.ts`.
 - 3 concrete backends (TypeScript, Python, Go) in `src/lang/backends/`.
 
@@ -18,7 +18,7 @@ Three registries collaborate:
 
 | Registry | File | Purpose | Entries |
 |---|---|---|---|
-| `LANGUAGE_REGISTRY` | `src/lang/profiles.ts` | High-level language profiles: build commands, test frameworks, linters, audit tooling, SAST rules, prompt constraints, tree-sitter grammar id. | 12 |
+| `LANGUAGE_REGISTRY` | `src/lang/profiles.ts` | High-level language profiles: build commands, test frameworks, linters, audit tooling, SAST rules, prompt constraints, tree-sitter grammar id. | 13 |
 | `languageDefinitions` | `src/lang/registry.ts` | Fine-grained tree-sitter parser entries. Intentionally has a different id space (e.g. `.tsx` → `'tsx'`, `.c` → `'c'`) because parsers are grammar-specific while profiles are dispatch-target-specific. | 20 |
 | `LANGUAGE_BACKEND_REGISTRY` | `src/lang/registry-backend.ts` | Per-language behavior overrides — `selectTestFramework`, `extractImports`, etc. When no backend is registered for a language id, the default backend (`src/lang/default-backend.ts`) is synthesized from the profile. | 3 |
 

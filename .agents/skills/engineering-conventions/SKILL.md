@@ -14,7 +14,7 @@ Read, in order:
 2. `docs/engineering-invariants.md`
 3. `.opencode/skills/engineering-conventions/SKILL.md`
 
-If editing agent prompt strings or escaped template text, also skim `.claude/skills/engineering-conventions/SKILL.md` because it carries prompt-string pitfalls.
+If editing agent prompt strings or escaped template text, pay attention to the "Agent prompt strings — escaping pitfalls" section, which is now carried in both the `.opencode` summary (item 3 above) and `.claude/skills/engineering-conventions/SKILL.md`.
 
 Codex-specific execution notes:
 

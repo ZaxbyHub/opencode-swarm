@@ -69,7 +69,7 @@ first pass:
 Fully implemented graph memory means the system is release-ready for broad agent
 use:
 
-- All 12 supported language profiles are covered according to their tier
+- All 13 supported language profiles are covered according to their tier
   guarantees.
 - Graph-first retrieval is the default for broad codebase orientation, with
   search used as a recorded fallback rather than an untracked substitute.
@@ -243,7 +243,7 @@ The graph-memory series is not complete until:
   issue;
 - Windows, macOS, and Linux CI prove graph build/load/query behavior;
 - old graph fixtures prove backward compatibility and self-gating;
-- all 12 language profiles have documented tier behavior and at least one graph-build test plus one query or `context_pack` test per profile in CI;
+- all 13 language profiles have documented tier behavior and at least one graph-build test plus one query or `context_pack` test per profile in CI;
 - context packs include required output fields and remain source-grounded;
 - agent-facing retrieval records graph-first use and search fallback provenance;
 - release notes explain migrations, caveats, and any remaining unsupported cases.
@@ -254,7 +254,7 @@ The graph-memory series is not complete until:
 | --- | --- |
 | Full graph-memory contract | This entire document. |
 | Windows, macOS, Linux support targets | `OS support matrix`. |
-| 12 supported profile languages | `Language support matrix`. |
+| 13 supported profile languages | `Language support matrix`. |
 | Confidence/provenance semantics | `Confidence levels` and `Required output fields`. |
 | Backward compatibility for `repo-graph.json` upgrades | `Backward compatibility policy`. |
 | Context reduction vs blind grep/search | `Graph-first, search-fallback retrieval`. |

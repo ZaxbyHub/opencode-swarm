@@ -1,23 +1,30 @@
 /**
- * Agent prompt template renderer.
+ * Agent prompt template helpers.
  *
- * Replaces `{{KEY}}` placeholders in agent prompt strings with values from
- * a `ProjectContext` resolved at session-init time. Strict by design:
- * unknown placeholders raise (caught at build time by
- * `tests/unit/agents/template-substitution.test.ts`), so a typo never
- * leaks to the model.
+ * `{{KEY}}` placeholders in agent prompt strings are substituted with values
+ * from a `ProjectContext` resolved at session-init time by the hand-rolled
+ * `.replace()` chains in `src/agents/index.ts` (Chain B) and
+ * `src/agents/architect.ts` (Chain A). `assertNoUnresolvedPlaceholders` is the
+ * post-substitution safety net that guarantees a typo never leaks a raw
+ * `{{KEY}}` to the model — it runs over each agent's FINAL prompt inside the
+ * `createSwarmAgents` loop (`src/agents/index.ts`), after every substitution
+ * chain has run, before the agents are returned.
  *
- * Phase 4b of language-agnostic plugin work. Pinned call site is
- * `src/index.ts:initializeOpenCodeSwarm` immediately before
- * `getAgentConfigs(...)` — see the `withTimeout(2000ms)` wrapping there
- * to honor invariant 1 (plugin init bounded + fail-open).
+ * Invariant 1 (fail-open): the assertion itself throws (unit tests depend on
+ * it), but its production call site in `createSwarmAgents` wraps it in a
+ * try/catch that downgrades a leftover placeholder to a deferred warning and
+ * registers the agent anyway — a user-authored custom prompt may legitimately
+ * contain a literal `{{UPPER_KEY}}` in prose, and plugin init must never abort.
+ * Built-in-prompt regressions stay caught in CI by a test that drains the
+ * warning buffer after `getAgentConfigs()` over the default prompts.
+ *
+ * Phase 4b of language-agnostic plugin work.
  */
 
 /**
  * Variables available for substitution into agent prompts. Every prompt's
- * `{{KEY}}` placeholders must be a key of this interface; the renderer
- * rejects unknown placeholders. New variables go here AND in
- * `buildProjectContext` in `src/index.ts`.
+ * `{{KEY}}` placeholders must be a key of this interface. New variables go
+ * here AND in `buildProjectContext` in `src/index.ts`.
  */
 export interface ProjectContext {
 	PROJECT_LANGUAGE: string;
@@ -88,34 +95,43 @@ export function escapeForTemplate(s: string): string {
 }
 
 /**
- * Render `prompt` with `vars`. Replaces every `{{KEY}}` whose KEY is a
- * documented `ProjectContext` field. Unknown placeholders raise.
+ * Post-substitution safety net for the hand-rolled `.replace()` chains that
+ * assemble each agent's FINAL system prompt (Chain A in
+ * `src/agents/architect.ts` and Chain B in `src/agents/index.ts`). Neither
+ * chain validated for leftover placeholders, so a renamed, mistyped, or
+ * newly-added `{{KEY}}` could leak raw template text straight to the model
+ * with no error. This asserts — over the fully-substituted prompt — that no
+ * `{{KEY}}` survived, applied at the reachable production call site (see
+ * `src/agents/index.ts`, immediately before `getAgentConfigs`).
  *
- * The renderer is intentionally simple — single-pass, no nesting, no
- * conditionals, no loops. Agent prompts that need conditional sections
- * should pre-compute a string variable in `buildProjectContext` and
- * substitute it as a single placeholder.
+ * The scan uses the character class `[A-Z_]+`. It MUST NOT be broadened to
+ * `[^}]+`, `.*?`, or similar: `src/agents/architect.ts` contains a literal
+ * `` `{{...}}` `` in instructional prose (teaching the architect what an
+ * unresolved field looks like). The dots in `...` are not in `[A-Z_]`, so this
+ * guard never matches that prose. A broader class WOULD match it and
+ * false-throw during agent init. The trailing `g` flag only enumerates every
+ * offender for the error message; it does not widen what counts as a
+ * placeholder.
+ *
+ * @throws if any `{{KEY}}` placeholder remains, naming the offending key(s)
+ *   and the agent whose prompt they were found in.
  */
-export function renderPrompt(prompt: string, vars: ProjectContext): string {
-	const knownKeys = new Set(Object.keys(vars));
-	const placeholderRegex = /\{\{([A-Z_]+)\}\}/g;
-	const unknown: string[] = [];
-	const rendered = prompt.replace(placeholderRegex, (_match, key: string) => {
-		if (!knownKeys.has(key)) {
-			unknown.push(key);
-			return _match; // leave unchanged; we throw below
-		}
-		return (vars as unknown as Record<string, string>)[key];
-	});
-	if (unknown.length > 0) {
+export function assertNoUnresolvedPlaceholders(
+	prompt: string,
+	agentName: string,
+): void {
+	const placeholderRegex = /\{\{[A-Z_]+\}\}/g;
+	const leftover = [...new Set(prompt.match(placeholderRegex) ?? [])];
+	if (leftover.length > 0) {
 		throw new Error(
-			`renderPrompt: unknown placeholder(s) ${[...new Set(unknown)]
-				.map((k) => `{{${k}}}`)
-				.join(', ')}. Add to ProjectContext in src/agents/template.ts ` +
-				'or fix the typo in the prompt.',
+			`assertNoUnresolvedPlaceholders: unresolved placeholder(s) ` +
+				`${leftover.join(', ')} in the "${agentName}" agent prompt. A ` +
+				'substitution chain (Chain A in src/agents/architect.ts or Chain B ' +
+				'in src/agents/index.ts) failed to replace it, or a placeholder was ' +
+				'added without a matching substitution. Add the substitution or fix ' +
+				'the typo in the prompt.',
 		);
 	}
-	return rendered;
 }
 
 /**

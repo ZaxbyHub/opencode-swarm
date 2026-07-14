@@ -216,6 +216,7 @@ import {
 	detectAdversarialPair,
 	formatAdversarialWarning,
 } from './adversarial-detector';
+import { sanitizeContextText } from './context-sanitizer';
 import {
 	type ContentType,
 	type ContextCandidate,
@@ -232,7 +233,10 @@ import {
 } from './extractors';
 import { _internals as knowledgeStoreInternals } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
-import { validateActionability } from './knowledge-validator.js';
+import {
+	validateActionability,
+	validateLesson,
+} from './knowledge-validator.js';
 import {
 	buildRealtimeLearningNudge,
 	getRealtimeLearningToolCallCount,
@@ -322,16 +326,16 @@ export async function buildRetroInjection(
 					).filter((d) => d.scope !== 'session');
 
 					let block = `## Previous Phase Retrospective (Phase ${prevPhase})
-**Outcome:** ${retroEntry.summary ?? 'Phase completed.'}
-**Rejection reasons:** ${rejections.join(', ') || 'None'}
+**Outcome:** ${sanitizeContextText(retroEntry.summary ?? 'Phase completed.')}
+**Rejection reasons:** ${sanitizeContextText(rejections.join(', ')) || 'None'}
 **Lessons learned:**
-${lessons.map((l) => `- ${l}`).join('\n')}
+${lessons.map((l) => `- ${sanitizeContextText(l)}`).join('\n')}
 
 ⚠️ Apply these lessons to the current phase. Do not repeat the same mistakes.`;
 
 					if (nonSessionDirectives.length > 0) {
 						const top5 = nonSessionDirectives.slice(0, 5);
-						block += `\n\n## User Directives (from Phase ${prevPhase})\n${top5.map((d) => `- [${d.category}] ${d.directive}`).join('\n')}`;
+						block += `\n\n## User Directives (from Phase ${prevPhase})\n${top5.map((d) => `- [${sanitizeContextText(d.category)}] ${sanitizeContextText(d.directive)}`).join('\n')}`;
 					}
 
 					return block;
@@ -375,16 +379,16 @@ ${lessons.map((l) => `- ${l}`).join('\n')}
 				);
 
 				let block = `## Previous Phase Retrospective (Phase ${phase})
-**Outcome:** ${entry.summary ?? 'Phase completed.'}
-**Rejection reasons:** ${rejections.join(', ') || 'None'}
+**Outcome:** ${sanitizeContextText(entry.summary ?? 'Phase completed.')}
+**Rejection reasons:** ${sanitizeContextText(rejections.join(', ')) || 'None'}
 **Lessons learned:**
-${lessons.map((l) => `- ${l}`).join('\n')}
+${lessons.map((l) => `- ${sanitizeContextText(l)}`).join('\n')}
 
 ⚠️ Apply these lessons to the current phase. Do not repeat the same mistakes.`;
 
 				if (nonSessionDirectives.length > 0) {
 					const top5 = nonSessionDirectives.slice(0, 5);
-					block += `\n\n## User Directives (from Phase ${phase})\n${top5.map((d) => `- [${d.category}] ${d.directive}`).join('\n')}`;
+					block += `\n\n## User Directives (from Phase ${phase})\n${top5.map((d) => `- [${sanitizeContextText(d.category)}] ${sanitizeContextText(d.directive)}`).join('\n')}`;
 				}
 
 				return block;
@@ -456,8 +460,12 @@ ${lessons.map((l) => `- ${l}`).join('\n')}
 			[];
 		for (const { entry, timestamp } of top3) {
 			const date = timestamp.split('T')[0] ?? 'unknown';
-			const summary = entry.summary ?? `Phase ${entry.phase_number} completed`;
-			const topLesson = entry.lessons_learned?.[0] ?? 'No lessons recorded';
+			const summary = sanitizeContextText(
+				entry.summary ?? `Phase ${entry.phase_number} completed`,
+			);
+			const topLesson = sanitizeContextText(
+				entry.lessons_learned?.[0] ?? 'No lessons recorded',
+			);
 			lines.push(`- Phase ${entry.phase_number} (${date}): ${summary}`);
 			lines.push(`  Key lesson: ${topLesson}`);
 			const nonSession = (entry.user_directives ?? []).filter(
@@ -469,7 +477,9 @@ ${lessons.map((l) => `- ${l}`).join('\n')}
 			const top5 = allCarriedDirectives.slice(0, 5);
 			lines.push('User directives carried forward:');
 			for (const d of top5) {
-				lines.push(`- [${d.category}] ${d.directive}`);
+				lines.push(
+					`- [${sanitizeContextText(d.category)}] ${sanitizeContextText(d.directive)}`,
+				);
 			}
 		}
 
@@ -505,8 +515,10 @@ async function buildCoderRetroInjection(
 
 		if (!retroEntry || retroEntry.verdict === 'fail') return null;
 
-		const lessons = retroEntry.lessons_learned ?? [];
-		const summaryLine = `[SWARM RETROSPECTIVE] From Phase ${prevPhase}:${retroEntry.summary ? ` ${retroEntry.summary}` : ''}`;
+		const lessons = (retroEntry.lessons_learned ?? []).map((l) =>
+			sanitizeContextText(l),
+		);
+		const summaryLine = `[SWARM RETROSPECTIVE] From Phase ${prevPhase}:${retroEntry.summary ? ` ${sanitizeContextText(retroEntry.summary)}` : ''}`;
 		const allLines = [summaryLine, ...lessons];
 		const text = allLines.join('\n');
 		return text.length <= 400 ? text : `${text.substring(0, 397)}...`;
@@ -795,10 +807,24 @@ export function createSystemEnhancerHook(
 									// generated actionable at the source, but the gate contract is
 									// structural — enforce it here so a future change to the
 									// generator cannot silently bypass it.
+									//
+									// M10 content-safety gate: the dark-matter writer is the one
+									// ingestion path that never ran through validateLesson — its
+									// lesson text is derived from git-tracked file paths, which are
+									// attacker-influenceable (a maliciously named path could embed
+									// `system:` / `<script>` / control-char payloads that would then
+									// be injected verbatim into the architect's system prompt). Run
+									// every generated entry through the same Layer-2 content-safety
+									// scan every other ingestion path uses, and drop any that fail.
 									const newEntries = knowledgeEntries.filter(
 										(e) =>
 											!existingLessons.has(e.lesson) &&
-											validateActionability(e).actionable,
+											validateActionability(e).actionable &&
+											validateLesson(e.lesson, [], {
+												category: e.category,
+												scope: e.scope,
+												confidence: e.confidence,
+											}).valid,
 									);
 									if (newEntries.length === 0) {
 										warn(
@@ -959,7 +985,7 @@ export function createSystemEnhancerHook(
 										const handoffBlock = `## HANDOFF — Resuming from model switch
 The previous model's session ended. Here is your starting context:
 
-${scopedHandoff.body}`;
+${sanitizeContextText(scopedHandoff.body)}`;
 										tryInject(`[HANDOFF BRIEF]\n${handoffBlock}`);
 									}
 								}
@@ -976,7 +1002,9 @@ ${scopedHandoff.body}`;
 						if (mode !== 'DISCOVER' && contextContent) {
 							const decisions = extractDecisions(contextContent, 200);
 							if (decisions) {
-								tryInject(`[SWARM CONTEXT] Key decisions: ${decisions}`);
+								tryInject(
+									`[SWARM CONTEXT] Key decisions: ${sanitizeContextText(decisions)}`,
+								);
 							}
 
 							// Priority 4 (lowest): Agent context
@@ -991,7 +1019,14 @@ ${scopedHandoff.body}`;
 										config.hooks?.agent_awareness_max_chars ?? 300,
 									);
 									if (agentContext) {
-										tryInject(`[SWARM AGENT CONTEXT] ${agentContext}`);
+										// Sanitize for parity with the sibling `decisions`
+										// inject above (:1006): both read from context.md,
+										// whose `## Agent Activity` section is auto-populated
+										// from recorded tool activity and can echo tool
+										// output / file content.
+										tryInject(
+											`[SWARM AGENT CONTEXT] ${sanitizeContextText(agentContext)}`,
+										);
 									}
 								}
 							}
@@ -1182,7 +1217,7 @@ ${scopedHandoff.body}`;
 													r.lesson.length > 200
 														? `${r.lesson.slice(0, 200)}...`
 														: r.lesson;
-												return `- [${r.category}] ${lesson}`;
+												return `- [${sanitizeContextText(r.category)}] ${sanitizeContextText(lesson)}`;
 											});
 											tryInject(
 												`## CONTEXT FROM KNOWLEDGE BASE\n${lines.join('\n')}`,
@@ -1238,7 +1273,8 @@ ${scopedHandoff.body}`;
 										);
 										if (rejections.length > 0) {
 											const lines = rejections.map(
-												(r) => `- ${r.reason ?? 'No reason provided'}`,
+												(r) =>
+													`- ${sanitizeContextText(r.reason ?? 'No reason provided')}`,
 											);
 											tryInject(`## PRIOR REJECTIONS\n${lines.join('\n')}`);
 										}
@@ -1516,7 +1552,7 @@ ${scopedHandoff.body}`;
 										if (driftResult.hasDrift) {
 											const driftText = formatDriftForContext(driftResult);
 											if (driftText) {
-												tryInject(driftText);
+												tryInject(sanitizeContextText(driftText));
 											}
 										}
 									} catch {
@@ -1793,7 +1829,7 @@ ${scopedHandoff.body}`;
 									const handoffBlock = `## HANDOFF — Resuming from model switch
 The previous model's session ended. Here is your starting context:
 
-${scopedHandoff.body}`;
+${sanitizeContextText(scopedHandoff.body)}`;
 									const handoffText = `[HANDOFF BRIEF]\n${handoffBlock}`;
 									candidates.push({
 										id: `candidate-${idCounter++}`,
@@ -1818,7 +1854,7 @@ ${scopedHandoff.body}`;
 					if (contextContent) {
 						const decisions = extractDecisions(contextContent, 200);
 						if (decisions) {
-							const text = `[SWARM CONTEXT] Key decisions: ${decisions}`;
+							const text = `[SWARM CONTEXT] Key decisions: ${sanitizeContextText(decisions)}`;
 							candidates.push({
 								id: `candidate-${idCounter++}`,
 								kind: 'decision',
@@ -1839,7 +1875,9 @@ ${scopedHandoff.body}`;
 									config.hooks?.agent_awareness_max_chars ?? 300,
 								);
 								if (agentContext) {
-									const text = `[SWARM AGENT CONTEXT] ${agentContext}`;
+									// Sanitize for parity with the sibling `decisions`
+									// candidate (:1850) — both derive from context.md.
+									const text = `[SWARM AGENT CONTEXT] ${sanitizeContextText(agentContext)}`;
 									candidates.push({
 										id: `candidate-${idCounter++}`,
 										kind: 'agent_context',
@@ -2312,11 +2350,12 @@ ${scopedHandoff.body}`;
 								if (driftResult_b.hasDrift) {
 									const driftText_b = formatDriftForContext(driftResult_b);
 									if (driftText_b) {
+										const sanitizedDrift_b = sanitizeContextText(driftText_b);
 										candidates.push({
 											id: `candidate-${idCounter++}`,
 											kind: 'phase' as ContextCandidate['kind'],
-											text: driftText_b,
-											tokens: estimateTokens(driftText_b),
+											text: sanitizedDrift_b,
+											tokens: estimateTokens(sanitizedDrift_b),
 											priority: 2, // High priority for drift signals
 											metadata: { contentType: 'prose' as ContentType },
 										});

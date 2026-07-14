@@ -146,6 +146,41 @@ function getPlanJsonPath(directory: string): string {
 }
 
 /**
+ * Durable atomic write: write `data` to `tempPath`, fsync the file descriptor so
+ * the bytes are flushed to stable storage, then atomically rename it over
+ * `targetPath`.
+ *
+ * WHY the fsync matters: a plain `writeFileSync` returns once the data is in the
+ * OS page cache, not on disk. A crash/power-loss between the write and the
+ * subsequent `rename` can publish a zero-length or partially-written temp file as
+ * the canonical ledger — silent truncation that later reads cannot distinguish
+ * from a legitimately short ledger. Forcing an fsync before the rename guarantees
+ * the temp file's bytes are durable before it becomes the canonical file.
+ *
+ * NOTE: the containing-directory fsync (which would also durably persist the
+ * rename's directory entry so the *rename itself* survives a crash) is
+ * intentionally OMITTED. The rename is atomic on POSIX, and the ledger's
+ * crash-consistency contract only requires that a published ledger never be
+ * partially-written; it tolerates losing the very last rename on power-loss (the
+ * prior canonical file is then still intact). Omitting the dir-fsync avoids the
+ * portability and cost concerns of opening the directory as a file descriptor.
+ */
+function writeFileFsyncedThenRename(
+	tempPath: string,
+	targetPath: string,
+	data: string,
+): void {
+	const fd = fs.openSync(tempPath, 'w');
+	try {
+		fs.writeFileSync(fd, data, 'utf8');
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	fs.renameSync(tempPath, targetPath);
+}
+
+/**
  * Compute a SHA-256 hash of the plan state.
  * Uses deterministic JSON serialization for consistent hashing.
  *
@@ -427,12 +462,13 @@ export async function initLedger(
 	// Ensure .swarm/ directory exists
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 
-	// Write to temp file then rename for atomicity
+	// Write to temp file then rename for atomicity. fsync the temp file before
+	// the rename so a crash cannot publish a truncated ledger (see
+	// writeFileFsyncedThenRename).
 	const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	const line = `${JSON.stringify(event)}\n`;
 
-	fs.writeFileSync(tempPath, line, 'utf8');
-	fs.renameSync(tempPath, ledgerPath);
+	writeFileFsyncedThenRename(tempPath, ledgerPath, line);
 }
 
 /**
@@ -512,15 +548,16 @@ export async function appendLedgerEvent(
 			const line = `${JSON.stringify(event)}\n`;
 
 			// If ledger exists, append to it via temp file
-			if (fs.existsSync(ledgerPath)) {
-				const existingContent = fs.readFileSync(ledgerPath, 'utf8');
-				fs.writeFileSync(tempPath, existingContent + line, 'utf8');
-			} else {
+			if (!fs.existsSync(ledgerPath)) {
 				// Ledger not initialized - cannot append without plan_created event
 				throw new Error('Ledger not initialized. Call initLedger() first.');
 			}
+			const existingContent = fs.readFileSync(ledgerPath, 'utf8');
 
-			fs.renameSync(tempPath, ledgerPath);
+			// fsync the fully-rewritten temp file before renaming it over the
+			// canonical ledger so a crash mid-write cannot publish a truncated or
+			// partially-flushed ledger (see writeFileFsyncedThenRename).
+			writeFileFsyncedThenRename(tempPath, ledgerPath, existingContent + line);
 
 			return event;
 		},
@@ -712,14 +749,35 @@ interface ReplayOptions {
 }
 
 /**
- * Replay ledger events to reconstruct plan state.
- * Loads plan.json as the base state and applies ledger events in sequence.
+ * Result of a status-aware ledger replay.
  *
- * NOTE: This function requires plan.json to exist as the base state.
- * The ledger only stores task_status_changed events, not the full plan payload.
- * If plan.json is missing, replay cannot proceed — this is a known limitation.
- * The fix would be to store the initial plan payload in the ledger, but that
- * is a larger architectural change beyond the current scope.
+ * Threads the integrity verdict OUT of replay so callers (notably `loadPlan`)
+ * can distinguish a full, clean reconstruction from a PREFIX-ONLY one produced
+ * after a poison line. Overwriting canonical plan.json with a prefix-only
+ * projection silently drops every durable event recorded after the corruption
+ * (the M1 silent-rollback defect); `truncated === true` is the signal that must
+ * gate any such overwrite.
+ */
+export interface ReplayStatusResult {
+	/** Reconstructed plan, or null when replay cannot proceed / plan was reset. */
+	plan: Plan | null;
+	/**
+	 * True when a malformed ledger line stopped the read before the tail, so
+	 * `plan` reflects only the events BEFORE the corruption. Never overwrite the
+	 * canonical plan.json with `plan` when this is true.
+	 */
+	truncated: boolean;
+	/** Raw corrupted suffix (first bad line through EOF), or null when clean. */
+	badSuffix: string | null;
+}
+
+/**
+ * Replay ledger events to reconstruct plan state (status-discarding wrapper).
+ *
+ * Delegates to {@link replayFromLedgerWithStatus} and returns only the plan.
+ * Retained as the stable, widely-called/mocked entry point; callers that must
+ * react to ledger truncation (to avoid the M1 silent-rollback) should use
+ * {@link replayFromLedgerWithStatus} instead.
  *
  * @param directory - The working directory
  * @param options - Optional replay options
@@ -727,21 +785,75 @@ interface ReplayOptions {
  */
 export async function replayFromLedger(
 	directory: string,
-	_options?: ReplayOptions,
+	options?: ReplayOptions,
 ): Promise<Plan | null> {
+	const { plan } = await replayFromLedgerWithStatus(directory, options);
+	return plan;
+}
+
+/**
+ * Replay ledger events to reconstruct plan state, threading the integrity
+ * verdict back to the caller.
+ *
+ * This is the folded successor to the former `replayWithIntegrity`: it performs
+ * integrity-checked reading (stop-at-first-bad via
+ * {@link readLedgerEventsWithIntegrity}), quarantines any corrupted suffix to a
+ * UNIQUE non-overwriting side file (never rewriting/truncating the canonical
+ * ledger), and reconstructs the plan from the clean prefix.
+ *
+ * IMPORTANT semantics preserved from `replayFromLedger` (do NOT regress):
+ *  - The `plan_created` embedded-plan bootstrap branch (#444) is honored via
+ *    {@link reconstructPlanFromEvents}.
+ *  - `applyEventToPlan`'s "unhandled event type" throw is intentionally allowed
+ *    to PROPAGATE to the caller (loadPlan's catch → critic-approved snapshot
+ *    fallback). It is NOT swallowed into a null return here (that was
+ *    `replayWithIntegrity`'s bug — it hid genuine replay failures).
+ *
+ * @param directory - The working directory
+ * @param _options - Optional replay options (reserved)
+ * @returns {@link ReplayStatusResult} with plan, truncated flag, and bad suffix
+ */
+export async function replayFromLedgerWithStatus(
+	directory: string,
+	_options?: ReplayOptions,
+): Promise<ReplayStatusResult> {
 	const { events, truncated, badSuffix } =
 		await readLedgerEventsWithIntegrity(directory);
 
 	// If no events, nothing to replay
 	if (events.length === 0) {
-		return null;
+		return { plan: null, truncated, badSuffix };
 	}
 
-	// Handle corruption: quarantine bad suffix, then continue with clean prefix
+	// Handle corruption: quarantine the bad suffix to a UNIQUE side file. This is
+	// NON-DESTRUCTIVE — it never rewrites or truncates the canonical ledger. The
+	// `truncated` flag is threaded back so the caller can refuse to overwrite
+	// plan.json with the prefix-only projection.
 	if (truncated && badSuffix !== null) {
 		await quarantineLedgerSuffix(directory, badSuffix);
 	}
 
+	const plan = reconstructPlanFromEvents(directory, events);
+	return { plan, truncated, badSuffix };
+}
+
+/**
+ * Reconstruct plan state from an ordered list of already-integrity-checked
+ * ledger events. Prefers an in-ledger snapshot, then a `plan_created` embedded
+ * plan (#444 self-sufficient ledger), then plan.json as the legacy base.
+ *
+ * Throws propagate by design: `applyEventToPlan`'s "unhandled event type" error
+ * is intentionally allowed to bubble up to the caller — it must NOT be swallowed
+ * into a null here.
+ *
+ * @param directory - The working directory (for plan.json fallback)
+ * @param events - Integrity-checked events in ascending seq order
+ * @returns Reconstructed Plan, or null when replay cannot proceed / plan reset
+ */
+function reconstructPlanFromEvents(
+	directory: string,
+	events: LedgerEvent[],
+): Plan | null {
 	// Filter to the identity of the first event...
 	const targetPlanId = events[0].plan_id;
 	const relevantEvents = events.filter((e) => e.plan_id === targetPlanId);
@@ -1030,150 +1142,108 @@ export async function readLedgerEventsWithIntegrity(
 }
 
 /**
- * Quarantine a corrupted ledger suffix to a separate file.
- * Does NOT modify the ledger file itself.
+ * Result of a {@link quarantineLedgerSuffix} call.
+ */
+export interface QuarantineResult {
+	/** Absolute path the suffix was written to, or null if the write failed. */
+	path: string | null;
+	/**
+	 * Count of individually-parseable JSON lines salvaged from the bad suffix.
+	 * The suffix is discarded from the active replay, but these lines were still
+	 * well-formed events sitting behind the poison line — surfacing the count
+	 * makes the size of the sacrificed tail observable rather than silent.
+	 */
+	salvagedCount: number;
+}
+
+/**
+ * Quarantine a corrupted ledger suffix to a separate, UNIQUE side file.
+ *
+ * Does NOT modify, rewrite, or truncate the canonical ledger file — it only
+ * copies the bad suffix aside for forensic recovery.
+ *
+ * Uniqueness (M1 fix): the target filename embeds a timestamp AND a content
+ * hash of the suffix, so a SECOND corruption cannot clobber the file written by
+ * the FIRST. The previous fixed `plan-ledger.quarantine` path overwrote any
+ * prior quarantine, permanently losing the earlier corrupted tail.
+ *
+ * Salvage: before returning, each line of the suffix is probed with JSON.parse
+ * and the count of well-formed lines is reported. The suffix is still excluded
+ * from the active replay (it lives behind a poison line and cannot be trusted as
+ * a contiguous continuation), but the salvage count is logged and returned so
+ * the loss is visible.
  *
  * @param directory - The working directory
  * @param badSuffix - The corrupted content to quarantine
+ * @returns {@link QuarantineResult} with the written path (or null) and the
+ *   number of parseable lines salvaged from the suffix
  */
 export async function quarantineLedgerSuffix(
 	directory: string,
 	badSuffix: string,
-): Promise<void> {
+): Promise<QuarantineResult> {
+	// Salvage: count individually-parseable lines in the suffix so the size of
+	// the sacrificed tail is observable rather than silently discarded.
+	let salvagedCount = 0;
+	for (const line of badSuffix.split('\n')) {
+		if (line.trim() === '') continue;
+		try {
+			JSON.parse(line);
+			salvagedCount++;
+		} catch {
+			// Non-parseable line — not salvageable.
+		}
+	}
+
 	try {
+		// Unique, non-overwriting side path: timestamp for ordering + content hash
+		// for identity, so distinct corruptions never collide on the same filename.
+		const hash = crypto
+			.createHash('sha256')
+			.update(badSuffix, 'utf8')
+			.digest('hex')
+			.slice(0, 12);
+		const swarmDir = path.join(directory, '.swarm');
+
+		// Dedup (F-002/F-009): the startup ledger check runs once per process, so
+		// the SAME corruption is re-quarantined on every process restart while the
+		// poison line persists. Each write used a fresh `Date.now()` prefix, so an
+		// unchanged corrupted tail accumulated one duplicate file per restart. If a
+		// quarantine file for this exact content (same `.<hash>` suffix, verified by
+		// byte-comparing the content) already exists, reuse it instead of writing a
+		// new one. Distinct corruptions still get their own file (different hash).
+		try {
+			const existing = fs
+				.readdirSync(swarmDir)
+				.filter(
+					(name) =>
+						name.startsWith('plan-ledger.quarantine.') &&
+						name.endsWith(`.${hash}`),
+				);
+			for (const name of existing) {
+				const existingPath = path.join(swarmDir, name);
+				if (fs.readFileSync(existingPath, 'utf8') === badSuffix) {
+					return { path: existingPath, salvagedCount };
+				}
+			}
+		} catch {
+			// readdir/read failure (dir missing, permission) — fall through and
+			// attempt a fresh write below.
+		}
+
 		const quarantinePath = path.join(
-			directory,
-			'.swarm',
-			'plan-ledger.quarantine',
+			swarmDir,
+			`plan-ledger.quarantine.${Date.now()}.${hash}`,
 		);
 		fs.writeFileSync(quarantinePath, badSuffix, 'utf8');
 		console.warn(
-			`[ledger] Corrupted suffix quarantined to ${path.relative(directory, quarantinePath)}`,
+			`[ledger] Corrupted suffix quarantined to ${path.relative(directory, quarantinePath)} (salvageable events: ${salvagedCount})`,
 		);
+		return { path: quarantinePath, salvagedCount };
 	} catch {
 		// Silently fail if we can't write the quarantine file
 		// The bad suffix has already been captured in memory for handling
-	}
-}
-
-/**
- * Replay ledger events with integrity checking.
- * If corruption is detected, quarantines the bad suffix and falls back to snapshot+prefix replay.
- * Never throws — all errors return null.
- *
- * @param directory - The working directory
- * @returns Reconstructed Plan from ledger events, or null if replay fails
- */
-export async function replayWithIntegrity(
-	directory: string,
-): Promise<Plan | null> {
-	try {
-		const { events, truncated, badSuffix } =
-			await readLedgerEventsWithIntegrity(directory);
-
-		// If ledger is empty, nothing to replay
-		if (events.length === 0) {
-			return null;
-		}
-
-		// Handle corruption: quarantine bad suffix and fall back to snapshot+prefix replay
-		if (truncated && badSuffix !== null) {
-			await quarantineLedgerSuffix(directory, badSuffix);
-
-			// Try in-ledger snapshot+prefix replay
-			const snapshotEvents = events.filter((e) => e.event_type === 'snapshot');
-			if (snapshotEvents.length > 0) {
-				const latestSnapshotEvent = snapshotEvents[snapshotEvents.length - 1];
-				const snapshotPayload =
-					latestSnapshotEvent.payload as unknown as SnapshotEventPayload;
-
-				// Get only events after the snapshot
-				const eventsAfterSnapshot = events.filter(
-					(event) => event.seq > latestSnapshotEvent.seq,
-				);
-
-				// Start from snapshot plan state and apply only valid events
-				let plan: Plan | null = snapshotPayload.plan;
-
-				for (const event of eventsAfterSnapshot) {
-					plan = applyEventToPlan(plan, event);
-					if (plan === null) {
-						// plan_reset event
-						return null;
-					}
-				}
-
-				return plan;
-			}
-
-			// No in-ledger snapshot available — fall back to plan.json base with only valid events
-			const planJsonPath = getPlanJsonPath(directory);
-			if (!fs.existsSync(planJsonPath)) {
-				return null;
-			}
-
-			let plan: Plan | null;
-			try {
-				const content = fs.readFileSync(planJsonPath, 'utf8');
-				plan = JSON.parse(content);
-			} catch {
-				return null;
-			}
-
-			// Apply only valid events in sequence
-			for (const event of events) {
-				if (plan === null) {
-					// plan_reset event
-					return null;
-				}
-				plan = applyEventToPlan(plan, event);
-			}
-
-			return plan;
-		}
-
-		// No corruption — check for in-ledger snapshots first (same as replayFromLedger)
-		const snapshotEvents = events.filter((e) => e.event_type === 'snapshot');
-		if (snapshotEvents.length > 0) {
-			const latestSnapshotEvent = snapshotEvents[snapshotEvents.length - 1];
-			const snapshotPayload =
-				latestSnapshotEvent.payload as unknown as SnapshotEventPayload;
-			let plan: Plan | null = snapshotPayload.plan;
-			const eventsAfterSnapshot = events.filter(
-				(e) => e.seq > latestSnapshotEvent.seq,
-			);
-			for (const event of eventsAfterSnapshot) {
-				plan = applyEventToPlan(plan, event);
-				if (plan === null) return null;
-			}
-			return plan;
-		}
-
-		// Fall back to plan.json as base state
-		const planJsonPath = getPlanJsonPath(directory);
-		if (!fs.existsSync(planJsonPath)) {
-			return null;
-		}
-
-		let plan: Plan | null;
-		try {
-			const content = fs.readFileSync(planJsonPath, 'utf8');
-			plan = JSON.parse(content);
-		} catch {
-			return null;
-		}
-
-		for (const event of events) {
-			if (plan === null) {
-				// plan_reset event
-				return null;
-			}
-			plan = applyEventToPlan(plan, event);
-		}
-
-		return plan;
-	} catch {
-		return null;
+		return { path: null, salvagedCount };
 	}
 }
 
@@ -1349,10 +1419,10 @@ export const _internals = {
 	appendLedgerEventWithRetry,
 	takeSnapshotEvent,
 	replayFromLedger,
+	replayFromLedgerWithStatus,
 	applyEventToPlan,
 	readLedgerEventsWithIntegrity,
 	quarantineLedgerSuffix,
-	replayWithIntegrity,
 	loadLastApprovedPlan,
 	loadLastPlanCriticApprovedSnapshot,
 	getLedgerPath,

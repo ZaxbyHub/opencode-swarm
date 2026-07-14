@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import {
+	clearToolchainCache,
+	_internals as discoveryInternals,
+} from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
 
 // Mock for Bun.spawn
@@ -634,6 +638,100 @@ describe('pkg-audit tool', () => {
 			expect(parsed.ecosystems).toContain('cargo');
 
 			Bun.spawn = originalMockSpawn;
+		});
+
+		// MH1: a silently-failed sub-scan (tool missing / timeout / parse error)
+		// must NOT let the combined result report unqualified clean:true.
+		it('should NOT report clean:true when one sub-scan is tool-missing/incomplete', async () => {
+			fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
+			fs.writeFileSync(
+				path.join(tempDir, 'Cargo.toml'),
+				'[package]\nname = "test"',
+			);
+
+			// npm completes clean; cargo-audit is "not installed" (spawn throws
+			// with a command-not-found message) → runCargoAudit returns
+			// incomplete:true.
+			const originalMockSpawn = Bun.spawn;
+			Bun.spawn = (cmd, opts) => {
+				if (cmd[0] === 'npm') {
+					mockSpawnError = null;
+					mockExitCode = 0;
+					mockStdout = '{"vulnerabilities": {}}';
+					return mockSpawn(cmd, opts);
+				}
+				// cargo path: simulate the tool being absent.
+				throw new Error('cargo-audit: command not found');
+			};
+
+			const result = await pkg_audit.execute(
+				{ ecosystem: 'auto' },
+				getMockContext(),
+			);
+			const parsed = JSON.parse(result);
+			Bun.spawn = originalMockSpawn;
+
+			// The core MH1 assertion: absence of findings is unproven because a
+			// sub-scan did not complete, so clean must NOT be an unqualified true.
+			expect(parsed.clean).toBe(false);
+			// The incomplete ecosystem is surfaced explicitly.
+			expect(parsed.ecosystemsIncomplete).toContain('cargo');
+			// npm actually completed and must not be flagged incomplete.
+			expect(parsed.ecosystemsIncomplete).not.toContain('npm');
+			// The per-ecosystem note is surfaced (not silently dropped).
+			expect(Array.isArray(parsed.notes)).toBe(true);
+			expect(
+				parsed.notes.some((n: string) => n.includes('not installed')),
+			).toBe(true);
+		});
+
+		// MH1 critic refinement: a COMPLETED scan that attaches a benign
+		// informational note (dart "outdated packages, not security
+		// vulnerabilities") must NOT be treated as incomplete — clean stays true.
+		it('should keep clean:true when a sub-scan completes with a benign note (dart-style)', async () => {
+			fs.writeFileSync(path.join(tempDir, 'pubspec.yaml'), 'name: test');
+
+			// Force dart to be "available" via the discovery DI seam so the dart
+			// scan actually runs instead of short-circuiting to a not-installed
+			// (incomplete) result. Toolchain cache is cleared before/after to
+			// avoid cross-test leakage (mirrors the _internals DI pattern).
+			const originalSpawnSync = discoveryInternals.spawnSyncImpl;
+			clearToolchainCache();
+			discoveryInternals.spawnSyncImpl = () => ({
+				stdout: new Uint8Array(),
+				stderr: new Uint8Array(),
+				exitCode: 0,
+				success: true,
+			});
+
+			try {
+				// dart pub outdated: exit 0, valid JSON, no upgradable packages →
+				// a completed clean scan that still attaches the benign note.
+				mockSpawnError = null;
+				mockExitCode = 0;
+				mockStdout = JSON.stringify({ packages: [] });
+
+				const result = await pkg_audit.execute(
+					{ ecosystem: 'auto' },
+					getMockContext(),
+				);
+				const parsed = JSON.parse(result);
+
+				expect(parsed.ecosystems).toContain('dart');
+				// Benign note present, scan completed → clean must remain true.
+				expect(parsed.clean).toBe(true);
+				expect(
+					parsed.notes.some((n: string) =>
+						n.includes('not security vulnerabilities'),
+					),
+				).toBe(true);
+				// A benign note must NOT be counted as incomplete.
+				expect(parsed.ecosystemsIncomplete).not.toContain('dart');
+				expect(parsed.ecosystemsIncomplete.length).toBe(0);
+			} finally {
+				discoveryInternals.spawnSyncImpl = originalSpawnSync;
+				clearToolchainCache();
+			}
 		});
 	});
 

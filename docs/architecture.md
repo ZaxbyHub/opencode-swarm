@@ -890,7 +890,7 @@ Swarm uses file locking to prevent concurrent writes from corrupting shared stat
 
 ### Implementation
 
-- **Library**: `proper-lockfile` with `retries: 0` (fail-fast — no polling)
+- **Library**: `proper-lockfile` with automatic retries (F-09): `retries: { retries: 5, minTimeout: 10, maxTimeout: 500, factor: 2 }` — 5 retries with exponential backoff from 10ms to 500ms; a held lock is considered stale after `LOCK_TIMEOUT_MS` (5 minutes)
 - **Lock acquisition**: `tryAcquireLock(directory, filename, agentName, taskId)` before every write to a shared state file
 - **Lock release**: `_release()` called in a `finally` block to ensure cleanup even on error
 - **Tagging**: Each lock records the agent name and task context for diagnostics

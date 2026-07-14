@@ -43,6 +43,14 @@ interface AuditResult {
 	totalCount: number;
 	clean: boolean;
 	note?: string;
+	/**
+	 * True ONLY when the scan did not actually complete (tool missing, timeout,
+	 * parse error, unexpected non-zero exit). A completed scan — including one
+	 * that attaches a benign informational note (e.g. dart "outdated packages,
+	 * not security vulnerabilities" or composer abandoned-packages) — MUST leave
+	 * this unset/false. Note presence alone is NOT a signal of incompleteness.
+	 */
+	incomplete?: boolean;
 }
 
 interface CombinedAuditResult {
@@ -52,6 +60,13 @@ interface CombinedAuditResult {
 	highCount: number;
 	totalCount: number;
 	clean: boolean;
+	/** Per-ecosystem notes collected from sub-scans (benign or diagnostic). */
+	notes?: string[];
+	/**
+	 * Ecosystems whose sub-scan did not actually complete. When non-empty,
+	 * `clean` is forced false because absence of findings is unproven.
+	 */
+	ecosystemsIncomplete?: string[];
 }
 
 // ============ Validation ============
@@ -205,6 +220,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `npm audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -295,6 +311,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: 'npm audit not available - npm may not be installed',
 			};
 		}
@@ -306,6 +323,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running npm audit: ${errorMessage}`,
 		};
 	}
@@ -369,6 +387,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `pip-audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -418,6 +437,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 					highCount: 0,
 					totalCount: 0,
 					clean: true,
+					incomplete: true,
 					note: 'pip-audit not installed. Install with: pip install pip-audit',
 				};
 			}
@@ -430,6 +450,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `pip-audit output could not be parsed: ${stdout.slice(0, 200)}`,
 			};
 		}
@@ -492,6 +513,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: 'pip-audit not installed. Install with: pip install pip-audit',
 			};
 		}
@@ -503,6 +525,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running pip-audit: ${errorMessage}`,
 		};
 	}
@@ -570,6 +593,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `cargo audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -660,6 +684,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: 'cargo-audit not installed. Install with: cargo install cargo-audit',
 			};
 		}
@@ -671,6 +696,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running cargo audit: ${errorMessage}`,
 		};
 	}
@@ -717,6 +743,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: 'govulncheck not installed. Install with: go install golang.org/x/vuln/cmd/govulncheck@latest',
 		};
 	}
@@ -748,6 +775,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `govulncheck timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -769,6 +797,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `govulncheck exited with code ${exitCode}`,
 			};
 		}
@@ -854,6 +883,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running govulncheck: ${errorMessage}`,
 		};
 	}
@@ -879,6 +909,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: 'dotnet CLI not installed. Install from: https://dotnet.microsoft.com/download',
 		};
 	}
@@ -910,6 +941,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `dotnet list package timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -934,6 +966,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `dotnet list package exited with code ${exitCode}`,
 			};
 		}
@@ -987,6 +1020,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running dotnet list package: ${errorMessage}`,
 		};
 	}
@@ -1044,6 +1078,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: 'bundle-audit not installed. Install with: gem install bundler-audit',
 		};
 	}
@@ -1079,6 +1114,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `bundle-audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -1100,6 +1136,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `bundle-audit failed with exit code ${exitCode}`,
 			};
 		}
@@ -1128,6 +1165,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: 'bundle-audit JSON output could not be parsed',
 			};
 		}
@@ -1177,6 +1215,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: isNotInstalled
 				? 'bundle-audit not installed. Install with: gem install bundler-audit'
 				: `Error running bundle-audit: ${errorMessage}`,
@@ -1239,6 +1278,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: 'dart or flutter not installed. Install from: https://dart.dev/get-dart',
 		};
 	}
@@ -1272,6 +1312,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `dart pub outdated timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -1292,6 +1333,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `dart pub outdated exited with code ${exitCode}`,
 			};
 		}
@@ -1308,6 +1350,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: 'dart pub outdated JSON output could not be parsed',
 			};
 		}
@@ -1354,6 +1397,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `Error running dart pub outdated: ${errorMessage}`,
 		};
 	}
@@ -1373,6 +1417,7 @@ async function runComposerAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: 'composer not installed or not on PATH',
 		};
 	}
@@ -1404,6 +1449,7 @@ async function runComposerAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: true,
+				incomplete: true,
 				note: `composer audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -1446,6 +1492,7 @@ async function runComposerAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: false,
+				incomplete: true,
 				note: `composer audit returned exit code ${exitCode} indicating vulnerabilities but produced no output`,
 			};
 		}
@@ -1463,6 +1510,7 @@ async function runComposerAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: !hasVulnerabilities,
+				incomplete: true,
 				note: `composer audit returned exit code ${exitCode} but output was not valid JSON`,
 			};
 		}
@@ -1533,6 +1581,7 @@ async function runComposerAudit(directory: string): Promise<AuditResult> {
 			highCount: 0,
 			totalCount: 0,
 			clean: true,
+			incomplete: true,
 			note: `composer audit error: ${error instanceof Error ? error.message : String(error)}`,
 		};
 	}
@@ -1588,11 +1637,24 @@ async function runAutoAudit(directory: string): Promise<CombinedAuditResult> {
 	const allFindings: VulnerabilityFinding[] = [];
 	let totalCritical = 0;
 	let totalHigh = 0;
+	const notes: string[] = [];
+	const ecosystemsIncomplete: string[] = [];
+	let anyIncomplete = false;
 
 	for (const result of results) {
 		allFindings.push(...result.findings);
 		totalCritical += result.criticalCount;
 		totalHigh += result.highCount;
+		if (result.note) {
+			notes.push(result.note);
+		}
+		// A benign note (dart/composer healthy scan) does NOT count as
+		// incomplete — only an explicit `incomplete` flag does. This prevents
+		// note-presence alone from flipping `clean`.
+		if (result.incomplete) {
+			anyIncomplete = true;
+			ecosystemsIncomplete.push(result.ecosystem);
+		}
 	}
 
 	return {
@@ -1601,7 +1663,12 @@ async function runAutoAudit(directory: string): Promise<CombinedAuditResult> {
 		criticalCount: totalCritical,
 		highCount: totalHigh,
 		totalCount: allFindings.length,
-		clean: allFindings.length === 0,
+		// A scan is only clean when there are no findings AND every sub-scan
+		// actually completed. A silently-failed sub-scan (tool missing, timeout,
+		// parse error) must NOT be reported as clean:true.
+		clean: allFindings.length === 0 && !anyIncomplete,
+		notes,
+		ecosystemsIncomplete,
 	};
 }
 
