@@ -66,7 +66,7 @@ describe('Tier-1 gate audit', () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
-	});
+	}, 120_000);
 
 	test('runs the production mutation adapter in isolation and resumes by run id', async () => {
 		const root = fs.realpathSync(

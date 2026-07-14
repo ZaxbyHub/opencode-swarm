@@ -11,8 +11,8 @@ import {
 const packageRoot = path.resolve(import.meta.dir, '../../..');
 
 describe('Tier-1 evaluation fixtures', () => {
-	test('ships six mutation and six curated content-addressed tasks', () => {
-		const tasks = loadTier1EvaluationTasks(packageRoot);
+	test('ships six mutation-class and six curated content-addressed tasks', async () => {
+		const tasks = await loadTier1EvaluationTasks(packageRoot);
 		expect(tasks).toHaveLength(12);
 		expect(tasks.map((task) => task.id).sort()).toEqual(
 			[...TIER1_FIXTURE_IDS].sort(),

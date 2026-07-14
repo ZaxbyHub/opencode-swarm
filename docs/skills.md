@@ -10,7 +10,7 @@ Repository-native skill roots are project-owned:
 - `.claude/skills/<name>/SKILL.md`
 - `.agents/skills/<name>/SKILL.md`
 
-The plugin does not install its runtime protocols into those roots. Shipped protocols are materialized privately under `.swarm/bundled-skills/<name>/` and loaded explicitly by `/swarm` MODE dispatch, so a repository skill may reuse a shipped slug without overwrite or native registry collision.
+The plugin does not install its runtime protocols into those roots. Shipped protocols are materialized privately under `.swarm/bundled-skills/<name>/`, so a repository skill may reuse a shipped slug without overwrite or native registry collision. Reachability into that private tree happens through two mechanisms, not one: most shipped skills load explicitly by `/swarm` MODE dispatch (a `/swarm <command>` emits a `[MODE: ...]` signal that an architect stub loads via `file:.swarm/bundled-skills/<name>/SKILL.md`); a smaller set of playbook/support skills (e.g. `ci-failure-batching`, `merge-queue-readiness`, `gate-attribution`, `worktree-retry-cleanup`, `test-file-split`, `skill-edit-validation`) are not MODE-dispatched at all — they load via an explicit `file:` trigger-point reference embedded in the body of the owning skill or contract doc that covers the relevant workflow step (e.g. `execute` references `gate-attribution` before its Stage B gate). `.swarm/bundled-skills` is intentionally excluded from the automatic keyword-scoring skill roots, so a skill placed there is unreachable unless one of these two explicit mechanisms references it (see issue #1806).
 
 Static skills declare a top-level audience:
 

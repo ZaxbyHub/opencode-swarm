@@ -59,16 +59,15 @@ The skill propagation system is configured via `opencode-swarm.json`:
 
 ```json
 {
-  "skill_propagation": {
+  "skillPropagation": {
     "enabled": true,
     "enforce": false,
-    "scoring": {
-      "threshold": 0.5,
-      "max_recommendations": 5
-    }
+    "audiences": []
   }
 }
 ```
+
+The config key is `skillPropagation` (camelCase). Supported fields are `enabled` (default `true`), `enforce` (default `false`), and `audiences` (string array, default `[]`). The relevance-scoring threshold (0.5) and recommendation cap (5) are internal constants, not config fields.
 
 ## Known caveats
 

@@ -679,7 +679,7 @@ export async function archiveEvidence(
 	options?: EvidenceArchiveReportOptions,
 ): Promise<string[] | EvidenceArchiveReport> {
 	const taskIds = await _internals.listEvidenceTaskIds(directory);
-	const cutoffDate = options?.now ? new Date(options.now) : new Date();
+	const cutoffDate = options?.now ? new Date(options.now) : _internals.now();
 	cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
 	const cutoffIso = cutoffDate.toISOString();
 
@@ -777,6 +777,7 @@ export const _internals: {
 	validateEvidence: typeof validateEvidence;
 	saveEvidence: typeof saveEvidence;
 	deleteEvidence: typeof deleteEvidence;
+	now: () => Date;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
@@ -785,4 +786,5 @@ export const _internals: {
 	validateEvidence,
 	saveEvidence,
 	deleteEvidence,
+	now: () => new Date(),
 } as const;

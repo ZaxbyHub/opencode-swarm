@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 5.12 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 4.9 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,22 +38,15 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5.12MB)', () => {
+	test('dist/index.js file size is reasonable (< 4.9MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// 4.6 × 1024 × 1024 = 4,823,449.6 bytes (cap); measured 4,481,025 bytes;
-		// headroom ≈ 342 KB (≈ 167× the ~2 KB cross-platform build variance, well
-		// above the ≥4× requirement). ≥10% growth = 4,481,025 × 1.1 = 4,929,127.5
-		// bytes, which EXCEEDS the 4,823,449.6 cap, so the gate fires on ≥10%
-		// growth (keeps growth visible). Decision: identifier-preserving minify
-		// adopted; full identifier mangling + source maps rejected (General
-		// Council, #1582). Debuggability preserved (identifier names intact; no
-		// source maps needed). #1582 is resolved.
-		// #1820 supersedes the historical measurement above: the evaluation
-		// substrate measures 4,887,574 bytes. The 5.12 MiB cap leaves about
-		// 481 KB of platform headroom, while 10% growth (5,376,331 bytes) still
-		// exceeds the 5,368,709-byte cap and therefore remains visible.
+		// Main had grown to 4,824,030 bytes before #1820. After integrating current
+		// main plus the evaluation substrate, the measured bundle is 4,960,550
+		// bytes. The 4.9 MiB cap preserves about 177 KB of cross-platform headroom,
+		// while a further 10% increase still exceeds the limit. The exact merged
+		// size is rechecked by this smoke test after every build.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

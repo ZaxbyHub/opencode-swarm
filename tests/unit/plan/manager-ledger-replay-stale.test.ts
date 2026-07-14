@@ -104,6 +104,13 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 			replayFromLedger: async () => {
 				throw new Error('simulated replay failure');
 			},
+			// loadPlan's primary hash-mismatch chokepoint calls
+			// replayFromLedgerWithStatus directly (M1 fix, to thread the
+			// truncated flag) rather than the replayFromLedger wrapper above —
+			// mock it too so the simulated failure is actually observed.
+			replayFromLedgerWithStatus: async () => {
+				throw new Error('simulated replay failure');
+			},
 			loadLastApprovedPlan: async () => null,
 		}));
 
@@ -148,6 +155,13 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 			ledgerExists: async () => true,
 			readLedgerEvents: async () => [fakeEvent],
 			replayFromLedger: async () => {
+				throw new Error('simulated replay failure');
+			},
+			// loadPlan's primary hash-mismatch chokepoint calls
+			// replayFromLedgerWithStatus directly (M1 fix, to thread the
+			// truncated flag) rather than the replayFromLedger wrapper above —
+			// mock it too so the simulated failure is actually observed.
+			replayFromLedgerWithStatus: async () => {
 				throw new Error('simulated replay failure');
 			},
 			loadLastApprovedPlan: async () => null,
@@ -206,6 +220,13 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 			ledgerExists: async () => true,
 			readLedgerEvents: async () => [makeEvent()],
 			replayFromLedger: async () => {
+				throw new Error('simulated replay failure');
+			},
+			// loadPlan's primary hash-mismatch chokepoint calls
+			// replayFromLedgerWithStatus directly (M1 fix, to thread the
+			// truncated flag) rather than the replayFromLedger wrapper above —
+			// mock it too so the simulated failure is actually observed.
+			replayFromLedgerWithStatus: async () => {
 				throw new Error('simulated replay failure');
 			},
 			loadLastApprovedPlan: async () => null,

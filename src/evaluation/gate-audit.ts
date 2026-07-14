@@ -602,8 +602,8 @@ export async function runGateAudit(
 	if (computeManifestContentHash(manifest) !== manifest.contentHash) {
 		throw new Error('gate-audit manifest content hash is invalid');
 	}
-	const tasks = loadTier1EvaluationTasks(options.packageRoot).filter((task) =>
-		manifest.taskIds.includes(task.id),
+	const tasks = (await loadTier1EvaluationTasks(options.packageRoot)).filter(
+		(task) => manifest.taskIds.includes(task.id),
 	);
 	if (tasks.length !== manifest.taskIds.length) {
 		throw new Error(

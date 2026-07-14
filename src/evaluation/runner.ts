@@ -534,7 +534,8 @@ export async function runEvaluation(
 	const candidate = EvaluationCandidateV1Schema.parse(options.candidate);
 	for (const item of [baseline, candidate]) {
 		if (
-			computeCandidateInputContentHash(inputRoot, item) !== item.contentHash
+			(await computeCandidateInputContentHash(inputRoot, item)) !==
+			item.contentHash
 		) {
 			throw new Error(`candidate ${item.id} content hash is invalid`);
 		}
@@ -651,13 +652,17 @@ export async function runEvaluation(
 		}
 		const results = await Promise.all(jobs);
 		for (const task of tasks) {
-			if (computeTaskInputContentHash(inputRoot, task) !== task.contentHash) {
+			if (
+				(await computeTaskInputContentHash(inputRoot, task)) !==
+				task.contentHash
+			) {
 				throw new Error(`task ${task.id} changed during evaluation`);
 			}
 		}
 		for (const item of [baseline, candidate]) {
 			if (
-				computeCandidateInputContentHash(inputRoot, item) !== item.contentHash
+				(await computeCandidateInputContentHash(inputRoot, item)) !==
+				item.contentHash
 			) {
 				throw new Error(`candidate ${item.id} changed during evaluation`);
 			}

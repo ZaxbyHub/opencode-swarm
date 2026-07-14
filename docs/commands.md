@@ -262,6 +262,27 @@ A leading token that **is** shaped like a PR reference (bare number, `owner/repo
 
 **No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
 
+### `/swarm ci-monitor <pr-url|owner/repo#N|N>`
+
+Drive an already human-reviewed, approved PR to green and merged: monitors CI, exhaustively researches and fixes every failure, iterates until all required checks are green (max 5 fix cycles), then merges. Only invoke after human review is complete — the skill re-verifies `reviewDecision: APPROVED` and mergeable state before doing anything destructive. This is the terminal closeout hop for a PR that just needs to get green and merge; distinct from `/swarm pr-subscribe`, which passively watches a PR without a merge terminal.
+
+| Argument | Description |
+|----------|-------------|
+| `<pr-url>` | Full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/42`) |
+| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
+| `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
+
+**URL sanitization:** identical to `pr-review`/`pr-feedback` — `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames.
+
+**No trailing instructions:** unlike `pr-review`/`pr-feedback`, this command accepts only the PR reference. Any text after it is rejected with an explicit error rather than forwarded — this mode performs a merge and has no review/feedback instructions to act on.
+
+**Workflow** (`MODE: CI_MONITOR`, loads `swarm-ci-monitor/SKILL.md`):
+1. **Pre-flight gates** — user named the PR explicitly, `reviewDecision: APPROVED`, and `mergeable: MERGEABLE` with an acceptable `mergeStateStatus`
+2. **Monitor → fix loop** (max 5 iterations) — fetch check runs, classify failures, fix, push, wait for the new run
+3. **Pre-merge staleness re-check** — re-verify checks, mergeable state, and review approval immediately before every merge attempt
+4. **Merge** — `gh pr merge` with no merge-strategy flag, then confirm via the local git object DB (not just the GitHub API response)
+
+**No-args behavior:** prints a usage string. The command never throws on bad input.
 
 ### `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>] [--json] [--skip-update] [--allow-dirty]`
 
@@ -571,7 +592,7 @@ Show performance metrics: tool call rates, delegation chains, evidence pass rate
 
 ### `/swarm gate-audit [options]`
 
-Run the bounded Tier-1 defect and clean-control matrix across reviewer, test-engineer, offline SAST, mutation, and quality gates. The packed corpus contains six mutation-generated and six curated defects, each with a green baseline. Each cell runs in a disposable copy, has explicit concurrency/retry/time/cost ceilings, and writes an immutable result below `.swarm/evidence/gate-audit/<run-id>/`.
+Run the bounded Tier-1 defect and clean-control matrix across reviewer, test-engineer, offline SAST, mutation, and quality gates. The packed corpus contains six canonical mutation-class fixtures and six independently curated Tier-1 defects, each with a green baseline. Each cell runs in a disposable copy, has explicit concurrency/retry/time/cost ceilings, and writes an immutable result below `.swarm/evidence/gate-audit/<run-id>/`.
 
 Use `--model`, `--swarm`, `--gates`, `--tasks`, `--runs`, `--max-concurrency`, `--max-retries`, `--max-time-ms`, `--max-cost-usd`, `--seed`, `--run-id`, and `--json` to bound and identify a run. `--swarm <id>` selects prefixed reviewer/test-engineer agents when multiple swarms are registered. If a cost ceiling is requested while a provider does not report cost, the run is inconclusive rather than silently treating the cost as zero.
 

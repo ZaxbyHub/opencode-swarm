@@ -49,10 +49,10 @@ function project(): string {
 	return root;
 }
 
-function task(
+async function task(
 	root: string,
 	overrides: Partial<Omit<EvaluationTaskV1, 'contentHash'>> = {},
-): EvaluationTaskV1 {
+): Promise<EvaluationTaskV1> {
 	const withoutHash = {
 		v: 1 as const,
 		id: 'task-1',
@@ -76,7 +76,7 @@ function task(
 	};
 	return {
 		...withoutHash,
-		contentHash: computeTaskInputContentHash(
+		contentHash: await computeTaskInputContentHash(
 			root,
 			withoutHash as EvaluationTaskV1,
 		),
@@ -158,16 +158,16 @@ function claim(
 describe('evaluation task admission', () => {
 	test('is idempotent and keeps validation tasks immutable', async () => {
 		const root = project();
-		const admitted = await admitEvaluationTask(root, task(root));
-		expect(await admitEvaluationTask(root, task(root))).toEqual(admitted);
+		const admitted = await admitEvaluationTask(root, await task(root));
+		expect(await admitEvaluationTask(root, await task(root))).toEqual(admitted);
 		await expect(
-			admitEvaluationTask(root, task(root, { category: 'changed' })),
+			admitEvaluationTask(root, await task(root, { category: 'changed' })),
 		).rejects.toBeInstanceOf(EvaluationConflictError);
 	});
 
 	test('detects instruction or fixture drift after a task was hashed', async () => {
 		const root = project();
-		const admitted = task(root);
+		const admitted = await task(root);
 		writeFileSync(
 			path.join(root, 'fixtures', 'instruction.md'),
 			'Changed instruction.',
@@ -186,7 +186,7 @@ describe('evaluation task admission', () => {
 		await expect(
 			admitEvaluationTask(
 				root,
-				task(root, {
+				await task(root, {
 					scorer: {
 						kind: 'project',
 						argv: ['scorer.mjs'],
@@ -200,17 +200,20 @@ describe('evaluation task admission', () => {
 
 	test('rejects split leakage for an already admitted task id', async () => {
 		const root = project();
-		await admitEvaluationTask(root, task(root));
+		await admitEvaluationTask(root, await task(root));
 		await expect(
-			admitEvaluationTask(root, task(root, { split: 'test' })),
+			admitEvaluationTask(root, await task(root, { split: 'test' })),
 		).rejects.toThrow('different split');
 	});
 
 	test('rejects split leakage through a different task id with identical inputs', async () => {
 		const root = project();
-		await admitEvaluationTask(root, task(root, { id: 'variant-a' }));
+		await admitEvaluationTask(root, await task(root, { id: 'variant-a' }));
 		await expect(
-			admitEvaluationTask(root, task(root, { id: 'variant-b', split: 'test' })),
+			admitEvaluationTask(
+				root,
+				await task(root, { id: 'variant-b', split: 'test' }),
+			),
 		).rejects.toThrow('lineage is already admitted to validation');
 	});
 
@@ -221,11 +224,11 @@ describe('evaluation task admission', () => {
 			path.join(root, 'fixtures', 'instruction-copy.md'),
 			'Complete the task.',
 		);
-		await admitEvaluationTask(root, task(root, { id: 'original-paths' }));
+		await admitEvaluationTask(root, await task(root, { id: 'original-paths' }));
 		await expect(
 			admitEvaluationTask(
 				root,
-				task(root, {
+				await task(root, {
 					id: 'copied-paths',
 					split: 'test',
 					instructionPath: path.join('fixtures', 'instruction-copy.md'),
@@ -240,7 +243,7 @@ describe('evaluation task admission', () => {
 
 	test('requires derived variants to inherit their admitted parent split', async () => {
 		const root = project();
-		await admitEvaluationTask(root, task(root, { id: 'parent' }));
+		await admitEvaluationTask(root, await task(root, { id: 'parent' }));
 		writeFileSync(
 			path.join(root, 'fixtures', 'instruction.md'),
 			'Derived instruction.',
@@ -248,14 +251,14 @@ describe('evaluation task admission', () => {
 		await expect(
 			admitEvaluationTask(
 				root,
-				task(root, {
+				await task(root, {
 					id: 'derived-wrong-split',
 					derivedFromTaskId: 'parent',
 					split: 'test',
 				}),
 			),
 		).rejects.toThrow('must inherit that split');
-		const derived = task(root, {
+		const derived = await task(root, {
 			id: 'derived-valid',
 			derivedFromTaskId: 'parent',
 		});
@@ -267,19 +270,21 @@ describe('evaluation task admission', () => {
 		await expect(
 			admitEvaluationTask(
 				root,
-				task(root, { id: 'orphan', derivedFromTaskId: 'missing-parent' }),
+				await task(root, {
+					id: 'orphan',
+					derivedFromTaskId: 'missing-parent',
+				}),
 			),
 		).rejects.toThrow('references an unadmitted parent');
 	});
 
 	test('serializes concurrent aliases so identical inputs cannot cross splits', async () => {
 		const root = project();
+		const validationAlias = await task(root, { id: 'alias-validation' });
+		const testAlias = await task(root, { id: 'alias-test', split: 'test' });
 		const outcomes = await Promise.allSettled([
-			admitEvaluationTask(root, task(root, { id: 'alias-validation' })),
-			admitEvaluationTask(
-				root,
-				task(root, { id: 'alias-test', split: 'test' }),
-			),
+			admitEvaluationTask(root, validationAlias),
+			admitEvaluationTask(root, testAlias),
 		]);
 		expect(
 			outcomes.filter((outcome) => outcome.status === 'fulfilled'),
@@ -291,9 +296,11 @@ describe('evaluation task admission', () => {
 
 	test('serializes concurrent admissions of the same id to different splits', async () => {
 		const root = project();
+		const validationTask = await task(root, { split: 'validation' });
+		const testTask = await task(root, { split: 'test' });
 		const outcomes = await Promise.allSettled([
-			admitEvaluationTask(root, task(root, { split: 'validation' })),
-			admitEvaluationTask(root, task(root, { split: 'test' })),
+			admitEvaluationTask(root, validationTask),
+			admitEvaluationTask(root, testTask),
 		]);
 		expect(
 			outcomes.filter((outcome) => outcome.status === 'fulfilled'),

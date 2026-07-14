@@ -111,6 +111,8 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
 
     When `council_mode` is OFF, the standard Stage B flow (steps 5j-5l: reviewer + test_engineer) runs as normal.
 
+    For set-dispatch reviewer/test_engineer verdict rows that must be attributed to plan tasks, read `file:.swarm/bundled-skills/gate-attribution/SKILL.md`. Before re-dispatching a coder for a task that already has a lane (any prior dispatch status), read `file:.swarm/bundled-skills/worktree-retry-cleanup/SKILL.md`.
+
     5j. the active swarm's reviewer agent - General review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate.
     → REQUIRED: Print "reviewer: [APPROVED | REJECTED — reason]"
     5k. Security gate: if change matches TIER 3 criteria OR content contains SECURITY_KEYWORDS OR secretscan has ANY findings OR sast_scan has ANY findings at or above threshold → MUST delegate the active swarm's reviewer agent security-only review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate to user.

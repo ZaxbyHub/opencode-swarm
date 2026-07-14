@@ -110,15 +110,10 @@ The new Phase 3 features are configured via `opencode-swarm.json`:
 
 ```json
 {
-  "skill_propagation": {
+  "skillPropagation": {
     "enabled": true,
     "enforce": false,
-    "scoring": {
-      "threshold": 0.5,
-      "max_recommendations": 5,
-      "compliance_weight_boost": 0.1,
-      "compliance_weight_decay": 0.05
-    }
+    "audiences": []
   },
   "knowledge_application": {
     "confidence_threshold": 0.8,
@@ -127,6 +122,8 @@ The new Phase 3 features are configured via `opencode-swarm.json`:
   }
 }
 ```
+
+The `skillPropagation` key (camelCase) supports only `enabled`, `enforce`, and `audiences`. Scoring and compliance-weight tuning are internal constants, not config fields.
 
 ## Files changed
 

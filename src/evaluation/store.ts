@@ -201,13 +201,15 @@ export async function admitEvaluationTask(
 	inputRoot: string = directory,
 ): Promise<EvaluationTaskV1> {
 	const task = EvaluationTaskV1Schema.parse(input);
-	if (computeTaskInputContentHash(inputRoot, task) !== task.contentHash) {
+	if (
+		(await computeTaskInputContentHash(inputRoot, task)) !== task.contentHash
+	) {
 		throw new Error(
 			`task ${task.id} content hash does not match its canonical inputs`,
 		);
 	}
 	validateTaskInputs(inputRoot, task);
-	const lineageInputHash = computeTaskLineageInputHash(inputRoot, task);
+	const lineageInputHash = await computeTaskLineageInputHash(inputRoot, task);
 	const relative = path.join(
 		'evolution',
 		'tasks',
@@ -343,7 +345,9 @@ export async function saveTaskSetSnapshot(
 		throw new Error('task-set tasks must all belong to the declared split');
 	}
 	for (const task of snapshot.tasks) {
-		if (computeTaskInputContentHash(inputRoot, task) !== task.contentHash) {
+		if (
+			(await computeTaskInputContentHash(inputRoot, task)) !== task.contentHash
+		) {
 			throw new Error(`task ${task.id} content hash is invalid`);
 		}
 	}

@@ -54,53 +54,60 @@ export function listTier1FixtureManifests(packageRoot: string): string[] {
 }
 
 /** Load packed Harbor-style manifests and rebase their package-relative paths. */
-export function loadTier1EvaluationTasks(
+export async function loadTier1EvaluationTasks(
 	packageRoot: string,
-): EvaluationTaskV1[] {
-	return listTier1FixtureManifests(packageRoot).map((manifestPath) => {
-		const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Record<
-			string,
-			unknown
-		>;
-		const id = raw.id;
-		if (
-			typeof id !== 'string' ||
-			!TIER1_FIXTURE_IDS.includes(id as Tier1FixtureId)
-		) {
-			throw new Error(`Unknown Tier-1 fixture id in ${manifestPath}`);
-		}
-		const prefix = path.posix.join('evaluation-fixtures', 'tier1', id);
-		const instructionPath = raw.instructionPath;
-		const environment = raw.environment as Record<string, unknown> | undefined;
-		const scorer = raw.scorer as Record<string, unknown> | undefined;
-		if (
-			typeof instructionPath !== 'string' ||
-			typeof environment?.path !== 'string'
-		) {
-			throw new Error(`Malformed Tier-1 fixture paths in ${manifestPath}`);
-		}
-		const rebased = {
-			...raw,
-			instructionPath: path.posix.join(prefix, instructionPath),
-			environment: {
-				...environment,
-				path: path.posix.join(prefix, environment.path),
-			},
-			scorer:
-				scorer?.kind === 'project' && Array.isArray(scorer.argv)
-					? {
-							...scorer,
-							argv: [
-								path.posix.join(prefix, String(scorer.argv[0])),
-								...scorer.argv.slice(1),
-							],
-						}
-					: scorer,
-		};
-		const task = EvaluationTaskV1Schema.parse(rebased);
-		if (computeTaskInputContentHash(packageRoot, task) !== task.contentHash) {
-			throw new Error(`Tier-1 fixture ${id} failed its content hash`);
-		}
-		return task;
-	});
+): Promise<EvaluationTaskV1[]> {
+	return Promise.all(
+		listTier1FixtureManifests(packageRoot).map(async (manifestPath) => {
+			const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Record<
+				string,
+				unknown
+			>;
+			const id = raw.id;
+			if (
+				typeof id !== 'string' ||
+				!TIER1_FIXTURE_IDS.includes(id as Tier1FixtureId)
+			) {
+				throw new Error(`Unknown Tier-1 fixture id in ${manifestPath}`);
+			}
+			const prefix = path.posix.join('evaluation-fixtures', 'tier1', id);
+			const instructionPath = raw.instructionPath;
+			const environment = raw.environment as
+				| Record<string, unknown>
+				| undefined;
+			const scorer = raw.scorer as Record<string, unknown> | undefined;
+			if (
+				typeof instructionPath !== 'string' ||
+				typeof environment?.path !== 'string'
+			) {
+				throw new Error(`Malformed Tier-1 fixture paths in ${manifestPath}`);
+			}
+			const rebased = {
+				...raw,
+				instructionPath: path.posix.join(prefix, instructionPath),
+				environment: {
+					...environment,
+					path: path.posix.join(prefix, environment.path),
+				},
+				scorer:
+					scorer?.kind === 'project' && Array.isArray(scorer.argv)
+						? {
+								...scorer,
+								argv: [
+									path.posix.join(prefix, String(scorer.argv[0])),
+									...scorer.argv.slice(1),
+								],
+							}
+						: scorer,
+			};
+			const task = EvaluationTaskV1Schema.parse(rebased);
+			if (
+				(await computeTaskInputContentHash(packageRoot, task)) !==
+				task.contentHash
+			) {
+				throw new Error(`Tier-1 fixture ${id} failed its content hash`);
+			}
+			return task;
+		}),
+	);
 }

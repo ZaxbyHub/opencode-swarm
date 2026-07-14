@@ -24,23 +24,33 @@
  * @returns Sanitized text safe for LLM context injection
  */
 export function sanitizeContextText(text: string): string {
-	return text
-		.split('')
-		.filter((char) => {
-			const code = char.charCodeAt(0);
-			// Keep: tab (9), LF (10), CR (13), printable ASCII and above (>31, not DEL 127)
-			return (
-				code === 9 || code === 10 || code === 13 || (code > 31 && code !== 127)
-			);
-		})
-		.join('')
-		.replace(/[\u200B-\u200D\uFEFF]/g, '') // Zero-width chars
-		.replace(/[\u202A-\u202E\u2066-\u2069]/g, '') // BiDi override chars
-		.replace(/```/g, '` ` `') // Break code block escapes
-		.replace(/^system\s*:/gim, '[BLOCKED]:') // Block system: prefix (case-insensitive)
-		.replace(/<system\b[^>]*>/gi, '[BLOCKED-TAG]') // Block <system ...> open tags
-		.replace(/<\/system>/gi, '[/BLOCKED-TAG]') // Block </system> close tags
-		.replace(/<tool_call\b[^>]*>/gi, '[BLOCKED-TOOL]') // Block <tool_call ...> open tags
-		.replace(/<\/tool_call>/gi, '[/BLOCKED-TOOL]') // Block </tool_call> close tags
-		.replace(/<\/\w+>/g, '[/BLOCKED-TAG]'); // Block all closing XML tags
+	return (
+		text
+			.split('')
+			.filter((char) => {
+				const code = char.charCodeAt(0);
+				// Keep: tab (9), LF (10), CR (13), printable ASCII and above (>31, not DEL 127)
+				return (
+					code === 9 ||
+					code === 10 ||
+					code === 13 ||
+					(code > 31 && code !== 127)
+				);
+			})
+			.join('')
+			// Invisible/format chars: soft hyphen, zero-width chars, LRM/RLM BiDi
+			// marks, word-joiner + invisible math operators, and BOM/ZWNBSP.
+			// Kept in sync with `INVISIBLE_FORMAT_CHARS` in knowledge-validator.ts so
+			// both layers strip the same set (this sanitizer is now the load-bearing
+			// injection guard for learned content wired in by issue #1779 M10).
+			.replace(/[\u00AD\u200B-\u200F\u2060-\u2064\uFEFF]/g, '')
+			.replace(/[\u202A-\u202E\u2066-\u2069]/g, '') // BiDi override chars
+			.replace(/```/g, '` ` `') // Break code block escapes
+			.replace(/^system\s*:/gim, '[BLOCKED]:') // Block system: prefix (case-insensitive)
+			.replace(/<system\b[^>]*>/gi, '[BLOCKED-TAG]') // Block <system ...> open tags
+			.replace(/<\/system>/gi, '[/BLOCKED-TAG]') // Block </system> close tags
+			.replace(/<tool_call\b[^>]*>/gi, '[BLOCKED-TOOL]') // Block <tool_call ...> open tags
+			.replace(/<\/tool_call>/gi, '[/BLOCKED-TOOL]') // Block </tool_call> close tags
+			.replace(/<\/\w+>/g, '[/BLOCKED-TAG]')
+	); // Block all closing XML tags
 }

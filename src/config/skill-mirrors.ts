@@ -244,12 +244,33 @@ export const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
  *    byte-identity contract to additional runtime mirrors when present.
  *  - `divergent`: both must exist; content intentionally differs per runtime.
  *  - `opencode-only`: `.opencode` exists; no `.claude` mirror expected.
+ *  - `adapter`: a non-architect-MODE skill whose `.opencode` copy is
+ *    canonical and has no `.claude` copy at all, but does have one or more
+ *    thin adapter shims (e.g. `.agents/skills/<slug>/`) that reference the
+ *    canonical file by a fixed substring (`expectedCanonicalRef`). Mirrors
+ *    the `ADAPTER_ARCHITECT_MODE_SKILLS` check, generalized to skills that
+ *    are not architect MODE skills (so `identical`/`divergent`, which both
+ *    require a `.claude` copy to exist, do not fit).
  */
 export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	slug: string;
-	kind: 'identical' | 'divergent' | 'opencode-only';
+	kind: 'identical' | 'divergent' | 'opencode-only' | 'adapter';
 	canonical?: '.claude' | '.opencode';
 	extraIdenticalPaths?: string[];
+	/**
+	 * For `divergent` pairs only: a set of Markdown section headings that must be
+	 * present in BOTH trees (`.opencode` and `.claude`). Divergence is still
+	 * allowed for genuinely runtime-specific prose (title line, `effort:`
+	 * frontmatter, "(Claude Code)" phrasing), but these designated safety
+	 * sections are parity-enforced by scripts/drift-check.ts so a whole safety
+	 * guard cannot silently exist in one tree and be absent from the other.
+	 * Match is a substring test, so a heading may omit a trailing parenthetical.
+	 * Fixes the M13 skill-mirror safety-drift defect: the divergent branch
+	 * previously did existence-only checks with no content comparison.
+	 */
+	sharedSafetyHeadings?: string[];
+	adapterPaths?: string[];
+	expectedCanonicalRef?: string;
 	reason: string;
 }> = [
 	{
@@ -262,8 +283,13 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	{
 		slug: 'engineering-conventions',
 		kind: 'divergent',
+		sharedSafetyHeadings: [
+			'## SAST baseline capturing',
+			'### Critical safety guard',
+			'## Agent prompt strings — escaping pitfalls',
+		],
 		reason:
-			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source. The `.claude` tree additionally carries the "Bounded is not free" nuance in invariant 1; `.opencode` now mirrors it.',
+			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source. The `.claude` tree additionally carries the "Bounded is not free" nuance in invariant 1; `.opencode` now mirrors it. Designated safety sections — "## SAST baseline capturing" (with its "### Critical safety guard") and "## Agent prompt strings — escaping pitfalls" — are now parity-enforced across BOTH trees via `sharedSafetyHeadings`: drift:check fails if any of them exists in one tree but is absent from the other, closing the M13 safety-drift gap where the divergent branch did existence-only checks.',
 	},
 	{
 		slug: 'swarm-implement',
@@ -305,6 +331,14 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		extraIdenticalPaths: ['.agents/skills/fork-pr-operations/SKILL.md'],
 		reason:
 			'Byte-identical across .opencode, .claude, and .agents trees; .opencode is the canonical source.',
+	},
+	{
+		slug: 'ci-fix-monitor',
+		kind: 'adapter',
+		adapterPaths: ['.agents/skills/ci-fix-monitor/SKILL.md'],
+		expectedCanonicalRef: '.opencode/skills/ci-fix-monitor/SKILL.md',
+		reason:
+			'.opencode is the canonical protocol (a static, non-architect-MODE support skill composed by swarm-ci-monitor); .agents/skills/ci-fix-monitor is a thin Codex adapter shim that reads "Read .opencode/skills/ci-fix-monitor/SKILL.md for the full protocol." There is no .claude copy, so identical/divergent (which both require one) do not fit — same "adapter shim not yet modeled by ADDITIONAL contracts" situation as swarm-implement/writing-tests, generalized here into an explicit adapter kind (issue #1806).',
 	},
 ];
 

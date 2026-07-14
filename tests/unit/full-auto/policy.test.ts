@@ -43,6 +43,9 @@ describe('isReadOnlyTool / isWriteLikeTool / isSubagentDelegation', () => {
 		expect(isReadOnlyTool('search')).toBe(true);
 		expect(isReadOnlyTool('diff')).toBe(true);
 		expect(isReadOnlyTool('write')).toBe(false);
+		// M4: gitingest was reclassified out of READ_ONLY_TOOLS into
+		// NETWORK_TOOLS — it performs a network fetch and is no longer read-only.
+		expect(isReadOnlyTool('gitingest')).toBe(false);
 	});
 
 	test('marks writes as write-like', () => {
@@ -384,6 +387,26 @@ describe('classifyFullAutoToolAction', () => {
 			}),
 		);
 		expect(d.action).toBe('escalate_critic');
+	});
+
+	// M4: gitingest performs a network fetch (gitingest.com). It must NOT
+	// short-circuit as read-only safe/allow; it must escalate to the critic
+	// via the network branch.
+	test('escalates gitingest to critic (network tier, not safe/allow)', () => {
+		const d = classifyFullAutoToolAction(
+			input({
+				toolName: 'gitingest',
+				args: { repo_url: 'https://github.com/some/repo' },
+			}),
+		);
+		expect(d.action).toBe('escalate_critic');
+		if (d.action === 'escalate_critic') {
+			expect(d.risk).toBe('medium');
+			expect(d.context.tool).toBe('gitingest');
+		}
+		// Explicitly assert it did NOT take the read-only safe/allow path.
+		expect(d.action).not.toBe('allow');
+		expect(isReadOnlyTool('gitingest')).toBe(false);
 	});
 
 	test('allows webfetch on trusted domain', () => {

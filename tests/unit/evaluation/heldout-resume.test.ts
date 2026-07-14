@@ -6,6 +6,7 @@ import type {
 	EvaluationCandidateV1,
 	EvaluationTaskV1,
 } from '../../../src/evaluation/contracts.js';
+import { TestConsumptionClaimV1Schema } from '../../../src/evaluation/contracts.js';
 import {
 	computeCandidateInputContentHash,
 	computeTaskInputContentHash,
@@ -20,11 +21,11 @@ afterEach(() => {
 	_internals.withDisposableWorktree = originalDisposableWorktree;
 });
 
-function candidate(
+async function candidate(
 	root: string,
 	id: string,
 	kind: 'baseline' | 'skill',
-): EvaluationCandidateV1 {
+): Promise<EvaluationCandidateV1> {
 	const draft = {
 		v: 1 as const,
 		id,
@@ -34,7 +35,7 @@ function candidate(
 	};
 	return {
 		...draft,
-		contentHash: computeCandidateInputContentHash(root, draft),
+		contentHash: await computeCandidateInputContentHash(root, draft),
 	};
 }
 
@@ -70,7 +71,7 @@ describe('held-out run restart safety', () => {
 			};
 			const task: EvaluationTaskV1 = {
 				...draft,
-				contentHash: computeTaskInputContentHash(root, draft),
+				contentHash: await computeTaskInputContentHash(root, draft),
 			};
 			_internals.captureWorkingTreeFingerprint = async () => ({
 				head: 'a'.repeat(40),
@@ -90,8 +91,8 @@ describe('held-out run restart safety', () => {
 			const options = {
 				projectRoot: root,
 				tasks: [task],
-				baseline: candidate(root, 'baseline', 'baseline'),
-				candidate: candidate(root, 'candidate', 'skill'),
+				baseline: await candidate(root, 'baseline', 'baseline'),
+				candidate: await candidate(root, 'candidate', 'skill'),
 				split: 'test' as const,
 				seed: 'heldout-resume',
 				models: ['configured'],
@@ -120,17 +121,31 @@ describe('held-out run restart safety', () => {
 			await expect(runEvaluation(options)).rejects.toThrow(
 				'changed during evaluation',
 			);
+			const ledgerPath = path.join(
+				root,
+				'.swarm',
+				'evolution',
+				'test-consumption.jsonl',
+			);
+			const firstLedgerText = fs.readFileSync(ledgerPath, 'utf8');
+			const firstLedgerLines = firstLedgerText.trim().split(/\r?\n/);
+			expect(firstLedgerLines).toHaveLength(1);
+			const firstClaim = TestConsumptionClaimV1Schema.parse(
+				JSON.parse(firstLedgerLines[0]!),
+			);
 			fs.writeFileSync(instructionPath, originalInstruction);
 			const resumed = await runEvaluation(options);
 			expect(resumed.status).toBe('complete');
-			const ledger = fs
-				.readFileSync(
-					path.join(root, '.swarm', 'evolution', 'test-consumption.jsonl'),
-					'utf8',
-				)
-				.trim()
-				.split(/\r?\n/);
-			expect(ledger).toHaveLength(1);
+			const resumedLedgerText = fs.readFileSync(ledgerPath, 'utf8');
+			expect(resumedLedgerText).toBe(firstLedgerText);
+			expect(firstClaim).toMatchObject({
+				v: 1,
+				runId: resumed.runId,
+				taskSetHash: resumed.taskSet.contentHash,
+				baselineHash: resumed.baseline.contentHash,
+				candidateHash: resumed.candidate.contentHash,
+			});
+			expect(Number.isNaN(Date.parse(firstClaim.claimedAt))).toBe(false);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

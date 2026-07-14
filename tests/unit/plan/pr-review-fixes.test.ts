@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as fsSync from 'node:fs';
+import * as realFs from 'node:fs';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -210,7 +210,7 @@ describe('rebuildPlan — F-004 marker reset on failure', () => {
 
 		mock.module('../../../src/plan/ledger', () => makeLedgerMock());
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			unlinkSync: mock(() => {}),
 			existsSync: mock(() => true),
@@ -267,7 +267,7 @@ describe('rebuildPlan — F-004 marker reset on failure', () => {
 
 		mock.module('../../../src/plan/ledger', () => makeLedgerMock());
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			unlinkSync: mock(() => {}),
 			existsSync: mock(() => true),
@@ -351,7 +351,7 @@ describe('closePlanTerminalState — F-004 marker reset on failure', () => {
 
 		mock.module('../../../src/plan/ledger', () => makeLedgerMock());
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			unlinkSync: mock(() => {}),
 			existsSync: mock(() => true),
@@ -420,6 +420,11 @@ describe('F-002 — temp file naming includes random suffix', () => {
 			safeHook: (name: string) => null as any,
 		}));
 
+		// plan.json's temp write now goes through a raw fs fd write (M1 fsync
+		// durability fix — bunWrite gives no fd to fsync), so its temp path is
+		// observed via the renameSync(tempPath, finalPath) call rather than
+		// bunWrite. plan.md's temp write still goes through bunWrite AND is
+		// renamed the same way, so the renameSync capture sees both temp names.
 		const writeLog: string[] = [];
 		const bunWriteMock = mock(async (p: string) => {
 			writeLog.push(p);
@@ -431,9 +436,12 @@ describe('F-002 — temp file naming includes random suffix', () => {
 		}));
 
 		mock.module('../../../src/plan/ledger', () => makeLedgerMock());
+		const renameLog: string[] = [];
 		mock.module('node:fs', () => ({
-			...fsSync,
-			renameSync: mock(() => {}),
+			...realFs,
+			renameSync: mock((from: string) => {
+				renameLog.push(from);
+			}),
 			unlinkSync: mock(() => {}),
 			existsSync: mock(() => true),
 			readdirSync: () => [],
@@ -444,8 +452,10 @@ describe('F-002 — temp file naming includes random suffix', () => {
 		const plan = createTestPlan();
 		await rebuildPlan(tempDir, plan, { reason: 'test-f002' });
 
-		const planJsonTemp = writeLog.find((p) => p.includes('plan.json.rebuild.'));
-		const planMdTemp = writeLog.find((p) => p.includes('plan.md.rebuild.'));
+		const planJsonTemp = renameLog.find((p) =>
+			p.includes('plan.json.rebuild.'),
+		);
+		const planMdTemp = renameLog.find((p) => p.includes('plan.md.rebuild.'));
 
 		expect(planJsonTemp).toBeDefined();
 		expect(planMdTemp).toBeDefined();
@@ -498,7 +508,7 @@ describe('F-002 — temp file naming includes random suffix', () => {
 
 		mock.module('../../../src/plan/ledger', () => makeLedgerMock());
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			unlinkSync: mock(() => {}),
 			existsSync: mock(() => true),

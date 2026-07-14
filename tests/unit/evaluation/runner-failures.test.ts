@@ -19,6 +19,7 @@ import {
 const originalFingerprint = _internals.captureWorkingTreeFingerprint;
 const originalDisposableWorktree = _internals.withDisposableWorktree;
 const originalRunExternalTool = _internals.runExternalTool;
+let harnessSequence = 0;
 
 afterEach(() => {
 	_internals.captureWorkingTreeFingerprint = originalFingerprint;
@@ -26,7 +27,10 @@ afterEach(() => {
 	_internals.runExternalTool = originalRunExternalTool;
 });
 
-function candidate(root: string, id: string): EvaluationCandidateV1 {
+async function candidate(
+	root: string,
+	id: string,
+): Promise<EvaluationCandidateV1> {
 	const draft = {
 		v: 1 as const,
 		id,
@@ -36,14 +40,14 @@ function candidate(root: string, id: string): EvaluationCandidateV1 {
 	};
 	return {
 		...draft,
-		contentHash: computeCandidateInputContentHash(root, draft),
+		contentHash: await computeCandidateInputContentHash(root, draft),
 	};
 }
 
-function harness(
+async function harness(
 	kind: 'builtin' | 'project' = 'project',
 	scorerInput: Record<string, unknown> = { score: 0.75 },
-) {
+): Promise<{ root: string; options: RunEvaluationOptions }> {
 	const root = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'eval-runner-failure-')),
 	);
@@ -84,7 +88,7 @@ function harness(
 	};
 	const task: EvaluationTaskV1 = {
 		...draft,
-		contentHash: computeTaskInputContentHash(root, draft),
+		contentHash: await computeTaskInputContentHash(root, draft),
 	};
 	_internals.captureWorkingTreeFingerprint = async () => ({
 		head: 'a'.repeat(40),
@@ -103,10 +107,10 @@ function harness(
 	const options: RunEvaluationOptions = {
 		projectRoot: root,
 		tasks: [task],
-		baseline: candidate(root, 'baseline'),
-		candidate: candidate(root, 'candidate'),
+		baseline: await candidate(root, 'baseline'),
+		candidate: await candidate(root, 'candidate'),
 		split: 'validation',
-		seed: `seed-${Date.now()}-${Math.random()}`,
+		seed: `seed-${++harnessSequence}`,
 		models: ['configured'],
 		budgets: {
 			maxTasks: 1,
@@ -201,7 +205,7 @@ describe('evaluation runner failure classification', () => {
 			'score-out-of-range',
 		],
 	] as const)('classifies project scorer %s distinctly', async (_name, result, outcome, failureCode) => {
-		const { root, options } = harness();
+		const { root, options } = await harness();
 		let calls = 0;
 		try {
 			_internals.runExternalTool = async () => {
@@ -222,13 +226,13 @@ describe('evaluation runner failure classification', () => {
 	});
 
 	test('returns on the per-task deadline when executor ignores AbortSignal', async () => {
-		const { root, options } = harness('builtin');
+		const { root, options } = await harness('builtin');
 		try {
 			options.budgets.maxTaskTimeMs = 20;
 			options.executor = async () => new Promise(() => {});
-			const startedAt = Date.now();
+			const startedAt = performance.now();
 			const run = await runEvaluation(options);
-			expect(Date.now() - startedAt).toBeLessThan(500);
+			expect(performance.now() - startedAt).toBeLessThan(500);
 			expect(run.results.every((entry) => entry.outcome === 'timeout')).toBe(
 				true,
 			);
@@ -243,7 +247,7 @@ describe('evaluation runner failure classification', () => {
 	});
 
 	test('executes a real portable scorer with sibling imports and relative data', async () => {
-		const { root, options } = harness();
+		const { root, options } = await harness();
 		try {
 			options.budgets.maxTaskTimeMs = 3_000;
 			_internals.runExternalTool = originalRunExternalTool;
@@ -273,7 +277,7 @@ describe('evaluation runner failure classification', () => {
 			'scorer-invalid-json',
 		],
 	] as const)('classifies a real portable scorer %s', async (_name, scorerInput, outcome, failureCode) => {
-		const { root, options } = harness('project', scorerInput);
+		const { root, options } = await harness('project', scorerInput);
 		try {
 			options.budgets.maxTaskTimeMs = 3_000;
 			_internals.runExternalTool = originalRunExternalTool;
@@ -291,7 +295,7 @@ describe('evaluation runner failure classification', () => {
 	});
 
 	test('bounds builtin output before parsing', async () => {
-		const { root, options } = harness('builtin');
+		const { root, options } = await harness('builtin');
 		try {
 			options.budgets.maxOutputBytes = 8;
 			options.executor = async () => ({

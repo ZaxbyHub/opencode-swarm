@@ -1,9 +1,14 @@
 import {
+	closeSync,
 	copyFileSync,
 	existsSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
 	readdirSync,
 	renameSync,
 	unlinkSync,
+	writeFileSync,
 } from 'node:fs';
 
 /**
@@ -96,6 +101,7 @@ import {
 	loadLastApprovedPlan,
 	readLedgerEvents,
 	replayFromLedger,
+	replayFromLedgerWithStatus,
 	takeSnapshotEvent,
 	takeSnapshotWithRetry,
 } from './ledger';
@@ -694,7 +700,38 @@ export async function loadPlan(
 										'[loadPlan] plan.json is stale (hash mismatch with ledger) — rebuilding from ledger. If this recurs, run /swarm reset-session to clear stale session state.',
 									);
 									try {
-										const rebuilt = await replayFromLedger(directory);
+										const { plan: rebuilt, truncated } =
+											await replayFromLedgerWithStatus(directory);
+										if (truncated) {
+											// M1 silent-rollback fix: the ledger contained a poison
+											// line, so integrity-checked replay could only reconstruct
+											// the PREFIX before the corruption. Overwriting canonical
+											// plan.json with that prefix-only projection would silently
+											// DROP every durable task_status_changed / task_removed
+											// event recorded AFTER the poison line — a silent rollback
+											// and permanent data loss.
+											//
+											// Instead: preserve the on-disk plan.json exactly as-is (do
+											// NOT call rebuildPlan), attach the structured staleness
+											// marker so downstream consumers (phase-complete.ts,
+											// update-task-status.ts) refuse to silently trust it, and
+											// surface a loud warning. The corrupted suffix has already
+											// been quarantined non-destructively to a UNIQUE side file
+											// by replayFromLedgerWithStatus — the canonical ledger is
+											// left untouched, so no durable history is destroyed.
+											const runtimeStale = validated as RuntimePlan;
+											runtimeStale._ledgerReplayStale = true;
+											runtimeStale._ledgerReplayStaleReason =
+												'Ledger truncated: a malformed line stopped replay before the tail, so the ledger could only be reconstructed up to the corruption. plan.json was PRESERVED (not rolled back to the prefix-only projection) and the corrupted suffix was quarantined to .swarm/plan-ledger.quarantine.*. Verify state, then run /swarm reset-session if this persists.';
+											// Persist the verdict so it re-surfaces on every later
+											// loadPlan (the startup replay runs at most once per
+											// workspace per process) via the return chokepoint below.
+											ledgerStaleWorkspaces.add(resolvedWorkspace);
+											criticalWarn(
+												'[loadPlan] Ledger truncated (poison line detected) — preserving plan.json instead of rolling back to the prefix-only ledger projection. Durable post-poison events remain in plan.json. Corrupted suffix quarantined to .swarm/plan-ledger.quarantine.*. Run /swarm reset-session after verifying state if this persists.',
+											);
+											return runtimeStale;
+										}
 										if (rebuilt) {
 											await rebuildPlan(directory, rebuilt, {
 												reason: 'ledger_hash_mismatch_recovery',
@@ -1702,12 +1739,32 @@ export async function rebuildPlan(
 	const planPath = path.join(swarmDir, 'plan.json');
 	const mdPath = path.join(swarmDir, 'plan.md');
 
-	// Atomic write for plan.json
+	// rebuildPlan is a recovery path and may run before anything else has
+	// created .swarm/ in this directory (e.g. a fresh workspace whose only
+	// prior write was the ledger itself). The previous bunWrite-based
+	// implementation auto-created parent directories; the raw fd write below
+	// does not, so create it explicitly to preserve that contract.
+	mkdirSync(swarmDir, { recursive: true });
+
+	// Atomic write for plan.json. rebuildPlan is a recovery-path writer of the
+	// canonical projection, so it must be crash-durable: use a Node fd write with
+	// an explicit fsync before the rename (bunWrite gives no fd to fsync). Without
+	// the fsync, a crash between the write and rename could publish a truncated
+	// plan.json — the same silent-truncation failure class the ledger fsync
+	// closes. (Containing-dir fsync intentionally omitted; the rename is atomic.)
 	const tempPlanPath = path.join(
 		swarmDir,
 		`plan.json.rebuild.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
-	await bunWrite(tempPlanPath, JSON.stringify(targetPlan, null, 2));
+	{
+		const fd = openSync(tempPlanPath, 'w');
+		try {
+			writeFileSync(fd, JSON.stringify(targetPlan, null, 2), 'utf8');
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	}
 	renameSync(tempPlanPath, planPath);
 
 	// Write in-progress marker right after plan.json rename.

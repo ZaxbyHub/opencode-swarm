@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleArchiveCommand } from '../../../src/commands/archive';
+import {
+	_internals as archiveCommandInternals,
+	handleArchiveCommand,
+} from '../../../src/commands/archive';
 import type { Evidence } from '../../../src/config/evidence-schema';
 import {
 	_internals as evidenceInternals,
@@ -10,19 +13,26 @@ import {
 } from '../../../src/evidence/manager';
 
 const realDeleteEvidence = evidenceInternals.deleteEvidence;
+const realArchiveNow = archiveCommandInternals.now;
+const FIXED_NOW = Date.UTC(2026, 6, 14, 12);
 
 describe('handleArchiveCommand', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
+		archiveCommandInternals.now = () => new Date(FIXED_NOW);
 		tempDir = mkdtemp();
 		mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 	});
 
 	afterEach(() => {
-		evidenceInternals.deleteEvidence = realDeleteEvidence;
-		cleanup(tempDir);
+		try {
+			cleanup(tempDir);
+		} finally {
+			evidenceInternals.deleteEvidence = realDeleteEvidence;
+			archiveCommandInternals.now = realArchiveNow;
+		}
 	});
 
 	test('No evidence bundles → "No evidence bundles to archive."', async () => {
@@ -231,7 +241,7 @@ async function makeBundleOld(
 	const bundle = result.bundle;
 
 	// Set updated_at and created_at to old date
-	const oldDate = new Date();
+	const oldDate = new Date(FIXED_NOW);
 	oldDate.setDate(oldDate.getDate() - daysOld);
 	const oldIso = oldDate.toISOString();
 
@@ -254,7 +264,7 @@ function createNoteEvidence(taskId: string, summary: string): Evidence {
 	return {
 		type: 'note',
 		task_id: taskId,
-		timestamp: new Date().toISOString(),
+		timestamp: new Date(FIXED_NOW).toISOString(),
 		agent: 'test-agent',
 		verdict: 'info',
 		summary,

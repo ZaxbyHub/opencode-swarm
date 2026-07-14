@@ -1,5 +1,30 @@
 # Changelog
 
+## [7.114.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.8...v7.114.9) (2026-07-14)
+
+
+### Bug Fixes
+
+* **skills:** address implementation review findings for ci-monitor wiring ([e003295](https://github.com/ZaxbyHub/opencode-swarm/commit/e003295431d050c01492043e43ce40f73f52e2e7))
+* **skills:** wire 7 unreachable bundled skills into consumer runtimes ([d2b989f](https://github.com/ZaxbyHub/opencode-swarm/commit/d2b989f1b7d103d281ff0c8f104b0a3b37dbde6a))
+* **skills:** wire 7 unreachable bundled skills into consumer runtimes ([8985bc6](https://github.com/ZaxbyHub/opencode-swarm/commit/8985bc63ed761beef3a4bc4e00da1bae65059140)), closes [#1806](https://github.com/ZaxbyHub/opencode-swarm/issues/1806)
+* **tests:** add ci-monitor to registry.tool-policy EXPECTED_NONE set ([a4b7cc0](https://github.com/ZaxbyHub/opencode-swarm/commit/a4b7cc0b6c3ed02383dfb17294ddd8cdade46935))
+
+## [7.114.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.7...v7.114.8) (2026-07-13)
+
+
+### Bug Fixes
+
+* **audit:** resolve medium and low severity defects from the 2026-07-09 audit ([2d96efd](https://github.com/ZaxbyHub/opencode-swarm/commit/2d96efd884c2ecfecfae9264a0a3f6adfacbe96b))
+* **cli:** make path-guard depth checks cross-platform ([39c9786](https://github.com/ZaxbyHub/opencode-swarm/commit/39c978665830975efe2679320bdab86a9e4aff05))
+
+## [7.114.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.6...v7.114.7) (2026-07-13)
+
+
+### Bug Fixes
+
+* **tui:** migrate tool-path console.warn/error to logger.log (PR4/5 [#1755](https://github.com/ZaxbyHub/opencode-swarm/issues/1755)) ([a5ed1f1](https://github.com/ZaxbyHub/opencode-swarm/commit/a5ed1f12495233cd08801fb3940d9f4e5923bb2b))
+
 ## [7.114.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.5...v7.114.6) (2026-07-13)
 
 

@@ -20,11 +20,11 @@ afterEach(() => {
 	_internals.withDisposableWorktree = originalDisposableWorktree;
 });
 
-function candidate(
+async function candidate(
 	root: string,
 	id: string,
 	kind: 'baseline' | 'skill',
-): EvaluationCandidateV1 {
+): Promise<EvaluationCandidateV1> {
 	const draft = {
 		v: 1 as const,
 		id,
@@ -34,7 +34,7 @@ function candidate(
 	};
 	return {
 		...draft,
-		contentHash: computeCandidateInputContentHash(root, draft),
+		contentHash: await computeCandidateInputContentHash(root, draft),
 	};
 }
 
@@ -74,7 +74,7 @@ describe('bounded evaluation runner', () => {
 			};
 			const task: EvaluationTaskV1 = {
 				...taskDraft,
-				contentHash: computeTaskInputContentHash(root, taskDraft),
+				contentHash: await computeTaskInputContentHash(root, taskDraft),
 			};
 			const attempts = new Map<string, number>();
 			_internals.captureWorkingTreeFingerprint = async () => ({
@@ -94,8 +94,8 @@ describe('bounded evaluation runner', () => {
 			const options = {
 				projectRoot: root,
 				tasks: [task],
-				baseline: candidate(root, 'baseline', 'baseline'),
-				candidate: candidate(root, 'candidate', 'skill'),
+				baseline: await candidate(root, 'baseline', 'baseline'),
+				candidate: await candidate(root, 'candidate', 'skill'),
 				split: 'validation' as const,
 				seed: 'stable-seed',
 				models: ['configured'],

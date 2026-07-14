@@ -1,4 +1,5 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
+import { log } from '../utils/logger.js';
 
 export type EvaluationModelDispatchRequest = {
 	directory: string;
@@ -56,11 +57,11 @@ export function resolveEvaluationAgentName(
 	preferredSwarm?: string,
 ): string {
 	const names = agents.map((agent) => agent.name);
-	if (names.includes(logicalName)) return logicalName;
 	if (preferredSwarm) {
 		const preferred = `${preferredSwarm}_${logicalName}`;
 		if (names.includes(preferred)) return preferred;
 	}
+	if (names.includes(logicalName)) return logicalName;
 	const prefixed = names
 		.filter((name) => name.endsWith(`_${logicalName}`))
 		.sort((left, right) => left.localeCompare(right));
@@ -78,27 +79,49 @@ async function boundedDelete(
 	sessionId: string,
 	timeoutMs = 500,
 ): Promise<void> {
+	const DELETED = 'deleted' as const;
+	const TIMED_OUT = 'timed-out' as const;
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		await Promise.race([
-			client.session.delete({
-				path: { id: sessionId },
-				signal: controller.signal,
-			}),
-			new Promise<void>((resolve) => {
-				controller.signal.addEventListener('abort', () => resolve(), {
-					once: true,
-				});
+		const outcome = await Promise.race([
+			client.session
+				.delete({
+					path: { id: sessionId },
+					signal: controller.signal,
+				})
+				.then(() => DELETED),
+			new Promise<typeof TIMED_OUT>((resolve) => {
+				timer = setTimeout(() => {
+					controller.abort();
+					resolve(TIMED_OUT);
+				}, timeoutMs);
 			}),
 		]);
-	} catch {
-		// Cleanup is best effort, but it is awaited and bounded.
+		if (outcome === TIMED_OUT) {
+			_internals.log('evaluation session cleanup timed out', {
+				sessionId,
+				timeoutMs,
+			});
+		}
+	} catch (error) {
+		_internals.log('evaluation session cleanup failed', {
+			sessionId,
+			error: error instanceof Error ? error.message : String(error),
+		});
 	} finally {
-		clearTimeout(timer);
+		if (timer) clearTimeout(timer);
 		controller.abort();
 	}
 }
+
+export const _internals: {
+	boundedDelete: typeof boundedDelete;
+	log: typeof log;
+} = {
+	boundedDelete,
+	log,
+};
 
 export function createEvaluationModelDispatcher(
 	client: OpencodeClient,
@@ -212,7 +235,7 @@ export function createEvaluationModelDispatcher(
 			clearTimeout(timeoutHandle);
 			request.abortSignal?.removeEventListener('abort', abortListener);
 			controller.abort();
-			if (sessionId) await boundedDelete(client, sessionId);
+			if (sessionId) await _internals.boundedDelete(client, sessionId);
 		}
 	};
 }

@@ -13,6 +13,7 @@ import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
+import { handleCiMonitorCommand } from './ci-monitor.js';
 import { handleCiSimulateCommand } from './ci-simulate.js';
 import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
@@ -941,6 +942,17 @@ export const COMMAND_REGISTRY = {
 		args: '[url|owner/repo#N|N] [instructions...]',
 		details:
 			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+		category: 'agent',
+		toolPolicy: 'none',
+	},
+	'ci-monitor': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleCiMonitorCommand),
+		description:
+			'Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge) [pr]',
+		args: '<pr-url|owner/repo#N|N>',
+		details:
+			'Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` with no merge-strategy flag. Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},

@@ -1,6 +1,10 @@
 import { loadPluginConfig } from '../config/loader';
 import { archiveEvidence } from '../evidence/manager';
 
+export const _internals: { now: () => Date } = {
+	now: () => new Date(),
+};
+
 function artifactLabel(artifact: {
 	namespace: 'evaluation-run' | 'gate-audit';
 	id: string;
@@ -20,6 +24,7 @@ export async function handleArchiveCommand(
 	const report = await archiveEvidence(directory, maxAgeDays, maxBundles, {
 		report: true,
 		dryRun,
+		now: _internals.now(),
 	});
 
 	const evaluationSelected = report.evaluation.selected.map(artifactLabel);

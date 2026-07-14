@@ -13,8 +13,30 @@ export * from './fixtures.js';
 export * from './gate-audit.js';
 export * from './gate-ground-truth.js';
 export * from './gate-stats.js';
-export * from './hashing.js';
-export * from './model-dispatcher.js';
+export type { TaskInputHashLimits } from './hashing.js';
+export {
+	canonicalHash,
+	canonicalJson,
+	computeCandidateInputContentHash,
+	computeManifestContentHash,
+	computeRunIntegrityHash,
+	computeTaskContentHash,
+	computeTaskInputContentHash,
+	computeTaskLineageInputHash,
+	computeTaskSetContentHash,
+	contentHashWithout,
+	resolveContainedExistingPath,
+	sha256,
+} from './hashing.js';
+export type {
+	EvaluationModelDispatcher,
+	EvaluationModelDispatchRequest,
+	EvaluationModelDispatchResult,
+} from './model-dispatcher.js';
+export {
+	createEvaluationModelDispatcher,
+	resolveEvaluationAgentName,
+} from './model-dispatcher.js';
 export * from './public-api.js';
 export * from './retention.js';
 export type {

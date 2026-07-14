@@ -191,3 +191,53 @@ When a sandbox executor (`src/sandbox/{linux,macos,win32}/*.ts`) interpolates en
 - Scope-materialization for lane-scoped resources.
 
 A divergence between primary and fallback that is not exercised by a parity test is a regression. The existing per-OS test files `tests/unit/sandbox/{linux,macos,win32}.test.ts` must continue to cover both the primary and fallback paths after every env-affecting change — extend these tests rather than relying on dedicated sandbox-envoverride test files that may or may not exist in your branch.
+
+## SAST baseline capturing (differential scanning)
+
+The `sast_scan` tool supports `capture_baseline: true` with a `phase` parameter
+to snapshot pre-existing findings. Subsequent scans with the same `phase` value
+perform differential checking — they only fail on **new** findings, not
+pre-existing ones.
+
+### When to capture a baseline
+
+- **Before Phase 1 code changes.** The baseline must reflect the state of the
+  codebase *before* any new work is done. This ensures the differential scan
+  catches findings introduced by the current session's changes.
+
+### Critical safety guard
+
+**NEVER capture a baseline after code changes have been made in a phase.**
+A baseline captured post-edit silently encodes the very bugs the scan is meant
+to catch as "pre-existing," suppressing them indefinitely. This turns the SAST
+gate into theater.
+
+Baseline capture also requires at least one supported, existing file to be
+successfully scanned. Omitted, empty, or entirely unscannable `changed_files`
+returns `capture_baseline requires changed_files to produce a non-empty baseline`
+instead of reporting a successful no-op capture.
+
+### How to use it
+
+1. Identify the files to scan. In a phase, use the union of declared task-scope
+   files plus files the coder is expected to touch. Derive the list from
+   `declare_scope` outputs, `git diff --name-only`, or the phase's task specs.
+2. Before any coder delegation in Phase 1, capture the baseline:
+   ```
+   sast_scan(directory, changed_files=[...], capture_baseline=true, phase=1)
+   ```
+3. After coder work, scan the same file set:
+   ```
+   sast_scan(directory, changed_files=[...], phase=1)
+   ```
+   This returns only NEW findings (absent from the baseline).
+4. If a pre-existing finding is legitimately fixed, the baseline can be
+   re-captured at the start of the next phase with the updated file list.
+
+### Why this matters
+
+During PR #1704 review, SAST flagged `RegExp.prototype.exec()` as
+"command injection via child_process.exec()" — a false positive that blocked
+the gate. With a baseline captured before the phase, this pre-existing false
+positive would have been suppressed, and only genuinely new findings would
+surface.

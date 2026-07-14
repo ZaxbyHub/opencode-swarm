@@ -14,13 +14,13 @@ Each baseline/candidate pair runs in a fresh temporary copy with bounded concurr
 
 Promotion uses deterministic paired bootstrap intervals (10,000 resamples, 95% confidence), a configurable deadband, minimum valid-pair coverage, protected-category tolerances, and comparisons against both the declared baseline and a compatible historical best. The decision artifact records full lineage and policy hashes.
 
-Package consumers use the versioned callable `evaluationV1` function namespace. Its `evaluateCandidate` boundary admits and freezes the task set, runs the immutable baseline/candidate pairs, evaluates the promotion policy, and persists the resulting decision before returning; calling `evaluationV1(options)` is equivalent. `runEvaluation` and `decidePromotion` remain attached for consumers that need the lower-level phases. The package default export remains the OpenCode v1 plugin object.
+Package consumers use the versioned callable `evaluationV1` function namespace. Its `evaluateCandidate` boundary admits and freezes the task set, runs the immutable baseline/candidate pairs, evaluates the promotion policy, and persists the resulting decision before returning; calling `evaluationV1(options)` is equivalent. `runEvaluation` and `decidePromotion` remain attached for consumers that need the lower-level phases. `hashTaskInput` and `hashCandidateInput` are asynchronous so bounded package hashing yields while reading task trees. The package default export remains the OpenCode v1 plugin object.
 
 `complexity_delta` and `public_api_delta` remain explicitly unavailable until the separate quality-metric work in #1655 exists. They are excluded from promotion rather than fabricated.
 
 ## Tier-1 production gate audit
 
-The npm package includes `evaluation-fixtures/tier1/`: six mutation-generated and six curated defects. Every package contains a green `baseline.ts` and a reviewed defective `defect.ts`. The mutation adapter proves the baseline test is green, applies the real baseline-to-defect patch, runs the test, and reverts through the bounded asynchronous runner. A red baseline is data quality, never a killed mutant.
+The npm package includes `evaluation-fixtures/tier1/`: six canonical mutation-class fixtures and six independently curated Tier-1 defects. Every package contains a green `baseline.ts` and a reviewed defective `defect.ts`. The mutation adapter proves the baseline test is green, applies the real baseline-to-defect patch, runs the test, and reverts through the bounded asynchronous runner. A red baseline is data quality, never a killed mutant.
 
 `/swarm gate-audit` runs defect and clean-control candidates across reviewer, test-engineer, offline SAST, mutation, and quality gates. Model gates use read-only child sessions; local gates use bounded in-process or array-form subprocess adapters. `--swarm <id>` selects a prefixed reviewer/test-engineer role when multiple swarms are registered, and stored cells use the model identity returned by the runtime. Container fixtures are reported as unsupported until a safe container runner is available.
 

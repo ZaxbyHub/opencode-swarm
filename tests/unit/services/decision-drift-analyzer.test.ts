@@ -152,6 +152,76 @@ Some content without decisions`;
 			expect(contradictions.length).toBe(0);
 		});
 
+		it('should NOT flag two agreeing "do not use" decisions (M11 regression)', () => {
+			// Regression for M11: negative phrases like "do not use" contain the
+			// positive substring "use". Two AGREEING negated decisions on the same
+			// subject must not be reported as contradictory.
+			const decisions = [
+				{
+					text: 'Do not use Redis for caching',
+					phase: 1,
+					confirmed: true,
+					timestamp: null,
+					line: 1,
+				},
+				{
+					text: 'Do not use Redis in the project',
+					phase: 2,
+					confirmed: false,
+					timestamp: null,
+					line: 2,
+				},
+			];
+
+			const contradictions = findContradictions(decisions);
+			expect(contradictions).toHaveLength(0);
+		});
+
+		it('should still flag "use X" vs "do not use X" (true positive preserved)', () => {
+			const decisions = [
+				{
+					text: 'Use Redis for caching',
+					phase: 1,
+					confirmed: true,
+					timestamp: null,
+					line: 1,
+				},
+				{
+					text: 'Do not use Redis for caching',
+					phase: 2,
+					confirmed: false,
+					timestamp: null,
+					line: 2,
+				},
+			];
+
+			const contradictions = findContradictions(decisions);
+			expect(contradictions.length).toBeGreaterThan(0);
+			expect(contradictions[0].type).toBe('contradiction');
+		});
+
+		it('should NOT flag two agreeing "use X" decisions', () => {
+			const decisions = [
+				{
+					text: 'Use Redis for caching',
+					phase: 1,
+					confirmed: true,
+					timestamp: null,
+					line: 1,
+				},
+				{
+					text: 'Use Redis in the project',
+					phase: 2,
+					confirmed: false,
+					timestamp: null,
+					line: 2,
+				},
+			];
+
+			const contradictions = findContradictions(decisions);
+			expect(contradictions).toHaveLength(0);
+		});
+
 		it('should return empty array for less than 2 decisions', () => {
 			const decisions = [
 				{
@@ -355,7 +425,7 @@ ${manyDecisions}`,
 				hasDrift: false,
 				signals: [],
 				summary: '',
-				analyzedAt: new Date().toISOString(),
+				analyzedAt: '2026-07-01T00:00:00.000Z',
 			};
 
 			expect(formatDriftForContext(result)).toBe('');
@@ -408,7 +478,7 @@ ${manyDecisions}`,
 				hasDrift: true,
 				signals,
 				summary: expectedSummary,
-				analyzedAt: new Date().toISOString(),
+				analyzedAt: '2026-07-01T00:00:00.000Z',
 			};
 
 			const formatted = formatDriftForContext(result);
@@ -433,7 +503,7 @@ ${manyDecisions}`,
 				hasDrift: true,
 				signals,
 				summary: 'Test summary',
-				analyzedAt: new Date().toISOString(),
+				analyzedAt: '2026-07-01T00:00:00.000Z',
 			};
 
 			const formatted = formatDriftForContext(result);

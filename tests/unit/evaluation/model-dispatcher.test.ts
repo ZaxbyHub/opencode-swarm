@@ -1,8 +1,17 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
+	_internals,
 	createEvaluationModelDispatcher,
 	resolveEvaluationAgentName,
 } from '../../../src/evaluation/model-dispatcher.js';
+
+const originalLog = _internals.log;
+const originalBoundedDelete = _internals.boundedDelete;
+
+afterEach(() => {
+	_internals.log = originalLog;
+	_internals.boundedDelete = originalBoundedDelete;
+});
 
 const assistantInfo = {
 	id: 'message-1',
@@ -93,10 +102,19 @@ describe('evaluation agent resolution', () => {
 			'mega_reviewer',
 		);
 	});
+
+	test('honors a preferred swarm when the legacy role is also registered', () => {
+		const agents = [{ name: 'reviewer' }, { name: 'mega_reviewer' }];
+		expect(resolveEvaluationAgentName(agents, 'reviewer', 'mega')).toBe(
+			'mega_reviewer',
+		);
+	});
 });
 
 describe('evaluation model dispatcher', () => {
 	test('selects the explicit model, reports actual identity, and is read-only', async () => {
+		const debugLog = mock(() => {});
+		_internals.log = debugLog;
 		const fake = fakeClient({ agents: ['mega_reviewer'] });
 		const dispatch = createEvaluationModelDispatcher(fake.value);
 		const result = await dispatch(
@@ -128,6 +146,7 @@ describe('evaluation model dispatcher', () => {
 			},
 		});
 		expect(fake.deleted()).toBe(1);
+		expect(debugLog).not.toHaveBeenCalled();
 	});
 
 	test('bounds a stalled session create before prompt', async () => {
@@ -149,6 +168,8 @@ describe('evaluation model dispatcher', () => {
 	});
 
 	test('returns despite cleanup failure', async () => {
+		const debugLog = mock(() => {});
+		_internals.log = debugLog;
 		const fake = fakeClient({
 			remove: async () => {
 				throw new Error('cleanup denied');
@@ -157,5 +178,25 @@ describe('evaluation model dispatcher', () => {
 		const result = await createEvaluationModelDispatcher(fake.value)(request());
 		expect(result.status).toBe('completed');
 		expect(fake.deleted()).toBe(1);
+		expect(debugLog).toHaveBeenCalledWith('evaluation session cleanup failed', {
+			sessionId: 'session-1',
+			error: 'cleanup denied',
+		});
+	});
+
+	test('bounds and reports stalled session cleanup', async () => {
+		const debugLog = mock(() => {});
+		_internals.log = debugLog;
+		const fake = fakeClient({ remove: () => new Promise(() => {}) });
+		const startedAt = performance.now();
+		await _internals.boundedDelete(fake.value, 'session-1', 10);
+		expect(performance.now() - startedAt).toBeLessThan(250);
+		expect(debugLog).toHaveBeenCalledWith(
+			'evaluation session cleanup timed out',
+			{
+				sessionId: 'session-1',
+				timeoutMs: 10,
+			},
+		);
 	});
 });
