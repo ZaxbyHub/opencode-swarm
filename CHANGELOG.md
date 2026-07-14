@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.116.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.115.0...v7.116.0) (2026-07-14)
+
+
+### Features
+
+* **evaluation:** add bounded evaluation substrate ([c39c35a](https://github.com/ZaxbyHub/opencode-swarm/commit/c39c35a2cd378d4af7b880569773a1b3d5094ac2))
+
+
+### Bug Fixes
+
+* **evaluation:** fail closed on unknown swarm selection ([0d83275](https://github.com/ZaxbyHub/opencode-swarm/commit/0d8327523e6f3777610fd6e7390e147bc1768333))
+* **evaluation:** resolve review feedback and merge conflicts ([7437aa1](https://github.com/ZaxbyHub/opencode-swarm/commit/7437aa18f9021055cdbac42f9312ff660a63fcf3))
+
 ## [7.115.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.9...v7.115.0) (2026-07-14)
 
 
