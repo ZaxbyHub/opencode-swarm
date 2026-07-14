@@ -66,7 +66,7 @@ class WorkflowSecurityTester {
 			'github.event.review',
 		];
 
-		function checkExpressions(obj, path = '') {
+		function checkExpressions(obj, path = '', inEnvBlock = false) {
 			if (typeof obj === 'string') {
 				// Check for expression syntax
 				const expressionRegex = /\$\{\{[^}]+\}\}/g;
@@ -76,6 +76,18 @@ class WorkflowSecurityTester {
 					for (const match of matches) {
 						for (const dangerousCtx of dangerousContexts) {
 							if (match.includes(dangerousCtx)) {
+								if (inEnvBlock) {
+									// Assigning a dangerous context to an `env:` var is
+									// GitHub's own recommended mitigation for expression
+									// injection (see "Using an intermediate environment
+									// variable" in GitHub's security-hardening docs): the
+									// value becomes a shell environment variable, not text
+									// spliced into the run: script, so it cannot alter the
+									// script's syntax. Still flag the same context when it
+									// appears directly inline (e.g. in a `run:` string),
+									// since that is the actually-dangerous placement.
+									continue;
+								}
 								result.passed = false;
 								result.issues.push({
 									location: path,
@@ -88,11 +100,15 @@ class WorkflowSecurityTester {
 				}
 			} else if (Array.isArray(obj)) {
 				obj.forEach((item, index) =>
-					checkExpressions(item, `${path}[${index}]`),
+					checkExpressions(item, `${path}[${index}]`, inEnvBlock),
 				);
 			} else if (obj && typeof obj === 'object') {
 				Object.keys(obj).forEach((key) =>
-					checkExpressions(obj[key], `${path}.${key}`),
+					checkExpressions(
+						obj[key],
+						`${path}.${key}`,
+						inEnvBlock || key === 'env',
+					),
 				);
 			}
 		}
