@@ -14,16 +14,23 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { promises as fsPromises } from 'node:fs';
+import {
+	promises as fsPromises,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 async function readHiveCount(): Promise<number> {
 	try {
-		const content = await fsPromises.readFile(resolveHiveKnowledgePath(), 'utf-8');
+		const content = await fsPromises.readFile(
+			resolveHiveKnowledgePath(),
+			'utf-8',
+		);
 		return content.split('\n').filter((l) => l.trim().length > 0).length;
 	} catch {
 		return 0;
@@ -61,7 +68,9 @@ describe('hive transaction storage gate (#1847)', () => {
 		if (process.platform === 'win32') {
 			process.env.LOCALAPPDATA = path.join(tempHome, 'AppData', 'Local');
 		}
-		scriptDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-scripts-')));
+		scriptDir = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'hive-scripts-')),
+		);
 	});
 
 	afterEach(() => {
@@ -77,15 +86,17 @@ describe('hive transaction storage gate (#1847)', () => {
 		// (HOME is shared → same resolveHiveKnowledgePath). Both run concurrently.
 		const scriptA = path.join(scriptDir, 'promote-a.mjs');
 		const scriptB = path.join(scriptDir, 'promote-b.mjs');
-		const entryA =
-			'Always run the type checker before opening a pull request';
+		const entryA = 'Always run the type checker before opening a pull request';
 		const entryB =
 			'Never commit secrets into the repository source control tree';
 
 		const promoterPath = path
 			.resolve(process.cwd(), 'src/hooks/hive-promoter.ts')
 			.replace(/\\/g, '/');
-		const loader = (lesson: string, cohortId: string) => `import { promoteToHive, _internals } from "${promoterPath}";
+		const loader = (
+			lesson: string,
+			cohortId: string,
+		) => `import { promoteToHive, _internals } from "${promoterPath}";
 _internals.resolveCohortId = async () => ({ cohortId: ${JSON.stringify(cohortId)}, source: 'remote', normalizedRemote: 'github.com/t/r', degraded: false });
 await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)});
 `;

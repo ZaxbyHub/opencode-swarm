@@ -26,9 +26,7 @@ import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
-import {
-	resolveHiveEventsPath as resolveHiveEventsPathImpl,
-} from '../knowledge/hive-paths.js';
+import { resolveHiveEventsPath as resolveHiveEventsPathImpl } from '../knowledge/hive-paths.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 // Type-only import: erased at runtime, so it does NOT create a dependency that

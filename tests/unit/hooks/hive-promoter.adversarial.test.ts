@@ -11,17 +11,24 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
+import {
+	promises as fsPromises,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { checkHivePromotions, _internals } from '../../../src/hooks/hive-promoter.js';
-import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import {
+	_internals,
+	checkHivePromotions,
+} from '../../../src/hooks/hive-promoter.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 const FIXED_COHORT = {
 	cohortId: 'cohort-adv-aaa111',
@@ -84,9 +91,21 @@ function makeSwarmEntry(
 		confidence: 0.8,
 		status: 'candidate',
 		confirmed_by: [
-			{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'project-a' },
-			{ phase_number: 2, confirmed_at: '2024-01-02T00:00:00Z', project_name: 'project-a' },
-			{ phase_number: 3, confirmed_at: '2024-01-03T00:00:00Z', project_name: 'project-a' },
+			{
+				phase_number: 1,
+				confirmed_at: '2024-01-01T00:00:00Z',
+				project_name: 'project-a',
+			},
+			{
+				phase_number: 2,
+				confirmed_at: '2024-01-02T00:00:00Z',
+				project_name: 'project-a',
+			},
+			{
+				phase_number: 3,
+				confirmed_at: '2024-01-03T00:00:00Z',
+				project_name: 'project-a',
+			},
 		],
 		retrieval_outcomes: {
 			applied_count: 0,
@@ -104,7 +123,10 @@ function makeSwarmEntry(
 
 async function readRawHive(): Promise<HiveKnowledgeEntry[]> {
 	try {
-		const content = await fsPromises.readFile(resolveHiveKnowledgePath(), 'utf-8');
+		const content = await fsPromises.readFile(
+			resolveHiveKnowledgePath(),
+			'utf-8',
+		);
 		return content
 			.split('\n')
 			.filter((l) => l.trim().length > 0)
@@ -135,7 +157,9 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 			reason: '',
 			severity: 'none' as const,
 		})) as unknown as typeof _internals.validateLesson;
-		_internals.loadPromotionEvidence = mock(async () => ({})) as unknown as typeof _internals.loadPromotionEvidence;
+		_internals.loadPromotionEvidence = mock(
+			async () => ({}),
+		) as unknown as typeof _internals.loadPromotionEvidence;
 	});
 
 	afterEach(() => {
@@ -251,9 +275,21 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 			const entry = makeSwarmEntry({
 				hive_eligible: true,
 				confirmed_by: [
-					{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'p' },
-					{ phase_number: 1, confirmed_at: '2024-01-02T00:00:00Z', project_name: 'p' },
-					{ phase_number: 1, confirmed_at: '2024-01-03T00:00:00Z', project_name: 'p' },
+					{
+						phase_number: 1,
+						confirmed_at: '2024-01-01T00:00:00Z',
+						project_name: 'p',
+					},
+					{
+						phase_number: 1,
+						confirmed_at: '2024-01-02T00:00:00Z',
+						project_name: 'p',
+					},
+					{
+						phase_number: 1,
+						confirmed_at: '2024-01-03T00:00:00Z',
+						project_name: 'p',
+					},
 				],
 				// Recent so route 3 (age) does not fire.
 				created_at: new Date().toISOString(),
@@ -277,9 +313,21 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 				confidence: 0.6,
 				status: 'candidate',
 				confirmed_by: [
-					{ project_name: 'p', cohort_id: FIXED_COHORT.cohortId, confirmed_at: '2024-01-01T00:00:00Z' },
-					{ project_name: 'p', cohort_id: FIXED_COHORT.cohortId, confirmed_at: '2024-01-02T00:00:00Z' },
-					{ project_name: 'p', cohort_id: FIXED_COHORT.cohortId, confirmed_at: '2024-01-03T00:00:00Z' },
+					{
+						project_name: 'p',
+						cohort_id: FIXED_COHORT.cohortId,
+						confirmed_at: '2024-01-01T00:00:00Z',
+					},
+					{
+						project_name: 'p',
+						cohort_id: FIXED_COHORT.cohortId,
+						confirmed_at: '2024-01-02T00:00:00Z',
+					},
+					{
+						project_name: 'p',
+						cohort_id: FIXED_COHORT.cohortId,
+						confirmed_at: '2024-01-03T00:00:00Z',
+					},
 				],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -301,7 +349,11 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 				`${JSON.stringify(existing)}\n`,
 			);
 			const swarm = makeSwarmEntry({ project_name: 'p' });
-			const summary = await checkHivePromotions([swarm], makeConfig(), swarmDir);
+			const summary = await checkHivePromotions(
+				[swarm],
+				makeConfig(),
+				swarmDir,
+			);
 			// Same cohort repeated = 1 distinct → no advancement.
 			expect(summary.advancements).toBe(0);
 			const hive = await readRawHive();
@@ -373,18 +425,16 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 			(config as { hive_enabled?: boolean }).hive_enabled = undefined;
 			const entry = makeSwarmEntry();
 			// Cast: the test intentionally exercises the falsy-not-false branch.
-			await checkHivePromotions(
-				[entry],
-				config as KnowledgeConfig,
-				swarmDir,
-			);
+			await checkHivePromotions([entry], config as KnowledgeConfig, swarmDir);
 			expect(await readRawHive()).toHaveLength(1);
 		});
 	});
 
 	describe('SCENARIO 12: invalid schema_version on swarm entry', () => {
 		it('should use config.schema_version when entry has schema_version: 0', async () => {
-			const entry = makeSwarmEntry({ schema_version: 0 } as SwarmKnowledgeEntry);
+			const entry = makeSwarmEntry({
+				schema_version: 0,
+			} as SwarmKnowledgeEntry);
 			await checkHivePromotions(
 				[entry],
 				makeConfig({ schema_version: 2 }),

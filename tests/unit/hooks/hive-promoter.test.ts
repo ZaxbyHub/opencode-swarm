@@ -22,24 +22,30 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdir, mkdtempSync, rmSync, writeFile, realpathSync } from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
+import {
+	promises as fsPromises,
+	mkdir,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	writeFile,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	checkHivePromotions,
 	createHivePromoterHook,
 	promoteFromSwarm,
 	promoteToHive,
-	_internals,
 } from '../../../src/hooks/hive-promoter.js';
-import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 const realReadKnowledge = _internals.readSwarmEntries;
 
@@ -149,9 +155,21 @@ function makeSwarmEntry(
 		status: 'promoted',
 		hive_eligible: true,
 		confirmed_by: [
-			{ phase_number: 1, confirmed_at: '2026-01-01T00:00:00Z', project_name: 'projectA' },
-			{ phase_number: 2, confirmed_at: '2026-01-02T00:00:00Z', project_name: 'projectA' },
-			{ phase_number: 3, confirmed_at: '2026-01-03T00:00:00Z', project_name: 'projectA' },
+			{
+				phase_number: 1,
+				confirmed_at: '2026-01-01T00:00:00Z',
+				project_name: 'projectA',
+			},
+			{
+				phase_number: 2,
+				confirmed_at: '2026-01-02T00:00:00Z',
+				project_name: 'projectA',
+			},
+			{
+				phase_number: 3,
+				confirmed_at: '2026-01-03T00:00:00Z',
+				project_name: 'projectA',
+			},
 		],
 		retrieval_outcomes: {
 			applied_count: 0,
@@ -192,7 +210,9 @@ describe('hive-promoter (transactional, #1847)', () => {
 			reason: '',
 			severity: undefined,
 		})) as unknown as typeof _internals.validateLesson;
-		_internals.loadPromotionEvidence = mock(async () => ({})) as unknown as typeof _internals.loadPromotionEvidence;
+		_internals.loadPromotionEvidence = mock(
+			async () => ({}),
+		) as unknown as typeof _internals.loadPromotionEvidence;
 	});
 
 	afterEach(() => {
@@ -241,8 +261,16 @@ describe('hive-promoter (transactional, #1847)', () => {
 			const entry = makeSwarmEntry({
 				hive_eligible: true,
 				confirmed_by: [
-					{ phase_number: 1, confirmed_at: '2026-01-01T00:00:00Z', project_name: 'projectA' },
-					{ phase_number: 2, confirmed_at: '2026-01-02T00:00:00Z', project_name: 'projectA' },
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00Z',
+						project_name: 'projectA',
+					},
+					{
+						phase_number: 2,
+						confirmed_at: '2026-01-02T00:00:00Z',
+						project_name: 'projectA',
+					},
 				],
 				created_at: new Date().toISOString(),
 			});
@@ -399,8 +427,16 @@ describe('hive-promoter (transactional, #1847)', () => {
 				confidence: 0.6,
 				status: 'candidate',
 				confirmed_by: [
-					{ project_name: 'p1', cohort_id: 'c1', confirmed_at: '2026-01-01T00:00:00Z' },
-					{ project_name: 'p2', cohort_id: 'c2', confirmed_at: '2026-01-02T00:00:00Z' },
+					{
+						project_name: 'p1',
+						cohort_id: 'c1',
+						confirmed_at: '2026-01-01T00:00:00Z',
+					},
+					{
+						project_name: 'p2',
+						cohort_id: 'c2',
+						confirmed_at: '2026-01-02T00:00:00Z',
+					},
 				],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -448,7 +484,11 @@ describe('hive-promoter (transactional, #1847)', () => {
 				confidence: 0.6,
 				status: 'candidate',
 				confirmed_by: [
-					{ project_name: 'projectA', cohort_id: FIXED_COHORT.cohortId, confirmed_at: '2026-01-01T00:00:00Z' },
+					{
+						project_name: 'projectA',
+						cohort_id: FIXED_COHORT.cohortId,
+						confirmed_at: '2026-01-01T00:00:00Z',
+					},
 				],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -484,7 +524,11 @@ describe('hive-promoter (transactional, #1847)', () => {
 				confidence: 0.6,
 				status: 'established',
 				confirmed_by: [
-					{ project_name: 'p1', cohort_id: 'c1', confirmed_at: '2026-01-01T00:00:00Z' },
+					{
+						project_name: 'p1',
+						cohort_id: 'c1',
+						confirmed_at: '2026-01-01T00:00:00Z',
+					},
 				],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -525,7 +569,11 @@ describe('hive-promoter (transactional, #1847)', () => {
 				confidence: 0.6,
 				status: 'established',
 				confirmed_by: [
-					{ project_name: 'p1', cohort_id: 'c1', confirmed_at: '2026-01-01T00:00:00Z' },
+					{
+						project_name: 'p1',
+						cohort_id: 'c1',
+						confirmed_at: '2026-01-01T00:00:00Z',
+					},
 				],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -574,7 +622,8 @@ describe('hive-promoter (transactional, #1847)', () => {
 		});
 
 		it('near-duplicate short-circuits with no write', async () => {
-			const lesson = 'Always run the full test suite before merging a pull request';
+			const lesson =
+				'Always run the full test suite before merging a pull request';
 			await writeHiveEntries([
 				{
 					id: 'existing',
@@ -709,7 +758,9 @@ describe('hive-promoter (transactional, #1847)', () => {
 				'operator override for critical hotfix lesson',
 			);
 			expect(hive[0].lineage?.override_failed_gates).toBeDefined();
-			expect(hive[0].lineage?.override_failed_gates!.length).toBeGreaterThan(0);
+			expect(
+				(hive[0].lineage?.override_failed_gates ?? []).length,
+			).toBeGreaterThan(0);
 			// The override is durable: an audit line was staged to the hive events log.
 			const eventsPath = path.join(
 				path.dirname(resolveHiveKnowledgePath()),

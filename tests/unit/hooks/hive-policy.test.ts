@@ -13,13 +13,11 @@
 
 import { describe, expect, it } from 'bun:test';
 import {
-	countDistinctProjects,
-} from '../../../src/hooks/hive-promoter.js';
-import {
-	evaluatePromotionPolicy,
 	describeEligibilityRoute,
+	evaluatePromotionPolicy,
 	failedGateNames,
 } from '../../../src/hooks/hive-policy.js';
+import { countDistinctProjects } from '../../../src/hooks/hive-promoter.js';
 import type {
 	KnowledgeConfig,
 	ProjectConfirmationRecord,
@@ -94,24 +92,48 @@ const baseConfig: KnowledgeConfig = {
 describe('countDistinctProjects — canonical cohort identity (#1847)', () => {
 	it('sibling worktrees (same cohort_id) count as ONE project', () => {
 		const confirmedBy: ProjectConfirmationRecord[] = [
-			{ project_name: 'repo-wt1', cohort_id: 'cohort-X', confirmed_at: '2026-01-01T00:00:00Z' },
-			{ project_name: 'repo-wt2', cohort_id: 'cohort-X', confirmed_at: '2026-01-02T00:00:00Z' },
+			{
+				project_name: 'repo-wt1',
+				cohort_id: 'cohort-X',
+				confirmed_at: '2026-01-01T00:00:00Z',
+			},
+			{
+				project_name: 'repo-wt2',
+				cohort_id: 'cohort-X',
+				confirmed_at: '2026-01-02T00:00:00Z',
+			},
 		];
 		expect(countDistinctProjects(confirmedBy)).toBe(1);
 	});
 
 	it('SSH and HTTPS aliases of one repo share one cohort_id → one project', () => {
 		const confirmedBy: ProjectConfirmationRecord[] = [
-			{ project_name: 'git@github.com:o/r', cohort_id: 'cohort-Y', confirmed_at: '2026-01-01T00:00:00Z' },
-			{ project_name: 'https-github-com-o-r', cohort_id: 'cohort-Y', confirmed_at: '2026-01-02T00:00:00Z' },
+			{
+				project_name: 'git@github.com:o/r',
+				cohort_id: 'cohort-Y',
+				confirmed_at: '2026-01-01T00:00:00Z',
+			},
+			{
+				project_name: 'https-github-com-o-r',
+				cohort_id: 'cohort-Y',
+				confirmed_at: '2026-01-02T00:00:00Z',
+			},
 		];
 		expect(countDistinctProjects(confirmedBy)).toBe(1);
 	});
 
 	it('two genuinely distinct cohorts count as two projects', () => {
 		const confirmedBy: ProjectConfirmationRecord[] = [
-			{ project_name: 'repo-a', cohort_id: 'cohort-A', confirmed_at: '2026-01-01T00:00:00Z' },
-			{ project_name: 'repo-b', cohort_id: 'cohort-B', confirmed_at: '2026-01-02T00:00:00Z' },
+			{
+				project_name: 'repo-a',
+				cohort_id: 'cohort-A',
+				confirmed_at: '2026-01-01T00:00:00Z',
+			},
+			{
+				project_name: 'repo-b',
+				cohort_id: 'cohort-B',
+				confirmed_at: '2026-01-02T00:00:00Z',
+			},
 		];
 		expect(countDistinctProjects(confirmedBy)).toBe(2);
 	});
@@ -127,8 +149,16 @@ describe('countDistinctProjects — canonical cohort identity (#1847)', () => {
 
 	it('mixed cohort + legacy: cohort deduped, legacy by name, never double-counted', () => {
 		const confirmedBy: ProjectConfirmationRecord[] = [
-			{ project_name: 'wt1', cohort_id: 'cohort-Z', confirmed_at: '2026-01-01T00:00:00Z' },
-			{ project_name: 'wt2', cohort_id: 'cohort-Z', confirmed_at: '2026-01-02T00:00:00Z' },
+			{
+				project_name: 'wt1',
+				cohort_id: 'cohort-Z',
+				confirmed_at: '2026-01-01T00:00:00Z',
+			},
+			{
+				project_name: 'wt2',
+				cohort_id: 'cohort-Z',
+				confirmed_at: '2026-01-02T00:00:00Z',
+			},
 			{ project_name: 'legacy-only', confirmed_at: '2026-01-03T00:00:00Z' },
 		];
 		// 1 cohort + 1 legacy name = 2.
@@ -141,9 +171,21 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 		const entry = makeEntry({
 			hive_eligible: true,
 			confirmed_by: [
-				{ phase_number: 1, confirmed_at: '2026-01-01T00:00:00Z', project_name: 'p' },
-				{ phase_number: 2, confirmed_at: '2026-01-02T00:00:00Z', project_name: 'p' },
-				{ phase_number: 3, confirmed_at: '2026-01-03T00:00:00Z', project_name: 'p' },
+				{
+					phase_number: 1,
+					confirmed_at: '2026-01-01T00:00:00Z',
+					project_name: 'p',
+				},
+				{
+					phase_number: 2,
+					confirmed_at: '2026-01-02T00:00:00Z',
+					project_name: 'p',
+				},
+				{
+					phase_number: 3,
+					confirmed_at: '2026-01-03T00:00:00Z',
+					project_name: 'p',
+				},
 			],
 		});
 		const decision = evaluatePromotionPolicy({
@@ -152,7 +194,9 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 			evidence: [],
 		});
 		expect(decision.eligible).toBe(true);
-		expect(decision.gates.find((g) => g.name === 'eligibility_route')?.passed).toBe(true);
+		expect(
+			decision.gates.find((g) => g.name === 'eligibility_route')?.passed,
+		).toBe(true);
 	});
 
 	it('an inactive status fails the active_status gate and is not eligible', () => {
@@ -163,7 +207,9 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 			evidence: [],
 		});
 		expect(decision.eligible).toBe(false);
-		expect(decision.gates.find((g) => g.name === 'active_status')?.passed).toBe(false);
+		expect(decision.gates.find((g) => g.name === 'active_status')?.passed).toBe(
+			false,
+		);
 		expect(failedGateNames(decision)).toContain('active_status');
 	});
 
@@ -178,7 +224,9 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 			evidence: [],
 		});
 		expect(decision.eligible).toBe(false);
-		expect(decision.gates.find((g) => g.name === 'confidence_floor')?.passed).toBe(false);
+		expect(
+			decision.gates.find((g) => g.name === 'confidence_floor')?.passed,
+		).toBe(false);
 	});
 
 	it('diagnostics explain each failed condition', () => {
@@ -305,9 +353,21 @@ describe('describeEligibilityRoute — preserved 3 routes (#1847 M1)', () => {
 			makeEntry({
 				hive_eligible: true,
 				confirmed_by: [
-					{ phase_number: 1, confirmed_at: '2026-01-01T00:00:00Z', project_name: 'p' },
-					{ phase_number: 2, confirmed_at: '2026-01-02T00:00:00Z', project_name: 'p' },
-					{ phase_number: 3, confirmed_at: '2026-01-03T00:00:00Z', project_name: 'p' },
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00Z',
+						project_name: 'p',
+					},
+					{
+						phase_number: 2,
+						confirmed_at: '2026-01-02T00:00:00Z',
+						project_name: 'p',
+					},
+					{
+						phase_number: 3,
+						confirmed_at: '2026-01-03T00:00:00Z',
+						project_name: 'p',
+					},
 				],
 			}),
 			90,

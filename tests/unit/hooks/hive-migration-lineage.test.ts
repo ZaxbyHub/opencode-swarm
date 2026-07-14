@@ -12,18 +12,25 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
+import {
+	promises as fsPromises,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { checkHivePromotions, _internals } from '../../../src/hooks/hive-promoter.js';
-import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import {
+	_internals,
+	checkHivePromotions,
+} from '../../../src/hooks/hive-promoter.js';
 import { transactHiveStore } from '../../../src/hooks/hive-transaction.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 const FIXED_COHORT = {
 	cohortId: 'cohort-mig-aaa',
@@ -73,7 +80,9 @@ function makeConfig(overrides: Partial<KnowledgeConfig> = {}): KnowledgeConfig {
 	};
 }
 
-function legacyHiveEntry(overrides: Partial<HiveKnowledgeEntry> = {}): HiveKnowledgeEntry {
+function legacyHiveEntry(
+	overrides: Partial<HiveKnowledgeEntry> = {},
+): HiveKnowledgeEntry {
 	return {
 		id: 'legacy-1',
 		tier: 'hive',
@@ -103,7 +112,10 @@ function legacyHiveEntry(overrides: Partial<HiveKnowledgeEntry> = {}): HiveKnowl
 
 async function readRawHive(): Promise<HiveKnowledgeEntry[]> {
 	try {
-		const content = await fsPromises.readFile(resolveHiveKnowledgePath(), 'utf-8');
+		const content = await fsPromises.readFile(
+			resolveHiveKnowledgePath(),
+			'utf-8',
+		);
 		return content
 			.split('\n')
 			.filter((l) => l.trim().length > 0)
@@ -133,7 +145,9 @@ describe('hive migration & lineage gate (#1847)', () => {
 			reason: '',
 			severity: 'none' as const,
 		})) as unknown as typeof _internals.validateLesson;
-		_internals.loadPromotionEvidence = mock(async () => ({})) as unknown as typeof _internals.loadPromotionEvidence;
+		_internals.loadPromotionEvidence = mock(
+			async () => ({}),
+		) as unknown as typeof _internals.loadPromotionEvidence;
 	});
 
 	afterEach(() => {
@@ -185,7 +199,8 @@ describe('hive migration & lineage gate (#1847)', () => {
 			});
 			const original = `${JSON.stringify(legacy)}\n`;
 			await fsPromises.writeFile(resolveHiveKnowledgePath(), original, 'utf-8');
-			const mtimeBefore = (await fsPromises.stat(resolveHiveKnowledgePath())).mtimeMs;
+			const mtimeBefore = (await fsPromises.stat(resolveHiveKnowledgePath()))
+				.mtimeMs;
 
 			// A no-op transaction: mutate returns noop.
 			await transactHiveStore(async (ctx) => ({
@@ -199,7 +214,8 @@ describe('hive migration & lineage gate (#1847)', () => {
 			);
 			expect(contentAfter).toBe(original);
 			// The transaction must not rewrite on a no-op.
-			const mtimeAfter = (await fsPromises.stat(resolveHiveKnowledgePath())).mtimeMs;
+			const mtimeAfter = (await fsPromises.stat(resolveHiveKnowledgePath()))
+				.mtimeMs;
 			expect(mtimeAfter).toBe(mtimeBefore);
 		});
 
@@ -261,8 +277,14 @@ describe('hive migration & lineage gate (#1847)', () => {
 	describe('cap inside the transaction (no separate enforceKnowledgeCap)', () => {
 		it('cap enforcement happens inside the same commit, evicting excess entries', async () => {
 			// Seed 2 entries, then commit a 3rd with maxEntries=2.
-			const e1 = legacyHiveEntry({ id: 'h1', lesson: 'first hive lesson about capping entries' });
-			const e2 = legacyHiveEntry({ id: 'h2', lesson: 'second hive lesson about capping entries' });
+			const e1 = legacyHiveEntry({
+				id: 'h1',
+				lesson: 'first hive lesson about capping entries',
+			});
+			const e2 = legacyHiveEntry({
+				id: 'h2',
+				lesson: 'second hive lesson about capping entries',
+			});
 			await fsPromises.mkdir(path.dirname(resolveHiveKnowledgePath()), {
 				recursive: true,
 			});

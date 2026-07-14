@@ -296,7 +296,8 @@ export async function computeKnowledgeDebug(
 	// read above; no new I/O, and never on the plugin-init path.
 	let hiveEntriesWithLineage = 0;
 	let hiveOverridePromotions = 0;
-	const hiveOverrideEntries: KnowledgeDebugMeta['hive']['override_entries'] = [];
+	const hiveOverrideEntries: KnowledgeDebugMeta['hive']['override_entries'] =
+		[];
 	try {
 		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
 		for (const e of hive) {

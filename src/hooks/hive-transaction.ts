@@ -46,12 +46,12 @@ import {
 	resolveHiveRejectedPath,
 } from '../knowledge/hive-paths.js';
 import { warn } from '../utils/logger.js';
+import { MAX_EVENT_LOG_ENTRIES } from './knowledge-events.js';
 import {
 	readKnowledge,
 	selectKnowledgeCapSurvivors,
 } from './knowledge-store.js';
 import type { HiveKnowledgeEntry, RejectedLesson } from './knowledge-types.js';
-import { MAX_EVENT_LOG_ENTRIES } from './knowledge-events.js';
 
 /** Stale duration MUST match every other hive writer (see module docstring). */
 const HIVE_LOCK_STALE_MS = 5_000;
@@ -109,7 +109,9 @@ export interface HiveTransactionResult<T> {
  * `noop`.
  */
 export async function transactHiveStore<T>(
-	mutate: (ctx: HiveTxContext) => Promise<HiveMutationOutcome<T>> | HiveMutationOutcome<T>,
+	mutate: (
+		ctx: HiveTxContext,
+	) => Promise<HiveMutationOutcome<T>> | HiveMutationOutcome<T>,
 ): Promise<HiveTransactionResult<T>> {
 	const dataDir = _internals.resolveHiveDataDir();
 	const hivePath = _internals.resolveHiveKnowledgePath();
@@ -148,9 +150,8 @@ export async function transactHiveStore<T>(
 		}
 
 		// 1. Read + normalize under the lock.
-		const entries = await _internals.readKnowledge<HiveKnowledgeEntry>(
-			hivePath,
-		);
+		const entries =
+			await _internals.readKnowledge<HiveKnowledgeEntry>(hivePath);
 
 		// 2. Caller mutation.
 		const outcome = await mutate({ entries });
@@ -211,8 +212,7 @@ export async function transactHiveStore<T>(
 			await appendFile(rejectedPath, rejectBlock, 'utf-8');
 		}
 		if (outcome.audit && outcome.audit.length > 0) {
-			const auditBlock =
-				outcome.audit.map((a) => a.line).join('\n') + '\n';
+			const auditBlock = outcome.audit.map((a) => a.line).join('\n') + '\n';
 			await appendFile(eventsPath, auditBlock, 'utf-8');
 			// FIFO trim the events log to the cap under the same lock (audit-only;
 			// hive events do not participate in the counter rollup baseline).

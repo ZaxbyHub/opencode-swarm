@@ -21,8 +21,8 @@
  * `server()` resolution.
  */
 
-import * as path from 'node:path';
 import * as os from 'node:os';
+import * as path from 'node:path';
 
 /**
  * Resolve the platform-specific hive data directory (the directory that holds

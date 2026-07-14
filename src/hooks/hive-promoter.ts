@@ -23,10 +23,13 @@
  */
 
 import path from 'node:path';
+import { KnowledgeConfigSchema } from '../config/schema.js';
+import type { CohortIdentity } from '../knowledge/cohort-identity.js';
+import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {
-	evaluatePromotionPolicy,
 	describeEligibilityRoute,
+	evaluatePromotionPolicy,
 	failedGateNames,
 } from './hive-policy.js';
 import {
@@ -34,18 +37,14 @@ import {
 	type HiveMutationOutcome,
 	transactHiveStore,
 } from './hive-transaction.js';
-import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import {
 	findNearDuplicate,
+	jaccardBigram,
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	wordBigrams,
-	jaccardBigram,
 } from './knowledge-store.js';
-import type {
-	CohortIdentity,
-} from '../knowledge/cohort-identity.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeCategory,
@@ -60,7 +59,6 @@ import type {
 import { isActiveStatus, KNOWLEDGE_SCHEMA_VERSION } from './knowledge-types.js';
 import { validateLesson } from './knowledge-validator.js';
 import { safeHook } from './utils.js';
-import { KnowledgeConfigSchema } from '../config/schema.js';
 
 /** Carry a swarm entry's actionable-directive metadata onto a promoted hive
  *  entry (Phase 4 review, MEDIUM finding). Dropping these fields on promotion
@@ -250,9 +248,12 @@ export async function checkHivePromotions(
 
 	const diagnostics: string[] = [];
 
-	const result = await _internals.transactHiveStore<
-		{ newPromotions: number; encounters: number; advancements: number; total: number }
-	>(async (ctx) => {
+	const result = await _internals.transactHiveStore<{
+		newPromotions: number;
+		encounters: number;
+		advancements: number;
+		total: number;
+	}>(async (ctx) => {
 		let newPromotions = 0;
 		let encounters = 0;
 		let advancements = 0;
@@ -398,7 +399,10 @@ export async function checkHivePromotions(
 					: new Set<string>();
 			let nearDuplicate: SwarmKnowledgeEntry | undefined;
 			for (let i = 0; i < activeSwarm.length; i++) {
-				if (jaccardBigram(hiveBigram, activeSwarmBigrams[i]) >= config.dedup_threshold) {
+				if (
+					jaccardBigram(hiveBigram, activeSwarmBigrams[i]) >=
+					config.dedup_threshold
+				) {
 					nearDuplicate = activeSwarm[i];
 					break;
 				}
@@ -453,8 +457,7 @@ export async function checkHivePromotions(
 			}
 		}
 
-		const modified =
-			newPromotions > 0 || encounters > 0 || advancements > 0;
+		const modified = newPromotions > 0 || encounters > 0 || advancements > 0;
 		// Rejects must be persisted even when nothing else changed — otherwise a
 		// batch where every eligible entry failed validation would silently drop
 		// the rejection records. Committing rewrites the hive (unchanged content,
@@ -462,7 +465,12 @@ export async function checkHivePromotions(
 		if (!modified && rejects.length === 0) {
 			return {
 				kind: 'noop',
-				return: { newPromotions, encounters, advancements, total: entries.length },
+				return: {
+					newPromotions,
+					encounters,
+					advancements,
+					total: entries.length,
+				},
 			};
 		}
 
@@ -472,7 +480,12 @@ export async function checkHivePromotions(
 			maxEntries: config.hive_max_entries,
 			rejects: rejects.length > 0 ? rejects : undefined,
 			audit: audit.length > 0 ? audit : undefined,
-			return: { newPromotions, encounters, advancements, total: entries.length },
+			return: {
+				newPromotions,
+				encounters,
+				advancements,
+				total: entries.length,
+			},
 		};
 	});
 
@@ -611,13 +624,21 @@ export async function promoteToHive(
 	// Use the real project config so manual promotion honors the same
 	// application-evidence / cohort thresholds as automatic promotion (AC9).
 	// Default to schema defaults when the command did not load one.
-	const policyConfig =
-		config ?? _internals.loadDefaultKnowledgeConfig();
+	const policyConfig = config ?? _internals.loadDefaultKnowledgeConfig();
 
 	const result = await _internals.transactHiveStore<string>(async (ctx) => {
 		// Dedup against the locked entries.
-		if (findNearDuplicate(trimmedLesson, ctx.entries, policyConfig.dedup_threshold)) {
-			return { kind: 'noop' as const, return: `Lesson already exists in hive (near-duplicate).` };
+		if (
+			findNearDuplicate(
+				trimmedLesson,
+				ctx.entries,
+				policyConfig.dedup_threshold,
+			)
+		) {
+			return {
+				kind: 'noop' as const,
+				return: `Lesson already exists in hive (near-duplicate).`,
+			};
 		}
 
 		// Validate before writing (throws on error severity — propagate).
@@ -770,12 +791,20 @@ export async function promoteFromSwarm(
 	const sourceCohort = await _internals.resolveCohortId(directory);
 	// Use the real project config so manual promotion honors the same policy
 	// thresholds as automatic promotion (AC9). Default to schema defaults.
-	const policyConfig =
-		config ?? _internals.loadDefaultKnowledgeConfig();
+	const policyConfig = config ?? _internals.loadDefaultKnowledgeConfig();
 
 	const result = await _internals.transactHiveStore<string>(async (ctx) => {
-		if (findNearDuplicate(swarmEntry.lesson, ctx.entries, policyConfig.dedup_threshold)) {
-			return { kind: 'noop' as const, return: `Lesson already exists in hive (near-duplicate).` };
+		if (
+			findNearDuplicate(
+				swarmEntry.lesson,
+				ctx.entries,
+				policyConfig.dedup_threshold,
+			)
+		) {
+			return {
+				kind: 'noop' as const,
+				return: `Lesson already exists in hive (near-duplicate).`,
+			};
 		}
 
 		const validationResult = _internals.validateLesson(

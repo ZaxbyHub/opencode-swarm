@@ -11,13 +11,13 @@
  *   alone is NEVER authorization to bypass policy; an explicit override is.
  */
 
+import { loadPluginConfigWithMeta } from '../config';
+import { KnowledgeConfigSchema } from '../config/schema';
 import {
 	type ManualPromotionOptions,
 	promoteFromSwarm,
 	promoteToHive,
 } from '../hooks/hive-promoter';
-import { KnowledgeConfigSchema } from '../config/schema';
-import { loadPluginConfigWithMeta } from '../config';
 import type { KnowledgeConfig } from '../hooks/knowledge-types';
 
 export async function handlePromoteCommand(
@@ -103,7 +103,13 @@ export async function handlePromoteCommand(
 
 	// Handle direct text promotion
 	try {
-		return await promoteToHive(directory, lessonText!, category, options, config);
+		return await promoteToHive(
+			directory,
+			lessonText!,
+			category,
+			options,
+			config,
+		);
 	} catch (error) {
 		if (error instanceof Error) {
 			return error.message;

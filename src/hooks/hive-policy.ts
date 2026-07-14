@@ -95,8 +95,7 @@ export function evaluatePromotionPolicy(
 	// validated PromotionEvidenceRecords across the configured minimum number of
 	// DISTINCT canonical cohort ids. Defaults to 0 → satisfied by absence (no
 	// synthetic credit, no new blocking) until #1849 produces real receipts.
-	const minApps =
-		config.promotion_min_terminal_applications ?? 0;
+	const minApps = config.promotion_min_terminal_applications ?? 0;
 	const minCohorts = config.promotion_min_distinct_cohorts ?? 0;
 	const distinctCohorts = new Set(
 		evidence.map((e) => e.cohort_id).filter((c): c is string => !!c),

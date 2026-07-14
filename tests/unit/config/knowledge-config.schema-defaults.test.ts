@@ -67,7 +67,7 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 			});
 		});
 
-	it('should accept partial overrides and merge with defaults', () => {
+		it('should accept partial overrides and merge with defaults', () => {
 			const result = KnowledgeConfigSchema.parse({
 				enabled: false,
 				max_inject_count: 10,
