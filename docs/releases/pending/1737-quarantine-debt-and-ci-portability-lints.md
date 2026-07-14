@@ -37,6 +37,28 @@
   aggregate job that checks `needs.unit.result` across the full matrix (not yet
   wired into branch protection — see Known caveats). Corrected a stale comment
   claiming the `coverage` check was not yet a required status check.
+- **`src/utils/swarm-artifact-cache.ts` / `src/evidence/task-file.ts`:** fixed a
+  lost-update bug (issue #1729 class) where `atomicWriteFile`'s stat-based cache
+  never invalidated on write. A same-size rewrite landing within one filesystem
+  timestamp tick of a prior cached read could produce an identical
+  mtime+ctime+size stamp, so a second locked read-modify-write immediately
+  following a write (e.g. `bumpKnowledgeConfidenceBatch`'s confidence-delta write
+  followed by its confidence-floor-flag transaction) would silently read the
+  pre-write content and clobber the just-committed value back to stale data.
+  Added `invalidateCachedArtifact()`, called from `atomicWriteFile` after every
+  successful write, closing the gap for all ~15 callers of the shared primitive.
+  Root-caused via `tests/unit/hooks/knowledge-floor-action.test.ts`'s "clears
+  stale confidence_floor_demoted flag on recovery above floor" case, which failed
+  deterministically (not flaky) on both this branch and clean `origin/main`.
+- **`src/turbo/lean/runner.ts`:** fixed a merge-back failure misclassification —
+  `_sequentialWorktreeCleanup` distinguished `'conflict'` from `'partial'` status
+  via `mergeResult.conflict === true`, but `attemptMergeBackFromDirty`'s
+  `DirtyMergePartial` result (`src/worktree/merge.ts`) never sets a `conflict`
+  field for a real conflict; it signals one via non-empty `conflictFiles` only.
+  Every dirty-worktree merge conflict reaching this path was reported as
+  `'partial'` instead of `'conflict'`. Root-caused via
+  `tests/unit/turbo/lean/integration-worktree.test.ts` AC-6, which also failed
+  deterministically on clean `origin/main`.
 
 ## New tests
 

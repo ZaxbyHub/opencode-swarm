@@ -1310,8 +1310,6 @@ export class LeanTurboRunner {
 						('partial' in mergeResult && mergeResult.partial)
 					) {
 						// Merge conflict or partial failure: log warning, do NOT remove worktree, record failure
-						const isConflict =
-							'conflict' in mergeResult && mergeResult.conflict === true;
 						const conflictFiles =
 							'conflictFiles' in mergeResult &&
 							Array.isArray(
@@ -1319,6 +1317,14 @@ export class LeanTurboRunner {
 							)
 								? (mergeResult as { conflictFiles: string[] }).conflictFiles
 								: [];
+						// attemptMergeBackFromDirty's DirtyMergePartial result never sets a
+						// `conflict` field (only mergeLaneBranch's MergeConflict does) — it
+						// signals a real conflict via non-empty `conflictFiles` instead. Without
+						// this, every dirty-worktree merge conflict was misclassified as
+						// 'partial' rather than 'conflict'.
+						const isConflict =
+							('conflict' in mergeResult && mergeResult.conflict === true) ||
+							conflictFiles.length > 0;
 						const reason =
 							('message' in mergeResult &&
 								typeof (mergeResult as { message?: unknown }).message ===

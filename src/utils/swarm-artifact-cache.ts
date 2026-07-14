@@ -253,6 +253,27 @@ export async function readCachedParsedFile<T>(
 	return cloneCachedValue(value);
 }
 
+/**
+ * Drop any cached text/parsed entries for `filePath` immediately after a write.
+ *
+ * The stat-based staleness check (mtimeMs + ctimeMs + size) is a best-effort
+ * optimization: a same-size rewrite that lands within one filesystem timestamp
+ * tick of a prior cached read can produce an identical stamp, so the very next
+ * read-your-own-write can silently return the pre-write value (issue #1729).
+ * Writers that read-modify-write the same path twice in quick succession (e.g.
+ * a second locked transaction immediately after an atomic write) MUST call
+ * this after the write so the next read cannot observe stale content —
+ * relying on stat-stamp comparison alone is not sufficient in that window.
+ */
+export function invalidateCachedArtifact(filePath: string): void {
+	const resolvedPath = path.resolve(filePath);
+	textCache.delete(resolvedPath);
+	const prefix = `${resolvedPath}\0`;
+	for (const key of parsedCache.keys()) {
+		if (key.startsWith(prefix)) parsedCache.delete(key);
+	}
+}
+
 export function resetSwarmArtifactCache(): void {
 	textCache.clear();
 	parsedCache.clear();
