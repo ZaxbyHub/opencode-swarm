@@ -1212,6 +1212,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'apply_patch': {
+			emitObjectTypeMismatch('apply_patch', value, findings);
+			break;
+		}
+
 		case 'automation': {
 			emitObjectTypeMismatch('automation', value, findings);
 			break;

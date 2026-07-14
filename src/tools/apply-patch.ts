@@ -21,11 +21,24 @@ import {
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { loadPluginConfigWithMeta } from '../config';
+import { findClosestLines, fuzzyFindAndReplace } from '../utils/fuzzy-match';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
+
+/**
+ * DI seam for hermetic config-load substitution in tests (AGENTS.md invariant 7).
+ * Mirrors the pattern at `src/tools/context-status.ts:81-88`. Tests override
+ * `_internals.loadPluginConfigWithMeta` and restore it in `afterEach` instead
+ * of writing real config files or using `mock.module` (which leaks across
+ * test files in Bun's shared runner).
+ */
+export const _internals = {
+	loadPluginConfigWithMeta,
+};
 
 // ============ Types ============
 
@@ -519,6 +532,23 @@ interface HunkApplyResult {
 	appliedLines?: string[];
 	failedHunkIndex?: number;
 	error?: ApplyPatchFileError;
+	/**
+	 * Set when a fuzzy fallback was attempted (config flag on) and failed.
+	 * Used by `processFileDiff` to append a "did you mean?" hint to the
+	 * diagnostic message — only when fuzzy actually ran and still missed.
+	 */
+	fuzzyAttempted?: boolean;
+}
+
+/**
+ * Opt-in fuzzy-matching options threaded from `execute` → `processFileDiff`
+ * → `applyHunks`. Both flags default false (exact-match-only, B3 decision).
+ */
+export interface ApplyHunksOptions {
+	/** Enable fuzzy fallback (strategies 1-8) on exact-match failure. */
+	fuzzyMatch: boolean;
+	/** Additionally enable strategy 9 (context_aware). Only effective with fuzzyMatch. */
+	fuzzyMatchContextAware: boolean;
 }
 
 /**
@@ -535,13 +565,25 @@ function arraysEqual(a: string[], b: string[]): boolean {
 /**
  * Attempt to apply all hunks from a ParsedFileDiff to the given file content.
  * Hunks are applied sequentially; on first failure, stops and returns diagnostics.
- * Uses exact context matching — no fuzzy or offset matching (B3 decision).
+ *
+ * Matching strategy:
+ * - **Default (no options, or `fuzzyMatch: false`):** exact positional context
+ *   matching only — the B3 decision. No fuzzy or offset matching.
+ * - **Opt-in (`fuzzyMatch: true`):** on exact-match failure, retries the
+ *   hermes-derived fuzzy text-matching chain (strategies 1-8) as a tolerance
+ *   layer before returning diagnostics. `fuzzyMatchContextAware: true` adds
+ *   strategy 9 (loosest). The exact `arraysEqual` path is never removed.
+ *
+ * Fuzzy is a per-hunk tolerance layer, not a whole-diff position searcher.
+ * If a fuzzy relocation overlaps a later hunk's declared context, that later
+ * hunk may still report a clean context-mismatch (not file corruption).
  *
  * @returns HunkApplyResult with success/appliedLines or the first failing hunk's diagnostics.
  */
 function applyHunks(
 	content: string,
 	fileDiff: ParsedFileDiff,
+	options?: ApplyHunksOptions,
 ): HunkApplyResult {
 	// Normalize CRLF to LF so context matching works regardless of file line endings
 	const normalizedContent = content.replace(/\r\n/g, '\n');
@@ -572,6 +614,8 @@ function applyHunks(
 
 	for (let hunkIdx = 0; hunkIdx < fileDiff.hunks.length; hunkIdx++) {
 		const hunk = fileDiff.hunks[hunkIdx];
+		// Reset per-hunk: true when fuzzy fallback ran and still missed.
+		let fuzzyAttemptedThisHunk = false;
 
 		// Compute match position: declared position adjusted by accumulated delta from prior hunks
 		const searchStart = Math.max(0, hunk.oldStart - 1 + accumulatedDelta);
@@ -609,6 +653,42 @@ function applyHunks(
 			);
 			const delta = newLinesForHunk.length - expectedOldLines.length;
 			accumulatedDelta += delta;
+		} else if (options?.fuzzyMatch) {
+			// Opt-in fuzzy fallback (issue #1718): when exact positional match
+			// fails and the config flag is set, retry via the hermes-derived
+			// fuzzy chain. We feed the in-progress content (which already
+			// reflects prior-hunk edits) so earlier hunks are preserved.
+			//
+			// `replaceAll: false` enforces uniqueness — the ambiguity guard
+			// fails rather than writing an ambiguous patch. The line-count
+			// delta uses the hunk's declared lines (fuzzy strategies preserve
+			// line counts; they transform within-line whitespace/unicode).
+			const currentContent = fileLines.join('\n');
+			const oldString = expectedOldLines.join('\n');
+			const newString = newLinesForHunk.join('\n');
+			const fuzzy = fuzzyFindAndReplace(
+				currentContent,
+				oldString,
+				newString,
+				false,
+				{
+					includeContextAware: options.fuzzyMatchContextAware,
+				},
+			);
+			if (fuzzy.error === null && fuzzy.matchCount === 1) {
+				fileLines.length = 0;
+				// Push line-by-line rather than `fileLines.push(...split('\n'))`:
+				// the spread-into-push form throws RangeError on very large line
+				// counts (~125k on Node, ~700k on Bun) because it routes through
+				// Function.prototype.apply, which is stack-bound. The loop has no
+				// such limit. (PRR-003 from the PR review.)
+				for (const line of fuzzy.content.split('\n')) fileLines.push(line);
+				accumulatedDelta += newLinesForHunk.length - expectedOldLines.length;
+				continue; // next hunk — skip the mismatch return below
+			}
+			// Fuzzy also failed — fall through to the context-mismatch return,
+			// flagging that fuzzy was attempted so the caller can append a hint.
+			fuzzyAttemptedThisHunk = true;
 		}
 
 		if (!matchFound) {
@@ -624,6 +704,7 @@ function applyHunks(
 			return {
 				success: false,
 				failedHunkIndex: hunkIdx,
+				fuzzyAttempted: fuzzyAttemptedThisHunk ? true : undefined,
 				error: {
 					hunkIndex: hunkIdx,
 					type: 'context-mismatch',
@@ -734,6 +815,7 @@ function processFileDiff(
 	dryRun: boolean,
 	allowCreates: boolean,
 	allowDeletes: boolean,
+	hunkOptions?: ApplyHunksOptions,
 ): ApplyPatchFileResult {
 	const hunksTotal = fileDiff.hunks.length;
 
@@ -1001,16 +1083,43 @@ function processFileDiff(
 	// Detect dominant line ending to preserve CRLF on write (Problem 2)
 	const originalLineEnding = detectLineEnding(content);
 
-	// Apply hunks with exact context matching (FR-010)
-	const hunkResult = applyHunks(content, fileDiff);
+	// Apply hunks with exact context matching (FR-010); opt-in fuzzy fallback
+	// (issue #1718) retries the hermes chain when exact match fails and the
+	// config flag is set.
+	const hunkResult = applyHunks(content, fileDiff, hunkOptions);
 	if (!hunkResult.success) {
+		// When fuzzy was attempted and still missed, append a "did you mean?"
+		// hint (ported from hermes) so the model can self-correct. We call
+		// findClosestLines directly with the expected context as the anchor —
+		// NOT formatNoMatchHint, whose message-prefix gate ("Could not find")
+		// never matches apply-patch's "Context mismatch in hunk..." message
+		// (the gate exists for hermes' shared caller where multiple error
+		// types share matchCount=0; here we only call when fuzzy genuinely
+		// failed, so direct findClosestLines is correct).
+		let errors = hunkResult.error ? [hunkResult.error] : [];
+		if (
+			hunkResult.fuzzyAttempted &&
+			errors.length > 0 &&
+			hunkOptions?.fuzzyMatch
+		) {
+			const expectedAnchor = errors[0].expected ?? '';
+			const hint = findClosestLines(expectedAnchor, content);
+			if (hint) {
+				errors = [
+					{
+						...errors[0],
+						message: `${errors[0].message}\n\nDid you mean one of these sections?\n${hint}`,
+					},
+				];
+			}
+		}
 		return {
 			file: targetPath,
 			status: 'error',
 			hunks: hunksTotal,
 			hunksApplied: 0,
 			hunksFailed: hunksTotal,
-			errors: hunkResult.error ? [hunkResult.error] : [],
+			errors,
 		};
 	}
 
@@ -1178,6 +1287,18 @@ export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 		const allowCreates = (obj.allowCreates as boolean) ?? false;
 		const allowDeletes = (obj.allowDeletes as boolean) ?? false;
 
+		// Load opt-in fuzzy-match config (issue #1718). Default off — preserves
+		// the B3 exact-match decision. Loaded once per invocation via the
+		// `_internals` DI seam so tests can substitute hermetically.
+		const { config } = _internals.loadPluginConfigWithMeta(directory);
+		const fuzzyMatch = config.apply_patch?.fuzzy_match === true;
+		const fuzzyMatchContextAware =
+			config.apply_patch?.fuzzy_match_context_aware === true;
+		const hunkOptions: ApplyHunksOptions | undefined =
+			fuzzyMatch || fuzzyMatchContextAware
+				? { fuzzyMatch, fuzzyMatchContextAware }
+				: undefined;
+
 		// Validate workspace directory
 		if (!existsSync(directory)) {
 			return JSON.stringify(
@@ -1302,6 +1423,7 @@ export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 				dryRun,
 				allowCreates,
 				allowDeletes,
+				hunkOptions,
 			);
 
 			fileResults.push(result);
