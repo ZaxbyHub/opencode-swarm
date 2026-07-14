@@ -1601,6 +1601,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
 				},
+				'swarm-ci-monitor': {
+					template: '/swarm ci-monitor $ARGUMENTS',
+					description:
+						'Use /swarm ci-monitor to drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge)',
+				},
 				'swarm-pr-subscribe': {
 					template: '/swarm pr subscribe $ARGUMENTS',
 					description: shortcutDescription('pr subscribe'),

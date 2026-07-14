@@ -312,6 +312,35 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 					}
 				}
 			}
+		} else if (kind === 'adapter') {
+			if (!fileExists(opencodePath)) {
+				findings.push({
+					category,
+					severity: 'error',
+					file: opencodePath,
+					message: `adapter skill "${slug}" missing canonical ${opencodePath}`,
+				});
+			}
+			for (const adapterPath of contract.adapterPaths ?? []) {
+				if (!fileExists(adapterPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: adapterPath,
+						message: `adapter skill "${slug}" missing adapter shim ${adapterPath}`,
+					});
+					continue;
+				}
+				const expectedRef = contract.expectedCanonicalRef ?? opencodePath;
+				if (!readFile(adapterPath).includes(expectedRef)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: adapterPath,
+						message: `adapter shim ${adapterPath} no longer references canonical "${expectedRef}"`,
+					});
+				}
+			}
 		} else if (kind === 'opencode-only') {
 			if (!fileExists(opencodePath)) {
 				findings.push({

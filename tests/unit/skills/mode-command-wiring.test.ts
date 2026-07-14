@@ -44,7 +44,6 @@ const NON_COMMAND_SKILLS = new Set([
 	'swarm-pr-subscribe',
 	'swarm-implement',
 	'swarm-pr-subscribe',
-	'swarm-ci-monitor',
 	'writing-tests',
 	'generated',
 	'worktree-retry-cleanup',

@@ -223,6 +223,88 @@ describe('drift-check: skill-mirror detection', () => {
 		const hit = findings.find((f) => f.message.includes('"generated"'));
 		expect(hit).toBeUndefined();
 	});
+
+	// ADDITIONAL_SKILL_MIRROR_CONTRACTS `adapter` kind — ci-fix-monitor is the
+	// real (currently only) entry using this kind: .opencode is canonical,
+	// .agents/skills/ci-fix-monitor is a thin adapter shim, no .claude copy.
+	describe('adapter kind (ci-fix-monitor)', () => {
+		test('passes when the canonical exists and the adapter shim references it', () => {
+			const root = makeTempRoot();
+			writeFile(
+				root,
+				'.opencode/skills/ci-fix-monitor/SKILL.md',
+				'canonical protocol\n',
+			);
+			writeFile(
+				root,
+				'.agents/skills/ci-fix-monitor/SKILL.md',
+				'Read `.opencode/skills/ci-fix-monitor/SKILL.md` for the full protocol.\n',
+			);
+
+			const findings = detectSkillMirrorDrift(root);
+			const hit = findings.find((f) => f.message.includes('ci-fix-monitor'));
+			expect(hit).toBeUndefined();
+		});
+
+		test('detects a missing canonical .opencode file', () => {
+			const root = makeTempRoot();
+			writeFile(
+				root,
+				'.agents/skills/ci-fix-monitor/SKILL.md',
+				'Read `.opencode/skills/ci-fix-monitor/SKILL.md` for the full protocol.\n',
+			);
+
+			const findings = detectSkillMirrorDrift(root);
+			const hit = findings.find(
+				(f) =>
+					f.severity === 'error' &&
+					f.file === '.opencode/skills/ci-fix-monitor/SKILL.md' &&
+					f.message.includes('missing canonical'),
+			);
+			expect(hit).toBeDefined();
+		});
+
+		test('detects a missing adapter shim', () => {
+			const root = makeTempRoot();
+			writeFile(
+				root,
+				'.opencode/skills/ci-fix-monitor/SKILL.md',
+				'canonical protocol\n',
+			);
+
+			const findings = detectSkillMirrorDrift(root);
+			const hit = findings.find(
+				(f) =>
+					f.severity === 'error' &&
+					f.file === '.agents/skills/ci-fix-monitor/SKILL.md' &&
+					f.message.includes('missing adapter shim'),
+			);
+			expect(hit).toBeDefined();
+		});
+
+		test('detects an adapter shim that no longer references the canonical file', () => {
+			const root = makeTempRoot();
+			writeFile(
+				root,
+				'.opencode/skills/ci-fix-monitor/SKILL.md',
+				'canonical protocol\n',
+			);
+			writeFile(
+				root,
+				'.agents/skills/ci-fix-monitor/SKILL.md',
+				'This shim no longer points anywhere useful.\n',
+			);
+
+			const findings = detectSkillMirrorDrift(root);
+			const hit = findings.find(
+				(f) =>
+					f.severity === 'error' &&
+					f.file === '.agents/skills/ci-fix-monitor/SKILL.md' &&
+					f.message.includes('no longer references canonical'),
+			);
+			expect(hit).toBeDefined();
+		});
+	});
 });
 
 describe('drift-check: static skill audience metadata', () => {

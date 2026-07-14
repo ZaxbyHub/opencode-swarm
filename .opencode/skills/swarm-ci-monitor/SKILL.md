@@ -241,6 +241,11 @@ already ran once in this invocation.
    directly per Step 5 as an "un-approval" terminal, do not loop back to
    Step 2.
 
+Optional pre-queue simulation: `file:.swarm/bundled-skills/merge-queue-readiness/SKILL.md`
+covers running `/swarm ci-simulate` before entering a merge queue. It is a
+fast local signal, not a substitute for this step's live re-checks above —
+run it in addition to, never instead of, Step 3.
+
 ## Step 4 — Merge
 
 ### 4a. Execute the merge

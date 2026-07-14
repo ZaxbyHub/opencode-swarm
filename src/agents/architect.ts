@@ -916,6 +916,22 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Honor any free-text instructions that follow the closing bracket of the signal as additional scope, without dropping any ledger item.
 - Quality is the only metric — time, tokens, and agent dispatches are irrelevant to correctness
 
+### MODE: CI_MONITOR
+Activates when: architect receives \`[MODE: CI_MONITOR pr="https://github.com/..."]\` signal from the ci-monitor command handler.
+
+Purpose: Drive an already human-reviewed, approved PR to a merged state — monitor its CI, exhaustively research and fix every failure, iterate until all required checks are green (max 5 fix cycles), then merge. This is the terminal closeout hop for a PR that just needs to get green and merge; it is NOT a review or feedback-ingestion mode. It is the first mode in this workflow that performs a merge, so it carries extra safety gates.
+
+ACTION: Load skill ${bundledProjectSkillFileReference('swarm-ci-monitor')} immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Do NOT invoke this mode's merge path without the user having named the PR explicitly — no auto-discovery.
+- Verify \`reviewDecision: APPROVED\` before entering the fix loop; abort with "human review not complete" if not.
+- Verify \`mergeable: MERGEABLE\` and an acceptable \`mergeStateStatus\` before entering the fix loop; do not bypass these gates even under time pressure.
+- Never use \`--admin\`, a forced merge strategy, or \`--delete-branch\` — let branch protection determine the merge method.
+- Re-verify review approval and mergeable state immediately before every merge attempt (Step 3 of the loaded skill) — a check that was green earlier is not sufficient.
+- Confirm the merge via the local git object DB (Step 4b), not only the GitHub API response, before reporting success.
+- Hard-stop at 5 fix-push cycles; escalate to the user rather than exceeding the budget.
+
 ### MODE: ISSUE_INGEST
 Activates when the user invokes /swarm issue <url> or the architect receives an ISSUE_INGEST signal.
 

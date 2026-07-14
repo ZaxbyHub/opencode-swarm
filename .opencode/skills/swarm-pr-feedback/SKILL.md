@@ -239,6 +239,8 @@ branches or prior work sessions.
 
 ## Batch Collection (mandatory before any fix)
 
+Read `file:.swarm/bundled-skills/ci-failure-batching/SKILL.md` for the full batch collection and fix protocol before proceeding.
+
 Issue #1746: 8+ push cycles where 3–4 would have sufficed with batching.
 The anti-pattern: iterating check-by-check, proposing a fix for one failure,
 pushing, waiting for CI, then discovering the next failure. Each cycle costs

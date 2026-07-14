@@ -1115,6 +1115,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace] [--no-repro]` | Ingest a GitHub issue for localization and resolution |
 | `/swarm pr-review <pr-url\|owner/repo#N\|N> [--council] [instructions...]` | Structured deep PR review with parallel lanes, reviewer confirmation, and critic challenge |
 | `/swarm pr-feedback [<pr-url\|owner/repo#N\|N>] [instructions...]` | Ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh review |
+| `/swarm ci-monitor <pr-url\|owner/repo#N\|N>` | Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles) |
 | `/swarm pr subscribe <pr-url\|owner/repo#N\|N>` | Subscribe current session to PR monitoring (session-scoped); requires `pr_monitor.enabled: true` |
 | `/swarm pr unsubscribe <pr-url\|owner/repo#N\|N>` | Remove session's subscription to a PR |
 | `/swarm pr status` | List active PR subscriptions for current session with relative timestamps (the `bunx opencode-swarm run pr status` CLI has no session context, so it lists subscriptions across all sessions) |
