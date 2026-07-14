@@ -41,11 +41,21 @@ export function resolveIdentityPath(projectHash: string): string {
 
 /**
  * Derive a deterministic project hash from a directory.
- * Uses git remote URL if available, otherwise falls back to absolute path.
+ *
+ * @deprecated Since issue #1846. This synchronous helper is retained for
+ * backward compatibility (and its existing test coverage) but the canonical,
+ * normalization-correct, subprocess-compliant resolver is
+ * {@link resolveCohortId} in `./cohort-identity.ts`. New callers MUST use
+ * `resolveCohortId`; it normalizes equivalent remotes (SSH/scp/HTTPS, `.git`,
+ * case, slashes, percent-encoding, NFC), falls back through
+ * `git rev-parse --git-common-dir` before the path, and uses the compliant
+ * array-form subprocess contract. This legacy helper is kept only so existing
+ * imports keep compiling; it delegates to the legacy un-normalized logic.
  *
  * Worktrees of the same repository share a git remote, so they derive the same
  * hash — which is what lets `/swarm link` (with no name) tie them to one shared
- * knowledge store by default.
+ * knowledge store by default. (Note: this legacy form does NOT normalize
+ * equivalent remote spellings; `resolveCohortId` does.)
  */
 export function deriveProjectHash(directory: string): string {
 	const absolutePath = path.resolve(directory);
@@ -55,10 +65,10 @@ export function deriveProjectHash(directory: string): string {
 		// Try to get git remote URL. Bounded with a timeout (Invariant 3 — no
 		// unbounded subprocess); a missing/hung remote falls back to the path.
 		const remoteUrl = child_process
-			.execSync('git remote get-url origin', {
+			.execSync('git -C . remote get-url origin', {
 				cwd: directory,
 				encoding: 'utf-8',
-				stdio: ['pipe', 'pipe', 'ignore'],
+				stdio: ['ignore', 'pipe', 'ignore'],
 				timeout: 1500,
 			})
 			.trim();

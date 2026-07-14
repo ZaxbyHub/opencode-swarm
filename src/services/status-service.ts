@@ -15,6 +15,7 @@ import {
 	readRecentEscalations,
 } from '../hooks/knowledge-escalator';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator';
+import { readLinkPointer, resolveLinkDir } from '../hooks/knowledge-link';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {
@@ -104,6 +105,19 @@ export interface StatusData {
 	unactionableQueueDepth?: number;
 	/** #1234 Part 3: pending insight candidates awaiting phase boundary consumption */
 	insightCandidatesPending?: number;
+	/**
+	 * Cohort/link status (issue #1846). Makes the linked knowledge store and its
+	 * health obvious in `/swarm status`. `undefined` when link state is absent.
+	 */
+	cohort?: {
+		linked: boolean;
+		linkId?: string;
+		cohortId?: string;
+		identitySource?: 'remote' | 'git-common-dir' | 'path';
+		degraded?: boolean;
+		sharedRoot?: string;
+		generation?: number;
+	};
 }
 
 /**
@@ -251,6 +265,28 @@ export async function getStatusData(
 	status.insightCandidatesPending = await safeLineCount(
 		validateSwarmPath(directory, 'insight-candidates.jsonl'),
 	);
+
+	// Issue #1846: surface cohort/link status so `/swarm status` makes the
+	// linked knowledge store and its health obvious. Best-effort: a missing or
+	// corrupt pointer reports the unlinked shape.
+	try {
+		const pointer = readLinkPointer(directory);
+		if (pointer) {
+			status.cohort = {
+				linked: true,
+				linkId: pointer.linkId,
+				cohortId: pointer.cohortId,
+				identitySource: pointer.identitySource,
+				degraded: pointer.degraded,
+				sharedRoot: resolveLinkDir(pointer.linkId),
+				generation: pointer.generation,
+			};
+		} else {
+			status.cohort = { linked: false };
+		}
+	} catch {
+		status.cohort = { linked: false };
+	}
 
 	// Check Full-Auto status (issue #1781 E2: this was previously nested
 	// inside `enrichWithLeanTurbo`, past its `if (!leanActive) return status`
@@ -472,6 +508,29 @@ export function formatStatusMarkdown(status: StatusData): string {
 			);
 		if (insights > 0)
 			lines.push(`  - Insight candidates: ${insights} (consumed at phase end)`);
+	}
+
+	// Issue #1846: cohort/link status — make the shared knowledge store visible.
+	if (status.cohort?.linked) {
+		lines.push('', '**Knowledge Cohort**:');
+		lines.push(`  - 🔗 Linked to shared store "${status.cohort.linkId}"`);
+		if (status.cohort.cohortId)
+			lines.push(`    cohort: ${status.cohort.cohortId}`);
+		if (status.cohort.identitySource)
+			lines.push(`    identity: ${status.cohort.identitySource}`);
+		if (status.cohort.degraded)
+			lines.push(
+				'    ⚠ degraded (machine-local, not portable across machines)',
+			);
+		if (status.cohort.sharedRoot)
+			lines.push(`    shared at: ${status.cohort.sharedRoot}`);
+		if (status.cohort.generation !== undefined)
+			lines.push(`    generation: ${status.cohort.generation}`);
+	} else {
+		lines.push(
+			'',
+			'**Knowledge Cohort**: local (not linked — run `/swarm link` to share across worktrees)',
+		);
 	}
 
 	return lines.join('\n');

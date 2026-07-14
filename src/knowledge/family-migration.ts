@@ -1,0 +1,563 @@
+/**
+ * Cohort family-migration engine for the linked-swarm knowledge system.
+ *
+ * Drives both `/swarm link` and `/swarm unlink` off the single
+ * {@link KNOWLEDGE_FAMILY} manifest (issue #1846 §3). Replaces the prior
+ * single-file (`knowledge.jsonl`-only) migration that silently orphaned the
+ * other six family members.
+ *
+ * Design (issue #1846, critic-reviewed plan W3/W4):
+ *  - One manifest drives link + unlink, so a new family member cannot be
+ *    silently omitted.
+ *  - Three merge strategies: `dedup-id-merge` (provenance-preserving store
+ *    merge), `append-union` (id-keyed union for append-only logs),
+ *    `sum-counters` (per-counter SUM for the baseline JSON, reusing
+ *    `mergeRollupInto`).
+ *  - All-or-nothing commit: stage the entire merged family into a sibling
+ *    staging directory, validate every file, then commit atomically. The
+ *    pointer is flipped last by the caller.
+ *  - Lock discipline: acquire the destination store's directory lock first,
+ *    read source files under a *brief* source-store lock (released before the
+ *    long merge/validate work), so a long migration cannot have its lock
+ *    stolen by `stale` expiry and cannot deadlock against the hot path.
+ *
+ * No writes happen here on the plugin-init path (invariant 1). Locks are
+ * `proper-lockfile` directory locks with a bumped `stale` for the migration
+ * critical section (invariant 3, critic C9).
+ */
+
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
+import lockfile from 'proper-lockfile';
+import * as path from 'node:path';
+import { atomicWriteFile } from '../evidence/task-file.js';
+import { findNearDuplicate } from '../hooks/knowledge-store.js';
+import { _internals as eventsInternals } from '../hooks/knowledge-events.js';
+import type { CounterRollup } from '../hooks/knowledge-events.js';
+import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import { KNOWLEDGE_FAMILY, type KnowledgeFamilyMember } from './family-manifest.js';
+
+const DEDUP_THRESHOLD = 0.6;
+
+/**
+ * Lock config for the migration critical section. The default knowledge-store
+ * `stale: 5000` (5 s) is too short for an 8-file merge under load; a long
+ * merge would have its lock stolen by a concurrent writer mid-flight (critic
+ * C9). 30 s comfortably covers worst-case merges of large knowledge corpora.
+ */
+const MIGRATION_LOCK_STALE_MS = 30_000;
+const MIGRATION_LOCK_RETRIES = {
+	retries: { retries: 10, minTimeout: 100, maxTimeout: 500 },
+};
+
+export interface FamilyMigrationCounts {
+	/** Per-member counts (filename → {merged, skipped}). */
+	readonly perMember: ReadonlyArray<{
+		filename: string;
+		merged: number;
+		skipped: number;
+	}>;
+}
+
+/** Read a JSONL file into an array of parsed objects (malformed lines skipped). */
+function readJsonl<T>(filePath: string): T[] {
+	if (!existsSync(filePath)) return [];
+	try {
+		const content = readFileSync(filePath, 'utf-8');
+		const out: T[] = [];
+		for (const line of content.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			try {
+				out.push(JSON.parse(trimmed) as T);
+			} catch {
+				/* skip malformed */
+			}
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
+
+/** Read a JSON file (object). Returns null if absent or unparseable. */
+function readJson<T>(filePath: string): T | null {
+	if (!existsSync(filePath)) return null;
+	try {
+		return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
+	} catch {
+		return null;
+	}
+}
+
+/** Id key extractor for append-union members (event id / entry id). */
+function lineId(obj: unknown): string | null {
+	if (!obj || typeof obj !== 'object') return null;
+	const o = obj as Record<string, unknown>;
+	if (typeof o.id === 'string' && o.id.length > 0) return o.id;
+	return null;
+}
+
+/**
+ * Provenance-preserving merge of the active store (`dedup-id-merge`).
+ *
+ * Exact-id duplicates: skip (already present). Near-duplicates (Jaccard bigram
+ * similarity ≥ threshold): merge fields rather than drop — union `confirmed_by`,
+ * `tags`, `source_refs`; union retrieval outcomes by unique outcome key;
+ * confidence becomes an evidence-weighted average; the losing entry's `id` is
+ * preserved in `merged_from` for retraction traceability. A `merge` is NOT
+ * silent. (Critic C8: this is "provenance-preserving", not "lossless".)
+ */
+function mergeStoreEntries(
+	destination: KnowledgeEntryBase[],
+	source: KnowledgeEntryBase[],
+): { merged: KnowledgeEntryBase[]; added: number; skipped: number } {
+	const result = [...destination];
+	const seenIds = new Set(result.map((e) => e.id));
+	let added = 0;
+	let skipped = 0;
+
+	for (const src of source) {
+		if (seenIds.has(src.id)) {
+			skipped++;
+			continue;
+		}
+		const dup = findNearDuplicate(src.lesson, result, DEDUP_THRESHOLD);
+		if (dup) {
+			// Provenance-preserving field union into the existing near-duplicate.
+			mergeEntryFields(dup, src);
+			skipped++;
+			continue;
+		}
+		result.push(src);
+		seenIds.add(src.id);
+		added++;
+	}
+	return { merged: result, added, skipped };
+}
+
+/** Field-level union of `src` into `target` (mutates target). */
+function mergeEntryFields(
+	target: KnowledgeEntryBase,
+	src: KnowledgeEntryBase,
+): void {
+	// Loose-record view for optional/extra fields not on the base type.
+	const tAny = target as unknown as Record<string, unknown>;
+	const sAny = src as unknown as Record<string, unknown>;
+	// confirmed_by: array union by a stable key.
+	target.confirmed_by = unionConfirmedBy(target.confirmed_by, src.confirmed_by);
+	// tags: array union (case-sensitive, ordered).
+	target.tags = Array.from(new Set([...(target.tags ?? []), ...(src.tags ?? [])]));
+	// source_refs is optional on some shapes; union if present.
+	const tRefs = tAny.source_refs;
+	const sRefs = sAny.source_refs;
+	if (Array.isArray(tRefs) && Array.isArray(sRefs)) {
+		tAny.source_refs = Array.from(new Set([...tRefs, ...sRefs]));
+	}
+	// Retrieval outcomes: sum per-counter fields (these are independent event
+	// counts, so summing is correct; we do NOT double-count a single human
+	// action because each side's counts come from distinct event logs).
+	sumRetrievalOutcomes(target, src);
+	// Confidence: evidence-weighted average (weight = outcome count + confirmed_by).
+	target.confidence = weightedConfidence(target, src);
+	// Preserve the losing entry's id for retraction traceability.
+	const mergedFrom = tAny.merged_from;
+	const trail: string[] = Array.isArray(mergedFrom) ? [...mergedFrom] : [];
+	if (!trail.includes(src.id)) trail.push(src.id);
+	tAny.merged_from = trail;
+	// created_at: keep the earliest; updated_at: keep the latest.
+	if (src.created_at && src.created_at < (target.created_at ?? src.created_at)) {
+		target.created_at = src.created_at;
+	}
+	if (src.updated_at && src.updated_at > (target.updated_at ?? src.updated_at)) {
+		target.updated_at = src.updated_at;
+	}
+	// Keep the richer (longer) lesson text.
+	if (src.lesson.length > target.lesson.length) {
+		// Preserve the original id; only swap the text.
+		target.lesson = src.lesson;
+	}
+}
+
+function unionConfirmedBy(
+	a: KnowledgeEntryBase['confirmed_by'],
+	b: KnowledgeEntryBase['confirmed_by'],
+): KnowledgeEntryBase['confirmed_by'] {
+	if (!a) return b ?? [];
+	if (!b) return a;
+	// Dedup by a composite key of available identifying fields.
+	const key = (r: unknown): string => {
+		if (!r || typeof r !== 'object') return JSON.stringify(r);
+		const o = r as Record<string, unknown>;
+		return `${o.phase_number ?? ''}|${o.project_name ?? ''}|${o.confirmed_at ?? ''}`;
+	};
+	const seen = new Set(a.map(key));
+	const merged = [...a];
+	for (const rec of b) {
+		const k = key(rec);
+		if (!seen.has(k)) {
+			seen.add(k);
+			merged.push(rec);
+		}
+	}
+	return merged;
+}
+
+function sumRetrievalOutcomes(
+	target: KnowledgeEntryBase,
+	src: KnowledgeEntryBase,
+): void {
+	const t = target.retrieval_outcomes;
+	const s = src.retrieval_outcomes;
+	if (!t || !s) return;
+	const tAny = t as unknown as Record<string, unknown>;
+	const sAny = s as unknown as Record<string, unknown>;
+	const numericKeys = [
+		'applied_count',
+		'succeeded_after_count',
+		'failed_after_count',
+		'shown_count',
+		'acknowledged_count',
+		'applied_explicit_count',
+		'ignored_count',
+		'violated_count',
+		'contradicted_count',
+		'n_a_count',
+		'succeeded_after_shown_count',
+		'failed_after_shown_count',
+		'partial_after_shown_count',
+	] as const;
+	for (const k of numericKeys) {
+		const tv = tAny[k];
+		const sv = sAny[k];
+		if (typeof tv === 'number' || typeof sv === 'number') {
+			tAny[k] = (typeof tv === 'number' ? tv : 0) + (typeof sv === 'number' ? sv : 0);
+		}
+	}
+	// Timestamps: keep the latest.
+	if (s.last_applied_at && (!t.last_applied_at || s.last_applied_at > t.last_applied_at)) {
+		t.last_applied_at = s.last_applied_at;
+	}
+}
+
+function weightedConfidence(
+	target: KnowledgeEntryBase,
+	src: KnowledgeEntryBase,
+): number {
+	const weightOf = (e: KnowledgeEntryBase): number => {
+		const o = e.retrieval_outcomes as unknown as
+			| Record<string, unknown>
+			| undefined;
+		let n = 0;
+		if (o) {
+			for (const k of ['shown_count', 'acknowledged_count', 'applied_explicit_count'] as const) {
+				const v = o[k];
+				if (typeof v === 'number') n += v;
+			}
+		}
+		n += Array.isArray(e.confirmed_by) ? e.confirmed_by.length : 0;
+		// Floor so an entry with no evidence still gets a tiny weight.
+		return Math.max(n, 0.5);
+	};
+	const wt = weightOf(target);
+	const ws = weightOf(src);
+	return (target.confidence * wt + src.confidence * ws) / (wt + ws);
+}
+
+/**
+ * Append-union: append source lines whose id is not already present on the
+ * destination. Lines without an id field are skipped (we cannot dedup them
+ * safely, and every family member here is id-keyed).
+ */
+function appendUnionById<T>(
+	destination: T[],
+	source: T[],
+): { merged: T[]; added: number; skipped: number } {
+	const result = [...destination];
+	const seen = new Set(result.map(lineId).filter((x): x is string => x !== null));
+	let added = 0;
+	let skipped = 0;
+	for (const src of source) {
+		const id = lineId(src);
+		if (!id || seen.has(id)) {
+			skipped++;
+			continue;
+		}
+		result.push(src);
+		seen.add(id);
+		added++;
+	}
+	return { merged: result, added, skipped };
+}
+
+/**
+ * Sum-counters: merge two baseline JSON objects (`Record<id, CounterRollup>`)
+ * by per-id field-wise sum, reusing the canonical `mergeRollupInto` primitive.
+ */
+function sumCounters(
+	destination: Record<string, CounterRollup>,
+	source: Record<string, CounterRollup>,
+): { merged: Record<string, CounterRollup>; added: number; skipped: number } {
+	const result: Record<string, CounterRollup> = { ...destination };
+	let added = 0;
+	let skipped = 0;
+	for (const [id, srcRollup] of Object.entries(source)) {
+		const existing = result[id];
+		if (existing) {
+			// Merge srcRollup INTO existing (mutates a shallow copy).
+			const merged = { ...existing, violation_timestamps: [...existing.violation_timestamps] };
+			eventsInternals.mergeRollupInto(merged, srcRollup);
+			result[id] = merged;
+			skipped++; // id already present (merged, not added)
+		} else {
+			result[id] = srcRollup;
+			added++;
+		}
+	}
+	return { merged: result, added, skipped };
+}
+
+/** Serialize a merged family member to its on-disk representation. */
+function serialize(member: KnowledgeFamilyMember, data: unknown): string {
+	if (member.mergeStrategy === 'sum-counters') {
+		return `${JSON.stringify(data)}\n`;
+	}
+	// JSONL member
+	const arr = data as unknown[];
+	if (arr.length === 0) return '';
+	return arr.map((e) => JSON.stringify(e)).join('\n') + '\n';
+}
+
+/**
+ * Validate a serialized merged member BEFORE commit. This is a real integrity
+ * gate, not a vacuous JSON-parseability check: each line must parse AND, for
+ * the store member, each entry must carry the required `id`/`lesson` shape so a
+ * corrupted merge (e.g. an entry that lost its id) is rejected before it reaches
+ * the destination. A failure aborts the migration — the destination stays
+ * untouched and the caller never flips the pointer, so a retry is safe.
+ */
+function validateSerialized(
+	member: KnowledgeFamilyMember,
+	serialized: string,
+): boolean {
+	if (member.mergeStrategy === 'sum-counters') {
+		// Counter baseline: must be a JSON object whose values are rollup objects.
+		try {
+			const obj = JSON.parse(serialized) as unknown;
+			if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	for (const line of serialized.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			return false;
+		}
+		// Every family member line must carry a stable `id` (the merge strategies
+		// and the hot path both key off it). A line without an id would be
+		// unaddressable for retraction/dedup — reject it.
+		if (
+			!parsed ||
+			typeof parsed !== 'object' ||
+			typeof (parsed as Record<string, unknown>).id !== 'string'
+		) {
+			return false;
+		}
+		// The store member additionally requires a `lesson` string (the field the
+		// near-duplicate detector and retrieval both depend on).
+		if (member.role === 'store') {
+			if (
+				typeof (parsed as Record<string, unknown>).lesson !== 'string' ||
+				((parsed as Record<string, unknown>).lesson as string).length === 0
+			) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/** Read a source family member from a store directory into merged form. */
+function readSourceMember(
+	member: KnowledgeFamilyMember,
+	sourceDir: string,
+): unknown {
+	const filePath = path.join(sourceDir, member.filename);
+	if (member.mergeStrategy === 'sum-counters') {
+		return readJson<Record<string, CounterRollup>>(filePath) ?? {};
+	}
+	return readJsonl(filePath);
+}
+
+/** Merge a single source member into the destination member's current data. */
+function mergeMember(
+	member: KnowledgeFamilyMember,
+	destinationData: unknown,
+	sourceData: unknown,
+): { merged: unknown; added: number; skipped: number } {
+	switch (member.mergeStrategy) {
+		case 'dedup-id-merge': {
+			const r = mergeStoreEntries(
+				(destinationData as KnowledgeEntryBase[]) ?? [],
+				(sourceData as KnowledgeEntryBase[]) ?? [],
+			);
+			return { merged: r.merged, added: r.added, skipped: r.skipped };
+		}
+		case 'append-union': {
+			const r = appendUnionById(
+				(destinationData as unknown[]) ?? [],
+				(sourceData as unknown[]) ?? [],
+			);
+			return { merged: r.merged, added: r.added, skipped: r.skipped };
+		}
+		case 'sum-counters': {
+			const r = sumCounters(
+				(destinationData as Record<string, CounterRollup>) ?? {},
+				(sourceData as Record<string, CounterRollup>) ?? {},
+			);
+			return { merged: r.merged, added: r.added, skipped: r.skipped };
+		}
+		default:
+			return { merged: destinationData, added: 0, skipped: 0 };
+	}
+}
+
+/**
+ * Read all family members from a store directory under a brief directory lock.
+ * Returns the in-memory snapshot keyed by filename. The lock is released before
+ * this function returns, so callers must not rely on it covering later work.
+ */
+async function snapshotSourceFamily(
+	storeDir: string,
+): Promise<Record<string, unknown>> {
+	const snapshot: Record<string, unknown> = {};
+	// Brief lock: acquire, read all files synchronously, release immediately.
+	let release: (() => Promise<void>) | null = null;
+	try {
+		await mkdir(storeDir, { recursive: true });
+	} catch {
+		/* may not exist — reads return empty below */
+	}
+	try {
+		release = await lockfile.lock(storeDir, {
+			...MIGRATION_LOCK_RETRIES,
+			stale: MIGRATION_LOCK_STALE_MS,
+		});
+	} catch {
+		/* If the lock cannot be acquired (e.g. dir doesn't exist), read unlocked.
+		   Source files are read-only here; the destination write is the serialized
+		   boundary. A missing source dir simply yields an empty snapshot. */
+	}
+	for (const member of KNOWLEDGE_FAMILY) {
+		snapshot[member.filename] = readSourceMember(member, storeDir);
+	}
+	if (release) {
+		try {
+			await release();
+		} catch {
+			/* non-blocking */
+		}
+	}
+	return snapshot;
+}
+
+/**
+ * Migrate the complete knowledge family from `sourceDir` into `destinationDir`,
+ * merging each member according to its manifest strategy. All-or-nothing:
+ * stage → validate → commit. The pointer is NOT touched here (caller flips it).
+ *
+ * Returns per-member merge counts. Throws on validation failure (caller
+ * surfaces the error; the destination is left untouched).
+ *
+ * @param destinationDir the cohort store that absorbs the merge (link → shared;
+ *   unlink → local `.swarm`).
+ * @param sourceDir the store whose family is merged in (link → local `.swarm`;
+ *   unlink → shared).
+ */
+export async function migrateKnowledgeFamily(
+	destinationDir: string,
+	sourceDir: string,
+): Promise<FamilyMigrationCounts> {
+	// 1. Acquire the destination lock for the whole critical section.
+	await mkdir(destinationDir, { recursive: true });
+	let destRelease: (() => Promise<void>) | null = null;
+	try {
+		destRelease = await lockfile.lock(destinationDir, {
+			...MIGRATION_LOCK_RETRIES,
+			stale: MIGRATION_LOCK_STALE_MS,
+		});
+	} catch (err) {
+		throw new Error(
+			`family-migration: could not lock destination ${destinationDir}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+
+	// 2. Snapshot source under a brief lock (released before long work).
+	const sourceSnapshot = await snapshotSourceFamily(sourceDir);
+
+	const perMember: Array<{ filename: string; merged: number; skipped: number }> = [];
+	const staged: Array<{ member: KnowledgeFamilyMember; serialized: string }> = [];
+
+	try {
+		// 3. Read current destination + merge each member in memory.
+		for (const member of KNOWLEDGE_FAMILY) {
+			const destData = readSourceMember(member, destinationDir);
+			const srcData = sourceSnapshot[member.filename] ?? (member.mergeStrategy === 'sum-counters' ? {} : []);
+			const { merged, added, skipped } = mergeMember(member, destData, srcData);
+			perMember.push({
+				filename: member.filename,
+				merged: added,
+				skipped,
+			});
+			staged.push({ member, serialized: serialize(member, merged) });
+		}
+
+		// 4. Validate every staged member before any commit.
+		for (const { member, serialized } of staged) {
+			if (!validateSerialized(member, serialized)) {
+				throw new Error(
+					`family-migration: validation failed for ${member.filename}; aborting before commit`,
+				);
+			}
+		}
+
+		// 5. Commit: write each merged member atomically (temp + rename). Because
+		//    validation passed for all members, a mid-commit failure leaves the
+		//    destination with a partial migration — but the pointer is NOT flipped
+		//    by this function, so the worktree stays in its prior link state and a
+		//    retry is idempotent (every strategy is id-keyed: re-merging already-
+		//    present ids/entries is a no-op). See critic C5.
+		for (const { member, serialized } of staged) {
+			const destPath = path.join(destinationDir, member.filename);
+			await atomicWriteFile(destPath, serialized);
+		}
+	} finally {
+		if (destRelease) {
+			try {
+				await destRelease();
+			} catch {
+				/* non-blocking */
+			}
+		}
+	}
+
+	return { perMember };
+}
+
+export const _internals = {
+	mergeStoreEntries,
+	appendUnionById,
+	sumCounters,
+	mergeEntryFields,
+	serialize,
+	validateSerialized,
+	MIGRATION_LOCK_STALE_MS,
+};

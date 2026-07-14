@@ -32,6 +32,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -44,7 +45,8 @@ import { warn } from '../utils/logger.js';
 
 /** On-disk pointer at `<directory>/.swarm/link.json`. */
 export interface LinkPointer {
-	version: 1;
+	/** Pointer schema version. v1 pointers stay valid; v2 carries cohort metadata. */
+	version: 1 | 2;
 	/** Path-safe identifier of the shared store (projectHash or sanitized name). */
 	linkId: string;
 	/** Human-friendly name when the link was created from an explicit name. */
@@ -53,6 +55,17 @@ export interface LinkPointer {
 	createdAt: string;
 	/** How the link was established. */
 	source: 'manual' | 'auto';
+	// --- v2 additions (optional so v1 pointers remain valid on read) ---
+	/** Canonical cohort id from `resolveCohortId` (issue #1846). */
+	cohortId?: string;
+	/** How the cohort id was derived. */
+	identitySource?: 'remote' | 'git-common-dir' | 'path';
+	/** True when the cohort id is machine-local (git-common-dir/path fallback). */
+	degraded?: boolean;
+	/** Deterministic hash of cohort-relevant config (issue #1846 §4). */
+	configFingerprint?: string;
+	/** Monotonic generation counter, bumped on each link/unlink. Aids cache invalidation. */
+	generation?: number;
 }
 
 export interface LinkedLocalKnowledgeStatus {
@@ -188,7 +201,13 @@ function resolveLinkPointerPath(directory: string): string {
 	return path.join(directory, '.swarm', LINK_POINTER_FILENAME);
 }
 
-/** Read and validate the link pointer for a worktree. Null if absent/invalid. */
+/**
+ * Read and validate the link pointer for a worktree. Null if absent/invalid.
+ *
+ * Schema-version aware (issue #1846): reads `version` from disk rather than
+ * hard-stamping `1`, validates it is a known version, and preserves v2 cohort
+ * metadata fields when present. Unknown fields are ignored (forward-compat).
+ */
 export function readLinkPointer(directory: string): LinkPointer | null {
 	const pointerPath = resolveLinkPointerPath(directory);
 	if (!existsSync(pointerPath)) return null;
@@ -202,8 +221,12 @@ export function readLinkPointer(directory: string): LinkPointer | null {
 		// or corrupted linkId must never reach the filesystem unsanitized.
 		const safeId = sanitizeLinkId(linkId);
 		if (!safeId) return null;
+		// Version: read from disk (do NOT hard-stamp 1). Default missing → 1.
+		const rawVersion = obj.version;
+		const version: 1 | 2 =
+			rawVersion === 2 ? 2 : 1; // unknown/missing → v1 (lenient, forward-compat)
 		return {
-			version: 1,
+			version,
 			linkId: safeId,
 			name: typeof obj.name === 'string' ? obj.name : undefined,
 			createdAt:
@@ -211,6 +234,20 @@ export function readLinkPointer(directory: string): LinkPointer | null {
 					? obj.createdAt
 					: new Date(0).toISOString(),
 			source: obj.source === 'auto' ? 'auto' : 'manual',
+			// v2 fields (only set when present and well-typed).
+			cohortId: typeof obj.cohortId === 'string' ? obj.cohortId : undefined,
+			identitySource:
+				obj.identitySource === 'remote' ||
+				obj.identitySource === 'git-common-dir' ||
+				obj.identitySource === 'path'
+					? obj.identitySource
+					: undefined,
+			degraded: typeof obj.degraded === 'boolean' ? obj.degraded : undefined,
+			configFingerprint:
+				typeof obj.configFingerprint === 'string'
+					? obj.configFingerprint
+					: undefined,
+			generation: typeof obj.generation === 'number' ? obj.generation : undefined,
 		};
 	} catch {
 		return null;
@@ -305,17 +342,53 @@ export async function removeLinkPointer(directory: string): Promise<void> {
 interface CacheEntry {
 	linkDir: string | null;
 	expires: number;
+	/**
+	 * Pointer-file stat fingerprint (`mtimeMs:ctimeMs:size`) captured when the
+	 * entry was created. On a cache hit we re-stat the pointer and compare; a
+	 * change means another process wrote/removed the pointer, so we treat the
+	 * entry as stale and re-resolve (issue #1846 §2, critic C6/C7).
+	 *
+	 * `null` means the pointer was absent at cache time (unlinked) — a later
+	 * appearance is a change.
+	 */
+	pointerStat: string | null;
 }
 
 const _resolutionCache = new Map<string, CacheEntry>();
+
+/**
+ * Build the stat fingerprint for the pointer file. Returns `null` when the
+ * pointer is absent (so an absent→present transition is detected as a change).
+ * Includes `ctimeMs` because Windows rename preserves `mtimeMs` (mirrors
+ * `buildCounterRollupCacheKey` in knowledge-events.ts — critic C7).
+ */
+function pointerStatFingerprint(directory: string): string | null {
+	const pointerPath = resolveLinkPointerPath(directory);
+	try {
+		const st = statSync(pointerPath);
+		return `${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Resolve the directory that holds the swarm knowledge family for `directory`.
  *
  * Returns the shared link directory when an active pointer is present, otherwise
  * the local `<directory>/.swarm`. Fail-open: any read/parse error degrades to the
- * local directory, so a corrupt pointer never strands knowledge. Synchronous and
- * cached so the hot retrieval path pays at most one tiny file read per TTL window.
+ * local directory, so a corrupt pointer never strands knowledge. Synchronous
+ * and cached; on a cache hit a cheap `stat` of the pointer file revalidates
+ * cross-process changes so the hot retrieval path stays fast while still
+ * observing link/unlink without waiting for the TTL to expire.
+ *
+ * Cross-process revalidation (issue #1846 §2): on a cache hit we additionally
+ * `stat` the pointer file and compare `mtimeMs:ctimeMs:size` to the cached
+ * fingerprint. A change (another process wrote/removed the pointer) invalidates
+ * the entry, so a stale process observes link/unlink without waiting for the
+ * TTL to expire. The TTL remains a backstop. The per-call `stat` is negligible
+ * (the pointer is tiny and almost never changes) and is the cost of correct
+ * cross-process link/unlink observation.
  *
  * NOTE: when unlinked, the return value is byte-identical to the legacy
  * `path.join(directory, '.swarm')`, so existing callers/tests are unaffected.
@@ -325,7 +398,12 @@ export function resolveKnowledgeStoreDir(directory: string): string {
 	const now = Date.now();
 
 	const cached = _resolutionCache.get(directory);
-	if (cached && now < cached.expires) {
+	const currentStat = pointerStatFingerprint(directory);
+	if (
+		cached &&
+		now < cached.expires &&
+		cached.pointerStat === currentStat
+	) {
 		return cached.linkDir ?? localSwarm;
 	}
 
@@ -363,7 +441,11 @@ export function resolveKnowledgeStoreDir(directory: string): string {
 		const oldest = _resolutionCache.keys().next().value;
 		if (oldest !== undefined) _resolutionCache.delete(oldest);
 	}
-	_resolutionCache.set(directory, { linkDir, expires: now + CACHE_TTL_MS });
+	_resolutionCache.set(directory, {
+		linkDir,
+		expires: now + CACHE_TTL_MS,
+		pointerStat: currentStat,
+	});
 
 	return linkDir ?? localSwarm;
 }

@@ -26,6 +26,11 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator.js';
+import {
+	getLinkedLocalKnowledgeStatus,
+	readLinkPointer,
+	resolveLinkDir,
+} from '../hooks/knowledge-link.js';
 import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
 import { readSynonymMap } from './synonym-map.js';
 import { compareVersions, readVersionCache } from './version-check.js';
@@ -78,6 +83,33 @@ export interface KnowledgeDebugMeta {
 		escalated_directives: number;
 		/** Knowledge-event volume bucketed by type (applied/ignored/violated/...). */
 		events_by_type: Record<string, number>;
+	};
+	/**
+	 * Cohort/link health (issue #1846). Makes the linked store and its health
+	 * obvious to an operator/architect. `null` when link state cannot be read.
+	 */
+	cohort: {
+		/** True when this worktree redirects its knowledge family to a shared store. */
+		linked: boolean;
+		/** Pointer schema version (1 = legacy, 2 = cohort-aware). */
+		pointer_version: 1 | 2 | null;
+		/** Link id (shared store directory segment). */
+		link_id: string | null;
+		/** Canonical cohort id (issue #1846 W1), when known. */
+		cohort_id: string | null;
+		/** How the cohort id was derived. */
+		identity_source: 'remote' | 'git-common-dir' | 'path' | null;
+		/** True when the cohort id is machine-local (not portable). */
+		degraded: boolean;
+		/** Resolved shared root, when linked. */
+		shared_root: string | null;
+		/** Pointer generation (bumped on each link/unlink), when known. */
+		generation: number | null;
+		/**
+		 * True when a local knowledge.jsonl coexists with an active link (the
+		 * pre-link local store was retained). Benign but worth surfacing.
+		 */
+		local_orphaned: boolean;
 	};
 }
 
@@ -213,6 +245,34 @@ export async function computeKnowledgeDebug(
 		// ignore — no/!corrupt synonym map
 	}
 
+	// Cohort/link health (issue #1846). Best-effort: any failure degrades to the
+	// "not linked" shape so a corrupt pointer never breaks diagnostics.
+	let cohortLinked = false;
+	let cohortPointerVersion: 1 | 2 | null = null;
+	let cohortLinkId: string | null = null;
+	let cohortId: string | null = null;
+	let cohortIdentitySource: 'remote' | 'git-common-dir' | 'path' | null = null;
+	let cohortDegraded = false;
+	let cohortSharedRoot: string | null = null;
+	let cohortGeneration: number | null = null;
+	let cohortLocalOrphaned = false;
+	try {
+		const pointer = readLinkPointer(directory);
+		if (pointer) {
+			cohortLinked = true;
+			cohortPointerVersion = pointer.version;
+			cohortLinkId = pointer.linkId;
+			cohortId = pointer.cohortId ?? null;
+			cohortIdentitySource = pointer.identitySource ?? null;
+			cohortDegraded = pointer.degraded ?? false;
+			cohortSharedRoot = resolveLinkDir(pointer.linkId);
+			cohortGeneration = pointer.generation ?? null;
+			cohortLocalOrphaned = getLinkedLocalKnowledgeStatus(directory).orphaned;
+		}
+	} catch {
+		// leave defaults (not linked)
+	}
+
 	return {
 		plugin_version: version,
 		directory,
@@ -235,6 +295,17 @@ export async function computeKnowledgeDebug(
 			enforced_directives: enforcedDirectives,
 			escalated_directives: escalatedDirectives,
 			events_by_type: eventsByType,
+		},
+		cohort: {
+			linked: cohortLinked,
+			pointer_version: cohortPointerVersion,
+			link_id: cohortLinkId,
+			cohort_id: cohortId,
+			identity_source: cohortIdentitySource,
+			degraded: cohortDegraded,
+			shared_root: cohortSharedRoot,
+			generation: cohortGeneration,
+			local_orphaned: cohortLocalOrphaned,
 		},
 	};
 }
@@ -297,15 +368,39 @@ export async function checkKnowledgeHealth(
 
 	const sb = debug.status_breakdown;
 	const lr = debug.learning;
+	const co = debug.cohort;
+	const cohortTag = co.linked
+		? ` | cohort[linked id=${co.link_id}${
+				co.cohort_id ? ` cohort=${co.cohort_id}` : ''
+			}${co.identity_source ? ` via=${co.identity_source}` : ''}${
+				co.degraded ? ' DEGRADED' : ''
+			}${co.local_orphaned ? ' local-orphan' : ''}${
+				co.generation !== null ? ` gen=${co.generation}` : ''
+			}]`
+		: ' | cohort[local]';
 	const summary =
 		`active=${sb.active} archived=${sb.archived} quarantined=${sb.quarantined} ` +
 		`rejected=${sb.rejected} | events=${debug.event_count} (retrieved/7d=${debug.retrieval_events_7d}) | ` +
 		`learning[enforce=${lr.enforced_directives} escalated=${lr.escalated_directives} ` +
 		`synonyms=${lr.synonym_pairs} unactionable=${lr.unactionable_queue_depth} ` +
 		`insights_pending=${lr.insight_candidates_pending}] | ` +
-		`schema=${JSON.stringify(debug.schema_versions)}`;
+		`schema=${JSON.stringify(debug.schema_versions)}` +
+		cohortTag;
 
 	const warnings: string[] = [];
+	// A degraded cohort identity (machine-local, not portable) must be visible —
+	// the linked store will only be cohesive for sibling worktrees on THIS
+	// machine (issue #1846 §1.3).
+	if (co.linked && co.degraded) {
+		warnings.push(
+			`cohort identity is degraded (via ${co.identity_source}): shared store is machine-local, not portable across machines`,
+		);
+	}
+	if (co.linked && co.local_orphaned) {
+		warnings.push(
+			'local .swarm/knowledge.jsonl is orphaned by the link store (benign; resolver ignores it)',
+		);
+	}
 	// A persistent backlog in either curation queue means the curator is not
 	// draining them (not running, erroring, or the gate is mis-tuned) — surface it
 	// so the learning loop's stall is visible, not silent.

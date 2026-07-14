@@ -84,7 +84,8 @@ describe('handleUnlinkCommand', () => {
 
 			const out = await handleUnlinkCommand(dir, []);
 			expect(out).toContain('Unlinked');
-			expect(out).toContain('copied 1 shared lesson');
+			expect(out).toContain('copied the shared knowledge family back to local');
+			expect(out).toContain('1 new');
 			expect(readLinkPointer(dir)).toBeNull();
 
 			// Local store (now back in effect) contains the copied lesson.
