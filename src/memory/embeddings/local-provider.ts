@@ -126,7 +126,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 			// One-time notice for first-use model download (~25MB for all-MiniLM-L6-v2).
 			if (!LocalEmbeddingProvider.downloadNoticePrinted) {
 				LocalEmbeddingProvider.downloadNoticePrinted = true;
-				// eslint-disable-next-line no-console
+				// biome-ignore lint/suspicious/noConsole: One-time first-use model download notice (~25MB) — this is the only user-facing signal that downloading is happening
 				console.log(
 					`[opencode-swarm] Downloading embedding model "${this.modelName}" (~25 MB) — this happens once per process.`,
 				);

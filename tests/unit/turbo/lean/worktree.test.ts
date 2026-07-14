@@ -11,6 +11,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../../src/services/warning-buffer';
+import {
 	_internals,
 	assertCleanWorkingTree,
 	autoCommitDirty,
@@ -445,6 +449,14 @@ describe('autoCommitDirty', () => {
 describe('cleanUntrackedFiles', () => {
 	const fakePath = 'C:\\worktrees\\session-abc\\lane-1';
 
+	beforeEach(() => {
+		clearDeferredWarnings();
+	});
+
+	afterEach(() => {
+		clearDeferredWarnings();
+	});
+
 	test('returns { cleaned: true } when dry-run is empty and clean succeeds', async () => {
 		// First call: dry-run (empty → nothing to clean), second call: actual clean
 		let callCount = 0;
@@ -482,39 +494,32 @@ describe('cleanUntrackedFiles', () => {
 	});
 
 	test('skips clean and returns error when dry-run shows source files', async () => {
-		// Capture console.warn
-		const warnCalls: string[] = [];
-		const origWarn = console.warn;
-		console.warn = (...args: unknown[]) => warnCalls.push(args.join(' '));
+		let callCount = 0;
+		_internals.bunSpawn = () => {
+			callCount++;
+			// dry-run shows a .ts file (source code)
+			return mockProc(
+				0,
+				'Would remove src/new-feature.ts\nWould remove debug.log\n',
+				'',
+			);
+		};
 
-		try {
-			let callCount = 0;
-			_internals.bunSpawn = () => {
-				callCount++;
-				// dry-run shows a .ts file (source code)
-				return mockProc(
-					0,
-					'Would remove src/new-feature.ts\nWould remove debug.log\n',
-					'',
-				);
-			};
+		const result = await cleanUntrackedFiles(fakePath);
 
-			const result = await cleanUntrackedFiles(fakePath);
-
-			expect(result).toEqual({
-				cleaned: false,
-				error:
-					'untracked source files detected — skipping clean to prevent data loss',
-			});
-			// Actual clean should NOT have been called
-			expect(callCount).toBe(1);
-			// Warning should have been logged
-			expect(warnCalls.length).toBe(1);
-			expect(warnCalls[0]).toContain('src/new-feature.ts');
-			expect(warnCalls[0]).toContain('Skipping clean');
-		} finally {
-			console.warn = origWarn;
-		}
+		expect(result).toEqual({
+			cleaned: false,
+			error:
+				'untracked source files detected — skipping clean to prevent data loss',
+		});
+		// Actual clean should NOT have been called
+		expect(callCount).toBe(1);
+		// Warning should have been logged via advisoryWarn (deferred warning buffer)
+		const warnings = getDeferredWarnings();
+		const allWarnings = warnings.join('\n');
+		expect(warnings.length).toBe(1);
+		expect(allWarnings).toContain('src/new-feature.ts');
+		expect(allWarnings).toContain('Skipping clean');
 	});
 
 	test('proceeds with clean when dry-run fails (fail-open)', async () => {
@@ -872,6 +877,14 @@ describe('provisionWorktree — path budget (Windows)', () => {
 	const fakeLaneId = 'lane-1';
 	const fakeSessionId = 'session-abc';
 
+	beforeEach(() => {
+		clearDeferredWarnings();
+	});
+
+	afterEach(() => {
+		clearDeferredWarnings();
+	});
+
 	test('auto-shortens on Windows when budget exceeded (no explicit worktree_dir)', async () => {
 		_internals.platform = 'win32';
 		_internals.osTmpdir = () => 'C:\\Temp';
@@ -927,28 +940,21 @@ describe('provisionWorktree — path budget (Windows)', () => {
 			return mockProc(0);
 		};
 
-		// Capture console.warn
-		const warnCalls: string[] = [];
-		const origWarn = console.warn;
-		console.warn = (...args: unknown[]) => warnCalls.push(args.join(' '));
+		const config = { worktree_dir: 'D:\\explicit-trees' };
+		const result = await provisionWorktree(
+			fakeDir,
+			fakeLaneId,
+			fakeSessionId,
+			config,
+		);
 
-		try {
-			const config = { worktree_dir: 'D:\\explicit-trees' };
-			const result = await provisionWorktree(
-				fakeDir,
-				fakeLaneId,
-				fakeSessionId,
-				config,
-			);
-
-			// Should succeed because user explicitly set worktree_dir
-			expect(result).toHaveProperty('worktreePath');
-			// Should have issued a warning
-			expect(warnCalls.length).toBeGreaterThan(0);
-			expect(warnCalls[0]).toContain('Path budget warning');
-		} finally {
-			console.warn = origWarn;
-		}
+		// Should succeed because user explicitly set worktree_dir
+		expect(result).toHaveProperty('worktreePath');
+		// Should have issued a warning via advisoryWarn (deferred warning buffer)
+		const warnings = getDeferredWarnings();
+		const allWarnings = warnings.join('\n');
+		expect(warnings.length).toBeGreaterThan(0);
+		expect(allWarnings).toContain('Path budget warning');
 	});
 });
 

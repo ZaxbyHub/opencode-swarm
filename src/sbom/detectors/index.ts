@@ -6,6 +6,7 @@
  */
 
 import { simpleGlobToRegex } from '../../utils';
+import { log } from '../../utils/logger.js';
 
 export interface SbomComponent {
 	/** Package name */
@@ -205,7 +206,7 @@ export function detectComponents(
 				return components;
 			}
 		} catch (error) {
-			console.warn(
+			log(
 				`[sbom] Detector failed for ${filePath}:`,
 				error instanceof Error ? error.message : String(error),
 			);

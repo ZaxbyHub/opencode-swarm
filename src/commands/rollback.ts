@@ -7,6 +7,7 @@ import { appendLedgerEvent, computePlanHash, initLedger } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
 import { checkpoint as checkpointTool } from '../tools/checkpoint.js';
 import type { ToolResult } from '../tools/create-tool';
+import { log } from '../utils/logger';
 
 type LegacyCheckpoint = { phase: number; label?: string; timestamp: string };
 type GitCheckpoint = { label: string; sha: string; timestamp: string };
@@ -100,7 +101,7 @@ async function restoreGitCheckpoint(
 	try {
 		fs.appendFileSync(eventsPath, `${JSON.stringify(rollbackEvent)}\n`);
 	} catch (error) {
-		console.error(
+		log(
 			'Failed to write rollback event:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -325,7 +326,7 @@ export async function handleRollbackCommand(
 	try {
 		fs.appendFileSync(eventsPath, `${JSON.stringify(rollbackEvent)}\n`);
 	} catch (error) {
-		console.error(
+		log(
 			'Failed to write rollback event:',
 			error instanceof Error ? error.message : String(error),
 		);

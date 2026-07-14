@@ -10,6 +10,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from 'node:fs';
+import { log } from '../utils/logger';
 
 /**
  * Typed error for concurrent plan modification (#444 item 3).
@@ -819,6 +820,7 @@ export async function loadPlan(
 						} else if (ledgerHash !== '' && planHash !== ledgerHash) {
 							// During active session: hash mismatch is expected due to concurrent writes.
 							if (process.env.DEBUG_SWARM) {
+								// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated legacy site preserved per epic #1752 task 1.2 — non-user-facing diagnostic
 								console.warn(
 									`[loadPlan] Ledger hash mismatch during active session for ${resolvedWorkspace} — skipping rebuild (startup check already performed).`,
 								);
@@ -2588,7 +2590,7 @@ export function migrateLegacyPlan(planContent: string, swarmId?: string): Plan {
 	let migrationStatus: Plan['migration_status'] = 'migrated';
 	if (phases.length === 0) {
 		// Zero phases parsed - migration failed
-		console.warn(
+		log(
 			`migrateLegacyPlan: 0 phases parsed from ${lines.length} lines. First 3 lines: ${lines.slice(0, 3).join(' | ')}`,
 		);
 		migrationStatus = 'migration_failed';

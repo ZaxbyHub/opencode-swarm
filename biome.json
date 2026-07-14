@@ -20,6 +20,9 @@
 			},
 			"style": {
 				"noNonNullAssertion": "off"
+			},
+			"suspicious": {
+				"noConsole": "error"
 			}
 		}
 	},
@@ -40,7 +43,8 @@
 				"tests/**",
 				"test/**",
 				"src/**/*.test.ts",
-				"src/**/__tests__/**"
+				"src/**/__tests__/**",
+				"tests/unit/**"
 			],
 			"linter": {
 				"rules": {
@@ -71,7 +75,88 @@
 						"noSelfCompare": "off",
 						"noApproximativeNumericConstant": "off",
 						"noSparseArray": "off",
-						"noControlCharactersInRegex": "off"
+						"noControlCharactersInRegex": "off",
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/cli/**"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/utils/logger.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/services/warning-buffer.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/hooks/delegation-gate/worktree-isolation.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/hooks/knowledge-store.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/hooks/skill-usage-log.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["src/commands/archive.error-handling.test.ts", "src/commands/benchmark.error-handling.test.ts", "src/commands/conflict-registry.structural.test.ts", "src/hooks/delegation-gate.evidence.test.ts", "src/hooks/delegation-gate.plan-fallback-security.test.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["tests/unit/utils/errors.test.ts", "tests/unit/utils/logger.edge-case.test.ts", "tests/unit/utils/logger.test.ts"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noConsole": "off"
 					}
 				}
 			}

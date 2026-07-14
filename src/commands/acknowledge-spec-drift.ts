@@ -4,6 +4,7 @@ import { validateSwarmPath } from '../hooks/utils';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import type { SpecDriftAcknowledgedEvent } from '../types/events';
+import { log } from '../utils/logger';
 import { computeSpecHash } from '../utils/spec-hash';
 
 interface SpecStalenessPayload {
@@ -100,7 +101,7 @@ Please re-run the relevant phase to detect current drift status.`;
 		}
 	} catch (planError) {
 		// Non-fatal: spec drift was acknowledged but plan update failed
-		console.error(
+		log(
 			'[acknowledge-spec-drift] Failed to update plan specHash:',
 			planError instanceof Error ? planError.message : String(planError),
 		);
@@ -133,7 +134,7 @@ Please re-run the relevant phase to detect current drift status.`;
 		);
 	} catch (appendError) {
 		// Non-fatal: the spec drift was acknowledged but event logging failed
-		console.error(
+		log(
 			'[acknowledge-spec-drift] Failed to write acknowledgment event:',
 			appendError instanceof Error ? appendError.message : String(appendError),
 		);

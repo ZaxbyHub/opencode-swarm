@@ -18,7 +18,11 @@ import {
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { addDeferredWarning } from '../services/warning-buffer.js';
+import {
+	addDeferredWarning,
+	advisoryWarn,
+} from '../services/warning-buffer.js';
+import { log } from '../utils/logger';
 import { type AgentDefinition, createArchitectAgent } from './architect';
 import { createCoderAgent } from './coder';
 import {
@@ -138,10 +142,8 @@ function getModelForAgent(
 	if (!warnedAgents.has(baseAgentName)) {
 		warnedAgents.add(baseAgentName);
 		if (!quiet) {
-			console.warn(
-				"[swarm] Agent '%s' not found in config — using default model '%s'. Add it to opencode-swarm.json to customize.",
-				baseAgentName,
-				resolvedModel,
+			advisoryWarn(
+				`[swarm] Agent '${baseAgentName}' not found in config — using default model '${resolvedModel}'. Add it to opencode-swarm.json to customize.`,
 			);
 		} else {
 			addDeferredWarning(
@@ -320,7 +322,7 @@ function applyOverrides(
 		const cleanedModel = modelSegments.slice(0, -1).join('/');
 		const effectiveVariant = variantOverride ?? autoVariant;
 		if (!quiet) {
-			console.warn(
+			advisoryWarn(
 				`[swarm] Deprecation: model "${agent.config.model}" embeds variant. ` +
 					`Use "model": "${cleanedModel}", "variant": "${effectiveVariant}" instead.`,
 			);
@@ -1017,7 +1019,7 @@ export function getAgentConfigs(
 	);
 	if (resolution.warning) {
 		if (!quiet) {
-			console.warn(resolution.warning);
+			log(resolution.warning);
 		} else {
 			addDeferredWarning(resolution.warning);
 		}
@@ -1030,7 +1032,7 @@ export function getAgentConfigs(
 		const generated = agents.map((a) => a.name).join(', ');
 		const diagnostic = `[swarm] DIAGNOSTIC: ${agents.length} generated agents but zero primaries. Likely cause: a regression in resolvePrimaryAgentNames. Generated: ${generated}.`;
 		if (!quiet) {
-			console.warn(diagnostic);
+			log(diagnostic);
 		} else {
 			addDeferredWarning(diagnostic);
 		}
@@ -1194,7 +1196,7 @@ export function getAgentConfigs(
 				];
 				const present = councilTools.filter((t) => override.includes(t));
 				if (present.length > 0 && !quiet) {
-					console.warn(
+					advisoryWarn(
 						`[opencode-swarm] tool_filter.overrides.architect includes ${present.join(', ')} but council.enabled is not true. ` +
 							`The runtime gate will reject these calls. Either set council.enabled=true, or remove ${present.join(', ')} from the architect override.`,
 					);
@@ -1204,7 +1206,7 @@ export function getAgentConfigs(
 			// Warn once when base name lacks a whitelist entry (no override and no AGENT_TOOL_MAP)
 			if (!allowedTools && !Object.hasOwn(toolFilterOverrides, baseAgentName)) {
 				if (!warnedMissingWhitelist.has(baseAgentName) && !quiet) {
-					console.warn(
+					log(
 						`[getAgentConfigs] Unknown agent '${baseAgentName}', defaulting to minimal toolset.`,
 					);
 					warnedMissingWhitelist.add(baseAgentName);

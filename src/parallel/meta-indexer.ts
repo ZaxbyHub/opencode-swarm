@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { log } from '../utils/logger.js';
 
 export interface MetaSummaryEntry {
 	timestamp: string;
@@ -56,7 +57,7 @@ export function extractMetaSummaries(eventsPath: string): MetaSummaryEntry[] {
 			}
 		} catch (error) {
 			// Log error for debugging but continue processing
-			console.warn(
+			log(
 				`[meta-indexer] Failed to parse line: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
@@ -101,7 +102,7 @@ export async function indexMetaSummaries(
 				existingEntries.add(`${entry.timestamp}:${entry.summary}`);
 			} catch (error) {
 				// Log error but continue processing
-				console.warn(
+				log(
 					`[meta-indexer] Failed to parse index entry: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}

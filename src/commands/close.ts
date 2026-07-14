@@ -49,6 +49,7 @@ import {
 } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 import { mergeEnvForChild } from '../utils/bun-compat';
+import { log } from '../utils/logger';
 
 interface PlanPhase {
 	id: number;
@@ -701,7 +702,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Lessons curation failed: ${msg}`);
-		console.warn('[close-command] curateAndStoreSwarm error:', error);
+		log('[close-command] curateAndStoreSwarm error:', error);
 	}
 
 	if (ctx.curationSucceeded && ctx.allLessons.length > 0) {
@@ -871,10 +872,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
 				ctx.warnings.push(`Failed to persist terminal plan state: ${msg}`);
-				console.warn(
-					'[close-command] Failed to write terminal plan state:',
-					error,
-				);
+				log('[close-command] Failed to write terminal plan state:', error);
 				// SC-013 rollback: restore in-memory state to match on-disk when
 				// terminal write fails so the summary does not falsely claim
 				// phases/tasks were closed
@@ -1252,7 +1250,7 @@ export async function runArchiveEvidenceRetention(
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Evidence retention archive failed: ${msg}`);
-		console.warn('[close-command] archiveEvidence error:', error);
+		log('[close-command] archiveEvidence error:', error);
 	}
 }
 
@@ -1577,7 +1575,7 @@ export async function runCleanStage(
 		}
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Failed to reset context.md: ${msg}`);
-		console.warn('[close-command] Failed to write context.md:', error);
+		log('[close-command] Failed to write context.md:', error);
 	}
 
 	return {
@@ -2072,7 +2070,7 @@ export async function handleCloseCommand(
 			}
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
-			console.warn('[close-command] Failed to write close-summary.md:', error);
+			log('[close-command] Failed to write close-summary.md:', error);
 		}
 
 		// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
