@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.115.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.9...v7.115.0) (2026-07-14)
+
+
+### Features
+
+* **apply-patch:** opt-in fuzzy text-matching fallback (port hermes 9-strategy chain) ([cdba875](https://github.com/ZaxbyHub/opencode-swarm/commit/cdba8755eb147301a817449fc5debd788ae46bad))
+
+
+### Bug Fixes
+
+* **config-doctor:** register apply_patch key in validateConfigKey ([#1841](https://github.com/ZaxbyHub/opencode-swarm/issues/1841)) ([879ba7a](https://github.com/ZaxbyHub/opencode-swarm/commit/879ba7a298c11d065e5087a45f41b6d2c0762334))
+
 ## [7.114.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.114.8...v7.114.9) (2026-07-14)
 
 
