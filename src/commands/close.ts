@@ -722,6 +722,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				const result = await _internals.checkHivePromotions(
 					entries,
 					ctx.config,
+					ctx.directory,
 				);
 				ctx.hivePromoted = result.new_promotions;
 			} catch (hiveErr) {

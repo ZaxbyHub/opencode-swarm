@@ -1195,6 +1195,14 @@ export const KnowledgeConfigSchema = z.object({
 		.min(-1)
 		.max(1)
 		.default(OUTCOME_BLOCK_THRESHOLD),
+	/** #1847: minimum validated terminal-application receipts required for the
+	 * `validated_terminal_applications` promotion gate. Default 0 (conservative:
+	 * until #1849 produces real receipts, absence neither credits nor blocks).
+	 * Legacy records get NO synthetic credit. */
+	promotion_min_terminal_applications: z.number().min(0).max(100).default(0),
+	/** #1847: minimum DISTINCT canonical cohort ids among the validated
+	 * terminal-application receipts. Default 0 (conservative). */
+	promotion_min_distinct_cohorts: z.number().min(0).max(50).default(0),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({

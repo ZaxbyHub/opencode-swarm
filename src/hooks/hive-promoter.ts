@@ -1,31 +1,70 @@
-/** Hive promoter hook for opencode-swarm v6.17 two-tier knowledge system. */
+/**
+ * Hive promoter for opencode-swarm v6.17 two-tier knowledge system.
+ *
+ * #1847 (transactional hive promotion): every hive write is routed through ONE
+ * global cross-process transaction (`transactHiveStore` in `./hive-transaction`).
+ * The transaction holds the hive directory lock across read → normalize →
+ * eligibility → canonical-cohort counting → dedup/merge → append/update →
+ * source confirmation → cap → staged audit → atomic persist. No caller reads
+ * the hive, makes a promotion decision, and later calls a separate unlocked
+ * write API.
+ *
+ * Canonical project identity (#1846): cross-project confirmations key on the
+ * canonical `cohort_id` from `resolveCohortId`, not the worktree `project_name`.
+ * Sibling worktrees and remote aliases of one repository count as one project.
+ *
+ * Lineage (#1847 §3): promoted entries retain source entry id, source cohort,
+ * promotion event id, and actor. Manual promotion that fails policy proceeds
+ * only with an explicit `--force` override that records a durable audit entry;
+ * an exact entry id alone is never authorization to bypass policy.
+ *
+ * This module is NOT imported on the plugin-init path (invariant 1): promotion
+ * runs only on the lazy `/swarm promote`, close, curate, and postmortem paths.
+ */
 
 import path from 'node:path';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {
-	appendKnowledge,
-	enforceKnowledgeCap,
+	evaluatePromotionPolicy,
+	describeEligibilityRoute,
+	failedGateNames,
+} from './hive-policy.js';
+import {
+	type HiveAuditEntry,
+	type HiveMutationOutcome,
+	transactHiveStore,
+} from './hive-transaction.js';
+import { resolveCohortId } from '../knowledge/cohort-identity.js';
+import {
 	findNearDuplicate,
 	readKnowledge,
 	resolveHiveKnowledgePath,
-	resolveHiveRejectedPath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	wordBigrams,
+	jaccardBigram,
 } from './knowledge-store.js';
+import type {
+	CohortIdentity,
+} from '../knowledge/cohort-identity.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeCategory,
 	KnowledgeConfig,
 	ProjectConfirmationRecord,
+	PromotionActor,
+	PromotionEvidenceRecord,
+	PromotionLineage,
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
-import { isActiveStatus } from './knowledge-types.js';
+import { isActiveStatus, KNOWLEDGE_SCHEMA_VERSION } from './knowledge-types.js';
+import { validateLesson } from './knowledge-validator.js';
+import { safeHook } from './utils.js';
+import { KnowledgeConfigSchema } from '../config/schema.js';
 
 /** Carry a swarm entry's actionable-directive metadata onto a promoted hive
  *  entry (Phase 4 review, MEDIUM finding). Dropping these fields on promotion
- *  would strip predicates/scope from cross-project knowledge, so hive copies
- *  of post-Change-4 entries would no longer be machine-checkable. */
+ *  would strip predicates/scope from cross-project knowledge. */
 function carryActionableFields(
 	source: SwarmKnowledgeEntry,
 ): Partial<HiveKnowledgeEntry> {
@@ -48,112 +87,75 @@ function carryActionableFields(
 	return out;
 }
 
-import { validateLesson } from './knowledge-validator.js';
-import { safeHook } from './utils.js';
-
-/** Hive promotion summary for curator state */
+/** Hive promotion summary for curator state. */
 export interface HivePromotionSummary {
 	timestamp: string;
 	new_promotions: number;
 	encounters_incremented: number;
 	advancements: number;
 	total_hive_entries: number;
+	/** #1847: per-entry policy diagnostics for operator visibility. */
+	diagnostics?: string[];
 }
 
 /**
- * Check if a swarm entry already exists in the hive (near-duplicate).
- * Uses findNearDuplicate with the configured threshold.
- */
-function isAlreadyInHive(
-	entry: SwarmKnowledgeEntry,
-	hiveEntries: HiveKnowledgeEntry[],
-	threshold: number,
-): boolean {
-	return findNearDuplicate(entry.lesson, hiveEntries, threshold) !== undefined;
-}
-
-/**
- * Check whether a swarm knowledge entry is eligible for hive promotion.
- * Three routes to eligibility:
- *   Route 1: hive_eligible flag + 3+ distinct phases
- *   Route 2: 'hive-fast-track' tag
- *   Route 3: age exceeds auto_promote_days threshold
+ * Check whether a swarm entry is eligible for hive promotion via the historical
+ * 3 routes. Kept as a thin wrapper delegating to the canonical policy route
+ * description (M1 fix, #1847) so existing test consumers
+ * (`hive-promoter-inactive.test.ts`, `close.test.ts` mock) keep working.
  *
- * @param entry - The swarm knowledge entry to check
- * @param autoPromoteDays - Number of days before age-based promotion kicks in
- * @returns true if the entry is eligible for hive promotion
+ * This is ONE of the gates inside {@link evaluatePromotionPolicy}; it is not
+ * the whole policy. New callers should use `evaluatePromotionPolicy`.
  */
 export function isHiveEligible(
 	entry: SwarmKnowledgeEntry,
 	autoPromoteDays: number,
 ): boolean {
-	if (!isActiveForHivePromotion(entry)) {
-		return false;
-	}
-
-	// Route 1: hive_eligible flag + 3+ distinct phases
-	const phaseNumbers = new Set<number>();
-	for (const record of entry.confirmed_by ?? []) {
-		if (record && typeof record.phase_number === 'number') {
-			phaseNumbers.add(record.phase_number);
-		}
-	}
-	if (entry.hive_eligible === true && phaseNumbers.size >= 3) {
-		return true;
-	}
-
-	// Route 2: fast-track tag bypasses count requirement
-	if ((entry.tags ?? []).includes('hive-fast-track')) {
-		return true;
-	}
-
-	// Route 3: age-based promotion
-	const createdMs = Date.parse(entry.created_at);
-	const ageMs = Number.isFinite(createdMs) ? Date.now() - createdMs : 0;
-	const ageThresholdMs = autoPromoteDays * 86400000;
-	if (ageMs >= ageThresholdMs) {
-		return true;
-	}
-
-	return false;
-}
-
-function isActiveForHivePromotion(entry: SwarmKnowledgeEntry): boolean {
-	// G4 (#1716): route through the canonical helper so the inactive set has a
-	// single source of truth.
-	return isActiveStatus(entry.status);
+	return describeEligibilityRoute(entry, autoPromoteDays).passed;
 }
 
 /**
- * Count distinct project names in a hive entry's confirmed_by array.
+ * Count distinct projects/cohort identities in a hive entry's confirmed_by.
+ *
+ * #1847: dedup by canonical `cohort_id` (sibling worktrees + remote aliases of
+ * one repo count as one project). Legacy records written before #1847 lack
+ * `cohort_id`; for those, fall back to `project_name` — but two records sharing
+ * a `cohort_id` are NEVER counted as distinct. This means AC3 ("sibling
+ * worktrees count as one project") is enforced for confirmations written from
+ * this PR forward; legacy confirmations remain `project_name`-keyed and are NOT
+ * retroactively re-counted (consistent with the no-broad-rewrite non-goal).
  */
-function countDistinctProjects(
+export function countDistinctProjects(
 	confirmedBy: ProjectConfirmationRecord[],
 ): number {
-	const projectNames = new Set<string>();
+	const cohortIds = new Set<string>();
+	const legacyProjectNames = new Set<string>();
 	for (const record of confirmedBy) {
-		projectNames.add(record.project_name);
+		if (typeof record.cohort_id === 'string' && record.cohort_id.length > 0) {
+			cohortIds.add(record.cohort_id);
+		} else {
+			// Legacy record without cohort_id — fall back to project_name.
+			legacyProjectNames.add(record.project_name);
+		}
 	}
-	return projectNames.size;
+	return cohortIds.size + legacyProjectNames.size;
 }
 
-/**
- * Check if a project confirmation already exists in the hive entry's confirmed_by.
- */
+/** Check if a project/cohort confirmation already exists. Prefers cohort_id. */
 function hasProjectConfirmation(
 	hiveEntry: HiveKnowledgeEntry,
 	projectName: string,
+	cohortId?: string,
 ): boolean {
-	return hiveEntry.confirmed_by.some(
-		(record) => record.project_name === projectName,
-	);
+	return hiveEntry.confirmed_by.some((record) => {
+		if (cohortId && record.cohort_id) {
+			return record.cohort_id === cohortId;
+		}
+		return record.project_name === projectName;
+	});
 }
 
-/**
- * Calculate the new encounter score after a confirmation.
- * Uses weighted scoring: same-project encounters count more slowly than cross-project.
- * Enforces min/max bounds from config.
- */
+/** Calculate the new encounter score after a confirmation (weighted scoring). */
 function calculateEncounterScore(
 	currentScore: number,
 	isSameProject: boolean,
@@ -170,200 +172,348 @@ function calculateEncounterScore(
 	);
 }
 
+/** Is the source cohort the same as the hive entry's origin cohort? */
+function isSameOrigin(
+	hiveEntry: HiveKnowledgeEntry,
+	sourceCohortId: string,
+): boolean {
+	// Prefer lineage source_cohort_id; fall back to comparing the first
+	// confirmation's cohort_id; lastly compare source_project as a legacy guard.
+	if (hiveEntry.lineage?.source_cohort_id) {
+		return hiveEntry.lineage.source_cohort_id === sourceCohortId;
+	}
+	const firstWithCohort = hiveEntry.confirmed_by.find((c) => c.cohort_id);
+	if (firstWithCohort) {
+		return firstWithCohort.cohort_id === sourceCohortId;
+	}
+	return false;
+}
+
+/** Build a PromotionLineage block for a newly promoted hive entry. */
+function buildLineage(args: {
+	actor: PromotionActor;
+	sourceEntryId?: string;
+	sourceCohortId?: string;
+	promotionEventId: string;
+	reason?: string;
+	overrideFailedGates?: string[];
+}): PromotionLineage {
+	return {
+		actor: args.actor,
+		source_entry_id: args.sourceEntryId,
+		source_cohort_id: args.sourceCohortId,
+		promotion_event_id: args.promotionEventId,
+		reason: args.reason,
+		override_failed_gates: args.overrideFailedGates,
+	};
+}
+
 /**
- * Main promotion logic: checks swarm entries and promotes eligible ones to hive.
- * Also updates existing hive entries with new project confirmations.
- * Returns a summary of the promotion activity for curator state.
+ * Main promotion logic: checks swarm entries and promotes eligible ones to hive
+ * inside ONE cross-process transaction. Also updates existing hive entries with
+ * new canonical-cohort confirmations. Returns a summary for curator state.
  *
- * @note The 'hive-fast-track' tag is treated as privileged — it bypasses the
- *   3-phase confirmation requirement. It should only be set by authorized tooling
- *   (inferTags() never produces it automatically).
+ * `directory` is required (#1847) to resolve the canonical cohort identity
+ * (#1846) for cross-project distinctness.
+ *
+ * @note The 'hive-fast-track' tag is privileged — it bypasses the 3-phase
+ *   confirmation requirement inside the eligibility_route gate. It should only
+ *   be set by authorized tooling (inferTags() never produces it automatically).
  */
 export async function checkHivePromotions(
 	swarmEntries: SwarmKnowledgeEntry[],
 	config: KnowledgeConfig,
+	directory: string,
 ): Promise<HivePromotionSummary> {
-	// Track promotion counts
-	let newPromotions = 0;
-	let encountersIncremented = 0;
-	let advancements = 0;
+	const empty: HivePromotionSummary = {
+		timestamp: new Date().toISOString(),
+		new_promotions: 0,
+		encounters_incremented: 0,
+		advancements: 0,
+		total_hive_entries: 0,
+	};
 
-	// Route 1: Early exit if hive is disabled
 	if (config.hive_enabled === false) {
-		return {
-			timestamp: new Date().toISOString(),
-			new_promotions: 0,
-			encounters_incremented: 0,
-			advancements: 0,
-			total_hive_entries: 0,
-		};
+		return empty;
 	}
 
-	// Read existing hive entries
-	const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(
-		resolveHiveKnowledgePath(),
-	);
+	// Resolve the source cohort ONCE, OUTSIDE the transaction. resolveCohortId
+	// may issue up to 2 sequential git subprocess calls (~3s worst case); doing
+	// this under the directory lock would risk exceeding the 5s stale window.
+	// It never throws (path fallback always succeeds).
+	const sourceCohort = await _internals.resolveCohortId(directory);
 
-	// NOTE: New hive entries are appended immediately (no lock); existing-entry updates
-	// use rewriteKnowledge (with lock). This mixed pattern is safe under single-writer
-	// assumptions (hooks are fire-and-forget, safeHook prevents concurrent calls).
+	// Validated terminal-application evidence is empty until #1849 produces real
+	// receipts. Loaded outside the lock. Legacy swarm entries get NO synthetic
+	// credit — an empty list simply does not add to the count.
+	const evidence = await _internals.loadPromotionEvidence(swarmEntries);
 
-	// Process each swarm entry for promotion
-	for (const swarmEntry of swarmEntries) {
-		// Check if already in hive (skip near-duplicates)
-		if (isAlreadyInHive(swarmEntry, hiveEntries, config.dedup_threshold)) {
-			continue;
-		}
+	const diagnostics: string[] = [];
 
-		// Determine promotion eligibility via shared helper
-		if (!isHiveEligible(swarmEntry, config.auto_promote_days)) {
-			continue;
-		}
+	const result = await _internals.transactHiveStore<
+		{ newPromotions: number; encounters: number; advancements: number; total: number }
+	>(async (ctx) => {
+		let newPromotions = 0;
+		let encounters = 0;
+		let advancements = 0;
+		const audit: HiveAuditEntry[] = [];
+		const rejects: RejectedLesson[] = [];
+		const entries = [...ctx.entries];
 
-		// Re-validate before promotion
-		const validationResult = validateLesson(
-			swarmEntry.lesson,
-			hiveEntries.map((e) => e.lesson),
-			{
-				category: swarmEntry.category,
-				scope: swarmEntry.scope,
-				confidence: swarmEntry.confidence,
-			},
+		// Precompute hive + swarm bigrams ONCE so the dedup loop is O(n) instead
+		// of O(n²) (findNearDuplicate recomputes hive bigrams per call). This
+		// keeps the held-lock closure fast enough to stay well under the 5s stale
+		// window even for 1000+ entries (#1847 MAJOR-2 / B1).
+		const hiveBigrams = entries.map((e) =>
+			typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
 		);
+		// Track bigrams of entries added within this run so same-run double-
+		// promotion of near-duplicate lessons is also prevented.
+		const addedBigrams: Set<string>[] = [];
+		const isDuplicateOfAny = (
+			lessonBigram: Set<string>,
+			threshold: number,
+		): boolean => {
+			for (const hb of hiveBigrams) {
+				if (jaccardBigram(lessonBigram, hb) >= threshold) return true;
+			}
+			for (const ab of addedBigrams) {
+				if (jaccardBigram(lessonBigram, ab) >= threshold) return true;
+			}
+			return false;
+		};
 
-		// If validation fails with error severity, reject to hive-rejected
-		if (validationResult.severity === 'error') {
-			const rejectedLesson: RejectedLesson = {
+		// 1. New promotions: eligible swarm entries → lineage-bearing hive entries.
+		for (const swarmEntry of swarmEntries) {
+			// Defensive: skip entries whose lesson is not a usable string. The
+			// validator normally rejects these, but a malformed/adversarial entry
+			// must never reach the entry-construction / audit-staging code (which
+			// assumes a string lesson).
+			if (
+				typeof swarmEntry.lesson !== 'string' ||
+				swarmEntry.lesson.length === 0
+			) {
+				continue;
+			}
+
+			// Dedup against the CURRENT (locked) hive entries (precomputed bigrams).
+			const swarmBigram = wordBigrams(swarmEntry.lesson);
+			if (isDuplicateOfAny(swarmBigram, config.dedup_threshold)) {
+				continue;
+			}
+
+			const decision = evaluatePromotionPolicy({
+				entry: swarmEntry,
+				config,
+				evidence: evidence[swarmEntry.id] ?? [],
+			});
+			if (!decision.eligible) {
+				diagnostics.push(
+					`skip promote '${swarmEntry.lesson.slice(0, 40)}…': ${decision.reason}`,
+				);
+				continue;
+			}
+
+			// Re-validate before promotion.
+			const validationResult = _internals.validateLesson(
+				swarmEntry.lesson,
+				entries.map((e) => e.lesson),
+				{
+					category: swarmEntry.category,
+					scope: swarmEntry.scope,
+					confidence: swarmEntry.confidence,
+				},
+			);
+
+			if (validationResult.severity === 'error') {
+				rejects.push({
+					id: crypto.randomUUID(),
+					lesson: swarmEntry.lesson,
+					rejection_reason:
+						validationResult.reason || 'validation failed for hive promotion',
+					rejected_at: new Date().toISOString(),
+					rejection_layer: validationResult.layer || 2,
+				});
+				continue;
+			}
+
+			const promotionEventId = crypto.randomUUID();
+			const newHiveEntry: HiveKnowledgeEntry = {
 				id: crypto.randomUUID(),
+				tier: 'hive',
 				lesson: swarmEntry.lesson,
-				rejection_reason:
-					validationResult.reason || 'validation failed for hive promotion',
-				rejected_at: new Date().toISOString(),
-				rejection_layer: validationResult.layer || 2,
+				category: swarmEntry.category,
+				tags: swarmEntry.tags,
+				scope: swarmEntry.scope,
+				confidence: 0.5, // starts at 0.5 in hive
+				status: 'candidate', // ALWAYS candidate on entry
+				confirmed_by: [], // empty — no project confirmations yet
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: config.schema_version || KNOWLEDGE_SCHEMA_VERSION,
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+				source_project: swarmEntry.project_name,
+				encounter_score: config.initial_encounter_score,
+				lineage: buildLineage({
+					actor: 'auto',
+					sourceEntryId: swarmEntry.id,
+					sourceCohortId: sourceCohort.cohortId,
+					promotionEventId,
+				}),
+				...carryActionableFields(swarmEntry),
 			};
 
-			// Append to hive rejected lessons using correct path
-			const hiveRejectedPath = resolveHiveRejectedPath();
-			await appendKnowledge(hiveRejectedPath, rejectedLesson);
-
-			continue;
+			entries.push(newHiveEntry);
+			addedBigrams.push(swarmBigram);
+			newPromotions++;
+			audit.push(
+				stagePromotionAudit({
+					entryId: newHiveEntry.id,
+					lesson: newHiveEntry.lesson,
+					actor: 'auto',
+					sourceEntryId: swarmEntry.id,
+					sourceCohortId: sourceCohort.cohortId,
+					promotionEventId,
+				}),
+			);
 		}
 
-		// Build new hive entry
-		const newHiveEntry: HiveKnowledgeEntry = {
-			id: crypto.randomUUID(),
-			tier: 'hive',
-			lesson: swarmEntry.lesson,
-			category: swarmEntry.category,
-			tags: swarmEntry.tags,
-			scope: swarmEntry.scope,
-			confidence: 0.5, // starts at 0.5 in hive
-			status: 'candidate', // ALWAYS candidate on entry
-			confirmed_by: [], // empty — no project confirmations yet
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
-			},
-			schema_version: config.schema_version,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
-			source_project: swarmEntry.project_name,
-			encounter_score: config.initial_encounter_score, // starts at configured initial value (default 1.0)
-			...carryActionableFields(swarmEntry),
+		// 2. Existing hive entries: add cross-cohort confirmations.
+		// Precompute swarm bigrams once so this loop is O(hive × swarm) without
+		// recomputing swarm bigrams per hive entry (keeps the closure fast —
+		// #1847 MAJOR-2).
+		const activeSwarm = swarmEntries.filter((e) => isActiveStatus(e.status));
+		const activeSwarmBigrams = activeSwarm.map((e) =>
+			typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
+		);
+		for (const hiveEntry of entries) {
+			// Find a near-duplicate swarm entry using precomputed bigrams.
+			const hiveBigram =
+				typeof hiveEntry.lesson === 'string'
+					? wordBigrams(hiveEntry.lesson)
+					: new Set<string>();
+			let nearDuplicate: SwarmKnowledgeEntry | undefined;
+			for (let i = 0; i < activeSwarm.length; i++) {
+				if (jaccardBigram(hiveBigram, activeSwarmBigrams[i]) >= config.dedup_threshold) {
+					nearDuplicate = activeSwarm[i];
+					break;
+				}
+			}
+			if (!nearDuplicate) continue;
+
+			// Do not self-confirm: if this hive entry was just promoted from this
+			// very swarm entry in this run, its origin cohort is already implied
+			// and should not double-count as a cross-project confirmation. A
+			// freshly promoted entry starts with empty confirmed_by and gains
+			// confirmations only from OTHER cohorts on subsequent runs.
+			if (
+				hiveEntry.lineage?.source_entry_id &&
+				hiveEntry.lineage.source_entry_id === nearDuplicate.id
+			) {
+				continue;
+			}
+
+			const sameProject = isSameOrigin(hiveEntry, sourceCohort.cohortId);
+			if (
+				hasProjectConfirmation(
+					hiveEntry,
+					nearDuplicate.project_name,
+					sourceCohort.cohortId,
+				)
+			) {
+				continue;
+			}
+
+			const newConfirmation: ProjectConfirmationRecord = {
+				project_name: nearDuplicate.project_name,
+				cohort_id: sourceCohort.cohortId,
+				confirmed_at: new Date().toISOString(),
+			};
+			hiveEntry.confirmed_by.push(newConfirmation);
+
+			const currentScore = hiveEntry.encounter_score ?? 1.0;
+			hiveEntry.encounter_score = calculateEncounterScore(
+				currentScore,
+				sameProject,
+				config,
+			);
+			encounters++;
+			hiveEntry.updated_at = new Date().toISOString();
+
+			if (
+				hiveEntry.status === 'candidate' &&
+				countDistinctProjects(hiveEntry.confirmed_by) >= 3
+			) {
+				hiveEntry.status = 'established';
+				advancements++;
+			}
+		}
+
+		const modified =
+			newPromotions > 0 || encounters > 0 || advancements > 0;
+		// Rejects must be persisted even when nothing else changed — otherwise a
+		// batch where every eligible entry failed validation would silently drop
+		// the rejection records. Committing rewrites the hive (unchanged content,
+		// an atomic no-op write) and appends the staged rejects under the lock.
+		if (!modified && rejects.length === 0) {
+			return {
+				kind: 'noop',
+				return: { newPromotions, encounters, advancements, total: entries.length },
+			};
+		}
+
+		return {
+			kind: 'commit',
+			entries,
+			maxEntries: config.hive_max_entries,
+			rejects: rejects.length > 0 ? rejects : undefined,
+			audit: audit.length > 0 ? audit : undefined,
+			return: { newPromotions, encounters, advancements, total: entries.length },
 		};
+	});
 
-		// Append to hive
-		await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
-
-		// Track new promotion
-		newPromotions++;
-
-		// Add the new entry to local array for subsequent processing
-		hiveEntries.push(newHiveEntry);
-	}
-
-	// After promotions, update hive entry confirmations for near-duplicates
-	// from different projects
-	let hiveModified = false;
-
-	for (const hiveEntry of hiveEntries) {
-		// Find near-duplicate swarm entries from different projects
-		const nearDuplicate = findNearDuplicate(
-			hiveEntry.lesson,
-			swarmEntries.filter(isActiveForHivePromotion),
-			config.dedup_threshold,
-		);
-
-		if (!nearDuplicate) {
-			continue;
-		}
-
-		// Determine if this is a same-project or cross-project encounter
-		const isSameProject =
-			nearDuplicate.project_name === hiveEntry.source_project;
-
-		// Skip if already confirmed by this project (same-run double-count prevention)
-		if (hasProjectConfirmation(hiveEntry, nearDuplicate.project_name)) {
-			continue;
-		}
-
-		// Add project confirmation
-		const newConfirmation: ProjectConfirmationRecord = {
-			project_name: nearDuplicate.project_name,
-			confirmed_at: new Date().toISOString(),
-		};
-
-		hiveEntry.confirmed_by.push(newConfirmation);
-
-		// Update encounter score with weighted scoring
-		// Use backward compatibility: default to 1.0 for older entries without encounter_score
-		const currentScore = hiveEntry.encounter_score ?? 1.0;
-		hiveEntry.encounter_score = calculateEncounterScore(
-			currentScore,
-			isSameProject,
-			config,
-		);
-
-		// Track encounter increment
-		encountersIncremented++;
-
-		hiveEntry.updated_at = new Date().toISOString();
-
-		// Advance status from candidate to established if 3+ distinct projects
-		if (
-			hiveEntry.status === 'candidate' &&
-			countDistinctProjects(hiveEntry.confirmed_by) >= 3
-		) {
-			hiveEntry.status = 'established';
-			// Track advancement
-			advancements++;
-		}
-
-		hiveModified = true;
-	}
-
-	// Rewrite hive file if any entries were modified
-	if (hiveModified) {
-		await rewriteKnowledge(resolveHiveKnowledgePath(), hiveEntries);
-	}
-
-	// Enforce hive_max_entries cap (FIFO: drop oldest when exceeded)
-	if (newPromotions > 0 || hiveModified) {
-		await enforceKnowledgeCap(
-			resolveHiveKnowledgePath(),
-			config.hive_max_entries,
-		);
-	}
-
-	// Return the promotion summary for curator state
 	return {
 		timestamp: new Date().toISOString(),
-		new_promotions: newPromotions,
-		encounters_incremented: encountersIncremented,
-		advancements: advancements,
-		total_hive_entries: hiveEntries.length,
+		new_promotions: result.return.newPromotions,
+		encounters_incremented: result.return.encounters,
+		advancements: result.return.advancements,
+		total_hive_entries: result.return.total,
+		diagnostics: [...diagnostics, ...result.diagnostics],
 	};
+}
+
+/** Build a staged promotion audit line (pre-serialized JSON). */
+function stagePromotionAudit(args: {
+	entryId: string;
+	lesson: string;
+	actor: PromotionActor;
+	sourceEntryId?: string;
+	sourceCohortId?: string;
+	promotionEventId: string;
+	reason?: string;
+	overrideFailedGates?: string[];
+}): HiveAuditEntry {
+	// Audit-only knowledge event tombstone (AC9 visibility). Shape mirrors the
+	// ArchivedEvent family but is a distinct promotion marker. Stored under the
+	// hive events log via the transaction's staged audit append.
+	const event = {
+		type: 'promotion',
+		schema_version: 1,
+		event_id: args.promotionEventId,
+		timestamp: new Date().toISOString(),
+		entry_id: args.entryId,
+		actor: args.actor,
+		reason: args.reason,
+		source_entry_id: args.sourceEntryId,
+		source_cohort_id: args.sourceCohortId,
+		override_failed_gates: args.overrideFailedGates,
+		lesson_excerpt: args.lesson.slice(0, 80),
+	};
+	return { line: JSON.stringify(event) };
 }
 
 export const _internals = {
@@ -372,6 +522,18 @@ export const _internals = {
 	checkHivePromotions,
 	readCuratorSummary,
 	appendCuratorRecommendation,
+	// #1847 DI seams (invariant 7) — tests inject these rather than mock.module.
+	resolveCohortId,
+	transactHiveStore,
+	validateLesson,
+	/** Loads validated terminal-application evidence per swarm entry id. Empty
+	 *  until #1849 produces real receipts (conservative: no synthetic credit). */
+	loadPromotionEvidence: async (
+		_swarmEntries: SwarmKnowledgeEntry[],
+	): Promise<Record<string, PromotionEvidenceRecord[]>> => ({}),
+	/** Loads the default KnowledgeConfig (schema defaults) for manual promotion
+	 *  paths when the command did not load one. */
+	loadDefaultKnowledgeConfig: () => KnowledgeConfigSchema.parse({}),
 };
 
 /**
@@ -383,13 +545,12 @@ export function createHivePromoterHook(
 	config: KnowledgeConfig,
 ): (input: unknown, output: unknown) => Promise<void> {
 	const hook = async (_input: unknown, _output: unknown): Promise<void> => {
-		// Read swarm entries from the project directory
 		const swarmEntries = await _internals.readSwarmEntries(directory);
 
-		// Run promotion logic and get summary
 		const promotionSummary = await _internals.checkHivePromotions(
 			swarmEntries,
 			config,
+			directory,
 		);
 
 		// Read first even on a no-op: this is the one-time migration path for
@@ -416,150 +577,305 @@ export function createHivePromoterHook(
 		});
 	};
 
-	// Wrap in safeHook for fire-and-forget error suppression
 	return safeHook(hook);
+}
+
+/** Options for manual promotion (override semantics, #1847 §4). */
+export interface ManualPromotionOptions {
+	force?: boolean;
+	reason?: string;
 }
 
 /**
  * Promote a lesson directly to the hive (manual promotion).
- * @param directory - Project directory
- * @param lesson - The lesson text to promote
- * @param category - Optional category (defaults to 'process')
- * @returns Confirmation message
+ *
+ * Runs the one policy evaluator. On a policy FAIL:
+ *   - without `force` → returns a diagnostic string listing the failed gates
+ *     (does NOT promote);
+ *   - with `force` + `reason` → promotes and writes a durable override audit
+ *     record (actor='manual-override', failed gates recorded) inside the
+ *     transaction.
+ * On a policy PASS → promotes with actor='manual'.
+ *
+ * An exact entry id / direct text alone is NEVER authorization to bypass policy.
  */
 export async function promoteToHive(
 	directory: string,
 	lesson: string,
 	category?: string,
+	options?: ManualPromotionOptions,
+	config?: KnowledgeConfig,
 ): Promise<string> {
 	const trimmedLesson = lesson.trim();
+	const sourceCohort = await _internals.resolveCohortId(directory);
+	// Use the real project config so manual promotion honors the same
+	// application-evidence / cohort thresholds as automatic promotion (AC9).
+	// Default to schema defaults when the command did not load one.
+	const policyConfig =
+		config ?? _internals.loadDefaultKnowledgeConfig();
 
-	// Read existing hive entries for deduplication
-	const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(
-		resolveHiveKnowledgePath(),
-	);
+	const result = await _internals.transactHiveStore<string>(async (ctx) => {
+		// Dedup against the locked entries.
+		if (findNearDuplicate(trimmedLesson, ctx.entries, policyConfig.dedup_threshold)) {
+			return { kind: 'noop' as const, return: `Lesson already exists in hive (near-duplicate).` };
+		}
 
-	// Validate before writing
-	const validationResult = validateLesson(
-		trimmedLesson,
-		hiveEntries.map((e) => e.lesson),
-		{
+		// Validate before writing (throws on error severity — propagate).
+		const validationResult = _internals.validateLesson(
+			trimmedLesson,
+			ctx.entries.map((e) => e.lesson),
+			{
+				category: (category as KnowledgeCategory) || 'process',
+				scope: 'global',
+				confidence: 1.0,
+			},
+		);
+		if (validationResult.severity === 'error') {
+			return {
+				kind: 'noop' as const,
+				return: `Lesson rejected by validator: ${validationResult.reason}`,
+			};
+		}
+
+		// Evaluate the one policy. The direct-text path has no swarm entry, so
+		// we synthesize a minimal stand-in for the policy gates that read swarm
+		// fields. Manual direct promotion is intentionally allowed to pass the
+		// eligibility_route gate (a human is explicitly authoring it); the
+		// active_status + confidence_floor + application gates still apply.
+		const swarmStandIn: SwarmKnowledgeEntry = {
+			id: 'manual-direct',
+			tier: 'swarm',
+			lesson: trimmedLesson,
 			category: (category as KnowledgeCategory) || 'process',
+			tags: ['hive-fast-track'], // route 2: explicit manual promotion
 			scope: 'global',
 			confidence: 1.0,
-		},
-	);
+			status: 'promoted',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: KNOWLEDGE_SCHEMA_VERSION,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: path.basename(directory) || 'unknown',
+		};
+		const decision = evaluatePromotionPolicy({
+			entry: swarmStandIn,
+			config: policyConfig,
+			evidence: [],
+		});
 
-	if (validationResult.severity === 'error') {
-		throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
-	}
+		const force = options?.force === true;
+		const reason = options?.reason?.trim();
 
-	// Check for near-duplicate
-	if (findNearDuplicate(trimmedLesson, hiveEntries, 0.6)) {
-		return `Lesson already exists in hive (near-duplicate).`;
-	}
+		let actor: PromotionActor;
+		let overrideFailedGates: string[] | undefined;
+		if (decision.eligible) {
+			actor = 'manual';
+		} else if (force && reason && reason.length > 0) {
+			actor = 'manual-override';
+			overrideFailedGates = failedGateNames(decision);
+		} else {
+			// Policy failed and no valid override → block, return diagnostics.
+			return {
+				kind: 'noop' as const,
+				return: `Promotion blocked by policy: ${decision.reason}. Use --force --reason "<why>" to record an audited override.`,
+			};
+		}
 
-	// Build hive entry
-	const newHiveEntry: HiveKnowledgeEntry = {
-		id: crypto.randomUUID(),
-		tier: 'hive',
-		lesson: trimmedLesson,
-		category: (category as KnowledgeCategory) || 'process',
-		tags: [],
-		scope: 'global',
-		confidence: 1.0,
-		status: 'promoted',
-		confirmed_by: [],
-		retrieval_outcomes: {
-			applied_count: 0,
-			succeeded_after_count: 0,
-			failed_after_count: 0,
-		},
-		schema_version: 1,
-		created_at: new Date().toISOString(),
-		updated_at: new Date().toISOString(),
-		source_project: path.basename(directory) || 'unknown',
-		encounter_score: 1.0, // manual promotions start at 1.0
-	};
+		const promotionEventId = crypto.randomUUID();
+		const newHiveEntry: HiveKnowledgeEntry = {
+			id: crypto.randomUUID(),
+			tier: 'hive',
+			lesson: trimmedLesson,
+			category: (category as KnowledgeCategory) || 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 1.0,
+			status: 'promoted',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: KNOWLEDGE_SCHEMA_VERSION,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			source_project: path.basename(directory) || 'unknown',
+			encounter_score: 1.0,
+			lineage: buildLineage({
+				actor,
+				sourceCohortId: sourceCohort.cohortId,
+				promotionEventId,
+				reason: reason || undefined,
+				overrideFailedGates,
+			}),
+		};
 
-	// Append to hive
-	await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
+		const entries = [...ctx.entries, newHiveEntry];
+		const audit = [
+			stagePromotionAudit({
+				entryId: newHiveEntry.id,
+				lesson: newHiveEntry.lesson,
+				actor,
+				sourceCohortId: sourceCohort.cohortId,
+				promotionEventId,
+				reason: reason || undefined,
+				overrideFailedGates,
+			}),
+		];
 
-	return `Promoted to hive: "${trimmedLesson.slice(0, 50)}${trimmedLesson.length > 50 ? '...' : ''}" (confidence: 1.0, source: manual)`;
+		return {
+			kind: 'commit' as const,
+			entries,
+			audit,
+			return: `Promoted to hive: "${trimmedLesson.slice(0, 50)}${trimmedLesson.length > 50 ? '...' : ''}" (confidence: 1.0, source: manual${actor === 'manual-override' ? '-override' : ''})`,
+		};
+	});
+
+	// The promotion audit is already staged inside the transaction (the durable
+	// override record). No extra post-transaction event is needed — emitting one
+	// here would re-enter the directory lock's file (deadlock risk) and the
+	// ReceiptEvent 'override' shape requires receipt-only fields we do not have.
+
+	return result.return;
 }
 
 /**
  * Promote a lesson from swarm knowledge to hive.
- * @param directory - Project directory
- * @param lessonId - The ID of the lesson to promote from swarm
- * @returns Confirmation message
+ *
+ * Snapshots the swarm read OUTSIDE the hive transaction (the swarm store is
+ * read-only here — no two-phase locking needed). Then runs the one policy
+ * evaluator + override semantics inside the hive transaction.
  */
 export async function promoteFromSwarm(
 	directory: string,
 	lessonId: string,
+	options?: ManualPromotionOptions,
+	config?: KnowledgeConfig,
 ): Promise<string> {
-	// Read swarm entries
+	// Snapshot the swarm entry outside the hive transaction.
 	const swarmEntries = await readKnowledge<SwarmKnowledgeEntry>(
 		resolveSwarmKnowledgePath(directory),
 	);
-
-	// Find the lesson
 	const swarmEntry = swarmEntries.find((e) => e.id === lessonId);
 	if (!swarmEntry) {
 		throw new Error(`Lesson ${lessonId} not found in .swarm/knowledge.jsonl`);
 	}
 
-	// Read existing hive entries
-	const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(
-		resolveHiveKnowledgePath(),
-	);
+	const sourceCohort = await _internals.resolveCohortId(directory);
+	// Use the real project config so manual promotion honors the same policy
+	// thresholds as automatic promotion (AC9). Default to schema defaults.
+	const policyConfig =
+		config ?? _internals.loadDefaultKnowledgeConfig();
 
-	// Validate before writing
-	const validationResult = validateLesson(
-		swarmEntry.lesson,
-		hiveEntries.map((e) => e.lesson),
-		{
+	const result = await _internals.transactHiveStore<string>(async (ctx) => {
+		if (findNearDuplicate(swarmEntry.lesson, ctx.entries, policyConfig.dedup_threshold)) {
+			return { kind: 'noop' as const, return: `Lesson already exists in hive (near-duplicate).` };
+		}
+
+		const validationResult = _internals.validateLesson(
+			swarmEntry.lesson,
+			ctx.entries.map((e) => e.lesson),
+			{
+				category: swarmEntry.category,
+				scope: swarmEntry.scope,
+				confidence: swarmEntry.confidence,
+			},
+		);
+		if (validationResult.severity === 'error') {
+			return {
+				kind: 'noop' as const,
+				return: `Lesson rejected by validator: ${validationResult.reason}`,
+			};
+		}
+
+		// One policy evaluator (M1: same gates as auto promotion). An exact id
+		// alone is NEVER authorization to bypass policy.
+		const decision = evaluatePromotionPolicy({
+			entry: swarmEntry,
+			config: policyConfig,
+			evidence: [],
+		});
+
+		const force = options?.force === true;
+		const reason = options?.reason?.trim();
+
+		let actor: PromotionActor;
+		let overrideFailedGates: string[] | undefined;
+		if (decision.eligible) {
+			actor = 'manual';
+		} else if (force && reason && reason.length > 0) {
+			actor = 'manual-override';
+			overrideFailedGates = failedGateNames(decision);
+		} else {
+			return {
+				kind: 'noop' as const,
+				return: `Promotion blocked by policy: ${decision.reason}. Use --force --reason "<why>" to record an audited override.`,
+			};
+		}
+
+		const promotionEventId = crypto.randomUUID();
+		const newHiveEntry: HiveKnowledgeEntry = {
+			id: crypto.randomUUID(),
+			tier: 'hive',
+			lesson: swarmEntry.lesson,
 			category: swarmEntry.category,
+			tags: swarmEntry.tags,
 			scope: swarmEntry.scope,
-			confidence: swarmEntry.confidence,
-		},
-	);
+			confidence: 1.0,
+			status: 'promoted',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: swarmEntry.schema_version || KNOWLEDGE_SCHEMA_VERSION,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			source_project: swarmEntry.project_name,
+			encounter_score: 1.0,
+			lineage: buildLineage({
+				actor,
+				sourceEntryId: swarmEntry.id,
+				sourceCohortId: sourceCohort.cohortId,
+				promotionEventId,
+				reason: reason || undefined,
+				overrideFailedGates,
+			}),
+			...carryActionableFields(swarmEntry),
+		};
 
-	if (validationResult.severity === 'error') {
-		throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
-	}
+		const entries = [...ctx.entries, newHiveEntry];
+		const audit = [
+			stagePromotionAudit({
+				entryId: newHiveEntry.id,
+				lesson: newHiveEntry.lesson,
+				actor,
+				sourceEntryId: swarmEntry.id,
+				sourceCohortId: sourceCohort.cohortId,
+				promotionEventId,
+				reason: reason || undefined,
+				overrideFailedGates,
+			}),
+		];
 
-	// Check for near-duplicate
-	if (findNearDuplicate(swarmEntry.lesson, hiveEntries, 0.6)) {
-		return `Lesson already exists in hive (near-duplicate).`;
-	}
+		return {
+			kind: 'commit' as const,
+			entries,
+			audit,
+			return: `Promoted lesson ${lessonId} from swarm to hive: "${swarmEntry.lesson.slice(0, 50)}${swarmEntry.lesson.length > 50 ? '...' : ''}"`,
+		};
+	});
 
-	// Build hive entry from swarm entry
-	const newHiveEntry: HiveKnowledgeEntry = {
-		id: crypto.randomUUID(),
-		tier: 'hive',
-		lesson: swarmEntry.lesson,
-		category: swarmEntry.category,
-		tags: swarmEntry.tags,
-		scope: swarmEntry.scope,
-		confidence: 1.0,
-		status: 'promoted',
-		confirmed_by: [],
-		retrieval_outcomes: {
-			applied_count: 0,
-			succeeded_after_count: 0,
-			failed_after_count: 0,
-		},
-		schema_version: 1,
-		created_at: new Date().toISOString(),
-		updated_at: new Date().toISOString(),
-		source_project: swarmEntry.project_name,
-		encounter_score: 1.0, // promotions from swarm start at 1.0
-		...carryActionableFields(swarmEntry),
-	};
-
-	// Append to hive
-	await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
-
-	return `Promoted lesson ${lessonId} from swarm to hive: "${swarmEntry.lesson.slice(0, 50)}${swarmEntry.lesson.length > 50 ? '...' : ''}"`;
+	return result.return;
 }
+
+// Resolve hive knowledge path re-exported for any external consumer that still
+// imports it from this module (historical surface).
+export { resolveHiveKnowledgePath } from './knowledge-store.js';

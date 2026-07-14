@@ -1169,9 +1169,10 @@ export const COMMAND_REGISTRY = {
 	},
 	promote: {
 		handler: (ctx) => handlePromoteCommand(ctx.directory, ctx.args),
-		description: 'Manually promote lesson to hive knowledge',
+		description:
+			'Manually promote lesson to hive knowledge (policy-gated; --force --reason overrides with audit)',
 		details:
-			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Validates lesson text before promotion. Either direct text or --from-swarm ID is required.',
+			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Promotion runs the one policy evaluator inside a single cross-process transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is supplied, which records a durable, audited override. An exact entry id alone is never authorization to bypass policy. Either direct text or --from-swarm ID is required.',
 		args: '--category <category>, --from-swarm <lesson-id>, <lesson-text>',
 		category: 'utility',
 		toolPolicy: 'none',

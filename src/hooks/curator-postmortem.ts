@@ -481,6 +481,7 @@ async function executePostMortemActions(
 			const hiveResult = await _internals.checkHivePromotions(
 				entries,
 				knowledgeConfig,
+				directory,
 			);
 			result.hive_promotions = hiveResult.new_promotions;
 			result.hive_encounters_incremented = hiveResult.encounters_incremented;
@@ -1380,9 +1381,10 @@ export const _internals = {
 	checkHivePromotions: async (
 		entries: SwarmKnowledgeEntry[],
 		knowledgeConfig: KnowledgeConfig,
+		directory: string,
 	) => {
 		const { checkHivePromotions } = await import('./hive-promoter.js');
-		return checkHivePromotions(entries, knowledgeConfig);
+		return checkHivePromotions(entries, knowledgeConfig, directory);
 	},
 	applyProposalTriage: async (
 		directory: string,

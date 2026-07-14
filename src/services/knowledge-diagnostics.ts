@@ -111,6 +111,24 @@ export interface KnowledgeDebugMeta {
 		 */
 		local_orphaned: boolean;
 	};
+	/**
+	 * Hive promotion health (issue #1847). Surfaces lineage presence and any
+	 * manual-override promotions so an operator can audit forced entries.
+	 */
+	hive: {
+		/** Hive entries carrying a #1847 lineage block. */
+		entries_with_lineage: number;
+		/** Hive entries promoted via an audited --force override (AC9 visibility). */
+		override_promotions: number;
+		/** Up to 20 most-recent override entries (id, failed gates, reason). */
+		override_entries: Array<{
+			id: string;
+			lesson_excerpt: string;
+			override_failed_gates?: string[];
+			reason?: string;
+			promotion_event_id?: string;
+		}>;
+	};
 }
 
 /** Parse JSONL lines without normalization. Returns parsed objects + corrupt count. */
@@ -273,6 +291,35 @@ export async function computeKnowledgeDebug(
 		// leave defaults (not linked)
 	}
 
+	// Hive promotion lineage + override audit (issue #1847, AC9 visibility).
+	// Best-effort: any failure degrades to zero. Reuses the hive entries already
+	// read above; no new I/O, and never on the plugin-init path.
+	let hiveEntriesWithLineage = 0;
+	let hiveOverridePromotions = 0;
+	const hiveOverrideEntries: KnowledgeDebugMeta['hive']['override_entries'] = [];
+	try {
+		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
+		for (const e of hive) {
+			if (e.lineage) {
+				hiveEntriesWithLineage++;
+				if (e.lineage.actor === 'manual-override') {
+					hiveOverridePromotions++;
+					if (hiveOverrideEntries.length < 20) {
+						hiveOverrideEntries.push({
+							id: e.id,
+							lesson_excerpt: e.lesson.slice(0, 80),
+							override_failed_gates: e.lineage.override_failed_gates,
+							reason: e.lineage.reason,
+							promotion_event_id: e.lineage.promotion_event_id,
+						});
+					}
+				}
+			}
+		}
+	} catch {
+		// leave defaults
+	}
+
 	return {
 		plugin_version: version,
 		directory,
@@ -306,6 +353,11 @@ export async function computeKnowledgeDebug(
 			shared_root: cohortSharedRoot,
 			generation: cohortGeneration,
 			local_orphaned: cohortLocalOrphaned,
+		},
+		hive: {
+			entries_with_lineage: hiveEntriesWithLineage,
+			override_promotions: hiveOverridePromotions,
+			override_entries: hiveOverrideEntries,
 		},
 	};
 }

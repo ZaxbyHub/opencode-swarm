@@ -13,7 +13,8 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Mock curator module
+// Mock curator recommendation append. Driven through the _internals DI seam,
+// NOT mock.module (which leaks across test files — AGENTS.md invariant 7).
 const mockReadCuratorSummary = mock();
 const mockWriteCuratorSummary = mock();
 const mockAppendCuratorRecommendation = mock(
@@ -34,38 +35,13 @@ const mockAppendCuratorRecommendation = mock(
 	},
 );
 
-mock.module('../../../src/hooks/curator.js', () => ({
-	readCuratorSummary: (...args: unknown[]) => mockReadCuratorSummary(...args),
-	writeCuratorSummary: (...args: unknown[]) => mockWriteCuratorSummary(...args),
-	appendCuratorRecommendation: (...args: unknown[]) =>
-		mockAppendCuratorRecommendation(...args),
-}));
-
-// Mock knowledge-store module
-mock.module('../../../src/hooks/knowledge-store.js', () => ({
-	resolveHiveKnowledgePath: mock(() => '/hive/shared-learnings.jsonl'),
-	resolveHiveRejectedPath: mock(() => '/hive/shared-learnings-rejected.jsonl'),
-	resolveSwarmKnowledgePath: mock(() => '/swarm/.swarm/knowledge.jsonl'),
-	readKnowledge: mock(async () => []),
-	appendKnowledge: mock(async () => undefined),
-	rewriteKnowledge: mock(async () => undefined),
-	findNearDuplicate: mock(() => undefined),
-	computeConfidence: mock(() => 0.6),
-	enforceKnowledgeCap: async () => {},
-	sweepAgedEntries: async () => {},
-	sweepStaleTodos: async () => {},
-	bumpKnowledgeConfidenceBatch: async () => {},
-}));
-
-// Mock validateLesson
-mock.module('../../../src/hooks/knowledge-validator.js', () => ({
-	validateLesson: mock(() => ({
-		valid: true,
-		layer: 1,
-		reason: '',
-		severity: 'none',
-	})),
-}));
+// NOTE (#1847): this file previously `mock.module`'d knowledge-store.js and
+// knowledge-validator.js, but it drives the promoter entirely through the
+// `_internals` DI seam (checkHivePromotions / readCuratorSummary /
+// appendCuratorRecommendation are all overridden per-test). The module mocks
+// were dead weight AND leaked across test files in Bun's shared runner
+// (AGENTS.md invariant 7), breaking the real-I/O hive-promoter tests that run
+// after this one. They are intentionally removed.
 
 // Import after mocking
 import {

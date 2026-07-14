@@ -36,6 +36,8 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 				min_retrievals_for_utility: 3,
 				promoted_demotion_min_negative_phases: 3,
 				promoted_demotion_signal_threshold: -0.3,
+				promotion_min_terminal_applications: 0,
+				promotion_min_distinct_cohorts: 0,
 				schema_version: 1,
 				same_project_weight: 1.0,
 				cross_project_weight: 0.5,
@@ -65,7 +67,7 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 			});
 		});
 
-		it('should accept partial overrides and merge with defaults', () => {
+	it('should accept partial overrides and merge with defaults', () => {
 			const result = KnowledgeConfigSchema.parse({
 				enabled: false,
 				max_inject_count: 10,
@@ -100,6 +102,8 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 				min_retrievals_for_utility: 5,
 				promoted_demotion_min_negative_phases: 5,
 				promoted_demotion_signal_threshold: -0.5,
+				promotion_min_terminal_applications: 2,
+				promotion_min_distinct_cohorts: 2,
 				schema_version: 2,
 				same_project_weight: 1.0,
 				cross_project_weight: 0.5,
@@ -227,6 +231,8 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 					min_retrievals_for_utility: 5,
 					promoted_demotion_min_negative_phases: 5,
 					promoted_demotion_signal_threshold: -0.5,
+					promotion_min_terminal_applications: 2,
+					promotion_min_distinct_cohorts: 2,
 					schema_version: 2,
 					same_project_weight: 1.0,
 					cross_project_weight: 0.5,
