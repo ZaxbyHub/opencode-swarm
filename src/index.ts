@@ -231,11 +231,12 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 		// Intentional FATAL surface: OpenCode's plugin loader silently drops a
 		// plugin whose entry rejects, leaving the user with no commands/agents
 		// and no visible error (issue #675). Raw stderr here is the one place it
-		// is justified. A biome-ignore(lint/suspicious/noConsole) comment will
-		// be added in PR5 of epic #1752 when noConsole is enabled globally.
+		// is justified. biome-ignore added in PR5 of epic #1752 when noConsole was enabled.
+		// biome-ignore lint/suspicious/noConsole: FATAL initialization failure — user must see this to debug plugin load issues (issue #675)
 		console.error(
 			'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
 		);
+		// biome-ignore lint/suspicious/noConsole: FATAL initialization failure — user must see this to debug plugin load issues (issue #675)
 		console.error(stack);
 		throw err;
 	}
@@ -2208,6 +2209,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			const _dbg = !!process.env.DEBUG_SWARM;
 			const _toolName = normalizeToolName(input.tool) ?? input.tool;
 			if (_dbg)
+				// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 				console.error(
 					`[DIAG] toolAfter START tool=${_toolName} session=${input.sessionID}`,
 				);
@@ -2218,9 +2220,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			const hookChain = async (): Promise<void> => {
 				await activityHooks.toolAfter(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter activity done tool=${_toolName}`);
 				await safeHook(trajectoryLoggerHook.toolAfter)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(
 						`[DIAG] toolAfter trajectoryLogger done tool=${_toolName}`,
 					);
@@ -2264,18 +2268,23 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter guardrails done tool=${_toolName}`);
 				await safeHook(delegationLedgerHook.toolAfter)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter ledger done tool=${_toolName}`);
 				await safeHook(selfReviewHook.toolAfter)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter selfReview done tool=${_toolName}`);
 				await safeHook(memoryLifecycleHooks.toolAfter)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter memory done tool=${_toolName}`);
 				await safeHook(delegationGateHooks.toolAfter)(input, output);
 				if (_dbg)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(
 						`[DIAG] toolAfter delegationGate done tool=${_toolName}`,
 					);
@@ -2559,6 +2568,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 			async (input: any, output: any) => {
 				if (process.env.DEBUG_SWARM)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
 					console.error(
 						`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
 					);
@@ -2591,6 +2601,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				}
 
 				if (process.env.DEBUG_SWARM)
+					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
 					console.error(
 						`[DIAG] chat.message DONE agent=${input.agent ?? 'none'}`,
 					);
