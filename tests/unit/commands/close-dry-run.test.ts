@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleCloseCommand } from '../../../src/commands/close';
+import { _internals, handleCloseCommand } from '../../../src/commands/close';
 
 let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');
@@ -85,6 +85,32 @@ describe('handleCloseCommand --dry-run', () => {
 		expect(beforeFootnote).not.toContain('swarm.db-wal');
 		// Sidecars remain on disk.
 		expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(true);
+	});
+
+	it('never tears down session state (endAgentSession / resetSwarmStatePreservingSingletons not called)', async () => {
+		// Locks the docblock's "no tearing down session state" claim: a future
+		// refactor that moves teardown earlier must not silently regress this.
+		writePlan();
+		let endAgentSessionCalls = 0;
+		let resetCalls = 0;
+		const originalEndAgentSession = _internals.endAgentSession;
+		const originalReset = _internals.resetSwarmStatePreservingSingletons;
+		_internals.endAgentSession = (...args) => {
+			endAgentSessionCalls++;
+			return originalEndAgentSession(...args);
+		};
+		_internals.resetSwarmStatePreservingSingletons = (...args) => {
+			resetCalls++;
+			return originalReset(...args);
+		};
+		try {
+			await handleCloseCommand(testDir, ['--dry-run']);
+			expect(endAgentSessionCalls).toBe(0);
+			expect(resetCalls).toBe(0);
+		} finally {
+			_internals.endAgentSession = originalEndAgentSession;
+			_internals.resetSwarmStatePreservingSingletons = originalReset;
+		}
 	});
 
 	it('handles a plan-free session (cleanup-only) without error', async () => {

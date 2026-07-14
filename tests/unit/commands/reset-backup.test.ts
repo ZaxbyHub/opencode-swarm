@@ -110,6 +110,26 @@ describe('backupSwarmStateBeforeReset', () => {
 		expect(result.warnings).toEqual([]);
 	});
 
+	test('refuses a symlinked .swarm/ directory (returns null, copies nothing)', () => {
+		const root = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'reset-backup-symlink-'),
+		);
+		tempRoots.push(root);
+		const realTarget = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'reset-backup-symlink-target-'),
+		);
+		tempRoots.push(realTarget);
+		fs.writeFileSync(path.join(realTarget, 'plan.json'), '{"a":1}');
+		fs.symlinkSync(realTarget, path.join(root, '.swarm'), 'dir');
+
+		const result = backupSwarmStateBeforeReset(root, 'reset', ['plan.json']);
+
+		expect(result.backupDir).toBeNull();
+		expect(result.copied).toEqual([]);
+		// Nothing was created under the redirected target.
+		expect(fs.existsSync(path.join(realTarget, 'reset-backups'))).toBe(false);
+	});
+
 	test('rejects path-traversal entries via a warning, without escaping .swarm', () => {
 		const root = makeRoot();
 		write(root, 'plan.json', '{}');

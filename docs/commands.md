@@ -870,7 +870,7 @@ against a three-route eligibility gate before promotion to hive:
 Entries failing all routes are skipped. The `auto_promote_days` threshold is read
 from your project's `knowledge.*` config.
 
-`/swarm close [--prune-branches] [--skill-review]` remains available as a deprecated alias.
+`/swarm close [--prune-branches] [--skill-review] [--dry-run]` remains available as a deprecated alias.
 
 ---
 
