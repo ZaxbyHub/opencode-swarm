@@ -41,14 +41,21 @@ export interface FuzzyResult {
 /** Options for {@link fuzzyFindAndReplace}. */
 export interface FuzzyOptions {
 	/**
-	 * When true (default), the `context_aware` strategy (9) is included in the
-	 * chain. Strategy 9 is the loosest/most-false-positive-prone strategy
-	 * (50% line similarity), so the `apply-patch` integration passes `false`
-	 * unless the separate `apply_patch.fuzzy_match_context_aware` flag is set.
+	 * When true (default at the utility level), the `context_aware` strategy
+	 * (9) is included in the chain. Strategy 9 is the loosest/most-false-
+	 * positive-prone strategy (requires 50% of lines to reach 0.80 per-line
+	 * similarity) and has quadratic cost, so it is bounded by an internal
+	 * cell-count cap.
 	 *
-	 * The utility itself defaults it to `true` so the byte-faithful ported
-	 * hermes test suite passes unmodified — strategy 9 is a legitimate part
-	 * of the matching chain and several test cases depend on it.
+	 * **Default divergence (intentional):** the utility defaults this to
+	 * `true` so the byte-faithful ported hermes test suite passes unmodified
+	 * (strategy 9 is a legitimate part of the matching chain and some test
+	 * cases depend on it). The `apply-patch` integration — the only consumer
+	 * today — explicitly passes `false` unless the separate
+	 * `apply_patch.fuzzy_match_context_aware` config flag is set, honoring
+	 * issue #1718's Non-Goal "do not port strategy 9 as default-on" at the
+	 * integration layer. New callers should pass `false` unless they
+	 * specifically want strategy 9.
 	 */
 	includeContextAware?: boolean;
 }
@@ -130,7 +137,12 @@ export function fuzzyFindAndReplace(
 	options: FuzzyOptions = {},
 ): FuzzyResult {
 	if (!oldString) {
-		return { content, matchCount: 0, strategy: null, error: 'old_string cannot be empty' };
+		return {
+			content,
+			matchCount: 0,
+			strategy: null,
+			error: 'old_string cannot be empty',
+		};
 	}
 	if (oldString === newString) {
 		return {
@@ -172,7 +184,12 @@ export function fuzzyFindAndReplace(
 
 		// Escape-drift guard (skipped for exact matches).
 		if (strategyName !== 'exact') {
-			const driftErr = detectEscapeDrift(content, matches, oldString, newString);
+			const driftErr = detectEscapeDrift(
+				content,
+				matches,
+				oldString,
+				newString,
+			);
 			if (driftErr) {
 				return { content, matchCount: 0, strategy: null, error: driftErr };
 			}
@@ -181,9 +198,32 @@ export function fuzzyFindAndReplace(
 		// Selective unescape of \t / \r in new_string based on the matched region.
 		let effectiveNew = maybeUnescapeNewString(newString, content, matches);
 
-		// Unicode preservation under strategy 7.
-		if (strategyName === 'unicode_normalized') {
-			effectiveNew = preserveUnicodeInReplacement(content, matches, oldString, effectiveNew);
+		// Unicode preservation: strategies 7 (unicode_normalized), 8 (block_anchor),
+		// and 9 (context_aware) all normalize Unicode characters for matching.
+		// `preserveUnicodeInReplacement` is invoked for all three so that, when the
+		// normalized forms of old_string and the file region align, the file's
+		// original Unicode characters (smart quotes, em-dashes, ellipsis) are kept
+		// for unchanged spans rather than clobbered to ASCII equivalents.
+		//
+		// Note: the helper has an internal guard (`normOld !== normFile → return
+		// newString`) that makes it a no-op when the normalized forms don't align.
+		// In practice this means preservation is fully effective for strategy 7
+		// (which only fires when the normalized forms match), and best-effort for
+		// strategies 8/9 (which can match with a fuzzy middle). A residual clobber
+		// risk remains for the narrow case of a strategy-8/9 match on Unicode
+		// content with middle drift; that is pre-existing and documented in the
+		// release notes.
+		if (
+			strategyName === 'unicode_normalized' ||
+			strategyName === 'block_anchor' ||
+			strategyName === 'context_aware'
+		) {
+			effectiveNew = preserveUnicodeInReplacement(
+				content,
+				matches,
+				oldString,
+				effectiveNew,
+			);
 		}
 
 		const newContent = applyReplacements(
@@ -192,7 +232,12 @@ export function fuzzyFindAndReplace(
 			effectiveNew,
 			strategyName !== 'exact' ? oldString : null,
 		);
-		return { content: newContent, matchCount: matches.length, strategy: strategyName, error: null };
+		return {
+			content: newContent,
+			matchCount: matches.length,
+			strategy: strategyName,
+			error: null,
+		};
 	}
 
 	return {
@@ -225,10 +270,15 @@ function detectEscapeDrift(
 	if (!newString.includes("\\'") && !newString.includes('\\"')) return null;
 
 	let matchedRegions = '';
-	for (const [start, end] of matches) matchedRegions += content.slice(start, end);
+	for (const [start, end] of matches)
+		matchedRegions += content.slice(start, end);
 
 	for (const suspect of ["\\'", '\\"'] as const) {
-		if (newString.includes(suspect) && oldString.includes(suspect) && !matchedRegions.includes(suspect)) {
+		if (
+			newString.includes(suspect) &&
+			oldString.includes(suspect) &&
+			!matchedRegions.includes(suspect)
+		) {
 			const plain = suspect[1]; // "'" or '"'
 			return (
 				`Escape-drift detected: old_string and new_string contain the literal sequence ` +
@@ -251,10 +301,16 @@ function detectEscapeDrift(
  * corresponding control byte. `\n` is intentionally excluded (newlines
  * serialize correctly through JSON).
  */
-function maybeUnescapeNewString(newString: string, content: string, matches: Span[]): string {
-	if (!newString.includes('\\t') && !newString.includes('\\r')) return newString;
+function maybeUnescapeNewString(
+	newString: string,
+	content: string,
+	matches: Span[],
+): string {
+	if (!newString.includes('\\t') && !newString.includes('\\r'))
+		return newString;
 	let matchedRegions = '';
-	for (const [start, end] of matches) matchedRegions += content.slice(start, end);
+	for (const [start, end] of matches)
+		matchedRegions += content.slice(start, end);
 	let out = newString;
 	if (out.includes('\\t') && matchedRegions.includes('\t')) {
 		out = out.split('\\t').join('\t');
@@ -274,7 +330,11 @@ function maybeUnescapeNewString(newString: string, content: string, matches: Spa
  * base indent prefix, preserving relative nesting. No-op when the base indents
  * already match.
  */
-function reindentReplacement(fileRegion: string, oldString: string, newString: string): string {
+function reindentReplacement(
+	fileRegion: string,
+	oldString: string,
+	newString: string,
+): string {
 	if (!newString) return newString;
 
 	const oldFirst = firstMeaningfulLine(oldString);
@@ -377,9 +437,10 @@ function applyReplacements(
 	const sorted = [...matches].sort((x, y) => y[0] - x[0]);
 	let result = content;
 	for (const [start, end] of sorted) {
-		const adjusted = oldString !== null
-			? reindentReplacement(content.slice(start, end), oldString, newString)
-			: newString;
+		const adjusted =
+			oldString !== null
+				? reindentReplacement(content.slice(start, end), oldString, newString)
+				: newString;
 		result = result.slice(0, start) + adjusted + result.slice(end);
 	}
 	return result;
@@ -411,7 +472,10 @@ function buildOrigToNormMap(original: string): number[] {
 }
 
 /** Convert (start, end) positions in the normalized string to original positions. */
-function mapPositionsNormToOrig(origToNorm: number[], normMatches: Span[]): Span[] {
+function mapPositionsNormToOrig(
+	origToNorm: number[],
+	normMatches: Span[],
+): Span[] {
 	const normToOrigStart: Map<number, number> = new Map();
 	for (let origPos = 0; origPos < origToNorm.length - 1; origPos++) {
 		const normPos = origToNorm[origPos];
@@ -469,9 +533,16 @@ function findNormalizedMatches(
 	const numPatternLines = patternNormLines.length;
 	const matches: Span[] = [];
 	for (let i = 0; i <= contentNormalizedLines.length - numPatternLines; i++) {
-		const block = contentNormalizedLines.slice(i, i + numPatternLines).join('\n');
+		const block = contentNormalizedLines
+			.slice(i, i + numPatternLines)
+			.join('\n');
 		if (block === patternNormalized) {
-			const [start, end] = calculateLinePositions(contentLines, i, i + numPatternLines, content.length);
+			const [start, end] = calculateLinePositions(
+				contentLines,
+				i,
+				i + numPatternLines,
+				content.length,
+			);
 			matches.push([start, end]);
 		}
 	}
@@ -511,7 +582,11 @@ function mapNormalizedPositions(
 			origToNorm.push(normIdx);
 			origIdx++;
 			// Don't advance norm_idx until all consecutive whitespace is consumed.
-			if (origIdx < original.length && original[origIdx] !== ' ' && original[origIdx] !== '\t') {
+			if (
+				origIdx < original.length &&
+				original[origIdx] !== ' ' &&
+				original[origIdx] !== '\t'
+			) {
 				normIdx++;
 			}
 		} else if (original[origIdx] === ' ' || original[origIdx] === '\t') {
@@ -548,7 +623,10 @@ function mapNormalizedPositions(
 			// Find nearest original position with normalized pos >= normStart.
 			origStart = origToNorm.length;
 			for (let i = 0; i < origToNorm.length; i++) {
-				if (origToNorm[i] >= normStart) { origStart = i; break; }
+				if (origToNorm[i] >= normStart) {
+					origStart = i;
+					break;
+				}
 			}
 		}
 
@@ -564,7 +642,10 @@ function mapNormalizedPositions(
 		// first whitespace in the original is a word boundary and must not be
 		// consumed.
 		if (normEnd < normalized.length && normalized[normEnd - 1] === ' ') {
-			while (origEnd < original.length && (original[origEnd] === ' ' || original[origEnd] === '\t')) {
+			while (
+				origEnd < original.length &&
+				(original[origEnd] === ' ' || original[origEnd] === '\t')
+			) {
 				origEnd++;
 			}
 		}
@@ -599,29 +680,55 @@ export function strategyLineTrimmed(content: string, pattern: string): Span[] {
 	const patternNormalized = patternLines.join('\n');
 	const contentLines = content.split('\n');
 	const contentNormalizedLines = contentLines.map((l) => l.trim());
-	return findNormalizedMatches(content, contentLines, contentNormalizedLines, patternNormalized);
+	return findNormalizedMatches(
+		content,
+		contentLines,
+		contentNormalizedLines,
+		patternNormalized,
+	);
 }
 
 /** Strategy 3: collapse `[ \t]+` → single space, preserve newlines. */
-export function strategyWhitespaceNormalized(content: string, pattern: string): Span[] {
+export function strategyWhitespaceNormalized(
+	content: string,
+	pattern: string,
+): Span[] {
 	const normalize = (s: string) => s.replace(/[ \t]+/g, ' ');
 	const patternNormalized = normalize(pattern);
 	const contentNormalized = normalize(content);
-	const matchesInNormalized = strategyExact(contentNormalized, patternNormalized);
+	const matchesInNormalized = strategyExact(
+		contentNormalized,
+		patternNormalized,
+	);
 	if (matchesInNormalized.length === 0) return [];
-	return mapNormalizedPositions(content, contentNormalized, matchesInNormalized);
+	return mapNormalizedPositions(
+		content,
+		contentNormalized,
+		matchesInNormalized,
+	);
 }
 
 /** Strategy 4: strip all leading whitespace per line (lstrip). */
-export function strategyIndentationFlexible(content: string, pattern: string): Span[] {
+export function strategyIndentationFlexible(
+	content: string,
+	pattern: string,
+): Span[] {
 	const contentLines = content.split('\n');
 	const contentStripped = contentLines.map((l) => l.replace(/^[ \t]+/, ''));
 	const patternLines = pattern.split('\n').map((l) => l.replace(/^[ \t]+/, ''));
-	return findNormalizedMatches(content, contentLines, contentStripped, patternLines.join('\n'));
+	return findNormalizedMatches(
+		content,
+		contentLines,
+		contentStripped,
+		patternLines.join('\n'),
+	);
 }
 
 /** Strategy 5: unescape `\n`/`\t`/`\r` literals → bytes, then exact match. */
-export function strategyEscapeNormalized(content: string, pattern: string): Span[] {
+export function strategyEscapeNormalized(
+	content: string,
+	pattern: string,
+): Span[] {
 	const unescapeLiterals = (s: string) =>
 		s.split('\\n').join('\n').split('\\t').join('\t').split('\\r').join('\r');
 	const patternUnescaped = unescapeLiterals(pattern);
@@ -630,11 +737,16 @@ export function strategyEscapeNormalized(content: string, pattern: string): Span
 }
 
 /** Strategy 6: trim only first and last lines, sliding window. */
-export function strategyTrimmedBoundary(content: string, pattern: string): Span[] {
+export function strategyTrimmedBoundary(
+	content: string,
+	pattern: string,
+): Span[] {
 	const patternLines = pattern.split('\n');
 	if (patternLines.length === 0) return [];
 	patternLines[0] = patternLines[0].trim();
-	if (patternLines.length > 1) patternLines[patternLines.length - 1] = patternLines[patternLines.length - 1].trim();
+	if (patternLines.length > 1)
+		patternLines[patternLines.length - 1] =
+			patternLines[patternLines.length - 1].trim();
 	const modifiedPattern = patternLines.join('\n');
 	const contentLines = content.split('\n');
 	const matches: Span[] = [];
@@ -643,9 +755,16 @@ export function strategyTrimmedBoundary(content: string, pattern: string): Span[
 		const blockLines = contentLines.slice(i, i + patternLineCount);
 		const checkLines = blockLines.slice();
 		checkLines[0] = checkLines[0].trim();
-		if (checkLines.length > 1) checkLines[checkLines.length - 1] = checkLines[checkLines.length - 1].trim();
+		if (checkLines.length > 1)
+			checkLines[checkLines.length - 1] =
+				checkLines[checkLines.length - 1].trim();
 		if (checkLines.join('\n') === modifiedPattern) {
-			const [start, end] = calculateLinePositions(contentLines, i, i + patternLineCount, content.length);
+			const [start, end] = calculateLinePositions(
+				contentLines,
+				i,
+				i + patternLineCount,
+				content.length,
+			);
 			matches.push([start, end]);
 		}
 	}
@@ -653,7 +772,10 @@ export function strategyTrimmedBoundary(content: string, pattern: string): Span[
 }
 
 /** Strategy 7: Unicode normalization (smart quotes, em/en dash, ellipsis, NBSP). */
-export function strategyUnicodeNormalized(content: string, pattern: string): Span[] {
+export function strategyUnicodeNormalized(
+	content: string,
+	pattern: string,
+): Span[] {
 	const normPattern = unicodeNormalize(pattern);
 	const normContent = unicodeNormalize(content);
 	if (normContent === content && normPattern === pattern) return [];
@@ -701,12 +823,23 @@ export function strategyBlockAnchor(content: string, pattern: string): Span[] {
 		if (patternLineCount <= 2) {
 			similarity = 1.0;
 		} else {
-			const contentMiddle = normContentLines.slice(i + 1, i + patternLineCount - 1).join('\n');
+			const contentMiddle = normContentLines
+				.slice(i + 1, i + patternLineCount - 1)
+				.join('\n');
 			const patternMiddle = patternLines.slice(1, -1).join('\n');
-			similarity = new SequenceMatcher(null, contentMiddle, patternMiddle).ratio();
+			similarity = new SequenceMatcher(
+				null,
+				contentMiddle,
+				patternMiddle,
+			).ratio();
 		}
 		if (similarity >= threshold) {
-			const [start, end] = calculateLinePositions(origContentLines, i, i + patternLineCount, content.length);
+			const [start, end] = calculateLinePositions(
+				origContentLines,
+				i,
+				i + patternLineCount,
+				content.length,
+			);
 			matches.push([start, end]);
 		}
 	}
@@ -717,23 +850,50 @@ export function strategyBlockAnchor(content: string, pattern: string): Span[] {
  * Strategy 9: line-by-line similarity, 50% threshold.
  *
  * Loosest strategy — accepts any block where half the lines have per-line
- * similarity ≥ 0.80. Quadratic cost. Opt-in only (separate flag).
+ * similarity ≥ 0.80. Quadratic cost (O(contentLines × patternLines × ratioCost)
+ * per failing hunk). Opt-in only (separate flag).
+ *
+ * Bounded by `CONTEXT_AWARE_MAX_CELLS`: when `contentLines.length ×
+ * patternLines.length` exceeds the cap, the strategy returns no matches rather
+ * than risk a multi-second/multi-minute hang on large files. The cap is set so
+ * a typical source file (<~5k lines) with a typical hunk (<~40 lines) still
+ * runs strategy 9, but a 50k-line file with a 1k-line pattern (which the critic
+ * benchmarked at ~3.8 minutes) bails out instantly. The file size is NOT
+ * bounded by `MAX_PATCH_SIZE` (that caps only the patch text), so this guard is
+ * the only protection against a DoS when `fuzzy_match_context_aware` is enabled.
  */
+const CONTEXT_AWARE_MAX_CELLS = 200_000;
+const FIND_CLOSEST_LINES_MAX_LINES = 10_000;
+
 export function strategyContextAware(content: string, pattern: string): Span[] {
 	const patternLines = pattern.split('\n');
 	const contentLines = content.split('\n');
 	if (patternLines.length === 0) return [];
+	// Size guard: bail out before the quadratic blowup. Without this, a large
+	// file + large hunk hangs the tool for minutes (issue #1718 PR review).
+	if (contentLines.length * patternLines.length > CONTEXT_AWARE_MAX_CELLS) {
+		return [];
+	}
 	const matches: Span[] = [];
 	const patternLineCount = patternLines.length;
 	for (let i = 0; i <= contentLines.length - patternLineCount; i++) {
 		const blockLines = contentLines.slice(i, i + patternLineCount);
 		let highSimilarityCount = 0;
 		for (let k = 0; k < patternLines.length; k++) {
-			const sim = new SequenceMatcher(null, patternLines[k].trim(), blockLines[k].trim()).ratio();
+			const sim = new SequenceMatcher(
+				null,
+				patternLines[k].trim(),
+				blockLines[k].trim(),
+			).ratio();
 			if (sim >= 0.8) highSimilarityCount++;
 		}
 		if (highSimilarityCount >= patternLines.length * 0.5) {
-			const [start, end] = calculateLinePositions(contentLines, i, i + patternLineCount, content.length);
+			const [start, end] = calculateLinePositions(
+				contentLines,
+				i,
+				i + patternLineCount,
+				content.length,
+			);
 			matches.push([start, end]);
 		}
 	}
@@ -760,6 +920,11 @@ export function findClosestLines(
 	const oldLines = oldString.split(/\r?\n/);
 	const contentLines = content.split(/\r?\n/);
 	if (oldLines.length === 0 || contentLines.length === 0) return '';
+	// Size guard: findClosestLines runs SequenceMatcher.ratio() on every
+	// non-blank content line against the anchor. On a large file this is a
+	// full-file quadratic scan per fuzzy-miss. Bail out (return no hint) when
+	// the file is very large rather than compound the failed-fuzzy cost.
+	if (contentLines.length > FIND_CLOSEST_LINES_MAX_LINES) return '';
 
 	let anchor = oldLines[0].trim();
 	if (!anchor) {
@@ -784,7 +949,10 @@ export function findClosestLines(
 	const seenRanges = new Set<string>();
 	for (const [, lineIdx] of top) {
 		const start = Math.max(0, lineIdx - contextLines);
-		const end = Math.min(contentLines.length, lineIdx + oldLines.length + contextLines);
+		const end = Math.min(
+			contentLines.length,
+			lineIdx + oldLines.length + contextLines,
+		);
 		const key = `${start}:${end}`;
 		if (seenRanges.has(key)) continue;
 		seenRanges.add(key);

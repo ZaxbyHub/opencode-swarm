@@ -18,48 +18,60 @@ describe('SequenceMatcher.ratio', () => {
 		expectRatio(new SequenceMatcher(null, 'abcd', 'bcde').ratio(), 0.75);
 	});
 
-	test("identical strings ratio 1.0", () => {
+	test('identical strings ratio 1.0', () => {
 		expectRatio(new SequenceMatcher(null, 'hello', 'hello').ratio(), 1.0);
 	});
 
-	test("both empty ratio 1.0", () => {
+	test('both empty ratio 1.0', () => {
 		expectRatio(new SequenceMatcher(null, '', '').ratio(), 1.0);
 	});
 
-	test("single identical char ratio 1.0", () => {
+	test('single identical char ratio 1.0', () => {
 		expectRatio(new SequenceMatcher(null, 'a', 'a').ratio(), 1.0);
 	});
 
-	test("disjoint single chars ratio 0.0", () => {
+	test('disjoint single chars ratio 0.0', () => {
 		expectRatio(new SequenceMatcher(null, 'a', 'b').ratio(), 0.0);
 	});
 
-	test("disjoint strings ratio 0.0", () => {
+	test('disjoint strings ratio 0.0', () => {
 		expectRatio(new SequenceMatcher(null, 'abc', 'xyz').ratio(), 0.0);
 	});
 
 	test("'qabxcd' vs 'abycdf' ratio 2/3", () => {
 		// CPython: SequenceMatcher(None, 'qabxcd', 'abycdf').ratio() = 0.6666...
-		expectRatio(new SequenceMatcher(null, 'qabxcd', 'abycdf').ratio(), 0.6666666666666666);
+		expectRatio(
+			new SequenceMatcher(null, 'qabxcd', 'abycdf').ratio(),
+			0.6666666666666666,
+		);
 	});
 
-	test("block_anchor high-sim middle ratio 0.9474", () => {
+	test('block_anchor high-sim middle ratio 0.9474', () => {
 		// Used by strategy 8 threshold (>=0.50 for unique). Real CPython value.
-		const r = new SequenceMatcher(null, '    x = 1\n    y = 2', '    x = 1\n    y = 9').ratio();
+		const r = new SequenceMatcher(
+			null,
+			'    x = 1\n    y = 2',
+			'    x = 1\n    y = 9',
+		).ratio();
 		expectRatio(r, 0.9473684210526315);
 	});
 
-	test("block_anchor low-sim middle ratio 0.4423", () => {
+	test('block_anchor low-sim middle ratio 0.4423', () => {
 		// Below 0.50 → block_anchor must NOT match. Real CPython value.
-		const cm = "    completely = 'unrelated'\n    content = 'here'\n    nothing = 'in common'";
+		const cm =
+			"    completely = 'unrelated'\n    content = 'here'\n    nothing = 'in common'";
 		const pm = '    x = 1\n    y = 2\n    z = 3';
 		expectRatio(new SequenceMatcher(null, cm, pm).ratio(), 0.4423076923076923);
 	});
 });
 
 describe('SequenceMatcher.getMatchingBlocks', () => {
-	test("returns matching blocks plus zero-size sentinel", () => {
-		const mb = new SequenceMatcher(null, 'qabxcd', 'abycdf').getMatchingBlocks();
+	test('returns matching blocks plus zero-size sentinel', () => {
+		const mb = new SequenceMatcher(
+			null,
+			'qabxcd',
+			'abycdf',
+		).getMatchingBlocks();
 		expect(mb).toEqual([
 			{ a: 1, b: 0, size: 2 },
 			{ a: 4, b: 3, size: 2 },
@@ -67,7 +79,7 @@ describe('SequenceMatcher.getMatchingBlocks', () => {
 		]);
 	});
 
-	test("identical strings produce a single full match + sentinel", () => {
+	test('identical strings produce a single full match + sentinel', () => {
 		const mb = new SequenceMatcher(null, 'abc', 'abc').getMatchingBlocks();
 		expect(mb).toEqual([
 			{ a: 0, b: 0, size: 3 },
@@ -75,7 +87,7 @@ describe('SequenceMatcher.getMatchingBlocks', () => {
 		]);
 	});
 
-	test("disjoint strings produce only the sentinel", () => {
+	test('disjoint strings produce only the sentinel', () => {
 		const mb = new SequenceMatcher(null, 'abc', 'xyz').getMatchingBlocks();
 		expect(mb).toEqual([{ a: 3, b: 3, size: 0 }]);
 	});
@@ -93,12 +105,12 @@ describe('SequenceMatcher.getOpcodes', () => {
 		]);
 	});
 
-	test("identical strings produce a single equal opcode", () => {
+	test('identical strings produce a single equal opcode', () => {
 		const ops = new SequenceMatcher(null, 'abc', 'abc').getOpcodes();
 		expect(ops).toEqual([{ tag: 'equal', i1: 0, i2: 3, j1: 0, j2: 3 }]);
 	});
 
-	test("pure insertion produces an insert opcode", () => {
+	test('pure insertion produces an insert opcode', () => {
 		const ops = new SequenceMatcher(null, 'ab', 'axb').getOpcodes();
 		expect(ops).toEqual([
 			{ tag: 'equal', i1: 0, i2: 1, j1: 0, j2: 1 },
@@ -109,21 +121,27 @@ describe('SequenceMatcher.getOpcodes', () => {
 });
 
 describe('SequenceMatcher autojunk (popular-element guard)', () => {
-	test("autojunk=True excludes popular elements from anchoring", () => {
+	test('autojunk=True excludes popular elements from anchoring', () => {
 		// b has 300 chars: 'x' ~16.7%, 'y' ~83.3% — both >1% are popular.
 		// CPython with autojunk=True: ratio 0.006622516556291391.
 		const b = 'x'.repeat(50) + 'y'.repeat(250);
-		expectRatio(new SequenceMatcher(null, 'xy', b, true).ratio(), 0.006622516556291391);
+		expectRatio(
+			new SequenceMatcher(null, 'xy', b, true).ratio(),
+			0.006622516556291391,
+		);
 	});
 
-	test("autojunk=False allows popular elements to anchor", () => {
+	test('autojunk=False allows popular elements to anchor', () => {
 		// Same input, autojunk off → longer matching blocks → higher ratio.
 		// CPython with autojunk=False: 0.013245033112582781.
 		const b = 'x'.repeat(50) + 'y'.repeat(250);
-		expectRatio(new SequenceMatcher(null, 'xy', b, false).ratio(), 0.013245033112582781);
+		expectRatio(
+			new SequenceMatcher(null, 'xy', b, false).ratio(),
+			0.013245033112582781,
+		);
 	});
 
-	test("autojunk does not fire on short sequences (< 200 chars)", () => {
+	test('autojunk does not fire on short sequences (< 200 chars)', () => {
 		// b is short — popular guard is inert, autojunk on/off give the same ratio.
 		const b = 'a'.repeat(50) + 'b'.repeat(50); // 100 chars
 		const on = new SequenceMatcher(null, 'ab', b, true).ratio();
@@ -133,15 +151,15 @@ describe('SequenceMatcher autojunk (popular-element guard)', () => {
 });
 
 describe('SequenceMatcher edge cases', () => {
-	test("empty `a` against non-empty `b` ratio 0.0", () => {
+	test('empty `a` against non-empty `b` ratio 0.0', () => {
 		expectRatio(new SequenceMatcher(null, '', 'abc').ratio(), 0.0);
 	});
 
-	test("non-empty `a` against empty `b` ratio 0.0", () => {
+	test('non-empty `a` against empty `b` ratio 0.0', () => {
 		expectRatio(new SequenceMatcher(null, 'abc', '').ratio(), 0.0);
 	});
 
-	test("astral-plane (emoji) input does not crash or corrupt", () => {
+	test('astral-plane (emoji) input does not crash or corrupt', () => {
 		// Round-trip safety: UTF-16 code-unit indexing must be internally
 		// consistent. An emoji consumes 2 units; the matcher must not throw
 		// or produce NaN.
@@ -158,7 +176,7 @@ describe('SequenceMatcher edge cases', () => {
 		expect(last.j2).toBe(b.length);
 	});
 
-	test("setSeqs resets cached matching blocks", () => {
+	test('setSeqs resets cached matching blocks', () => {
 		const sm = new SequenceMatcher(null, 'abc', 'xyz');
 		const r1 = sm.ratio();
 		expect(r1).toBe(0.0);

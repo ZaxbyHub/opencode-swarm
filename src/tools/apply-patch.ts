@@ -21,12 +21,12 @@ import {
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { loadPluginConfigWithMeta } from '../config';
+import { findClosestLines, fuzzyFindAndReplace } from '../utils/fuzzy-match';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../utils/path-security';
-import { fuzzyFindAndReplace, findClosestLines } from '../utils/fuzzy-match';
-import { loadPluginConfigWithMeta } from '../config';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -666,12 +666,23 @@ function applyHunks(
 			const currentContent = fileLines.join('\n');
 			const oldString = expectedOldLines.join('\n');
 			const newString = newLinesForHunk.join('\n');
-			const fuzzy = fuzzyFindAndReplace(currentContent, oldString, newString, false, {
-				includeContextAware: options.fuzzyMatchContextAware,
-			});
+			const fuzzy = fuzzyFindAndReplace(
+				currentContent,
+				oldString,
+				newString,
+				false,
+				{
+					includeContextAware: options.fuzzyMatchContextAware,
+				},
+			);
 			if (fuzzy.error === null && fuzzy.matchCount === 1) {
 				fileLines.length = 0;
-				fileLines.push(...fuzzy.content.split('\n'));
+				// Push line-by-line rather than `fileLines.push(...split('\n'))`:
+				// the spread-into-push form throws RangeError on very large line
+				// counts (~125k on Node, ~700k on Bun) because it routes through
+				// Function.prototype.apply, which is stack-bound. The loop has no
+				// such limit. (PRR-003 from the PR review.)
+				for (const line of fuzzy.content.split('\n')) fileLines.push(line);
 				accumulatedDelta += newLinesForHunk.length - expectedOldLines.length;
 				continue; // next hunk — skip the mismatch return below
 			}
@@ -1086,12 +1097,19 @@ function processFileDiff(
 		// types share matchCount=0; here we only call when fuzzy genuinely
 		// failed, so direct findClosestLines is correct).
 		let errors = hunkResult.error ? [hunkResult.error] : [];
-		if (hunkResult.fuzzyAttempted && errors.length > 0 && hunkOptions?.fuzzyMatch) {
+		if (
+			hunkResult.fuzzyAttempted &&
+			errors.length > 0 &&
+			hunkOptions?.fuzzyMatch
+		) {
 			const expectedAnchor = errors[0].expected ?? '';
 			const hint = findClosestLines(expectedAnchor, content);
 			if (hint) {
 				errors = [
-					{ ...errors[0], message: `${errors[0].message}\n\nDid you mean one of these sections?\n${hint}` },
+					{
+						...errors[0],
+						message: `${errors[0].message}\n\nDid you mean one of these sections?\n${hint}`,
+					},
 				];
 			}
 		}
@@ -1274,7 +1292,8 @@ export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 		// `_internals` DI seam so tests can substitute hermetically.
 		const { config } = _internals.loadPluginConfigWithMeta(directory);
 		const fuzzyMatch = config.apply_patch?.fuzzy_match === true;
-		const fuzzyMatchContextAware = config.apply_patch?.fuzzy_match_context_aware === true;
+		const fuzzyMatchContextAware =
+			config.apply_patch?.fuzzy_match_context_aware === true;
 		const hunkOptions: ApplyHunksOptions | undefined =
 			fuzzyMatch || fuzzyMatchContextAware
 				? { fuzzyMatch, fuzzyMatchContextAware }

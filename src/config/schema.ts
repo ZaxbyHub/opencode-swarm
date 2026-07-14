@@ -1032,8 +1032,10 @@ export const ApplyPatchConfigSchema = z
 		// false preserves the B3 exact-match decision.
 		fuzzy_match: z.boolean().default(false),
 		// Separately opts in to strategy 9 (context_aware) — the loosest,
-		// most-false-positive-prone strategy (50% line similarity threshold).
-		// Only effective when `fuzzy_match` is also true.
+		// most-false-positive-prone strategy (requires 50% of lines to reach
+		// 0.80 per-line similarity). Only effective when `fuzzy_match` is also
+		// true. Bounded by an internal cell-count cap to prevent quadratic-cost
+		// hangs on large files.
 		fuzzy_match_context_aware: z.boolean().default(false),
 	})
 	.strict();

@@ -11,7 +11,7 @@ import { fuzzyFindAndReplace } from '../fuzzy-match';
  * - TestIndentDifference (1)
  * - TestIndentationPreservation (6 — `ast.parse` replaced with exact string assertion)
  * - TestReplaceAll (3 — self-overlapping regression)
- * - TestUnicodeNormalized (7)
+ * - TestUnicodeNormalized (8)
  * - TestBlockAnchorThreshold (2)
  * - TestStrategyNameSurfaced (2)
  *
@@ -47,7 +47,11 @@ describe('TestExactMatch', () => {
 	});
 
 	test('multiline exact', () => {
-		const r = fuzzyFindAndReplace('line1\nline2\nline3', 'line1\nline2', 'replaced');
+		const r = fuzzyFindAndReplace(
+			'line1\nline2\nline3',
+			'line1\nline2',
+			'replaced',
+		);
 		expect(r.error).toBeNull();
 		expect(r.matchCount).toBe(1);
 		expect(r.content).toBe('replaced\nline3');
@@ -56,7 +60,11 @@ describe('TestExactMatch', () => {
 
 describe('TestWhitespaceDifference', () => {
 	test('extra spaces match', () => {
-		const r = fuzzyFindAndReplace('def  foo(  x,  y  ):', 'def foo( x, y ):', 'def bar(x, y):');
+		const r = fuzzyFindAndReplace(
+			'def  foo(  x,  y  ):',
+			'def foo( x, y ):',
+			'def bar(x, y):',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.content).toContain('bar');
 	});
@@ -72,7 +80,11 @@ describe('TestWhitespaceDifference', () => {
 	});
 
 	test('boundary space preserved in code edit', () => {
-		const r = fuzzyFindAndReplace('result = compute(a,  b) + tail', 'compute(a, b)', 'compute(a, b, c)');
+		const r = fuzzyFindAndReplace(
+			'result = compute(a,  b) + tail',
+			'compute(a, b)',
+			'compute(a, b, c)',
+		);
 		expect(r.error).toBeNull();
 		expect(r.matchCount).toBe(1);
 		expect(r.strategy).toBe('whitespace_normalized');
@@ -228,14 +240,22 @@ describe('TestReplaceAll', () => {
 
 describe('TestUnicodeNormalized', () => {
 	test('em-dash in content matches ASCII "--" in pattern', () => {
-		const r = fuzzyFindAndReplace('return value\u2014fallback', 'return value--fallback', 'return value or fallback');
+		const r = fuzzyFindAndReplace(
+			'return value\u2014fallback',
+			'return value--fallback',
+			'return value or fallback',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.strategy).toBe('unicode_normalized');
 		expect(r.content).toContain('return value or fallback');
 	});
 
 	test('smart quotes in content match straight quotes in pattern', () => {
-		const r = fuzzyFindAndReplace('print(\u201chello\u201d)', 'print("hello")', 'print("world")');
+		const r = fuzzyFindAndReplace(
+			'print(\u201chello\u201d)',
+			'print("hello")',
+			'print("world")',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.content).toContain('world');
 	});
@@ -247,31 +267,61 @@ describe('TestUnicodeNormalized', () => {
 	});
 
 	test('unicode preserved in output (em-dash)', () => {
-		const r = fuzzyFindAndReplace('Hello\u2014world', 'Hello--world', 'Hello--there');
+		const r = fuzzyFindAndReplace(
+			'Hello\u2014world',
+			'Hello--world',
+			'Hello--there',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.strategy).toBe('unicode_normalized');
 		expect(r.content).toBe('Hello\u2014there');
 	});
 
 	test('smart quotes preserved', () => {
-		const r = fuzzyFindAndReplace('He said \u201chello\u201d to her', 'He said "hello" to her', 'He said "goodbye" to her');
+		const r = fuzzyFindAndReplace(
+			'He said \u201chello\u201d to her',
+			'He said "hello" to her',
+			'He said "goodbye" to her',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.content).toBe('He said \u201cgoodbye\u201d to her');
 	});
 
 	test('ellipsis preserved', () => {
-		const r = fuzzyFindAndReplace('Wait for it\u2026and done', 'Wait for it...and done', 'Wait for it...then done');
+		const r = fuzzyFindAndReplace(
+			'Wait for it\u2026and done',
+			'Wait for it...and done',
+			'Wait for it...then done',
+		);
 		expect(r.matchCount).toBe(1);
 		expect(r.content).toBe('Wait for it\u2026then done');
 	});
 
 	test('mixed unicode multiline all preserved', () => {
-		const content = 'Line 1 \u2014 with dash\nLine 2 \u201cquoted\u201d text\nLine 3 plain';
+		const content =
+			'Line 1 \u2014 with dash\nLine 2 \u201cquoted\u201d text\nLine 3 plain';
 		const old = 'Line 1 -- with dash\nLine 2 "quoted" text\nLine 3 plain';
-		const replacement = 'Line 1 -- with dash\nLine 2 "quoted" text\nLine 3 changed';
+		const replacement =
+			'Line 1 -- with dash\nLine 2 "quoted" text\nLine 3 changed';
 		const r = fuzzyFindAndReplace(content, old, replacement);
 		expect(r.matchCount).toBe(1);
-		expect(r.content).toBe('Line 1 \u2014 with dash\nLine 2 \u201cquoted\u201d text\nLine 3 changed');
+		expect(r.content).toBe(
+			'Line 1 \u2014 with dash\nLine 2 \u201cquoted\u201d text\nLine 3 changed',
+		);
+	});
+
+	test('no unicode: replacement is direct (no-op guard)', () => {
+		// Ported from hermes test_no_unicode_no_change (test_fuzzy_match.py:313).
+		// When the file has no Unicode, replacement is direct — the unicode
+		// preservation pass is a no-op (its normalized-forms-equal guard
+		// returns newString unchanged).
+		const r = fuzzyFindAndReplace(
+			'plain text here',
+			'plain text here',
+			'plain text there',
+		);
+		expect(r.matchCount).toBe(1);
+		expect(r.content).toBe('plain text there');
 	});
 });
 
@@ -279,7 +329,11 @@ describe('TestBlockAnchorThreshold', () => {
 	test('high-similarity middle matches', () => {
 		const content = 'def foo():\n    x = 1\n    y = 2\n    return x + y\n';
 		const pattern = 'def foo():\n    x = 1\n    y = 9\n    return x + y';
-		const r = fuzzyFindAndReplace(content, pattern, 'def foo():\n    return 0\n');
+		const r = fuzzyFindAndReplace(
+			content,
+			pattern,
+			'def foo():\n    return 0\n',
+		);
 		expect(r.matchCount).toBe(1);
 	});
 
@@ -290,8 +344,7 @@ describe('TestBlockAnchorThreshold', () => {
 			"    content = 'here'\n" +
 			"    nothing = 'in common'\n" +
 			'    pass\n';
-		const pattern =
-			'class Foo:\n    x = 1\n    y = 2\n    z = 3\n    pass';
+		const pattern = 'class Foo:\n    x = 1\n    y = 2\n    z = 3\n    pass';
 		const r = fuzzyFindAndReplace(content, pattern, 'replaced');
 		// Near-zero-similarity middle (0.4423 < 0.50) must not match.
 		expect(r.matchCount).toBe(0);

@@ -186,11 +186,7 @@ export class SequenceMatcher {
 		// Extend the best match backward and forward over equal characters
 		// (CPython does this to coalesce adjacent equal runs that the
 		// dynamic-programming scan didn't merge).
-		while (
-			bestI > alo &&
-			bestJ > blo &&
-			a[bestI - 1] === b[bestJ - 1]
-		) {
+		while (bestI > alo && bestJ > blo && a[bestI - 1] === b[bestJ - 1]) {
 			bestI--;
 			bestJ--;
 			bestSize++;
@@ -214,9 +210,7 @@ export class SequenceMatcher {
 		const lb = this.b.length;
 		const matches: Match[] = [];
 
-		const stack: Array<[number, number, number, number]> = [
-			[0, la, 0, lb],
-		];
+		const stack: Array<[number, number, number, number]> = [[0, la, 0, lb]];
 		while (stack.length > 0) {
 			const [alo, ahi, blo, bhi] = stack.pop()!;
 			const m = this.findLongestMatch(alo, ahi, blo, bhi);
@@ -270,7 +264,13 @@ export class SequenceMatcher {
 			}
 			// Emit equal for the block itself (size 0 on the sentinel → skipped).
 			if (size > 0) {
-				opcodes.push({ tag: 'equal', i1: ai, i2: ai + size, j1: bj, j2: bj + size });
+				opcodes.push({
+					tag: 'equal',
+					i1: ai,
+					i2: ai + size,
+					j1: bj,
+					j2: bj + size,
+				});
 			}
 			i = ai + size;
 			j = bj + size;

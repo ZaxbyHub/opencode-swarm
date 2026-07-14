@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { fuzzyFindAndReplace, findClosestLines, formatNoMatchHint } from '../fuzzy-match';
+import {
+	findClosestLines,
+	formatNoMatchHint,
+	fuzzyFindAndReplace,
+} from '../fuzzy-match';
 
 /**
  * Fuzzy-match acceptance tests — part 2 of 2.
@@ -55,7 +59,11 @@ describe('TestEscapeDriftGuard', () => {
 	test('drift allowed on exact match', () => {
 		// Exact matches bypass the drift guard entirely.
 		const content = "hello \\'world\\'";
-		const r = fuzzyFindAndReplace(content, "hello \\'world\\'", "hello \\'there\\'");
+		const r = fuzzyFindAndReplace(
+			content,
+			"hello \\'world\\'",
+			"hello \\'there\\'",
+		);
 		expect(r.error).toBeNull();
 		expect(r.matchCount).toBe(1);
 		expect(r.strategy).toBe('exact');
@@ -174,12 +182,18 @@ describe('TestEscapeNormalizedNewString', () => {
 
 describe('TestFindClosestLines', () => {
 	test('finds similar line', () => {
-		const result = findClosestLines('def baz():', 'def foo():\n    pass\ndef bar():\n    return 1\n');
+		const result = findClosestLines(
+			'def baz():',
+			'def foo():\n    pass\ndef bar():\n    return 1\n',
+		);
 		expect(result.includes('def foo') || result.includes('def bar')).toBe(true);
 	});
 
 	test('returns empty for no match', () => {
-		const result = findClosestLines('xyzzy_no_match_possible_!!!', 'completely different content here');
+		const result = findClosestLines(
+			'xyzzy_no_match_possible_!!!',
+			'completely different content here',
+		);
 		expect(result).toBe('');
 	});
 
@@ -189,12 +203,18 @@ describe('TestFindClosestLines', () => {
 	});
 
 	test('includes context lines', () => {
-		const result = findClosestLines('def target():', 'line1\nline2\ndef target():\n    pass\nline5\n');
+		const result = findClosestLines(
+			'def target():',
+			'line1\nline2\ndef target():\n    pass\nline5\n',
+		);
 		expect(result).toContain('target');
 	});
 
 	test('includes line numbers', () => {
-		const result = findClosestLines('def foo():', 'line1\nline2\ndef foo():\n    pass\n');
+		const result = findClosestLines(
+			'def foo():',
+			'line1\nline2\ndef foo():\n    pass\n',
+		);
 		// Format "   N| content"
 		expect(result).toContain('|');
 	});
