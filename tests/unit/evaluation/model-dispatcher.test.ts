@@ -109,6 +109,19 @@ describe('evaluation agent resolution', () => {
 			'mega_reviewer',
 		);
 	});
+
+	test('rejects a preferred swarm that does not register the requested role', () => {
+		expect(() =>
+			resolveEvaluationAgentName([{ name: 'reviewer' }], 'reviewer', 'mega'),
+		).toThrow('preferred swarm mega');
+		expect(() =>
+			resolveEvaluationAgentName(
+				[{ name: 'local_reviewer' }],
+				'reviewer',
+				'mega',
+			),
+		).toThrow('preferred swarm mega');
+	});
 });
 
 describe('evaluation model dispatcher', () => {

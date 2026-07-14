@@ -60,6 +60,9 @@ export function resolveEvaluationAgentName(
 	if (preferredSwarm) {
 		const preferred = `${preferredSwarm}_${logicalName}`;
 		if (names.includes(preferred)) return preferred;
+		throw new Error(
+			`preferred swarm ${preferredSwarm} does not provide evaluation agent ${logicalName}`,
+		);
 	}
 	if (names.includes(logicalName)) return logicalName;
 	const prefixed = names
