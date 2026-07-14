@@ -24,7 +24,10 @@ import {
 	_internals,
 	checkHivePromotions,
 } from '../../../src/hooks/hive-promoter.js';
-import { transactHiveStore } from '../../../src/hooks/hive-transaction.js';
+import {
+	_internals as _internals_hiveTxn,
+	transactHiveStore,
+} from '../../../src/hooks/hive-transaction.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeConfig,
@@ -311,6 +314,176 @@ describe('hive migration & lineage gate (#1847)', () => {
 			const hive = await readRawHive();
 			// Cap was applied inside the commit → at most 2 entries survive.
 			expect(hive.length).toBeLessThanOrEqual(2);
+		});
+
+		it('cap priority: an inactive (archived) entry is evicted before an active one (PRR-6)', async () => {
+			const active = legacyHiveEntry({
+				id: 'h-active',
+				lesson: 'an active established hive lesson that should survive cap',
+				status: 'established',
+			});
+			const archived = legacyHiveEntry({
+				id: 'h-archived',
+				lesson: 'an archived hive lesson that should be evicted by cap',
+				status: 'archived',
+			});
+			await fsPromises.mkdir(path.dirname(resolveHiveKnowledgePath()), {
+				recursive: true,
+			});
+			await fsPromises.writeFile(
+				resolveHiveKnowledgePath(),
+				`${JSON.stringify(active)}\n${JSON.stringify(archived)}\n`,
+				'utf-8',
+			);
+			// Commit a 3rd entry with maxEntries=2 → one must be evicted.
+			const extra = legacyHiveEntry({
+				id: 'h-extra',
+				lesson: 'an extra hive lesson forcing the cap to evict one entry',
+				status: 'established',
+			});
+			await transactHiveStore(async (ctx) => ({
+				kind: 'commit' as const,
+				entries: [...ctx.entries, extra],
+				maxEntries: 2,
+				return: undefined,
+			}));
+			const hive = await readRawHive();
+			expect(hive).toHaveLength(2);
+			// The archived (inactive, priority 0) entry is evicted; active survives.
+			const ids = hive.map((h) => h.id);
+			expect(ids).toContain('h-active');
+			expect(ids).not.toContain('h-archived');
+		});
+	});
+
+	describe('lineage merge (F-001)', () => {
+		it('a near-duplicate promotion records the losing source id in merged_from', async () => {
+			// Seed the hive with an existing entry.
+			const existing = legacyHiveEntry({
+				id: 'hive-existing',
+				lesson: 'Use bun for fast test execution across the project',
+				lineage: { actor: 'auto', source_entry_id: 'src-old' },
+			});
+			await fsPromises.mkdir(path.dirname(resolveHiveKnowledgePath()), {
+				recursive: true,
+			});
+			await fsPromises.writeFile(
+				resolveHiveKnowledgePath(),
+				`${JSON.stringify(existing)}\n`,
+				'utf-8',
+			);
+			// Run checkHivePromotions with a near-duplicate swarm entry (same lesson).
+			const { checkHivePromotions, _internals } = await import(
+				'../../../src/hooks/hive-promoter.js'
+			);
+			const swarm: SwarmKnowledgeEntry = {
+				id: 'src-new-dup',
+				tier: 'swarm',
+				lesson: 'Use bun for fast test execution across the project',
+				category: 'process',
+				tags: ['hive-fast-track'],
+				scope: 'global',
+				confidence: 0.7,
+				status: 'promoted',
+				confirmed_by: [],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00Z',
+				updated_at: '2026-01-01T00:00:00Z',
+				project_name: 'p',
+			};
+			_internals.resolveCohortId = mock(async () => FIXED_COHORT);
+			_internals.validateLesson = mock(() => ({
+				valid: true,
+				layer: 1,
+				reason: '',
+				severity: 'none' as const,
+			})) as unknown as typeof _internals.validateLesson;
+			_internals.loadPromotionEvidence = mock(
+				async () => ({}),
+			) as unknown as typeof _internals.loadPromotionEvidence;
+
+			await checkHivePromotions([swarm], makeConfig(), swarmDir);
+			const hive = await readRawHive();
+			// The near-duplicate was NOT added as a new entry (dedup)...
+			expect(hive).toHaveLength(1);
+			// ...but its source id was recorded in merged_from (provenance preserved).
+			expect(hive[0].lineage?.merged_from).toContain('src-new-dup');
+		});
+	});
+
+	describe('confirmed_by backfill (PRR-2)', () => {
+		it('a legacy hive record with missing confirmed_by loads as [] and does not throw', async () => {
+			// Hand-write a malformed record with NO confirmed_by field.
+			const malformed = {
+				id: 'malformed-1',
+				tier: 'hive',
+				lesson: 'a malformed legacy hive record missing confirmed_by field',
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'established',
+				// confirmed_by intentionally OMITTED
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 1,
+				created_at: '2025-01-01T00:00:00Z',
+				updated_at: '2025-01-01T00:00:00Z',
+				source_project: 'old',
+				encounter_score: 1.0,
+			};
+			await fsPromises.mkdir(path.dirname(resolveHiveKnowledgePath()), {
+				recursive: true,
+			});
+			await fsPromises.writeFile(
+				resolveHiveKnowledgePath(),
+				`${JSON.stringify(malformed)}\n`,
+				'utf-8',
+			);
+			// A read+noop transaction must NOT throw on the missing confirmed_by.
+			let observed: HiveKnowledgeEntry[] = [];
+			const result = await transactHiveStore(async (ctx) => {
+				observed = ctx.entries;
+				return { kind: 'noop' as const, return: undefined };
+			});
+			expect(result.committed).toBe(false);
+			expect(observed).toHaveLength(1);
+			// normalizeEntry backfilled confirmed_by to [] in memory.
+			expect(Array.isArray(observed[0].confirmed_by)).toBe(true);
+			expect(observed[0].confirmed_by).toEqual([]);
+		});
+	});
+
+	describe('lock-acquire fail-safe (PRR-5)', () => {
+		it('transactHiveStore returns committed:false + diagnostics on lock failure (never hangs)', async () => {
+			// Inject a lockfile mock that always rejects acquire.
+			const origLock = _internals_hiveTxn.lockfile;
+			_internals_hiveTxn.lockfile = {
+				lock: mock(async () => {
+					throw new Error('simulated lock contention');
+				}),
+			} as unknown as typeof origLock;
+			try {
+				const result = await transactHiveStore(async () => ({
+					kind: 'commit' as const,
+					entries: [],
+					return: 'should-not-reach',
+				}));
+				expect(result.committed).toBe(false);
+				expect(result.return).toBeUndefined();
+				expect(result.diagnostics.length).toBeGreaterThan(0);
+				expect(result.diagnostics.join(' ')).toContain('lock acquire failed');
+			} finally {
+				_internals_hiveTxn.lockfile = origLock;
+			}
 		});
 	});
 });

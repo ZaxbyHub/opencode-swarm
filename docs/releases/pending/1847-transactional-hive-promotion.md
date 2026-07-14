@@ -35,8 +35,10 @@ application.
   Legacy `confirmed_by` records (no `cohort_id`) are not retroactively re-
   counted (no broad rewrite), consistent with the no-synthetic-credit non-goal.
 - **Lineage**: promoted hive entries carry a `lineage` block (source entry id,
-  source cohort id, promotion event id, actor). Near-duplicate merges preserve
-  provenance.
+  source cohort id, source content revision, prior confidence/phases snapshot,
+  promotion event id, actor). Near-duplicate promotions record the losing
+  source entry id in `lineage.merged_from` so provenance is preserved rather
+  than silently discarded; conflicting lessons are never auto-collapsed.
 - **One policy evaluator + override**: `evaluatePromotionPolicy` is used by
   automatic promotion and the manual `/swarm promote` command. A policy failure
   blocks promotion unless `--force --reason "<why>"` is supplied, which records

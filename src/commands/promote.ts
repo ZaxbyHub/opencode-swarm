@@ -44,15 +44,11 @@ export async function handlePromoteCommand(
 		} else if (arg === '--force') {
 			force = true;
 		} else if (arg === '--reason' && i + 1 < args.length) {
-			// Join the remainder of the args until the next flag as the reason.
-			const reasonParts: string[] = [];
-			let j = i + 1;
-			while (j < args.length && !args[j].startsWith('--')) {
-				reasonParts.push(args[j]);
-				j++;
-			}
-			reason = reasonParts.join(' ').trim();
-			i = j - 1;
+			// Take the NEXT arg as the reason (quote multi-word reasons).
+			// Mirrors --category / --from-swarm single-arg convention so the
+			// lesson text is not swallowed by the reason.
+			reason = args[i + 1];
+			i++; // Skip next arg
 		} else if (!arg.startsWith('--')) {
 			// Treat as lesson text (take the rest of the args as text)
 			lessonText = args.slice(i).join(' ');

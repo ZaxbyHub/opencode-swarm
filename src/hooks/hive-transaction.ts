@@ -93,8 +93,13 @@ export type HiveMutationOutcome<T> =
 export interface HiveTransactionResult<T> {
 	/** True iff the hive file was rewritten within the transaction. */
 	committed: boolean;
-	/** The caller's return value (from either outcome kind). */
-	return: T;
+	/**
+	 * The caller's return value. Present when `committed` is true OR the mutate
+	 * closure returned a `noop` outcome. Undefined on lock-acquire / mkdir /
+	 * validation-before-commit failure (F-004/PRR-1): callers MUST check
+	 * `committed` (or `return !== undefined`) before dereferencing it.
+	 */
+	return: T | undefined;
 	/** Human-readable diagnostics (lock timeout, validation failure, etc.). */
 	diagnostics: string[];
 }
@@ -128,7 +133,7 @@ export async function transactHiveStore<T>(
 				err instanceof Error ? err.message : String(err)
 			}`,
 		);
-		return { committed: false, return: undefined as T, diagnostics };
+		return { committed: false, return: undefined, diagnostics };
 	}
 
 	let release: (() => Promise<void>) | null = null;
@@ -146,7 +151,7 @@ export async function transactHiveStore<T>(
 					err instanceof Error ? err.message : String(err)
 				}`,
 			);
-			return { committed: false, return: undefined as T, diagnostics };
+			return { committed: false, return: undefined, diagnostics };
 		}
 
 		// 1. Read + normalize under the lock.
@@ -179,7 +184,11 @@ export async function transactHiveStore<T>(
 					err instanceof Error ? err.message : String(err)
 				}`,
 			);
-			return { committed: false, return: outcome.return, diagnostics };
+			// PRR-3: do NOT surface outcome.return — it carries counts computed
+			// from the rejected entries that were never persisted. Returning
+			// undefined forces callers through the !committed branch so they
+			// report zero activity + the diagnostic reason.
+			return { committed: false, return: undefined, diagnostics };
 		}
 
 		// 4. Priority-aware cap enforcement in the SAME closure (not a separate

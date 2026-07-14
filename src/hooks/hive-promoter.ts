@@ -22,6 +22,7 @@
  * runs only on the lazy `/swarm promote`, close, curate, and postmortem paths.
  */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import type { CohortIdentity } from '../knowledge/cohort-identity.js';
@@ -187,23 +188,64 @@ function isSameOrigin(
 	return false;
 }
 
-/** Build a PromotionLineage block for a newly promoted hive entry. */
+/** Sanitize a free-text reason so it cannot carry control chars / be
+ *  unbounded when stored in lineage + the audit log (F-007). Truncates to a
+ *  reasonable audit length and strips control characters (incl. newlines,
+ *  which could break the JSONL line format if naively embedded). */
+const MAX_OVERRIDE_REASON_LEN = 280;
+function sanitizeReason(raw: string | undefined): string | undefined {
+	if (raw === undefined) return undefined;
+	// Strip C0/C1 control chars (keep tab/newline as spaces). Built char-by-char
+	// to avoid control-character literals in a regex (Biome lint).
+	let cleaned = '';
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) ?? 0;
+		// Allow tab (0x09) and newline (0x0A) → space; strip other C0/C1 control.
+		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+			cleaned += ' ';
+		} else {
+			cleaned += ch;
+		}
+	}
+	const trimmed = cleaned.trim();
+	if (trimmed.length === 0) return undefined;
+	return trimmed.slice(0, MAX_OVERRIDE_REASON_LEN);
+}
+
+/** Build a PromotionLineage block for a newly promoted hive entry. Wires the
+ *  provenance fields #1847 requires (F-001): source revision, prior
+ *  confidence/phases snapshot, and merged_from for dedup merges. */
 function buildLineage(args: {
 	actor: PromotionActor;
 	sourceEntryId?: string;
 	sourceCohortId?: string;
+	sourceRevision?: string;
+	priorConfidence?: number;
+	priorPhasesAlive?: number;
+	mergedFrom?: string[];
 	promotionEventId: string;
 	reason?: string;
 	overrideFailedGates?: string[];
 }): PromotionLineage {
-	return {
+	const lineage: PromotionLineage = {
 		actor: args.actor,
 		source_entry_id: args.sourceEntryId,
 		source_cohort_id: args.sourceCohortId,
+		source_revision: args.sourceRevision,
+		prior_confidence: args.priorConfidence,
+		prior_phases_alive: args.priorPhasesAlive,
+		merged_from: args.mergedFrom,
 		promotion_event_id: args.promotionEventId,
 		reason: args.reason,
 		override_failed_gates: args.overrideFailedGates,
 	};
+	return lineage;
+}
+
+/** A content hash for source-revision provenance (F-001). Lightweight SHA-256
+ *  prefix over the lesson text — enough to detect drift, not a security hash. */
+function lessonRevision(lesson: string): string {
+	return createHash('sha256').update(lesson).digest('hex').slice(0, 12);
 }
 
 /**
@@ -248,6 +290,75 @@ export async function checkHivePromotions(
 
 	const diagnostics: string[] = [];
 
+	// === F-003: pre-decision work OUTSIDE the lock ===
+	// Compute swarm bigrams, eligibility, and validation for every swarm entry
+	// BEFORE acquiring the directory lock. The held closure then only does a
+	// fast O(candidates × hive) dedup-recheck against the locked-current hive
+	// (candidates is typically << swarmEntries because ineligible entries are
+	// filtered), plus append/confirm/cap/persist. This keeps the closure well
+	// under the 5s stale window for default caps (100/200); admin-raised caps
+	// remain bounded by the candidate count, not the raw swarm×hive product.
+	const activeSwarm = swarmEntries.filter((e) => isActiveStatus(e.status));
+	const activeSwarmBigrams = activeSwarm.map((e) =>
+		typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
+	);
+
+	interface PromotionCandidate {
+		swarmEntry: SwarmKnowledgeEntry;
+		swarmBigram: Set<string>;
+		promotionEventId: string;
+	}
+	const candidates: PromotionCandidate[] = [];
+	const rejectsOutside: RejectedLesson[] = [];
+
+	for (const swarmEntry of swarmEntries) {
+		if (
+			typeof swarmEntry.lesson !== 'string' ||
+			swarmEntry.lesson.length === 0
+		) {
+			continue;
+		}
+		const swarmBigram = wordBigrams(swarmEntry.lesson);
+
+		const decision = evaluatePromotionPolicy({
+			entry: swarmEntry,
+			config,
+			evidence: evidence[swarmEntry.id] ?? [],
+		});
+		if (!decision.eligible) {
+			diagnostics.push(
+				`skip promote '${swarmEntry.lesson.slice(0, 40)}…': ${decision.reason}`,
+			);
+			continue;
+		}
+
+		// Re-validate before promotion (against an empty existing-lessons list
+		// here; the in-lock dedup-recheck catches near-duplicates against the
+		// current hive). Validation is pure CPU — safe outside the lock.
+		const validationResult = _internals.validateLesson(swarmEntry.lesson, [], {
+			category: swarmEntry.category,
+			scope: swarmEntry.scope,
+			confidence: swarmEntry.confidence,
+		});
+		if (validationResult.severity === 'error') {
+			rejectsOutside.push({
+				id: crypto.randomUUID(),
+				lesson: swarmEntry.lesson,
+				rejection_reason:
+					validationResult.reason || 'validation failed for hive promotion',
+				rejected_at: new Date().toISOString(),
+				rejection_layer: validationResult.layer || 2,
+			});
+			continue;
+		}
+
+		candidates.push({
+			swarmEntry,
+			swarmBigram,
+			promotionEventId: crypto.randomUUID(),
+		});
+	}
+
 	const result = await _internals.transactHiveStore<{
 		newPromotions: number;
 		encounters: number;
@@ -257,88 +368,78 @@ export async function checkHivePromotions(
 		let newPromotions = 0;
 		let encounters = 0;
 		let advancements = 0;
+		let merges = 0;
 		const audit: HiveAuditEntry[] = [];
-		const rejects: RejectedLesson[] = [];
+		const rejects: RejectedLesson[] = [...rejectsOutside];
 		const entries = [...ctx.entries];
 
-		// Precompute hive + swarm bigrams ONCE so the dedup loop is O(n) instead
-		// of O(n²) (findNearDuplicate recomputes hive bigrams per call). This
-		// keeps the held-lock closure fast enough to stay well under the 5s stale
-		// window even for 1000+ entries (#1847 MAJOR-2 / B1).
+		// Precompute hive bigrams ONCE under the lock (O(n)) so the per-candidate
+		// dedup-recheck is O(candidates × n) — not O(candidates × n²).
 		const hiveBigrams = entries.map((e) =>
 			typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
 		);
 		// Track bigrams of entries added within this run so same-run double-
 		// promotion of near-duplicate lessons is also prevented.
 		const addedBigrams: Set<string>[] = [];
-		const isDuplicateOfAny = (
+		const findExistingDuplicate = (
+			lessonBigram: Set<string>,
+			threshold: number,
+		): HiveKnowledgeEntry | undefined => {
+			for (let i = 0; i < entries.length; i++) {
+				if (jaccardBigram(lessonBigram, hiveBigrams[i]) >= threshold) {
+					return entries[i];
+				}
+			}
+			return undefined;
+		};
+		const isDuplicateOfAdded = (
 			lessonBigram: Set<string>,
 			threshold: number,
 		): boolean => {
-			for (const hb of hiveBigrams) {
-				if (jaccardBigram(lessonBigram, hb) >= threshold) return true;
-			}
 			for (const ab of addedBigrams) {
 				if (jaccardBigram(lessonBigram, ab) >= threshold) return true;
 			}
 			return false;
 		};
 
-		// 1. New promotions: eligible swarm entries → lineage-bearing hive entries.
-		for (const swarmEntry of swarmEntries) {
-			// Defensive: skip entries whose lesson is not a usable string. The
-			// validator normally rejects these, but a malformed/adversarial entry
-			// must never reach the entry-construction / audit-staging code (which
-			// assumes a string lesson).
-			if (
-				typeof swarmEntry.lesson !== 'string' ||
-				swarmEntry.lesson.length === 0
-			) {
-				continue;
-			}
-
-			// Dedup against the CURRENT (locked) hive entries (precomputed bigrams).
-			const swarmBigram = wordBigrams(swarmEntry.lesson);
-			if (isDuplicateOfAny(swarmBigram, config.dedup_threshold)) {
-				continue;
-			}
-
-			const decision = evaluatePromotionPolicy({
-				entry: swarmEntry,
-				config,
-				evidence: evidence[swarmEntry.id] ?? [],
-			});
-			if (!decision.eligible) {
-				diagnostics.push(
-					`skip promote '${swarmEntry.lesson.slice(0, 40)}…': ${decision.reason}`,
-				);
-				continue;
-			}
-
-			// Re-validate before promotion.
-			const validationResult = _internals.validateLesson(
-				swarmEntry.lesson,
-				entries.map((e) => e.lesson),
-				{
-					category: swarmEntry.category,
-					scope: swarmEntry.scope,
-					confidence: swarmEntry.confidence,
-				},
+		// 1. New promotions: eligible candidates → lineage-bearing hive entries.
+		for (const { swarmEntry, swarmBigram, promotionEventId } of candidates) {
+			// Dedup-recheck against the CURRENT (locked) hive entries. F-001: if a
+			// near-duplicate already exists, MERGE provenance (record the losing
+			// source id in merged_from) rather than silently discarding it.
+			const existingDup = findExistingDuplicate(
+				swarmBigram,
+				config.dedup_threshold,
 			);
-
-			if (validationResult.severity === 'error') {
-				rejects.push({
-					id: crypto.randomUUID(),
-					lesson: swarmEntry.lesson,
-					rejection_reason:
-						validationResult.reason || 'validation failed for hive promotion',
-					rejected_at: new Date().toISOString(),
-					rejection_layer: validationResult.layer || 2,
-				});
+			if (existingDup) {
+				// F-001: preserve provenance — record that this swarm entry was a
+				// near-duplicate of an existing hive entry. Do not auto-collapse
+				// conflicting lessons; just record the link for audit.
+				if (existingDup.lineage) {
+					const mergedFrom = existingDup.lineage.merged_from ?? [];
+					if (!mergedFrom.includes(swarmEntry.id)) {
+						existingDup.lineage.merged_from = [...mergedFrom, swarmEntry.id];
+						existingDup.updated_at = new Date().toISOString();
+						merges++;
+					}
+				}
+				continue;
+			}
+			if (isDuplicateOfAdded(swarmBigram, config.dedup_threshold)) {
+				// Same-run duplicate of a just-promoted entry — record on the
+				// most-recently-added entry's lineage if possible.
+				const lastAdded = entries[entries.length - 1];
+				if (lastAdded?.lineage) {
+					const mergedFrom = lastAdded.lineage.merged_from ?? [];
+					if (!mergedFrom.includes(swarmEntry.id)) {
+						lastAdded.lineage.merged_from = [...mergedFrom, swarmEntry.id];
+						lastAdded.updated_at = new Date().toISOString();
+						merges++;
+					}
+				}
 				continue;
 			}
 
-			const promotionEventId = crypto.randomUUID();
 			const newHiveEntry: HiveKnowledgeEntry = {
 				id: crypto.randomUUID(),
 				tier: 'hive',
@@ -363,6 +464,9 @@ export async function checkHivePromotions(
 					actor: 'auto',
 					sourceEntryId: swarmEntry.id,
 					sourceCohortId: sourceCohort.cohortId,
+					sourceRevision: lessonRevision(swarmEntry.lesson),
+					priorConfidence: swarmEntry.confidence,
+					priorPhasesAlive: swarmEntry.phases_alive,
 					promotionEventId,
 				}),
 				...carryActionableFields(swarmEntry),
@@ -370,6 +474,7 @@ export async function checkHivePromotions(
 
 			entries.push(newHiveEntry);
 			addedBigrams.push(swarmBigram);
+			hiveBigrams.push(swarmBigram);
 			newPromotions++;
 			audit.push(
 				stagePromotionAudit({
@@ -383,16 +488,15 @@ export async function checkHivePromotions(
 			);
 		}
 
-		// 2. Existing hive entries: add cross-cohort confirmations.
-		// Precompute swarm bigrams once so this loop is O(hive × swarm) without
-		// recomputing swarm bigrams per hive entry (keeps the closure fast —
-		// #1847 MAJOR-2).
-		const activeSwarm = swarmEntries.filter((e) => isActiveStatus(e.status));
-		const activeSwarmBigrams = activeSwarm.map((e) =>
-			typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
-		);
+		// 2. Existing hive entries: add cross-cohort confirmations. Uses the
+		// precomputed activeSwarmBigrams (computed OUTSIDE the lock). The
+		// inner loop breaks on first match, so average cost is << hive×swarm.
 		for (const hiveEntry of entries) {
-			// Find a near-duplicate swarm entry using precomputed bigrams.
+			// PRR-2: defensively treat a malformed legacy record whose
+			// confirmed_by is missing as an empty array.
+			if (!Array.isArray(hiveEntry.confirmed_by)) {
+				hiveEntry.confirmed_by = [];
+			}
 			const hiveBigram =
 				typeof hiveEntry.lesson === 'string'
 					? wordBigrams(hiveEntry.lesson)
@@ -410,10 +514,7 @@ export async function checkHivePromotions(
 			if (!nearDuplicate) continue;
 
 			// Do not self-confirm: if this hive entry was just promoted from this
-			// very swarm entry in this run, its origin cohort is already implied
-			// and should not double-count as a cross-project confirmation. A
-			// freshly promoted entry starts with empty confirmed_by and gains
-			// confirmations only from OTHER cohorts on subsequent runs.
+			// very swarm entry in this run, its origin cohort is already implied.
 			if (
 				hiveEntry.lineage?.source_entry_id &&
 				hiveEntry.lineage.source_entry_id === nearDuplicate.id
@@ -457,7 +558,8 @@ export async function checkHivePromotions(
 			}
 		}
 
-		const modified = newPromotions > 0 || encounters > 0 || advancements > 0;
+		const modified =
+			newPromotions > 0 || encounters > 0 || advancements > 0 || merges > 0;
 		// Rejects must be persisted even when nothing else changed — otherwise a
 		// batch where every eligible entry failed validation would silently drop
 		// the rejection records. Committing rewrites the hive (unchanged content,
@@ -489,12 +591,32 @@ export async function checkHivePromotions(
 		};
 	});
 
+	// F-004/PRR-1/PRR-3: fail-safe contract. On lock/mkdir/validation failure
+	// transactHiveStore returns committed:false with a zeroed return + the
+	// diagnostic reason. Never dereference result.return blindly; surface the
+	// diagnostics so the failure is visible instead of silently dropped.
+	if (!result.committed) {
+		return {
+			timestamp: new Date().toISOString(),
+			new_promotions: 0,
+			encounters_incremented: 0,
+			advancements: 0,
+			total_hive_entries: 0,
+			diagnostics: [
+				...diagnostics,
+				...result.diagnostics,
+				'hive promotion transaction did not commit (see prior diagnostics)',
+			],
+		};
+	}
+
+	const ret = result.return;
 	return {
 		timestamp: new Date().toISOString(),
-		new_promotions: result.return.newPromotions,
-		encounters_incremented: result.return.encounters,
-		advancements: result.return.advancements,
-		total_hive_entries: result.return.total,
+		new_promotions: ret?.newPromotions ?? 0,
+		encounters_incremented: ret?.encounters ?? 0,
+		advancements: ret?.advancements ?? 0,
+		total_hive_entries: ret?.total ?? 0,
 		diagnostics: [...diagnostics, ...result.diagnostics],
 	};
 }
@@ -659,16 +781,21 @@ export async function promoteToHive(
 		}
 
 		// Evaluate the one policy. The direct-text path has no swarm entry, so
-		// we synthesize a minimal stand-in for the policy gates that read swarm
-		// fields. Manual direct promotion is intentionally allowed to pass the
-		// eligibility_route gate (a human is explicitly authoring it); the
-		// active_status + confidence_floor + application gates still apply.
+		// we synthesize a minimal stand-in. Per #1847 §4, a human explicitly
+		// authoring a hive lesson IS the authorization for the eligibility_route
+		// (route 2 fast-track) — this is recorded as actor:'manual' (NOT
+		// 'manual-override'). The active_status + confidence_floor +
+		// application-evidence gates still apply honestly. --force is required
+		// only when THOSE gates fail, recording actor:'manual-override' + the
+		// failed gates. (F-006: the fast-track tag here is the explicit manual
+		// authorization, not a silent self-satisfaction — it is documented and
+		// the actor field distinguishes authorized-manual from forced-override.)
 		const swarmStandIn: SwarmKnowledgeEntry = {
 			id: 'manual-direct',
 			tier: 'swarm',
 			lesson: trimmedLesson,
 			category: (category as KnowledgeCategory) || 'process',
-			tags: ['hive-fast-track'], // route 2: explicit manual promotion
+			tags: ['hive-fast-track'], // route 2: explicit manual authorization
 			scope: 'global',
 			confidence: 1.0,
 			status: 'promoted',
@@ -690,7 +817,9 @@ export async function promoteToHive(
 		});
 
 		const force = options?.force === true;
-		const reason = options?.reason?.trim();
+		// F-007: sanitize the free-text reason before it is stored in lineage
+		// and the audit log (which is readable via knowledge_recall debug).
+		const reason = sanitizeReason(options?.reason);
 
 		let actor: PromotionActor;
 		let overrideFailedGates: string[] | undefined;
@@ -763,7 +892,10 @@ export async function promoteToHive(
 	// here would re-enter the directory lock's file (deadlock risk) and the
 	// ReceiptEvent 'override' shape requires receipt-only fields we do not have.
 
-	return result.return;
+	// PRR-4: on transaction failure, surface the diagnostic reason instead of
+	// returning undefined (which would give the user an empty reply).
+	if (result.return !== undefined) return result.return;
+	return `Promotion failed: ${result.diagnostics.join('; ') || 'transaction did not commit'}`;
 }
 
 /**
@@ -832,7 +964,9 @@ export async function promoteFromSwarm(
 		});
 
 		const force = options?.force === true;
-		const reason = options?.reason?.trim();
+		// F-007: sanitize the free-text reason before it is stored in lineage
+		// and the audit log (which is readable via knowledge_recall debug).
+		const reason = sanitizeReason(options?.reason);
 
 		let actor: PromotionActor;
 		let overrideFailedGates: string[] | undefined;
@@ -902,7 +1036,9 @@ export async function promoteFromSwarm(
 		};
 	});
 
-	return result.return;
+	// PRR-4: surface the diagnostic reason on transaction failure.
+	if (result.return !== undefined) return result.return;
+	return `Promotion failed: ${result.diagnostics.join('; ') || 'transaction did not commit'}`;
 }
 
 // Resolve hive knowledge path re-exported for any external consumer that still

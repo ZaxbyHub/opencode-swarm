@@ -219,6 +219,13 @@ export function normalizeEntry<T>(raw: T): T {
 	if (typeof obj.recent_negative_phase_count !== 'number') {
 		obj.recent_negative_phase_count = 0;
 	}
+	// #1847 PRR-2: ensure confirmed_by is an array. Legacy/malformed on-disk
+	// records may omit it (null/undefined), and hive promotion's confirmation
+	// loop calls .push/.some on it directly — a missing array would throw
+	// mid-transaction. Backfill to [] in memory; never synthesize cohort ids.
+	if (!Array.isArray(obj.confirmed_by)) {
+		obj.confirmed_by = [];
+	}
 	// Ensure actionable arrays are at least undefined-or-array (never wrong type).
 	const arrayFields: Array<keyof ActionableDirectiveFields> = [
 		'triggers',

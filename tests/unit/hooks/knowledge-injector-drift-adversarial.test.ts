@@ -85,7 +85,6 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	getPlatformConfigDir: () => '/tmp',
 	computeOutcomeSignal: () => 0,
 	OUTCOME_SIGNAL_SMOOTHING: 0.5,
-	confirmEntriesPhase: async () => {},
 	_internals: {},
 }));
 mock.module('../../../src/plan/manager.js', () => ({

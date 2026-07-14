@@ -398,6 +398,11 @@ export async function appendHiveKnowledgeEvent(
 	try {
 		release = await lockfile.lock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
+			// #1847 F-008: MUST match transactHiveStore's stale (5s). This writer
+			// locks the SAME hive data directory; an asymmetric (longer) stale
+			// would let a concurrent 5s transaction force-break this append
+			// mid-write. The high retry count (200) already covers contention.
+			stale: 5_000,
 		});
 		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
 		// Hive events don't participate in the counter rollup baseline (archival
