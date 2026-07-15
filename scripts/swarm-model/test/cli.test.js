@@ -59,6 +59,13 @@ test('valueless --opencode-config exits 1 with a clear message (F-09)', async ()
   assert.match(stderr, /Missing value for --opencode-config/);
 });
 
+// A following flag must not be swallowed as this flag's path value.
+test('--swarm-config followed by another flag errors rather than consuming it', async () => {
+  const { code, stderr } = await run(['--swarm-config', '--opencode-config', 'x']);
+  assert.equal(code, 1);
+  assert.match(stderr, /Missing value for --swarm-config/);
+});
+
 // F-13: with HOME and USERPROFILE both unset the module-level default paths
 // must still resolve (os.homedir fallback), so the CLI starts instead of
 // crashing at import with `path.join(undefined, ...)`.

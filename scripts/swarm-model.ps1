@@ -41,8 +41,14 @@ function Write-SwarmConfig {
         $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
         if (Test-Path -LiteralPath $backupPath) {
             $backupPath = $path + '.' + $timestamp + '.bak'
+            # Guarantee uniqueness for multiple writes within the same second.
+            $n = 1
+            while (Test-Path -LiteralPath $backupPath) {
+                $backupPath = $path + '.' + $timestamp + '-' + $n + '.bak'
+                $n++
+            }
         }
-        Copy-Item -LiteralPath $path -Destination $backupPath -Force
+        Copy-Item -LiteralPath $path -Destination $backupPath
         Write-Host "已备份原配置: $backupPath" -ForegroundColor DarkGray
     }
     # -Depth 10: PowerShell's ConvertTo-Json defaults to depth 2, which would

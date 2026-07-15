@@ -30,6 +30,13 @@ export function writeSwarmConfig(config, filePath) {
       // other; stripping all non-digits first avoids that.
       const ts = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
       dest = filePath + '.' + ts + '.bak';
+      // Guarantee uniqueness even for multiple writes within the same second
+      // (second-resolution stamps would otherwise collide and overwrite).
+      let n = 1;
+      while (fs.existsSync(dest)) {
+        dest = filePath + '.' + ts + '-' + n + '.bak';
+        n++;
+      }
     }
     fs.copyFileSync(filePath, dest);
     console.log(`Backed up to: ${dest}`);

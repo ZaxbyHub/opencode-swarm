@@ -92,6 +92,25 @@ test('writeSwarmConfig backup filename is full-resolution and never overwrites t
   assert.ok(fs.existsSync(p + '.bak'), 'original .bak still present (not overwritten)');
 });
 
+test('writeSwarmConfig never overwrites an existing timestamped backup (same-second collision)', () => {
+  const dir = tmpDir();
+  const p = path.join(dir, 'swarm.json');
+  fs.writeFileSync(p, JSON.stringify({ agents: { a: { model: 'x/y' } } }));
+
+  // Occupy the .bak slot and the timestamped slot for "now" with sentinels.
+  fs.writeFileSync(p + '.bak', 'SENTINEL_BAK');
+  const ts = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+  const stampedSlot = `${p}.${ts}.bak`;
+  fs.writeFileSync(stampedSlot, 'SENTINEL_TS');
+
+  writeSwarmConfig({ agents: { a: { model: 'x/z' } } }, p);
+
+  // Neither pre-existing backup may be overwritten, whichever second the write
+  // lands in (same second -> uses a `-N` suffix; next second -> a fresh stamp).
+  assert.equal(fs.readFileSync(p + '.bak', 'utf8'), 'SENTINEL_BAK');
+  assert.equal(fs.readFileSync(stampedSlot, 'utf8'), 'SENTINEL_TS');
+});
+
 test('writeSwarmConfig preserves non-edited nested fields (schema integrity)', () => {
   const dir = tmpDir();
   const p = path.join(dir, 'swarm.json');

@@ -15,7 +15,9 @@ function parseArgs() {
     if (args[i] === '--swarm-config' || args[i] === '--opencode-config') {
       const flag = args[i];
       const value = args[i + 1];
-      if (!value) {
+      // Treat a following flag (or no token) as a missing value rather than
+      // silently consuming `--other-flag` as this flag's path.
+      if (!value || value.startsWith('--')) {
         throw new Error(`Missing value for ${flag}`);
       }
       i++;
