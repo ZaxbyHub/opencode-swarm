@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.119.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.118.1...v7.119.0) (2026-07-15)
+
+
+### Features
+
+* **scripts:** add swarm-model config CLI (supersedes [#1857](https://github.com/ZaxbyHub/opencode-swarm/issues/1857)) ([e77461f](https://github.com/ZaxbyHub/opencode-swarm/commit/e77461fedc00547639d7ad56b8d3650799c3b31b))
+
 ## [7.118.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.118.0...v7.118.1) (2026-07-15)
 
 
