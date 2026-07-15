@@ -124,7 +124,11 @@ jobs:
           # src/parallel (lock-directory creation / EACCES semantics — the
           # confirmed root cause of A2a's read-only-.swarm cross-platform
           # bug, added after a test-engineer review caught it missing from
-          # the original 5-prefix list), CI scripts, and the workflow files
+          # the original 5-prefix list), src/knowledge (cohort-identity git
+          # rev-parse / realpath canonicalization — issue #1846's git-common-dir
+          # worktree convergence bug was Windows-only under Bun and slipped
+          # through ubuntu-only PR CI to fail in the merge queue on PR #1851),
+          # CI scripts, and the workflow files
           # themselves. Piped directly rather than captured into a variable
           # first. Deliberately grep -E redirected to /dev/null below, and
           # NOT grep -q: under set -o pipefail, grep -q exits as soon as it
@@ -136,7 +140,7 @@ jobs:
           # platform-path PRs to the ubuntu-only matrix). grep without -q
           # or -m reads its input to EOF before exiting, so git diff always
           # finishes writing normally and no SIGPIPE is possible.
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|scripts/|\.github/workflows/)' >/dev/null; then
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|src/knowledge/|scripts/|\.github/workflows/)' >/dev/null; then
             echo "touches-platform-paths=true" >> "$GITHUB_OUTPUT"
           else
             echo "touches-platform-paths=false" >> "$GITHUB_OUTPUT"

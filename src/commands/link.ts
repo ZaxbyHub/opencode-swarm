@@ -7,17 +7,19 @@
  * keeping an isolated `.swarm/knowledge.jsonl`.
  *
  * Usage:
- * - /swarm link                — link using the project hash (ties all worktrees
- *                                of the same repo to one shared store).
+ * - /swarm link                — link using the canonical cohort id (ties all
+ *                                worktrees of the same repo to one shared store).
  * - /swarm link <name>         — link using an explicit shared name (use the same
  *                                name in each worktree/repo to tie them together).
  * - /swarm link status         — show the current link state for this worktree.
  *
- * On link, this worktree's existing local lessons are merged (deduplicated) into
- * the shared store so nothing already learned is lost.
+ * On link, this worktree's existing local knowledge *family* (store, events,
+ * rejected, retractions, counters, quarantine, unactionable, application-legacy)
+ * is migrated into the shared store per the family manifest, with each member
+ * merged according to its strategy (issue #1846). The pointer is flipped only
+ * after the migration commits.
  */
 
-import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	type LinkPointer,
@@ -27,92 +29,11 @@ import {
 	writeLinkPointer,
 } from '../hooks/knowledge-link.js';
 import {
-	findNearDuplicate,
-	transactKnowledge,
-} from '../hooks/knowledge-store.js';
-import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
-import { deriveProjectHash } from '../knowledge/identity.js';
-
-const DEDUP_THRESHOLD = 0.6;
-
-interface MergeResult {
-	merged: number;
-	skipped: number;
-}
-
-/**
- * Merge the local worktree's knowledge.jsonl into the shared link store,
- * skipping entries that already exist there (exact id or near-duplicate lesson).
- * Reads/writes explicit paths so it does not depend on the active link pointer.
- *
- * CRITICAL: both local and shared entries are read INSIDE the shared-store lock
- * to prevent concurrent-merge races. If worktrees A and B link simultaneously,
- * both must dedupe against the current shared-store state (not stale local reads),
- * ensuring near-duplicates cannot slip through due to read-time ordering.
- */
-async function mergeLocalKnowledgeIntoLink(
-	localSwarmDir: string,
-	linkDir: string,
-): Promise<MergeResult> {
-	const localPath = path.join(localSwarmDir, 'knowledge.jsonl');
-	const sharedPath = path.join(linkDir, 'knowledge.jsonl');
-	if (!existsSync(localPath)) return { merged: 0, skipped: 0 };
-
-	let merged = 0;
-	let skipped = 0;
-
-	// Use transactFile directly to ensure both reads happen inside the lock.
-	// The mutate callback reads the shared entries; we read local entries
-	// synchronously inside the mutate callback so they're synchronized with
-	// the shared store state at lock-acquisition time.
-	const { readFileSync } = await import('node:fs');
-	let changed = false;
-
-	await transactKnowledge<KnowledgeEntryBase>(sharedPath, (sharedEntries) => {
-		// Read local entries inside the lock to ensure synchronization with shared state.
-		const localEntries: KnowledgeEntryBase[] = [];
-		try {
-			const content = readFileSync(localPath, 'utf-8');
-			for (const line of content.split('\n')) {
-				if (line.trim()) {
-					try {
-						localEntries.push(JSON.parse(line));
-					} catch {
-						// Skip malformed entries
-					}
-				}
-			}
-		} catch {
-			// Local file doesn't exist or can't be read; no-op
-			return null;
-		}
-
-		if (localEntries.length === 0) return null;
-
-		const result = [...sharedEntries];
-		const seenIds = new Set(result.map((e) => e.id));
-		changed = false;
-
-		for (const entry of localEntries) {
-			if (seenIds.has(entry.id)) {
-				skipped++;
-				continue;
-			}
-			// findNearDuplicate normalizes both sides internally; pass the raw
-			// lesson to match every other caller in the codebase.
-			if (findNearDuplicate(entry.lesson, result, DEDUP_THRESHOLD)) {
-				skipped++;
-				continue;
-			}
-			result.push(entry);
-			seenIds.add(entry.id);
-			merged++;
-			changed = true;
-		}
-		return changed ? result : null;
-	});
-	return { merged, skipped };
-}
+	type CohortIdentity,
+	resolveCohortId,
+} from '../knowledge/cohort-identity.js';
+import { migrateKnowledgeFamily } from '../knowledge/family-migration.js';
+import { criticalWarn } from '../utils/logger.js';
 
 function formatStatus(directory: string): string {
 	const pointer = readLinkPointer(directory);
@@ -129,8 +50,20 @@ function formatStatus(directory: string): string {
 		`  link id:   ${pointer.linkId}`,
 	];
 	if (pointer.name) lines.push(`  name:      ${pointer.name}`);
+	if (pointer.cohortId) lines.push(`  cohort:    ${pointer.cohortId}`);
+	if (pointer.identitySource) {
+		lines.push(`  identity:  ${pointer.identitySource}`);
+	}
+	if (pointer.degraded) {
+		lines.push(
+			'  ⚠ degraded: cohort id is machine-local (not portable across machines).',
+		);
+	}
 	lines.push(`  shared at: ${linkDir}`);
 	lines.push(`  since:     ${pointer.createdAt}`);
+	if (pointer.generation !== undefined) {
+		lines.push(`  generation: ${pointer.generation}`);
+	}
 	lines.push('Run `/swarm unlink` to stop sharing (keeps a local copy).');
 	return lines.join('\n');
 }
@@ -149,6 +82,7 @@ export async function handleLinkCommand(
 
 	let linkId: string;
 	let displayName: string | undefined;
+	let cohort: CohortIdentity | undefined;
 	if (nameArg) {
 		const sanitized = sanitizeLinkId(nameArg);
 		if (!sanitized) {
@@ -156,14 +90,32 @@ export async function handleLinkCommand(
 		}
 		linkId = sanitized;
 		displayName = nameArg;
+		// Still resolve the canonical cohort id for diagnostics/provenance.
+		try {
+			cohort = await resolveCohortId(directory);
+		} catch {
+			/* optional — explicit name does not require a resolvable identity */
+		}
 	} else {
 		try {
-			linkId = deriveProjectHash(directory);
+			cohort = await resolveCohortId(directory);
+			linkId = cohort.cohortId;
 		} catch (error) {
-			return `❌ Failed to derive project hash: ${
+			return `❌ Failed to resolve cohort identity: ${
 				error instanceof Error ? error.message : String(error)
 			}`;
 		}
+	}
+
+	// Surface a visible warning when the cohort identity is degraded (machine-local,
+	// not portable). The operator should know the cohort won't follow a clone of
+	// this repo to another machine (issue #1846 §1.3, critic C3).
+	if (cohort?.degraded) {
+		criticalWarn(
+			`[opencode-swarm] Cohort identity for this worktree is degraded (source: ${cohort.source}). ` +
+				'The shared store will be cohesive for sibling worktrees on THIS machine, ' +
+				'but it is not a portable cohort identity (no usable git remote).',
+		);
 	}
 
 	const existing = readLinkPointer(directory);
@@ -172,31 +124,48 @@ export async function handleLinkCommand(
 	}
 
 	const linkDir = resolveLinkDir(linkId);
-	let merge: MergeResult;
+	let totalMerged = 0;
+	let totalSkipped = 0;
+	let familySummary = '';
 	try {
-		merge = await mergeLocalKnowledgeIntoLink(
-			path.join(directory, '.swarm'),
+		const result = await migrateKnowledgeFamily(
 			linkDir,
+			path.join(directory, '.swarm'),
 		);
+		for (const m of result.perMember) {
+			totalMerged += m.merged;
+			totalSkipped += m.skipped;
+		}
+		familySummary = result.perMember
+			.filter((m) => m.merged > 0 || m.skipped > 0)
+			.map((m) => `    ${m.filename}: ${m.merged} merged, ${m.skipped} kept`)
+			.join('\n');
 	} catch (error) {
-		return `❌ Failed to merge local knowledge into the link store: ${
+		return `❌ Failed to migrate the knowledge family into the link store: ${
 			error instanceof Error ? error.message : String(error)
 		}`;
 	}
 
+	// v2 pointer carries cohort metadata (issue #1846). Bump generation so the
+	// cross-process cache revalidates (resolveKnowledgeStoreDir keys off it).
 	const pointer: LinkPointer = {
-		version: 1,
+		version: 2,
 		linkId,
 		name: displayName,
 		createdAt: new Date().toISOString(),
 		source: 'manual',
+		cohortId: cohort?.cohortId,
+		identitySource: cohort?.source,
+		degraded: cohort?.degraded,
+		generation: (existing?.generation ?? 0) + 1,
 	};
-	// Ordering is deliberate: merge BEFORE writing the pointer. The merge is
-	// idempotent and deduped, so if writeLinkPointer fails the worktree stays
-	// unlinked while the local lessons are safely already in the shared store —
-	// re-running `/swarm link` simply skips the duplicates and writes the pointer.
-	// The reverse order (pointer first) would, on a merge failure, leave the
-	// worktree linked to a shared store missing its local lessons, which is worse.
+	// Ordering is deliberate: migrate BEFORE writing the pointer. The migration
+	// is id-keyed and idempotent, so if writeLinkPointer fails the worktree stays
+	// unlinked while the local family is safely already in the shared store —
+	// re-running `/swarm link` re-merges (no-ops for already-present ids) and
+	// writes the pointer. The reverse order (pointer first) would, on a migration
+	// failure, leave the worktree linked to a shared store missing local family
+	// data, which is worse.
 	try {
 		await writeLinkPointer(directory, pointer);
 	} catch (error) {
@@ -208,21 +177,13 @@ export async function handleLinkCommand(
 	const relinkNote = existing
 		? `\n(Re-linked from previous link "${existing.linkId}".)`
 		: '';
-	// Finding A (known limitation): only the lessons themselves migrate on link;
-	// each merged lesson's accumulated outcome counters (shown/applied/violated)
-	// start fresh in the shared store and re-accrue as the linked swarms run.
-	const historyNote =
-		merge.merged > 0
-			? '\n  note: merged lessons keep their text; their outcome-history counters re-accrue in the shared store.'
-			: '';
+	const familyNote = familySummary ? `\n${familySummary}` : '';
 	return [
 		`🔗 Linked this worktree to shared knowledge store "${linkId}".`,
-		`  merged ${merge.merged} local lesson(s) into the shared store` +
-			(merge.skipped > 0 ? ` (${merge.skipped} already present)` : '') +
-			'.',
+		`  migrated the complete knowledge family (${totalMerged} new, ${totalSkipped} already present).`,
 		`  shared at: ${linkDir}`,
 		'All swarms linked to this id now read and write the same knowledge.' +
 			relinkNote +
-			historyNote,
+			familyNote,
 	].join('\n');
 }

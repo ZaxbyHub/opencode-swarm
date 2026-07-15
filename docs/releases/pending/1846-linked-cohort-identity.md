@@ -1,0 +1,71 @@
+## Linked Knowledge 1/5: canonical cohort identity, provenance-preserving family migration, and link diagnostics
+
+Closes #1846
+
+### What changed
+The linked-swarm knowledge feature is now a reliable repository-level cohort
+instead of a pointer to one shared `knowledge.jsonl` file. Two worktrees of the
+same repository deterministically resolve to the same cohort, migrate and unlink
+the complete knowledge family without data loss, and expose cohort health to
+operators via existing status surfaces.
+
+### Why
+Previously, `/swarm link` redirected only `knowledge.jsonl`, leaving the other
+six knowledge-family members (events, rejected, retractions, counter baseline,
+quarantine, unactionable, legacy application log) silently orphaned at link time
+and lost at unlink time. Repository identity was derived from an un-normalized
+git remote, so equivalent spellings (SSH vs HTTPS, optional `.git`, case, NFC vs
+NFD) resolved to different cohorts, and no-origin repos fell back to hashing the
+worktree path (splitting sibling worktrees). Diagnostics did not surface any of
+this, so architects behaved as if the linked store did not exist.
+
+### Fixes
+- **Canonical cohort identity** (`src/knowledge/cohort-identity.ts`): a single
+  resolver normalizes equivalent remotes (SSH/scp/HTTPS, `.git`, host/scheme
+  case, slash direction, percent-encoding, default ports, userinfo, NFC/NFD),
+  falls back through `git rev-parse --path-format=absolute --git-common-dir`
+  (worktree-stable, and Windows-safe: the absolute form hands every worktree of
+  a repo one identical string so sibling worktrees converge under Bun on
+  Windows, not just POSIX) before the path, and emits a visible degraded
+  warning when the cohort id is
+  machine-local. Compliant subprocess contract (array form, `git -C`, ignored
+  stdin, bounded timeout, kill in finally).
+- **Knowledge-family manifest** (`src/knowledge/family-manifest.ts`): a single
+  source of truth for the 8 family members drives both link and unlink, so a new
+  member cannot be silently omitted.
+- **Transactional family migration** (`src/knowledge/family-migration.ts`):
+  link and unlink now migrate the complete family with per-member merge
+  strategies — provenance-preserving near-duplicate merge (union fields,
+  evidence-weighted confidence, preserve losing id), id-keyed append-union for
+  logs, and per-counter SUM for the baseline (reusing the canonical
+  `mergeRollupInto`). Migrations run under a bumped-stale (30 s) lock with a
+  validate-before-commit sequence and per-file atomic writes; the pointer flips
+  last, so a failed migration leaves the worktree in its prior link state and is
+  idempotently retryable (every strategy is id-keyed).
+- **Pointer schema v2** (`src/hooks/knowledge-link.ts`): widens `version` to
+  `1 | 2`, carries cohort metadata (cohort id, identity source, degraded flag,
+  config fingerprint, generation), and reads the version from disk instead of
+  hard-stamping it. Legacy v1 pointers remain valid.
+- **Cross-process cache revalidation**: `resolveKnowledgeStoreDir` now stats the
+  pointer file (`mtimeMs:ctimeMs:size`) on cache hit so a stale process observes
+  link/unlink without waiting for the TTL.
+- **Operator-visible cohort status**: `/swarm diagnose`, `/swarm status`, and
+  `/swarm link status` now report linked vs local mode, cohort/link id, identity
+  source, degraded-fallback warnings, generation, and local-orphan state.
+- **Cohort config fingerprint** (`src/knowledge/config-fingerprint.ts`): a
+  deterministic hash of cohort-relevant config. Planned-future-use: the helper
+  and its tests ship now, but it is not yet wired into link/unlink or
+  diagnostics in this PR. Cohort-agreement enforcement (fail-closed on
+  mismatch) lands with #1847/#1823, which consume the cohort-status source this
+  PR establishes.
+
+### Foundation for
+This is the foundation PR for the linked-knowledge epic. #1847 (transactional
+hive promotion), #1848 (cohort-safe curation), #1849 (real-host injection), and
+#1850 (opt-in linked repository memory) depend on the identity/resolver contract
+established here.
+
+### Non-goals (per issue)
+No hive redesign, host-hook injection, memory sharing enablement, new init-path
+I/O, or new tools. The architect cohort-context surface is deferred to #1823
+(this PR owns the truthful status source that #1823 will consume).

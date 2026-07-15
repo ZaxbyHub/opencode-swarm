@@ -250,4 +250,46 @@ describe('knowledge-diagnostics', () => {
 		expect(health.status).toBe('⚠️');
 		expect(health.detail).toContain('unactionable queue');
 	});
+
+	it('reports cohort[local] when the worktree is not linked', async () => {
+		const debug = await computeKnowledgeDebug(dir);
+		expect(debug.cohort.linked).toBe(false);
+		expect(debug.cohort.link_id).toBeNull();
+
+		const health = await checkKnowledgeHealth(dir);
+		expect(health.detail).toContain('cohort[local]');
+	});
+
+	it('reports cohort link/id/degraded when the worktree is linked (issue #1846)', async () => {
+		// Hand-write a v2 pointer so diagnostics can read cohort metadata.
+		mkdirSync(join(dir, '.swarm'), { recursive: true });
+		writeFileSync(
+			join(dir, '.swarm', 'link.json'),
+			JSON.stringify({
+				version: 2,
+				linkId: 'diag-cohort',
+				createdAt: '2026-01-01T00:00:00.000Z',
+				source: 'manual',
+				cohortId: 'abc123def456',
+				identitySource: 'git-common-dir',
+				degraded: true,
+				generation: 4,
+			}),
+		);
+
+		const debug = await computeKnowledgeDebug(dir);
+		expect(debug.cohort.linked).toBe(true);
+		expect(debug.cohort.link_id).toBe('diag-cohort');
+		expect(debug.cohort.cohort_id).toBe('abc123def456');
+		expect(debug.cohort.identity_source).toBe('git-common-dir');
+		expect(debug.cohort.degraded).toBe(true);
+		expect(debug.cohort.generation).toBe(4);
+
+		// The health render surfaces the cohort tag + a degraded warning.
+		const health = await checkKnowledgeHealth(dir);
+		expect(health.detail).toContain('cohort[linked');
+		expect(health.detail).toContain('diag-cohort');
+		expect(health.detail).toContain('DEGRADED');
+		expect(health.detail).toContain('degraded (via git-common-dir)');
+	});
 });

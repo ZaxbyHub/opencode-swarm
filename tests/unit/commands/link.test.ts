@@ -121,7 +121,8 @@ describe('handleLinkCommand', () => {
 			);
 
 			const out = await handleLinkCommand(dir, ['proj']);
-			expect(out).toContain('merged 2 local lesson');
+			expect(out).toContain('migrated the complete knowledge family');
+			expect(out).toContain('2 new');
 
 			// Shared store now contains both lessons.
 			const sharedPath = path.join(resolveLinkDir('proj'), 'knowledge.jsonl');

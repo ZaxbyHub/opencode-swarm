@@ -1224,6 +1224,10 @@ export const _internals: {
 	appendHiveKnowledgeEvent: typeof appendHiveKnowledgeEvent;
 	recordHiveKnowledgeEvent: typeof recordHiveKnowledgeEvent;
 	readHiveKnowledgeEvents: typeof readHiveKnowledgeEvents;
+	// Exposed for the cohort family-migration engine (issue #1846) so the
+	// counter-baseline `sum-counters` merge reuses the canonical primitive
+	// rather than reimplementing the per-counter sum + maxIso-timestamp logic.
+	mergeRollupInto: typeof mergeRollupInto;
 } = {
 	resolveKnowledgeEventsPath,
 	resolveKnowledgeCounterBaselinePath,
@@ -1242,4 +1246,5 @@ export const _internals: {
 	appendHiveKnowledgeEvent,
 	recordHiveKnowledgeEvent,
 	readHiveKnowledgeEvents,
+	mergeRollupInto,
 };
