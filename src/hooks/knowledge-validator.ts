@@ -4,6 +4,11 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import {
+	authorizeCuration,
+	type CurationAuthorizationInput,
+	type CurationContext,
+} from '../knowledge/curation-policy.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import {
@@ -904,6 +909,15 @@ export async function quarantineEntry(
 	entryId: string,
 	reason: string,
 	reportedBy: 'architect' | 'user' | 'auto',
+	/** #1848: cohort-safe curation context. When provided, the quarantine is
+	 * authorized through the shared curation policy BEFORE mutating; an
+	 * unauthorized action becomes a non-destructive no-op (the policy records a
+	 * proposal). When omitted, the legacy behavior applies (used by
+	 * deterministic validation-failure withholds and non-cohort callers). */
+	curationContext?: {
+		input: CurationAuthorizationInput;
+		context: CurationContext;
+	},
 ): Promise<void> {
 	// Guard against path traversal
 	if (!directory || directory.includes('..')) {
@@ -956,6 +970,29 @@ export async function quarantineEntry(
 		const entry = entries.find((e) => e.id === entryId);
 		if (!entry) {
 			return;
+		}
+
+		// #1848 §2: cohort-safe authorization. When a curation context is
+		// supplied, quarantine is gated by the shared policy. Pre-transaction
+		// authorization over the freshest entry (just read inside the lock);
+		// the revision CAS inside the mutation guards against drift between
+		// authorize and apply (C-4 fix).
+		if (curationContext) {
+			const refreshedContext: CurationContext = {
+				...curationContext.context,
+				entry: entry as CurationContext['entry'],
+			};
+			const decision = await authorizeCuration(
+				curationContext.input,
+				refreshedContext,
+			);
+			if (!decision.authorized) {
+				warn(
+					`[knowledge-validator] quarantineEntry blocked by cohort-safety policy ` +
+						`(basis: ${decision.basis}): ${decision.detail}`,
+				);
+				return; // non-destructive no-op; the policy recorded a proposal
+			}
 		}
 
 		// Separate: remaining entries
@@ -1027,6 +1064,12 @@ export async function quarantineEntry(
 export async function restoreEntry(
 	directory: string,
 	entryId: string,
+	/** #1848 §2: cohort-safe curation context (optional). When provided, the
+	 * restore is authorized through the shared policy before mutating. */
+	curationContext?: {
+		input: CurationAuthorizationInput;
+		context: CurationContext;
+	},
 ): Promise<void> {
 	// Guard against path traversal
 	if (!directory || directory.includes('..')) {
@@ -1068,6 +1111,26 @@ export async function restoreEntry(
 		const entryToRestore = quarantinedEntries.find((e) => e.id === entryId);
 		if (!entryToRestore) {
 			return; // No-op if not found
+		}
+
+		// #1848 §2 (IR-3 fix): cohort-safe authorization for restore. When a
+		// curation context is supplied, the restore is gated by the shared policy.
+		if (curationContext) {
+			const refreshedContext: CurationContext = {
+				...curationContext.context,
+				entry: entryToRestore as CurationContext['entry'],
+			};
+			const decision = await authorizeCuration(
+				curationContext.input,
+				refreshedContext,
+			);
+			if (!decision.authorized) {
+				warn(
+					`[knowledge-validator] restoreEntry blocked by cohort-safety policy ` +
+						`(basis: ${decision.basis}): ${decision.detail}`,
+				);
+				return;
+			}
 		}
 
 		// Separate: remaining quarantined entries
@@ -1135,7 +1198,11 @@ export async function restoreEntry(
 export interface UnarchiveResult {
 	restored: boolean;
 	restored_to?: string;
-	reason?: 'not_found' | 'not_archived' | 'invalid_lesson';
+	reason?:
+		| 'not_found'
+		| 'not_archived'
+		| 'invalid_lesson'
+		| 'blocked_by_policy';
 }
 
 /**
@@ -1149,6 +1216,11 @@ export interface UnarchiveResult {
 export async function unarchiveEntry(
 	directory: string,
 	entryId: string,
+	/** #1848 §2 (IR-3 fix): cohort-safe curation context (optional). */
+	curationContext?: {
+		input: CurationAuthorizationInput;
+		context: CurationContext;
+	},
 ): Promise<UnarchiveResult> {
 	// Guard against path traversal
 	if (!directory || directory.includes('..')) {
@@ -1184,6 +1256,25 @@ export async function unarchiveEntry(
 		}
 		if (target.status !== 'archived') {
 			return { restored: false, reason: 'not_archived' };
+		}
+
+		// #1848 §2 (IR-3 fix): cohort-safe authorization for unarchive.
+		if (curationContext) {
+			const refreshedContext: CurationContext = {
+				...curationContext.context,
+				entry: target as CurationContext['entry'],
+			};
+			const decision = await authorizeCuration(
+				curationContext.input,
+				refreshedContext,
+			);
+			if (!decision.authorized) {
+				warn(
+					`[knowledge-validator] unarchiveEntry blocked by cohort-safety policy ` +
+						`(basis: ${decision.basis}): ${decision.detail}`,
+				);
+				return { restored: false, reason: 'blocked_by_policy' };
+			}
 		}
 
 		// Re-validate before restoring — an archived entry may have been blocked

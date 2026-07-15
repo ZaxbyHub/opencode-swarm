@@ -1,11 +1,22 @@
 import { z } from 'zod';
 import {
+	readKnowledge,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
+import {
+	authorizeCuration,
+	type CurationAuthorizationInput,
+	type CurationContext,
+} from '../knowledge/curation-policy.js';
 import { createSwarmTool } from './create-tool.js';
+
+async function loadConfigForPolicy() {
+	const { KnowledgeConfigSchema } = await import('../config/schema.js');
+	return KnowledgeConfigSchema.parse({});
+}
 
 export const _internals = {
 	transactKnowledge,
@@ -42,6 +53,37 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 			const id = idInput as string;
 
 			const swarmPath = resolveSwarmKnowledgePath(directory);
+
+			// #1848 §2: cohort-safe authorization before destructive remove.
+			// Removal is the most destructive lifecycle action; route through the
+			// shared policy with cohort-wide evidence scope. Promoted entries are
+			// still protected by the status guard below.
+			const preEntries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+			const preTarget = preEntries.find((e) => e.id === id) ?? null;
+			if (preTarget) {
+				const curationInput: CurationAuthorizationInput = {
+					directory,
+					action: 'remove',
+					entryId: id,
+					reason: 'hard-delete via knowledge_remove tool',
+					evidenceScope: 'cohort-wide',
+				};
+				const curationContext: CurationContext = {
+					config: await loadConfigForPolicy(),
+					entry: preTarget,
+				};
+				const decision = await authorizeCuration(
+					curationInput,
+					curationContext,
+				);
+				if (!decision.authorized) {
+					return JSON.stringify({
+						success: false,
+						error: `Cohort-safety policy blocked removal: ${decision.detail}`,
+						basis: decision.basis,
+					});
+				}
+			}
 
 			// Atomically read, check status, filter, and rewrite in one locked transaction to
 			// prevent concurrent appendKnowledge calls from inserting entries that

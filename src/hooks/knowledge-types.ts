@@ -138,6 +138,107 @@ export interface ActionableDirectiveFields {
 	last_acknowledged_at?: string;
 }
 
+/**
+ * Canonical cohort-scoped producer provenance (issue #1848 §1).
+ *
+ * Every mutable knowledge entry carries enough immutable provenance for a
+ * cohort-safe ownership decision: who produced it, in which cohort, from which
+ * worktree/session, and tied to which creation transaction. Absent/null on
+ * legacy entries written before #1848 — such entries are treated as
+ * unknown-owner and protected from destructive curation by default (the
+ * curation-policy layer converts destructive intent into a non-destructive
+ * proposal rather than guessing an owner from the current worktree).
+ *
+ * `worktree_id` is the primary ownership key: a worktree may directly mutate an
+ * entry only when it is the proven producer (or cohort quorum / operator
+ * override applies). It is stored at write time from `resolveWorktreeId`
+ * (src/knowledge/worktree-identity.ts) — a per-worktree stable id, NOT
+ * link-resolved, so two sibling worktrees of the same cohort have distinct
+ * ownership keys.
+ */
+export interface ProducerProvenance {
+	/** Canonical cohort id (from `resolveCohortId`, #1846). Scopes quorum + audit. */
+	cohort_id: string;
+	/** Stable per-worktree id (owner key). NOT link-resolved — per-worktree. */
+	worktree_id: string;
+	/** Producing session id, when known (audit). */
+	session_id?: string;
+	/** Producing agent/role, when known (audit). */
+	role?: string;
+	/** Creation transaction/event id, when known (audit lineage). */
+	creation_event_id?: string;
+}
+
+/**
+ * The evidence scope a curation decision was based on (issue #1848 §2).
+ *
+ * Absence of LOCAL session events is NOT negative evidence — a worktree that
+ * never saw an application event for an entry cannot conclude the entry was
+ * never applied (a sibling producer may have applied it). Evidence queries must
+ * be scoped intentionally:
+ *   - `local-session`: only this worktree's session events (owner-local decisions)
+ *   - `producer`:       the producing worktree's own validated evidence
+ *   - `cohort-wide`:    the full cohort event log (shared/quorum decisions)
+ */
+export type CurationEvidenceScope =
+	| 'local-session'
+	| 'producer'
+	| 'cohort-wide';
+
+/**
+ * Every destructive lifecycle action the curation-policy layer authorizes
+ * (issue #1848 §2). All of these share one policy so archive/purge/remove/
+ * quarantine/retraction/merge/retire cannot diverge in ownership semantics.
+ */
+export type CurationAction =
+	| 'archive'
+	| 'purge'
+	| 'remove'
+	| 'quarantine'
+	| 'retract'
+	| 'rewrite'
+	| 'merge'
+	| 'retire'
+	| 'demote'
+	| 'restore'
+	| 'unarchive'
+	| 'escalate';
+
+/**
+ * A non-destructive proposal recorded when a destructive curation action is
+ * unauthorized (issue #1848 §2). Other cohort members may later confirm it.
+ * Destructive intent is preserved WITHOUT mutating the shared record.
+ */
+export interface CurationProposal {
+	entryId: string;
+	action: CurationAction;
+	reason?: string;
+	evidenceScope: CurationEvidenceScope;
+	proposedAt: string; // ISO 8601
+	status: 'pending';
+}
+
+/**
+ * Immutable before/after history for a destructive rewrite or merge (issue
+ * #1848 §3). Ensures the only copy of prior lesson text is never overwritten,
+ * and supports deterministic reconstruction or rollback. Appended to the
+ * cohort-scoped `knowledge-rewrites.jsonl` audit log.
+ */
+export interface RewriteHistoryRecord {
+	entry_id: string;
+	before_lesson: string;
+	after_lesson: string;
+	before_revision: number;
+	after_revision: number;
+	/** 'auto' | producing worktree_id | 'manual-override'. */
+	actor: string;
+	reason?: string;
+	/** Event/trace ids that justified the change. */
+	evidence_refs?: string[];
+	timestamp: string; // ISO 8601
+	action: 'rewrite' | 'merge';
+}
+
 export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	id: string; // UUID v4
 	tier: 'swarm' | 'hive';
@@ -186,10 +287,34 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	 * counter update. Prevents double-counting when `curateAndStoreSwarm` runs
 	 * multiple times in the same logical phase (e.g. phase-complete + close). */
 	last_demotion_phase?: number;
+	/** #1848 §1: producer provenance. Absent/null on legacy entries →
+	 * unknown-owner → protected from destructive curation by default. Filled at
+	 * creation time by all new-entry paths via `resolveWorktreeId` +
+	 * `resolveCohortId`. Never synthesized for legacy records. */
+	producer?: ProducerProvenance | null;
+	/** #1848 §3: monotonic revision counter for compare-and-swap. Starts at 1
+	 * at creation, bumped on each accepted mutation. Absent/0 = legacy (CAS
+	 * with `expectedRevision === undefined` allows the first mutation). */
+	revision?: number;
+	/** #1848 §3: 12-hex SHA-256 prefix of `lesson`, for CAS content verification.
+	 * Computed at WRITE time only (never per-read) to avoid hashing thousands of
+	 * entries on every readKnowledge of a large cohort store. Absent on legacy. */
+	content_hash?: string;
+	/** #1848 §4: idempotency stamp for the fair scan cursor. Records the
+	 * generation in which this entry was last curated by a non-idempotent action
+	 * (rewrite/demote/confidence-delta). Prevents compounding under concurrent
+	 * cohort postmortems that claim the same batch. */
+	last_curated_generation?: number;
 }
 
-/** v2 schema marker. v1 entries are still parseable and normalized in-memory by knowledge-store.normalizeEntry. */
-export const KNOWLEDGE_SCHEMA_VERSION = 2;
+/**
+ * Current knowledge schema marker. v1 entries are still parseable and
+ * normalized in-memory by knowledge-store.normalizeEntry. v3 (#1848) adds
+ * optional `producer`, `revision`, `content_hash`, and `last_curated_generation`
+ * fields — all default-absent so v1/v2/v3 records coexist on disk without an
+ * on-disk migration. New writes stamp v3.
+ */
+export const KNOWLEDGE_SCHEMA_VERSION = 3;
 
 /**
  * The single canonical set of inactive (non-retrieval) knowledge statuses.

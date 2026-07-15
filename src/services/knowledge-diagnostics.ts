@@ -129,6 +129,27 @@ export interface KnowledgeDebugMeta {
 			promotion_event_id?: string;
 		}>;
 	};
+	/**
+	 * Cohort-safe curation health (issue #1848). Surfaces the fair scan
+	 * cursor progress and cohort config-fingerprint agreement so an operator
+	 * knows whether entries are being starved and whether cohort members
+	 * share curation semantics.
+	 */
+	curation: {
+		/** Fair scan generation (monotonic sweep counter). 0 = no cursor yet. */
+		scan_generation: number;
+		/** True when the last sweep completed (next sweep starts fresh). */
+		scan_completed: boolean;
+		/** Approximate count of entries still eligible to visit this generation. */
+		scan_remaining_estimate: number;
+		/** True when this worktree's config fingerprint matches the cohort's.
+		 * `null` when unlinked or no cohort fingerprint is stored. */
+		config_fingerprint_match: boolean | null;
+		/** Count of entries with producer provenance (v3+). */
+		entries_with_provenance: number;
+		/** Count of legacy entries without provenance (protected by default). */
+		entries_unknown_owner: number;
+	};
 }
 
 /** Parse JSONL lines without normalization. Returns parsed objects + corrupt count. */
@@ -360,6 +381,77 @@ export async function computeKnowledgeDebug(
 			override_promotions: hiveOverridePromotions,
 			override_entries: hiveOverrideEntries,
 		},
+		curation: await computeCurationDiagnostics(directory, rawEntries),
+	};
+}
+
+/**
+ * #1848: compute the cohort-safe curation diagnostics block — fair scan cursor
+ * progress, config fingerprint agreement, and provenance coverage. All
+ * best-effort (fail-open to zeros/nulls).
+ */
+async function computeCurationDiagnostics(
+	directory: string,
+	entries: Array<{ producer?: unknown }>,
+): Promise<{
+	scan_generation: number;
+	scan_completed: boolean;
+	scan_remaining_estimate: number;
+	config_fingerprint_match: boolean | null;
+	entries_with_provenance: number;
+	entries_unknown_owner: number;
+}> {
+	// Scan cursor status (best-effort).
+	let scanGeneration = 0;
+	let scanCompleted = false;
+	let scanRemaining = 0;
+	try {
+		const { getScanStatus } = await import('../knowledge/scan-cursor.js');
+		const status = await getScanStatus(directory);
+		scanGeneration = status.generation;
+		scanCompleted = status.completed;
+		scanRemaining = status.remaining_estimate;
+	} catch {
+		/* best-effort */
+	}
+
+	// Config fingerprint agreement (best-effort).
+	let configMatch: boolean | null = null;
+	try {
+		const { isLinked } = await import('../hooks/knowledge-link.js');
+		if (isLinked(directory)) {
+			const { KnowledgeConfigSchema } = await import('../config/schema.js');
+			const config = KnowledgeConfigSchema.parse({});
+			const { cohortConfigFingerprint } = await import(
+				'../knowledge/config-fingerprint.js'
+			);
+			const { buildConfigFingerprintInput, readCohortConfigFingerprint } =
+				await import('../knowledge/curation-policy.js');
+			const currentFp = cohortConfigFingerprint(
+				buildConfigFingerprintInput(config),
+			);
+			const cohortFp = await readCohortConfigFingerprint(directory);
+			configMatch = cohortFp === null ? null : currentFp === cohortFp;
+		}
+	} catch {
+		/* best-effort */
+	}
+
+	// Provenance coverage.
+	let withProvenance = 0;
+	let unknownOwner = 0;
+	for (const e of entries) {
+		if (e.producer != null) withProvenance++;
+		else unknownOwner++;
+	}
+
+	return {
+		scan_generation: scanGeneration,
+		scan_completed: scanCompleted,
+		scan_remaining_estimate: scanRemaining,
+		config_fingerprint_match: configMatch,
+		entries_with_provenance: withProvenance,
+		entries_unknown_owner: unknownOwner,
 	};
 }
 

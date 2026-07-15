@@ -27,9 +27,18 @@ import {
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
-import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import type {
+	CurationAction,
+	CurationEvidenceScope,
+	KnowledgeEntryBase,
+} from '../hooks/knowledge-types.js';
 import { quarantineEntry } from '../hooks/knowledge-validator.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
+import {
+	authorizeCuration,
+	type CurationAuthorizationInput,
+	type CurationContext,
+} from '../knowledge/curation-policy.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -38,6 +47,12 @@ type ArchiveMode = (typeof MODES)[number];
 
 const TIERS = ['swarm', 'hive'] as const;
 type ArchiveTier = (typeof TIERS)[number];
+
+/** #1848: load the resolved KnowledgeConfig for the curation policy. */
+async function loadConfigForPolicy() {
+	const { KnowledgeConfigSchema } = await import('../config/schema.js');
+	return KnowledgeConfigSchema.parse({});
+}
 
 export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -133,7 +148,8 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					const swarmEntries = await readKnowledge<KnowledgeEntryBase>(
 						resolveSwarmKnowledgePath(directory),
 					);
-					if (!swarmEntries.some((e) => e.id === id)) {
+					const target = swarmEntries.find((e) => e.id === id);
+					if (!target) {
 						return JSON.stringify({
 							success: false,
 							message: 'entry not found',
@@ -141,7 +157,23 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					}
 					const reportedBy: 'architect' | 'user' | 'auto' =
 						ctx?.agent === 'architect' ? 'architect' : 'user';
-					await quarantineEntry(directory, id, reason, reportedBy);
+					// #1848 §2: route quarantine through the cohort-safe policy.
+					const curationInput: CurationAuthorizationInput = {
+						directory,
+						action: 'quarantine' as CurationAction,
+						entryId: id,
+						reason,
+						evidenceScope: 'cohort-wide' as CurationEvidenceScope,
+						actorRole: ctx?.agent,
+					};
+					const curationContext: CurationContext = {
+						config: await loadConfigForPolicy(),
+						entry: target,
+					};
+					await quarantineEntry(directory, id, reason, reportedBy, {
+						input: curationInput,
+						context: curationContext,
+					});
 				} catch (err) {
 					return JSON.stringify({
 						success: false,
@@ -172,6 +204,50 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			let previousStatus: string | undefined;
 			const now = new Date().toISOString();
 			let resultStatus: string | undefined;
+
+			// #1848 §2: cohort-safe authorization for archive/purge (swarm tier).
+			// Hive-tier entries are cross-project and already gated by hive-policy
+			// at promotion; the destructive archive here is the operator path and
+			// remains available. For swarm tier, route through authorizeCuration.
+			if (tier === 'swarm') {
+				const preEntries =
+					await readKnowledge<KnowledgeEntryBase>(knowledgePath);
+				const preTarget = preEntries.find((e) => e.id === id) ?? null;
+				// Skip authorization for a missing entry — let the existing
+				// not-found path handle it (avoids a misleading policy error).
+				if (preTarget) {
+					const curationInput: CurationAuthorizationInput = {
+						directory,
+						action: mode as CurationAction,
+						entryId: id,
+						reason,
+						evidenceScope: 'cohort-wide' as CurationEvidenceScope,
+						actorRole: ctx?.agent,
+						override:
+							mode === 'purge'
+								? {
+										actor: 'manual-override',
+										reason: 'operator purge (allow_purge)',
+									}
+								: undefined,
+					};
+					const curationContext: CurationContext = {
+						config: await loadConfigForPolicy(),
+						entry: preTarget,
+					};
+					const decision = await authorizeCuration(
+						curationInput,
+						curationContext,
+					);
+					if (!decision.authorized) {
+						return JSON.stringify({
+							success: false,
+							error: `Cohort-safety policy blocked this ${mode}: ${decision.detail}`,
+							basis: decision.basis,
+						});
+					}
+				} // end if (preTarget)
+			} // end if (tier === 'swarm')
 
 			try {
 				await transactKnowledge<KnowledgeEntryBase>(

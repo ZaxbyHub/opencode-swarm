@@ -858,6 +858,7 @@ Phase: 1
 				'entry-1',
 				'Retracted by architect: Always use strict mode',
 				'architect',
+				expect.any(Object),
 			);
 			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
 				'/project',
@@ -948,6 +949,7 @@ Phase: 1
 				'entry-2',
 				'Retracted by architect: Disable all linting errors',
 				'architect',
+				expect.any(Object),
 			);
 			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
 				'/project',
@@ -1161,6 +1163,7 @@ Phase: 1
 				'entry-4',
 				'Retracted by architect: Old outdated rule',
 				'architect',
+				expect.any(Object),
 			);
 		});
 
@@ -1333,12 +1336,14 @@ Phase: 1
 				'entry-5',
 				'Retracted by architect: First rule to retract',
 				'architect',
+				expect.any(Object),
 			);
 			expect(mockQuarantineEntry).toHaveBeenCalledWith(
 				'/project',
 				'entry-6',
 				'Retracted by architect: Second rule to retract',
 				'architect',
+				expect.any(Object),
 			);
 		});
 	});

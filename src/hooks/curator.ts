@@ -34,6 +34,7 @@ import {
 } from '../agents/explorer.js';
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
+import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
 	computeLearningMetrics,
@@ -68,6 +69,7 @@ import type {
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
+	computeContentHash,
 	getArchivedKnowledgeIds,
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -1955,6 +1957,56 @@ export async function applyCuratorKnowledgeUpdates(
 
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 
+	// #1848 §2 (C-4 fix): PRE-TRANSACTION cohort-safe authorization. The
+	// synchronous `mutate` callback inside transactKnowledge cannot await the
+	// async authorizeCuration (which reads cohort events), so we authorize over
+	// the freshest snapshot here, then the per-entry revision CAS inside the
+	// transaction guards against drift between authorize and apply. Destructive
+	// recommendations (archive/rewrite) that are not authorized are filtered out
+	// and recorded as proposals by the policy. Promote/flag_contradiction are
+	// non-destructive (they only enrich, not remove/replace) and are not gated.
+	if (validRecommendations.length > 0) {
+		const preSnapshot =
+			await _internals.readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
+		const authorizedRecs: KnowledgeRecommendation[] = [];
+		for (const rec of validRecommendations) {
+			// Only gate destructive actions (archive/rewrite). Promote and
+			// flag_contradiction enrich the entry without removing/replacing it.
+			if (rec.action !== 'archive' && rec.action !== 'rewrite') {
+				authorizedRecs.push(rec);
+				continue;
+			}
+			// Skip authorization for recommendations without an entry_id — they
+			// can't target an existing entry (handled as new-entry candidates
+			// elsewhere). The existing not-found/id-resolution logic skips them.
+			if (!rec.entry_id) {
+				authorizedRecs.push(rec);
+				continue;
+			}
+			const target = preSnapshot.find((e) => e.id === rec.entry_id) ?? null;
+			const decision = await authorizeCuration(
+				{
+					directory,
+					action: rec.action,
+					entryId: rec.entry_id ?? '',
+					reason: rec.reason,
+					evidenceScope: 'cohort-wide',
+				},
+				{ config: knowledgeConfig, entry: target },
+			);
+			if (decision.authorized) {
+				authorizedRecs.push(rec);
+			} else {
+				// Unauthorized destructive recommendation → skip (the policy
+				// recorded a proposal). Counted as skipped below.
+				logger.warn(
+					`[curator] ${rec.action} for '${rec.entry_id}' blocked by cohort-safety (basis: ${decision.basis})`,
+				);
+			}
+		}
+		validRecommendations = authorizedRecs;
+	}
+
 	// Closure variables written by the transactKnowledge callback so the
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
@@ -2077,11 +2129,15 @@ export async function applyCuratorKnowledgeUpdates(
 					appliedIds.add(entry.id);
 					txApplied++;
 					modified = true;
+					// #1848 §3: stamp revision + content_hash on rewrite so the
+					// before/after is recoverable and CAS can detect drift.
 					return {
 						...entry,
 						lesson: newLesson,
 						updated_at: new Date().toISOString(),
 						confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05),
+						revision: (entry.revision ?? 0) + 1,
+						content_hash: computeContentHash(newLesson),
 					};
 				}
 				default:

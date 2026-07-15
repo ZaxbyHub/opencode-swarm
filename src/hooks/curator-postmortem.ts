@@ -15,6 +15,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { claimNextScanBatch } from '../knowledge/scan-cursor.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
@@ -29,7 +30,6 @@ import { readKnowledge, resolveSwarmKnowledgePath } from './knowledge-store.js';
 import type {
 	KnowledgeCategory,
 	KnowledgeConfig,
-	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
@@ -121,11 +121,21 @@ async function collectKnowledgeSummary(
 	scope: 'session' | 'project' = 'project',
 	sessionID?: string,
 ): Promise<KnowledgeEventSummary[]> {
-	const entries = await readKnowledge<KnowledgeEntryBase>(
-		resolveSwarmKnowledgePath(directory),
-		MAX_KNOWLEDGE_ENTRIES,
-	);
-	let events = await readKnowledgeEvents(directory, MAX_KNOWLEDGE_ENTRIES * 4);
+	// #1848 §4: replace the fixed oldest-~500 window with a durable, fair scan
+	// cursor. Every eligible record is eventually visited; progress survives
+	// restart; concurrent append/update does not permanently skip entries. The
+	// cursor atomically claims a batch (read+advance in one step) so concurrent
+	// cohort postmortems do not duplicate work.
+	const batch = await claimNextScanBatch(directory, MAX_KNOWLEDGE_ENTRIES);
+	const entries = batch.entries;
+	// Read events scoped to this batch's entry ids (not a fixed 4× window).
+	const batchIds = new Set(entries.map((e) => e.id));
+	let events = (await readKnowledgeEvents(directory)).filter((e) => {
+		const kid =
+			(e as { knowledge_id?: string }).knowledge_id ??
+			(e as { entry_id?: string }).entry_id;
+		return kid != null && batchIds.has(kid);
+	});
 	if (scope === 'session' && sessionID) {
 		events = events.filter(
 			(e) => (e as { session_id?: string }).session_id === sessionID,
@@ -1101,11 +1111,21 @@ export async function runCuratorPostMortem(
 		} catch {
 			warnings.push('Failed to collect knowledge summary.');
 		}
-		if (knowledgeSummary.length > MAX_KNOWLEDGE_ENTRIES) {
-			warnings.push(
-				`Knowledge entries capped at ${MAX_KNOWLEDGE_ENTRIES} (had ${knowledgeSummary.length}); older entries truncated.`,
-			);
-			knowledgeSummary = knowledgeSummary.slice(0, MAX_KNOWLEDGE_ENTRIES);
+		// #1848 §4: the fair scan cursor returns a bounded batch; report the
+		// remaining eligible work so the operator knows future sweeps will visit
+		// the rest. The old fixed-window silently starved entries beyond 500.
+		try {
+			const { getScanStatus } = await import('../knowledge/scan-cursor.js');
+			const scanStatus = await getScanStatus(directory);
+			if (scanStatus.remaining_estimate > 0) {
+				warnings.push(
+					`Fair scan: reviewed ${knowledgeSummary.length} entries this sweep ` +
+						`(generation ${scanStatus.generation}); ${scanStatus.remaining_estimate} ` +
+						`more eligible entries will be visited in future curation sweeps.`,
+				);
+			}
+		} catch {
+			/* scan status is best-effort diagnostics */
 		}
 
 		let curatorDigest: string | null = null;
