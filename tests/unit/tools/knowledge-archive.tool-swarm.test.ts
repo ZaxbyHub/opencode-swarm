@@ -14,6 +14,7 @@ import {
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { _internals as policyInternals } from '../../../src/knowledge/curation-policy';
 import { knowledge_archive } from '../../../src/tools/knowledge-archive';
 import { makeCtx, makeSwarmEntry } from './_knowledge-archive-helpers';
 
@@ -144,6 +145,69 @@ describe('knowledge_archive — swarm-tier', () => {
 		const parsed = JSON.parse(raw);
 		expect(parsed.success).toBe(false);
 		expect(parsed.message).toBe('entry not found');
+	});
+
+	// F-03: purge no longer auto-synthesizes a `manual-override` from
+	// `allow_purge:true`. In a LINKED cohort, a purge of an entry owned by a
+	// DIFFERENT worktree must now route through the cohort-safety policy and be
+	// BLOCKED (cohort-wide evidence scope with no quorum) — returning
+	// {success:false} with a cohort-safety policy detail — instead of silently
+	// hard-deleting a sibling worktree's entry.
+	//
+	// Falsification: before the fix, purge synthesized an operator override, so
+	// `authorizeCuration` short-circuited to `basis:'override' → authorized` and
+	// the cross-owner entry was PURGED (success:true, store empty). After the fix
+	// no override is synthesized, so the linked cross-owner ladder blocks it.
+	//
+	// Cohort-linkedness is simulated via the SANCTIONED curation-policy
+	// `_internals` DI seam (mutable module object) — NOT `mock.module` of the
+	// knowledge-store (which leaks across Bun's shared runner). isLinked→true
+	// activates the ownership ladder; resolveWorktreeId pins the actor to a
+	// worktree that is NOT the entry's producer; readCohortConfigFingerprint→null
+	// keeps the config guard permissive (first cohort member).
+	it('F-03: blocks a purge of a cross-owned entry in a linked cohort (no override synthesis)', async () => {
+		const snapshot = { ...policyInternals };
+		policyInternals.isLinked = () => true;
+		policyInternals.readCohortConfigFingerprint = async () => null;
+		policyInternals.resolveWorktreeId = async () => 'wt-actor';
+		try {
+			// An entry owned by a DIFFERENT worktree; only local (no cohort-wide
+			// negative) evidence exists, so the quorum cannot authorize it.
+			const owned = {
+				...makeSwarmEntry('owned-by-other'),
+				producer: { cohort_id: 'shared-cohort', worktree_id: 'wt-other' },
+				revision: 1,
+			} as SwarmKnowledgeEntry;
+			await appendKnowledge(swarmPath, owned);
+
+			const raw = await knowledge_archive.execute(
+				{
+					id: 'owned-by-other',
+					reason: 'not mine',
+					mode: 'purge',
+					allow_purge: true,
+				},
+				makeCtx(dir),
+			);
+			const parsed = JSON.parse(raw);
+			// Blocked by the cohort-safety policy — not a silent hard-delete.
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain('Cohort-safety policy blocked');
+			expect(parsed.basis).toBe('quorum-insufficient');
+
+			// The cross-owned entry SURVIVES the blocked purge.
+			const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+			expect(entries.some((e) => e.id === 'owned-by-other')).toBe(true);
+
+			// No purge tombstone was written for the blocked entry.
+			const tomb = (await readKnowledgeEvents(dir)).filter(
+				(e): e is ArchivedEvent =>
+					e.type === 'archived' && e.entry_id === 'owned-by-other',
+			);
+			expect(tomb).toHaveLength(0);
+		} finally {
+			Object.assign(policyInternals, snapshot);
+		}
 	});
 
 	it('purges (hard-deletes) with allow_purge:true and still writes a tombstone', async () => {
