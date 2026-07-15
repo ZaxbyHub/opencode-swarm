@@ -6,7 +6,13 @@
  * an accepted mutation bumps the revision + content_hash.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
@@ -17,8 +23,18 @@ import {
 } from '../../../src/hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
 
+// Track created temp dirs so they can be removed (avoid leaking into tmpdir).
+const createdTmpDirs: string[] = [];
+afterEach(() => {
+	while (createdTmpDirs.length > 0) {
+		const dir = createdTmpDirs.pop();
+		if (dir) rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 function makeTmpDir(): string {
 	const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'swarm-cas-')));
+	createdTmpDirs.push(dir);
 	return dir;
 }
 

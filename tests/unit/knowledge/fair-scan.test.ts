@@ -23,8 +23,13 @@ import {
 	getScanStatus,
 } from '../../../src/knowledge/scan-cursor.js';
 
+// Track created temp dirs so they can be removed (avoid leaking into tmpdir).
+const createdTmpDirs: string[] = [];
+
 function makeTmpDir(): string {
-	return realpathSync(mkdtempSync(path.join(tmpdir(), 'swarm-scan-')));
+	const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'swarm-scan-')));
+	createdTmpDirs.push(dir);
+	return dir;
 }
 
 function makeEntry(id: string, createdAt: string): SwarmKnowledgeEntry {
@@ -78,6 +83,10 @@ describe('fair scan cursor — >500 entries eventually visited', () => {
 	});
 	afterEach(() => {
 		Object.assign(_internals, _internalsSnapshot);
+		while (createdTmpDirs.length > 0) {
+			const created = createdTmpDirs.pop();
+			if (created) rmSync(created, { recursive: true, force: true });
+		}
 	});
 
 	it('visits every eligible entry across repeated bounded runs (no starvation)', async () => {

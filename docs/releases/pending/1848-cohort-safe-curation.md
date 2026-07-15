@@ -13,8 +13,12 @@ cohorts no longer starve entries beyond the scan window.
 ### Producer provenance + revision (schema v3)
 - Each mutable knowledge entry now carries optional `producer` (cohort id +
   worktree id + session/role), `revision` (monotonic CAS counter), and
-  `content_hash`. Legacy entries without provenance are treated as unknown-owner
-  and protected from destructive curation by default.
+  `content_hash`. Legacy entries without provenance are treated as unknown-owner.
+  This protection applies only in cohort-linked worktrees (`/swarm link`, opt-in):
+  there a destructive action against an unknown-owner entry is blocked and recorded
+  as a proposal requiring an audited override. In the common unlinked
+  single-worktree store there is no sibling to damage, so the local operator is the
+  sole owner and may curate every entry freely.
 - v1/v2 entries continue to load unchanged (all v3 fields are optional;
   `normalizeEntry` fills defaults without an on-disk migration).
 
@@ -46,5 +50,7 @@ cohorts no longer starve entries beyond the scan window.
   diagnostic.
 
 ### Diagnostics
-- `/swarm diagnose` surfaces scan generation/remaining, config-fingerprint
-  agreement, and provenance coverage.
+- `/swarm diagnose` surfaces the fair scan status (generation, completion, and
+  remaining estimate), cohort config-fingerprint agreement, provenance coverage
+  (entries with vs. without producer provenance), and the count of pending
+  curation proposals.

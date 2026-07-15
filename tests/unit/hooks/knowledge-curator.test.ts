@@ -858,7 +858,15 @@ Phase: 1
 				'entry-1',
 				'Retracted by architect: Always use strict mode',
 				'architect',
-				expect.any(Object),
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'retract',
+						entryId: 'entry-1',
+						reason: 'Always use strict mode',
+						evidenceScope: 'local-session',
+						actorRole: 'architect',
+					}),
+				}),
 			);
 			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
 				'/project',
@@ -949,7 +957,15 @@ Phase: 1
 				'entry-2',
 				'Retracted by architect: Disable all linting errors',
 				'architect',
-				expect.any(Object),
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'retract',
+						entryId: 'entry-2',
+						reason: 'Disable all linting errors',
+						evidenceScope: 'local-session',
+						actorRole: 'architect',
+					}),
+				}),
 			);
 			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
 				'/project',
@@ -1163,7 +1179,15 @@ Phase: 1
 				'entry-4',
 				'Retracted by architect: Old outdated rule',
 				'architect',
-				expect.any(Object),
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'retract',
+						entryId: 'entry-4',
+						reason: 'Old outdated rule',
+						evidenceScope: 'local-session',
+						actorRole: 'architect',
+					}),
+				}),
 			);
 		});
 
@@ -1336,14 +1360,30 @@ Phase: 1
 				'entry-5',
 				'Retracted by architect: First rule to retract',
 				'architect',
-				expect.any(Object),
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'retract',
+						entryId: 'entry-5',
+						reason: 'First rule to retract',
+						evidenceScope: 'local-session',
+						actorRole: 'architect',
+					}),
+				}),
 			);
 			expect(mockQuarantineEntry).toHaveBeenCalledWith(
 				'/project',
 				'entry-6',
 				'Retracted by architect: Second rule to retract',
 				'architect',
-				expect.any(Object),
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'retract',
+						entryId: 'entry-6',
+						reason: 'Second rule to retract',
+						evidenceScope: 'local-session',
+						actorRole: 'architect',
+					}),
+				}),
 			);
 		});
 	});
