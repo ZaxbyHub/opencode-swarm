@@ -217,6 +217,14 @@ jobs:
         shell: bash
         run: chmod +x scripts/check-bash-portability.sh && bash scripts/check-bash-portability.sh
 
+      # Standalone helper under scripts/swarm-model/ has its own node:test suite
+      # (not part of the src/**/*.test.ts glob the unit job discovers). Run it
+      # here so the utility's regression tests are actually gated in CI.
+      - name: swarm-model CLI tests
+        if: needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: cd scripts/swarm-model && node --test
+
   # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback
   # UNLESS the diff touches a platform-sensitive path (issue #1737 FR-013,
   # detect-paths job above), in which case the full 3-OS matrix runs on

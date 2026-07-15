@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 
 import { readSwarmConfig } from './config.js';
-import { resolve } from 'path';
-
-const defaultSwarmConfig = resolve(process.env.HOME || process.env.USERPROFILE, '.config', 'opencode', 'opencode-swarm.json');
 
 export function showList(configPath) {
   const config = readSwarmConfig(configPath);

@@ -3,14 +3,14 @@
   "version": "1.0.0",
   "description": "Interactive CLI to configure swarm agent LLM models",
   "type": "module",
-  "main": "src/index.js",
   "bin": {
     "swarm-model": "./src/cli.js"
   },
   "scripts": {
     "start": "node src/cli.js",
     "list": "node src/cli.js list",
-    "help": "node src/cli.js help"
+    "help": "node src/cli.js help",
+    "test": "node --test"
   },
   "keywords": ["swarm", "opencode", "model", "config"],
   "author": "",

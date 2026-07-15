@@ -38,14 +38,17 @@ function Write-SwarmConfig {
     $path = $args[1]
     if (Test-Path -LiteralPath $path) {
         $backupPath = $path + '.bak'
-        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
         if (Test-Path -LiteralPath $backupPath) {
             $backupPath = $path + '.' + $timestamp + '.bak'
         }
         Copy-Item -LiteralPath $path -Destination $backupPath -Force
         Write-Host "已备份原配置: $backupPath" -ForegroundColor DarkGray
     }
-    $json = $cfg | ConvertTo-Json
+    # -Depth 10: PowerShell's ConvertTo-Json defaults to depth 2, which would
+    # serialize nested agent fields (fallback_models, reasoning, thinking) as
+    # type-name strings and silently corrupt them on write.
+    $json = $cfg | ConvertTo-Json -Depth 10
     Set-Content -LiteralPath $path -Value $json -NoNewline
 }
 

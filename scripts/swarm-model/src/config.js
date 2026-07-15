@@ -1,9 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 
-const DEFAULT_SWARM_CONFIG = path.join(process.env.HOME || process.env.USERPROFILE, '.config', 'opencode', 'opencode-swarm.json');
-const DEFAULT_OPENCODE_CONFIG = path.join(process.env.HOME || process.env.USERPROFILE, '.config', 'opencode', 'opencode.json');
-
 export function readSwarmConfig(filePath) {
   if (!fs.existsSync(filePath)) {
     const dir = path.dirname(filePath);
@@ -14,7 +11,11 @@ export function readSwarmConfig(filePath) {
     console.log(`Created: ${filePath}`);
   }
   const raw = fs.readFileSync(filePath, 'utf8');
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Failed to parse swarm config ${filePath}: ${err.message}`);
+  }
 }
 
 export function writeSwarmConfig(config, filePath) {
@@ -22,7 +23,12 @@ export function writeSwarmConfig(config, filePath) {
   if (fs.existsSync(filePath)) {
     let dest = backupPath;
     if (fs.existsSync(backupPath)) {
-      const ts = new Date().toISOString().replace(/[:.]/g, '').slice(0, 14);
+      // Full YYYYMMDDHHMMSS second-resolution stamp (matches README + the
+      // PowerShell impl). The earlier slice(0,14) of the raw ISO string kept
+      // the `-`/`T` separators and truncated to ~10-minute resolution, so
+      // backups within the same 10-minute window collided and overwrote each
+      // other; stripping all non-digits first avoids that.
+      const ts = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
       dest = filePath + '.' + ts + '.bak';
     }
     fs.copyFileSync(filePath, dest);
@@ -34,7 +40,15 @@ export function writeSwarmConfig(config, filePath) {
 export function getOpenCodeProviders(filePath) {
   if (!fs.existsSync(filePath)) return {};
   const raw = fs.readFileSync(filePath, 'utf8');
-  const config = JSON.parse(raw);
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch {
+    // Malformed opencode.json is non-fatal: fall back to no discovered
+    // providers (parity with the PowerShell impl) rather than aborting the tool.
+    console.warn(`\x1b[33mWarning: could not parse ${filePath}; ignoring discovered providers\x1b[0m`);
+    return {};
+  }
   if (!config.provider) return {};
   const providers = {};
   for (const [name, data] of Object.entries(config.provider)) {

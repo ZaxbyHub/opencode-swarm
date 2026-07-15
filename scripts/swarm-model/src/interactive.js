@@ -1,9 +1,5 @@
-import { readSwarmConfig, writeSwarmConfig, getOpenCodeProviders, getAllModels, getProviders, mergeProviderModels } from './config.js';
-import { selectFromList, close } from './ui.js';
-import { resolve } from 'path';
-
-const defaultSwarmConfig = resolve(process.env.HOME || process.env.USERPROFILE, '.config', 'opencode', 'opencode-swarm.json');
-const defaultOpenCodeConfig = resolve(process.env.HOME || process.env.USERPROFILE, '.config', 'opencode', 'opencode.json');
+import { readSwarmConfig, writeSwarmConfig, getOpenCodeProviders, getAllModels, getProviders, mergeProviderModels, splitModelName } from './config.js';
+import { selectFromList, ask, close } from './ui.js';
 
 export async function runInteractive(swarmPath, openCodePath) {
   const config = readSwarmConfig(swarmPath);
@@ -25,10 +21,9 @@ export async function runInteractive(swarmPath, openCodePath) {
   const provList = Object.keys(allProviders).join(', ');
   console.log(`\x1b[90mDetected ${provCount} providers (${provList})\x1b[0m`);
 
-  const running = true;
   let exitLoop = false;
 
-  while (running && !exitLoop) {
+  while (!exitLoop) {
     // Refresh config each iteration
     const cfg = readSwarmConfig(swarmPath);
     const sm = getAllModels(cfg);
@@ -43,10 +38,12 @@ export async function runInteractive(swarmPath, openCodePath) {
     if (selectedAgent === '__quit__') { exitLoop = true; break; }
 
     const currentAgent = cfg.agents[selectedAgent];
-    const cp = currentAgent.model.split('/');
-    const currentProvider = cp.length > 1 ? cp[0] : '';
-    const currentModelName = cp.length > 1 ? cp[1] : currentAgent.model;
-    console.log(`\x1b[32mCurrent: ${selectedAgent} = ${currentAgent.model} (temp=${currentAgent.temperature})\x1b[0m`);
+    const currentModel = currentAgent.model || '';
+    // Use the same splitter as the provider/model lists (lastIndexOf-based) so
+    // the `[current]` marker matches, and guard against agents with no `model`
+    // field (valid: an agent may set only temperature/disabled).
+    const { provider: currentProvider, model: currentModelName } = splitModelName(currentModel);
+    console.log(`\x1b[32mCurrent: ${selectedAgent} = ${currentModel || '(unset)'} (temp=${currentAgent.temperature ?? '(unset)'})\x1b[0m`);
 
     // Step 2: Select provider
     const providerNames = Object.keys(ap).sort();
@@ -106,8 +103,9 @@ export async function runInteractive(swarmPath, openCodePath) {
     // Step 4: Temperature
     console.log('');
     console.log('\x1b[36mStep 4: Temperature\x1b[0m');
-    console.log(`Current: ${currentAgent.temperature}`);
-    const tempPrompt = `New temp (0.0-2.0, Enter to keep current [${currentAgent.temperature}]): `;
+    const currentTempDisplay = currentAgent.temperature ?? '(unset)';
+    console.log(`Current: ${currentTempDisplay}`);
+    const tempPrompt = `New temp (0.0-2.0, Enter to keep current [${currentTempDisplay}]): `;
     const tempInput = await ask(tempPrompt);
     let newTemp = currentAgent.temperature;
     if (tempInput.trim()) {
@@ -123,8 +121,8 @@ export async function runInteractive(swarmPath, openCodePath) {
     console.log('');
     console.log('\x1b[36m=== Confirm ===\x1b[0m');
     console.log('  Agent:       ' + selectedAgent);
-    console.log('  Model:       ' + currentAgent.model + ' -> ' + fullModel);
-    console.log('  Temperature: ' + currentAgent.temperature + ' -> ' + newTemp);
+    console.log('  Model:       ' + (currentModel || '(unset)') + ' -> ' + fullModel);
+    console.log('  Temperature: ' + (currentAgent.temperature ?? '(unset)') + ' -> ' + (newTemp ?? '(unset)'));
     console.log('');
 
     const confirm = await ask('Confirm? ([Y]/n): ');
@@ -134,20 +132,20 @@ export async function runInteractive(swarmPath, openCodePath) {
     }
 
     cfg.agents[selectedAgent].model = fullModel;
-    cfg.agents[selectedAgent].temperature = newTemp;
+    if (newTemp !== undefined) {
+      cfg.agents[selectedAgent].temperature = newTemp;
+    }
     writeSwarmConfig(cfg, swarmPath);
 
     console.log('');
     console.log('\x1b[32mConfig updated!\x1b[0m');
-    console.log(`  ${selectedAgent} = ${fullModel} (temp=${newTemp})`);
+    console.log(`  ${selectedAgent} = ${fullModel} (temp=${newTemp ?? '(unset)'})`);
     console.log('');
     console.log('\x1b[33mNote: Restart opencode/swarm session to apply changes\x1b[0m');
     console.log('');
 
-    // Continue or quit
-    const contLabels = ['Continue modifying another agent', 'Quit/Exit'];
-    const contValues = ['continue', '__quit__'];
-    const choice = await selectFromList('Next', contLabels, contValues);
+    // Continue or quit (selectFromList appends the quit option itself)
+    const choice = await selectFromList('Next', ['Continue modifying another agent'], ['continue']);
     if (choice === '__quit__') {
       console.log('\x1b[36mGoodbye!\x1b[0m');
       exitLoop = true;

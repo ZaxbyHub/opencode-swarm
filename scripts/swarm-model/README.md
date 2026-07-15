@@ -43,9 +43,18 @@ node scripts/swarm-model/src/cli.js help
 
 # Help
 .\scripts\swarm-model.ps1 help
+
+# Custom config paths (note: PowerShell uses different flag names than Node)
+.\scripts\swarm-model.ps1 -ConfigPath C:\path\opencode-swarm.json -OpenCodeConfigPath C:\path\opencode.json
 ```
 
+> **Note:** the PowerShell version's on-screen prompts and help text are in
+> Chinese; the Node version is in English. Both drive the same config format.
+
 ## Interactive Flow
+
+The provider count and agent list below are **illustrative** — the tool prints
+whatever it discovers in your own `opencode.json` and `opencode-swarm.json`:
 
 ```
 === Swarm Model Config Tool ===
@@ -53,11 +62,11 @@ Detected 6 providers (agnes, geminiproxy, opencode-go, opencode-zen, sensenova, 
 
 Step 1: Select Agent to Configure
 ------------------------------------------------------------
-  [1] architect | opencode-go/deepseek-v4-pro | temp=0.1
-  [2] coder | opencode-go/deepseek-v4-flash | temp=0.2
+  [1] architect | opencode-go/hy3-preview | temp=0.1
+  [2] coder | opencode-go/kimi-k2.5 | temp=0.2
   ...
   [18] test_engineer | opencode-go/minimax-m2.5 | temp=0.2
-  [19] [quit/退出]
+  [19] [quit/exit]
 
 Please select (1-19):
 ```
@@ -98,7 +107,8 @@ opencode-swarm.json.bak              # First backup
 opencode-swarm.json.20260714170500.bak  # Subsequent backups (timestamped)
 ```
 
-Timestamps are in `YYYYMMDD-HHMMSS` format. Old backups are never overwritten.
+Timestamps are in `YYYYMMDDHHMMSS` format (14 digits, second resolution). The
+first `.bak` and any timestamped backups are never overwritten.
 
 ## Temperature Guide
 
@@ -108,8 +118,24 @@ Timestamps are in `YYYYMMDD-HHMMSS` format. Old backups are never overwritten.
 | 0.3 – 0.7 | Balanced | `sme`, `docs` |
 | 0.7 – 2.0 | Creative, varied | `explorer`, `designer` |
 
+## Testing
+
+The Node.js version has a self-contained test suite (Node's built-in
+`node:test`, no dependencies):
+
+```bash
+cd scripts/swarm-model
+npm test   # or: node --test
+```
+
+It covers the config read/write/backup and provider-merge logic plus an
+end-to-end drive of the interactive flow.
+
 ## Notes
 
+- **Standalone utility** — this is a contributor helper script under `scripts/`;
+  it is not part of the published `opencode-swarm` package and is run directly
+  from a repo checkout.
 - **Restart required** after modifying — changes only take effect on the next opencode/swarm session
 - **Cross-platform** — the Node.js version works on Windows, macOS, and Linux
 - **Windows-only** — the PowerShell version requires Windows PowerShell 5.1+
