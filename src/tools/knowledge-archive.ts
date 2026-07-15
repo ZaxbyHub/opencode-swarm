@@ -210,8 +210,18 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			// at promotion; the destructive archive here is the operator path and
 			// remains available. For swarm tier, route through authorizeCuration.
 			if (tier === 'swarm') {
-				const preEntries =
-					await readKnowledge<KnowledgeEntryBase>(knowledgePath);
+				// #1848 review F-14: honor the tool's {success:false, error}
+				// contract on I/O failure during the pre-authorization read
+				// (same class of bug as knowledge-remove F-13); an unguarded
+				// throw would escape to createSwarmTool's outer wrapper and drop
+				// the `.error` field.
+				let preEntries: KnowledgeEntryBase[];
+				try {
+					preEntries = await readKnowledge<KnowledgeEntryBase>(knowledgePath);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : 'Unknown error';
+					return JSON.stringify({ success: false, error: message });
+				}
 				const preTarget = preEntries.find((e) => e.id === id) ?? null;
 				// Skip authorization for a missing entry — let the existing
 				// not-found path handle it (avoids a misleading policy error).

@@ -97,6 +97,8 @@ mock.module('../../../src/hooks/search-knowledge.js', () => ({
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons: mockReadRejectedLessons,
 	// Stubs for ESM named-import resolution — transitive consumers reference these.
+	// #1848 review PRR-001a: curator.ts imports computeContentHash.
+	computeContentHash: (lesson: string) => String(lesson).slice(0, 12),
 	readKnowledge: async () => [],
 	readRetractionRecords: async () => [],
 	appendRetractionRecord: async () => {},

@@ -17,6 +17,7 @@ import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
+import { KNOWLEDGE_SCHEMA_VERSION } from '../../../src/hooks/knowledge-types';
 import { knowledge_add } from '../../../src/tools/knowledge-add';
 
 describe('knowledge_add tool verification tests', () => {
@@ -194,7 +195,7 @@ describe('knowledge_add tool verification tests', () => {
 			expect(entry.confidence).toBe(0.5);
 			expect(entry.status).toBe('candidate');
 			expect(entry.confirmed_by).toEqual([]);
-			expect(entry.schema_version).toBe(1);
+			expect(entry.schema_version).toBe(KNOWLEDGE_SCHEMA_VERSION);
 			expect(entry.created_at).toBeDefined();
 			expect(entry.updated_at).toBeDefined();
 		});

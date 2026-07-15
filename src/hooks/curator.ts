@@ -1997,8 +1997,13 @@ export async function applyCuratorKnowledgeUpdates(
 			if (decision.authorized) {
 				authorizedRecs.push(rec);
 			} else {
-				// Unauthorized destructive recommendation → skip (the policy
-				// recorded a proposal). Counted as skipped below.
+				// Unauthorized destructive recommendation → the policy recorded a
+				// non-destructive proposal. Count it as skipped HERE: it is
+				// filtered out of `validRecommendations` below (via the
+				// `authorizedRecs` reassignment), so the post-transaction skip
+				// loop never sees it and would otherwise drop it from both the
+				// applied AND skipped tallies (#1848 review F-12).
+				skipped++;
 				logger.warn(
 					`[curator] ${rec.action} for '${rec.entry_id}' blocked by cohort-safety (basis: ${decision.basis})`,
 				);

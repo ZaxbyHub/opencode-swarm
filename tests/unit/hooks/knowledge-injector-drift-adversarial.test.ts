@@ -52,6 +52,10 @@ mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	_internals: {},
 }));
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	// #1848 review PRR-001a: curator.ts (transitively loaded here) imports
+	// computeContentHash; this non-spreading mock must expose the named export
+	// or bun throws a load-time SyntaxError. Deterministic content-derived stub.
+	computeContentHash: (lesson: string) => String(lesson).slice(0, 12),
 	readRejectedLessons,
 	confirmEntriesPhase: async () => {},
 	readKnowledge: async () => [],

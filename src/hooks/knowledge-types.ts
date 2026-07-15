@@ -258,7 +258,7 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 		| 'quarantined_unactionable';
 	confirmed_by: PhaseConfirmationRecord[] | ProjectConfirmationRecord[];
 	retrieval_outcomes: RetrievalOutcome;
-	schema_version: number; // current: 2 (v1 still readable; normalized on read)
+	schema_version: number; // current: 3 (v1/v2 still readable; normalized on read)
 	created_at: string; // ISO 8601
 	updated_at: string; // ISO 8601
 	hive_eligible?: boolean; // set true when ready for hive promotion

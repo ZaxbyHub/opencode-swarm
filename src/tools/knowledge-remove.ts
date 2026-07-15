@@ -58,7 +58,18 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 			// Removal is the most destructive lifecycle action; route through the
 			// shared policy with cohort-wide evidence scope. Promoted entries are
 			// still protected by the status guard below.
-			const preEntries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+			// #1848 review F-13: the pre-authorization read must honor the tool's
+			// {success:false, error} contract on I/O failure (e.g. EACCES).
+			// Without this guard the throw escapes to createSwarmTool's outer
+			// wrapper, which returns {failure_class, errors:[...]} with no
+			// `.error` field, breaking the tool's documented error shape.
+			let preEntries: SwarmKnowledgeEntry[];
+			try {
+				preEntries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : 'Unknown error';
+				return JSON.stringify({ success: false, error: message });
+			}
 			const preTarget = preEntries.find((e) => e.id === id) ?? null;
 			if (preTarget) {
 				const curationInput: CurationAuthorizationInput = {

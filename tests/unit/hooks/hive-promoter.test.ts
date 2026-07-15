@@ -45,6 +45,7 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { KNOWLEDGE_SCHEMA_VERSION } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 const realReadKnowledge = _internals.readSwarmEntries;
@@ -615,8 +616,10 @@ describe('hive-promoter (transactional, #1847)', () => {
 			expect(hive[0].tier).toBe('hive');
 			expect(hive[0].lineage?.actor).toBe('manual');
 			expect(hive[0].lineage?.source_cohort_id).toBe(FIXED_COHORT.cohortId);
-			// schema_version is KNOWLEDGE_SCHEMA_VERSION, not hardcoded 1 (M3 fix).
-			expect(hive[0].schema_version).toBe(2);
+			// schema_version tracks KNOWLEDGE_SCHEMA_VERSION, not a hardcoded
+			// literal (M3 fix) — assert against the constant so the bump can't
+			// silently drift the test (#1848 review F-10).
+			expect(hive[0].schema_version).toBe(KNOWLEDGE_SCHEMA_VERSION);
 			// source_project = basename of directory.
 			expect(hive[0].source_project).toBe(path.basename(swarmDir));
 		});
