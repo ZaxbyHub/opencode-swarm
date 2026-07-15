@@ -16,7 +16,7 @@ import {
 } from '../config/plan-schema';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
-import { log } from '../utils/logger';
+import { criticalWarn, log } from '../utils/logger';
 import { derivePlanId } from './utils';
 
 /**
@@ -668,7 +668,7 @@ export async function takeSnapshotWithRetry(
 			}
 		}
 	}
-	log(
+	criticalWarn(
 		`[takeSnapshotWithRetry] Snapshot failed after ${MAX_RETRIES} retries (${TOTAL_ATTEMPTS} attempts): ${lastError!.message}`,
 	);
 	try {

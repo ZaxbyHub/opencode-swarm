@@ -14,6 +14,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../../../src/agents';
 import { PluginConfigSchema } from '../../../src/config/schema';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 
 let tempDir: string;
 
@@ -74,10 +78,12 @@ describe('quiet:true suppresses non-critical warnings', () => {
 
 	beforeEach(() => {
 		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+		clearDeferredWarnings();
 	});
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		clearDeferredWarnings();
 	});
 
 	it('2.1 quiet:true suppresses all warnings from createAgents', () => {
@@ -117,12 +123,11 @@ describe('quiet:true suppresses non-critical warnings', () => {
 
 		createAgents(config as any);
 
-		const warningCalls = warnSpy.mock.calls;
-		const deprecationWarnings = warningCalls.filter(
-			(call) =>
-				typeof call[0] === 'string' &&
-				call[0].includes('Deprecation') &&
-				call[0].includes('variant'),
+		// Epic #1752 PR5: the deprecation warning now routes through advisoryWarn
+		// (buffered for /swarm diagnose, never raw console.warn) per AGENTS.md
+		// Invariant 10 — see tests/unit/agents/factory.test.ts for the same pattern.
+		const deprecationWarnings = getDeferredWarnings().filter(
+			(msg) => msg.includes('Deprecation') && msg.includes('variant'),
 		);
 		expect(deprecationWarnings.length).toBeGreaterThan(0);
 	});
@@ -336,10 +341,12 @@ describe('quiet config is properly threaded through agent creation', () => {
 
 	beforeEach(() => {
 		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+		clearDeferredWarnings();
 	});
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		clearDeferredWarnings();
 	});
 
 	it('5.1 both quiet:true and quiet:false create the same number of agents', () => {
@@ -396,9 +403,10 @@ describe('quiet config is properly threaded through agent creation', () => {
 
 		createAgents(config as any);
 
-		// Should have deprecation warnings
-		const variantWarnings = warnSpy.mock.calls.filter(
-			(call) => typeof call[0] === 'string' && call[0].includes('variant'),
+		// Should have deprecation warnings — buffered via advisoryWarn, not raw
+		// console.warn (epic #1752 PR5, AGENTS.md Invariant 10).
+		const variantWarnings = getDeferredWarnings().filter((msg) =>
+			msg.includes('variant'),
 		);
 		expect(variantWarnings.length).toBeGreaterThan(0);
 	});

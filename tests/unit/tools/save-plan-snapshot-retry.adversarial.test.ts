@@ -7,11 +7,8 @@
  * Tests BOTH save-plan.ts and manager.ts takeSnapshotWithRetry via their
  * respective _test_exports seams.
  *
- * NOTE: log() throwing is NOT wrapped in try/catch (unlike the emit
+ * NOTE: console.warn throwing is NOT wrapped in try/catch (unlike the emit
  * call), making it the primary attack surface for denial-of-service.
- *
- * NOTE: console.warn was migrated to log() (debug-gated). Tests use
- * OPENCODE_SWARM_DEBUG=1 + spyOn(console, 'log') per Pattern A.
  */
 
 import {
@@ -109,182 +106,102 @@ describe('AV1: non-Error thrown values', () => {
 		mockTakeSnapshotEvent.mockRejectedValue(
 			'error string not an Error' as never,
 		);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			// Must not throw — the string is converted to Error via String(err)
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			expect(logSpy.mock.calls[0][0] as string).toContain(
-				'error string not an Error',
-			);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		// Must not throw — the string is converted to Error via String(err)
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0] as string).toContain(
+			'error string not an Error',
+		);
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: throws number — still retries and eventually warns', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(-1 as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// String(-1) → '-1'
-			expect(logSpy.mock.calls[0][0] as string).toContain('-1');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// String(-1) → '-1'
+		expect(warnSpy.mock.calls[0][0] as string).toContain('-1');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: throws undefined — still retries and eventually warns', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(undefined as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// String(undefined) → 'undefined'
-			expect(logSpy.mock.calls[0][0] as string).toContain('undefined');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// String(undefined) → 'undefined'
+		expect(warnSpy.mock.calls[0][0] as string).toContain('undefined');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: throws null — still retries and eventually warns', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(null as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// String(null) → 'null'
-			expect(logSpy.mock.calls[0][0] as string).toContain('null');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// String(null) → 'null'
+		expect(warnSpy.mock.calls[0][0] as string).toContain('null');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: throws plain object — still retries and eventually warns', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue({ reason: 'disk full' } as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// String({...}) → '[object Object]'
-			expect(logSpy.mock.calls[0][0] as string).toContain('[object Object]');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// String({...}) → '[object Object]'
+		expect(warnSpy.mock.calls[0][0] as string).toContain('[object Object]');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: throws Error-like object without message — still retries and eventually warns', async () => {
 		// An object with a 'message' property that is not an Error instance
 		mockTakeSnapshotEvent.mockRejectedValue({ message: '' } as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// String({message: ''}) → '[object Object]'
-			expect(logSpy.mock.calls[0][0] as string).toContain('[object Object]');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// String({message: ''}) → '[object Object]'
+		expect(warnSpy.mock.calls[0][0] as string).toContain('[object Object]');
+		warnSpy.mockRestore();
 	});
 
 	test('manager: throws string — still retries and eventually warns', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockRejectedValue('manager error string' as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				managerRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			expect(logSpy.mock.calls[0][0] as string).toContain(
-				'manager error string',
-			);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			managerRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0] as string).toContain(
+			'manager error string',
+		);
+		warnSpy.mockRestore();
 	});
 
 	test('manager: throws undefined — still retries and eventually warns', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockRejectedValue(undefined as never);
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				managerRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			managerRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });
 
@@ -298,114 +215,95 @@ describe('AV2: takeSnapshotEvent resolves with undefined/null (void)', () => {
 
 	test('save-plan: resolves with undefined — treated as success, no warning', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed when OPENCODE_SWARM_DEBUG is not set — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: resolves with null — treated as success, no warning', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(null);
-		// log() is suppressed when OPENCODE_SWARM_DEBUG is not set — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('manager: resolves with undefined — treated as success', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed when OPENCODE_SWARM_DEBUG is not set — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			managerRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Attack Vector 3: log() throws
-// The log() call is NOT wrapped in try/catch (unlike emit),
+// Attack Vector 3: console.warn throws
+// The console.warn call is NOT wrapped in try/catch (unlike emit),
 // making it a denial-of-service attack surface.
 // ---------------------------------------------------------------------------
-describe('AV3: log() throws — unhandled, propagates', () => {
+describe('AV3: console.warn throws — unhandled, propagates', () => {
 	beforeEach(resetMocks);
 	afterEach(() => mock.restore());
 
-	test('save-plan: log() throws — error propagates out of takeSnapshotWithRetry', async () => {
+	test('save-plan: console.warn throws — error propagates out of takeSnapshotWithRetry', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('underlying failure'));
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		// log() calls console.log when debug is enabled
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {
-			throw new Error('console.log blocked');
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {
+			throw new Error('console.warn blocked');
 		});
-		try {
-			// log() throwing is NOT caught — it propagates
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).rejects.toThrow('console.log blocked');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+
+		// console.warn throwing is NOT caught — it propagates
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).rejects.toThrow('console.warn blocked');
+
+		warnSpy.mockRestore();
 	});
 
-	test('manager: log() throws — error propagates out of takeSnapshotWithRetry', async () => {
+	test('manager: console.warn throws — error propagates out of takeSnapshotWithRetry', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('underlying failure'));
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {
-			throw new Error('console.log unavailable');
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {
+			throw new Error('console.warn unavailable');
 		});
-		try {
-			// log() throwing is NOT caught — it propagates
-			await expect(managerRetry(TEST_DIR, makeTestPlan())).rejects.toThrow(
-				'console.log unavailable',
-			);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+
+		// console.warn throwing is NOT caught — it propagates
+		await expect(managerRetry(TEST_DIR, makeTestPlan())).rejects.toThrow(
+			'console.warn unavailable',
+		);
+
+		warnSpy.mockRestore();
 	});
 
-	test('save-plan: log() throws after all retries exhausted — emit is never called', async () => {
+	test('save-plan: console.warn throws after all retries exhausted — emit is never called', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('underlying'));
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {
-			throw new Error('log blocked');
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {
+			throw new Error('warn blocked');
 		});
-		try {
-			// log() runs AFTER the retry loop, OUTSIDE the emit try/catch.
-			// When log throws, emit is never reached.
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).rejects.toThrow('log blocked');
-			// emit is never called because log throws before emit is reached
-			expect(mockEmit).toHaveBeenCalledTimes(0);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+
+		// console.warn runs AFTER the retry loop, OUTSIDE the emit try/catch.
+		// When warn throws, emit is never reached.
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).rejects.toThrow('warn blocked');
+		// emit is never called because warn throws before emit is reached
+		expect(mockEmit).toHaveBeenCalledTimes(0);
+
+		warnSpy.mockRestore();
 	});
 });
 
@@ -420,13 +318,14 @@ describe('AV4: malformed plan shape', () => {
 	test('save-plan: plan with empty string title — passed to takeSnapshotEvent without crash', async () => {
 		const plan = makeTestPlan({ title: '' });
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
+		const warnSpy = spyOn(console, 'warn');
 		// Should not throw — the helper just passes the plan through
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, plan),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
 		expect(mockTakeSnapshotEvent.mock.calls[0][1]).toMatchObject({ title: '' });
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: plan with undefined swarm — passed to takeSnapshotEvent without crash', async () => {
@@ -435,12 +334,13 @@ describe('AV4: malformed plan shape', () => {
 		const planWithUndefinedSwarm = plan as Plan;
 		planWithUndefinedSwarm.swarm = undefined as never;
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
+		const warnSpy = spyOn(console, 'warn');
 		// Should not throw — the helper just passes the plan through
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, planWithUndefinedSwarm),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: plan with missing phases array — passed to takeSnapshotEvent without crash', async () => {
@@ -451,11 +351,13 @@ describe('AV4: malformed plan shape', () => {
 			// phases intentionally missing
 		} as Plan;
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, plan),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: plan with null phases — passed to takeSnapshotEvent without crash', async () => {
@@ -466,33 +368,24 @@ describe('AV4: malformed plan shape', () => {
 			phases: null as never,
 		} as Plan;
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('ledger failure'));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			// Should not throw — retry helper does not validate plan shape
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, plan),
-			).resolves.toBeUndefined();
-			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4); // 1 + 3 retries
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		// Should not throw — retry helper does not validate plan shape
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, plan),
+		).resolves.toBeUndefined();
+		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4); // 1 + 3 retries
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 
 	test('manager: plan with empty string title — passed without crash', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		const plan = makeTestPlan({ title: '' });
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(managerRetry(TEST_DIR, plan)).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });
 
@@ -507,40 +400,44 @@ describe('AV5: empty string / relative path for directory', () => {
 
 	test('save-plan: empty string directory — passed to takeSnapshotEvent without crash', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry('', makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
 		expect(mockTakeSnapshotEvent.mock.calls[0][0]).toBe('');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: relative path directory — passed to takeSnapshotEvent without crash', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry('./.swarm', makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
 		expect(mockTakeSnapshotEvent.mock.calls[0][0]).toBe('./.swarm');
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: directory with path traversal — passed to takeSnapshotEvent without crash', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry('../../../etc/passwd', makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
 		expect(mockTakeSnapshotEvent.mock.calls[0][0]).toBe('../../../etc/passwd');
+		warnSpy.mockRestore();
 	});
 
 	test('manager: empty string directory — passed without crash', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(managerRetry('', makeTestPlan())).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });
 
@@ -559,12 +456,14 @@ describe('AV6: alternating resolve/reject in takeSnapshotEvent', () => {
 			.mockResolvedValueOnce(undefined)
 			.mockRejectedValueOnce(new Error('should not be called'));
 
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		// Stopped after success on second attempt
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(2);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: succeeds then fails then succeeds — stops after first success', async () => {
@@ -573,11 +472,13 @@ describe('AV6: alternating resolve/reject in takeSnapshotEvent', () => {
 			.mockRejectedValueOnce(new Error('should not be called'))
 			.mockResolvedValueOnce(undefined);
 
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: all retries fail, lastError is the LAST error not the first', async () => {
@@ -587,25 +488,15 @@ describe('AV6: alternating resolve/reject in takeSnapshotEvent', () => {
 			.mockRejectedValueOnce(new Error('third error'))
 			.mockRejectedValueOnce(new Error('final error — all retries exhausted'));
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// lastError is the LAST error encountered
-			expect(logSpy.mock.calls[0][0] as string).toContain('final error');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// lastError is the LAST error encountered
+		expect(warnSpy.mock.calls[0][0] as string).toContain('final error');
+		warnSpy.mockRestore();
 	});
 
 	test('manager: all retries fail, lastError is the LAST error', async () => {
@@ -616,23 +507,13 @@ describe('AV6: alternating resolve/reject in takeSnapshotEvent', () => {
 			.mockRejectedValueOnce(new Error('error 3'))
 			.mockRejectedValueOnce(new Error('error 4 — final'));
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				managerRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			expect(logSpy.mock.calls[0][0] as string).toContain('error 4');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			managerRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0] as string).toContain('error 4');
+		warnSpy.mockRestore();
 	});
 });
 
@@ -648,56 +529,38 @@ describe('AV7: MAX_RETRIES boundary behavior (observable via call count)', () =>
 
 	test('save-plan: immediate success = only 1 call (0 retries needed)', async () => {
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
 		).resolves.toBeUndefined();
 		// With MAX_RETRIES=3, TOTAL_ATTEMPTS=4. But on first success, only 1 call.
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: all 4 attempts fail when every call rejects', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('always fails'));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			// 1 initial + 3 retries = 4 total attempts
-			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		// 1 initial + 3 retries = 4 total attempts
+		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 
 	test('manager: all 4 attempts fail when every call rejects', async () => {
 		const { takeSnapshotWithRetry: managerRetry } = managerTestExports;
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('always fails'));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				managerRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			managerRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });
 
@@ -712,68 +575,38 @@ describe('AV8: oversized error message strings', () => {
 	test('save-plan: very long error message — converted to string without crash', async () => {
 		const longMessage = 'x'.repeat(100_000);
 		mockTakeSnapshotEvent.mockRejectedValue(new Error(longMessage));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			// The long message should appear in the log output
-			expect((logSpy.mock.calls[0][0] as string).length).toBeGreaterThan(
-				100_000,
-			);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		// The long message should appear in the warn output
+		expect((warnSpy.mock.calls[0][0] as string).length).toBeGreaterThan(
+			100_000,
+		);
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: error message with Unicode — converted to string without crash', async () => {
 		const unicodeMessage = '💣'.repeat(10_000);
 		mockTakeSnapshotEvent.mockRejectedValue(new Error(unicodeMessage));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: error message with null bytes — String() conversion', async () => {
 		const nullBytes = 'a\x00b\x00c';
 		mockTakeSnapshotEvent.mockRejectedValue(new Error(nullBytes));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });
 
@@ -790,7 +623,7 @@ describe('AV9: injection attempts in plan fields', () => {
 		// Use a string that looks like a template literal but is NOT evaluated
 		const plan = makeTestPlan({ title: '$' + '{process.exit(1)}' });
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, plan),
 		).resolves.toBeUndefined();
@@ -798,12 +631,14 @@ describe('AV9: injection attempts in plan fields', () => {
 		expect((mockTakeSnapshotEvent.mock.calls[0][1] as Plan).title).toBe(
 			'${process.exit(1)}',
 		);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: plan swarm with shell injection characters — passed safely', async () => {
 		const plan = makeTestPlan({ swarm: 'test; rm -rf /' });
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, plan),
 		).resolves.toBeUndefined();
@@ -811,41 +646,35 @@ describe('AV9: injection attempts in plan fields', () => {
 		expect((mockTakeSnapshotEvent.mock.calls[0][1] as Plan).swarm).toBe(
 			'test; rm -rf /',
 		);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: plan title with HTML/script injection — passed safely to takeSnapshotEvent', async () => {
 		const plan = makeTestPlan({ title: '<script>alert(1)</script>' });
 		mockTakeSnapshotEvent.mockResolvedValue(undefined);
-		// log() is suppressed without OPENCODE_SWARM_DEBUG — no warning fires
+		const warnSpy = spyOn(console, 'warn');
 		await expect(
 			takeSnapshotWithRetry(TEST_DIR, plan),
 		).resolves.toBeUndefined();
 		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(1);
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 
 	test('save-plan: error message with newlines — warn message still readable', async () => {
 		const multilineError = 'line1\nline2\nline3';
 		mockTakeSnapshotEvent.mockRejectedValue(new Error(multilineError));
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			const logMsg = logSpy.mock.calls[0][0] as string;
-			// Newlines are preserved in the message
-			expect(logMsg).toContain('line1');
-			expect(logMsg).toContain('line2');
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const warnMsg = warnSpy.mock.calls[0][0] as string;
+		// Newlines are preserved in the message
+		expect(warnMsg).toContain('line1');
+		expect(warnMsg).toContain('line2');
+		warnSpy.mockRestore();
 	});
 });
 
@@ -926,24 +755,14 @@ describe('AV11: emit throws — non-fatal, warn still fires', () => {
 			throw new Error('telemetry write failed');
 		});
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			// The emit threw but was caught — log should still fire
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			expect(mockEmit).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		// The emit threw but was caught — warn should still fire
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(mockEmit).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 
 	test('manager: emit throws — takeSnapshotWithRetry still resolves, warn still fires', async () => {
@@ -954,22 +773,12 @@ describe('AV11: emit throws — non-fatal, warn still fires', () => {
 			throw new Error('telemetry write failed');
 		});
 
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-		try {
-			await expect(
-				managerRetry(TEST_DIR, makeTestPlan()),
-			).resolves.toBeUndefined();
-			expect(logSpy).toHaveBeenCalledTimes(1);
-			expect(mockEmit).toHaveBeenCalledTimes(1);
-		} finally {
-			logSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		const warnSpy = spyOn(console, 'warn');
+		await expect(
+			managerRetry(TEST_DIR, makeTestPlan()),
+		).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(mockEmit).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
 	});
 });

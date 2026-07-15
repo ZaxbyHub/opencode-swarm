@@ -10,7 +10,6 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from 'node:fs';
-import { log } from '../utils/logger';
 
 /**
  * Typed error for concurrent plan modification (#444 item 3).
@@ -2590,7 +2589,7 @@ export function migrateLegacyPlan(planContent: string, swarmId?: string): Plan {
 	let migrationStatus: Plan['migration_status'] = 'migrated';
 	if (phases.length === 0) {
 		// Zero phases parsed - migration failed
-		log(
+		criticalWarn(
 			`migrateLegacyPlan: 0 phases parsed from ${lines.length} lines. First 3 lines: ${lines.slice(0, 3).join(' | ')}`,
 		);
 		migrationStatus = 'migration_failed';
