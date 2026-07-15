@@ -1690,6 +1690,87 @@ invalid json here
 			expect(updatedContent[0].updated_at).not.toBe('2026-01-01T00:00:00Z');
 		});
 
+		// #1848 §4 (F-09/PRR-003): the fair-scan generation stamp is the second
+		// idempotency layer. An entry already curated in the current generation
+		// (e.g. a batch re-claimed after a crash) must be SKIPPED so the mutation
+		// does not compound; a fresh entry must be curated AND stamped with the
+		// generation so the next sweep can detect it.
+		it('F-09: skips entries already curated this generation and stamps fresh ones', async () => {
+			const entries: SwarmKnowledgeEntry[] = [
+				{
+					id: 'GEN-STALE',
+					tier: 'swarm',
+					lesson: 'Already curated in generation 5',
+					category: 'testing',
+					tags: [],
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 3,
+					created_at: '2026-01-01T00:00:00Z',
+					updated_at: '2026-01-01T00:00:00Z',
+					hive_eligible: false,
+					project_name: 'test-project',
+					last_curated_generation: 5,
+				},
+				{
+					id: 'GEN-FRESH',
+					tier: 'swarm',
+					lesson: 'Not yet curated in generation 5',
+					category: 'testing',
+					tags: [],
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 3,
+					created_at: '2026-01-01T00:00:00Z',
+					updated_at: '2026-01-01T00:00:00Z',
+					hive_eligible: false,
+					project_name: 'test-project',
+				},
+			];
+			createKnowledgeFile(tempDir, entries);
+
+			const recommendations: KnowledgeRecommendation[] = [
+				{ action: 'archive', entry_id: 'GEN-STALE', lesson: '', reason: 'x' },
+				{ action: 'archive', entry_id: 'GEN-FRESH', lesson: '', reason: 'x' },
+			];
+
+			// generation=5: GEN-STALE was already curated in gen 5 → skipped;
+			// GEN-FRESH is new → archived and stamped with 5.
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				recommendations,
+				defaultKnowledgeConfig,
+				5,
+			);
+
+			expect(result.applied).toBe(1);
+			expect(result.skipped).toBe(1);
+
+			const updated = readKnowledgeJsonl(tempDir);
+			const stale = updated.find((e) => e.id === 'GEN-STALE');
+			const fresh = updated.find((e) => e.id === 'GEN-FRESH');
+			// Already-curated entry left untouched (idempotency).
+			expect(stale?.status).toBe('candidate');
+			expect(stale?.updated_at).toBe('2026-01-01T00:00:00Z');
+			// Fresh entry curated AND stamped with the current generation.
+			expect(fresh?.status).toBe('archived');
+			expect(fresh?.last_curated_generation).toBe(5);
+		});
+
 		// G11 (issue #1717): curator-archive recommendations now route through
 		// the shared tombstone + retire/stale invalidator. Before this fix,
 		// curator-archived knowledge silently orphaned its generated skills (no

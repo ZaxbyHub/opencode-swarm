@@ -141,6 +141,37 @@ describe('resolveWorktreeId', () => {
 		const id2 = await resolveWorktreeId(dir);
 		expect(id2).toBe(id);
 	});
+
+	// F-21 (race): concurrent first-creates must converge on ONE id. The
+	// exclusive `wx` write fails with EEXIST when a racing caller already
+	// created the file; the loser must re-read and return the WINNER's id
+	// rather than its own locally-generated one.
+	it('F-21: converges on the winner id when the exclusive create races (EEXIST)', async () => {
+		const dir = makeTmpDir(); // empty .swarm → top existsSync is false
+		const winnerId = '11111111-1111-4111-8111-111111111111';
+		const loserId = '22222222-2222-4222-8222-222222222222';
+		// This caller would mint the loser id...
+		_internals.randomUUID = () => loserId;
+		// ...but a racing caller won the O_EXCL create first (EEXIST)...
+		_internals.writeFile = () => {
+			const err = new Error(
+				'EEXIST: file already exists',
+			) as NodeJS.ErrnoException;
+			err.code = 'EEXIST';
+			throw err;
+		};
+		// ...and the persisted file holds the winner's valid id.
+		_internals.readFile = async () =>
+			`${JSON.stringify({
+				worktree_id: winnerId,
+				created_at: new Date().toISOString(),
+			})}\n`;
+
+		const id = await resolveWorktreeId(dir);
+		// Converged on the racing winner, not the local loser.
+		expect(id).toBe(winnerId);
+		expect(id).not.toBe(loserId);
+	});
 });
 
 describe('normalizeEntry — v3 fields', () => {

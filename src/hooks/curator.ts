@@ -35,6 +35,7 @@ import {
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
+import { alreadyCuratedThisGeneration } from '../knowledge/scan-cursor.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
 	computeLearningMetrics,
@@ -2086,6 +2087,19 @@ export async function applyCuratorKnowledgeUpdates(
 		const updatedEntries = entries.map((entry) => {
 			const rec = validRecommendations.find((r) => r.entry_id === entry.id);
 			if (!rec) return entry;
+
+			// #1848 §4 (F-09/PRR-003): second idempotency layer. If this entry was
+			// already curated in the current fair-scan generation (e.g. the batch
+			// was re-claimed after a crash/retry), skip re-applying the mutation so
+			// non-idempotent effects (confidence deltas, revision bumps) do not
+			// compound. No-op when `generation` is undefined, so callers that don't
+			// thread a generation are unaffected.
+			if (
+				generation !== undefined &&
+				alreadyCuratedThisGeneration(entry, generation)
+			) {
+				return entry;
+			}
 
 			switch (rec.action) {
 				case 'promote':
