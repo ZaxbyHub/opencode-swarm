@@ -22,11 +22,6 @@
 
 import { z } from 'zod';
 import {
-	type KnowledgeEventInput,
-	recordHiveKnowledgeEvent,
-	recordKnowledgeEvent,
-} from '../hooks/knowledge-events.js';
-import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
@@ -224,11 +219,6 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			// update between authorize and mutate cannot be silently clobbered.
 			let casExpectedRevision: number | undefined;
 			let casExpectedContentHash: string | undefined;
-			// PRR-010: set when authorization was granted via the manual-override
-			// bypass so an explicit override-audit event can be appended below.
-			let overrideDecisionBasis: string | undefined;
-			let overrideActor: string | undefined;
-			let overrideReason: string | undefined;
 
 			// #1848 §2: cohort-safe authorization for archive/purge (swarm tier).
 			// Hive-tier entries are cross-project and already gated by hive-policy
@@ -255,15 +245,12 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					// `allow_purge:true`. `allow_purge` remains the LOCAL admin confirmation
 					// required to ATTEMPT a purge (checked above), but it must not bypass
 					// cohort ownership/quorum. Purge now routes through authorizeCuration
-					// with NO override — identical to archive — so the normal ladder applies:
-					// unlinked/owner → authorized; cross-owner in a linked cohort → blocked
-					// (returns a proposal) and the not-authorized path below reports it.
-					// The `override` variable stays declared (always undefined here) so the
-					// defensive PRR-010 override-audit branch remains wired for any future
-					// explicit operator override, without any current code producing one.
-					const override:
-						| { actor: 'manual-override'; reason: string }
-						| undefined = undefined;
+					// with NO override — identical to archive — so the normal ladder
+					// applies: unlinked/owner → authorized; cross-owner in a linked
+					// cohort → blocked (returns a proposal) and the not-authorized path
+					// below reports it. F-03 (#1848 review): purge no longer synthesizes
+					// a manual-override from allow_purge, so no ownership/quorum bypass
+					// occurs here — the archive tool exposes no override input.
 					const curationInput: CurationAuthorizationInput = {
 						directory,
 						action: mode as CurationAction,
@@ -271,7 +258,6 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 						reason,
 						evidenceScope: 'cohort-wide' as CurationEvidenceScope,
 						actorRole: ctx?.agent,
-						override,
 					};
 					const curationContext: CurationContext = {
 						config: await loadConfigForPolicy(directory),
@@ -293,15 +279,6 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					// stale plan if the entry changed between here and the mutation).
 					casExpectedRevision = preTarget.revision;
 					casExpectedContentHash = preTarget.content_hash;
-					// PRR-010: when the override bypass was the actual decision basis, the
-					// standard archived tombstone does not record that an ownership/quorum
-					// gate was bypassed. Capture it so an explicit override-audit event is
-					// appended after the mutation (who/why/basis are all auditable).
-					if (decision.basis === 'override' && curationInput.override) {
-						overrideDecisionBasis = decision.basis;
-						overrideActor = curationInput.override.actor;
-						overrideReason = curationInput.override.reason;
-					}
 				} // end if (preTarget)
 			} // end if (tier === 'swarm')
 
@@ -421,19 +398,12 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				return JSON.stringify({ success: false, message: 'entry not found' });
 			}
 
-			// PRR-010: the standard archived tombstone records who/why/mode but NOT
-			// that an ownership/quorum gate was BYPASSED via the manual-override. When
-			// the authorization decision basis was the override path, suppress the
-			// helper's plain tombstone (`skipTombstone`) and write a single ENRICHED
-			// archived tombstone below carrying the override markers. This keeps the
-			// tombstone count invariant (exactly one archived event per removal) while
-			// making the bypass auditable (actor/reason/basis). Skill invalidation
-			// still runs — `skipTombstone` only suppresses the tombstone write.
-			const overrideUsed = Boolean(overrideDecisionBasis);
-
 			// G11 (issue #1717): route through the shared tombstone + retire/stale
 			// invalidator so this path cannot diverge from the curator archive
-			// path and knowledge-remove. Fire-and-forget (fail-open).
+			// path and knowledge-remove. Fire-and-forget (fail-open). The standard
+			// archived tombstone (who/why/mode/previous_status) is the audit record;
+			// F-03 removed the manual-override bypass, so there is no override to
+			// separately audit.
 			await writeArchiveTombstoneAndInvalidateSkills({
 				directory,
 				entryId: id,
@@ -444,34 +414,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				evidence,
 				previousStatus,
 				sourceLabel: 'knowledge-archive',
-				skipTombstone: overrideUsed,
 			});
-
-			// PRR-010: enriched override tombstone (replaces the suppressed plain one).
-			// Reuses the existing knowledge-event mechanism — no new file. Fail-open.
-			if (overrideUsed) {
-				const overrideTombstone = {
-					type: 'archived' as const,
-					entry_id: id,
-					tier,
-					actor: ctx?.agent ?? 'unknown',
-					reason,
-					mode,
-					evidence,
-					previous_status: previousStatus,
-					// Explicit bypass markers (extra fields on the archived event; the
-					// event log preserves them verbatim for audit tooling).
-					override_used: true,
-					override_actor: overrideActor,
-					override_reason: overrideReason,
-					decision_basis: overrideDecisionBasis,
-				} as KnowledgeEventInput;
-				if (tier === 'hive') {
-					await recordHiveKnowledgeEvent(overrideTombstone);
-				} else {
-					await recordKnowledgeEvent(directory, overrideTombstone);
-				}
-			}
 
 			return JSON.stringify({
 				success: true,

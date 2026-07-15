@@ -113,7 +113,7 @@ function rewriteHistoryKey(line: unknown): string | null {
 	if (typeof afterRevision !== 'number' || !Number.isFinite(afterRevision)) {
 		return null;
 	}
-	// NUL separator: cannot occur inside the component strings, so no key
+	// "|" separator: cannot occur inside the component strings, so no key
 	// collision across field boundaries.
 	return `${entryId}|${afterRevision}|${timestamp}`;
 }
