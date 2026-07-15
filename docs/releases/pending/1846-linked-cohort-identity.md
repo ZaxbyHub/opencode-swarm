@@ -23,8 +23,11 @@ this, so architects behaved as if the linked store did not exist.
 - **Canonical cohort identity** (`src/knowledge/cohort-identity.ts`): a single
   resolver normalizes equivalent remotes (SSH/scp/HTTPS, `.git`, host/scheme
   case, slash direction, percent-encoding, default ports, userinfo, NFC/NFD),
-  falls back through `git rev-parse --git-common-dir` (worktree-stable) before
-  the path, and emits a visible degraded warning when the cohort id is
+  falls back through `git rev-parse --path-format=absolute --git-common-dir`
+  (worktree-stable, and Windows-safe: the absolute form hands every worktree of
+  a repo one identical string so sibling worktrees converge under Bun on
+  Windows, not just POSIX) before the path, and emits a visible degraded
+  warning when the cohort id is
   machine-local. Compliant subprocess contract (array form, `git -C`, ignored
   stdin, bounded timeout, kill in finally).
 - **Knowledge-family manifest** (`src/knowledge/family-manifest.ts`): a single

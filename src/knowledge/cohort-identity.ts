@@ -238,12 +238,31 @@ function cohortHash(input: string): string {
 }
 
 /**
+ * Fold a realpath'd absolute path into a stable cohort-id input. On Windows,
+ * path separators and drive-letter case are insignificant, and `realpathSync`
+ * can emit an extended-length `\\?\` prefix for one spelling of a path but not
+ * another; none of these differences should split a cohort, so we fold them
+ * all. A trailing separator is likewise insignificant. This is defence in
+ * depth: the primary convergence guarantee comes from asking git for the
+ * ABSOLUTE common dir (see `resolveCohortId`), which hands every worktree of a
+ * repo one identical string; this folding only removes any residual spelling
+ * difference that survives realpath.
+ */
+function stabilizePath(input: string): string {
+	return input
+		.replace(/\\/g, '/') // OS-native separators → forward slashes
+		.replace(/^\/\/\?\//, '') // strip Windows \\?\ extended-length prefix
+		.replace(/\/+$/, '') // strip trailing slash(es)
+		.toLowerCase();
+}
+
+/**
  * Resolve the canonical cohort identity for a worktree directory.
  *
  * Resolution order:
  *   1. Normalized origin remote (portable cohort identity; not degraded).
- *   2. `git rev-parse --git-common-dir` — shared by sibling worktrees of the
- *      same repo, but machine-local → degraded.
+ *   2. `git rev-parse --path-format=absolute --git-common-dir` — shared by
+ *      sibling worktrees of the same repo, but machine-local → degraded.
  *   3. Realpath of the directory — last resort, machine-local → degraded.
  *
  * Never throws. The path fallback always succeeds.
@@ -252,7 +271,11 @@ export async function resolveCohortId(
 	directory: string,
 ): Promise<CohortIdentity> {
 	// 1. Remote.
-	const remoteUrl = await runGit(directory, ['remote', 'get-url', 'origin']);
+	const remoteUrl = await _internals.runGit(directory, [
+		'remote',
+		'get-url',
+		'origin',
+	]);
 	if (remoteUrl && remoteUrl.length > 0) {
 		const normalized = normalizeGitRemote(remoteUrl);
 		if (normalized) {
@@ -268,28 +291,42 @@ export async function resolveCohortId(
 	}
 
 	// 2. git rev-parse --git-common-dir (repository-stable, worktree-shared).
-	const commonDirRaw = await runGit(directory, [
+	//
+	// Ask git for the ABSOLUTE common dir (`--path-format=absolute`) so the main
+	// worktree and every linked worktree receive the *identical* string from the
+	// same git binary. Plain `--git-common-dir` returns a relative `.git` from
+	// the main worktree but an absolute path from a linked worktree; those two
+	// spellings were then canonicalized down two different code paths and, on
+	// Windows (under Bun), did NOT converge even after separator/case folding —
+	// splitting sibling worktrees into different cohorts in the merge-queue CI
+	// (issue #1846 Windows regression, PR #1851). Forcing absolute output makes
+	// git compute one canonical path for both, so realpath receives one input
+	// and returns one hash regardless of platform-specific realpath quirks
+	// (`\\?\` prefixes, short-name expansion, etc.) — same input, same output.
+	//
+	// `--path-format` requires git >= 2.31; on older git the option errors and
+	// runGit resolves null, so we fall back to the plain (pre-fix) form, which
+	// still converges on case-sensitive POSIX filesystems.
+	let commonDirRaw = await _internals.runGit(directory, [
 		'rev-parse',
+		'--path-format=absolute',
 		'--git-common-dir',
 	]);
+	if (!commonDirRaw || commonDirRaw.length === 0) {
+		commonDirRaw = await _internals.runGit(directory, [
+			'rev-parse',
+			'--git-common-dir',
+		]);
+	}
 	if (commonDirRaw && commonDirRaw.length > 0) {
 		try {
-			// From the main worktree git returns a relative `.git`; from a linked
-			// worktree it returns an absolute path. Resolve against `directory`
-			// first, then realpath so both forms converge (issue #1846 critic C3).
+			// Resolve against `directory` (a no-op when git already returned an
+			// absolute path) then realpath, so any residual symlink/short-name
+			// form is canonicalized identically for every worktree of the repo.
 			const resolved = path.resolve(directory, commonDirRaw);
 			const canonical = realpathSync(resolved);
-			// Normalize to a stable cohort-id input: forward slashes + lowercase.
-			// `realpathSync` returns OS-native separators, so on Windows the main
-			// worktree yields `C:\...\main\.git` (backslashes, from Node) while a
-			// linked worktree yields `C:/.../main/.git` (forward slashes, from
-			// git's absolute --git-common-dir output). Without normalization the
-			// two sibling worktrees hash to DIFFERENT cohort ids on Windows. Both
-			// Windows path separators and drive-letter case are insignificant, so
-			// folding them makes the cohort id deterministic per machine.
-			const stable = canonical.replace(/\\/g, '/').toLowerCase();
 			return {
-				cohortId: cohortHash(stable),
+				cohortId: cohortHash(stabilizePath(canonical)),
 				source: 'git-common-dir',
 				degraded: true,
 			};
@@ -305,12 +342,12 @@ export async function resolveCohortId(
 	} catch {
 		canonicalPath = path.resolve(directory);
 	}
-	// Same separator/case normalization as the git-common-dir branch: two
-	// paths that differ only by OS-native separator or drive-letter case must
-	// not produce different cohort ids (issue #1846 Windows CI fix).
-	const stablePath = canonicalPath.replace(/\\/g, '/').toLowerCase();
+	// Same separator/case/prefix folding as the git-common-dir branch: two
+	// paths that differ only by OS-native separator, drive-letter case, a
+	// Windows `\\?\` prefix, or a trailing slash must not produce different
+	// cohort ids (issue #1846 Windows CI fix).
 	return {
-		cohortId: cohortHash(stablePath),
+		cohortId: cohortHash(stabilizePath(canonicalPath)),
 		source: 'path',
 		degraded: true,
 	};
@@ -320,5 +357,6 @@ export const _internals = {
 	normalizeGitRemote,
 	runGit,
 	cohortHash,
+	stabilizePath,
 	GIT_TIMEOUT_MS,
 };

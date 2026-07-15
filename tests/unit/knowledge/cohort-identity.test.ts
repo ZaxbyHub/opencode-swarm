@@ -336,12 +336,16 @@ describe('subprocess contract (invariant 3)', () => {
 });
 
 describe('cross-platform cohort-id convergence (Windows CI regression)', () => {
-	// Regression guard for the merge-queue Windows failure (run 29390417124):
+	// Regression guard for the merge-queue Windows failure (PR #1851): sibling
+	// worktrees of one repo hashed to DIFFERENT cohort ids on Windows because
 	// the main worktree's git-common-dir resolved to a backslash path via Node
-	// while the linked worktree's returned a forward-slash path via git, so the
-	// two sibling worktrees hashed to DIFFERENT cohort ids. The resolver now
-	// normalizes separators + case before hashing. This test proves the
-	// invariant directly so it is exercised on every platform, not just Windows.
+	// while the linked worktree's returned a forward-slash absolute path via
+	// git. The resolver now (a) asks git for the ABSOLUTE common dir so every
+	// worktree receives one identical string (see the seam tests below) and
+	// (b) folds separators, drive-letter case, a Windows `\\?\` prefix, and
+	// trailing slashes via `stabilizePath`. These tests exercise the REAL
+	// production folder (`_internals.stabilizePath`) so the invariant is checked
+	// on every platform, not just Windows.
 	test('backslash vs forward-slash common-dir paths converge to one cohort id', () => {
 		// What git returns from the MAIN worktree on Windows (after Node realpath):
 		const mainForm = 'C:\\Users\\runner\\repo\\.git';
@@ -350,18 +354,112 @@ describe('cross-platform cohort-id convergence (Windows CI regression)', () => {
 		// These are lexically different...
 		expect(mainForm).not.toBe(linkedForm);
 		// ...but after the resolver's normalization they must hash identically.
-		const norm = (s: string): string => s.replace(/\\/g, '/').toLowerCase();
-		expect(_internals.cohortHash(norm(mainForm))).toBe(
-			_internals.cohortHash(norm(linkedForm)),
+		expect(_internals.cohortHash(_internals.stabilizePath(mainForm))).toBe(
+			_internals.cohortHash(_internals.stabilizePath(linkedForm)),
 		);
 	});
 
 	test('drive-letter case does not split the cohort', () => {
-		const upper = 'D:/a/repo/.git';
-		const lower = 'd:/a/repo/.git';
-		const norm = (s: string): string => s.replace(/\\/g, '/').toLowerCase();
-		expect(_internals.cohortHash(norm(upper))).toBe(
-			_internals.cohortHash(norm(lower)),
+		expect(
+			_internals.cohortHash(_internals.stabilizePath('D:/a/repo/.git')),
+		).toBe(_internals.cohortHash(_internals.stabilizePath('d:/a/repo/.git')));
+	});
+
+	test('Windows \\\\?\\ extended-length prefix and trailing slash are folded', () => {
+		// realpathSync can emit a `\\?\` extended-length prefix for one spelling
+		// of a path but not another; it must not split the cohort.
+		const extended = '\\\\?\\C:\\Users\\runner\\repo\\.git\\';
+		const plain = 'C:/Users/runner/repo/.git';
+		expect(_internals.stabilizePath(extended)).toBe(
+			'c:/users/runner/repo/.git',
 		);
+		expect(_internals.cohortHash(_internals.stabilizePath(extended))).toBe(
+			_internals.cohortHash(_internals.stabilizePath(plain)),
+		);
+	});
+});
+
+describe('resolveCohortId git-common-dir command (issue #1846 Windows fix)', () => {
+	// The load-bearing fix: sibling worktrees converge because the resolver asks
+	// git for the ABSOLUTE common dir with the SAME command from every worktree,
+	// so realpath receives one identical input and platform-specific realpath
+	// quirks cannot split the cohort. These tests drive the mockable
+	// `_internals.runGit` seam so the command contract is verified on every
+	// platform (the real-git worktree convergence test above runs Windows-only
+	// in the merge-queue CI matrix).
+	test('requests the absolute git-common-dir and does not fall back when it succeeds', async () => {
+		const { dir, cleanup } = createSafeTestDir('cohort-cmd-abs-');
+		const gitDir = path.join(dir, '.git');
+		fs.mkdirSync(gitDir, { recursive: true });
+		const original = _internals.runGit;
+		const calls: string[][] = [];
+		_internals.runGit = ((_d: string, args: string[]) => {
+			calls.push(args);
+			if (args[0] === 'remote') return Promise.resolve(null);
+			if (args.includes('--path-format=absolute')) {
+				return Promise.resolve(gitDir);
+			}
+			return Promise.resolve(null);
+		}) as typeof _internals.runGit;
+		try {
+			const id = await resolveCohortId(dir);
+			expect(id.source).toBe('git-common-dir');
+			expect(id.degraded).toBe(true);
+			// The absolute form must be requested...
+			expect(
+				calls.some(
+					(a) =>
+						a[0] === 'rev-parse' &&
+						a.includes('--path-format=absolute') &&
+						a.includes('--git-common-dir'),
+				),
+			).toBe(true);
+			// ...and because it succeeded, the plain (pre-fix) form is NOT used.
+			expect(
+				calls.some(
+					(a) =>
+						a[0] === 'rev-parse' &&
+						!a.includes('--path-format=absolute') &&
+						a.includes('--git-common-dir'),
+				),
+			).toBe(false);
+		} finally {
+			_internals.runGit = original;
+			cleanup();
+		}
+	});
+
+	test('falls back to plain --git-common-dir when --path-format is unsupported (git < 2.31)', async () => {
+		const { dir, cleanup } = createSafeTestDir('cohort-cmd-fallback-');
+		const gitDir = path.join(dir, '.git');
+		fs.mkdirSync(gitDir, { recursive: true });
+		const original = _internals.runGit;
+		const calls: string[][] = [];
+		_internals.runGit = ((_d: string, args: string[]) => {
+			calls.push(args);
+			if (args[0] === 'remote') return Promise.resolve(null);
+			// Simulate old git: --path-format errors → runGit resolves null.
+			if (args.includes('--path-format=absolute')) return Promise.resolve(null);
+			if (args.includes('--git-common-dir')) return Promise.resolve(gitDir);
+			return Promise.resolve(null);
+		}) as typeof _internals.runGit;
+		try {
+			const id = await resolveCohortId(dir);
+			expect(id.source).toBe('git-common-dir');
+			// Both the absolute attempt AND the plain fallback were made.
+			expect(calls.some((a) => a.includes('--path-format=absolute'))).toBe(
+				true,
+			);
+			expect(
+				calls.some(
+					(a) =>
+						!a.includes('--path-format=absolute') &&
+						a.includes('--git-common-dir'),
+				),
+			).toBe(true);
+		} finally {
+			_internals.runGit = original;
+			cleanup();
+		}
 	});
 });
