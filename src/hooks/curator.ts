@@ -324,6 +324,20 @@ async function autoRetireSkills(
 			const violationRate =
 				skillUsage.length > 0 ? violations / skillUsage.length : 0;
 
+			// #1848 review PRR-006: skill auto-retirement is a SKILL-lifecycle
+			// action, not a knowledge-entry curation. A skill slug has no
+			// producer / revision / entry_id, so authorizeCuration — which gates
+			// destructive KNOWLEDGE-ENTRY actions — does not type-fit here, and
+			// routing it through the policy would be a vacuous always-authorize.
+			// Both retire triggers remain safe under issue #1848 criterion #8:
+			//  (1) the violation-rate trigger below acts on skill compliance
+			//      health and touches no knowledge entry;
+			//  (2) the archived-source trigger further down fires only AFTER the
+			//      source knowledge entries were archived — and that archival is
+			//      itself already routed through authorizeCuration (the curator
+			//      apply path and the knowledge_archive tool).
+			// Skill retirement is therefore a downstream consequence of an
+			// already-authorized knowledge action, never an independent bypass.
 			if (violationRate > 0.3) {
 				const reason = `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`;
 				await _internals.retireSkill(directory, active.slug, reason);

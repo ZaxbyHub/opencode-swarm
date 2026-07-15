@@ -251,15 +251,19 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				// Skip authorization for a missing entry — let the existing
 				// not-found path handle it (avoids a misleading policy error).
 				if (preTarget) {
+					// F-03: purge no longer auto-synthesizes a `manual-override` from
+					// `allow_purge:true`. `allow_purge` remains the LOCAL admin confirmation
+					// required to ATTEMPT a purge (checked above), but it must not bypass
+					// cohort ownership/quorum. Purge now routes through authorizeCuration
+					// with NO override — identical to archive — so the normal ladder applies:
+					// unlinked/owner → authorized; cross-owner in a linked cohort → blocked
+					// (returns a proposal) and the not-authorized path below reports it.
+					// The `override` variable stays declared (always undefined here) so the
+					// defensive PRR-010 override-audit branch remains wired for any future
+					// explicit operator override, without any current code producing one.
 					const override:
 						| { actor: 'manual-override'; reason: string }
-						| undefined =
-						mode === 'purge'
-							? {
-									actor: 'manual-override',
-									reason: 'operator purge (allow_purge)',
-								}
-							: undefined;
+						| undefined = undefined;
 					const curationInput: CurationAuthorizationInput = {
 						directory,
 						action: mode as CurationAction,
@@ -293,10 +297,10 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					// standard archived tombstone does not record that an ownership/quorum
 					// gate was bypassed. Capture it so an explicit override-audit event is
 					// appended after the mutation (who/why/basis are all auditable).
-					if (decision.basis === 'override' && override) {
+					if (decision.basis === 'override' && curationInput.override) {
 						overrideDecisionBasis = decision.basis;
-						overrideActor = override.actor;
-						overrideReason = override.reason;
+						overrideActor = curationInput.override.actor;
+						overrideReason = curationInput.override.reason;
 					}
 				} // end if (preTarget)
 			} // end if (tier === 'swarm')
