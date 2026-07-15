@@ -22,6 +22,8 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { loadPluginConfigWithMeta } from '../config';
+import { KnowledgeConfigSchema } from '../config/schema.js';
 import {
 	type LinkPointer,
 	readLinkPointer,
@@ -184,8 +186,12 @@ export async function handleLinkCommand(
 	// failure does not abort the link (the policy falls back to permissive when
 	// no fingerprint is stored).
 	try {
-		const { KnowledgeConfigSchema } = await import('../config/schema.js');
-		const config = KnowledgeConfigSchema.parse({});
+		// #1848 §3 / F-06: fingerprint the REAL cohort config (from opencode.json),
+		// not bare schema defaults. `/swarm link` writes the single source of truth
+		// that all cohort members compare against; fingerprinting defaults here
+		// would make every worktree with real config look "mismatched".
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
 		const fingerprint = cohortConfigFingerprint(
 			buildConfigFingerprintInput(config),
 		);

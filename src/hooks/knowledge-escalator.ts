@@ -345,7 +345,11 @@ export async function maybeQuarantineOnContradiction(
 		let policyConfig: unknown;
 		try {
 			const { KnowledgeConfigSchema } = await import('../config/schema.js');
-			policyConfig = KnowledgeConfigSchema.parse({});
+			// F-06: parse the project's real config so the cohort config-fingerprint
+			// guard compares actual settings, not defaults-vs-defaults.
+			const { loadPluginConfigWithMeta } = await import('../config/index.js');
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			policyConfig = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
 		} catch {
 			policyConfig = undefined;
 		}

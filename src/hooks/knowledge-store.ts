@@ -1268,7 +1268,17 @@ async function applyConfidenceFloorAction(
 		// (the rollups are from the link-aware event log). Route through the
 		// cohort-safe policy so unknown-owner legacy entries are protected.
 		const { KnowledgeConfigSchema } = await import('../config/schema.js');
-		const config = KnowledgeConfigSchema.parse({});
+		// F-06: parse the project's real config so the cohort config-fingerprint
+		// guard compares actual settings, not defaults-vs-defaults. Best-effort:
+		// fall back to schema defaults on any load/parse error.
+		let config: ReturnType<typeof KnowledgeConfigSchema.parse>;
+		try {
+			const { loadPluginConfigWithMeta } = await import('../config/index.js');
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+		} catch {
+			config = KnowledgeConfigSchema.parse({});
+		}
 		for (const { id } of toQuarantine) {
 			await quarantineEntry(
 				directory,

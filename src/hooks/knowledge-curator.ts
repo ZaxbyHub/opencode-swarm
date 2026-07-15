@@ -118,9 +118,18 @@ function hashContent(content: string): string {
 }
 
 /** #1848: load the resolved KnowledgeConfig for the curation policy. */
-async function loadConfigForPolicyCurator() {
+async function loadConfigForPolicyCurator(directory: string) {
 	const { KnowledgeConfigSchema } = await import('../config/schema.js');
-	return KnowledgeConfigSchema.parse({});
+	// F-06: parse the project's real config so the cohort config-fingerprint
+	// guard compares actual settings, not defaults-vs-defaults. Best-effort:
+	// fall back to schema defaults on any load/parse error.
+	try {
+		const { loadPluginConfigWithMeta } = await import('../config/index.js');
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		return KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+	} catch {
+		return KnowledgeConfigSchema.parse({});
+	}
 }
 
 async function canonicalExistingPath(candidate: string): Promise<string> {
@@ -419,6 +428,9 @@ async function processRetractions(
 					typeof value === 'string' && value.length > 0,
 			),
 	);
+	// F-06: load the resolved config ONCE before the loops (do not reload
+	// per-iteration — the loaded config is identical for every entry).
+	const policyConfig = await loadConfigForPolicyCurator(directory);
 	for (const retractionText of retractions) {
 		const normalizedRetraction = normalize(retractionText);
 		const matchedSwarmIds: string[] = [];
@@ -446,7 +458,7 @@ async function processRetractions(
 							actorRole: 'architect',
 						},
 						context: {
-							config: await loadConfigForPolicyCurator(),
+							config: policyConfig,
 							entry,
 						} as CurationContext,
 					},

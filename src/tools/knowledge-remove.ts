@@ -13,9 +13,18 @@ import {
 } from '../knowledge/curation-policy.js';
 import { createSwarmTool } from './create-tool.js';
 
-async function loadConfigForPolicy() {
+async function loadConfigForPolicy(directory: string) {
 	const { KnowledgeConfigSchema } = await import('../config/schema.js');
-	return KnowledgeConfigSchema.parse({});
+	// F-06: parse the project's real config so the cohort config-fingerprint
+	// guard compares actual settings, not defaults-vs-defaults. Best-effort:
+	// fall back to schema defaults on any load/parse error.
+	try {
+		const { loadPluginConfigWithMeta } = await import('../config/index.js');
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		return KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+	} catch {
+		return KnowledgeConfigSchema.parse({});
+	}
 }
 
 export const _internals = {
@@ -80,7 +89,7 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 					evidenceScope: 'cohort-wide',
 				};
 				const curationContext: CurationContext = {
-					config: await loadConfigForPolicy(),
+					config: await loadConfigForPolicy(directory),
 					entry: preTarget,
 				};
 				const decision = await authorizeCuration(

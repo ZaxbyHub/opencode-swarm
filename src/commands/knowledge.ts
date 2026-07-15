@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { loadPluginConfigWithMeta } from '../config';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import { resolveKnowledgeStoreDir } from '../hooks/knowledge-link.js';
 import {
@@ -11,6 +12,7 @@ import {
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
+	CurationAction,
 	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
@@ -20,6 +22,11 @@ import {
 	restoreEntry,
 	unarchiveEntry,
 } from '../hooks/knowledge-validator.js';
+import {
+	authorizeCuration,
+	type CurationAuthorizationInput,
+	type CurationContext,
+} from '../knowledge/curation-policy.js';
 import type { HardenableRecord } from '../services/unactionable-hardening.js';
 import { log } from '../utils/logger';
 
@@ -46,6 +53,59 @@ function resolveEntryByPrefix<T extends { id: string }>(
 	return {
 		error: `Ambiguous prefix '${inputId}' matches ${matches.length} entries:\n  ${candidates}`,
 	};
+}
+
+/**
+ * #1848 §2 (F-02): build and pre-authorize a cohort-safe curation context for a
+ * user-initiated destructive lifecycle command (quarantine / restore /
+ * unarchive). Every destructive action must route through `authorizeCuration`
+ * so a `/swarm knowledge` command cannot damage an entry owned by a sibling
+ * cohort worktree.
+ *
+ * A user command acts on the local session's view of knowledge, so the evidence
+ * scope is `local-session` and the actor role is `user` — mirroring the
+ * curator's retraction-driven quarantine (knowledge-curator.ts). The real
+ * project config is loaded (via `loadPluginConfigWithMeta`) so the config-
+ * fingerprint guard compares against the same semantics the cohort agreed on.
+ *
+ * On authorization the returned `curationContext` is handed to the validator,
+ * which re-authorizes INSIDE its lock against the freshest entry (the C-4 CAS
+ * guard); passing it keeps that protection. On denial the caller surfaces
+ * `decision.detail` to the user instead of reporting a false success (the
+ * validators are silent no-ops when blocked, so the pre-check is what lets the
+ * command report the block accurately).
+ */
+async function authorizeUserCuration(
+	directory: string,
+	entry: KnowledgeEntryBase,
+	action: CurationAction,
+	reason: string | undefined,
+): Promise<
+	| {
+			ok: true;
+			curationContext: {
+				input: CurationAuthorizationInput;
+				context: CurationContext;
+			};
+	  }
+	| { ok: false; detail: string }
+> {
+	const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+	const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+	const input: CurationAuthorizationInput = {
+		directory,
+		action,
+		entryId: entry.id,
+		reason,
+		evidenceScope: 'local-session',
+		actorRole: 'user',
+	};
+	const context: CurationContext = { config, entry };
+	const decision = await authorizeCuration(input, context);
+	if (!decision.authorized) {
+		return { ok: false, detail: decision.detail };
+	}
+	return { ok: true, curationContext: { input, context } };
 }
 
 /**
@@ -79,7 +139,22 @@ export async function handleKnowledgeQuarantineCommand(
 			return `❌ ${resolved.error}`;
 		}
 		const fullId = resolved.entry.id;
-		await quarantineEntry(directory, fullId, reason, 'user');
+		const auth = await authorizeUserCuration(
+			directory,
+			resolved.entry,
+			'quarantine',
+			reason,
+		);
+		if (!auth.ok) {
+			return `🚫 Quarantine of ${fullId} blocked by cohort-safety policy: ${auth.detail}`;
+		}
+		await quarantineEntry(
+			directory,
+			fullId,
+			reason,
+			'user',
+			auth.curationContext,
+		);
 		return `✅ Entry ${fullId} quarantined successfully.`;
 	} catch (error) {
 		log(
@@ -122,7 +197,20 @@ export async function handleKnowledgeRestoreCommand(
 		const swarmResolved = resolveEntryByPrefix(swarmEntries, inputId);
 		if ('entry' in swarmResolved && swarmResolved.entry.status === 'archived') {
 			const fullId = swarmResolved.entry.id;
-			const result = await unarchiveEntry(directory, fullId);
+			const auth = await authorizeUserCuration(
+				directory,
+				swarmResolved.entry,
+				'unarchive',
+				undefined,
+			);
+			if (!auth.ok) {
+				return `🚫 Unarchive of ${fullId} blocked by cohort-safety policy: ${auth.detail}`;
+			}
+			const result = await unarchiveEntry(
+				directory,
+				fullId,
+				auth.curationContext,
+			);
 			if (result.restored) {
 				return `✅ Archived entry ${fullId} restored to '${result.restored_to}'.`;
 			}
@@ -147,7 +235,16 @@ export async function handleKnowledgeRestoreCommand(
 			return `❌ ${resolved.error}`;
 		}
 		const fullId = resolved.entry.id;
-		await restoreEntry(directory, fullId);
+		const auth = await authorizeUserCuration(
+			directory,
+			resolved.entry,
+			'restore',
+			undefined,
+		);
+		if (!auth.ok) {
+			return `🚫 Restore of ${fullId} blocked by cohort-safety policy: ${auth.detail}`;
+		}
+		await restoreEntry(directory, fullId, auth.curationContext);
 		return `✅ Entry ${fullId} restored successfully.`;
 	} catch (error) {
 		log(
