@@ -1930,15 +1930,29 @@ export async function runCuratorPhase(
  * @param directory - The workspace directory
  * @param recommendations - Array of knowledge recommendations to apply
  * @param knowledgeConfig - Knowledge configuration (for path resolution)
+ * @param generation - Optional fair-scan-cursor generation (#1848 §4). When
+ *   provided, curation mutations stamp `last_curated_generation` on the mutated
+ *   entry so a future sweep can detect it was already curated this generation.
+ *   When undefined, no stamp is written (preserves callers that don't pass it).
  * @returns Counts of applied and skipped recommendations
  */
 export async function applyCuratorKnowledgeUpdates(
 	directory: string,
 	recommendations: KnowledgeRecommendation[],
 	knowledgeConfig: KnowledgeConfig,
+	generation?: number,
 ): Promise<{ applied: number; skipped: number }> {
 	let applied = 0;
 	let skipped = 0;
+
+	// #1848 §4: generation stamp for the fair scan cursor. Spread onto each
+	// mutated entry so `alreadyCuratedThisGeneration` can skip re-curation of an
+	// entry already handled in this generation. Undefined → `{...undefined}` is a
+	// no-op, so callers that don't thread a generation are unaffected.
+	const genStamp =
+		generation !== undefined
+			? { last_curated_generation: generation }
+			: undefined;
 
 	// Guard: treat null/undefined recommendations as empty
 	if (!recommendations || recommendations.length === 0) {
@@ -1960,11 +1974,16 @@ export async function applyCuratorKnowledgeUpdates(
 	// #1848 §2 (C-4 fix): PRE-TRANSACTION cohort-safe authorization. The
 	// synchronous `mutate` callback inside transactKnowledge cannot await the
 	// async authorizeCuration (which reads cohort events), so we authorize over
-	// the freshest snapshot here, then the per-entry revision CAS inside the
-	// transaction guards against drift between authorize and apply. Destructive
-	// recommendations (archive/rewrite) that are not authorized are filtered out
-	// and recorded as proposals by the policy. Promote/flag_contradiction are
-	// non-destructive (they only enrich, not remove/replace) and are not gated.
+	// the freshest snapshot here. Because that snapshot is unlocked, an entry can
+	// change between authorize and apply. To close that gap we capture each
+	// authorized destructive rec's expected revision (from the preSnapshot entry)
+	// and re-check it inside the locked transaction: the per-entry revision CAS in
+	// the archive/rewrite cases skips any entry whose fresh revision no longer
+	// matches what was authorized. Destructive recommendations (archive/rewrite)
+	// that are not authorized are filtered out and recorded as proposals by the
+	// policy. Promote/flag_contradiction are non-destructive (they only enrich,
+	// not remove/replace) and are not gated.
+	const authorizedRevisions = new Map<string, number | undefined>();
 	if (validRecommendations.length > 0) {
 		const preSnapshot =
 			await _internals.readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
@@ -1996,6 +2015,11 @@ export async function applyCuratorKnowledgeUpdates(
 			);
 			if (decision.authorized) {
 				authorizedRecs.push(rec);
+				// Capture the revision we authorized against so the in-transaction
+				// CAS can detect drift if the entry mutates before apply. Legacy
+				// entries (revision absent) record `undefined` → treated as 0 by
+				// the CAS check, matching transactKnowledgeWithCas semantics.
+				authorizedRevisions.set(rec.entry_id, target?.revision ?? undefined);
 			} else {
 				// Unauthorized destructive recommendation → the policy recorded a
 				// non-destructive proposal. Count it as skipped HERE: it is
@@ -2017,6 +2041,12 @@ export async function applyCuratorKnowledgeUpdates(
 	const appliedIds = new Set<string>();
 	const foundIds = new Set<string>();
 	let idResolutionSkipped = 0;
+	// #1848 §3 CAS: count destructive mutations skipped because the entry's fresh
+	// revision drifted from the revision we authorized against. Added to `skipped`
+	// after the transaction commits. `casDriftedIds` lets the post-transaction
+	// skip loop exclude these ids so they are not counted a second time.
+	let casDriftSkipped = 0;
+	const casDriftedIds = new Set<string>();
 	// G11 (issue #1717): capture the pre-mutation status of each archived
 	// entry so the shared invalidator's tombstone records the real prior status.
 	const archivedPrevStatus = new Map<string, string>();
@@ -2035,6 +2065,8 @@ export async function applyCuratorKnowledgeUpdates(
 		foundIds.clear();
 		archivedPrevStatus.clear();
 		contradictedEntries.length = 0;
+		casDriftSkipped = 0;
+		casDriftedIds.clear();
 		let txApplied = 0;
 		let modified = false;
 
@@ -2065,8 +2097,18 @@ export async function applyCuratorKnowledgeUpdates(
 						hive_eligible: true,
 						confidence: Math.min(1.0, (entry.confidence ?? 0) + 0.1),
 						updated_at: new Date().toISOString(),
+						...genStamp,
 					};
 				case 'archive': {
+					// #1848 §3 CAS: skip if the entry drifted since authorization.
+					if (
+						authorizedRevisions.has(entry.id) &&
+						(entry.revision ?? 0) !== (authorizedRevisions.get(entry.id) ?? 0)
+					) {
+						casDriftSkipped++;
+						casDriftedIds.add(entry.id);
+						return entry;
+					}
 					// PRR-015: guard against re-archiving an already-archived entry.
 					// A duplicate/late recommendation targeting an archived entry
 					// would otherwise record `archived_from: 'archived'`
@@ -2089,6 +2131,7 @@ export async function applyCuratorKnowledgeUpdates(
 						archived_from: entry.status,
 						archived_at: new Date().toISOString(),
 						updated_at: new Date().toISOString(),
+						...genStamp,
 					};
 				}
 				case 'flag_contradiction':
@@ -2107,8 +2150,18 @@ export async function applyCuratorKnowledgeUpdates(
 							`contradiction:${(rec.reason ?? '').slice(0, 50)}`,
 						],
 						updated_at: new Date().toISOString(),
+						...genStamp,
 					};
 				case 'rewrite': {
+					// #1848 §3 CAS: skip if the entry drifted since authorization.
+					if (
+						authorizedRevisions.has(entry.id) &&
+						(entry.revision ?? 0) !== (authorizedRevisions.get(entry.id) ?? 0)
+					) {
+						casDriftSkipped++;
+						casDriftedIds.add(entry.id);
+						return entry;
+					}
 					const newLesson = (rec.lesson ?? '').trim();
 					if (newLesson.length < 15 || newLesson.length > 280) {
 						return entry;
@@ -2143,6 +2196,7 @@ export async function applyCuratorKnowledgeUpdates(
 						confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05),
 						revision: (entry.revision ?? 0) + 1,
 						content_hash: computeContentHash(newLesson),
+						...genStamp,
 					};
 				}
 				default:
@@ -2154,6 +2208,9 @@ export async function applyCuratorKnowledgeUpdates(
 		return modified ? updatedEntries : null;
 	});
 	skipped += idResolutionSkipped;
+	// #1848 §3 CAS: entries skipped because their revision drifted between the
+	// unlocked authorization snapshot and the locked apply are counted as skipped.
+	skipped += casDriftSkipped;
 
 	// G3 (#1715): emit `contradicted` events for flag_contradiction actions,
 	// AFTER the transaction commits. This unifies the two previously-disconnected
@@ -2205,6 +2262,9 @@ export async function applyCuratorKnowledgeUpdates(
 	// Count skipped: recommendations that were not applied to existing entries
 	for (const rec of validRecommendations) {
 		if (rec.entry_id !== undefined && !appliedIds.has(rec.entry_id)) {
+			// CAS-drifted recs are already counted via `casDriftSkipped` above;
+			// skip them here so they are not double-counted.
+			if (casDriftedIds.has(rec.entry_id)) continue;
 			if (!foundIds.has(rec.entry_id)) {
 				logger.warn(
 					`[curator] applyCuratorKnowledgeUpdates: entry_id '${rec.entry_id}' not found — skipping`,
