@@ -132,7 +132,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 		const hook = createDelegationGateHook(makeConfig(), process.cwd());
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
-			description: 'review',
+			description: 'review\nACCEPTANCE: task complete and covered by tests',
 		});
 		expect(threw).toBe(false);
 	});
@@ -142,6 +142,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
 			background: false,
+			prompt: 'ACCEPTANCE: task complete and covered by tests',
 		});
 		expect(threw).toBe(false);
 	});

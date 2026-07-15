@@ -14,6 +14,7 @@ import {
 import { updateTaskStatus } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -66,7 +67,8 @@ function coderDispatch(sessionID = 'session-plan-critic-gate') {
 		output: {
 			args: {
 				subagent_type: 'coder',
-				prompt: 'TASK: 1.1\nImplement the approved plan.',
+				prompt:
+					'TASK: 1.1\nImplement the approved plan.\nACCEPTANCE: task complete and covered by tests',
 			},
 		},
 	};
@@ -338,7 +340,7 @@ describe('delegation gate plan critic approval', () => {
 				phase: 1,
 				verdict: 'APPROVED',
 				summary: 'Phase 1 drift verification approved',
-				approved_at: new Date().toISOString(),
+				approved_at: withFrozenClock(() => new Date().toISOString()),
 			},
 		});
 

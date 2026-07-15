@@ -9,6 +9,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state';
+import { withFrozenClock } from '../helpers/test-clock.js';
 
 /**
  * Simulate a coder delegation by adding a delegation chain entry.
@@ -20,7 +21,9 @@ function simulateCoderDelegation(sessionId: string): void {
 	const entry: DelegationEntry = {
 		from: 'architect',
 		to: 'coder',
-		timestamp: Date.now(),
+		timestamp: withFrozenClock(() => Date.now(), {
+			fixedNow: 1_700_000_000_000,
+		}),
 	};
 	swarmState.delegationChains.set(sessionId, [...existing, entry]);
 }
@@ -62,7 +65,10 @@ describe('runtime reviewer gate', () => {
 			callID: 'call-1',
 		};
 		const output = {
-			args: { subagent_type: 'coder', prompt: 'Fix the bug' },
+			args: {
+				subagent_type: 'coder',
+				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
+			},
 		};
 
 		await expect(hooks.toolBefore(input, output)).rejects.toThrow(
@@ -84,7 +90,10 @@ describe('runtime reviewer gate', () => {
 			callID: 'call-1',
 		};
 		const output = {
-			args: { subagent_type: 'coder', prompt: 'Fix the bug' },
+			args: {
+				subagent_type: 'coder',
+				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
+			},
 		};
 
 		// Should not throw
@@ -107,7 +116,10 @@ describe('runtime reviewer gate', () => {
 			callID: 'call-1',
 		};
 		const output = {
-			args: { subagent_type: 'coder', prompt: 'Fix the bug' },
+			args: {
+				subagent_type: 'coder',
+				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
+			},
 		};
 
 		// Should not throw — reviewer has already run
@@ -131,7 +143,10 @@ describe('runtime reviewer gate', () => {
 			callID: 'call-1',
 		};
 		const output = {
-			args: { subagent_type: 'coder', prompt: 'Fix the bug' },
+			args: {
+				subagent_type: 'coder',
+				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
+			},
 		};
 
 		// Should not throw in turbo mode for non-Tier-3 tasks
@@ -158,7 +173,10 @@ describe('runtime reviewer gate', () => {
 			callID: 'call-1',
 		};
 		const output = {
-			args: { subagent_type: 'coder', prompt: 'Fix the bug' },
+			args: {
+				subagent_type: 'coder',
+				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
+			},
 		};
 
 		// Should throw even in turbo mode for Tier 3 tasks

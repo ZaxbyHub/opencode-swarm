@@ -177,6 +177,47 @@ describe('TaskSchema', () => {
 		const result = TaskSchema.safeParse(task);
 		expect(result.success).toBe(false);
 	});
+
+	it('fr_refs: absent when not provided (optional, not defaulted to [])', () => {
+		const task = {
+			id: '1.1',
+			phase: 1,
+			description: 'Test',
+		};
+		const result = TaskSchema.safeParse(task);
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.fr_refs).toBeUndefined();
+			// Load-bearing for hash stability (issue #1687, task 1.2): must be
+			// omitted by JSON.stringify, not serialized as `[]`.
+			expect(JSON.stringify(result.data)).not.toContain('fr_refs');
+		}
+	});
+
+	it('fr_refs: accepted as an array of FR/SC IDs when provided', () => {
+		const task = {
+			id: '1.1',
+			phase: 1,
+			description: 'Test',
+			fr_refs: ['FR-001', 'SC-002'],
+		};
+		const result = TaskSchema.safeParse(task);
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.fr_refs).toEqual(['FR-001', 'SC-002']);
+		}
+	});
+
+	it('fr_refs: invalid when a non-string entry is provided', () => {
+		const task = {
+			id: '1.1',
+			phase: 1,
+			description: 'Test',
+			fr_refs: [123],
+		};
+		const result = TaskSchema.safeParse(task);
+		expect(result.success).toBe(false);
+	});
 });
 
 describe('PhaseSchema', () => {

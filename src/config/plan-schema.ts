@@ -77,6 +77,12 @@ export const TaskSchema = z.object({
 	files_touched: z.array(z.string()).default([]), // files modified by this task
 	evidence_path: z.string().optional(), // path to evidence directory
 	blocked_reason: z.string().optional(), // why task is blocked
+	// Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000/SC-000).
+	// Deliberately `.optional()` (NOT `.default([])`): must serialize to
+	// `undefined` (omitted by JSON.stringify) for tasks that don't set it, so
+	// computePlanHash/computePlanStructureHash/computePlanContentHash stay
+	// byte-identical for every existing persisted plan predating this field.
+	fr_refs: z.array(z.string()).optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 

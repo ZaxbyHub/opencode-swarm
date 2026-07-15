@@ -14,6 +14,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
@@ -93,9 +94,23 @@ async function callToolBefore(
 	sessionID: string,
 	args: Record<string, unknown>,
 ): Promise<void> {
+	// Issue #1687 FR-003: coder/reviewer Task dispatches require a non-empty
+	// ACCEPTANCE: line or toolBefore throws ACCEPTANCE_FIELD_REQUIRED before
+	// reaching the adversarial-injection logic under test here. Appends an
+	// inert ACCEPTANCE-only line (no N.M-shaped tokens, no other KEY:
+	// headers) AFTER any existing prompt content — the adversarial null-byte
+	// / unicode / long-string fixtures already in this file are preserved
+	// verbatim, not modified.
+	const argsWithAcceptance = {
+		...args,
+		prompt:
+			typeof args.prompt === 'string'
+				? `${args.prompt}\nACCEPTANCE: task complete and covered by tests`
+				: 'ACCEPTANCE: task complete and covered by tests',
+	};
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
-		{ args },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
+		{ args: argsWithAcceptance },
 	);
 }
 

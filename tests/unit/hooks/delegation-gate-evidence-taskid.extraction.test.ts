@@ -16,6 +16,7 @@ import {
 	parsePerTaskVerdicts,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
@@ -96,7 +97,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
 		{ args },
 	);
 }
@@ -139,6 +140,7 @@ describe('delegation-gate: evidence task ID extraction', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -163,6 +165,7 @@ describe('delegation-gate: evidence task ID extraction', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.3',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;

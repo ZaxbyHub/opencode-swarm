@@ -518,6 +518,10 @@ function computePlanContentHash(plan: Plan): string {
 						files_touched: [...task.files_touched].sort(),
 						evidence_path: task.evidence_path,
 						blocked_reason: task.blocked_reason,
+						// `task.fr_refs` (optional spec FR/SC mapping, #1687) is
+						// deliberately EXCLUDED from this field list to preserve
+						// byte-identical output for every plan persisted before this
+						// field existed. Do not add it here.
 					}))
 					.sort((a, b) => compareTaskIds(a.id, b.id)),
 			}))

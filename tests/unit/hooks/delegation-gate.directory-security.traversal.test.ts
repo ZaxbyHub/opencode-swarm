@@ -13,6 +13,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
@@ -93,7 +94,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
 		{ args },
 	);
 }
@@ -136,6 +137,7 @@ describe('delegation-gate: directory traversal prevention', () => {
 			await callToolBefore(hook2, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -153,7 +155,8 @@ describe('delegation-gate: directory traversal prevention', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
-				prompt: 'TASK: 1.1\nFILE: ../etc/passwd',
+				prompt:
+					'TASK: 1.1\nFILE: ../etc/passwd\nACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -171,7 +174,8 @@ describe('delegation-gate: directory traversal prevention', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
-				prompt: 'TASK: 1.1\nFILE: /absolute/path',
+				prompt:
+					'TASK: 1.1\nFILE: /absolute/path\nACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -215,7 +219,7 @@ describe('delegation-gate: path validation', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
-				prompt: `TASK: 1.1\nFILE: ${longPath}`,
+				prompt: `TASK: 1.1\nFILE: ${longPath}\nACCEPTANCE: task complete and covered by tests`,
 			});
 		} catch {
 			threw = true;
@@ -233,7 +237,8 @@ describe('delegation-gate: path validation', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
-				prompt: 'TASK: 1.1\nFILE: src/file with spaces.txt',
+				prompt:
+					'TASK: 1.1\nFILE: src/file with spaces.txt\nACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;

@@ -394,6 +394,8 @@ DELEGATION ENVELOPE FIELDS — include these in every delegation for traceabilit
 
 Before delegating to {{AGENT_PREFIX}}reviewer: call check_gate_status for the current task_id and include the gate results in the GATES field of the reviewer message. Format: GATES: lint=PASS/FAIL, sast_scan=PASS/FAIL, secretscan=PASS/FAIL (use PASS/FAIL/skipped for each gate). If no gates have been run yet, use GATES: none.
 
+ACCEPTANCE FIELD RESOLUTION — before every {{AGENT_PREFIX}}coder (and {{AGENT_PREFIX}}reviewer) delegation, populate that delegation's ACCEPTANCE field like this: (1) read the current task's \`fr_refs\` from the plan; (2) if \`fr_refs\` is non-empty, look up EVERY listed FR-###/SC-### id in the current \`.swarm/spec.md\` and copy each one's full requirement text into ACCEPTANCE VERBATIM — byte-for-byte, no summarizing or paraphrasing, and concatenate all of them when a task maps to more than one; (3) if \`fr_refs\` is empty or absent, populate ACCEPTANCE with a task-derived one-line restatement of what DONE looks like instead (the same pattern as \`acceptanceCriteria\` above). ACCEPTANCE must never be empty — lacking a spec mapping is normal and is not a reason to omit it.
+
 <!-- BEHAVIORAL_GUIDANCE_START -->
 PARTIAL GATE RATIONALIZATIONS — automated gates ≠ agent review. Running SOME gates is NOT compliance:
   ✗ "I ran pre_check_batch so the code is verified" → pre_check_batch does NOT replace {{AGENT_PREFIX}}reviewer or {{AGENT_PREFIX}}test_engineer
@@ -570,7 +572,7 @@ FILE: src/auth/login.ts
 INPUT: Validate email format, password >= 8 chars
 OUTPUT: Modified file
 CONSTRAINT: Do not modify other functions
-ACCEPTANCE: Populate from the plan task's acceptance criteria / FR / SC when the task has them (one item per line, or FR-/SC-style references), so the coder can gate its implementation on each. Omit the field entirely when the task has no structured acceptance criteria.
+ACCEPTANCE: [copied verbatim from spec.md, or a task-derived DONE restatement — see ACCEPTANCE FIELD RESOLUTION]
 SKILLS: file:.claude/skills/engineering-conventions/SKILL.md
 
 {{AGENT_PREFIX}}reviewer
@@ -578,8 +580,9 @@ TASK: Review login validation
 FILE: src/auth/login.ts
 CHECK: [security, correctness, edge-cases]
 GATES: lint=PASS, sast_scan=PASS, secretscan=PASS
+ACCEPTANCE: [copied verbatim from spec.md, or a task-derived DONE restatement — see ACCEPTANCE FIELD RESOLUTION; same text as the coder delegation for this task]
 SKILLS_USED_BY_CODER: file:.claude/skills/engineering-conventions/SKILL.md
-OUTPUT: VERDICT + RISK + ISSUES
+OUTPUT: VERDICT + RISK + ISSUES + ACCEPTANCE_SATISFACTION
 SKILLS: file:.claude/skills/engineering-conventions/SKILL.md
 
 {{AGENT_PREFIX}}test_engineer

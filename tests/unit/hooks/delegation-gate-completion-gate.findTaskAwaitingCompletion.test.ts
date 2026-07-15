@@ -19,6 +19,7 @@ import {
 	getTaskState,
 	resetSwarmState,
 } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(
@@ -118,7 +119,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
 		{ args },
 	);
 }
@@ -158,6 +159,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 
 			// Should not throw — no completion gate violation
@@ -175,6 +177,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.3',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 
 			// Should not throw — no task in tests_run state
@@ -198,6 +201,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 
 			expect(true).toBe(true);
@@ -238,6 +242,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 				await callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
 					task_id: '1.1',
+					prompt: 'ACCEPTANCE: task complete and covered by tests',
 				});
 			} catch {
 				threw = true;
@@ -312,7 +317,8 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			try {
 				await callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
-					description: 'Implement task 1.2',
+					description:
+						'Implement task 1.2\nACCEPTANCE: task complete and covered by tests',
 				});
 			} catch {
 				threw = true;
@@ -349,7 +355,8 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 				await callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
 					task_id: 'not-valid',
-					prompt: 'TASK: 1.2\nFILE: src/foo.ts',
+					prompt:
+						'TASK: 1.2\nFILE: src/foo.ts\nACCEPTANCE: task complete and covered by tests',
 				});
 			} catch {
 				threw = true;
@@ -367,7 +374,8 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			try {
 				await callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
-					prompt: 'TASK: 1.1\nFILE: src/foo.ts',
+					prompt:
+						'TASK: 1.1\nFILE: src/foo.ts\nACCEPTANCE: task complete and covered by tests',
 					description: 'Implement task 1.1',
 					input: 'Do the work for 1.1',
 				});
@@ -388,7 +396,8 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 				await callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
 					task_id: '1.1',
-					prompt: 'TASK: 1.2\nFILE: src/foo.ts',
+					prompt:
+						'TASK: 1.2\nFILE: src/foo.ts\nACCEPTANCE: task complete and covered by tests',
 				});
 			} catch {
 				threw = true;

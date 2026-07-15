@@ -85,7 +85,13 @@ describe('delegation-gate background flag (Stage A)', () => {
 		try {
 			await hook.toolBefore(
 				{ tool: 'Task', sessionID: 's1', callID: 'c1' },
-				{ args: { subagent_type: 'reviewer', background: true } },
+				{
+					args: {
+						subagent_type: 'reviewer',
+						background: true,
+						prompt: 'ACCEPTANCE: task complete and covered by tests',
+					},
+				},
 			);
 		} catch {
 			threw = true;

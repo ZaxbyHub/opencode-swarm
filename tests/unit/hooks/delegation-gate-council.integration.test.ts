@@ -13,6 +13,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 function makeConfig(council?: { enabled?: boolean }): PluginConfig {
 	return {
@@ -91,7 +92,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
 		{ args },
 	);
 }
@@ -168,6 +169,7 @@ describe('delegation-gate: council mode integration', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_reviewer',
 				task_id: '1.1',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;

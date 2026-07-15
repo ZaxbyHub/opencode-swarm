@@ -52,6 +52,24 @@ const REJECTED_OUTPUT = [
 	'- guard `input?.value` before dereference',
 ].join('\n');
 
+// Mirrors the real field order mandated by src/agents/reviewer.ts's OUTPUT
+// FORMAT block: ISSUES is immediately followed by ACCEPTANCE_SATISFACTION,
+// then TASK, then SKILL_COMPLIANCE. Regression coverage for the bug where
+// ACCEPTANCE_SATISFACTION (and the TASK line after it) were swallowed into
+// the ISSUES section because ACCEPTANCE_SATISFACTION was missing from
+// SECTION_FIELDS.
+const APPROVED_WITH_ACCEPTANCE_OUTPUT = [
+	'VERDICT: APPROVED',
+	'REUSE_RE_VERIFICATION: SKIPPED (no new exports)',
+	'RISK: LOW',
+	'ISSUES: none',
+	'ACCEPTANCE_SATISFACTION: SATISFIED - FR-002 implemented at src/foo.ts:10',
+	'TASK: 2.2',
+	'SKILL_COMPLIANCE: COMPLIANT — all rules followed',
+	'DIRECTIVE_COMPLIANCE: none',
+	'FIXES: none',
+].join('\n');
+
 describe('parseReviewerOutput', () => {
 	test('parses an APPROVED verdict with risk and empty issues', () => {
 		const parsed = parseReviewerOutput(APPROVED_OUTPUT);
@@ -153,6 +171,48 @@ describe('parseReviewerOutput', () => {
 
 	test('does not match partial words like VERDICT: APPROVEDISH', () => {
 		expect(parseReviewerOutput('VERDICT: APPROVEDISH')).toBeNull();
+	});
+
+	test('regression: ACCEPTANCE_SATISFACTION and TASK lines between ISSUES and SKILL_COMPLIANCE do not leak into issues', () => {
+		const parsed = parseReviewerOutput(APPROVED_WITH_ACCEPTANCE_OUTPUT);
+		expect(parsed).not.toBeNull();
+		expect(parsed?.verdict).toBe('approved');
+		// ISSUES: none -> empty issues array, not swallowing ACCEPTANCE_SATISFACTION/TASK
+		expect(parsed?.issues).toEqual([]);
+		// FIXES: none -> empty fixes array, unaffected by the new section
+		expect(parsed?.fixes).toEqual([]);
+	});
+
+	test('regression: real ISSUES content is not extended by a following ACCEPTANCE_SATISFACTION section', () => {
+		const rejectedWithAcceptance = [
+			'VERDICT: REJECTED',
+			'REUSE_RE_VERIFICATION: SKIPPED',
+			'RISK: HIGH',
+			'ISSUES:',
+			'- [HIGH] src/utils/parse.ts:42 off-by-one in loop bound drops the last element',
+			'ACCEPTANCE_SATISFACTION: NOT_SATISFIED - FR-002 not implemented (no corresponding implementation found)',
+			'TASK: 2.2',
+			'SKILL_COMPLIANCE: COMPLIANT',
+			'DIRECTIVE_COMPLIANCE: none',
+			'FIXES:',
+			'- implement FR-002 at src/foo.ts',
+		].join('\n');
+		const parsed = parseReviewerOutput(rejectedWithAcceptance);
+		expect(parsed?.verdict).toBe('rejected');
+		// Only the single real ISSUES line — ACCEPTANCE_SATISFACTION/TASK content
+		// must not be appended to the ISSUES collection.
+		expect(parsed?.issues).toHaveLength(1);
+		expect(parsed?.issues[0].text).toContain('off-by-one');
+		expect(
+			parsed?.issues.some((i) => i.text.includes('ACCEPTANCE_SATISFACTION')),
+		).toBe(false);
+		expect(parsed?.issues.some((i) => i.text.includes('NOT_SATISFIED'))).toBe(
+			false,
+		);
+		expect(parsed?.issues.some((i) => i.text.startsWith('TASK'))).toBe(false);
+		// FIXES section still parses correctly after the new section.
+		expect(parsed?.fixes).toHaveLength(1);
+		expect(parsed?.fixes[0]).toContain('src/foo.ts');
 	});
 });
 

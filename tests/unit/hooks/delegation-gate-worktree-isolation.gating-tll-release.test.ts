@@ -25,6 +25,7 @@ import {
 	standardWorktreeSerializationSessions,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { freezeClock, withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(
@@ -122,7 +123,7 @@ function serializeSessionDirectly(
 	standardWorktreeSerializationSessions.add(sessionID);
 	isolationInternals.serializationStateBySessionID!.set(sessionID, {
 		sessionID,
-		serializedAt: opts?.serializedAt ?? Date.now(),
+		serializedAt: opts?.serializedAt ?? withFrozenClock(() => Date.now()),
 		successfulDispatchesSince: 0,
 	});
 	const session = ensureAgentSession(sessionID);
@@ -137,7 +138,13 @@ async function callToolBeforeCoder(
 ): Promise<void> {
 	await hook.toolBefore(
 		{ tool: 'Task', sessionID, callID: `call-${Date.now()}` },
-		{ args: { subagent_type: 'coder', task_id: taskId } },
+		{
+			args: {
+				subagent_type: 'coder',
+				task_id: taskId,
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
+			},
+		},
 	);
 }
 
@@ -179,8 +186,7 @@ describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 		const hook = createDelegationGateHook(config, tempDir);
 
 		// Mock Date.now to advance time well past TTL (TTL = 50ms, elapsed = 100ms)
-		const originalNow = Date.now;
-		Date.now = () => now + 100;
+		const restore = freezeClock({ fixedNow: now + 100 });
 
 		try {
 			// Dispatch a coder Task via the public toolBefore path
@@ -198,7 +204,7 @@ describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 				standardWorktreeSerializationSessions.has('sc112-gate-session'),
 			).toBe(false);
 		} finally {
-			Date.now = originalNow;
+			restore();
 		}
 	});
 
@@ -218,8 +224,7 @@ describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 		const hook = createDelegationGateHook(config, tempDir);
 
 		// Advance time by only 1 second (TTL = 60s, elapsed = 1s)
-		const originalNow = Date.now;
-		Date.now = () => now + 1000;
+		const restore = freezeClock({ fixedNow: now + 1000 });
 
 		try {
 			// Dispatch should still be rejected because TTL has not expired
@@ -227,7 +232,7 @@ describe('FR-104 SC-112: TTL release reachable via public gating path', () => {
 				callToolBeforeCoder(hook, 'sc112-not-expired-session', '1.1'),
 			).rejects.toThrow(/STANDARD_WORKTREE_ISOLATION_SERIALIZED/);
 		} finally {
-			Date.now = originalNow;
+			restore();
 		}
 	});
 });
@@ -262,7 +267,7 @@ describe('FR-104 SC-111: count release reachable via public gating path', () => 
 			'sc111-gate-session',
 			{
 				sessionID: 'sc111-gate-session',
-				serializedAt: Date.now(),
+				serializedAt: withFrozenClock(() => Date.now()),
 				successfulDispatchesSince: 10, // count threshold is 5
 			},
 		);

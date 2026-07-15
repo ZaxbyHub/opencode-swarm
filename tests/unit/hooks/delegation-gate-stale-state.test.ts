@@ -14,6 +14,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 function makeConfig(): PluginConfig {
 	return {
@@ -43,7 +44,15 @@ function makeToolBeforeArgs(
 ] {
 	return [
 		{ tool: 'Task', sessionID, callID },
-		{ args: { subagent_type: agentName, prompt: 'do work' } },
+		{
+			args: {
+				subagent_type: agentName,
+				// ACCEPTANCE line keeps the #1687 coder/reviewer pre-dispatch gate
+				// inert here so these stale-state tests exercise their original
+				// assertions unchanged (issue #1687, FR-003).
+				prompt: 'do work\nACCEPTANCE: task complete and covered by tests',
+			},
+		},
 	];
 }
 
@@ -86,7 +95,11 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 		// Delegation chains exist but only for reviewer (no coder delegation)
 		swarmState.delegationChains.set(SESSION_ID, [
-			{ from: 'architect', to: 'reviewer', timestamp: Date.now() },
+			{
+				from: 'architect',
+				to: 'reviewer',
+				timestamp: withFrozenClock(() => Date.now()),
+			},
 		]);
 
 		await expect(

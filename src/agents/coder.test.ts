@@ -95,3 +95,41 @@ describe('CODER_PROMPT — REUSE_SCAN in DONE template', () => {
 		);
 	});
 });
+
+describe('CODER_PROMPT — ACCEPTANCE field (issue #1687 task 2.1)', () => {
+	const agent = createCoderAgent('test-model');
+	const prompt = agent.config.prompt ?? '';
+
+	it('INPUT FORMAT includes an ACCEPTANCE field', () => {
+		expect(prompt).toContain('ACCEPTANCE:');
+	});
+
+	it('ACCEPTANCE field is positioned after OUTPUT and CONSTRAINT, before SKILLS', () => {
+		const outputIndex = prompt.indexOf('OUTPUT: [expected deliverable]');
+		const constraintIndex = prompt.indexOf('CONSTRAINT: [what NOT to do]');
+		const acceptanceIndex = prompt.indexOf('ACCEPTANCE:', constraintIndex);
+		const skillsIndex = prompt.indexOf('SKILLS: [optional', acceptanceIndex);
+		expect(constraintIndex).toBeGreaterThan(outputIndex);
+		expect(acceptanceIndex).toBeGreaterThan(constraintIndex);
+		expect(skillsIndex).toBeGreaterThan(acceptanceIndex);
+	});
+
+	it('documents verbatim/byte-for-byte FR text requirement, not paraphrase', () => {
+		expect(prompt).toContain('byte-for-byte');
+		expect(prompt).toContain('never a paraphrase or summary');
+	});
+
+	it('documents ACCEPTANCE is never empty even without a spec mapping', () => {
+		expect(prompt).toContain('This field is never empty.');
+	});
+
+	it('does NOT describe ACCEPTANCE as optional/omittable (old M15 wording removed)', () => {
+		expect(prompt).not.toContain('its absence is normal and is NOT a blocker');
+	});
+
+	it('ACCEPTANCE HANDLING guidance treats ACCEPTANCE as at least as binding as TASK', () => {
+		expect(prompt).toContain('ACCEPTANCE HANDLING');
+		expect(prompt).toContain('at least as binding as TASK');
+		expect(prompt).toContain('the task is not complete');
+	});
+});

@@ -103,7 +103,8 @@ describe('delegation gate doc-only durable evidence', () => {
 		const args = {
 			subagent_type: 'coder',
 			task_id: '1.1',
-			prompt: 'TASK: 1.1\nImplement the approved task.',
+			prompt:
+				'TASK: 1.1\nImplement the approved task.\nACCEPTANCE: task complete and covered by tests',
 		};
 		await hook.toolBefore(
 			{ tool: 'Task', sessionID: 'architect-session', callID: 'coder-call' },
@@ -214,7 +215,8 @@ describe('delegation gate doc-only durable evidence', () => {
 					args: {
 						subagent_type: 'coder',
 						task_id: '1.1',
-						prompt: 'TASK: 1.1\nImplement the approved code task.',
+						prompt:
+							'TASK: 1.1\nImplement the approved code task.\nACCEPTANCE: task complete and covered by tests',
 					},
 				},
 			);
@@ -259,7 +261,8 @@ describe('delegation gate doc-only durable evidence', () => {
 			const args = {
 				subagent_type: 'coder',
 				task_id: '1.1',
-				prompt: 'TASK: 1.1\nUpdate the approved documentation.',
+				prompt:
+					'TASK: 1.1\nUpdate the approved documentation.\nACCEPTANCE: task complete and covered by tests',
 			};
 
 			try {

@@ -2,10 +2,13 @@ import { describe, expect, it } from 'bun:test';
 import { createCoderAgent } from '../../../src/agents/coder';
 
 /**
- * M15: the coder INPUT FORMAT block must document the optional ACCEPTANCE line
- * so structured acceptance / FR / SC criteria reach the delegated coder instead
- * of being lost as architect free-text. The field is optional — its absence is
- * explicitly declared non-blocking.
+ * M15 (superseded by issue #1687 task 2.1): the coder INPUT FORMAT block must
+ * document the ACCEPTANCE line so structured acceptance / FR / SC criteria
+ * reach the delegated coder instead of being lost as architect free-text.
+ * Per #1687 FR-004/FR-005, the field is now REQUIRED and never empty: it
+ * carries verbatim FR/SC text when the task maps to a spec requirement, or a
+ * task-derived restatement of DONE when it does not — either way ACCEPTANCE
+ * is always populated, never omitted.
  */
 describe('M15: coder INPUT FORMAT carries ACCEPTANCE criteria', () => {
 	const prompt = (
@@ -31,16 +34,17 @@ describe('M15: coder INPUT FORMAT carries ACCEPTANCE criteria', () => {
 			.split('\n')
 			.find((line) => line.startsWith('ACCEPTANCE:'));
 		expect(acceptanceLine).toBeDefined();
-		expect(acceptanceLine).toContain('optional');
 		expect(acceptanceLine).toContain('FR');
 		expect(acceptanceLine).toContain('SC');
 	});
 
-	it('ACCEPTANCE is declared non-blocking when absent', () => {
+	it('ACCEPTANCE is declared required and never empty (supersedes M15 "optional" wording)', () => {
 		const acceptanceLine = prompt
 			.split('\n')
 			.find((line) => line.startsWith('ACCEPTANCE:'));
-		// Absence must be explicitly normal so a coder never blocks on a missing field.
-		expect(acceptanceLine?.toLowerCase()).toContain('absent');
+		// #1687 FR-004: absence of a spec mapping is normal, but the field itself
+		// must never be empty — a coder never gets to treat ACCEPTANCE as optional.
+		expect(acceptanceLine?.toLowerCase()).toContain('never empty');
+		expect(acceptanceLine?.toLowerCase()).not.toContain('optional');
 	});
 });

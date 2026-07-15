@@ -97,6 +97,39 @@ describe('save_plan requirement coverage gate', () => {
 		expect(saved.phases[0].tasks[0].description).toContain('FR-001');
 	});
 
+	test('saves plan when required FR IDs are mapped via structured fr_refs alone (no free-text match)', async () => {
+		const result = await executeSavePlan(
+			baseArgs({
+				phases: [
+					{
+						id: 1,
+						name: 'Implementation',
+						tasks: [
+							{
+								id: '1.1',
+								description: 'Implement the runtime execution gate',
+								fr_refs: ['FR-001', 'FR-002'],
+							},
+						],
+					},
+				],
+			}),
+			dir,
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.requirement_coverage?.status).toBe('passed');
+		expect(result.requirement_coverage?.missing_count).toBe(0);
+		expect(
+			result.requirement_coverage?.covered.find((r) => r.id === 'FR-001')
+				?.mapped_task_ids,
+		).toEqual(['1.1']);
+		const saved = JSON.parse(
+			await readFile(join(dir, '.swarm', 'plan.json'), 'utf8'),
+		);
+		expect(saved.phases[0].tasks[0].fr_refs).toEqual(['FR-001', 'FR-002']);
+	});
+
 	test('allows explicit override while returning structured missing coverage', async () => {
 		const result = await executeSavePlan(
 			baseArgs({ confirm_requirement_coverage_gaps: true }),

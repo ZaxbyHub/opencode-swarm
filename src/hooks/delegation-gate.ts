@@ -335,6 +335,20 @@ interface ValidationContext {
 /**
  * Validates a DelegationEnvelope against the current plan and agent list.
  * Returns { valid: true } on success, or { valid: false; reason: string } on failure.
+ *
+ * NOTE (#1687, kept SEPARATE from {@link validateCoderReviewerAcceptanceField}):
+ * this validator operates on a *structured* `DelegationEnvelope` object recovered
+ * from the OLD `KEY:VALUE` envelope format (`taskId:`/`targetAgent:`/`action:`/
+ * `commandType:`/`files:`/`acceptanceCriteria:`) and is consumed ADVISORY-ONLY,
+ * POST-execution via {@link appendDelegationEnvelopeAdvisory} in `toolAfter` (it
+ * never throws). The free-text coder/reviewer format
+ * (`TASK:`/`FILE:`/`ACCEPTANCE:`) does NOT parse into this shape
+ * (`parseDelegationEnvelope` returns `null`), so this path never fires on a real
+ * coder/reviewer dispatch. The pre-dispatch, BLOCKING acceptance-field gate for
+ * the free-text format lives in {@link validateCoderReviewerAcceptanceField};
+ * the two are intentionally not merged (advisory-vs-blocking, structured-vs-
+ * free-text are different contracts). Do not delete this function — it retains a
+ * real purpose for the old envelope format and other delegation types.
  */
 export function validateDelegationEnvelope(
 	envelope: unknown,
@@ -466,6 +480,56 @@ export function appendDelegationEnvelopeAdvisory(
 		// The advisory path must never throw into the caller (fail-open).
 		return null;
 	}
+}
+
+/**
+ * FR-003 / SC-003 / SC-004 (issue #1687): pre-dispatch acceptance-criteria
+ * enforcement for **coder and reviewer** delegations, operating on the REAL
+ * free-text delegation prompt (`TASK:`/`FILE:`/`INPUT:`/`OUTPUT:`/`CONSTRAINT:`/
+ * `ACCEPTANCE:`/`SKILLS:`) the architect actually sends via the native Task tool.
+ *
+ * Deliberately kept SEPARATE from {@link validateDelegationEnvelope} (see the
+ * sibling note there), NOT a rename/reuse of it, because the semantics differ on
+ * two axes: this function parses the FREE-TEXT `ACCEPTANCE:` line (not a
+ * structured envelope object) and is consumed as a BLOCKING, PRE-execution
+ * (`toolBefore`) gate (not the advisory, post-execution `toolAfter` path that
+ * `validateDelegationEnvelope` feeds via {@link appendDelegationEnvelopeAdvisory}).
+ * The two formats never overlap — `parseDelegationEnvelope` returns `null` for
+ * the free-text coder/reviewer format — so merging them would conflate
+ * advisory-vs-blocking and structured-vs-free-text contracts. M15's advisory
+ * mechanism is left fully intact for the old envelope format and other
+ * delegation types.
+ *
+ * A dispatch passes only when an `ACCEPTANCE:` line exists AND carries non-empty,
+ * non-whitespace content on that line. The `$` line-terminator is intentionally
+ * omitted from the regex: `.` already stops at a newline so `(.*)` captures
+ * exactly the inline field content, and omitting `$` keeps a trailing `\r`
+ * (CRLF-authored prompts) from defeating the match. Multi-line FR bodies are not
+ * validated line-by-line — the coder/reviewer INPUT FORMAT contract puts the
+ * field content on the `ACCEPTANCE:` line itself, and "the field is never empty"
+ * is the only invariant enforced here.
+ *
+ * @param promptText the assembled delegation prompt (all text-bearing Task args
+ *   joined).
+ * @returns `{ valid: true }` when the ACCEPTANCE field is present and non-empty;
+ *   otherwise `{ valid: false, reason }` with a diagnosable reason the caller
+ *   turns into a blocking, pre-dispatch error.
+ */
+export function validateCoderReviewerAcceptanceField(promptText: string): {
+	valid: boolean;
+	reason?: 'acceptance_field_missing' | 'acceptance_field_empty';
+} {
+	// `^ACCEPTANCE:` anchored to a line start (m flag) so an incidental
+	// "ACCEPTANCE:" appearing mid-line (e.g. inside a CONSTRAINT sentence) is not
+	// mistaken for the field header. No `$` anchor — see the doc comment above.
+	const match = /^ACCEPTANCE:[ \t]*(.*)/im.exec(promptText);
+	if (!match) {
+		return { valid: false, reason: 'acceptance_field_missing' };
+	}
+	if (match[1].trim().length === 0) {
+		return { valid: false, reason: 'acceptance_field_empty' };
+	}
+	return { valid: true };
 }
 
 interface MessageInfo {
@@ -1403,6 +1467,48 @@ export function createDelegationGateHook(
 				}
 			} catch {
 				// review routing errors must never block delegation
+			}
+		}
+
+		// FR-003/SC-003/SC-004 (#1687): pre-dispatch acceptance-criteria
+		// enforcement, scoped to coder + reviewer ONLY. Runs here in toolBefore
+		// (pre-execution) so a dispatch whose prompt lacks a non-empty ACCEPTANCE
+		// field is rejected BEFORE the target agent runs — a genuinely new,
+		// BLOCKING check, distinct from M15's advisory, post-execution
+		// appendDelegationEnvelopeAdvisory (toolAfter), which is left untouched for
+		// the old structured-envelope format and other delegation types. Placed
+		// ABOVE the `targetAgent !== 'coder'` early-return below so reviewer (which
+		// returns there and never reaches the coder-only logic) is gated too. Other
+		// delegation targets (sme/explorer/critic/…) are never inspected here.
+		if (targetAgent === 'coder' || targetAgent === 'reviewer') {
+			// Reuse the same broad text-field extraction other checks in this file
+			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
+			// ACCEPTANCE line is found regardless of which arg carried the prompt.
+			const acceptancePromptText = [
+				args.prompt,
+				args.description,
+				args.task,
+				args.input,
+				args.message,
+			]
+				.filter((value): value is string => typeof value === 'string')
+				.join('\n');
+			const acceptanceCheck =
+				validateCoderReviewerAcceptanceField(acceptancePromptText);
+			if (!acceptanceCheck.valid) {
+				const detail =
+					acceptanceCheck.reason === 'acceptance_field_empty'
+						? 'its ACCEPTANCE field is present but empty/whitespace-only'
+						: 'it has no ACCEPTANCE field';
+				const inputFormatFile =
+					targetAgent === 'reviewer' ? 'reviewer' : 'coder';
+				throw new Error(
+					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
+						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the verbatim ` +
+						`FR-###/SC-### requirement text from spec.md when the task maps to one or more spec requirements, or a ` +
+						`one-line task-derived statement of what DONE looks like otherwise (see the INPUT FORMAT in ` +
+						`src/agents/${inputFormatFile}.ts). Add an ACCEPTANCE: line to the delegation prompt and re-dispatch.`,
+				);
 			}
 		}
 
