@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.118.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.118.0...v7.118.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **tui:** migrate command/plan/worktree/turbo/parallel/agents/council/sbom console writes + close epic (PR5/5 [#1756](https://github.com/ZaxbyHub/opencode-swarm/issues/1756)) ([3c7b351](https://github.com/ZaxbyHub/opencode-swarm/commit/3c7b3518e933fd539666b0f9c861524bf197aa8b))
+
 ## [7.118.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.117.0...v7.118.0) (2026-07-15)
 
 
