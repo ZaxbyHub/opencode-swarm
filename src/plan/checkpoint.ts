@@ -22,6 +22,8 @@ import * as path from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { appendLedgerEvent } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
+import { advisoryWarn } from '../services/warning-buffer';
+import { log } from '../utils/logger';
 import {
 	derivePlanMarkdown,
 	loadPlan,
@@ -59,7 +61,7 @@ Regenerated on: save_plan and phase_complete.
 		_fsInternals.writeFileSync(mdPath, header + md);
 	} catch (error) {
 		// Non-blocking: checkpoint failure must never break the calling operation
-		console.warn(
+		log(
 			`[checkpoint] Failed to write SWARM_PLAN checkpoint: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
@@ -104,13 +106,13 @@ export async function importCheckpoint(
 		} else if (_fsInternals.existsSync(swarmDirPath)) {
 			checkpointPath = swarmDirPath;
 			rawContent = _fsInternals.readFileSync(checkpointPath);
-			console.warn(
+			advisoryWarn(
 				'[checkpoint] importCheckpoint: using legacy flat .swarm/SWARM_PLAN.json. This location is deprecated and will be removed in a future version. Run /swarm close to migrate.',
 			);
 		} else if (_fsInternals.existsSync(rootPath)) {
 			checkpointPath = rootPath;
 			rawContent = _fsInternals.readFileSync(checkpointPath);
-			console.warn(
+			advisoryWarn(
 				'[checkpoint] importCheckpoint: using legacy root-level SWARM_PLAN.json. Consider running /swarm close to migrate.',
 			);
 		} else {

@@ -95,34 +95,46 @@ describe('withTurboStateLock', () => {
 	});
 
 	test('logs a warning when lock._release() throws but still returns fn() result', async () => {
-		const warnSpy = spyOn(console, 'warn');
+		// Enable debug mode so log() actually calls console.log
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
 
-		// Inject a mock tryAcquireLock that returns a lock whose _release throws.
-		_internals.tryAcquireLock = mock(async () => ({
-			acquired: true as const,
-			lock: {
-				filePath: '.swarm/turbo-state.json',
-				agent: 'lean-turbo-runner',
-				taskId: SESSION_ID,
-				timestamp: new Date().toISOString(),
-				expiresAt: Date.now() + 60_000,
-				_release: async () => {
-					throw new Error('simulated release failure');
+		try {
+			// Inject a mock tryAcquireLock that returns a lock whose _release throws.
+			_internals.tryAcquireLock = mock(async () => ({
+				acquired: true as const,
+				lock: {
+					filePath: '.swarm/turbo-state.json',
+					agent: 'lean-turbo-runner',
+					taskId: SESSION_ID,
+					timestamp: new Date().toISOString(),
+					expiresAt: Date.now() + 60_000,
+					_release: async () => {
+						throw new Error('simulated release failure');
+					},
 				},
-			},
-		}));
+			}));
 
-		// fn() should complete successfully even though release fails.
-		const result = await withTurboStateLock(
-			tmpDir,
-			SESSION_ID,
-			async () => 'ok',
-		);
-		expect(result).toBe('ok');
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect(warnSpy.mock.calls[0][0]).toContain('state lock release failed');
-
-		warnSpy.mockRestore();
+			// fn() should complete successfully even though release fails.
+			const result = await withTurboStateLock(
+				tmpDir,
+				SESSION_ID,
+				async () => 'ok',
+			);
+			expect(result).toBe('ok');
+			expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+			expect(consoleLogSpy.mock.calls[0][0]).toContain(
+				'state lock release failed',
+			);
+		} finally {
+			consoleLogSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+		}
 	});
 
 	test('retries and eventually throws TurboStateLockTimeoutError when tryAcquireLock throws', async () => {

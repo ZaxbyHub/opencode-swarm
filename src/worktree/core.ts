@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
@@ -216,7 +217,7 @@ export async function removeLaneProfileFromDiskReal(
 	} catch (err) {
 		// ENOENT means the file was already absent — this is fine.
 		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-			console.warn(
+			log(
 				`[worktree] Failed to remove lane profile ${envPath}: ${(err as Error).message}`,
 			);
 		}
@@ -574,7 +575,7 @@ export async function provisionWorktree(
 	if (budgetResult.ok === false) {
 		if (options.worktreeDir) {
 			// User explicitly set worktree_dir — warn but proceed
-			console.warn(
+			advisoryWarn(
 				`[swarm] Path budget warning: ${budgetResult.error} ${budgetResult.suggestion}`,
 			);
 		} else {
@@ -766,7 +767,7 @@ export async function provisionWorktree(
 			} catch (e) {
 				// Non-fatal: the lane may still function for tasks that do not require the deps,
 				// or the subsequent commands will surface the real missing-dep error.
-				console.warn(
+				log(
 					`[swarm] deps_strategy '${strategy}' preparation failed for ${id}: ${e instanceof Error ? e.message : String(e)}`,
 				);
 			}
@@ -1074,7 +1075,7 @@ export async function cleanUntrackedFiles(
 		const unsafePaths = candidates.filter((p) => !isSafeToClean(p));
 
 		if (unsafePaths.length > 0) {
-			console.warn(
+			advisoryWarn(
 				`[swarm:cleanUntrackedFiles] Skipping clean — untracked source files detected: ${unsafePaths.join(', ')}`,
 			);
 			return {

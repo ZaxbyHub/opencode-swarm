@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import { log } from '../utils/logger.js';
-
 export const BUNDLED_PROJECT_SKILLS = [
 	'brainstorm',
 	'specify',
@@ -45,46 +44,37 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'parallel-work-check',
 	'ci-fix-monitor',
 ] as const;
-
 export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
-
 /**
  * Project-private runtime location for plugin-owned skills. Repository-native
  * skill roots (`.opencode/skills`, `.claude/skills`, and `.agents/skills`) are
  * user-owned and must never be used as materialization destinations.
  */
 export const BUNDLED_PROJECT_SKILL_ROOT = '.swarm/bundled-skills';
-
 export function bundledProjectSkillFileReference(
 	slug: BundledProjectSkill,
 ): string {
 	return `file:${BUNDLED_PROJECT_SKILL_ROOT}/${slug}/SKILL.md`;
 }
-
 const MAX_SKILL_FILES = 64;
 const MAX_SKILL_BYTES = 512_000;
 const MAX_IN_FLIGHT_SYNCS = 64;
-
 const inFlightSyncs = new Map<string, Promise<void>>();
-
 interface CopyState {
 	files: number;
 	bytes: number;
 }
-
 interface BundledSkillFile {
 	relativePath: string;
 }
-
 function describeBundledSkillSyncFailure(err: unknown): string {
 	const message = err instanceof Error ? err.message : String(err);
 	return `[opencode-swarm] Could not install bundled project skills; continuing without sync: ${message}`;
 }
-
 // ---------------------------------------------------------------------------
 // Async materialization for the plugin-init path. The plugin-init path must be
 // bounded by `withTimeout` (AGENTS.md Invariant 1). `withTimeout` is
-// `Promise.race`, so it can only bound work that actually yields — a synchronous
+// `Promise.race`, so it can only bound work that actually yields â€” a synchronous
 // copy loop wrapped in an async IIFE still runs to completion on one tick and is
 // NOT bounded. This implementation uses `fs/promises` with real await points
 // between files so the timeout is enforceable at file boundaries.
@@ -93,7 +83,6 @@ function describeBundledSkillSyncFailure(err: unknown): string {
 // MAX_SKILL_FILES/MAX_SKILL_BYTES bounds, and rollback-on-error. Any filesystem
 // error leaves command execution fail-open.
 // ---------------------------------------------------------------------------
-
 async function isSymbolicLinkAsync(p: string): Promise<boolean> {
 	try {
 		return (await fsp.lstat(p)).isSymbolicLink();
@@ -101,7 +90,6 @@ async function isSymbolicLinkAsync(p: string): Promise<boolean> {
 		return false;
 	}
 }
-
 async function ensureNotSymlinkedDirectoryAsync(p: string): Promise<boolean> {
 	try {
 		const stat = await fsp.lstat(p);
@@ -110,7 +98,6 @@ async function ensureNotSymlinkedDirectoryAsync(p: string): Promise<boolean> {
 		return (err as NodeJS.ErrnoException).code === 'ENOENT';
 	}
 }
-
 async function pathExistsAsync(p: string): Promise<boolean> {
 	try {
 		await fsp.access(p);
@@ -119,7 +106,6 @@ async function pathExistsAsync(p: string): Promise<boolean> {
 		return false;
 	}
 }
-
 async function collectBundledSkillFilesBoundedAsync(
 	sourceDir: string,
 	state: CopyState,
@@ -129,15 +115,12 @@ async function collectBundledSkillFilesBoundedAsync(
 	const entries = await fsp.readdir(currentSource, { withFileTypes: true });
 	entries.sort((a, b) => a.name.localeCompare(b.name));
 	const files: BundledSkillFile[] = [];
-
 	for (const entry of entries) {
 		const relativeEntry = path.join(relativeDir, entry.name);
 		const sourcePath = path.join(sourceDir, relativeEntry);
-
 		if (entry.isSymbolicLink() || (await isSymbolicLinkAsync(sourcePath))) {
 			throw new Error('refusing to copy symlinked bundled skill entry');
 		}
-
 		if (entry.isDirectory()) {
 			files.push(
 				...(await collectBundledSkillFilesBoundedAsync(
@@ -148,9 +131,7 @@ async function collectBundledSkillFilesBoundedAsync(
 			);
 			continue;
 		}
-
 		if (!entry.isFile()) continue;
-
 		const stat = await fsp.stat(sourcePath);
 		const nextFiles = state.files + 1;
 		const nextBytes = state.bytes + stat.size;
@@ -161,10 +142,8 @@ async function collectBundledSkillFilesBoundedAsync(
 		state.bytes = nextBytes;
 		files.push({ relativePath: relativeEntry });
 	}
-
 	return files;
 }
-
 async function ensureContainedDirectoryAsync(
 	rootDir: string,
 	directory: string,
@@ -188,7 +167,6 @@ async function ensureContainedDirectoryAsync(
 			throw new Error('refusing to traverse unsafe bundled skill directory');
 		}
 	}
-
 	let current = safeRoot;
 	for (const segment of relative.split(path.sep).filter(Boolean)) {
 		current = path.join(current, segment);
@@ -213,7 +191,6 @@ async function ensureContainedDirectoryAsync(
 		}
 	}
 }
-
 async function rollbackCopiedFilesAsync(
 	copiedFiles: string[],
 	destDir: string,
@@ -225,7 +202,6 @@ async function rollbackCopiedFilesAsync(
 		const resolvedFile = path.resolve(copiedFile);
 		const relative = path.relative(safeDestDir, resolvedFile);
 		if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
-
 		try {
 			await fsp.rm(resolvedFile, { force: true });
 		} catch {
@@ -233,7 +209,6 @@ async function rollbackCopiedFilesAsync(
 		}
 		dirs.add(path.dirname(resolvedFile));
 	}
-
 	for (const overwritten of overwrittenFiles.reverse()) {
 		const resolvedFile = path.resolve(overwritten.path);
 		const relative = path.relative(safeDestDir, resolvedFile);
@@ -244,7 +219,6 @@ async function rollbackCopiedFilesAsync(
 			// Best effort restore only; the original copy error remains primary.
 		}
 	}
-
 	for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
 		const relative = path.relative(safeDestDir, path.resolve(dir));
 		if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
@@ -255,7 +229,6 @@ async function rollbackCopiedFilesAsync(
 		}
 	}
 }
-
 async function copyFileAtomicAsync(
 	sourcePath: string,
 	destPath: string,
@@ -276,7 +249,6 @@ async function copyFileAtomicAsync(
 		throw err;
 	}
 }
-
 async function copyBundledDirectoryBoundedAsync(
 	sourceDir: string,
 	destDir: string,
@@ -287,12 +259,10 @@ async function copyBundledDirectoryBoundedAsync(
 	});
 	const copiedFiles: string[] = [];
 	const overwrittenFiles: Array<{ path: string; contents: Buffer }> = [];
-
 	try {
 		for (const file of files) {
 			const sourcePath = path.join(sourceDir, file.relativePath);
 			const destPath = path.join(destDir, file.relativePath);
-
 			await ensureContainedDirectoryAsync(destDir, path.dirname(destPath));
 			if (await pathExistsAsync(destPath)) {
 				if (await isSymbolicLinkAsync(destPath)) {
@@ -317,7 +287,6 @@ async function copyBundledDirectoryBoundedAsync(
 		throw err;
 	}
 }
-
 async function performBundledProjectSkillSyncAsync(
 	projectDirectory: string,
 	packageRoot: string,
@@ -327,24 +296,20 @@ async function performBundledProjectSkillSyncAsync(
 		const sourceRoot = path.join(packageRoot, '.opencode', 'skills');
 		const swarmDir = path.join(projectDirectory, '.swarm');
 		const skillsDir = path.join(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT);
-
 		if (!(await ensureNotSymlinkedDirectoryAsync(sourceRoot))) {
 			throw new Error('refusing to copy symlinked bundled skill source root');
 		}
 		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) return;
 		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
-
 		for (const slug of BUNDLED_PROJECT_SKILLS) {
 			const sourceDir = path.join(sourceRoot, slug);
 			const sourceSkill = path.join(sourceDir, 'SKILL.md');
 			const destDir = path.join(skillsDir, slug);
-
 			if (!(await pathExistsAsync(sourceSkill))) continue;
 			if (!(await ensureNotSymlinkedDirectoryAsync(sourceDir))) {
 				throw new Error('refusing to copy symlinked bundled skill directory');
 			}
 			if (!(await ensureNotSymlinkedDirectoryAsync(destDir))) continue;
-
 			await copyBundledDirectoryBoundedAsync(sourceDir, destDir);
 			// Success is a routine, expected, non-advisory event (the sync is
 			// best-effort by design). Emit ONLY through the debug-gated logger so
@@ -368,11 +333,11 @@ async function performBundledProjectSkillSyncAsync(
 		if (quiet) {
 			advisoryWarn(failureMsg);
 		} else {
+			// biome-ignore lint/suspicious/noConsole: Fallback user-facing warning when bundled skill sync fails non-quietly — cannot use advisoryWarn as it would duplicate the already-raised advisory
 			console.warn(failureMsg);
 		}
 	}
 }
-
 /**
  * Materialize built-in mode skills into the target project's private runtime
  * tree so architect MODE dispatch never collides with repository-owned skills
@@ -401,7 +366,6 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 		});
 		return;
 	}
-
 	const syncPromise = performBundledProjectSkillSyncAsync(
 		projectDirectory,
 		packageRoot,
@@ -411,12 +375,9 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 			inFlightSyncs.delete(syncKey);
 		}
 	});
-
 	inFlightSyncs.set(syncKey, syncPromise);
-
 	return syncPromise;
 }
-
 export const _test_exports = {
 	collectBundledSkillFilesBoundedAsync,
 	copyBundledDirectoryBoundedAsync,

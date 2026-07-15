@@ -10,6 +10,7 @@
  * @module merge-back
  */
 
+import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
 import type { MergeStrategy } from './types';
@@ -261,7 +262,7 @@ export async function mergeLaneBranch(
 			} else {
 				// No common ancestor (e.g. unrelated histories) — fall back
 				// to cherry-picking just the branch tip with a warning.
-				console.warn(
+				log(
 					'[worktree] mergeLaneBranch: git merge-base failed for cherry-pick; falling back to tip-only cherry-pick',
 				);
 				result = await runGit(['cherry-pick', branchName], primaryDir);
@@ -442,7 +443,7 @@ export async function attemptMergeBackFromDirty(
 		autoCommitted = true;
 	} else if (commitResult.reason !== 'Nothing to commit') {
 		autoCommitFailed = true;
-		console.warn(
+		log(
 			`[worktree] attemptMergeBackFromDirty: auto-commit failed for worktree "${worktreePath}" branch "${branchName}": ${commitResult.reason}`,
 		);
 	}
@@ -453,7 +454,7 @@ export async function attemptMergeBackFromDirty(
 		cleaned = true;
 	} else {
 		cleanFailed = true;
-		console.warn(
+		log(
 			`[worktree] attemptMergeBackFromDirty: clean untracked failed for worktree "${worktreePath}" branch "${branchName}": ${cleanResult.error}`,
 		);
 	}
@@ -646,7 +647,7 @@ export async function startupOrphanRecovery(
 	}
 
 	for (const warning of warnings) {
-		console.warn(warning);
+		log(warning);
 	}
 
 	return {

@@ -90,6 +90,7 @@ function callRealClose(provider: MemoryProvider & MemoryProposalStore): void {
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		if (process.env.OPENCODE_SWARM_DEBUG === '1') {
+			// biome-ignore lint/suspicious/noConsole: Debug-only close failure log — only emits when OPENCODE_SWARM_DEBUG=1 is set
 			console.debug(`[provider-pool] real close failed: ${msg}`);
 		}
 	}

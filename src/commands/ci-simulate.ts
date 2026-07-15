@@ -27,6 +27,7 @@ import {
 	type ExternalToolRunResult,
 	runExternalTool,
 } from '../utils/external-tool-runner.js';
+import { log } from '../utils/logger';
 
 /** Default timeout for git operations (30 seconds). */
 const GIT_TIMEOUT_MS = 30_000;
@@ -230,7 +231,7 @@ async function cleanupWorktree(
 
 	// If git worktree remove failed, log a warning but don't throw
 	if (removeResult.exitCode !== 0) {
-		console.warn(
+		log(
 			`[ci-simulate] git worktree remove failed: ${removeResult.stderr.trim() || removeResult.stdout.trim()}`,
 		);
 	}

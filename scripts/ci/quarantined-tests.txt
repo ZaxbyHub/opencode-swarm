@@ -7,6 +7,13 @@
 # matrix (PR-branch ubuntu-only CI doesn't hit them). Pre-existing, unrelated
 # to any specific PR. Tracked under #1737 (test quarantine debt) pending a
 # dedicated test-stability sprint.
+#
+# reset.test.ts: mock.module('../../../src/state.js') leaks across test files
+# in Bun's shared test-runner process, causing state.test.ts and other tests
+# in the same partition to receive the mock's resetSwarmState (which throws).
+# The mock must be replaced with a _internals DI seam in state.ts to fix properly.
+# Quarantined per issue #1854 (partition reassignment from epic file-count growth).
+tests/unit/commands/reset.test.ts
 # swarm-artifact-cache.test.ts: all assertions pass, but bun can exit
 # non-zero on Windows CI runners (e.g. AV holding a handle on the tmpdir
 # during afterEach's recursive rm) — a platform quirk, not a test-logic bug.

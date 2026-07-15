@@ -30,6 +30,7 @@
  */
 
 import { tryAcquireLock } from '../../parallel/file-locks';
+import { log } from '../../utils/logger';
 
 /** Test-only seam — allows injecting a mock tryAcquireLock without mock.module. */
 export const _internals = { tryAcquireLock };
@@ -101,7 +102,7 @@ export async function withTurboStateLock<T>(
 		} catch (acquireErr) {
 			// tryAcquireLock threw (e.g. transient filesystem error during acquisition).
 			// Treat as a failed acquisition and fall through to deadline/backoff logic.
-			console.warn(
+			log(
 				`[lean-turbo] state lock acquisition error for ${sessionID} (${lockPath}), will retry: ${acquireErr instanceof Error ? acquireErr.message : String(acquireErr)}`,
 			);
 		}
@@ -116,7 +117,7 @@ export async function withTurboStateLock<T>(
 						await lock._release();
 					} catch (releaseErr) {
 						// Non-fatal: proper-lockfile TTL will eventually clean up the stale lock.
-						console.warn(
+						log(
 							`[lean-turbo] state lock release failed for ${sessionID} (${lockPath}): ${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}`,
 						);
 					}

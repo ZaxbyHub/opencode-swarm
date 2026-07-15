@@ -939,6 +939,7 @@ export class SQLiteMemoryProvider
 				})
 				.catch((err) => {
 					if (process.env.OPENCODE_SWARM_DEBUG === '1') {
+						// biome-ignore lint/suspicious/noConsole: Debug-only auto-compaction failure log — only emits when OPENCODE_SWARM_DEBUG=1 is set
 						console.debug(`[memory] auto-compaction failed: ${err}`);
 					}
 				})

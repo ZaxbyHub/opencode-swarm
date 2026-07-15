@@ -9,6 +9,7 @@ import {
 	darkMatterToKnowledgeEntries,
 	formatDarkMatterOutput,
 } from '../tools/co-change-analyzer.js';
+import { log } from '../utils/logger';
 
 /**
  * Handles /swarm dark-matter command.
@@ -59,7 +60,7 @@ export async function handleDarkMatterCommand(
 				return `${output}\n\n[${entries.length} dark matter finding(s) saved to .swarm/knowledge.jsonl]`;
 			}
 		} catch (err) {
-			console.warn('dark-matter: failed to save knowledge entries:', err);
+			log('dark-matter: failed to save knowledge entries:', err);
 			return output;
 		}
 	}

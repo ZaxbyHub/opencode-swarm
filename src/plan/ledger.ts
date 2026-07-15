@@ -16,6 +16,7 @@ import {
 } from '../config/plan-schema';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
+import { criticalWarn, log } from '../utils/logger';
 import { derivePlanId } from './utils';
 
 /**
@@ -387,7 +388,7 @@ export async function readLedgerEvents(
 			}
 		}
 		if (skippedCount > 0) {
-			console.warn(
+			log(
 				`[ledger] Skipped ${skippedCount} malformed line(s) in plan-ledger.jsonl`,
 			);
 		}
@@ -667,7 +668,7 @@ export async function takeSnapshotWithRetry(
 			}
 		}
 	}
-	console.warn(
+	criticalWarn(
 		`[takeSnapshotWithRetry] Snapshot failed after ${MAX_RETRIES} retries (${TOTAL_ATTEMPTS} attempts): ${lastError!.message}`,
 	);
 	try {
@@ -1236,7 +1237,7 @@ export async function quarantineLedgerSuffix(
 			`plan-ledger.quarantine.${Date.now()}.${hash}`,
 		);
 		fs.writeFileSync(quarantinePath, badSuffix, 'utf8');
-		console.warn(
+		log(
 			`[ledger] Corrupted suffix quarantined to ${path.relative(directory, quarantinePath)} (salvageable events: ${salvagedCount})`,
 		);
 		return { path: quarantinePath, salvagedCount };

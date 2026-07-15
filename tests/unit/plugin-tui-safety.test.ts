@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import path from 'path';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../..');
 
@@ -186,6 +186,105 @@ const TUI_SAFETY_SCOPES: Array<{
 		label: 'semgrep.ts',
 		quietTokens: [],
 	},
+	// PR5 of epic #1752 migrated these modules to advisoryWarn/log.
+	// quietTokens: [] means findUnguardedWarns flags ANY console.warn.
+	{
+		file: 'src/sdd/effective-spec.ts',
+		label: 'effective-spec.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/plan/checkpoint.ts',
+		label: 'checkpoint.ts',
+		quietTokens: [],
+	},
+	// src/plan/manager.ts: the console.warn at ~line 786 is guarded by the
+	// DEBUG_SWARM env-var check at line 785 (preserved per issue #1754 note).
+	{
+		file: 'src/plan/manager.ts',
+		label: 'manager.ts',
+		quietTokens: ['process.env.DEBUG_SWARM'],
+	},
+	{
+		file: 'src/plan/ledger.ts',
+		label: 'ledger.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/worktree/core.ts',
+		label: 'core.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/worktree/merge.ts',
+		label: 'merge.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/parallel/dependency-graph.ts',
+		label: 'dependency-graph.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/parallel/meta-indexer.ts',
+		label: 'meta-indexer.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/sbom/detectors/index.ts',
+		label: 'sbom-detectors-index.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/turbo/lean/state-lock.ts',
+		label: 'state-lock.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/turbo/lean/runner.ts',
+		label: 'runner.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/agents/index.ts',
+		label: 'agents-index.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/dark-matter.ts',
+		label: 'dark-matter.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/close.ts',
+		label: 'close.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/knowledge.ts',
+		label: 'knowledge.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/design-docs.ts',
+		label: 'design-docs.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/ci-simulate.ts',
+		label: 'ci-simulate.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/acknowledge-spec-drift.ts',
+		label: 'acknowledge-spec-drift.ts',
+		quietTokens: [],
+	},
+	{
+		file: 'src/commands/rollback.ts',
+		label: 'rollback.ts',
+		quietTokens: [],
+	},
 ];
 
 function readScope(file: string): string {
@@ -212,7 +311,10 @@ function findUnguardedWarns(
 	quietTokens: string[],
 ): Array<{ line: number; context: string }> {
 	const lines = src.split('\n');
-	const unguarded: Array<{ line: number; context: string }> = [];
+	const unguarded: Array<{
+		line: number;
+		context: string;
+	}> = [];
 	for (let i = 0; i < lines.length; i += 1) {
 		if (!/console\.warn\(/.test(lines[i])) continue;
 		const context = lines.slice(Math.max(0, i - 8), i + 1).join('\n');
@@ -296,29 +398,33 @@ describe('Plugin TUI safety', () => {
 		}
 	});
 
-	test('PR2/PR3/PR4-migrated modules have zero raw console.* (epic #1752)', () => {
+	test('PR2/PR3/PR4/PR5-migrated modules have zero raw console.* (epic #1752)', () => {
 		// PR2 (loader.ts, architect.ts, snapshot-reader.ts, project-init.ts),
 		// PR3 (delegation-gate, worktree-isolation, knowledge-store,
 		// skill-usage-log, council-evidence-writer, ast-diff,
-		// context-budget-service, worktree-link-suggestion, prm/*), and PR4
+		// context-budget-service, worktree-link-suggestion, prm/*), PR4
 		// (build-check, convene-general-council, dispatch-lanes,
 		// lean-turbo-run-phase, req-coverage, sbom-generate, update-task-status,
-		// write-drift-evidence, mutation/generator, sast/semgrep) were migrated
-		// to advisoryWarn/log. They must contain ZERO raw console.warn/error/log
-		// so the bubbletea TUI is never corrupted on the init, hook, and tool
-		// execute paths (issue #1249 class). This is the interim regression
-		// guard until PR5 enables Biome `noConsole` globally. The regex covers
-		// all three console channels because PR4 migrated `console.error` sites
-		// (semgrep kill-failed, build-check evidence, lean-turbo cleanup) in
-		// addition to `console.warn`.
+		// write-drift-evidence, mutation/generator, sast/semgrep), and PR5
+		// (effective-spec, checkpoint, manager, ledger, worktree/*, parallel/*,
+		// turbo/lean/*, agents/index, council-evidence-writer, commands/*) were
+		// migrated to advisoryWarn/log. They must contain ZERO raw
+		// console.warn/error/log (the `noConsole` lint is deferred to PR5, so
+		// this static guard is the interim regression guard until PR5 enables
+		// Biome `noConsole` globally. The regex covers all three console
+		// channels because PR4 migrated `console.error` sites (semgrep
+		// kill-failed, build-check evidence, lean-turbo cleanup) in addition
+		// to `console.warn`.
 		for (const scope of TUI_SAFETY_SCOPES) {
 			if (scope.quietTokens.length > 0) continue; // skip guarded-scope files
 			const src = readScope(scope.file);
-			const consoleCount = (src.match(/console\.(warn|error|log)\(/g) || [])
-				.length;
+			const warnCount = (src.match(/console\.warn\(/g) || []).length;
+			const errorCount = (src.match(/console\.error\(/g) || []).length;
+			const logCount = (src.match(/console\.log\(/g) || []).length;
+			const consoleCount = warnCount + errorCount + logCount;
 			expect(
 				consoleCount,
-				`${scope.file} must contain zero raw console.warn/error/log after epic #1752 PR2/PR3/PR4 migration`,
+				`${scope.file} must contain zero raw console.warn/error/log after epic #1752 PR2/PR3/PR4/PR5 migration`,
 			).toBe(0);
 		}
 	});
@@ -332,6 +438,6 @@ describe('Plugin TUI safety', () => {
 		const src = readScope('src/utils/gitignore-warning.ts');
 		const warnMatches = src.match(/console\.warn\(/g) || [];
 		expect(warnMatches.length).toBe(1);
-		expect(src).toContain('INTENTIONALLY NOT gated behind quiet');
+		expect(src).toContain('intentionally always emitted as raw');
 	});
 });

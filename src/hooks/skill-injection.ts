@@ -127,6 +127,7 @@ export function injectSkillsIntoDelegation(
 		// skillPath would corrupt per-skill scoring.
 		args.prompt = `SKILLS: none\n\n${promptRaw}`;
 		if (!options.quiet) {
+			// biome-ignore lint/suspicious/noConsole: Skill propagation gate audit log — confirms when no skills qualified and SKILLS:none was injected; architect must see this to debug injection issues
 			console.warn(
 				'[skill-propagation-gate] No skills above threshold 0.5 — injected SKILLS: none',
 			);
@@ -187,6 +188,7 @@ export function injectSkillsIntoDelegation(
 				(s) => `${path.basename(s.skillPath)} (score: ${s.score.toFixed(2)})`,
 			)
 			.join(', ');
+		// biome-ignore lint/suspicious/noConsole: Skill propagation gate audit log — confirms which skills were injected for architect visibility
 		console.warn(`[skill-propagation-gate] Injected skills: ${skillNames}`);
 	}
 

@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
 import { handleDarkMatterCommand } from '../../../src/commands/dark-matter.js';
 import type {
 	CoChangeEntry,
@@ -10,7 +18,9 @@ const mockFormatDarkMatterOutput = mock();
 const mockDarkMatterToKnowledgeEntries = mock();
 const mockAppendKnowledge = mock();
 const mockResolveSwarmKnowledgePath = mock();
-const mockConsoleWarn = spyOn(console, 'warn').mockImplementation(() => {});
+// Module-level storage for debug/spy setup — actual assignment happens in beforeEach
+let originalDebug: string | undefined;
+let mockConsoleLog: ReturnType<typeof spyOn>;
 
 mock.module('../../../src/tools/co-change-analyzer.js', () => ({
 	detectDarkMatter: mockDetectDarkMatter,
@@ -51,17 +61,32 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 
 describe('handleDarkMatterCommand (adversarial)', () => {
 	beforeEach(() => {
+		// Enable debug so log() (used for "dark-matter: failed to save knowledge entries:")
+		// actually calls console.log. Store original and restore in afterEach.
+		originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
+
 		// NOTE: mock.restore() (not clearAllMocks) would revert the module-level
-		// `console.warn` spy to the *real* console.warn (losing its no-op
+		// `console.log` spy to the *real* console.log (losing its no-op
 		// mockImplementation) and would never re-arm it, since nothing here calls
 		// `.mockImplementation()` again. clearAllMocks() resets call history/
-		// results without tearing down spy implementations, so the warn spy stays
+		// results without tearing down spy implementations, so the log spy stays
 		// silent and trackable across every test in this file.
 		mock.clearAllMocks();
 		mockDetectDarkMatter.mockResolvedValue([]);
 		mockFormatDarkMatterOutput.mockReturnValue(
 			'## Dark Matter: Hidden Couplings\n\nNo hidden couplings detected.',
 		);
+	});
+
+	afterEach(() => {
+		mockConsoleLog.mockRestore();
+		if (originalDebug === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+		}
 	});
 
 	describe('1. Empty string args', () => {
@@ -331,6 +356,11 @@ describe('handleDarkMatterCommand (adversarial)', () => {
 
 describe('Knowledge persistence adversarial tests', () => {
 	beforeEach(() => {
+		// Enable debug so log() calls console.log. Restore in afterEach.
+		originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
+
 		// See the comment in the sibling describe block above: use
 		// clearAllMocks() (not restore()) so the module-level console.warn spy
 		// keeps its no-op implementation (and stays call-trackable) instead of
@@ -346,7 +376,16 @@ describe('Knowledge persistence adversarial tests', () => {
 		mockResolveSwarmKnowledgePath.mockReturnValue(
 			'/dir/.swarm/knowledge.jsonl',
 		);
-		mockConsoleWarn.mockClear();
+		mockConsoleLog.mockClear();
+	});
+
+	afterEach(() => {
+		mockConsoleLog.mockRestore();
+		if (originalDebug === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+		}
 	});
 
 	describe('1. appendKnowledge throws', () => {
@@ -377,8 +416,10 @@ describe('Knowledge persistence adversarial tests', () => {
 
 			const result = await handleDarkMatterCommand('/dir', []);
 
-			expect(mockConsoleWarn).toHaveBeenCalledWith(
-				'dark-matter: failed to save knowledge entries:',
+			expect(mockConsoleLog).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'dark-matter: failed to save knowledge entries:',
+				),
 				expect.any(Error),
 			);
 			expect(result).toBe(mockOutput);
@@ -412,8 +453,10 @@ describe('Knowledge persistence adversarial tests', () => {
 
 			const result = await handleDarkMatterCommand('/dir', []);
 
-			expect(mockConsoleWarn).toHaveBeenCalledWith(
-				'dark-matter: failed to save knowledge entries:',
+			expect(mockConsoleLog).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'dark-matter: failed to save knowledge entries:',
+				),
 				expect.any(Error),
 			);
 			expect(result).toBe(mockOutput);
@@ -511,8 +554,10 @@ describe('Knowledge persistence adversarial tests', () => {
 
 			// First append succeeded, second failed
 			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
-			expect(mockConsoleWarn).toHaveBeenCalledWith(
-				'dark-matter: failed to save knowledge entries:',
+			expect(mockConsoleLog).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'dark-matter: failed to save knowledge entries:',
+				),
 				expect.any(Error),
 			);
 			// Returns plain output, not "[2 saved]" message
@@ -546,8 +591,10 @@ describe('Knowledge persistence adversarial tests', () => {
 			const result = await handleDarkMatterCommand('/dir', []);
 
 			// TypeError from entries.length is caught by try-catch, returns plain output
-			expect(mockConsoleWarn).toHaveBeenCalledWith(
-				'dark-matter: failed to save knowledge entries:',
+			expect(mockConsoleLog).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'dark-matter: failed to save knowledge entries:',
+				),
 				expect.any(Error),
 			);
 			expect(result).toBe(mockOutput);
@@ -578,8 +625,10 @@ describe('Knowledge persistence adversarial tests', () => {
 			const result = await handleDarkMatterCommand('/dir', []);
 
 			// TypeError from entries.length is caught by try-catch, returns plain output
-			expect(mockConsoleWarn).toHaveBeenCalledWith(
-				'dark-matter: failed to save knowledge entries:',
+			expect(mockConsoleLog).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'dark-matter: failed to save knowledge entries:',
+				),
 				expect.any(Error),
 			);
 			expect(result).toBe(mockOutput);

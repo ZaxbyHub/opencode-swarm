@@ -1,5 +1,4 @@
-/** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
-
+﻿/** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -63,22 +62,19 @@ import { readSwarmFileAsync, safeHook } from './utils.js';
 // ============================================================================
 // Module-level state
 // ============================================================================
-
 // Idempotency guard: keyed by sessionID (and by `evidence:<sessionID>:<path>`),
 // stores last-seen retro section hash with timestamp.
 const seenRetroSections = new Map<
 	string,
 	{ value: string; timestamp: number }
 >();
-
-// AGENTS.md §8: module-level state must have an explicit eviction strategy, not
+// AGENTS.md Â§8: module-level state must have an explicit eviction strategy, not
 // only time-based pruning. A burst of distinct sessions inside the 24h window
 // would otherwise grow this map without bound. Cap the entry count and evict the
 // oldest-timestamp entries (LRU-by-recency) once the cap is exceeded.
 const MAX_TRACKED_RETRO_SECTIONS = 500;
 const MAX_IN_FLIGHT_EVIDENCE_ENTRIES = 500;
 const inFlightEvidenceEntries = new Set<string>();
-
 /**
  * Prune entries from seenRetroSections that are older than 24 hours.
  */
@@ -90,7 +86,6 @@ function pruneSeenRetroSections(): void {
 		}
 	}
 }
-
 /**
  * Bound seenRetroSections to MAX_TRACKED_RETRO_SECTIONS entries, evicting the
  * oldest-timestamp entries first. Called after every insert so the map can never
@@ -108,7 +103,6 @@ function capSeenRetroSections(): void {
 		seenRetroSections.delete(byAge[i][0]);
 	}
 }
-
 /** Record a seen-section hash and enforce the size cap in one step. */
 function recordSeenRetroSection(
 	key: string,
@@ -118,11 +112,9 @@ function recordSeenRetroSection(
 	seenRetroSections.set(key, { value, timestamp });
 	capSeenRetroSections();
 }
-
 function hashContent(content: string): string {
 	return createHash('sha1').update(content).digest('hex');
 }
-
 async function canonicalExistingPath(candidate: string): Promise<string> {
 	let resolved = path.resolve(candidate);
 	try {
@@ -133,7 +125,6 @@ async function canonicalExistingPath(candidate: string): Promise<string> {
 	}
 	return resolved;
 }
-
 function isPathContained(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
 	return (
@@ -143,17 +134,14 @@ function isPathContained(root: string, candidate: string): boolean {
 			!path.isAbsolute(relative))
 	);
 }
-
 function physicalPathIdentity(candidate: string): string {
 	const normalized = candidate.replaceAll('\\', '/').normalize('NFC');
 	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
-
 interface EvidencePathScope {
 	projectIdentity: string;
 	evidenceIdentity: string;
 }
-
 async function resolveEvidencePathScope(
 	directory: string,
 	relativeEvidencePath: string,
@@ -176,14 +164,12 @@ async function resolveEvidencePathScope(
 		evidenceIdentity: hashContent(physicalPathIdentity(evidenceTarget)),
 	};
 }
-
 interface EvidenceLessonBatch {
 	identity: string;
 	lessons: string[];
 	projectName: string;
 	phaseNumber: number;
 }
-
 function sanitizeEvidenceLessons(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return value
@@ -191,7 +177,6 @@ function sanitizeEvidenceLessons(value: unknown): string[] {
 		.map((lesson) => lesson.trim())
 		.filter((lesson) => lesson.length > 0 && lesson.length <= 280);
 }
-
 function evidenceProjectName(
 	entry: Record<string, unknown>,
 	root: Record<string, unknown>,
@@ -205,7 +190,6 @@ function evidenceProjectName(
 				? root.project_name
 				: 'unknown';
 }
-
 function evidencePhaseNumber(
 	entry: Record<string, unknown>,
 	root: Record<string, unknown>,
@@ -216,7 +200,6 @@ function evidencePhaseNumber(
 			? root.phase_number
 			: 1;
 }
-
 function extractEvidenceLessonBatches(
 	evidenceData: Record<string, unknown>,
 ): EvidenceLessonBatch[] {
@@ -253,11 +236,9 @@ function extractEvidenceLessonBatches(
 	}
 	return batches;
 }
-
 // ============================================================================
 // Internal helpers (NOT exported)
 // ============================================================================
-
 /**
  * Check if the input is a write operation targeting an evidence file.
  * Exported for testing purposes only.
@@ -266,28 +247,23 @@ export function isWriteToEvidenceFile(input: unknown): boolean {
 	const trigger = normalizeWriteTrigger(input);
 	return isEvidencePath(trigger?.filePath);
 }
-
 interface WriteTrigger {
 	toolName: string;
 	filePath: string;
 	sessionID: string;
 }
-
 const WRITE_TOOLS = new Set([
 	'write',
 	'edit',
 	'apply_patch',
 	'swarm_apply_patch',
 ]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null;
 }
-
 function normalizePathField(value: unknown): string | null {
 	return typeof value === 'string' ? value.replace(/\\/g, '/') : null;
 }
-
 function firstPathFromRecord(record: Record<string, unknown>): string | null {
 	return (
 		normalizePathField(record.path) ??
@@ -295,13 +271,11 @@ function firstPathFromRecord(record: Record<string, unknown>): string | null {
 		normalizePathField(record.file)
 	);
 }
-
 function normalizeWriteTrigger(
 	input: unknown,
 	output?: unknown,
 ): WriteTrigger | null {
 	if (!isRecord(input)) return null;
-
 	const toolName =
 		typeof input.toolName === 'string'
 			? input.toolName
@@ -309,7 +283,6 @@ function normalizeWriteTrigger(
 				? input.tool
 				: null;
 	if (!toolName || !WRITE_TOOLS.has(toolName)) return null;
-
 	const inputArgs = isRecord(input.args) ? input.args : null;
 	const outputArgs =
 		isRecord(output) && isRecord(output.args) ? output.args : null;
@@ -318,7 +291,6 @@ function normalizeWriteTrigger(
 		(inputArgs ? firstPathFromRecord(inputArgs) : null) ??
 		(outputArgs ? firstPathFromRecord(outputArgs) : null);
 	if (!filePath) return null;
-
 	return {
 		toolName,
 		filePath,
@@ -326,16 +298,13 @@ function normalizeWriteTrigger(
 			typeof input.sessionID === 'string' ? input.sessionID : 'default',
 	};
 }
-
 export function isEvidencePath(filePath: string | undefined | null): boolean {
 	if (!filePath) return false;
 	return /(?:^|\/)\.swarm\/+evidence\//i.test(filePath);
 }
-
 function isPlanPath(filePath: string | undefined | null): boolean {
 	return filePath?.includes('.swarm/plan.md') ?? false;
 }
-
 /**
  * Extract the "Lessons Learned" retrospective section from plan markdown.
  * Returns the text from that heading line through the next ### or ## heading (exclusive).
@@ -344,46 +313,36 @@ function isPlanPath(filePath: string | undefined | null): boolean {
 function extractRetrospectiveSection(planContent: string): string | null {
 	const headingRegex = /^###\s+Lessons\s+Learned$/m;
 	const match = headingRegex.exec(planContent);
-
 	if (!match) return null;
-
 	const startIndex = match.index;
 	const restOfContent = planContent.slice(startIndex);
-
 	// Skip the heading line itself before searching for the next heading
 	const firstNewline = restOfContent.indexOf('\n');
 	const contentAfterHeading =
 		firstNewline === -1 ? '' : restOfContent.slice(firstNewline + 1);
-
 	// Find the next heading (### or ##) after the "Lessons Learned" section
 	const nextHeadingRegex = /^#{1,2}\s+/m;
 	const nextMatch = nextHeadingRegex.exec(contentAfterHeading);
-
 	let endIndex: number;
 	if (nextMatch) {
 		endIndex = startIndex + firstNewline + 1 + nextMatch.index;
 	} else {
 		endIndex = planContent.length;
 	}
-
 	return planContent.slice(startIndex, endIndex).trim();
 }
-
 /**
  * Check if the retrospective section has changed since last seen.
  */
 function checkRetroChanged(sessionID: string, section: string): boolean {
 	const hash = hashContent(section);
 	const lastSeen = seenRetroSections.get(sessionID);
-
 	if (lastSeen?.value === hash) {
 		return false; // no change
 	}
-
 	recordSeenRetroSection(sessionID, hash, Date.now());
 	return true; // changed (or new)
 }
-
 /**
  * Extract bullet-point lessons from the retrospective section.
  * Parses lines starting with "- " or "* " (with optional leading whitespace).
@@ -391,7 +350,6 @@ function checkRetroChanged(sessionID: string, section: string): boolean {
 function extractLessonsFromRetro(section: string): string[] {
 	const lessons: string[] = [];
 	const lines = section.split('\n');
-
 	for (const line of lines) {
 		const trimmed = line.trim();
 		// Match bullet points: optional whitespace, then - or *, then space, then content
@@ -403,10 +361,8 @@ function extractLessonsFromRetro(section: string): string[] {
 			}
 		}
 	}
-
 	return lessons;
 }
-
 /**
  * Separate RETRACT:/BAD RULE: lines from normal lessons.
  * Returns: { retractions: string[], normalLessons: string[] }
@@ -431,7 +387,6 @@ function extractRetractionsAndLessons(allLessons: string[]): {
 	}
 	return { retractions, normalLessons };
 }
-
 /**
  * For each retraction text, search knowledge.jsonl for entries whose normalized
  * lesson matches and quarantine them.
@@ -441,7 +396,6 @@ async function processRetractions(
 	directory: string,
 ): Promise<void> {
 	if (retractions.length === 0) return;
-
 	const swarmEntries =
 		(await readKnowledge<SwarmKnowledgeEntry>(
 			resolveSwarmKnowledgePath(directory),
@@ -457,12 +411,10 @@ async function processRetractions(
 					typeof value === 'string' && value.length > 0,
 			),
 	);
-
 	for (const retractionText of retractions) {
 		const normalizedRetraction = normalize(retractionText);
 		const matchedSwarmIds: string[] = [];
 		const matchedHiveIds: string[] = [];
-
 		for (const entry of swarmEntries) {
 			const normalizedLesson = normalize(entry.lesson);
 			if (normalizedLesson === normalizedRetraction) {
@@ -473,18 +425,17 @@ async function processRetractions(
 					`Retracted by architect: ${retractionText}`,
 					'architect',
 				);
+				// biome-ignore lint/suspicious/noConsole: Non-blocking quarantine action log — provides visibility into curator decisions without blocking the operation
 				console.info(
 					`[knowledge-curator] Quarantined entry ${entry.id}: "${entry.lesson}"`,
 				);
 			}
 		}
-
 		for (const entry of hiveEntries) {
 			if (normalize(entry.lesson) === normalizedRetraction) {
 				matchedHiveIds.push(entry.id);
 			}
 		}
-
 		if (!existingSuppressedLessons.has(normalizedRetraction)) {
 			await appendRetractionRecord(directory, {
 				id: crypto.randomUUID(),
@@ -499,15 +450,12 @@ async function processRetractions(
 		}
 	}
 }
-
 // ============================================================================
 // Exported functions
 // ============================================================================
-
 // ============================================================================
 // v3 Actionability Enrichment (Change 4, Task 4.2)
 // ============================================================================
-
 /** Fields the enrichment LLM may emit. verification_predicate is intentionally
  *  NOT accepted from auto-enrichment: predicates execute subprocesses, and
  *  LLM-authored executables from an automated loop are not trusted. Predicates
@@ -521,7 +469,6 @@ const ENRICHMENT_ALLOWED_FIELDS = [
 	'applies_to_tools',
 	'directive_priority',
 ] as const;
-
 /** Build the v3-schema enrichment prompt for a single prose lesson. */
 export function buildV3EnrichmentPrompt(
 	lesson: string,
@@ -530,19 +477,19 @@ export function buildV3EnrichmentPrompt(
 ): string {
 	return [
 		'Convert this prose lesson into an actionable knowledge directive.',
-		'Output ONLY a single JSON object — no code fences, no commentary.',
+		'Output ONLY a single JSON object â€” no code fences, no commentary.',
 		'',
 		'MANDATORY fields (the directive is rejected without them):',
 		'- At least ONE scope field non-empty:',
-		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
-		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
+		'  "applies_to_agents": string[] â€” roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] â€” tool names from: edit, write, patch, bash, read, grep, glob',
 		'- At least ONE predicate field non-empty:',
-		'  "forbidden_actions": string[] — concrete actions to never take',
-		'  "required_actions": string[] — concrete actions to always take',
-		'  "verification_checks": string[] — checks a reviewer can run',
+		'  "forbidden_actions": string[] â€” concrete actions to never take',
+		'  "required_actions": string[] â€” concrete actions to always take',
+		'  "verification_checks": string[] â€” checks a reviewer can run',
 		'',
 		'OPTIONAL fields:',
-		'  "triggers": string[] — short phrases that should surface this lesson',
+		'  "triggers": string[] â€” short phrases that should surface this lesson',
 		'  "directive_priority": "low" | "medium" | "high" | "critical"',
 		'',
 		'Example output:',
@@ -553,7 +500,6 @@ export function buildV3EnrichmentPrompt(
 		`TAGS: ${tags.join(', ')}`,
 	].join('\n');
 }
-
 /** Build the v3-schema enrichment prompt for a batch of prose lessons. */
 function buildV3BatchEnrichmentPrompt(
 	lessons: EnrichmentLessonInput[],
@@ -572,8 +518,8 @@ function buildV3BatchEnrichmentPrompt(
 		'',
 		'For EACH element, mandatory requirements:',
 		'- At least ONE scope field non-empty:',
-		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
-		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
+		'  "applies_to_agents": string[] â€” roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] â€” tool names from: edit, write, patch, bash, read, grep, glob',
 		'- At least ONE predicate field non-empty:',
 		'  "forbidden_actions": string[] | "required_actions": string[] | "verification_checks": string[]',
 		'',
@@ -587,7 +533,6 @@ function buildV3BatchEnrichmentPrompt(
 		lessonLines,
 	].join('\n');
 }
-
 /**
  * Parse + validate an enrichment response. Returns the sanitized fields when
  * the output is shape-valid AND actionable, otherwise the list of missing
@@ -646,7 +591,6 @@ export function parseV3EnrichmentResponse(
 	}
 	return { fields };
 }
-
 function parseV3BatchEnrichmentResponse(
 	text: string,
 	expectedLength: number,
@@ -728,7 +672,6 @@ function parseV3BatchEnrichmentResponse(
 	}
 	return { fields, missing };
 }
-
 /**
  * Batch-enrich plain-prose lessons via the curator LLM with bounded retry.
  *
@@ -810,29 +753,25 @@ async function enrichLessonsToV3Batched(params: {
 	}
 	return out;
 }
-
 /** Per-call timeout for enrichment LLM calls (small, targeted prompts). */
 const ENRICHMENT_LLM_TIMEOUT_MS = 60_000;
 /** Max lessons enriched per LLM call (batch mode). */
 export const ENRICHMENT_BATCH_SIZE = 6;
-
 export interface EnrichmentQuotaOptions {
 	maxCalls: number;
 	window: 'utc' | 'local';
 }
-
 interface EnrichmentLessonInput {
 	lesson: string;
 	category: string;
 	tags: string[];
 }
-
 /**
  * Enrich one prose lesson with v3 actionability fields via the curator LLM.
  * One retry on schema failure (with a RETRY message naming the missing
  * fields). Quota-gated per call via the dedicated knowledge-enrichment quota.
  * Returns null when
- * enrichment is unavailable (quota exhausted) or fails twice — the caller
+ * enrichment is unavailable (quota exhausted) or fails twice â€” the caller
  * quarantines the entry. Never throws.
  */
 export async function enrichLessonToV3(params: {
@@ -875,13 +814,12 @@ export async function enrichLessonToV3(params: {
 					err instanceof Error ? err.message : String(err)
 				}`,
 			);
-			// LLM/transport error: do not retry on a second transport failure path —
+			// LLM/transport error: do not retry on a second transport failure path â€”
 			// the loop's second iteration is the single retry budget either way.
 		}
 	}
 	return null;
 }
-
 /** Append a curator_skipped audit line to `.swarm/events.jsonl` (best-effort). */
 async function appendCuratorSkippedEvent(
 	directory: string,
@@ -905,14 +843,11 @@ async function appendCuratorSkippedEvent(
 		// audit log is best-effort; never break curation
 	}
 }
-
 // ============================================================================
-// Meso reflector — micro-reflection insight consumption (Change 6, Task 5.2)
+// Meso reflector â€” micro-reflection insight consumption (Change 6, Task 5.2)
 // ============================================================================
-
 /** Max insight candidates folded into the store per phase boundary. */
 export const MESO_INSIGHT_BATCH_LIMIT = 20;
-
 const KNOWLEDGE_CATEGORIES: ReadonlySet<string> = new Set<KnowledgeCategory>([
 	'process',
 	'architecture',
@@ -925,7 +860,6 @@ const KNOWLEDGE_CATEGORIES: ReadonlySet<string> = new Set<KnowledgeCategory>([
 	'todo',
 	'other',
 ]);
-
 function readInsightJsonl(content: string): InsightCandidate[] {
 	const out: InsightCandidate[] = [];
 	for (const line of content.split('\n')) {
@@ -939,7 +873,6 @@ function readInsightJsonl(content: string): InsightCandidate[] {
 	}
 	return out;
 }
-
 /**
  * Atomically consume up to `batchLimit` insight candidates from
  * `.swarm/insight-candidates.jsonl`, writing back the unconsumed tail under the
@@ -976,7 +909,6 @@ export async function consumeInsightCandidates(
 		return [];
 	}
 }
-
 /** Build a SwarmKnowledgeEntry from an already-v3-actionable insight candidate. */
 export function insightCandidateToEntry(
 	cand: InsightCandidate,
@@ -1028,7 +960,6 @@ export function insightCandidateToEntry(
 			: undefined,
 	};
 }
-
 /**
  * Curate and store swarm knowledge entries from lessons.
  * @returns Promise resolving to an object with counts of stored, skipped, and rejected lessons.
@@ -1058,17 +989,14 @@ export async function curateAndStoreSwarm(
 	quarantined: number;
 }> {
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
-
 	// Unlocked snapshot read for validation purposes only.
 	// Dedup against the final on-disk state happens atomically inside
 	// transactKnowledge below (CF-2 prevention).
 	const snapshot =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
-
 	let skipped = 0;
 	let rejected = 0;
 	let quarantined = 0;
-
 	// Tag-to-category mapping (static, hoisted outside loop)
 	const categoryByTag = new Map<string, KnowledgeCategory>([
 		['process', 'process'],
@@ -1082,7 +1010,6 @@ export async function curateAndStoreSwarm(
 		['other', 'other'],
 		['todo', 'todo'],
 	]);
-
 	// Pre-compute new entries using the snapshot for validation and initial dedup.
 	// The in-progress accumulator (snapshotPlusNew) prevents intra-batch duplicates.
 	const snapshotPlusNew: SwarmKnowledgeEntry[] = [...snapshot];
@@ -1094,7 +1021,6 @@ export async function curateAndStoreSwarm(
 		category: string;
 		tags: string[];
 	}> = [];
-
 	for (const lesson of lessons) {
 		// Determine category from tags
 		const tags = inferTags(lesson);
@@ -1105,14 +1031,12 @@ export async function curateAndStoreSwarm(
 				break;
 			}
 		}
-
 		// Build meta object for validation
 		const meta = {
 			category,
 			scope: 'global',
 			confidence: computeConfidence(0, true),
 		};
-
 		// Validate the lesson if validation_enabled is set in config
 		if (config.validation_enabled !== false) {
 			const result = validateLesson(
@@ -1120,7 +1044,6 @@ export async function curateAndStoreSwarm(
 				snapshotPlusNew.map((e) => e.lesson),
 				meta,
 			);
-
 			// If validation failed (severity is 'error'), reject the lesson
 			if (result.valid === false || result.severity === 'error') {
 				const rejectedLesson: RejectedLesson = {
@@ -1139,7 +1062,6 @@ export async function curateAndStoreSwarm(
 				continue;
 			}
 		}
-
 		// Check for near-duplicates against snapshot + already-planned new entries
 		const duplicate = findActiveSwarmNearDuplicate(
 			lesson,
@@ -1151,7 +1073,6 @@ export async function curateAndStoreSwarm(
 			skipped++;
 			continue; // skip duplicate
 		}
-
 		// Build the new swarm entry
 		const entry: SwarmKnowledgeEntry = {
 			id: crypto.randomUUID(),
@@ -1180,8 +1101,7 @@ export async function curateAndStoreSwarm(
 			project_name: projectName,
 			auto_generated: true,
 		};
-
-		// Layer 5 — Mandatory v3 actionability (Change 4). No new entry reaches the
+		// Layer 5 â€” Mandatory v3 actionability (Change 4). No new entry reaches the
 		// active store without >=1 machine-checkable predicate AND >=1 scope tag.
 		// Plain-prose lessons are enriched via the curator LLM (one retry); entries
 		// that still fail are quarantined to the unactionable queue (recoverable by
@@ -1209,12 +1129,10 @@ export async function curateAndStoreSwarm(
 			});
 			continue;
 		}
-
 		toAdd.push(entry);
 		// Track in accumulator so subsequent lessons in this batch see it for dedup.
 		snapshotPlusNew.push(entry);
 	}
-
 	if (pendingBatchEnrichment.length > 0 && options?.llmDelegate) {
 		const enrichedBatch = await enrichLessonsToV3Batched({
 			directory,
@@ -1256,7 +1174,6 @@ export async function curateAndStoreSwarm(
 			snapshotPlusNew.push(pending.entry);
 		}
 	}
-
 	// Meso reflector (Change 6, Task 5.2): fold in micro-reflection insight
 	// candidates. They are already v3-actionable, so they skip enrichment and go
 	// straight through the actionability gate + dedup against the retro lessons
@@ -1274,7 +1191,7 @@ export async function curateAndStoreSwarm(
 			// Defense-in-depth (Phase 5 review): the insight-candidates queue is an
 			// on-disk file that could be tampered between the micro-reflector's write
 			// and this read, so re-apply BOTH gates the micro-reflector applied at
-			// write time — shape (validateActionableFields: length caps, name
+			// write time â€” shape (validateActionableFields: length caps, name
 			// patterns, injection/control-char checks) AND presence
 			// (validateActionability). insightCandidateToEntry already copies only an
 			// explicit field allowlist (verification_predicate is never carried), so
@@ -1313,7 +1230,6 @@ export async function curateAndStoreSwarm(
 	} catch {
 		// insight consumption is best-effort; never break curation
 	}
-
 	// Atomically append new entries under lock (CF-2: dedup at commit time against
 	// fresh disk state prevents two concurrent curator calls from both appending the
 	// same lesson).
@@ -1322,7 +1238,6 @@ export async function curateAndStoreSwarm(
 	if (toAdd.length > 0 || pendingReinforcementIds.size > 0) {
 		await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (current) => {
 			let changed = false;
-
 			for (const id of pendingReinforcementIds) {
 				const existing = current.find((entry) => entry.id === id);
 				if (!existing) continue;
@@ -1336,7 +1251,6 @@ export async function curateAndStoreSwarm(
 					changed = true;
 				}
 			}
-
 			const trulyNew: SwarmKnowledgeEntry[] = [];
 			for (const entry of toAdd) {
 				const duplicate = findActiveSwarmNearDuplicate(
@@ -1359,23 +1273,19 @@ export async function curateAndStoreSwarm(
 				}
 				trulyNew.push(entry);
 			}
-
 			if (trulyNew.length > 0) {
 				current.push(...trulyNew);
 				stored = trulyNew.length;
 				changed = true;
 			}
-
 			return changed ? current : null;
 		});
 	}
-
 	// Enforce swarm_max_entries cap (FIFO: drop oldest when exceeded)
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
-
 	// Change 5 / Task 6.2: refresh the tag co-occurrence synonym map from the
 	// post-write corpus so retrieval can expand queries along learned synonyms.
-	// Only when the corpus actually changed (something stored) — a no-op curation
+	// Only when the corpus actually changed (something stored) â€” a no-op curation
 	// run leaves the tag distribution untouched. Best-effort: a failure here must
 	// never break curation, and the retrieval read path degrades to no-expansion
 	// when the map is absent. The map is bounded by synonym_map_max_pairs.
@@ -1397,7 +1307,6 @@ export async function curateAndStoreSwarm(
 			// synonym map refresh is best-effort; never break curation
 		}
 	}
-
 	// Run auto-promotion after processing all lessons. Callers that only want to PROPOSE
 	// candidate knowledge (e.g. the architecture supervisor's recommendations) pass
 	// skipAutoPromotion to avoid promoting unrelated pre-existing candidates as a side
@@ -1418,10 +1327,8 @@ export async function curateAndStoreSwarm(
 			);
 		}
 	}
-
 	return { stored, reinforced, skipped, rejected, quarantined };
 }
-
 // A track-record signal at or below this (negatives clearly outweighing positives,
 // with enough corroborating evidence) blocks auto-promotion regardless of phase
 // confirmations or age. G7 (#1716): lifted to `OUTCOME_BLOCK_THRESHOLD` in
@@ -1429,7 +1336,6 @@ export async function curateAndStoreSwarm(
 // can reference the same value. Both the promotion block and the demotion
 // threshold share this single source of truth.
 const OUTCOME_PROMOTION_BLOCK = OUTCOME_BLOCK_THRESHOLD;
-
 /**
  * Auto-promote swarm entries based on phase confirmations and age.
  */
@@ -1441,13 +1347,10 @@ export async function runAutoPromotion(
 	const entries =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
 	const counterRollups = await readKnowledgeCounterRollups(directory);
-
 	let changed = false;
-
 	for (const entry of entries) {
 		// Skip already promoted entries
 		if (entry.status === 'promoted') continue;
-
 		// Event-sourced safety gate: a clearly negative track record blocks
 		// auto-promotion regardless of phase confirmations or age. Entries with no
 		// outcome history (signal 0) are unaffected, preserving prior behavior.
@@ -1461,12 +1364,10 @@ export async function runAutoPromotion(
 		) {
 			continue;
 		}
-
 		// Count distinct phase numbers
 		const distinctPhases = new Set(
 			(entry.confirmed_by ?? []).map((c) => c.phase_number),
 		).size;
-
 		// Candidate -> Established: need 3+ distinct phases
 		if (entry.status === 'candidate' && distinctPhases >= 3) {
 			entry.status = 'established';
@@ -1474,13 +1375,11 @@ export async function runAutoPromotion(
 			changed = true;
 			continue;
 		}
-
 		// Established -> Promoted: need 3+ distinct phases OR age threshold
 		if (entry.status === 'established') {
 			const createdAt = Date.parse(entry.created_at ?? '');
 			const ageMs = Number.isNaN(createdAt) ? 0 : Date.now() - createdAt;
 			const ageThresholdMs = config.auto_promote_days * 86400000;
-
 			if (distinctPhases >= 3 || ageMs >= ageThresholdMs) {
 				entry.status = 'promoted';
 				entry.hive_eligible = true;
@@ -1489,25 +1388,23 @@ export async function runAutoPromotion(
 			}
 		}
 	}
-
 	// Rewrite if any changes were made
 	if (changed) {
 		await rewriteKnowledge(knowledgePath, entries);
 	}
 }
-
 /**
  * G7 (#1716): Auto-demote swarm entries that have sustained a net-negative
  * outcome signal over consecutive phase EVALUATIONS (i.e. consecutive
- * `runAutoDemotion` invocations with distinct phase numbers — a skipped phase
- * in between still counts, matching the issue's "≥3 consecutive" intent as
+ * `runAutoDemotion` invocations with distinct phase numbers â€” a skipped phase
+ * in between still counts, matching the issue's "â‰¥3 consecutive" intent as
  * implemented against evaluation cadence, not wall-clock phase contiguity).
  *
  * Companion to {@link runAutoPromotion}. For each `promoted` entry:
  *  1. Dedupe by phase: if `entry.last_demotion_phase === phaseNumber`, this
  *     entry has already been processed for this phase (handles the case where
  *     `curateAndStoreSwarm` is invoked multiple times in the same logical
- *     phase — e.g. phase-complete + close). Skip the counter update.
+ *     phase â€” e.g. phase-complete + close). Skip the counter update.
  *  2. Otherwise compute the outcome signal. If at/below
  *     `config.promoted_demotion_signal_threshold`, increment
  *     `recent_negative_phase_count`; else reset it to 0.
@@ -1530,34 +1427,28 @@ export async function runAutoDemotion(
 	const entries =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
 	const counterRollups = await readKnowledgeCounterRollups(directory);
-
 	let changed = false;
-
 	for (const entry of entries) {
 		if (entry.status !== 'promoted') continue;
-
 		// Phase-keyed dedupe: only one counter update per real phase. This
 		// prevents double-counting when `curateAndStoreSwarm` is called from
 		// multiple sites in the same logical phase.
 		if (entry.last_demotion_phase === phaseNumber) continue;
-
 		const signal = computeOutcomeSignal(
 			effectiveRetrievalOutcomes(
 				entry.retrieval_outcomes,
 				counterRollups.get(entry.id),
 			),
 		);
-
 		const threshold = config.promoted_demotion_signal_threshold;
 		const minPhases = config.promoted_demotion_min_negative_phases;
 		const prevCount = entry.recent_negative_phase_count ?? 0;
 		const next = signal <= threshold ? prevCount + 1 : 0;
-
 		// PRR-016: avoid phantom `updated_at` churn + file rewrites when nothing
 		// changed. Three real state transitions: counter increments, counter
 		// resets from a non-zero value (the entry "recovered" this phase), or
 		// demotion fires. A consistently-positive entry that stays at 0 between
-		// phases is a no-op — its `last_demotion_phase` update is the only
+		// phases is a no-op â€” its `last_demotion_phase` update is the only
 		// change and isn't worth a rewrite (the dedupe gate keys off it but a
 		// missing update is harmless: the next phase just re-evaluates).
 		const counterChanged = next !== prevCount;
@@ -1569,14 +1460,12 @@ export async function runAutoDemotion(
 			entry.last_demotion_phase = phaseNumber;
 			continue;
 		}
-
 		entry.recent_negative_phase_count = next;
 		entry.last_demotion_phase = phaseNumber;
-
 		if (willDemote) {
-			// Demote: promoted → established. The boost-table raise (G7.2) means
+			// Demote: promoted â†’ established. The boost-table raise (G7.2) means
 			// an `established` entry (+0.10) outranks a `candidate` (+0.0) but
-			// is outranked by a still-`promoted` entry (+0.15) — satisfying the
+			// is outranked by a still-`promoted` entry (+0.15) â€” satisfying the
 			// issue's intent that demoted entries no longer get the promoted boost.
 			entry.status = 'established';
 			entry.hive_eligible = false;
@@ -1589,12 +1478,10 @@ export async function runAutoDemotion(
 		entry.updated_at = new Date().toISOString();
 		changed = true;
 	}
-
 	if (changed) {
 		await rewriteKnowledge(knowledgePath, entries);
 	}
 }
-
 /**
  * Create the knowledge curator hook.
  * Watches for writes to .swarm/plan.md and extracts lessons from the retrospective section.
@@ -1603,7 +1490,6 @@ export interface KnowledgeCuratorHookOptions {
 	llmDelegateFactory?: (sessionID: string) => CuratorLLMDelegate | undefined;
 	enrichmentQuota?: EnrichmentQuotaOptions;
 }
-
 export function createKnowledgeCuratorHook(
 	directory: string,
 	config: KnowledgeConfig,
@@ -1612,17 +1498,14 @@ export function createKnowledgeCuratorHook(
 	const handler = async (input: unknown, output: unknown): Promise<void> => {
 		// Prune stale entries from seenRetroSections
 		pruneSeenRetroSections();
-
 		if (!config.enabled) return;
 		const trigger = normalizeWriteTrigger(input, output);
 		if (!trigger) return;
-
 		// Detect which trigger fired
 		const isPlanTrigger = isPlanPath(trigger.filePath);
 		const isEvidenceTrigger =
 			isEvidencePath(trigger.filePath) && !isPlanTrigger;
 		if (!isPlanTrigger && !isEvidenceTrigger) return;
-
 		// Handle evidence file trigger
 		if (isEvidenceTrigger) {
 			// Compute normalized relative path (strip leading path up to and including .swarm/)
@@ -1644,14 +1527,12 @@ export function createKnowledgeCuratorHook(
 				relativeEvidencePath,
 			);
 			if (!evidenceContent) return;
-
 			let evidenceData: Record<string, unknown>;
 			try {
 				evidenceData = JSON.parse(evidenceContent);
 			} catch {
 				return;
 			}
-
 			const batches = extractEvidenceLessonBatches(evidenceData);
 			for (const batch of batches) {
 				const evidenceKey = `evidence:${evidenceScope.projectIdentity}:${evidenceScope.evidenceIdentity}:entry:${batch.identity}`;
@@ -1667,7 +1548,6 @@ export function createKnowledgeCuratorHook(
 					);
 					continue;
 				}
-
 				inFlightEvidenceEntries.add(evidenceKey);
 				try {
 					await _internals.curateAndStoreSwarm(
@@ -1690,42 +1570,31 @@ export function createKnowledgeCuratorHook(
 					inFlightEvidenceEntries.delete(evidenceKey);
 				}
 			}
-
 			return;
 		}
-
 		// Handle plan.md trigger (existing behavior)
 		const planContent = await readSwarmFileAsync(directory, 'plan.md');
 		if (!planContent) return;
-
 		const section = extractRetrospectiveSection(planContent);
 		if (!section) return;
-
 		if (!checkRetroChanged(trigger.sessionID, section)) return;
-
 		const allLessons = extractLessonsFromRetro(section);
 		if (allLessons.length === 0) return;
-
 		// Separate RETRACT:/BAD RULE: lines from normal lessons
 		const { retractions, normalLessons } =
 			extractRetractionsAndLessons(allLessons);
-
 		// Process retractions: quarantine matching knowledge entries
 		await processRetractions(retractions, directory);
-
 		// Only curate non-retraction lessons
 		if (normalLessons.length === 0) return;
-
 		// Extract project name from plan content (look for "# <name>" on first line, fallback to 'unknown')
 		const projectNameMatch = /^#\s+(.+)$/m.exec(planContent);
 		const projectName = projectNameMatch
 			? projectNameMatch[1].trim()
 			: 'unknown';
-
 		// Extract phase number from plan content (look for "Phase: <N>" header line, fallback to 1)
 		const phaseMatch = /^Phase:\s*(\d+)/m.exec(planContent);
 		const phaseNumber = phaseMatch ? parseInt(phaseMatch[1], 10) : 1;
-
 		await _internals.curateAndStoreSwarm(
 			normalLessons,
 			projectName,
@@ -1738,14 +1607,11 @@ export function createKnowledgeCuratorHook(
 			},
 		);
 	};
-
 	return safeHook(handler);
 }
-
 // ============================================================================
-// DI Seam — _internals
+// DI Seam â€” _internals
 // ============================================================================
-
 export const _internals: {
 	isWriteToEvidenceFile: typeof isWriteToEvidenceFile;
 	curateAndStoreSwarm: typeof curateAndStoreSwarm;

@@ -4,6 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents, getAgentConfigs } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 
 let originalXDG: string | undefined;
 let tempDir: string | undefined;
@@ -12,6 +16,7 @@ beforeEach(() => {
 	originalXDG = process.env.XDG_CONFIG_HOME;
 	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-test-'));
 	process.env.XDG_CONFIG_HOME = tempDir;
+	clearDeferredWarnings();
 });
 
 afterEach(() => {
@@ -21,6 +26,7 @@ afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		tempDir = undefined;
 	}
+	clearDeferredWarnings();
 });
 
 describe('createAgents', () => {
@@ -204,7 +210,6 @@ describe('createAgents', () => {
 		});
 
 		it('auto-splits variant from 3-segment model string', () => {
-			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const config = {
 				quiet: false,
 				agents: {
@@ -220,12 +225,13 @@ describe('createAgents', () => {
 			expect((coder?.config as { variant?: string } | undefined)?.variant).toBe(
 				'medium',
 			);
-			expect(warnSpy).toHaveBeenCalled();
-			warnSpy.mockRestore();
+			// advisoryWarn is used for the deprecation warning — check deferred warnings buffer
+			const warnings = getDeferredWarnings().join('\n');
+			expect(warnings).toContain('Deprecation');
+			expect(warnings).toContain('grove-openai/gpt-5.3-codex/medium');
 		});
 
 		it('explicit variant override takes precedence over auto-split', () => {
-			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const config = {
 				quiet: false,
 				agents: {
@@ -242,8 +248,10 @@ describe('createAgents', () => {
 			expect((coder?.config as { variant?: string } | undefined)?.variant).toBe(
 				'high',
 			);
-			expect(warnSpy).toHaveBeenCalled();
-			warnSpy.mockRestore();
+			// advisoryWarn is used for the deprecation warning — check deferred warnings buffer
+			const warnings = getDeferredWarnings().join('\n');
+			expect(warnings).toContain('Deprecation');
+			expect(warnings).toContain('grove-openai/gpt-5.3-codex/medium');
 		});
 
 		it('does not modify 2-segment model string', () => {
@@ -320,7 +328,6 @@ describe('createAgents', () => {
 		});
 
 		it('still auto-splits known variant tokens: low, medium, high, max, xhigh, thinking', () => {
-			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const variantCases: Array<[string, string, string]> = [
 				['grove-openai/gpt-5.3-codex/low', 'grove-openai/gpt-5.3-codex', 'low'],
 				[
@@ -363,8 +370,9 @@ describe('createAgents', () => {
 					(coder?.config as { variant?: string } | undefined)?.variant,
 				).toBe(expectedVariant);
 			}
-			expect(warnSpy).toHaveBeenCalled();
-			warnSpy.mockRestore();
+			// advisoryWarn is used for deprecation warnings — check deferred warnings buffer
+			const warnings = getDeferredWarnings().join('\n');
+			expect(warnings).toContain('Deprecation');
 		});
 
 		it('disabled agent is filtered out', () => {

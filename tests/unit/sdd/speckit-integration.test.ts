@@ -19,6 +19,10 @@ import {
 	readEffectiveSpecSync,
 	writeProjectedSpecSync,
 } from '../../../src/sdd/effective-spec';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import { writeSpeckitFixture } from '../../helpers/speckit-fixture';
 
 let tempDir: string;
@@ -211,25 +215,18 @@ describe('3: FR-010 ambiguity diagnostic — warn count is exactly 1 per call (s
 	test('both-present repo: returns null AND emits EXACTLY ONE console.warn (not 0, not 2+)', () => {
 		buildBothPresentFixture();
 
-		const warnMessages: string[] = [];
-		const realWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnMessages.push(args.map(String).join(' '));
-		};
-
-		let result: ReturnType<typeof readEffectiveSpecSync>;
-		try {
-			result = readEffectiveSpecSync(tempDir);
-		} finally {
-			console.warn = realWarn;
-		}
+		// Epic #1752 PR5: the diagnostic now routes through advisoryWarn (buffered
+		// for /swarm diagnose) instead of raw console.warn.
+		clearDeferredWarnings();
+		const result = readEffectiveSpecSync(tempDir);
 
 		// Must return null (ambiguous → no effective spec).
-		expect(result!).toBeNull();
+		expect(result).toBeNull();
 
 		// EXACTLY ONE warning: not zero (silent suppression defeats critic Finding 2)
 		// and not 2+ (double-firing from a loop or nested call path).
 		// The existing unit test asserts `> 0`; this integration test nails it to `=== 1`.
+		const warnMessages = getDeferredWarnings();
 		expect(warnMessages).toHaveLength(1);
 
 		const msg = warnMessages[0]!;
@@ -246,20 +243,11 @@ describe('3: FR-010 ambiguity diagnostic — warn count is exactly 1 per call (s
 		// the per-call count to exactly 1 independently of call count.
 		buildBothPresentFixture();
 
-		const warnMessages: string[] = [];
-		const realWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnMessages.push(args.map(String).join(' '));
-		};
+		clearDeferredWarnings();
+		readEffectiveSpecSync(tempDir);
+		readEffectiveSpecSync(tempDir);
 
-		try {
-			readEffectiveSpecSync(tempDir);
-			readEffectiveSpecSync(tempDir);
-		} finally {
-			console.warn = realWarn;
-		}
-
-		expect(warnMessages).toHaveLength(2);
+		expect(getDeferredWarnings()).toHaveLength(2);
 	});
 });
 

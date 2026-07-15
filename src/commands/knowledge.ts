@@ -21,6 +21,7 @@ import {
 	unarchiveEntry,
 } from '../hooks/knowledge-validator.js';
 import type { HardenableRecord } from '../services/unactionable-hardening.js';
+import { log } from '../utils/logger';
 
 /**
  * Resolves a user-supplied ID or prefix against a list of entries.
@@ -81,7 +82,7 @@ export async function handleKnowledgeQuarantineCommand(
 		await quarantineEntry(directory, fullId, reason, 'user');
 		return `✅ Entry ${fullId} quarantined successfully.`;
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] quarantineEntry error:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -149,7 +150,7 @@ export async function handleKnowledgeRestoreCommand(
 		await restoreEntry(directory, fullId);
 		return `✅ Entry ${fullId} restored successfully.`;
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] restoreEntry error:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -220,7 +221,7 @@ export async function handleKnowledgeMigrateCommand(
 
 		return messages.join('\n');
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] migration error:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -269,7 +270,7 @@ export async function handleKnowledgeListCommand(
 
 		return lines.join('\n');
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] list error:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -341,7 +342,7 @@ export async function handleKnowledgeUnactionableCommand(
 
 		return lines.join('\n');
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] unactionable list error:',
 			error instanceof Error ? error.message : String(error),
 		);
@@ -400,7 +401,7 @@ export async function handleKnowledgeRetryHardeningCommand(
 
 		return `Reset ${resetCount} retire candidate(s). They will be re-processed on the next scheduled hardening pass.`;
 	} catch (error) {
-		console.warn(
+		log(
 			'[knowledge-command] retry-hardening error:',
 			error instanceof Error ? error.message : String(error),
 		);

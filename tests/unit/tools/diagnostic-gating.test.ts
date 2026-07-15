@@ -289,10 +289,16 @@ describe('DEBUG_SWARM diagnostic gating', () => {
 			// All DEBUG_SWARM checks should use process.env.DEBUG_SWARM
 			const allSources = indexSource + snapshotWriterSource + curatorSource;
 
+			// Strip single-line comments before checking for bare references — Epic
+			// #1752 PR5 added `biome-ignore` comments that mention "DEBUG_SWARM" in
+			// prose (e.g. "DEBUG_SWARM diagnostic output — only fires when explicitly
+			// enabled"), which aren't code and shouldn't trip this check.
+			const codeOnly = allSources.replace(/\/\/.*$/gm, '');
+
 			// Verify no bare DEBUG_SWARM references (should always be process.env.DEBUG_SWARM)
 			// This regex looks for DEBUG_SWARM that's NOT preceded by process.env.
 			const bareDebugSwarm = /(?<!process\.env\.)DEBUG_SWARM/;
-			expect(allSources).not.toMatch(bareDebugSwarm);
+			expect(codeOnly).not.toMatch(bareDebugSwarm);
 
 			// Count the DEBUG_SWARM env var checks. Both snapshot-writer (PR #327) and
 			// curator have since migrated their diagnostics to the gated logger

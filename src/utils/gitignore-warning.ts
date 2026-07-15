@@ -358,7 +358,7 @@ export async function ensureSwarmGitExcluded(
 		}
 
 		if (trackedExitCode === 0 && trackedOutput.trim().length > 0) {
-			// INTENTIONALLY NOT gated behind quiet — hygiene warning must always be visible
+			// biome-ignore lint/suspicious/noConsole: Hygiene warning for .swarm files tracked by Git — must always be visible per AGENTS.md Invariant 4; not gated behind quiet
 			console.warn(
 				'[opencode-swarm] WARNING: .swarm/ files are tracked by Git.\n' +
 					'.swarm/ contains local runtime state and may contain sensitive session data.\n' +

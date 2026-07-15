@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { validateSpecContent } from '../config/spec-schema';
+import { advisoryWarn } from '../services/warning-buffer';
 
 const SWARM_SPEC_REL = path.join('.swarm', 'spec.md');
 const OPENSPEC_ROOT = 'openspec';
@@ -1051,7 +1052,7 @@ export function readEffectiveSpecSync(
 		// This is INDEPENDENT of the null return value: the drift gate (and all
 		// other consumers) see only the null; this warn fires regardless of
 		// whether any consumer checks the return or its contents.
-		console.warn(
+		advisoryWarn(
 			'[opencode-swarm] Multiple SDD sources detected (openspec and speckit). ' +
 				'Enforcement/projection is suppressed until you disambiguate. ' +
 				'Pass --source openspec or --source speckit to select a provider.',

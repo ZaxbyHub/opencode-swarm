@@ -5,6 +5,10 @@ import * as path from 'node:path';
 import { writeSpeckitFixture } from '../../tests/helpers/speckit-fixture';
 import { validateSpecContent } from '../config/spec-schema';
 import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../services/warning-buffer';
+import {
 	buildOpenSpecProjectionSync,
 	buildSpeckitProjectionSync,
 	detectSpeckit,
@@ -779,32 +783,21 @@ describe('readEffectiveSpecSync — resolver precedence (task 2.1)', () => {
 		// won't register as a competing source").
 		writeSpeckitFixture(tempDir, { variant: 'single-explicit-fr' });
 
-		// Manual console.warn capture: portable across bun:test versions where
-		// spyOn(console, 'warn') + mockRestore() before assertions clears call history.
-		// This approach intercepts console.warn at the JS property level — the diagnostic
-		// fires through the same `console.warn(...)` call in effective-spec.ts.
-		const warnMessages: string[] = [];
-		const realWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnMessages.push(args.map(String).join(' '));
-		};
-
-		let result: ReturnType<typeof readEffectiveSpecSync>;
-		try {
-			result = readEffectiveSpecSync(tempDir);
-		} finally {
-			// Restore before any throw so the test suite output stays clean.
-			console.warn = realWarn;
-		}
+		// Epic #1752 PR5: the diagnostic now routes through advisoryWarn (buffered
+		// for /swarm diagnose) instead of raw console.warn — see architect.designer-gate.test.ts
+		// for the established assertion pattern.
+		clearDeferredWarnings();
+		const result = readEffectiveSpecSync(tempDir);
 
 		// Return value must be null (ambiguous → no effective spec).
-		expect(result!).toBeNull();
+		expect(result).toBeNull();
 
 		// Diagnostic MUST have fired — independent of the null return.
 		// This is the anti-silent-suppression contract from critic Finding 2:
 		// returning null downgrades the drift gate to advisory-only; without this
 		// warn a repo that had ONE source (enforcing) would silently stop enforcing
 		// when a second inert source is added, with no observable signal.
+		const warnMessages = getDeferredWarnings();
 		expect(warnMessages.length).toBeGreaterThan(0);
 		const firstMsg = warnMessages[0] ?? '';
 		// Message must name the disambiguation flag.
@@ -826,22 +819,12 @@ describe('readEffectiveSpecSync — resolver precedence (task 2.1)', () => {
 			'## Requirements\n### Requirement: Login\nThe system MUST allow users to sign in.\n',
 		);
 
-		const warnMessages: string[] = [];
-		const realWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnMessages.push(args.map(String).join(' '));
-		};
-
-		let result: ReturnType<typeof readEffectiveSpecSync>;
-		try {
-			result = readEffectiveSpecSync(tempDir);
-		} finally {
-			console.warn = realWarn;
-		}
+		clearDeferredWarnings();
+		const result = readEffectiveSpecSync(tempDir);
 
 		// Should return the openspec projection — not null, no diagnostic.
 		expect(result?.source).toBe('openspec_projection');
-		expect(warnMessages).toHaveLength(0);
+		expect(getDeferredWarnings()).toHaveLength(0);
 	});
 });
 

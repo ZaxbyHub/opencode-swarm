@@ -278,7 +278,7 @@ function classifyChange(
  * const diffs = await astDiff(oldCode, newCode);
  * const classified = classifyChanges(diffs);
  * for (const change of classified) {
- *   console.log(`[${change.riskLevel}] ${change.category}: ${change.symbolName}`);
+ *   printToConsole(`[${change.riskLevel}] ${change.category}: ${change.symbolName}`);
  * }
  * ```
  */

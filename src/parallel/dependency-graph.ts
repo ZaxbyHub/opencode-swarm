@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import { ZodError, z } from 'zod';
+import { advisoryWarn } from '../services/warning-buffer.js';
+import { log } from '../utils/logger.js';
 
 export interface TaskNode {
 	id: string;
@@ -66,7 +68,7 @@ export function parseDependencyGraph(planPath: string): DependencyGraph {
 				: error instanceof Error
 					? error.message
 					: String(error);
-		console.error(`[dependency-graph] Failed to parse ${planPath}:`, detail);
+		log(`[dependency-graph] Failed to parse ${planPath}: ${detail}`);
 		return { tasks, phases, roots: [], leaves: [] };
 	}
 
@@ -211,7 +213,7 @@ export function getDependencyChain(
 
 	function collect(id: string): void {
 		if (recursing.has(id)) {
-			console.warn(`[dependency-graph] Circular dependency detected: ${id}`);
+			advisoryWarn(`[dependency-graph] Circular dependency detected: ${id}`);
 			return;
 		}
 		if (visited.has(id)) return;

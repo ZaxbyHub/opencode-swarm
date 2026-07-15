@@ -23,6 +23,7 @@ import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { derivePlanId } from '../../plan/utils';
 import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
+import { log } from '../../utils/logger';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
@@ -486,7 +487,7 @@ export class LeanTurboRunner {
 					this._pendingDowngrade = {
 						reason: cleanResult.error ?? 'uncommitted changes',
 					};
-					console.warn(
+					log(
 						`[lean-turbo] worktree isolation requires clean working tree: ${cleanResult.error}`,
 					);
 					leanConfig.worktree_isolation = false;
@@ -499,7 +500,7 @@ export class LeanTurboRunner {
 				this._pendingDowngrade = {
 					reason: `cleanliness check failed: ${assertMsg}`,
 				};
-				console.warn(
+				log(
 					`[lean-turbo] unable to verify working tree cleanliness: ${assertMsg} — degrading to shared directory`,
 				);
 				leanConfig.worktree_isolation = false;
@@ -1069,7 +1070,7 @@ export class LeanTurboRunner {
 			// Retry once for transient errors, fail immediately for permanent ones
 			if (provisionError) {
 				if (isTransientProvisionError(provisionError)) {
-					console.warn(
+					log(
 						`[lean-turbo] worktree provision failed for lane ${lane.laneId}: ${provisionError} — retrying once...`,
 					);
 					await new Promise<void>((r) => setTimeout(r, 100));
@@ -1092,7 +1093,7 @@ export class LeanTurboRunner {
 								retryResult.worktreePath,
 								retryResult.branchName,
 							);
-							console.warn(
+							log(
 								`[lean-turbo] worktree provision retry succeeded for lane ${lane.laneId}`,
 							);
 							// Retry succeeded — clear provisionError so we don't fail below
@@ -1100,7 +1101,7 @@ export class LeanTurboRunner {
 						} else {
 							// Retry returned an error — keep provisionError set
 							provisionError = retryResult.error;
-							console.warn(
+							log(
 								`[lean-turbo] worktree provision retry failed for lane ${lane.laneId}: ${retryResult.error}`,
 							);
 						}
@@ -1108,13 +1109,13 @@ export class LeanTurboRunner {
 						const retryMsg =
 							retryErr instanceof Error ? retryErr.message : String(retryErr);
 						// Retry threw — keep provisionError set
-						console.warn(
+						log(
 							`[lean-turbo] worktree provision retry threw for lane ${lane.laneId}: ${retryMsg}`,
 						);
 					}
 				} else {
 					// Permanent error — log and fail (no retry)
-					console.warn(
+					log(
 						`[lean-turbo] worktree provision failed for lane ${lane.laneId}: ${provisionError}`,
 					);
 				}
@@ -1360,7 +1361,7 @@ export class LeanTurboRunner {
 								mergeBackFailure: failureInfo,
 							},
 						);
-						console.warn(
+						log(
 							`[lean-turbo] merge-back PARTIAL for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
 						continue; // Skip removeWorktree — keep worktree for manual recovery
@@ -1393,7 +1394,7 @@ export class LeanTurboRunner {
 								mergeBackFailure: failureInfo,
 							},
 						);
-						console.warn(
+						log(
 							`[lean-turbo] merge-back ERROR for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
 						continue; // Skip removeWorktree — keep worktree for manual recovery
@@ -1429,7 +1430,7 @@ export class LeanTurboRunner {
 							mergeBackFailure: failureInfo,
 						},
 					);
-					console.warn(
+					log(
 						`[lean-turbo] merge-back EXCEPTION for lane ${lr.laneId}: ${errMsg} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 					);
 					continue; // Skip removeWorktree — keep worktree for manual recovery
@@ -1446,7 +1447,7 @@ export class LeanTurboRunner {
 				};
 				mergeBackFailures.push(failureInfo);
 				lr.mergeBackFailure = failureInfo;
-				console.warn(
+				log(
 					`[lean-turbo] failed lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath}; not merging partial work`,
 				);
 				continue; // Keep failed lane worktree for manual inspection.
@@ -1614,7 +1615,7 @@ export class LeanTurboRunner {
 			);
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
-			console.warn(`[lean-turbo] phase evidence write failed: ${msg}`);
+			log(`[lean-turbo] phase evidence write failed: ${msg}`);
 		}
 	}
 
@@ -1663,7 +1664,7 @@ export class LeanTurboRunner {
 				);
 				const phase = runState?.phase;
 				if (phase === undefined) {
-					console.warn(
+					log(
 						`[lean-turbo] evidence write skipped for lane ${lane.laneId}: phase not set in run state`,
 					);
 					return;
@@ -1703,7 +1704,7 @@ export class LeanTurboRunner {
 
 				// Permanent error or last attempt — log but don't fail the runner
 				const msg = error instanceof Error ? error.message : String(error);
-				console.warn(
+				log(
 					`[lean-turbo] evidence write failed for lane ${lane.laneId}: ${msg}`,
 				);
 				return;
