@@ -4,7 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents, getAgentConfigs } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
-import { clearDeferredWarnings, getDeferredWarnings } from '../../../src/services/warning-buffer';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 
 let originalXDG: string | undefined;
 let tempDir: string | undefined;

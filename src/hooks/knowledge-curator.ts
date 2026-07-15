@@ -58,6 +58,7 @@ import {
 	resolveInsightCandidatesPath,
 } from './micro-reflector.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
+
 // ============================================================================
 // Module-level state
 // ============================================================================
@@ -424,10 +425,10 @@ async function processRetractions(
 					`Retracted by architect: ${retractionText}`,
 					'architect',
 				);
-			// biome-ignore lint/suspicious/noConsole: Non-blocking quarantine action log — provides visibility into curator decisions without blocking the operation
-			console.info(
-				`[knowledge-curator] Quarantined entry ${entry.id}: "${entry.lesson}"`,
-			);
+				// biome-ignore lint/suspicious/noConsole: Non-blocking quarantine action log — provides visibility into curator decisions without blocking the operation
+				console.info(
+					`[knowledge-curator] Quarantined entry ${entry.id}: "${entry.lesson}"`,
+				);
 			}
 		}
 		for (const entry of hiveEntries) {
