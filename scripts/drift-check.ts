@@ -76,6 +76,7 @@ export const REPO_ROOT = path.resolve(
 
 interface FsHelpers {
 	abs: (relativePath: string) => string;
+	realpath: (relativePath: string) => string;
 	fileExists: (relativePath: string) => boolean;
 	readFile: (relativePath: string) => string;
 	writeFile: (relativePath: string, contents: string) => void;
@@ -91,6 +92,13 @@ function makeFs(root: string): FsHelpers {
 	const abs = (relativePath: string): string => path.join(root, relativePath);
 	return {
 		abs,
+		realpath: (relativePath) => {
+			try {
+				return fs.realpathSync(abs(relativePath));
+			} catch {
+				return abs(relativePath);
+			}
+		},
 		fileExists: (relativePath) => fs.existsSync(abs(relativePath)),
 		readFile: (relativePath) => fs.readFileSync(abs(relativePath), 'utf-8'),
 		writeFile: (relativePath, contents) => {
@@ -925,8 +933,17 @@ function listSkillFilesRecursively(
 	fs: FsHelpers,
 ): Array<{ slug: string; skillPath: string; skillDir: string }> {
 	const results: Array<{ slug: string; skillPath: string; skillDir: string }> = [];
+	const visited = new Set<string>();
 
 	function walk(dir: string): void {
+		// Defense-in-depth (layer 2): The primary defense is Dirent.isDirectory()
+		// returning false for symlinks in listDirEntries, which prevents following
+		// symlink cycles. This visited Set uses realpathSync for physical path
+		// canonicalization, preventing cycles even on filesystems with unreliable d_type.
+		const resolved = fs.realpath(dir);
+		if (visited.has(resolved)) return;
+		visited.add(resolved);
+
 		const entries = fs.listDirEntries(dir);
 		for (const entry of entries) {
 			if (entry.isDirectory()) {

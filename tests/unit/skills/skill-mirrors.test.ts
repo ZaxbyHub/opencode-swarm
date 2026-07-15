@@ -197,6 +197,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...ADDITIONAL_SKILL_MIRROR_CONTRACTS.map(({ slug }) => slug),
 		];
 		const seen = new Set<string>();
 		const duplicates: string[] = [];

@@ -469,3 +469,28 @@ describe('edge cases', () => {
 		expect(hit).toBeUndefined();
 	});
 });
+
+describe('SC-006: Multi-level ../../ sibling reference resolution', () => {
+	test('valid ../../<slug>/SKILL.md multi-level reference resolves correctly', () => {
+		const root = makeTempRoot();
+		writeFile(
+			root,
+			'.opencode/skills/nested/deep/SKILL.md',
+			'See `../../target-skill/SKILL.md`.\n',
+		);
+		writeFile(root, '.opencode/skills/target-skill/SKILL.md', '# Target\n');
+		const findings = detectSkillReferenceDrift(root);
+		expect(findings).toEqual([]);
+	});
+
+	test('broken ../../<slug>/SKILL.md multi-level reference is detected as error', () => {
+		const root = makeTempRoot();
+		writeFile(
+			root,
+			'.opencode/skills/nested/deep/SKILL.md',
+			'See `../../nonexistent/SKILL.md`.\n',
+		);
+		const findings = detectSkillReferenceDrift(root);
+		expect(findings.some((f) => f.severity === 'error')).toBe(true);
+	});
+});

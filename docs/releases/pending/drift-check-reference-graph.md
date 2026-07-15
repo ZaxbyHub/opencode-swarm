@@ -4,6 +4,9 @@
 PR-4 of the 6-PR skills quality audit. Adds six new detectors to `scripts/drift-check.ts`, extends the `skill-mirrors.ts` contract with a new `adapter`/`agents-only` kind taxonomy, and hardens four parity-test suites that pin behavioral invariants from the skill prose:
 
 - **NEW DETECTOR — Skill-reference resolver**: validates every `file: SKILL.md` reference across all tracked skill trees against the bundled skills list and sibling mirror contracts. Catches references to slugs that no longer exist or that have moved trees.
+  - **Cycle prevention hardening**: `listSkillFilesRecursively` now uses `realpathSync` to canonicalize physical paths before adding to the visited Set, preventing symlink-based infinite recursion during traversal.
+  - **SC-006 multi-level sibling reference tests**: added test coverage for multi-level `../../` sibling reference resolution paths.
+  - **SC-010 extended**: duplicate-slug detection now covers `ADDITIONAL_SKILL_MIRROR_CONTRACTS` in addition to the five primary contract arrays.
 - **NEW DETECTOR — Duplicate-slug detection**: cross-checks all five contract arrays (`MIRRORED`, `DIVERGENT`, `ADAPTER`, `OPENCODE_ONLY`, `ADDITIONAL`) for duplicate slug entries. Each slug must appear in exactly one contract bucket.
 - **NEW DETECTOR — Duplicate `package.json#files` entry detection**: scans the `files` array for duplicate `.opencode/skills/` entries that would cause the pack script to include the same path twice.
 - **NEW DETECTOR — Divergent `extraIdenticalPaths` existence check**: validates that any paths listed in a divergent contract's `extraIdenticalPaths` array actually exist on disk, so drift-check can correctly scope diffs for contracts that share only a subset of paths. The array itself is optional — omitted arrays pass silently.
