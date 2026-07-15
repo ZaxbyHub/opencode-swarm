@@ -6,9 +6,19 @@
  * - /swarm promote "<lesson text>" — Promote direct text
  * - /swarm promote --category <category> "<lesson text>" — Promote with category
  * - /swarm promote --from-swarm <lesson-id> — Promote from existing swarm lesson
+ * - /swarm promote --force --reason "<why>" ... — Override failed policy gates
+ *   with a durable, audited override record (issue #1847 §4). An exact entry id
+ *   alone is NEVER authorization to bypass policy; an explicit override is.
  */
 
-import { promoteFromSwarm, promoteToHive } from '../hooks/hive-promoter';
+import { loadPluginConfigWithMeta } from '../config';
+import { KnowledgeConfigSchema } from '../config/schema';
+import {
+	type ManualPromotionOptions,
+	promoteFromSwarm,
+	promoteToHive,
+} from '../hooks/hive-promoter';
+import type { KnowledgeConfig } from '../hooks/knowledge-types';
 
 export async function handlePromoteCommand(
 	directory: string,
@@ -18,6 +28,8 @@ export async function handlePromoteCommand(
 	let category: string | undefined;
 	let lessonId: string | undefined;
 	let lessonText: string | undefined;
+	let force = false;
+	let reason: string | undefined;
 
 	// Simple argument parsing
 	for (let i = 0; i < args.length; i++) {
@@ -29,6 +41,14 @@ export async function handlePromoteCommand(
 		} else if (arg === '--from-swarm' && i + 1 < args.length) {
 			lessonId = args[i + 1];
 			i++; // Skip next arg
+		} else if (arg === '--force') {
+			force = true;
+		} else if (arg === '--reason' && i + 1 < args.length) {
+			// Take the NEXT arg as the reason (quote multi-word reasons).
+			// Mirrors --category / --from-swarm single-arg convention so the
+			// lesson text is not swallowed by the reason.
+			reason = args[i + 1];
+			i++; // Skip next arg
 		} else if (!arg.startsWith('--')) {
 			// Treat as lesson text (take the rest of the args as text)
 			lessonText = args.slice(i).join(' ');
@@ -38,16 +58,37 @@ export async function handlePromoteCommand(
 
 	// Validate input - check for empty lesson text or lesson ID
 	if (!lessonText && !lessonId) {
-		return `Usage: /swarm promote "<lesson text>" or /swarm promote --from-swarm <id>`;
+		return `Usage: /swarm promote "<lesson text>" or /swarm promote --from-swarm <id>\nOptions: --category <cat>, --force --reason "<why>" (audited policy override)`;
+	}
+
+	// --force requires --reason (an override without a reason is not auditable).
+	if (force && (!reason || reason.length === 0)) {
+		return `--force requires --reason "<why>" so the override is auditable.`;
+	}
+
+	const options: ManualPromotionOptions | undefined =
+		force || reason ? { force, reason } : undefined;
+
+	// Load the REAL user knowledge config (from opencode.json) so manual
+	// promotion honors the same policy thresholds (dedup, application evidence,
+	// cohort) as automatic promotion (AC9). Mirrors how close.ts loads its
+	// config. Best-effort: fall back to schema defaults on any load/parse error.
+	let config: KnowledgeConfig | undefined;
+	try {
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+	} catch {
+		config = undefined; // promoter falls back to schema defaults internally
 	}
 
 	// Note: validateLesson is not needed here because promoteToHive and promoteFromSwarm
-	// (imported from hooks/hive-promoter.ts) both validate internally and throw on failure.
+	// (imported from hooks/hive-promoter.ts) both validate internally inside the
+	// transaction and return a diagnostic string on failure.
 
 	// Handle --from-swarm case
 	if (lessonId) {
 		try {
-			return await promoteFromSwarm(directory, lessonId);
+			return await promoteFromSwarm(directory, lessonId, options, config);
 		} catch (error) {
 			if (error instanceof Error) {
 				return error.message;
@@ -58,7 +99,13 @@ export async function handlePromoteCommand(
 
 	// Handle direct text promotion
 	try {
-		return await promoteToHive(directory, lessonText!, category);
+		return await promoteToHive(
+			directory,
+			lessonText!,
+			category,
+			options,
+			config,
+		);
 	} catch (error) {
 		if (error instanceof Error) {
 			return error.message;

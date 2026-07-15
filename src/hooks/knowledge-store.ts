@@ -6,6 +6,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import {
+	resolveHiveDataDir,
+	resolveHiveEventsPath as resolveHiveEventsPathImpl,
+	resolveHiveKnowledgePath as resolveHiveKnowledgePathImpl,
+	resolveHiveRejectedPath as resolveHiveRejectedPathImpl,
+} from '../knowledge/hive-paths.js';
 import * as logger from '../utils/logger.js';
 import { readCachedParsedFile } from '../utils/swarm-artifact-cache.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
@@ -70,50 +76,14 @@ export function resolveSwarmRetractionsPath(directory: string): string {
 	);
 }
 
-// Cross-platform resolver — inlined 15-line implementation (NO env-paths dependency)
-export function resolveHiveKnowledgePath(): string {
-	const platform = process.platform;
-	// Read $HOME live each call so test redirection via process.env.HOME works.
-	// Bun caches os.homedir(), so changing $HOME after first call is ignored.
-	const home = process.env.HOME || os.homedir();
-	let dataDir: string;
-	if (platform === 'win32') {
-		dataDir = path.join(
-			process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
-			'opencode-swarm',
-			'Data',
-		);
-	} else if (platform === 'darwin') {
-		dataDir = path.join(
-			home,
-			'Library',
-			'Application Support',
-			'opencode-swarm',
-		);
-	} else {
-		dataDir = path.join(
-			process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'),
-			'opencode-swarm',
-		);
-	}
-	return path.join(dataDir, 'shared-learnings.jsonl');
-}
-
-// Returns path to hive-level rejected lessons (same directory as hive knowledge)
-export function resolveHiveRejectedPath(): string {
-	const hivePath = resolveHiveKnowledgePath();
-	return path.join(path.dirname(hivePath), 'shared-learnings-rejected.jsonl');
-}
-
-// Returns path to the hive-level knowledge events log (same directory as hive
-// knowledge). This is the shared, cross-project audit trail for mutations to the
-// hive store: it lives alongside the hive store so the store and its audit
-// history share one scope, and any project can read why a hive entry was
-// archived/quarantined/purged.
-export function resolveHiveEventsPath(): string {
-	const hivePath = resolveHiveKnowledgePath();
-	return path.join(path.dirname(hivePath), 'shared-knowledge-events.jsonl');
-}
+// Cross-project hive path resolution is centralized in
+// `src/knowledge/hive-paths.ts` (issue #1847 §1) so the store, the rejected
+// log, and the audit-event log always share one directory and one platform
+// branch. Re-exported here to preserve the historical import surface.
+export const resolveHiveKnowledgePath = resolveHiveKnowledgePathImpl;
+export const resolveHiveRejectedPath = resolveHiveRejectedPathImpl;
+export const resolveHiveEventsPath = resolveHiveEventsPathImpl;
+export { resolveHiveDataDir };
 
 // ============================================================================
 // Read Functions
@@ -248,6 +218,13 @@ export function normalizeEntry<T>(raw: T): T {
 	// optional and old entries simply haven't been archived/demoted yet.
 	if (typeof obj.recent_negative_phase_count !== 'number') {
 		obj.recent_negative_phase_count = 0;
+	}
+	// #1847 PRR-2: ensure confirmed_by is an array. Legacy/malformed on-disk
+	// records may omit it (null/undefined), and hive promotion's confirmation
+	// loop calls .push/.some on it directly — a missing array would throw
+	// mid-transaction. Backfill to [] in memory; never synthesize cohort ids.
+	if (!Array.isArray(obj.confirmed_by)) {
+		obj.confirmed_by = [];
 	}
 	// Ensure actionable arrays are at least undefined-or-array (never wrong type).
 	const arrayFields: Array<keyof ActionableDirectiveFields> = [
@@ -545,7 +522,10 @@ interface KnowledgeCapCandidate<T> {
 	outcomeSignal: number;
 }
 
-function selectKnowledgeCapSurvivors<T>(entries: T[], maxEntries: number): T[] {
+export function selectKnowledgeCapSurvivors<T>(
+	entries: T[],
+	maxEntries: number,
+): T[] {
 	if (entries.length <= maxEntries) return entries;
 	if (maxEntries <= 0) return [];
 

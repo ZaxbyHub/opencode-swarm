@@ -23,10 +23,10 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { resolveHiveEventsPath as resolveHiveEventsPathImpl } from '../knowledge/hive-paths.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 // Type-only import: erased at runtime, so it does NOT create a dependency that
@@ -270,29 +270,12 @@ export function resolveKnowledgeCounterBaselinePath(directory: string): string {
 	);
 }
 
-// Defined locally to avoid importing from knowledge-store.ts, which tests mock.
-// Mirrors resolveHiveKnowledgePath()'s directory logic in knowledge-store.ts so
-// the two paths stay co-located in the same platform-specific data directory.
-export function resolveHiveEventsPath(): string {
-	const platform = process.platform;
-	const home = process.env.HOME || os.homedir();
-	let dir: string;
-	if (platform === 'win32') {
-		dir = path.join(
-			process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
-			'opencode-swarm',
-			'Data',
-		);
-	} else if (platform === 'darwin') {
-		dir = path.join(home, 'Library', 'Application Support', 'opencode-swarm');
-	} else {
-		dir = path.join(
-			process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'),
-			'opencode-swarm',
-		);
-	}
-	return path.join(dir, 'shared-knowledge-events.jsonl');
-}
+// Hive events-path resolution is centralized in `src/knowledge/hive-paths.ts`
+// (issue #1847 §1). Previously this was a local copy of the platform branch
+// "to avoid importing from knowledge-store.ts, which tests mock" — the new
+// module is mock-free and exposes its own `_internals` seam, so the original
+// reason is gone and the drift vector is removed.
+export const resolveHiveEventsPath = resolveHiveEventsPathImpl;
 
 /** Returns the knowledge-application.jsonl path for legacy v2 audit records (link-aware). */
 export function resolveLegacyApplicationLogPath(directory: string): string {
@@ -415,6 +398,11 @@ export async function appendHiveKnowledgeEvent(
 	try {
 		release = await lockfile.lock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
+			// #1847 F-008: MUST match transactHiveStore's stale (5s). This writer
+			// locks the SAME hive data directory; an asymmetric (longer) stale
+			// would let a concurrent 5s transaction force-break this append
+			// mid-write. The high retry count (200) already covers contention.
+			stale: 5_000,
 		});
 		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
 		// Hive events don't participate in the counter rollup baseline (archival

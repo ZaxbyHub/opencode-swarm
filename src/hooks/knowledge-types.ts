@@ -20,6 +20,15 @@ export interface PhaseConfirmationRecord {
 
 export interface ProjectConfirmationRecord {
 	project_name: string;
+	/**
+	 * Canonical cohort id (issue #1847) — the identity used for cross-project
+	 * distinctness, from `resolveCohortId` (#1846). Sibling worktrees and remote
+	 * aliases of one repository share one `cohort_id`, so they count as a single
+	 * project. Absent on legacy records written before #1847; such records are
+	 * counted by `project_name` as a degraded fallback and are NEVER synthetically
+	 * credited with a cohort id.
+	 */
+	cohort_id?: string;
 	confirmed_at: string; // ISO 8601
 	phase_number?: number;
 }
@@ -240,6 +249,72 @@ export interface SwarmKnowledgeEntry extends KnowledgeEntryBase {
 	project_name: string;
 }
 
+/**
+ * A single validated terminal application of a knowledge entry, usable as
+ * promotion evidence (issue #1847). Only receipts tied to a real retrieval
+ * trace AND a terminal outcome (`applied` / `violated` / `contradicted`) that
+ * is a member of that trace's result set qualify. Shown / retrieved / injected
+ * / acknowledged-only states do NOT qualify — they are display/attention
+ * signals, not application evidence.
+ *
+ * Production of real host traces is owned by #1849; this PR (#1847) owns the
+ * schema and the conservative promotion-side consumer. Legacy records carry no
+ * `PromotionEvidenceRecord`s and receive NO synthetic credit.
+ */
+export interface PromotionEvidenceRecord {
+	/** Canonical repository/cohort identity (from `resolveCohortId`, #1846). */
+	cohort_id: string;
+	/** Source cohort / link id when known (from the v2 LinkPointer). */
+	source_link_id?: string;
+	/** The hive/swarm entry id this evidence contributes to. */
+	entry_id: string;
+	/** Retrieval trace id that surfaced the entry (ties to a RetrievedEvent). */
+	retrieval_trace_id: string;
+	/** Terminal receipt outcome. */
+	receipt_outcome: 'applied' | 'violated' | 'contradicted';
+	/** Id of the ReceiptEvent this evidence was derived from. */
+	receipt_event_id: string;
+	phase?: string;
+	timestamp: string; // ISO 8601
+}
+
+/** How a hive entry was promoted (issue #1847 §3 lineage). */
+export type PromotionActor = 'auto' | 'manual' | 'manual-override';
+
+/**
+ * Lineage + validated-evidence block attached to a promoted hive entry (issue
+ * #1847 §3). A promoted hive record must retain enough provenance to audit
+ * redaction/ownership and to trace back to its source without storing
+ * unnecessary sensitive content.
+ *
+ * All fields optional except `actor` so legacy on-disk records (which predate
+ * this block) load unchanged. Legacy records are NOT retroactively given a
+ * synthetic lineage block (no broad rewrite); consumers treat an absent
+ * `lineage` as "origin unknown, pre-#1847".
+ */
+export interface PromotionLineage {
+	/** UUID of the source swarm entry this hive record was promoted from. */
+	source_entry_id?: string;
+	/** Canonical cohort id of the source repository (#1846). */
+	source_cohort_id?: string;
+	/** Source entry content hash/revision (for drift detection). */
+	source_revision?: string;
+	/** Prior phase/confidence snapshot captured at promotion time. */
+	prior_confidence?: number;
+	prior_phases_alive?: number;
+	/** Ids of {@link PromotionEvidenceRecord}s that contributed to this promotion. */
+	contributing_evidence_ids?: string[];
+	/** For merged near-duplicates: losing entry ids preserved for audit. */
+	merged_from?: string[];
+	/** The promotion transaction/event id (ties to the hive audit-event log). */
+	promotion_event_id?: string;
+	/** Who/what initiated the promotion. */
+	actor: PromotionActor;
+	reason?: string;
+	/** When an override was used: the policy gates that failed. */
+	override_failed_gates?: string[];
+}
+
 export interface HiveKnowledgeEntry extends KnowledgeEntryBase {
 	tier: 'hive';
 	confirmed_by: ProjectConfirmationRecord[];
@@ -248,6 +323,9 @@ export interface HiveKnowledgeEntry extends KnowledgeEntryBase {
 	encounter_score: number;
 	/** @deprecated Legacy field for backward compatibility. Use encounter_score for weighting. */
 	encounter_count?: number;
+	/** #1847: promotion lineage + validated-evidence references. Optional so
+	 * legacy on-disk records load unchanged; normalized in-memory on read. */
+	lineage?: PromotionLineage;
 }
 
 export interface RejectedLesson {
@@ -335,6 +413,18 @@ export interface KnowledgeConfig {
 	 * demotion counter increments for the current phase. Default: -0.3 (matches
 	 * `OUTCOME_BLOCK_THRESHOLD`). */
 	promoted_demotion_signal_threshold: number;
+	/** #1847: minimum number of validated terminal-application receipts
+	 * (PromotionEvidenceRecord) required for the `validated_terminal_applications`
+	 * promotion gate. Default 0 — conservative: until #1849 produces real
+	 * receipts, absence of evidence neither credits nor blocks. Raising this
+	 * activates application-evidence gating. Legacy records get NO synthetic
+	 * credit; they simply do not add to the count. */
+	promotion_min_terminal_applications: number;
+	/** #1847: minimum number of DISTINCT canonical cohort ids that must appear
+	 * among the validated terminal-application receipts for the
+	 * `validated_terminal_applications` gate. Default 0 (conservative; see
+	 * `promotion_min_terminal_applications`). */
+	promotion_min_distinct_cohorts: number;
 	/** Change 5: retrieval-upgrade tuning (MMR / cold-start / synonyms). */
 	retrieval?: {
 		mmr_lambda?: number;

@@ -68,6 +68,7 @@ export async function handleCurateCommand(
 		const summary: CurationSummary = await _internals.checkHivePromotions(
 			swarmEntries,
 			config,
+			directory,
 		);
 
 		if (options?.sessionID) {
@@ -151,6 +152,7 @@ export async function handleCurateCommand(
 						const postUpdateHive = await _internals.checkHivePromotions(
 							updatedEntries,
 							config,
+							directory,
 						);
 						summary.new_promotions += postUpdateHive.new_promotions;
 						summary.encounters_incremented +=

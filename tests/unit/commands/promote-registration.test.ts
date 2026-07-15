@@ -328,4 +328,31 @@ describe('/swarm promote Command Registration', () => {
 			expect(result).not.toContain('supplemental context text');
 		});
 	});
+
+	describe('#1847: --force --reason override semantics (PRR-7)', () => {
+		it('--force without --reason is rejected with an auditable-reason message', async () => {
+			const result = await handlePromoteCommand(tempDir, [
+				'--force',
+				'A lesson about transactional hive promotion safety guarantees',
+			]);
+			expect(result).toContain('--force requires --reason');
+		});
+
+		it('--force --reason parses a quoted reason and promotes', async () => {
+			const result = await handlePromoteCommand(tempDir, [
+				'--force',
+				'--reason',
+				'operator override for critical hotfix',
+				'A lesson about transactional hive promotion safety guarantees now',
+			]);
+			// The single-arg reason is captured; direct-text with --force promotes.
+			expect(result).toContain('Promoted to hive');
+		});
+
+		it('usage text mentions --force --reason', async () => {
+			const result = await handlePromoteCommand(tempDir, []);
+			expect(result).toContain('--force');
+			expect(result).toContain('--reason');
+		});
+	});
 });

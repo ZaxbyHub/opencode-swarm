@@ -111,6 +111,24 @@ export interface KnowledgeDebugMeta {
 		 */
 		local_orphaned: boolean;
 	};
+	/**
+	 * Hive promotion health (issue #1847). Surfaces lineage presence and any
+	 * manual-override promotions so an operator can audit forced entries.
+	 */
+	hive: {
+		/** Hive entries carrying a #1847 lineage block. */
+		entries_with_lineage: number;
+		/** Hive entries promoted via an audited --force override (AC9 visibility). */
+		override_promotions: number;
+		/** Up to 20 most-recent override entries (id, failed gates, reason). */
+		override_entries: Array<{
+			id: string;
+			lesson_excerpt: string;
+			override_failed_gates?: string[];
+			reason?: string;
+			promotion_event_id?: string;
+		}>;
+	};
 }
 
 /** Parse JSONL lines without normalization. Returns parsed objects + corrupt count. */
@@ -273,6 +291,36 @@ export async function computeKnowledgeDebug(
 		// leave defaults (not linked)
 	}
 
+	// Hive promotion lineage + override audit (issue #1847, AC9 visibility).
+	// Best-effort: any failure degrades to zero. Reuses the hive entries already
+	// read above; no new I/O, and never on the plugin-init path.
+	let hiveEntriesWithLineage = 0;
+	let hiveOverridePromotions = 0;
+	const hiveOverrideEntries: KnowledgeDebugMeta['hive']['override_entries'] =
+		[];
+	try {
+		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
+		for (const e of hive) {
+			if (e.lineage) {
+				hiveEntriesWithLineage++;
+				if (e.lineage.actor === 'manual-override') {
+					hiveOverridePromotions++;
+					if (hiveOverrideEntries.length < 20) {
+						hiveOverrideEntries.push({
+							id: e.id,
+							lesson_excerpt: e.lesson.slice(0, 80),
+							override_failed_gates: e.lineage.override_failed_gates,
+							reason: e.lineage.reason,
+							promotion_event_id: e.lineage.promotion_event_id,
+						});
+					}
+				}
+			}
+		}
+	} catch {
+		// leave defaults
+	}
+
 	return {
 		plugin_version: version,
 		directory,
@@ -306,6 +354,11 @@ export async function computeKnowledgeDebug(
 			shared_root: cohortSharedRoot,
 			generation: cohortGeneration,
 			local_orphaned: cohortLocalOrphaned,
+		},
+		hive: {
+			entries_with_lineage: hiveEntriesWithLineage,
+			override_promotions: hiveOverridePromotions,
+			override_entries: hiveOverrideEntries,
 		},
 	};
 }
@@ -369,6 +422,7 @@ export async function checkKnowledgeHealth(
 	const sb = debug.status_breakdown;
 	const lr = debug.learning;
 	const co = debug.cohort;
+	const hv = debug.hive;
 	const cohortTag = co.linked
 		? ` | cohort[linked id=${co.link_id}${
 				co.cohort_id ? ` cohort=${co.cohort_id}` : ''
@@ -378,6 +432,10 @@ export async function checkKnowledgeHealth(
 				co.generation !== null ? ` gen=${co.generation}` : ''
 			}]`
 		: ' | cohort[local]';
+	const hiveTag =
+		hv.entries_with_lineage > 0 || hv.override_promotions > 0
+			? ` | hive[lineage=${hv.entries_with_lineage} overrides=${hv.override_promotions}]`
+			: ' | hive[local]';
 	const summary =
 		`active=${sb.active} archived=${sb.archived} quarantined=${sb.quarantined} ` +
 		`rejected=${sb.rejected} | events=${debug.event_count} (retrieved/7d=${debug.retrieval_events_7d}) | ` +
@@ -385,7 +443,8 @@ export async function checkKnowledgeHealth(
 		`synonyms=${lr.synonym_pairs} unactionable=${lr.unactionable_queue_depth} ` +
 		`insights_pending=${lr.insight_candidates_pending}] | ` +
 		`schema=${JSON.stringify(debug.schema_versions)}` +
-		cohortTag;
+		cohortTag +
+		hiveTag;
 
 	const warnings: string[] = [];
 	// A degraded cohort identity (machine-local, not portable) must be visible —
@@ -427,6 +486,18 @@ export async function checkKnowledgeHealth(
 	if (debug.cache_status === 'stale') {
 		warnings.push(
 			'stale plugin cache — run `bunx opencode-swarm update` (knowledge tools may be running old code)',
+		);
+	}
+	// #1847 F-002: surface manual-override promotions so operators can audit
+	// force-promoted entries (AC9 visibility). Each override records the failed
+	// gates + reason in debug.hive.override_entries.
+	if (hv.override_promotions > 0) {
+		const sample = hv.override_entries[0];
+		const gates = sample?.override_failed_gates?.join(',') ?? '?';
+		warnings.push(
+			`${hv.override_promotions} hive entr(y/ies) promoted via --force override (failed gates: ${gates}${
+				sample?.reason ? `; reason: "${sample.reason.slice(0, 60)}"` : ''
+			})`,
 		);
 	}
 

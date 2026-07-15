@@ -51,6 +51,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	jaccardBigram: mockJaccardBigram,
 	findNearDuplicate: mockFindNearDuplicate,
 	computeConfidence: mockComputeConfidence,
+	selectKnowledgeCapSurvivors: mock(<T>(entries: T[]) => entries),
 	inferTags: mockInferTags,
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
 	getArchivedKnowledgeIds: mock(async () => new Set<string>()),

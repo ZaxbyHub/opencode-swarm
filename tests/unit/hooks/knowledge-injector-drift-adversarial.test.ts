@@ -45,7 +45,11 @@ mock.module('../../../src/hooks/curator-drift.js', () => ({
 }));
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	readMergedKnowledge,
+	// Stubs for ESM named-import resolution — not called in these tests.
+	updateRetrievalOutcome: async () => {},
+	scoreDirectiveAgainstContext: () => 0,
 	recordLessonsShown: async () => {},
+	_internals: {},
 }));
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons,
@@ -76,6 +80,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	jaccardBigram: () => 0,
 	findNearDuplicate: () => null,
 	computeConfidence: () => 0.5,
+	selectKnowledgeCapSurvivors: <T>(entries: T[]) => entries,
 	inferTags: () => [],
 	getPlatformConfigDir: () => '/tmp',
 	computeOutcomeSignal: () => 0,
