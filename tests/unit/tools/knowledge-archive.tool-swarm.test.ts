@@ -225,4 +225,62 @@ describe('knowledge_archive — swarm-tier', () => {
 		// archived_at may be unchanged (prefer equality, not deep equality)
 		expect(after2.archived_at).toBe(archivedAt1);
 	});
+
+	// PRR-002: the swarm archive mutation now flows through
+	// `transactKnowledgeWithCas`, closing the authorize→mutate TOCTOU. A stale
+	// archive plan (the entry changed since the authorization snapshot) must be
+	// REJECTED with `{success:false}` rather than silently clobbering the newer
+	// entry.
+	//
+	// Falsification via REAL concurrency (no mocking — mock.module'ing
+	// knowledge-store leaks across Bun's shared runner, see hive-promoter note
+	// #1847): two simultaneous archives of the SAME revisioned entry both capture
+	// `revision: 1` at their (unlocked) pre-authorization read. The directory lock
+	// then serializes the two CAS transactions: the first commits (bumping the
+	// revision to 2), and the second observes the drift (2 !== 1) and CAS-fails.
+	//
+	// Before the fix (plain single `transactKnowledge`, no CAS) BOTH archives
+	// succeed — the loser hits the re-archive no-op guard and returns
+	// `{success:true, status:'archived'}` — so `succeeded===2, failed===0` and this
+	// test fails. With the CAS wiring exactly one succeeds and one is rejected.
+	it('PRR-002: rejects a stale archive plan when the entry drifted since authorization', async () => {
+		// A revisioned entry (revision 1). makeSwarmEntry leaves `revision`
+		// undefined, which would SKIP the revision CAS check; set it explicitly so
+		// the drift is observable via the revision token.
+		const seed = makeSwarmEntry('cas-drift');
+		(seed as SwarmKnowledgeEntry & { revision: number }).revision = 1;
+		await appendKnowledge(swarmPath, seed);
+
+		// Two concurrent archives. Promise.all initiates both execute() calls
+		// before either resolves its pre-authorization read, so both capture the
+		// same authorized revision (1); the directory lock inside
+		// transactKnowledgeWithCas then serializes the mutations.
+		const [rawA, rawB] = await Promise.all([
+			knowledge_archive.execute(
+				{ id: 'cas-drift', reason: 'plan-A' },
+				makeCtx(dir),
+			),
+			knowledge_archive.execute(
+				{ id: 'cas-drift', reason: 'plan-B' },
+				makeCtx(dir),
+			),
+		]);
+		const results = [JSON.parse(rawA), JSON.parse(rawB)];
+
+		const succeeded = results.filter((r) => r.success === true);
+		const rejected = results.filter((r) => r.success === false);
+		// Exactly one archive commits; the other is CAS-rejected as a stale plan.
+		expect(succeeded).toHaveLength(1);
+		expect(rejected).toHaveLength(1);
+		expect(succeeded[0].status).toBe('archived');
+		// The rejection surfaces the stale-plan contract, not a false success.
+		expect(rejected[0].error).toContain('stale archive plan rejected');
+
+		// The winning mutation committed exactly once: the entry is archived and
+		// its revision was bumped a single time (1 → 2).
+		const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+		const after = entries.find((e) => e.id === 'cas-drift');
+		expect(after?.status).toBe('archived');
+		expect(after?.revision).toBe(2);
+	});
 });
