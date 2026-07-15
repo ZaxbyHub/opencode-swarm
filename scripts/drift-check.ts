@@ -80,6 +80,7 @@ interface FsHelpers {
 	readFile: (relativePath: string) => string;
 	writeFile: (relativePath: string, contents: string) => void;
 	listDirNames: (relativePath: string) => string[];
+	listDirEntries: (relativePath: string) => fs.Dirent[];
 }
 
 /**
@@ -104,6 +105,11 @@ function makeFs(root: string): FsHelpers {
 				.readdirSync(dir, { withFileTypes: true })
 				.filter((entry) => entry.isDirectory())
 				.map((entry) => entry.name);
+		},
+		listDirEntries: (relativePath) => {
+			const dir = abs(relativePath);
+			if (!fs.existsSync(dir)) return [];
+			return fs.readdirSync(dir, { withFileTypes: true });
 		},
 	};
 }
@@ -312,6 +318,19 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 					}
 				}
 			}
+			// extraIdenticalPaths: existence check for divergent contracts.
+			// Unlike 'identical' kind, divergent pairs may differ in content,
+			// but extra paths listed in the contract MUST exist (SC-006, SC-007).
+			for (const extraPath of contract.extraIdenticalPaths ?? []) {
+				if (!fileExists(extraPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: extraPath,
+						message: `divergent skill "${slug}" missing extra path ${extraPath}`,
+					});
+				}
+			}
 		} else if (kind === 'adapter') {
 			if (!fileExists(opencodePath)) {
 				findings.push({
@@ -358,6 +377,19 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 					message: `opencode-only skill "${slug}" unexpectedly has a .claude mirror at ${claudePath}`,
 				});
 			}
+		} else if (kind === 'agents-only') {
+			// agents-only: skills that exist in .agents/.claude but NOT .opencode.
+			// detectSkillMirrorDrift enforces extraIdenticalPaths existence for this kind.
+			for (const extraPath of contract.extraIdenticalPaths ?? []) {
+				if (!fileExists(extraPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: extraPath,
+						message: `agents-only skill "${slug}" missing ${extraPath}`,
+					});
+				}
+			}
 		}
 	}
 
@@ -377,6 +409,142 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 				message: `skill "${slug}" exists in both .opencode and .claude but has no mirror contract in src/config/skill-mirrors.ts — classify it (identical / divergent / adapter / opencode-only)`,
 			});
 		}
+	}
+
+	// SC-009: Check .agents/skills/ and .github/skills/ for unclassified dirs.
+	const extraSkillTrees = ['.agents/skills', '.github/skills'];
+	for (const treePath of extraSkillTrees) {
+		if (fileExists(treePath)) {
+			const treeSlugs = listDirNames(treePath);
+			for (const slug of treeSlugs) {
+				if (!classified.has(slug)) {
+					findings.push({
+						category,
+						severity: 'warning',
+						file: `${treePath}/${slug}/SKILL.md`,
+						message: `skill "${slug}" exists in ${treePath} but has no contract in src/config/skill-mirrors.ts — classify it`,
+					});
+				}
+			}
+		}
+	}
+
+	return findings;
+}
+
+// ---------------------------------------------------------------------------
+// 1c) Duplicate slug detection (FR-004, SC-010, SC-011)
+// ---------------------------------------------------------------------------
+
+type SlugCarrier = { slug: string };
+
+/**
+ * Pure helper — counts slug occurrences across all provided contract arrays and
+ * returns an error finding for every slug that appears in more than one array.
+ * Exported via _internals for unit-test direct invocation (avoids mock.module
+ * leakage across the shared Bun test-runner process per AGENTS.md invariant #7).
+ */
+export function _checkDuplicateSlugsFromArrays(
+	mirrored: SlugCarrier[],
+	divergent: SlugCarrier[],
+	adapter: SlugCarrier[],
+	opencodeOnly: SlugCarrier[],
+	additional: SlugCarrier[],
+): DriftFinding[] {
+	const findings: DriftFinding[] = [];
+	const category = 'skill-mirror';
+	const slugCount = new Map<string, number>();
+
+	for (const { slug } of mirrored) {
+		slugCount.set(slug, (slugCount.get(slug) ?? 0) + 1);
+	}
+	for (const { slug } of divergent) {
+		slugCount.set(slug, (slugCount.get(slug) ?? 0) + 1);
+	}
+	for (const { slug } of adapter) {
+		slugCount.set(slug, (slugCount.get(slug) ?? 0) + 1);
+	}
+	for (const { slug } of opencodeOnly) {
+		slugCount.set(slug, (slugCount.get(slug) ?? 0) + 1);
+	}
+	for (const { slug } of additional) {
+		slugCount.set(slug, (slugCount.get(slug) ?? 0) + 1);
+	}
+
+	for (const [slug, count] of slugCount) {
+		if (count > 1) {
+			findings.push({
+				category,
+				severity: 'error',
+				message: `duplicate slug "${slug}" appears in ${count} mirror contract arrays — each slug must be unique across all arrays`,
+			});
+		}
+	}
+
+	return findings;
+}
+
+/** _internals seam for test injection — see AGENTS.md invariant #7. */
+export const _internals = { _checkDuplicateSlugsFromArrays };
+
+/**
+ * Detect duplicate slugs across ALL skill mirror contract arrays.
+ * A duplicate slug appearing in multiple arrays (e.g. both MIRRORED and DIVERGENT)
+ * is a configuration error that must be reported as a drift finding.
+ */
+export function detectDuplicateSlugs(): DriftFinding[] {
+	return _checkDuplicateSlugsFromArrays(
+		MIRRORED_ARCHITECT_MODE_SKILLS,
+		DIVERGENT_ARCHITECT_MODE_SKILLS,
+		ADAPTER_ARCHITECT_MODE_SKILLS,
+		OPENCODE_ONLY_ARCHITECT_MODE_SKILLS,
+		ADDITIONAL_SKILL_MIRROR_CONTRACTS,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// 1d) Package.json files duplicate detection (SC-012)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect duplicate entries in package.json's `files` array that start with
+ * `.opencode/skills/`. Duplicate entries in the published package files list
+ * would cause incorrect package contents.
+ */
+export function detectPackageJsonFilesDuplicates(root: string = REPO_ROOT): DriftFinding[] {
+	const { readFile } = makeFs(root);
+	const findings: DriftFinding[] = [];
+	const category = 'bundled-skill';
+
+	let pkg: PackageJson = {};
+	try {
+		pkg = JSON.parse(readFile('package.json')) as PackageJson;
+	} catch (err) {
+		return findings; // Already handled by detectBundledSkillDrift.
+	}
+
+	const skillPrefix = '.opencode/skills/';
+	const filesArr = pkg.files ?? [];
+
+	// Find duplicates among entries starting with .opencode/skills/
+	const seen = new Map<string, number>();
+	const duplicates: string[] = [];
+	for (const file of filesArr) {
+		if (!file.startsWith(skillPrefix)) continue;
+		const count = seen.get(file) ?? 0;
+		if (count === 1) {
+			duplicates.push(file);
+		}
+		seen.set(file, count + 1);
+	}
+
+	for (const dup of duplicates) {
+		findings.push({
+			category,
+			severity: 'error',
+			file: 'package.json',
+			message: `duplicate entry "${dup}" in package.json#files`,
+		});
 	}
 
 	return findings;
@@ -725,6 +893,150 @@ export function detectAgentDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
+// 6) Skill-reference resolver drift (FR-001)
+// ---------------------------------------------------------------------------
+
+const SKILL_REFERENCE_BUNDLED_RE = /file:\.swarm\/bundled-skills\/([^/]+)\/SKILL\.md/g;
+const SKILL_REFERENCE_SIBLING_RE = /(?<![\/\.\w-])(?:\.\.\/)+(.+?)\/SKILL\.md/g;
+
+/**
+ * Detect broken cross-skill references in SKILL.md bodies.
+ *
+ * Two reference forms are checked:
+ *  1. `file:.swarm/bundled-skills/<slug>/SKILL.md` — runtime path; the slug must
+ *     resolve to a real skill directory in any of the four trees OR be listed in
+ *     BUNDLED_PROJECT_SKILLS.
+ *  2. `../<slug>/SKILL.md` — sibling-relative path; the target must exist as a
+ *     sibling SKILL.md in the same tree.
+ *
+ * Broken references produce a `skill-reference` error finding with the file path
+ * of the SKILL.md containing the broken reference.
+ */
+
+/**
+ * Recursively find all SKILL.md files beneath a tree root.
+ * Returns array of { slug, skillPath, skillDir } where:
+ *   - slug: directory name containing the SKILL.md (e.g., "pr-review-fix")
+ *   - skillPath: absolute path to the SKILL.md file
+ *   - skillDir: parent directory of SKILL.md (e.g., ".opencode/skills/generated/pr-review-fix")
+ */
+function listSkillFilesRecursively(
+	treeRoot: string,
+	fs: FsHelpers,
+): Array<{ slug: string; skillPath: string; skillDir: string }> {
+	const results: Array<{ slug: string; skillPath: string; skillDir: string }> = [];
+
+	function walk(dir: string): void {
+		const entries = fs.listDirEntries(dir);
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				const subDir = `${dir}/${entry.name}`;
+				const skillPath = `${subDir}/SKILL.md`;
+				if (fs.fileExists(skillPath)) {
+					results.push({
+						slug: entry.name,
+						skillPath,
+						skillDir: subDir,
+					});
+				}
+				// Recurse into subdirectories to find nested skills
+				walk(subDir);
+			}
+		}
+	}
+
+	walk(treeRoot);
+	return results;
+}
+
+export function detectSkillReferenceDrift(root: string = REPO_ROOT): DriftFinding[] {
+	const fs = makeFs(root);
+	const findings: DriftFinding[] = [];
+	const category = 'skill-reference';
+
+	const skillRoots = [
+		'.opencode/skills',
+		'.claude/skills',
+		'.agents/skills',
+		'.github/skills',
+	];
+
+	// Scan every SKILL.md in every tree.
+	for (const treeRoot of skillRoots) {
+		for (const { slug, skillPath, skillDir } of listSkillFilesRecursively(treeRoot, fs)) {
+			if (!fs.fileExists(skillPath)) continue;
+			const content = fs.readFile(skillPath);
+
+			// Check form 1: file:.swarm/bundled-skills/<slug>/SKILL.md
+			for (const match of content.matchAll(SKILL_REFERENCE_BUNDLED_RE)) {
+				if (match[0].includes('<') || match[0].includes('>')) continue;
+				const referencedSlug = match[1];
+				if (!BUNDLED_PROJECT_SKILLS.includes(referencedSlug)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: skillPath,
+						message: `skill "${slug}" references \`file:.swarm/bundled-skills/${referencedSlug}/SKILL.md\` but slug "${referencedSlug}" is not in BUNDLED_PROJECT_SKILLS`,
+					});
+				}
+			}
+
+			// Check form 2: ../<slug>/SKILL.md (sibling relative reference)
+			// Handles multi-level ../ like ../../<slug>/SKILL.md (two levels up)
+			// Also handles cross-tree references like ../../../.claude/skills/commit-pr/SKILL.md
+			for (const siblingMatch of content.matchAll(SKILL_REFERENCE_SIBLING_RE)) {
+				const fullMatch = siblingMatch[0];
+				// Skip documentation template placeholders like <slug> or <path>
+				if (fullMatch.includes('<') || fullMatch.includes('>')) continue;
+				const referencedPath = siblingMatch[1];
+				// Count the number of ../ in the match to determine traversal depth
+				// Count only the LEADING ../ prefix, not any ../ inside the referenced path
+				const leadingPrefix = fullMatch.match(/^(?:\.\.\/)+/);
+				const upLevelCount = leadingPrefix ? (leadingPrefix[0].length / 3) : 0;
+				// Build the traversal path by going up upLevelCount levels from skillDir
+				let traversedSkillDir = skillDir;
+				for (let i = 0; i < upLevelCount; i++) {
+					traversedSkillDir = path.join(traversedSkillDir, '..');
+				}
+				// Build the full target path
+				const siblingSkillPath = path.join(traversedSkillDir, referencedPath, 'SKILL.md');
+
+				// Safety check: ensure the FINAL target is within a skill tree root
+				// (not the intermediate traversal directory — cross-tree refs like ../../../.claude/skills/xxx
+				// traverse through the repo root before reaching the target)
+				const resolvedTarget = path.resolve(root, siblingSkillPath);
+				const isInSkillTree = skillRoots.some((tr) => {
+					const resolvedRoot = path.resolve(root, tr);
+					return resolvedTarget === resolvedRoot + path.sep + 'SKILL.md'
+						|| resolvedTarget.startsWith(resolvedRoot + path.sep);
+				});
+				if (!isInSkillTree) {
+					// Target resolves outside all skill trees — this is a broken cross-skill reference
+					findings.push({
+						category,
+						severity: 'error',
+						file: skillPath,
+						message: `skill "${slug}" references \`${fullMatch}\` but the target resolves outside all skill trees (.opencode/skills, .claude/skills, .agents/skills, .github/skills)`,
+					});
+					continue;
+				}
+
+				if (!fs.fileExists(siblingSkillPath)) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: skillPath,
+						message: `skill "${slug}" references \`${fullMatch}\` but ${siblingSkillPath} does not exist`,
+					});
+				}
+			}
+		}
+	}
+
+	return findings;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -732,6 +1044,9 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['skill-mirror', detectSkillMirrorDrift],
 	['skill-audience', detectSkillAudienceDrift],
 	['bundled-skill', detectBundledSkillDrift],
+	['skill-reference', detectSkillReferenceDrift],
+	['duplicate-slug', detectDuplicateSlugs],
+	['package-json-files', detectPackageJsonFilesDuplicates],
 	['tool', detectToolRegistrationDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],

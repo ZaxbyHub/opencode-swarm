@@ -143,6 +143,16 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 						);
 					}
 				});
+			} else if (contract.kind === 'agents-only') {
+				// No .opencode counterpart exists. Verify the paths in
+				// extraIdenticalPaths (the actual runtime copies) all exist.
+				it(`${contract.slug}: agents-only — .opencode absent, runtime copies present`, () => {
+					expect(existsSync(opencodePath)).toBe(false);
+					for (const extraPath of contract.extraIdenticalPaths ?? []) {
+						const resolvedExtraPath = join(process.cwd(), extraPath);
+						expect(existsSync(resolvedExtraPath)).toBe(true);
+					}
+				});
 			}
 		}
 	});
@@ -178,5 +188,24 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		expect([...new Set(stubSlugs)].sort()).toEqual(
 			[...new Set(mirroredSlugs)].sort(),
 		);
+	});
+
+	// SC-010: No duplicate slugs within or across contract arrays
+	it('contract arrays have no duplicate slugs (SC-010)', () => {
+		const allSlugs = [
+			...MIRRORED_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+		];
+		const seen = new Set<string>();
+		const duplicates: string[] = [];
+		for (const slug of allSlugs) {
+			if (seen.has(slug)) {
+				duplicates.push(slug);
+			}
+			seen.add(slug);
+		}
+		expect(duplicates).toEqual([]);
 	});
 });
