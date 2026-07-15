@@ -107,9 +107,7 @@ describe('handleResetCommand', () => {
 
 		expect(result).toContain('## Swarm Reset');
 		expect(result).toContain('⚠️ This will delete all swarm state from .swarm/');
-		expect(result).toContain(
-			'Tip**: Run `/swarm export` first to backup your state.',
-		);
+		expect(result).toContain('.swarm/reset-backups/');
 		expect(result).toContain('To confirm, run: `/swarm reset --confirm`');
 
 		// Verify files still exist
@@ -183,12 +181,11 @@ describe('handleResetCommand', () => {
 		expect(existsSync(join(tempDir, '.swarm', 'context.md'))).toBe(false);
 	});
 
-	test('Warning message includes tip about /swarm export', async () => {
+	test('Warning message mentions auto-backup and portable export', async () => {
 		const result = await handleResetCommand(tempDir, []);
 
-		expect(result).toContain(
-			'Tip**: Run `/swarm export` first to backup your state.',
-		);
+		expect(result).toContain('.swarm/reset-backups/');
+		expect(result).toContain('/swarm export');
 	});
 
 	test('With --confirm flag', async () => {
@@ -309,6 +306,58 @@ describe('handleResetCommand', () => {
 		expect(result).toContain('⏭️ SWARM_PLAN.json not found (skipped)');
 		expect(result).toContain('⏭️ checkpoints.json not found (skipped)');
 		expect(result).toContain('⏭️ events.jsonl not found (skipped)');
+	});
+
+	// ── SPEC-DRIFT + PLAN-LEDGER STATE (resurrection guard) ──────────────────────
+	// Verifies reset wipes single-session spec-drift state (spec.md,
+	// spec-staleness.json, spec-snapshot.md) and plan-ledger.jsonl, matching the
+	// fix applied to /swarm close. Without this, spec-staleness.json survives as
+	// an existence-only gate that hard-blocks core write tools, and a surviving
+	// plan-ledger.jsonl gets replayed by replayFromLedger() on the next
+	// loadPlan(), resurrecting the wiped plan back into plan.json.
+	test('With --confirm - deletes spec-drift state files (spec.md, spec-staleness.json, spec-snapshot.md)', async () => {
+		await writeFile(join(tempDir, '.swarm', 'spec.md'), '# Spec');
+		await writeFile(
+			join(tempDir, '.swarm', 'spec-staleness.json'),
+			JSON.stringify({ stale: true }),
+		);
+		await writeFile(join(tempDir, '.swarm', 'spec-snapshot.md'), '# Snapshot');
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted spec.md');
+		expect(result).toContain('✅ Deleted spec-staleness.json');
+		expect(result).toContain('✅ Deleted spec-snapshot.md');
+		expect(existsSync(join(tempDir, '.swarm', 'spec.md'))).toBe(false);
+		expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
+			false,
+		);
+		expect(existsSync(join(tempDir, '.swarm', 'spec-snapshot.md'))).toBe(false);
+	});
+
+	test('With --confirm - deletes plan-ledger.jsonl and prevents plan resurrection via replayFromLedger', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify({ swarm: 'test', title: 'Test Plan', phases: [] }),
+		);
+		await writeFile(
+			join(tempDir, '.swarm', 'plan-ledger.jsonl'),
+			`${JSON.stringify({ op: 'create', title: 'Test Plan' })}\n`,
+		);
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted plan-ledger.jsonl');
+		expect(result).toContain('✅ Deleted plan.json');
+
+		// Resurrection guard: both plan.json and plan-ledger.jsonl must be absent
+		// so a subsequent loadPlan()/replayFromLedger() has nothing to resurrect.
+		expect(existsSync(join(tempDir, '.swarm', 'plan.json'))).toBe(false);
+		expect(existsSync(join(tempDir, '.swarm', 'plan-ledger.jsonl'))).toBe(
+			false,
+		);
 	});
 
 	// ── SINGLETON PRESERVATION (FR-001d) ─────────────────────────────────

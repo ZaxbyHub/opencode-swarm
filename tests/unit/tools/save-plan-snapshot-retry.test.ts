@@ -155,62 +155,79 @@ describe('takeSnapshotWithRetry (FR-004)', () => {
 		const error = new Error('ENOSPC: no space left on device');
 		mockTakeSnapshotEvent.mockRejectedValue(error);
 
-		const warnSpy = spyOn(console, 'warn');
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			await takeSnapshotWithRetry(TEST_DIR, makeTestPlan());
 
-		await takeSnapshotWithRetry(TEST_DIR, makeTestPlan());
-
-		// Initial attempt + 3 retries = 4 total attempts
-		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
-		// Should have logged a visible warning
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		const warnMsg = warnSpy.mock.calls[0][0] as string;
-		expect(warnMsg).toContain('Snapshot failed after 3 retries');
-		expect(warnMsg).toContain('4 attempts');
-		expect(warnMsg).toContain('ENOSPC');
-		// Should have emitted snapshot_failed telemetry
-		expect(mockEmit).toHaveBeenCalledTimes(1);
-		expect(mockEmit).toHaveBeenCalledWith('snapshot_failed', {
-			error: 'ENOSPC: no space left on device',
-			retries: 3,
-			source: 'save_plan_tool',
-		});
-		warnSpy.mockRestore();
+			// Initial attempt + 3 retries = 4 total attempts
+			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
+			// Should have logged a visible warning (DEBUG-gated via log())
+			expect(logSpy).toHaveBeenCalledTimes(1);
+			const logMsg = logSpy.mock.calls[0][0] as string;
+			expect(logMsg).toContain('Snapshot failed after 3 retries');
+			expect(logMsg).toContain('4 attempts');
+			expect(logMsg).toContain('ENOSPC');
+			// Should have emitted snapshot_failed telemetry
+			expect(mockEmit).toHaveBeenCalledTimes(1);
+			expect(mockEmit).toHaveBeenCalledWith('snapshot_failed', {
+				error: 'ENOSPC: no space left on device',
+				retries: 3,
+				source: 'save_plan_tool',
+			});
+		} finally {
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+		}
 	});
 
 	test('non-fatal — function resolves (does not throw) even when all retries fail', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('ledger unavailable'));
 
-		const warnSpy = spyOn(console, 'warn');
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			// Must NOT throw — the failure is non-fatal
+			await expect(
+				takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
+			).resolves.toBeUndefined();
 
-		// Must NOT throw — the failure is non-fatal
-		await expect(
-			takeSnapshotWithRetry(TEST_DIR, makeTestPlan()),
-		).resolves.toBeUndefined();
-
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		warnSpy.mockRestore();
+			expect(logSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+		}
 	});
 
-	test('warning is visible regardless of OPENCODE_SWARM_DEBUG (uses console.warn directly)', async () => {
-		// Ensure the flag is NOT set — the warning must still fire
+	test('warning fires when OPENCODE_SWARM_DEBUG=1 (log() is DEBUG-gated per epic #1752)', async () => {
+		// log() is DEBUG-gated — warning only fires when OPENCODE_SWARM_DEBUG=1
 		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		delete process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			mockTakeSnapshotEvent.mockRejectedValue(new Error('test failure'));
 
-		mockTakeSnapshotEvent.mockRejectedValue(new Error('test failure'));
+			await takeSnapshotWithRetry(TEST_DIR, makeTestPlan());
 
-		const warnSpy = spyOn(console, 'warn');
-
-		await takeSnapshotWithRetry(TEST_DIR, makeTestPlan());
-
-		// Warning must fire even without DEBUG flag
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-
-		// Restore
-		warnSpy.mockRestore();
-		if (originalDebug !== undefined) {
-			process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-		} else {
-			delete process.env.OPENCODE_SWARM_DEBUG;
+			// Warning fires when DEBUG flag is set
+			expect(logSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
 		}
 	});
 
@@ -299,7 +316,9 @@ describe('manager.ts takeSnapshotWithRetry (FR-004)', () => {
 		const error = new Error('ENOSPC: no space left on device');
 		mockTakeSnapshotEvent.mockRejectedValue(error);
 
-		const warnSpy = spyOn(console, 'warn');
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
 
 		// Spy on setTimeout to capture delays
 		const delays: number[] = [];
@@ -315,15 +334,22 @@ describe('manager.ts takeSnapshotWithRetry (FR-004)', () => {
 			},
 		);
 
-		await managerRetry(TEST_DIR, makeTestPlan());
+		try {
+			await managerRetry(TEST_DIR, makeTestPlan());
 
-		// Initial attempt + 3 retries = 4 total attempts
-		expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
-		expect(delays).toEqual([10, 20, 40]);
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-
-		setTimeoutSpy.mockRestore();
-		warnSpy.mockRestore();
+			// Initial attempt + 3 retries = 4 total attempts
+			expect(mockTakeSnapshotEvent).toHaveBeenCalledTimes(4);
+			expect(delays).toEqual([10, 20, 40]);
+			expect(logSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			setTimeoutSpy.mockRestore();
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+		}
 	});
 
 	test('emits snapshot_failed telemetry with source savePlan_manager', async () => {
@@ -342,41 +368,51 @@ describe('manager.ts takeSnapshotWithRetry (FR-004)', () => {
 		});
 	});
 
-	test('warning is visible without debug flags', async () => {
+	test('warning fires when OPENCODE_SWARM_DEBUG=1 (log() is DEBUG-gated per epic #1752)', async () => {
+		// log() is DEBUG-gated — warning only fires when OPENCODE_SWARM_DEBUG=1
 		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		delete process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			mockTakeSnapshotEvent.mockRejectedValue(new Error('test failure'));
 
-		mockTakeSnapshotEvent.mockRejectedValue(new Error('test failure'));
+			await managerRetry(TEST_DIR, makeTestPlan());
 
-		const warnSpy = spyOn(console, 'warn');
-
-		await managerRetry(TEST_DIR, makeTestPlan());
-
-		// Warning must fire even without DEBUG flag
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		const warnMsg = warnSpy.mock.calls[0][0] as string;
-		expect(warnMsg).toContain('Snapshot failed after 3 retries');
-		expect(warnMsg).toContain('4 attempts');
-		expect(warnMsg).toContain('test failure');
-
-		warnSpy.mockRestore();
-		if (originalDebug !== undefined) {
-			process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-		} else {
-			delete process.env.OPENCODE_SWARM_DEBUG;
+			// Warning fires when DEBUG flag is set
+			expect(logSpy).toHaveBeenCalledTimes(1);
+			const logMsg = logSpy.mock.calls[0][0] as string;
+			expect(logMsg).toContain('Snapshot failed after 3 retries');
+			expect(logMsg).toContain('4 attempts');
+			expect(logMsg).toContain('test failure');
+		} finally {
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
 		}
 	});
 
 	test('non-fatal — does not throw even when all retries fail', async () => {
 		mockTakeSnapshotEvent.mockRejectedValue(new Error('ledger unavailable'));
 
-		const warnSpy = spyOn(console, 'warn');
+		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			await expect(
+				managerRetry(TEST_DIR, makeTestPlan()),
+			).resolves.toBeUndefined();
 
-		await expect(
-			managerRetry(TEST_DIR, makeTestPlan()),
-		).resolves.toBeUndefined();
-
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		warnSpy.mockRestore();
+			expect(logSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			logSpy.mockRestore();
+			if (originalDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
+			}
+		}
 	});
 });
