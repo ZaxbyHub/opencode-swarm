@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.117.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.116.1...v7.117.0) (2026-07-15)
+
+
+### Features
+
+* **knowledge:** canonical cohort identity and provenance-preserving family migration ([5f78ee6](https://github.com/ZaxbyHub/opencode-swarm/commit/5f78ee6f49054396e5f4667d77e0922d7f121ea3))
+* **knowledge:** canonical cohort identity and provenance-preserving family migration ([51a7d73](https://github.com/ZaxbyHub/opencode-swarm/commit/51a7d73fdacf947b453ece9900f84323d2dd7f42))
+
+
+### Bug Fixes
+
+* **knowledge:** address PR review findings ([#1851](https://github.com/ZaxbyHub/opencode-swarm/issues/1851)) ([8c8acf5](https://github.com/ZaxbyHub/opencode-swarm/commit/8c8acf565b54ac6f8fc4a7197f10bc348b6f8860))
+* **knowledge:** normalize cohort-id path separators for Windows worktree convergence ([c3d1e5f](https://github.com/ZaxbyHub/opencode-swarm/commit/c3d1e5f9767f0e5fcb5a5f8560d0b1d2a7236f9e))
+* **knowledge:** resolve absolute git-common-dir so worktrees converge on Windows ([e2b1b86](https://github.com/ZaxbyHub/opencode-swarm/commit/e2b1b86ae37e3640871955e4339f2a87e7932450))
+
 ## [7.116.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.116.0...v7.116.1) (2026-07-14)
 
 
