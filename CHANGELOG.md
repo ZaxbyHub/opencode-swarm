@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.118.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.117.0...v7.118.0) (2026-07-15)
+
+
+### Features
+
+* **knowledge:** transactional hive promotion with preserved lineage ([#1847](https://github.com/ZaxbyHub/opencode-swarm/issues/1847)) ([10a692e](https://github.com/ZaxbyHub/opencode-swarm/commit/10a692e4d2895f3b66a5bd5f8ae497a73df0848a))
+* **knowledge:** transactional hive promotion with preserved lineage ([#1847](https://github.com/ZaxbyHub/opencode-swarm/issues/1847)) ([78355be](https://github.com/ZaxbyHub/opencode-swarm/commit/78355be9ceee5e692e5ee5f826d24f1fcf2bacff))
+
+
+### Bug Fixes
+
+* **knowledge:** resolve PR [#1856](https://github.com/ZaxbyHub/opencode-swarm/issues/1856) review findings (F-001..F-012, PRR-1..7) ([892f588](https://github.com/ZaxbyHub/opencode-swarm/commit/892f588ee46f09af0407c77fc58ab79b3159b9c4))
+
 ## [7.117.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.116.1...v7.117.0) (2026-07-15)
 
 
