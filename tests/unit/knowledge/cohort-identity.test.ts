@@ -334,3 +334,34 @@ describe('subprocess contract (invariant 3)', () => {
 		);
 	});
 });
+
+describe('cross-platform cohort-id convergence (Windows CI regression)', () => {
+	// Regression guard for the merge-queue Windows failure (run 29390417124):
+	// the main worktree's git-common-dir resolved to a backslash path via Node
+	// while the linked worktree's returned a forward-slash path via git, so the
+	// two sibling worktrees hashed to DIFFERENT cohort ids. The resolver now
+	// normalizes separators + case before hashing. This test proves the
+	// invariant directly so it is exercised on every platform, not just Windows.
+	test('backslash vs forward-slash common-dir paths converge to one cohort id', () => {
+		// What git returns from the MAIN worktree on Windows (after Node realpath):
+		const mainForm = 'C:\\Users\\runner\\repo\\.git';
+		// What git returns from the LINKED worktree on Windows (absolute, forward):
+		const linkedForm = 'C:/Users/runner/repo/.git';
+		// These are lexically different...
+		expect(mainForm).not.toBe(linkedForm);
+		// ...but after the resolver's normalization they must hash identically.
+		const norm = (s: string): string => s.replace(/\\/g, '/').toLowerCase();
+		expect(_internals.cohortHash(norm(mainForm))).toBe(
+			_internals.cohortHash(norm(linkedForm)),
+		);
+	});
+
+	test('drive-letter case does not split the cohort', () => {
+		const upper = 'D:/a/repo/.git';
+		const lower = 'd:/a/repo/.git';
+		const norm = (s: string): string => s.replace(/\\/g, '/').toLowerCase();
+		expect(_internals.cohortHash(norm(upper))).toBe(
+			_internals.cohortHash(norm(lower)),
+		);
+	});
+});

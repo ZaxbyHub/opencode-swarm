@@ -279,8 +279,17 @@ export async function resolveCohortId(
 			// first, then realpath so both forms converge (issue #1846 critic C3).
 			const resolved = path.resolve(directory, commonDirRaw);
 			const canonical = realpathSync(resolved);
+			// Normalize to a stable cohort-id input: forward slashes + lowercase.
+			// `realpathSync` returns OS-native separators, so on Windows the main
+			// worktree yields `C:\...\main\.git` (backslashes, from Node) while a
+			// linked worktree yields `C:/.../main/.git` (forward slashes, from
+			// git's absolute --git-common-dir output). Without normalization the
+			// two sibling worktrees hash to DIFFERENT cohort ids on Windows. Both
+			// Windows path separators and drive-letter case are insignificant, so
+			// folding them makes the cohort id deterministic per machine.
+			const stable = canonical.replace(/\\/g, '/').toLowerCase();
 			return {
-				cohortId: cohortHash(canonical),
+				cohortId: cohortHash(stable),
 				source: 'git-common-dir',
 				degraded: true,
 			};
@@ -296,8 +305,12 @@ export async function resolveCohortId(
 	} catch {
 		canonicalPath = path.resolve(directory);
 	}
+	// Same separator/case normalization as the git-common-dir branch: two
+	// paths that differ only by OS-native separator or drive-letter case must
+	// not produce different cohort ids (issue #1846 Windows CI fix).
+	const stablePath = canonicalPath.replace(/\\/g, '/').toLowerCase();
 	return {
-		cohortId: cohortHash(canonicalPath),
+		cohortId: cohortHash(stablePath),
 		source: 'path',
 		degraded: true,
 	};
