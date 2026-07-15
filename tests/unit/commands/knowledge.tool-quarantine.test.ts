@@ -69,6 +69,14 @@ describe('handleKnowledgeQuarantineCommand', () => {
 			'test-id',
 			'because it is bad',
 			'user',
+			// F-02: cohort-safety curationContext threaded through the command.
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'quarantine',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 	});
 
@@ -90,6 +98,13 @@ describe('handleKnowledgeQuarantineCommand', () => {
 			'test-id',
 			'Quarantined via /swarm knowledge quarantine command',
 			'user',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'quarantine',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 	});
 
@@ -103,6 +118,13 @@ describe('handleKnowledgeQuarantineCommand', () => {
 			'abc',
 			'bad rule',
 			'user',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'quarantine',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 	});
 
@@ -146,6 +168,13 @@ describe('handleKnowledgeQuarantineCommand', () => {
 			fullId,
 			'Quarantined via /swarm knowledge quarantine command',
 			'user',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'quarantine',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 		expect(result).toBe(`✅ Entry ${fullId} quarantined successfully.`);
 	});

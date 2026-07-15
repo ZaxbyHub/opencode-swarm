@@ -196,6 +196,14 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 				validId,
 				'Quarantined via /swarm knowledge quarantine command',
 				'user',
+				// F-02: cohort-safety curationContext threaded through the command.
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'quarantine',
+						evidenceScope: 'local-session',
+						actorRole: 'user',
+					}),
+				}),
 			);
 		});
 
@@ -303,6 +311,13 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 				validId,
 				longReason,
 				'user',
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'quarantine',
+						evidenceScope: 'local-session',
+						actorRole: 'user',
+					}),
+				}),
 			);
 			expect(result).toBe(`✅ Entry ${validId} quarantined successfully.`);
 		});
@@ -323,6 +338,13 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 				validId,
 				reasonWithControls,
 				'user',
+				expect.objectContaining({
+					input: expect.objectContaining({
+						action: 'quarantine',
+						evidenceScope: 'local-session',
+						actorRole: 'user',
+					}),
+				}),
 			);
 			expect(result).toBe(`✅ Entry ${validId} quarantined successfully.`);
 		});
