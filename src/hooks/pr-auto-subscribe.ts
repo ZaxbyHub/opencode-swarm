@@ -19,7 +19,7 @@
 import { subscribe } from '../background/pr-subscriptions.js';
 import type { PrMonitorConfig } from '../config/schema.js';
 import { log } from '../utils';
-import { resolveToolAfterContext } from './host-boundary';
+import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
 
 /** Only scan a bounded slice of tool output (defense against huge outputs). */
@@ -98,12 +98,10 @@ export function createPrAutoSubscribeHook(
 				// callID snapshot. Fall back to input.args/output.args for direct-call
 				// test fixtures (the production host never populates input.args here).
 				const recovered =
-					typeof input.callID === 'string' && input.sessionID
-						? resolveToolAfterContext({
-								tool: input.tool,
-								sessionID: input.sessionID,
-								callID: input.callID,
-							}).args
+					typeof input.callID === 'string'
+						? (getStoredInputArgs(input.callID) as
+								| Record<string, unknown>
+								| undefined)
 						: undefined;
 				const args = (recovered ?? input.args ?? output.args) as
 					| Record<string, unknown>

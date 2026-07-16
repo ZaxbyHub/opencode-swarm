@@ -25,7 +25,7 @@ import { sanitizeTaskId } from '../evidence/manager.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
-import { resolveToolAfterContext } from './host-boundary.js';
+import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
 import { transactFile } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
@@ -466,12 +466,10 @@ export async function microReflectorAfter(
 	// inline (the production host never populates input.args here).
 	const recovered =
 		typeof input.callID === 'string'
-			? resolveToolAfterContext({
-					tool: String(input.tool),
-					sessionID: String(input.sessionID ?? ''),
-					callID: input.callID,
-				}).args
-			: null;
+			? (getStoredInputArgs(input.callID) as
+					| Record<string, unknown>
+					| undefined)
+			: undefined;
 	const argsRecord =
 		recovered ?? (input.args as Record<string, unknown> | undefined) ?? null;
 	const argsForParse = argsRecord ?? input.args;

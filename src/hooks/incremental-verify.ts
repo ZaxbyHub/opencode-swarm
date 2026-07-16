@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IncrementalVerifyConfig } from '../config/schema';
-import { resolveToolAfterContext } from './host-boundary';
+import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { spawnAsync } from './spawn-helper';
 export type { IncrementalVerifyConfig };
 export { detectTypecheckCommand };
@@ -172,11 +172,9 @@ export function createIncrementalVerifyHook(
 			// Fall back to input.args/output.args only for direct-call test fixtures.
 			const recovered =
 				typeof input.callID === 'string'
-					? resolveToolAfterContext({
-							tool: input.tool,
-							sessionID: input.sessionID,
-							callID: input.callID,
-						}).args
+					? (getStoredInputArgs(input.callID) as
+							| Record<string, unknown>
+							| undefined)
 					: undefined;
 			const args = (recovered ?? input.args ?? output.args) as
 				| Record<string, unknown>
