@@ -1,5 +1,24 @@
 # Changelog
 
+## [7.120.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.119.0...v7.120.0) (2026-07-16)
+
+
+### Features
+
+* **knowledge:** cohort-safe pooled curation with provenance and fair scanning ([8be07cf](https://github.com/ZaxbyHub/opencode-swarm/commit/8be07cf5d48e83b2cafb3dfc612ee8559edc48ec))
+
+
+### Bug Fixes
+
+* **knowledge:** address Stage B review — wire generation consumer + test the worktree race (F-09/PRR-003, F-21) ([a9b3f2e](https://github.com/ZaxbyHub/opencode-swarm/commit/a9b3f2e06858938d2ff690418e2debf396b12b64))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — config fingerprint, command bypass, worktree id, diagnostics (F-01,F-02,F-06,F-08,PRR-008,PRR-009) ([fa66a15](https://github.com/ZaxbyHub/opencode-swarm/commit/fa66a15cd9594a13bdafe9f0d60e275b8d714b0a))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — migrate rewrite-history + curation-proposals on link/unlink (F-15) ([96e0c13](https://github.com/ZaxbyHub/opencode-swarm/commit/96e0c13768a5885a837f8548c637311037dbc981))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — purge routes through ownership policy, document skill-retire disposition (F-03, PRR-006) ([c9fae7a](https://github.com/ZaxbyHub/opencode-swarm/commit/c9fae7a621b1549eb576b74d28defa2dc61086eb))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — real curator CAS + generation-stamp idempotency (F-05,PRR-004,F-09,PRR-003,F-06) ([fd0d204](https://github.com/ZaxbyHub/opencode-swarm/commit/fd0d2048cd954c3418df0364540ce4a47344ae66))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — route hive dedup-merge through the policy with an audit record (PRR-007) ([5b6ca4c](https://github.com/ZaxbyHub/opencode-swarm/commit/5b6ca4cf4f2f60ddca188951f209b9f5fe58c19f))
+* **knowledge:** PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) feedback — wire CAS into archive, audit purge overrides, real config (PRR-002,PRR-010,F-06,F-07) ([f8dc5ed](https://github.com/ZaxbyHub/opencode-swarm/commit/f8dc5ed0ca6d48476a4e1b9ee31cd3f2a7b91558))
+* **knowledge:** resolve PR [#1862](https://github.com/ZaxbyHub/opencode-swarm/issues/1862) CI-red merge blockers (F-10..F-14, PRR-001/001a) ([91e1fae](https://github.com/ZaxbyHub/opencode-swarm/commit/91e1faef23e54200ae3ec666d18d6aa6853785bf))
+
 ## [7.119.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.118.1...v7.119.0) (2026-07-15)
 
 
