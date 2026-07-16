@@ -1,14 +1,20 @@
 /**
- * Issue #1768 — injection_skip reason telemetry tests.
+ * Issue #1768 / #1849 — injection_skip reason telemetry tests.
  *
- * Every silent early-return in the architect auto-injection path now emits a
+ * Every silent early-return in the architect auto-injection path emits a
  * structured `injection_skip` event so the dead-path cause is diagnosable from
  * `.swarm/knowledge-events.jsonl`. These tests pin one event per reason.
+ *
+ * (#1849) Identity is no longer recovered from a `role:'system'` message (the
+ * SDK Message union has no system variant). It comes from
+ * `swarmState.activeAgent` (primary, set by chat.message) with the last user
+ * message's `info.agent` as a first-turn fallback. Fixtures set
+ * `swarmState.activeAgent` instead of a system message.
  *
  * Pattern (AGENTS.md invariant 7): bun:test, real temp dirs, `_internals` DI
  * seams, restore in afterEach. No mock.module.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -34,6 +40,7 @@ let originalSearch: typeof _internals.searchKnowledge;
 let originalRecordShown: typeof _internals.recordKnowledgeShown;
 let originalRecordLessonsShown: typeof _internals.recordLessonsShown;
 let originalConfirmEntriesPhase: typeof _internals.confirmEntriesPhase;
+const SESSION = 's';
 
 function output(messages: MessageWithParts[]): {
 	messages?: MessageWithParts[];
@@ -45,6 +52,7 @@ beforeEach(() => {
 	tempDir = mkdtempSync(path.join(os.tmpdir(), 'swarm-skip-'));
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	originalRecordEvent = _internals.recordKnowledgeEvent;
 	originalSearch = _internals.searchKnowledge;
 	originalRecordShown = _internals.recordKnowledgeShown;
@@ -59,6 +67,7 @@ afterEach(() => {
 	_internals.recordLessonsShown = originalRecordLessonsShown;
 	_internals.confirmEntriesPhase = originalConfirmEntriesPhase;
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -81,9 +90,10 @@ function captureEvents(): {
 const skipEvents = (events: KnowledgeEventInput[]) =>
 	events.filter((e) => e.type === 'injection_skip');
 
-describe('knowledge injector injection_skip telemetry (#1768)', () => {
+describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 	test('headroom_budget: emits skip when context headroom is below threshold', async () => {
 		const { events } = captureEvents();
+		swarmState.activeAgent.set(SESSION, 'architect');
 		const hook = createKnowledgeInjectorHook(
 			tempDir,
 			{ ...baseConfig, enabled: true, context_budget_threshold: 300 },
@@ -96,21 +106,17 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 			output([
 				{
 					info: {
-						role: 'system',
-						agent: 'architect',
-						sessionID: 's',
-					},
-					parts: [{ type: 'text', text: 'system' }],
-				},
-				{
-					info: {
 						role: 'assistant',
 						modelID: 'tiny',
 						providerID: 'test-provider',
+						sessionID: SESSION,
 					},
 					parts: [{ type: 'text', text: big }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'go' }] },
+				{
+					info: { role: 'user', agent: 'architect', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
+				},
 			]),
 		);
 		await new Promise((r) => setTimeout(r, 5));
@@ -121,8 +127,10 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 		expect(skips[0].detail).toMatchObject({ modelID: 'tiny' });
 	});
 
-	test('no_agent_name: emits skip when the system message carries no agent', async () => {
+	test('no_agent_name: emits skip when no activeAgent AND no user message carries agent', async () => {
 		const { events } = captureEvents();
+		// Deliberately do NOT set swarmState.activeAgent and provide a user
+		// message with no info.agent. The adapter cannot resolve identity.
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
 			enabled: true,
@@ -130,12 +138,10 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 		await hook(
 			{},
 			output([
-				// system message with no info.agent
 				{
-					info: { role: 'system', sessionID: 's' },
-					parts: [{ type: 'text', text: 'system' }],
+					info: { role: 'user', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'go' }] },
 			]),
 		);
 		await new Promise((r) => setTimeout(r, 5));
@@ -147,6 +153,7 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 
 	test('not_architect: emits skip for an unrecognized non-delegate agent', async () => {
 		const { events } = captureEvents();
+		swarmState.activeAgent.set(SESSION, 'mystery_role');
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
 			enabled: true,
@@ -155,10 +162,9 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 			{},
 			output([
 				{
-					info: { role: 'system', agent: 'mystery_role', sessionID: 's' },
-					parts: [{ type: 'text', text: 'system' }],
+					info: { role: 'user', agent: 'mystery_role', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'go' }] },
 			]),
 		);
 		await new Promise((r) => setTimeout(r, 5));
@@ -171,6 +177,7 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 
 	test('no_matching_entries: emits skip when search returns empty', async () => {
 		const { events } = captureEvents();
+		swarmState.activeAgent.set(SESSION, 'architect');
 		_internals.searchKnowledge = async () => ({ trace_id: 't', results: [] });
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
@@ -180,10 +187,9 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 			{},
 			output([
 				{
-					info: { role: 'system', agent: 'architect', sessionID: 's' },
-					parts: [{ type: 'text', text: 'system' }],
+					info: { role: 'user', agent: 'architect', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'go' }] },
 			]),
 		);
 		await new Promise((r) => setTimeout(r, 5));
@@ -193,15 +199,10 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 		expect(skips[0].reason).toBe('no_matching_entries');
 	});
 
-	test('injection_skip events round-trip to disk and are a no-op in counter replay', async () => {
-		// The new event type must persist to knowledge-events.jsonl and not break
-		// recomputeCounters (it has no case for it → safely skipped).
-		const eventsPath = path.join(tempDir, '.swarm', 'knowledge-events.jsonl');
-		// Use the REAL recordKnowledgeEvent (writes the file) for this one test.
-		// Restore the originals captured in beforeEach momentarily:
-		_internals.recordKnowledgeEvent = originalRecordEvent;
-		_internals.recordKnowledgeShown = async () => {};
-		// Drive the no_agent_name skip.
+	test('(#1849) empty retrieval also emits a no_relevant terminal (every retrieval accounted for)', async () => {
+		const { events } = captureEvents();
+		swarmState.activeAgent.set(SESSION, 'architect');
+		_internals.searchKnowledge = async () => ({ trace_id: 't', results: [] });
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
 			enabled: true,
@@ -210,10 +211,41 @@ describe('knowledge injector injection_skip telemetry (#1768)', () => {
 			{},
 			output([
 				{
-					info: { role: 'system', sessionID: 's' },
-					parts: [{ type: 'text', text: 'system' }],
+					info: { role: 'user', agent: 'architect', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'go' }] },
+			]),
+		);
+		await new Promise((r) => setTimeout(r, 5));
+
+		// Empty architect retrieval now files a retrieved(empty) + no_relevant.
+		const retrieved = events.filter((e) => e.type === 'retrieved');
+		expect(retrieved).toHaveLength(1);
+		expect(retrieved[0].result_ids).toEqual([]);
+		const noRelevant = events.filter((e) => e.type === 'no_relevant');
+		expect(noRelevant).toHaveLength(1);
+		expect(noRelevant[0].trace_id).toBe('t');
+	});
+
+	test('injection_skip events round-trip to disk and are a no-op in counter replay', async () => {
+		// The skip event must persist to knowledge-events.jsonl and not break
+		// recomputeCounters (it has no case for it → safely skipped).
+		const eventsPath = path.join(tempDir, '.swarm', 'knowledge-events.jsonl');
+		// Use the REAL recordKnowledgeEvent (writes the file) for this one test.
+		_internals.recordKnowledgeEvent = originalRecordEvent;
+		_internals.recordKnowledgeShown = async () => {};
+		// Drive the no_agent_name skip (no activeAgent, no user-message agent).
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+		});
+		await hook(
+			{},
+			output([
+				{
+					info: { role: 'user', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
+				},
 			]),
 		);
 		await new Promise((r) => setTimeout(r, 20));

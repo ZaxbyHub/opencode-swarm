@@ -14,13 +14,32 @@
  */
 
 import { z } from 'zod';
+import { ensureCohortIdCached } from '../hooks/cohort-cache.js';
 import {
 	type KnowledgeEventInput,
 	recordKnowledgeEvent,
 } from '../hooks/knowledge-events.js';
+import { readLinkPointer } from '../hooks/knowledge-link.js';
+import {
+	type ReceiptItem,
+	validateReceipt,
+} from '../hooks/knowledge-receipt-validator.js';
+import type { PromotionEvidenceRecord } from '../hooks/knowledge-types.js';
+import { appendPromotionEvidence } from '../hooks/promotion-evidence-store.js';
 import { log } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 import { knowledge_add } from './knowledge-add.js';
+
+/** Read the link pointer id if present, fail-open. */
+async function readLinkPointerSafe(
+	directory: string,
+): Promise<string | undefined> {
+	try {
+		return readLinkPointer(directory)?.linkId;
+	} catch {
+		return undefined;
+	}
+}
 
 const IGNORE_REASONS = [
 	'not_relevant',
@@ -149,7 +168,63 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					recordedEventIds.push(written.event_id);
 			};
 
+			// (#1849) Validate the receipt against the authoritative event log
+			// BEFORE emitting. Reject forged / expired / conflicting / non-trace
+			// receipts; idempotent retries are accepted as skips (not re-emitted).
+			// `no_relevant_knowledge` files one durable `no_relevant` terminal.
+			// A lessons-only receipt (no items, no no_relevant, but new_lessons) is
+			// meaningful and skips items-validation — it just persists lessons.
+			const validationItems = [
+				...applied.map((i) => ({ id: i.id, outcome: 'applied' as const })),
+				...ignored.map((i) => ({ id: i.id, outcome: 'ignored' as const })),
+				...contradicted.map((i) => ({
+					id: i.id,
+					outcome: 'contradicted' as const,
+				})),
+			];
+			const needsValidation = validationItems.length > 0 || noRelevant;
+			let acceptedIds = new Set<string>();
+			let closesNoRelevant = false;
+			let acceptedItems: ReceiptItem[] = [];
+			if (needsValidation) {
+				const validation = await validateReceipt({
+					directory,
+					trace_id: traceId,
+					session_id: sessionId,
+					task_id: taskId,
+					phase,
+					agent,
+					items: validationItems,
+					no_relevant_knowledge: noRelevant,
+				});
+
+				if (!validation.ok) {
+					// Rejection: the validator audited it. Return a clear JSON error to
+					// the agent without emitting any terminal events.
+					return JSON.stringify({
+						recorded: false,
+						rejected: true,
+						reason: validation.reason,
+						detail: validation.detail,
+						rejected_items: validation.rejected_items,
+					});
+				}
+				acceptedIds = new Set(validation.accepted.map((i) => i.id));
+				closesNoRelevant = validation.closes_no_relevant;
+				acceptedItems = validation.accepted;
+			}
+
+			// `no_relevant` terminal for an empty/real-empty trace.
+			if (closesNoRelevant) {
+				await emit({
+					type: 'no_relevant',
+					...base,
+					reason: 'no relevant knowledge surfaced by the trace',
+				});
+			}
+
 			for (const item of applied) {
+				if (!acceptedIds.has(item.id)) continue;
 				await emit({
 					type: 'applied',
 					...base,
@@ -165,6 +240,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				});
 			}
 			for (const item of ignored) {
+				if (!acceptedIds.has(item.id)) continue;
 				await emit({
 					type: 'ignored',
 					...base,
@@ -173,6 +249,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				});
 			}
 			for (const item of contradicted) {
+				if (!acceptedIds.has(item.id)) continue;
 				await emit({
 					type: 'contradicted',
 					...base,
@@ -180,6 +257,56 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					reason: `${item.proposed_action}: ${item.evidence}`,
 					evidence: { summary: item.evidence },
 				});
+			}
+
+			// (#1849 §B2) Derive PromotionEvidenceRecords from validated
+			// applied/violated/contradicted receipts and persist them so #1847's
+			// evaluatePromotionPolicy finally consumes real evidence. cohort_id is
+			// resolved once-bounded + cached; never re-runs git per receipt.
+			if (acceptedItems.length > 0) {
+				try {
+					const cohortId = await ensureCohortIdCached(directory, sessionId);
+					const linkId = await readLinkPointerSafe(directory);
+					const now = new Date().toISOString();
+					// Map emitted events to their receipt_event_id by order of emit.
+					// recordKnowledgeEvent assigns event_id sequentially per append;
+					// we pair accepted items with the tail of recordedEventIds.
+					const evidenceRecords: PromotionEvidenceRecord[] = [];
+					let cursor = recordedEventIds.length - acceptedItems.length;
+					for (const item of acceptedItems) {
+						if (item.outcome !== 'applied' && item.outcome !== 'contradicted') {
+							// Only applied/contradicted (and violated, not filed here) feed
+							// promotion evidence per the PromotionEvidenceRecord schema.
+							if (item.outcome === 'violated') {
+								// fall through to record
+							} else {
+								cursor++;
+								continue;
+							}
+						}
+						const receiptEventId = recordedEventIds[cursor] ?? '';
+						cursor++;
+						if (!cohortId || !receiptEventId) continue;
+						evidenceRecords.push({
+							cohort_id: cohortId,
+							source_link_id: linkId,
+							entry_id: item.id,
+							retrieval_trace_id: traceId,
+							receipt_outcome:
+								item.outcome === 'applied'
+									? 'applied'
+									: item.outcome === 'violated'
+										? 'violated'
+										: 'contradicted',
+							receipt_event_id: receiptEventId,
+							phase,
+							timestamp: now,
+						});
+					}
+					await appendPromotionEvidence(directory, evidenceRecords);
+				} catch {
+					/* non-blocking — evidence is a derived consumer */
+				}
 			}
 
 			// Persist new lessons through the normal validation/dedup path.

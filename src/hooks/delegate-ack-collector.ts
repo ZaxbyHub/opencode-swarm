@@ -23,7 +23,14 @@ import * as path from 'node:path';
 import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
 import { newTraceId, recordKnowledgeEvent } from './knowledge-events.js';
-import { parseDelegateDirectiveBlock } from './knowledge-injector.js';
+import {
+	parseDelegateDirectiveBlock,
+	parseDelegateDirectiveTraceId,
+} from './knowledge-injector.js';
+import {
+	type ReceiptItem,
+	validateReceipt,
+} from './knowledge-receipt-validator.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -99,24 +106,78 @@ export async function collectDelegateAcks(params: {
 		const violatedIds = new Set<string>();
 		const sessionId = params.sessionId ?? 'unknown';
 		const taskId = params.taskId ?? extractTaskId(params.prompt);
-		const traceId = newTraceId();
+		// (#1849 RC-4/R2) Recover the ORIGINAL retrieval trace_id from the
+		// directive block instead of minting an untied one. This links ack events
+		// back to the delegate retrieval's `retrieved` event, which the shared
+		// receipt validator requires (trace-existence + cited-ID membership). Fall
+		// back to a fresh trace only for legacy prompts without the trace header.
+		const traceId =
+			parseDelegateDirectiveTraceId(params.prompt) ?? newTraceId();
 
+		// (#1849 R2) Build the candidate items (one per acknowledged shown
+		// directive) and route them through the SHARED validator so the ack path
+		// gets the same trace-existence / session / idempotency / conflict
+		// guarantees as the knowledge_receipt tool. Anti-spoofing (only-shown
+		// IDs) is preserved by filtering to shownById before validating.
+		const ackItems: ReceiptItem[] = [];
+		const ackByItemId = new Map<
+			string,
+			{ id: string; result: string; reason?: string }
+		>();
 		for (const ack of acks) {
 			// Anti-spoofing: only honor acks for directives that were actually shown.
 			if (!shownById.has(ack.id)) continue;
-			ackedIds.add(ack.id);
-			await recordKnowledgeEvent(params.directory, {
-				type: ack.result,
-				trace_id: traceId,
-				knowledge_id: ack.id,
-				session_id: sessionId,
-				task_id: taskId,
-				agent: params.agent,
-				reason: ack.reason,
-			});
-			if (ack.result === 'violated') violatedIds.add(ack.id);
-			result.emitted.push({ id: ack.id, type: ack.result });
+			// Only terminal outcomes the validator accepts are routed; others
+			// (e.g. 'acknowledged') fall through to direct emit below for compat.
+			if (
+				ack.result === 'applied' ||
+				ack.result === 'ignored' ||
+				ack.result === 'violated' ||
+				ack.result === 'n_a' ||
+				ack.result === 'contradicted'
+			) {
+				ackItems.push({ id: ack.id, outcome: ack.result, reason: ack.reason });
+				ackByItemId.set(ack.id, ack);
+			}
 		}
+
+		const validation = await validateReceipt({
+			directory: params.directory,
+			trace_id: traceId,
+			session_id: sessionId,
+			task_id: taskId,
+			agent: params.agent,
+			items: ackItems,
+			no_relevant_knowledge: false,
+		});
+
+		if (validation.ok) {
+			for (const item of validation.accepted) {
+				const ack = ackByItemId.get(item.id);
+				if (!ack) continue;
+				ackedIds.add(item.id);
+				await recordKnowledgeEvent(params.directory, {
+					type: item.outcome,
+					trace_id: traceId,
+					knowledge_id: item.id,
+					session_id: sessionId,
+					task_id: taskId,
+					agent: params.agent,
+					reason: ack.reason,
+				});
+				if (item.outcome === 'violated') violatedIds.add(item.id);
+				result.emitted.push({ id: item.id, type: item.outcome });
+			}
+			// Idempotent skips: already recorded with the same outcome — do not
+			// re-emit or double-count, but mark them acked so the unacknowledged
+			// escalation below does not flag them.
+			for (const item of validation.idempotent_skips) {
+				ackedIds.add(item.id);
+			}
+		}
+		// If validation did NOT succeed (ok:false), the ack path fails open: we
+		// do not emit terminals (the validator already audited the rejection),
+		// and unacknowledged escalation proceeds against the shown critical set.
 
 		// Any critical that was shown but never acknowledged is a contract
 		// violation: record it as violated/unacknowledged and audit it.

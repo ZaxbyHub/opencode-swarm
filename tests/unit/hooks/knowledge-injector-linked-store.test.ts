@@ -17,6 +17,13 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. The fixture sets swarmState.activeAgent and stamps a consistent
+// sessionID on every message.
+import { swarmState } from '../../../src/state';
+
+const SESSION_ID = 'linked-injection-session';
 
 function makeEntry(
 	overrides: Partial<SwarmKnowledgeEntry>,
@@ -67,6 +74,7 @@ describe('knowledge injector linked-store regression', () => {
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
 		invalidateKnowledgeStoreDirCache();
+		swarmState.activeAgent.delete(SESSION_ID);
 		dataCleanup?.();
 	});
 
@@ -105,12 +113,12 @@ describe('knowledge injector linked-store regression', () => {
 						info: {
 							role: 'system',
 							agent: 'architect',
-							sessionID: 'linked-injection-session',
+							sessionID: SESSION_ID,
 						},
 						parts: [{ type: 'text', text: 'system prompt' }],
 					},
 					{
-						info: { role: 'user' },
+						info: { role: 'user', sessionID: SESSION_ID },
 						parts: [
 							{
 								type: 'text',
@@ -120,6 +128,9 @@ describe('knowledge injector linked-store regression', () => {
 					},
 				],
 			};
+
+			// (#1849) Map the session to the architect so identity resolves.
+			swarmState.activeAgent.set(SESSION_ID, 'architect');
 
 			const hook = createKnowledgeInjectorHook(
 				b.dir,

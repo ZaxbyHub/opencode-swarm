@@ -86,6 +86,11 @@ export interface SerializedAgentSession {
 	autoProceedOverride?: boolean;
 	/** Flag tracking whether the auto-proceed nudge has been shown (Phase 1) */
 	autoProceedNudgeDone?: boolean;
+	/**
+	 * Cached canonical cohort id (issue #1849). Omitted on disk when undefined
+	 * so older snapshots deserialize cleanly; the reader defaults to undefined.
+	 */
+	cachedCohortId?: string;
 }
 
 /**
@@ -240,6 +245,9 @@ export function serializeAgentSession(
 		}),
 		...(s.autoProceedNudgeDone !== undefined && {
 			autoProceedNudgeDone: s.autoProceedNudgeDone,
+		}),
+		...(s.cachedCohortId !== undefined && {
+			cachedCohortId: s.cachedCohortId,
 		}),
 	};
 }

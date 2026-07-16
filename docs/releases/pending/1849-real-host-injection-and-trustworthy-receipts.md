@@ -1,0 +1,64 @@
+# Linked Knowledge 4/5: real-host injection + trustworthy receipt accounting
+
+Restores the OpenCode host integration so architects and delegated agents
+actually receive linked knowledge at the right boundaries, with traceable
+retrieval traces and durable terminal receipts. Replaces the write-only,
+guess-the-payload lifecycle with one typed host-boundary adapter and one shared
+receipt validator.
+
+## Why
+The knowledge/delegation hooks read SDK payload shapes the host never provides.
+`tool.execute.before` was read for `input.agent`/`input.args` (the host supplies
+neither — mutable args live on `output.args`). The architect auto-injector
+searched `experimental.chat.messages.transform` output for a `role:'system'`
+message, but the SDK `Message = UserMessage | AssistantMessage` has no system
+role — so identity was always `undefined`, the `no_agent_name` skip fired every
+turn, and the entire shown→applied knowledge loop was dark in production
+(the #1768 symptom that prior attempts only added telemetry for). Receipts were
+write-only trust-the-caller emitters; `no_relevant_knowledge` left no durable
+record; retrieval trace IDs were dropped at the delegate rendering boundary.
+
+## What changes
+- **One host-boundary adapter** (`src/hooks/host-boundary.ts`): resolves caller
+  identity from `swarmState.activeAgent` (set reliably by `chat.message`, which
+  DOES carry `agent`) with the last user message's `info.agent` as a first-turn
+  fallback; reads mutable args from `output.args` (toolBefore) or the
+  `getStoredInputArgs(callID)` snapshot (toolAfter). Never reads `input.agent` /
+  `input.args` / a `role:'system'` message. Handles legacy `architect` and
+  multi-swarm prefixed `cohort_architect` names.
+- **One shared receipt validator** (`src/hooks/knowledge-receipt-validator.ts`):
+  enforces trace existence, cited-ID membership, session ownership, a 30-min
+  validity window, and one-terminal-per-`(trace_id, knowledge_id)` with
+  idempotent-same-outcome accept vs conflicting-outcome reject. Used by BOTH the
+  `knowledge_receipt` tool and the delegate-ack-collector. Fail-open + audited.
+- **Empty-retrieval terminal accounting**: both the architect and delegate
+  injection paths now emit a `retrieved` event (with empty `result_ids` + the
+  real trace_id) and a `no_relevant` terminal when nothing matched, so every
+  retrieval cycle is accountable.
+- **Trace threading**: the `<delegate_knowledge_directives>` block carries a
+  `trace_id:` header; the delegate-ack-collector recovers the ORIGINAL retrieval
+  trace instead of minting an untied one.
+- **Promotion-evidence wiring (#1847 unblock)**: validated applied/violated/
+  contradicted receipts now produce `PromotionEvidenceRecord`s persisted to
+  `.swarm/knowledge-promotion-evidence.jsonl`; the previously-inert
+  `loadPromotionEvidence` stub now reads them, feeding
+  `evaluatePromotionPolicy` real evidence (conservative default
+  `promotion_min_terminal_applications: 0` preserved).
+- **Cohort identity line**: the system-enhancer surfaces a concise
+  cohort-identity/health line for linked architects. Cohort id is resolved once
+  at `chat.message` and cached on the session (with snapshot persistence + a
+  cache-miss fallback) — never per-turn git.
+- **Diagnostics**: `knowledge_recall --debug` and `/swarm diagnose` now surface
+  shown-vs-applied (distinct, never conflated) and `no_relevant` counts.
+
+## Acceptance
+Real SDK-shaped end-to-end test (`tests/integration/knowledge-real-host-boundary.test.ts`)
+drives the exported plugin through `src/index.ts`: legacy + prefixed architects,
+real `{info:{role,agent,sessionID}}` message shape, `tool.execute.before` with
+`output.args` mutation, trace-bearing directives, valid + forged + wrong-session
++ conflicting + idempotent receipts, empty-recall `no_relevant` terminal,
+fail-open on corrupt state, and shown≠applied counter separation.
+
+Closes #1849. Depends on #1846, #1847, #1848 (merged).
+
+🤖 Generated with [ZCode](https://zcode.ai)
