@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { ORCHESTRATOR_NAME } from '../src/config/constants';
 import { stripKnownSwarmPrefix } from '../src/config/schema';
 import { resetSwarmState, swarmState, type ToolCallEntry } from '../src/state';
+import { withFrozenClockAsync } from './helpers/test-clock';
 
 // Mock the tool.execute.before logic directly from src/index.ts
 // This tests the actual stale-delegation guard logic
@@ -915,59 +916,73 @@ describe('Stale-Delegation Guard - Adversarial Tests', () => {
 		});
 
 		it('should handle exactly 10s boundary correctly', async () => {
-			const sessionId = 'session-10s-boundary';
-			const subagentName = 'swarm:coder';
+			// Freeze the clock so the setup timestamp and the guard's own
+			// `Date.now()` (executeToolBeforeGuard, above) read the SAME instant.
+			// The delta is then exactly 10000ms — the boundary this test targets.
+			// Without freezing, the real clock advances a few ms between
+			// `Date.now() - 10000` and the guard's read, pushing the delta past
+			// 10000 (`> 10000` → stale → blocked) and flaking under coverage
+			// instrumentation (issue #1782 root-cause class 1). A positive
+			// fixedNow avoids a negative-epoch `tenSecondsAgo`.
+			await withFrozenClockAsync(
+				async () => {
+					const sessionId = 'session-10s-boundary';
+					const subagentName = 'swarm:coder';
 
-			swarmState.activeAgent.set(sessionId, subagentName);
+					swarmState.activeAgent.set(sessionId, subagentName);
 
-			// Exactly 10s ago - should be considered stale
-			const tenSecondsAgo = Date.now() - 10000;
+					// Exactly 10s ago - should be considered stale
+					const tenSecondsAgo = Date.now() - 10000;
 
-			swarmState.agentSessions.set(sessionId, {
-				agentName: 'coder',
-				lastToolCallTime: Date.now(),
-				lastAgentEventTime: tenSecondsAgo,
-				delegationActive: true,
-				activeInvocationId: 1,
-				lastInvocationIdByAgent: {},
-				windows: {},
-				lastCompactionHint: 0,
-				architectWriteCount: 0,
-				lastCoderDelegationTaskId: null,
-				currentTaskId: null,
-				gateLog: new Map(),
-				reviewerCallCount: new Map(),
-				lastGateFailure: null,
-				partialGateWarningsIssuedForTask: new Set(),
-				selfFixAttempted: false,
-				selfCodingWarnedAtCount: 0,
-				catastrophicPhaseWarnings: new Set(),
-				lastPhaseCompleteTimestamp: 0,
-				lastPhaseCompletePhase: 0,
-				phaseAgentsDispatched: new Set(),
-				lastCompletedPhaseAgentsDispatched: new Set(),
-				qaSkipCount: 0,
-				qaSkipTaskIds: [],
-				taskWorkflowStates: new Map(),
-				lastGateOutcome: null,
-				declaredCoderScope: null,
-				lastScopeViolation: null,
-				scopeViolationDetected: false,
-				modifiedFilesThisCoderTask: [],
-			});
+					swarmState.agentSessions.set(sessionId, {
+						agentName: 'coder',
+						lastToolCallTime: Date.now(),
+						lastAgentEventTime: tenSecondsAgo,
+						delegationActive: true,
+						activeInvocationId: 1,
+						lastInvocationIdByAgent: {},
+						windows: {},
+						lastCompactionHint: 0,
+						architectWriteCount: 0,
+						lastCoderDelegationTaskId: null,
+						currentTaskId: null,
+						gateLog: new Map(),
+						reviewerCallCount: new Map(),
+						lastGateFailure: null,
+						partialGateWarningsIssuedForTask: new Set(),
+						selfFixAttempted: false,
+						selfCodingWarnedAtCount: 0,
+						catastrophicPhaseWarnings: new Set(),
+						lastPhaseCompleteTimestamp: 0,
+						lastPhaseCompletePhase: 0,
+						phaseAgentsDispatched: new Set(),
+						lastCompletedPhaseAgentsDispatched: new Set(),
+						qaSkipCount: 0,
+						qaSkipTaskIds: [],
+						taskWorkflowStates: new Map(),
+						lastGateOutcome: null,
+						declaredCoderScope: null,
+						lastScopeViolation: null,
+						scopeViolationDetected: false,
+						modifiedFilesThisCoderTask: [],
+					});
 
-			// No other tool calls in progress
-			const result = await executeToolBeforeGuard({
-				tool: 'write',
-				sessionID: sessionId,
-				callID: 'call-boundary',
-			});
+					// No other tool calls in progress
+					const result = await executeToolBeforeGuard({
+						tool: 'write',
+						sessionID: sessionId,
+						callID: 'call-boundary',
+					});
 
-			// At exactly 10s, the condition Date.now() - session.lastAgentEventTime > 10000
-			// will be false (it's exactly 10000, not greater than)
-			// So it should NOT trigger stale-delegation at exactly 10s
-			expect(result.blocked).toBe(false);
-			expect(result.activeAgent).toBe('swarm:coder');
+					// At exactly 10s, the condition
+					// Date.now() - session.lastAgentEventTime > 10000 will be false
+					// (it's exactly 10000, not greater than), so it should NOT
+					// trigger stale-delegation at exactly 10s.
+					expect(result.blocked).toBe(false);
+					expect(result.activeAgent).toBe('swarm:coder');
+				},
+				{ fixedNow: 1_000_000_000_000 },
+			);
 		});
 
 		it('should handle just over 10s correctly', async () => {

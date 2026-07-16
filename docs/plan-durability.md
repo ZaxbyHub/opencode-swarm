@@ -271,6 +271,37 @@ once pre-check succeeds.
 | Handoff data | ✅ In `HandoffData.execution_profile` |
 | Export data | ✅ In `ExportData.execution_profile` |
 
+## Task Field: `fr_refs` (Issue #1687)
+
+**v7.x** added an optional `fr_refs: string[]` field to `TaskSchema`, recording which spec `FR-###`/`SC-###` requirement IDs a task maps to. It exists so a delegation step can mechanically retrieve a task's originating spec requirement instead of relying on free-text prose in `description`/`acceptance`.
+
+### Design decision: reference IDs, not a text snapshot
+
+`fr_refs` stores requirement **IDs** only. The requirement's full text is resolved **live** against the current `.swarm/spec.md` at delegation time, not snapshotted into the task when the plan is saved. A snapshot would itself be a second, driftable copy of the spec text — exactly the class of problem `fr_refs` exists to eliminate. The existing spec-staleness machinery (`PlanSchema.specHash`/`specMtime`, `_specStale`) already detects "spec.md changed after the plan was saved," so live-resolution reuses an established pattern rather than introducing a new one.
+
+### Schema
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fr_refs` | `string[]` | `undefined` (optional, **not** `.default([])`) | Spec `FR-###`/`SC-###` IDs this task maps to |
+
+**Why `.optional()` and not `.default([])`:** unlike `depends`/`files_touched` (which default to `[]`), `fr_refs` must serialize to `undefined` — omitted entirely by `JSON.stringify` — for tasks that don't set it, not an empty array. This preserves byte-for-byte hash stability for every plan persisted before this field existed (see "Hash coverage" below).
+
+### Hash coverage — deliberately EXCLUDED
+
+Unlike `execution_profile` (which IS included in `computePlanHash`), `fr_refs` is **deliberately excluded** from `computePlanHash`, `computePlanStructureHash` (`src/plan/ledger.ts`), and `computePlanContentHash` (`src/plan/manager.ts`). All three hash functions build an explicit, named field list and do not reference `fr_refs`; each site carries a one-line code comment recording this exclusion so a future reader doesn't "fix" the omission. This means editing a task's `fr_refs` after critic approval does not change the plan's structural hash and does not re-trip `assertPlanCriticApprovedForExecution` — an intentional consequence of treating `fr_refs` as additive metadata, not structural plan content.
+
+### Round-trip surfaces
+
+| Surface | Carries `fr_refs`? |
+|---------|--------------------------|
+| `plan.json` | ✅ Persisted in schema |
+| Ledger replay / snapshot embed | ✅ Rides the existing generic whole-`Plan`-object embed — no field-by-field wiring needed |
+| `checkpoint.ts` import/export | ✅ Passes through generically via `PlanSchema.parse` |
+| `get_approved_plan` tool | ✅ Passes through generically (`plan: unknown` payload) |
+| `computePlanHash` / `computePlanStructureHash` / `computePlanContentHash` | ❌ Deliberately excluded (see above) |
+| `migrateLegacyPlan` | Not applicable — legacy markdown plans predate this field |
+
 ## Scope Materialization at Worktree Paths (FR-102)
 
 When Lean Turbo provisions a lane worktree, the task's declared scope is materialized at:

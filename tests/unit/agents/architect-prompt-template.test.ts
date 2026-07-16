@@ -201,4 +201,73 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 			/save_plan\(\{\s*title: "My Real Project",\s*swarm_id: "mega",/,
 		);
 	});
+
+	// ACCEPTANCE field resolution verification tests (issue #1687 task 2.1)
+	it('31. ARCHITECT_PROMPT documents ACCEPTANCE FIELD RESOLUTION instructions', () => {
+		expect(prompt).toContain('ACCEPTANCE FIELD RESOLUTION');
+	});
+
+	it("32. ACCEPTANCE FIELD RESOLUTION instructs reading the task's fr_refs", () => {
+		expect(prompt).toContain('fr_refs');
+	});
+
+	it('33. ACCEPTANCE FIELD RESOLUTION requires verbatim/byte-for-byte FR text, all mapped FRs concatenated', () => {
+		expect(prompt).toContain('byte-for-byte');
+		expect(prompt).toContain('no summarizing or paraphrasing');
+		expect(prompt).toContain(
+			'concatenate all of them when a task maps to more than one',
+		);
+	});
+
+	it('34. ACCEPTANCE FIELD RESOLUTION requires a task-derived restatement when fr_refs is absent, and ACCEPTANCE is never empty', () => {
+		expect(prompt).toContain(
+			'if `fr_refs` is empty or absent, populate ACCEPTANCE with a task-derived one-line restatement',
+		);
+		expect(prompt).toContain('ACCEPTANCE must never be empty');
+	});
+
+	it('35. Coder delegation example no longer instructs omitting ACCEPTANCE when unmapped (old M15 wording removed)', () => {
+		expect(prompt).not.toContain(
+			'Omit the field entirely when the task has no structured acceptance criteria',
+		);
+	});
+
+	// Reviewer ACCEPTANCE field verification tests (issue #1687 task 2.2)
+	it('36. ACCEPTANCE FIELD RESOLUTION explicitly covers reviewer delegations, not just coder', () => {
+		const resolutionIndex = prompt.indexOf('ACCEPTANCE FIELD RESOLUTION');
+		expect(resolutionIndex).toBeGreaterThan(-1);
+		const resolutionLine = prompt.slice(resolutionIndex, resolutionIndex + 200);
+		expect(resolutionLine).toContain('{{AGENT_PREFIX}}reviewer');
+	});
+
+	it('37. reviewer delegation example includes an ACCEPTANCE field matching the coder delegation', () => {
+		const reviewerExampleIndex = prompt.indexOf(
+			'TASK: Review login validation',
+		);
+		expect(reviewerExampleIndex).toBeGreaterThan(-1);
+		const reviewerExampleEnd = prompt.indexOf(
+			'{{AGENT_PREFIX}}test_engineer',
+			reviewerExampleIndex,
+		);
+		const reviewerExample = prompt.slice(
+			reviewerExampleIndex,
+			reviewerExampleEnd,
+		);
+		expect(reviewerExample).toContain('ACCEPTANCE:');
+	});
+
+	it('38. reviewer delegation example OUTPUT includes ACCEPTANCE_SATISFACTION', () => {
+		const reviewerExampleIndex = prompt.indexOf(
+			'TASK: Review login validation',
+		);
+		const reviewerExampleEnd = prompt.indexOf(
+			'{{AGENT_PREFIX}}test_engineer',
+			reviewerExampleIndex,
+		);
+		const reviewerExample = prompt.slice(
+			reviewerExampleIndex,
+			reviewerExampleEnd,
+		);
+		expect(reviewerExample).toContain('ACCEPTANCE_SATISFACTION');
+	});
 });

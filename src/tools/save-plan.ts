@@ -52,6 +52,8 @@ export interface SavePlanArgs {
 			size?: 'small' | 'medium' | 'large';
 			depends?: string[];
 			acceptance?: string;
+			/** Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000). */
+			fr_refs?: string[];
 		}>;
 	}>;
 	/**
@@ -186,7 +188,14 @@ function evaluateRequirementCoverage(
 		for (const phase of args.phases) {
 			for (const task of phase.tasks) {
 				const taskText = `${task.description}\n${task.acceptance ?? ''}`;
-				if (idPattern.test(taskText)) {
+				const matchesFreeText = idPattern.test(taskText);
+				// FR-000/FR-004: also treat a requirement as covered when the
+				// task explicitly maps to it via fr_refs, in addition to the
+				// existing free-text fallback. fr_refs is `undefined` for any
+				// task that doesn't set it (schema uses `.optional()`, not
+				// `.default([])`), so it must be null-guarded.
+				const matchesFrRefs = task.fr_refs?.includes(requirement.id) ?? false;
+				if (matchesFreeText || matchesFrRefs) {
 					mappedTaskIds.push(task.id);
 				}
 			}
@@ -817,6 +826,7 @@ export async function executeSavePlan(
 						depends: task.depends ?? [],
 						acceptance: task.acceptance,
 						files_touched: [],
+						fr_refs: task.fr_refs,
 					};
 				}),
 			};
@@ -1060,6 +1070,12 @@ export const save_plan: ToolDefinition = createSwarmTool({
 									.string()
 									.optional()
 									.describe('Acceptance criteria for this task'),
+								fr_refs: z
+									.array(z.string())
+									.optional()
+									.describe(
+										'Spec FR-###/SC-### IDs this task maps to, e.g. ["FR-001", "SC-002"]',
+									),
 							}),
 						)
 						.min(1)

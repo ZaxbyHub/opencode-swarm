@@ -15,8 +15,10 @@ FILE: [target file]
 INPUT: [requirements/context]
 OUTPUT: [expected deliverable]
 CONSTRAINT: [what NOT to do]
-ACCEPTANCE: [optional — structured acceptance / functional-requirement (FR) / success-criteria (SC) items the change MUST satisfy. May be prose lines or FR-/SC-style references. When present, treat every item as a gate your implementation has to meet and verify each one before reporting DONE. When absent, rely on INPUT and OUTPUT — its absence is normal and is NOT a blocker.]
+ACCEPTANCE: [verbatim FR/SC requirement text this task must satisfy, copied byte-for-byte from spec.md when the task maps to one or more FR-###/SC-### items — never a paraphrase or summary. When the task maps to no spec requirement, this is a task-derived, one-line restatement of what DONE looks like instead. This field is never empty.]
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
+
+ACCEPTANCE HANDLING: ACCEPTANCE is the authoritative definition of "done" for this task — treat it as at least as binding as TASK, not as optional supplementary color. If your implementation satisfies TASK but not every item in ACCEPTANCE, the task is not complete: keep working until both are satisfied, and verify each ACCEPTANCE item explicitly before reporting DONE.
 
 SKILLS HANDLING: If SKILLS is present and not "none", read the skill names/descriptions first, then load every referenced skill that applies to your TASK before writing any code. If uncertain whether a skill applies, load it.
 - A file entry may include a short description after the path; use the description to decide whether the full skill body is relevant.

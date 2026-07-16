@@ -15,6 +15,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function derivePlanId(plan: { swarm: string; title: string }): string {
@@ -128,9 +129,24 @@ async function callToolBefore(
 	sessionID: string,
 	args: Record<string, unknown>,
 ): Promise<void> {
+	// Issue #1687 FR-003: coder/reviewer Task dispatches require a non-empty
+	// ACCEPTANCE: line or toolBefore throws ACCEPTANCE_FIELD_REQUIRED before
+	// reaching the completion-gate logic under test here. The mega_coder Task
+	// dispatches in this file carry no prompt text field at all, so add an
+	// inert ACCEPTANCE-only prompt (no N.M-shaped tokens, no other KEY:
+	// headers). Harmless no-op for the non-Task update_task_status calls in
+	// this file, since the gate's ACCEPTANCE check only runs for Task/task
+	// tool invocations.
+	const argsWithAcceptance = {
+		...args,
+		prompt:
+			typeof args.prompt === 'string'
+				? `${args.prompt}\nACCEPTANCE: task complete and covered by tests`
+				: 'ACCEPTANCE: task complete and covered by tests',
+	};
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
-		{ args },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
+		{ args: argsWithAcceptance },
 	);
 }
 

@@ -7,6 +7,9 @@
  * evidence of a coder delegation, and resets stale entries to 'idle'.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
@@ -14,6 +17,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 function makeConfig(): PluginConfig {
 	return {
@@ -43,24 +47,44 @@ function makeToolBeforeArgs(
 ] {
 	return [
 		{ tool: 'Task', sessionID, callID },
-		{ args: { subagent_type: agentName, prompt: 'do work' } },
+		{
+			args: {
+				subagent_type: agentName,
+				// ACCEPTANCE line keeps the #1687 coder/reviewer pre-dispatch gate
+				// inert here so these stale-state tests exercise their original
+				// assertions unchanged (issue #1687, FR-003).
+				prompt: 'do work\nACCEPTANCE: task complete and covered by tests',
+			},
+		},
 	];
+}
+
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	return fs.realpathSync(dir);
 }
 
 describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 	const SESSION_ID = 'test-session';
+	let tempDir: string;
 
 	beforeEach(() => {
 		resetSwarmState();
+		tempDir = makeTempProject('stale-state-gate-');
 	});
 
 	afterEach(() => {
 		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
 	});
 
 	it('resets stale coder_delegated state when no delegation chains exist for session', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Simulate rehydrated session with stale coder_delegated state
 		const session = ensureAgentSession(SESSION_ID);
@@ -79,14 +103,18 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('resets stale coder_delegated when delegation chains exist but have no coder entries', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('2.1', 'coder_delegated');
 
 		// Delegation chains exist but only for reviewer (no coder delegation)
 		swarmState.delegationChains.set(SESSION_ID, [
-			{ from: 'architect', to: 'reviewer', timestamp: Date.now() },
+			{
+				from: 'architect',
+				to: 'reviewer',
+				timestamp: withFrozenClock(() => Date.now()),
+			},
 		]);
 
 		await expect(
@@ -98,7 +126,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('resets stale coder_delegated when coder delegation is older than lastPhaseCompleteTimestamp', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('1.3', 'coder_delegated');
@@ -118,7 +146,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('blocks when coder_delegated state is current (delegation chain has fresh coder entry)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('3.1', 'coder_delegated');
@@ -140,7 +168,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('error message includes recovery instruction for stale state', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('3.2', 'coder_delegated');
@@ -165,7 +193,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('resets multiple stale tasks and allows delegation', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('1.1', 'coder_delegated');
@@ -185,7 +213,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('does not affect non-coder delegations', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('1.5', 'coder_delegated');
@@ -201,7 +229,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('handles prefixed agent names via stripKnownSwarmPrefix', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('2.1', 'coder_delegated');
@@ -221,7 +249,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('detects stale state after rehydration even when delegation chains are restored', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Simulate a rehydrated session: session was restored from snapshot
 		// with both stale coder_delegated state AND old delegation chains
@@ -248,7 +276,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('blocks after rehydration when a NEW coder delegation is made post-rehydration', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('3.1', 'coder_delegated');
@@ -269,7 +297,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 
 	it('uses lastPhaseCompleteTimestamp for non-rehydrated sessions (sessionRehydratedAt=0)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('2.1', 'coder_delegated');

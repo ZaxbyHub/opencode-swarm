@@ -13,6 +13,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
@@ -93,7 +94,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${withFrozenClock(() => Date.now())}` },
 		{ args },
 	);
 }
@@ -140,6 +141,7 @@ describe('delegation-gate: worktree state cleanup', () => {
 			await callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -163,6 +165,7 @@ describe('delegation-gate: worktree state cleanup', () => {
 			await callToolBefore(hook, 'Task', 'session-2', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;
@@ -213,6 +216,7 @@ describe('delegation-gate: cross-session worktree isolation edge cases', () => {
 			await callToolBefore(hook, 'Task', 'session-new', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
+				prompt: 'ACCEPTANCE: task complete and covered by tests',
 			});
 		} catch {
 			threw = true;

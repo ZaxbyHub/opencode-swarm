@@ -153,6 +153,18 @@ describe('withEvidenceLock — timeout path', () => {
 			resolveBlock = r;
 		});
 
+		// Fires from inside the blocker's callback — i.e. once withEvidenceLock
+		// has ACTUALLY acquired the lock and is executing fn. The waiter below
+		// only starts contending after this resolves. Without this barrier both
+		// withEvidenceLock calls race to acquire the fresh lock and the "waiter"
+		// can win it, running its callback and RESOLVING instead of timing out —
+		// a flaky "expected reject, received resolved" failure that reproduces on
+		// loaded CI runners (observed failing all retries on macOS shards).
+		let signalHeld!: () => void;
+		const lockHeld = new Promise<void>((r) => {
+			signalHeld = r;
+		});
+
 		// Occupy the lock without releasing
 		const blocker = withEvidenceLock(
 			tempDir,
@@ -160,10 +172,14 @@ describe('withEvidenceLock — timeout path', () => {
 			'blocker',
 			'3.1',
 			async () => {
+				signalHeld();
 				await blockDone;
 				return 'blocked';
 			},
 		);
+
+		// Only contend once the blocker demonstrably holds the lock.
+		await lockHeld;
 
 		// Short timeout so the test doesn't hang
 		const attempt = withEvidenceLock(
