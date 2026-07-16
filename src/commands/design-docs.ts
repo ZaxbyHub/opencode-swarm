@@ -5,9 +5,13 @@
  */
 
 import { loadPluginConfigWithMeta } from '../config';
-import { log } from '../utils/logger';
+import { advisoryWarn } from '../services/warning-buffer';
 
 const MAX_DESC_LEN = 2000;
+
+export const _internals: {
+	loadPluginConfigWithMeta: typeof loadPluginConfigWithMeta;
+} = { loadPluginConfigWithMeta };
 
 const USAGE = `Usage: /swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]
 
@@ -142,7 +146,7 @@ export async function handleDesignDocsCommand(
 	// design_docs.enabled === true. Emitting the MODE signal while disabled would
 	// route the architect to dispatch an unregistered agent. Fail fast instead.
 	try {
-		const { config } = loadPluginConfigWithMeta(directory);
+		const { config } = _internals.loadPluginConfigWithMeta(directory);
 		if (config.design_docs?.enabled !== true) {
 			return (
 				'Error: design docs are disabled. Set `design_docs.enabled: true` in ' +
@@ -154,7 +158,7 @@ export async function handleDesignDocsCommand(
 		// If config cannot be loaded, fall through — the architect MODE protocol
 		// also checks registration and stops if docs_design is unavailable.
 		// Emit a warning so the UX is not silent (F-15 / PR #1096 follow-up).
-		log(
+		advisoryWarn(
 			`[design-docs] Could not read opencode-swarm.json (${String(configErr)}). ` +
 				'Falling through — the architect will abort if docs_design is not registered.',
 		);

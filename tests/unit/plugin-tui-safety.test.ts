@@ -1,443 +1,134 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import path from 'path';
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../..');
+const SRC_ROOT = path.join(REPO_ROOT, 'src');
+const RAW_CONSOLE = /console\.(warn|error|log)\(/;
+const INLINE_RATIONALE = /biome-ignore lint\/suspicious\/noConsole:\s*\S/;
+const IMPLEMENTATION_EXEMPTIONS = new Set([
+	'src/utils/logger.ts',
+	'src/services/warning-buffer.ts',
+]);
 
-/**
- * Source files on the plugin-host path that can write to the terminal while the
- * host bubbletea TUI owns it. Each is scanned for raw `console.warn` calls that
- * bypass the TUI-safety contract (issue #1249 class; broader sweep in epic
- * #1752). As PR2–5 of #1752 migrate the remaining modules, add them to this
- * scope list so the same class of regression cannot recur there.
- *
- * The contract: every `console.warn` must be guarded by a `quiet`/`config.quiet`
- * check (either `!config.quiet` / `!quiet`, or a `quiet ... else` two-way
- * branch). The bundled-skill sync failure path legitimately retains a guarded
- * `console.warn` for the `quiet=false` host parity branch; that is allowed
- * because it is guarded. The success path is now debug-gated only.
- *
- * Unconditional `console.error` / `logger.error()` on exceptional paths (init
- * failure, pr-monitor errors) are intentionally out of scope — the two
- * intentional FATAL `console.error` calls in src/index.ts are biome-ignored
- * with an explicit issue #675 rationale.
- */
-const TUI_SAFETY_SCOPES: Array<{
-	file: string;
-	label: string;
-	quietTokens: string[];
-}> = [
-	// src/index.ts uses `config.quiet` as the guard variable name.
-	{
-		file: 'src/index.ts',
-		label: 'index.ts',
-		quietTokens: ['!config.quiet'],
-	},
-	// src/config/bundled-skills.ts uses a local `quiet` parameter.
-	{
-		file: 'src/config/bundled-skills.ts',
-		label: 'bundled-skills.ts',
-		quietTokens: ['!quiet', 'quiet)'],
-	},
-	// src/commands/registry.ts: the command path must never write stderr
-	// mid-turn; assert it has zero unguarded console.warn (it should have
-	// zero console.warn at all).
-	{
-		file: 'src/commands/registry.ts',
-		label: 'registry.ts',
-		quietTokens: ['!config.quiet', '!quiet'],
-	},
-	// PR2 of epic #1752 migrated these init-path modules to advisoryWarn/log.
-	// They must contain ZERO raw console.warn/error/log (the `noConsole` lint
-	// rule is deferred to PR5, so this static guard is the interim regression
-	// net). quietTokens: [] means findUnguardedWarns flags ANY console.warn.
-	{
-		file: 'src/config/loader.ts',
-		label: 'loader.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/agents/architect.ts',
-		label: 'architect.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/session/snapshot-reader.ts',
-		label: 'snapshot-reader.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/config/project-init.ts',
-		label: 'project-init.ts',
-		quietTokens: [],
-	},
-	// PR3 of epic #1752 migrated these hook-path modules (chat/tool/system
-	// message hooks + their service deps + the prm subsystem) to
-	// advisoryWarn/log. Same contract as the PR2 block above: zero raw
-	// console.warn. This is the interim regression guard until PR5 enables
-	// Biome `noConsole` globally.
-	{
-		file: 'src/hooks/delegation-gate.ts',
-		label: 'delegation-gate.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/hooks/delegation-gate/worktree-isolation.ts',
-		label: 'worktree-isolation.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/hooks/knowledge-store.ts',
-		label: 'knowledge-store.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/hooks/skill-usage-log.ts',
-		label: 'skill-usage-log.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/council/council-evidence-writer.ts',
-		label: 'council-evidence-writer.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/diff/ast-diff.ts',
-		label: 'ast-diff.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/services/context-budget-service.ts',
-		label: 'context-budget-service.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/session/worktree-link-suggestion.ts',
-		label: 'worktree-link-suggestion.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/prm/index.ts',
-		label: 'prm-index.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/prm/replay.ts',
-		label: 'prm-replay.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/prm/trajectory-store.ts',
-		label: 'prm-trajectory-store.ts',
-		quietTokens: [],
-	},
-	// PR4 of epic #1752 migrated these tool-execute-path modules (the tool
-	// handler bodies in src/tools/*, plus the mutation generator and semgrep
-	// SAST runner) to logger.log. Same contract as the PR2/PR3 blocks above:
-	// zero raw console.warn/error/log. This is the interim regression guard
-	// until PR5 enables Biome `noConsole` globally.
-	{
-		file: 'src/tools/build-check.ts',
-		label: 'build-check.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/convene-general-council.ts',
-		label: 'convene-general-council.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/dispatch-lanes.ts',
-		label: 'dispatch-lanes.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/lean-turbo-run-phase.ts',
-		label: 'lean-turbo-run-phase.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/req-coverage.ts',
-		label: 'req-coverage.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/sbom-generate.ts',
-		label: 'sbom-generate.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/update-task-status.ts',
-		label: 'update-task-status.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/tools/write-drift-evidence.ts',
-		label: 'write-drift-evidence.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/mutation/generator.ts',
-		label: 'mutation-generator.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/sast/semgrep.ts',
-		label: 'semgrep.ts',
-		quietTokens: [],
-	},
-	// PR5 of epic #1752 migrated these modules to advisoryWarn/log.
-	// quietTokens: [] means findUnguardedWarns flags ANY console.warn.
-	{
-		file: 'src/sdd/effective-spec.ts',
-		label: 'effective-spec.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/plan/checkpoint.ts',
-		label: 'checkpoint.ts',
-		quietTokens: [],
-	},
-	// src/plan/manager.ts: the console.warn at ~line 786 is guarded by the
-	// DEBUG_SWARM env-var check at line 785 (preserved per issue #1754 note).
-	{
-		file: 'src/plan/manager.ts',
-		label: 'manager.ts',
-		quietTokens: ['process.env.DEBUG_SWARM'],
-	},
-	{
-		file: 'src/plan/ledger.ts',
-		label: 'ledger.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/worktree/core.ts',
-		label: 'core.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/worktree/merge.ts',
-		label: 'merge.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/parallel/dependency-graph.ts',
-		label: 'dependency-graph.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/parallel/meta-indexer.ts',
-		label: 'meta-indexer.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/sbom/detectors/index.ts',
-		label: 'sbom-detectors-index.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/turbo/lean/state-lock.ts',
-		label: 'state-lock.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/turbo/lean/runner.ts',
-		label: 'runner.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/agents/index.ts',
-		label: 'agents-index.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/dark-matter.ts',
-		label: 'dark-matter.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/close.ts',
-		label: 'close.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/knowledge.ts',
-		label: 'knowledge.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/design-docs.ts',
-		label: 'design-docs.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/ci-simulate.ts',
-		label: 'ci-simulate.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/acknowledge-spec-drift.ts',
-		label: 'acknowledge-spec-drift.ts',
-		quietTokens: [],
-	},
-	{
-		file: 'src/commands/rollback.ts',
-		label: 'rollback.ts',
-		quietTokens: [],
-	},
-];
-
-function readScope(file: string): string {
-	return readFileSync(path.resolve(REPO_ROOT, file), 'utf-8');
+function toRepoPath(file: string): string {
+	return path.relative(REPO_ROOT, file).replaceAll('\\', '/');
 }
 
-/**
- * Asserts that every `console.warn(` line in `src` is preceded (within 8 lines)
- * by a quiet-guard. A guard is recognized in EITHER of two forms (both are used
- * in this codebase):
- *   - negated guard: a `!config.quiet` / `!quiet` token in the preceding context
- *   - two-way else branch: a `quiet`/`config.quiet` token AND a `} else` in the
- *     preceding context (the `if (config.quiet) ... else console.warn(...)` form
- *     used by scheduleVersionCheck and the bundled-skill failure path).
- * Any `console.warn` lacking either form is collected as unguarded.
- *
- * Limitation: the `hasElseBranch` check matches a `} else` and a quiet token
- * anywhere in the 8-line window without verifying they belong to the same
- * if-statement; this is adequate for the owned files (which have clean guard
- * patterns) but is not AST-accurate for arbitrary dense control flow.
- */
-function findUnguardedWarns(
-	src: string,
-	quietTokens: string[],
-): Array<{ line: number; context: string }> {
-	const lines = src.split('\n');
-	const unguarded: Array<{
-		line: number;
-		context: string;
-	}> = [];
-	for (let i = 0; i < lines.length; i += 1) {
-		if (!/console\.warn\(/.test(lines[i])) continue;
-		const context = lines.slice(Math.max(0, i - 8), i + 1).join('\n');
-		const hasNegatedGuard = quietTokens.some((token) =>
-			context.includes(token),
-		);
-		const hasElseBranch =
-			context.includes('} else') &&
-			quietTokens.some((token) => context.includes(token.replace('!', '')));
-		if (!hasNegatedGuard && !hasElseBranch) {
-			unguarded.push({ line: i + 1, context });
+function productionSourceFiles(directory = SRC_ROOT): string[] {
+	const files: string[] = [];
+	for (const entry of readdirSync(directory, { withFileTypes: true })) {
+		const absolute = path.join(directory, entry.name);
+		if (entry.isDirectory()) {
+			if (entry.name !== '__tests__')
+				files.push(...productionSourceFiles(absolute));
+			continue;
+		}
+		if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+			files.push(absolute);
 		}
 	}
-	return unguarded;
+	return files.sort();
+}
+
+function rawConsoleViolations(source: string): number[] {
+	const lines = source.split(/\r?\n/);
+	const violations: number[] = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		if (!RAW_CONSOLE.test(lines[index])) continue;
+		if (!INLINE_RATIONALE.test(lines[index - 1] ?? '')) {
+			violations.push(index + 1);
+		}
+	}
+	return violations;
+}
+
+function readRepoFile(file: string): string {
+	return readFileSync(path.join(REPO_ROOT, file), 'utf8');
+}
+
+function isAllowedNoConsoleOverride(pattern: string): boolean {
+	return (
+		pattern === 'src/cli/**' ||
+		IMPLEMENTATION_EXEMPTIONS.has(pattern) ||
+		pattern.startsWith('tests/') ||
+		pattern.startsWith('test/') ||
+		pattern.endsWith('.test.ts') ||
+		pattern.includes('/__tests__/')
+	);
 }
 
 describe('Plugin TUI safety', () => {
-	test('no process.exit in SIGINT/SIGTERM handlers', () => {
-		const INDEX_SRC = readScope('src/index.ts');
-		const sigintBlock = /process\.once\(\s*['"]SIGINT['"][\s\S]*?process\.exit/;
-		const sigtermBlock =
-			/process\.once\(\s*['"]SIGTERM['"][\s\S]*?process\.exit/;
-		expect(sigintBlock.test(INDEX_SRC)).toBe(false);
-		expect(sigtermBlock.test(INDEX_SRC)).toBe(false);
+	test('full production src scan requires an inline rationale for every raw console call', () => {
+		const scanned = productionSourceFiles();
+		expect(scanned.length).toBeGreaterThan(200);
+		expect(scanned.map(toRepoPath)).toContain('src/index.ts');
+
+		const violations: string[] = [];
+		for (const file of scanned) {
+			const repoPath = toRepoPath(file);
+			if (
+				repoPath.startsWith('src/cli/') ||
+				IMPLEMENTATION_EXEMPTIONS.has(repoPath)
+			) {
+				continue;
+			}
+			for (const line of rawConsoleViolations(readFileSync(file, 'utf8'))) {
+				violations.push(`${repoPath}:${line}`);
+			}
+		}
+
+		expect(violations).toEqual([]);
 	});
 
-	test('no SIGINT/SIGTERM handler registrations via any method', () => {
-		const INDEX_SRC = readScope('src/index.ts');
-		const methods = ['process.once', 'process.on', 'process.addListener'];
-		const signals = ['SIGINT', 'SIGTERM'];
-		for (const method of methods) {
-			for (const signal of signals) {
-				expect(INDEX_SRC).not.toContain(`${method}('${signal}'`);
-				expect(INDEX_SRC).not.toContain(`${method}("${signal}"`);
+	test('raw-console detector rejects an unannotated call and accepts a reasoned exception', () => {
+		expect(rawConsoleViolations("console.warn('unsafe');")).toEqual([1]);
+		expect(
+			rawConsoleViolations(
+				"// biome-ignore lint/suspicious/noConsole: test-only reason\nconsole.warn('guarded');",
+			),
+		).toEqual([]);
+	});
+
+	test('Biome noConsole exemptions are limited to tests, CLI, and logger implementations', () => {
+		const biome = JSON.parse(readRepoFile('biome.json')) as {
+			overrides?: Array<{
+				includes?: string[];
+				linter?: { rules?: { suspicious?: { noConsole?: string } } };
+			}>;
+		};
+		const forbidden = (biome.overrides ?? [])
+			.filter(
+				(override) => override.linter?.rules?.suspicious?.noConsole === 'off',
+			)
+			.flatMap((override) => override.includes ?? [])
+			.filter((pattern) => !isAllowedNoConsoleOverride(pattern));
+		expect(forbidden).toEqual([]);
+	});
+
+	test('no SIGINT or SIGTERM handler registrations are introduced', () => {
+		const indexSource = readRepoFile('src/index.ts');
+		for (const method of [
+			'process.once',
+			'process.on',
+			'process.addListener',
+		]) {
+			for (const signal of ['SIGINT', 'SIGTERM']) {
+				expect(indexSource).not.toContain(`${method}('${signal}'`);
+				expect(indexSource).not.toContain(`${method}("${signal}"`);
 			}
 		}
 	});
 
-	test('Config Doctor console.warn calls are guarded by config.quiet', () => {
-		const INDEX_SRC = readScope('src/index.ts');
-		const doctorSection = INDEX_SRC.slice(
-			INDEX_SRC.indexOf('Config Doctor'),
-			INDEX_SRC.indexOf('Advisory emission must never block startup') + 50,
-		);
-		const warnCalls = doctorSection.match(/console\.warn\(/g) || [];
-		const quietGuards = doctorSection.match(/!config\.quiet/g) || [];
-		expect(warnCalls.length).toBeGreaterThan(0);
-		expect(quietGuards.length).toBeGreaterThanOrEqual(warnCalls.length);
+	test('command registry never writes raw console output mid-turn', () => {
+		const registry = readRepoFile('src/commands/registry.ts');
+		expect(registry.match(/console\.(warn|error|log)\(/g) ?? []).toEqual([]);
 	});
 
-	test('every console.warn in index.ts is guarded by config.quiet check', () => {
-		const INDEX_SRC = readScope('src/index.ts');
-		const unguarded = findUnguardedWarns(INDEX_SRC, ['!config.quiet']).map(
-			(u) => u.line,
-		);
-		expect(unguarded).toEqual([]);
-	});
-
-	test('bundled-skill sync has no unguarded console.warn (issue #1249 class)', () => {
-		const src = readScope('src/config/bundled-skills.ts');
-		const unguarded = findUnguardedWarns(src, ['!quiet', 'quiet)']);
-		expect(unguarded).toEqual([]);
-	});
-
-	test('command registry has no unguarded console.warn (command path TUI safety)', () => {
-		const src = readScope('src/commands/registry.ts');
-		const unguarded = findUnguardedWarns(src, ['!config.quiet', '!quiet']);
-		expect(unguarded).toEqual([]);
-		expect(
-			(src.match(/console\.warn\(/g) || []).length,
-			'registry.ts command path must contain zero console.warn calls (mid-turn stderr corrupts the TUI)',
-		).toBe(0);
-	});
-
-	test('TUI_SAFETY_SCOPES files all exist and are non-empty', () => {
-		for (const scope of TUI_SAFETY_SCOPES) {
-			const src = readScope(scope.file);
-			expect(src.length, `${scope.file} should be non-empty`).toBeGreaterThan(
-				0,
-			);
-		}
-	});
-
-	test('PR2/PR3/PR4/PR5-migrated modules have zero raw console.* (epic #1752)', () => {
-		// PR2 (loader.ts, architect.ts, snapshot-reader.ts, project-init.ts),
-		// PR3 (delegation-gate, worktree-isolation, knowledge-store,
-		// skill-usage-log, council-evidence-writer, ast-diff,
-		// context-budget-service, worktree-link-suggestion, prm/*), PR4
-		// (build-check, convene-general-council, dispatch-lanes,
-		// lean-turbo-run-phase, req-coverage, sbom-generate, update-task-status,
-		// write-drift-evidence, mutation/generator, sast/semgrep), and PR5
-		// (effective-spec, checkpoint, manager, ledger, worktree/*, parallel/*,
-		// turbo/lean/*, agents/index, council-evidence-writer, commands/*) were
-		// migrated to advisoryWarn/log. They must contain ZERO raw
-		// console.warn/error/log (the `noConsole` lint is deferred to PR5, so
-		// this static guard is the interim regression guard until PR5 enables
-		// Biome `noConsole` globally. The regex covers all three console
-		// channels because PR4 migrated `console.error` sites (semgrep
-		// kill-failed, build-check evidence, lean-turbo cleanup) in addition
-		// to `console.warn`.
-		for (const scope of TUI_SAFETY_SCOPES) {
-			if (scope.quietTokens.length > 0) continue; // skip guarded-scope files
-			const src = readScope(scope.file);
-			const warnCount = (src.match(/console\.warn\(/g) || []).length;
-			const errorCount = (src.match(/console\.error\(/g) || []).length;
-			const logCount = (src.match(/console\.log\(/g) || []).length;
-			const consoleCount = warnCount + errorCount + logCount;
-			expect(
-				consoleCount,
-				`${scope.file} must contain zero raw console.warn/error/log after epic #1752 PR2/PR3/PR4/PR5 migration`,
-			).toBe(0);
-		}
-	});
-
-	test('gitignore-warning.ts has exactly one intentional raw console.warn (tracked-file security)', () => {
-		// src/utils/gitignore-warning.ts retains ONE intentionally-unguarded
-		// console.warn — the ".swarm/ files are tracked by Git" remediation
-		// warning (must-see-always security/hygiene). All other advisories in
-		// this file route through advisoryWarn. Assert the count is exactly 1
-		// and the comment rationale is present.
-		const src = readScope('src/utils/gitignore-warning.ts');
-		const warnMatches = src.match(/console\.warn\(/g) || [];
-		expect(warnMatches.length).toBe(1);
-		expect(src).toContain('intentionally always emitted as raw');
+	test('gitignore warning keeps exactly one documented always-visible security warning', () => {
+		const source = readRepoFile('src/utils/gitignore-warning.ts');
+		expect(source.match(/console\.warn\(/g) ?? []).toHaveLength(1);
+		expect(source).toContain('intentionally always emitted as raw');
+		expect(rawConsoleViolations(source)).toEqual([]);
 	});
 });
