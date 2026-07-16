@@ -25,7 +25,6 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema.js';
-import type { CohortIdentity } from '../knowledge/cohort-identity.js';
 import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
@@ -35,16 +34,11 @@ import {
 	evaluatePromotionPolicy,
 	failedGateNames,
 } from './hive-policy.js';
-import {
-	type HiveAuditEntry,
-	type HiveMutationOutcome,
-	transactHiveStore,
-} from './hive-transaction.js';
+import { type HiveAuditEntry, transactHiveStore } from './hive-transaction.js';
 import {
 	findNearDuplicate,
 	jaccardBigram,
 	readKnowledge,
-	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	wordBigrams,
 } from './knowledge-store.js';

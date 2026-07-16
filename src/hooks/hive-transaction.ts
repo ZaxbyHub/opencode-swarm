@@ -216,12 +216,11 @@ export async function transactHiveStore<T>(
 		//    which would re-enter the directory lock and deadlock. (See curator
 		//    precedent at curator.ts:1966-1969.)
 		if (outcome.rejects && outcome.rejects.length > 0) {
-			const rejectBlock =
-				outcome.rejects.map((r) => JSON.stringify(r)).join('\n') + '\n';
+			const rejectBlock = `${outcome.rejects.map((r) => JSON.stringify(r)).join('\n')}\n`;
 			await appendFile(rejectedPath, rejectBlock, 'utf-8');
 		}
 		if (outcome.audit && outcome.audit.length > 0) {
-			const auditBlock = outcome.audit.map((a) => a.line).join('\n') + '\n';
+			const auditBlock = `${outcome.audit.map((a) => a.line).join('\n')}\n`;
 			await appendFile(eventsPath, auditBlock, 'utf-8');
 			// FIFO trim the events log to the cap under the same lock (audit-only;
 			// hive events do not participate in the counter rollup baseline).

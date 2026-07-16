@@ -16,21 +16,22 @@ Purpose: ingest a GitHub issue, localize root cause, and produce a resolution sp
 
 Flags parsed from signal:
 - `plan=true` → after spec generation, transition to MODE: PLAN (create implementation plan)
-- `trace=true` → after plan, delegate to swarm-implement skill for the fix workflow; the user invokes commit-pr to publish (implies plan=true)
+- `trace=true` → the issue-trace hook (src/hooks/issue-trace.ts) automatically drives the standard PLAN → CRITIC-GATE → EXECUTE → commit-pr ladder (implies plan=true)
 - `noRepro=true` → skip the reproduction step below
 
 #### Phase 1: INTAKE
 1. Fetch the issue body using the GitHub CLI (`gh issue view <N> --repo <owner>/<repo> --json title,body,labels,assignees,comments`) or web fetch.
    - If the issue cannot be fetched (404, private repo, no `gh` auth, or the argument resolves to a PR not an issue), report the blocked operation explicitly and do not proceed on empty intake; fall back to any pasted issue text the user provided. Closed-issue cases proceed but note the closed state.
-2. Parse the issue into a normalized **Intake Note** with four required fields:
+2. Read `.swarm/issue-reference.json` as the authoritative source for the issue URL, owner, repo, number, and flags (`plan`/`trace`/`noRepro`). If absent, fall back to the URL from the mode signal string.
+3. Parse the issue into a normalized **Intake Note** with four required fields:
    - **Observed behavior**: what the issue reports
    - **Expected behavior**: what should happen instead
    - **Reproduction steps**: how to trigger the issue (may be absent; flag with `[NEEDS REPRO]` if missing)
    - **Environment**: platform, version, configuration context
-3. If any required field is missing and cannot be inferred from context, flag as `[NEEDS REPRO]`.
-4. Attempt a minimal reproduction of the reported issue: record the exact commands and their output. Skip this step when `noRepro=true` (set via `--no-repro`); in that case, note that reproduction was skipped and proceed on the issue text alone.
-5. Ask the user clarifying questions one at a time, max 6 per intake, when the issue text is ambiguous; otherwise flag the item with markers like `[NEEDS REPRO]` or `[NEEDS CLARIFICATION]` and proceed.
-6. Exit when the Intake Note is complete or all missing fields are flagged.
+4. If any required field is missing and cannot be inferred from context, flag as `[NEEDS REPRO]`.
+5. Attempt a minimal reproduction of the reported issue: record the exact commands and their output. Skip this step when `noRepro=true` (set via `--no-repro`); in that case, note that reproduction was skipped and proceed on the issue text alone.
+6. Ask the user clarifying questions one at a time, max 6 per intake, when the issue text is ambiguous; otherwise flag the item with markers like `[NEEDS REPRO]` or `[NEEDS CLARIFICATION]` and proceed.
+7. Exit when the Intake Note is complete or all missing fields are flagged.
 
 #### Phase 2: LOCALIZATION
 1. Delegate to `the active swarm's explorer agent` to scan the codebase for code areas related to the issue's observed behavior.
@@ -44,6 +45,7 @@ Flags parsed from signal:
 
 #### Phase 3: SPEC GENERATION
 0. Include a **Root Cause** section derived from Phase 2 localization results: concise statement of the identified root cause, location, and confidence score; the `location` field (file/function from Phase 2 localization) is the sole exception to the no-implementation-detail rule. Include a **Fix Strategy** section at product/behavior level (what the fix must accomplish, not how to implement it).
+0a. Include a `## Source Issue` section at the top of `.swarm/spec.md` containing the GitHub issue URL and number, read from `.swarm/issue-reference.json`.
 1. If `.swarm/spec.md` already exists, route through MODE: SPECIFY step 1's classification (overwrite / refine / archive / non-shadowing check) before writing — do not clobber an existing spec. (This protects the drift-gate which consumes spec.md.)
 2. Generate `.swarm/spec.md` using the same SPEC CONTENT RULES as MODE: SPECIFY:
    - WHAT users need and WHY — never HOW to implement
@@ -61,7 +63,7 @@ Flags parsed from signal:
 Based on flags:
 - No flags → report spec summary and suggest `PLAN` or `CLARIFY-SPEC`
 - `plan=true` → transition to MODE: PLAN using the generated spec
-- `trace=true` → transition to MODE: PLAN, then delegate to swarm-implement skill for the fix workflow; the user invokes commit-pr to publish
+- `trace=true` → the issue-trace hook (`src/hooks/issue-trace.ts`) automatically emits `[MODE: PLAN]` after spec generation. The standard PLAN → CRITIC-GATE → EXECUTE ladder follows deterministically.
 
 RULES:
 - One question per message in INTAKE dialogue (max 6 questions)

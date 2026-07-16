@@ -117,8 +117,17 @@ export const PRESERVED_SWARM_PATHS = [
 	'DOC_DRIFT_REPORT_PREFIX',
 
 	// Skill propagation gate context rewrites (context.md is already listed;
+	// this covers the temp file the gate writes during propagation)
+	'skill-propagation-context',
 	// swarmDir mkdir is the .swarm/ root bootstrap covered above)
 	'.context-propagation-stamp',
+
+	// Issue-ingest durable persistence (src/commands/issue.ts writes both at
+	// command invocation; src/hooks/issue-trace-state.ts reads/writes trace state)
+	'issue-reference.json',
+	'issue-trace-state.json',
+	// Atomic write temp files (created inside .swarm/, renamed to final path)
+	'.tmp-',
 ] as const;
 
 describe('cleanup-drift prevention — exhaustive .swarm/ write scan (FR-003+FR-009)', () => {

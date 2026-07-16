@@ -11,6 +11,9 @@
  *   no args       → returns usage string (no throw)
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import {
 	containsControlCharacters,
 	detectGitRemote,
@@ -143,6 +146,57 @@ function parseIssueRef(input: string, directory: string): ParsedIssue | null {
 	return null;
 }
 
+/**
+ * DI seam for filesystem operations — allows tests to override synchronous fs calls.
+ */
+export const _internals = {
+	writeFileSync: fs.writeFileSync,
+	mkdirSync: fs.mkdirSync,
+	renameSync: fs.renameSync,
+	unlinkSync: fs.unlinkSync,
+	readFileSync: fs.readFileSync,
+	existsSync: fs.existsSync,
+};
+
+/**
+ * Atomic synchronous write: write to a uniquely-named temp file, then rename.
+ * On Windows, fs.renameSync can fail if the target already exists; the retry
+ * after unlink handles this.
+ */
+function atomicWriteFileSync(
+	dir: string,
+	filename: string,
+	content: string,
+): void {
+	const tmpPath = path.join(
+		dir,
+		`.tmp-${filename}-${Date.now()}-${process.pid}`,
+	);
+	const finalPath = path.join(dir, filename);
+	_internals.writeFileSync(tmpPath, content, 'utf-8');
+	try {
+		_internals.renameSync(tmpPath, finalPath);
+	} catch {
+		// Windows: target may already exist — unlink first, then rename
+		try {
+			_internals.unlinkSync(finalPath);
+		} catch {
+			// best effort
+		}
+		try {
+			_internals.renameSync(tmpPath, finalPath);
+		} catch (retryErr) {
+			// Clean up leaked temp file before re-throwing
+			try {
+				_internals.unlinkSync(tmpPath);
+			} catch {
+				// best effort
+			}
+			throw retryErr;
+		}
+	}
+}
+
 export function handleIssueCommand(directory: string, args: string[]): string {
 	const parsed = parseArgs(args);
 	const rawInput = parsed.rest.join(' ').trim();
@@ -169,6 +223,83 @@ export function handleIssueCommand(directory: string, args: string[]): string {
 	const result = validateAndSanitizeUrl(issueUrl);
 	if ('error' in result) {
 		return `Error: ${result.error}\n\n${USAGE}`;
+	}
+
+	// Durable persistence: write issue reference and trace state before emitting signal
+	const swarmDir = path.join(directory, '.swarm');
+
+	const issueReference: Record<string, unknown> = {
+		url: result.sanitized,
+		owner: issueInfo.owner,
+		repo: issueInfo.repo,
+		number: issueInfo.number,
+		timestamp: new Date().toISOString(),
+		flags: {
+			...(parsed.plan && { plan: true }),
+			...(parsed.trace && { trace: true }),
+			...(parsed.noRepro && { noRepro: true }),
+		},
+	};
+	if (parsed.noRepro) {
+		issueReference.noReproWaiver = {
+			waived: true,
+			reason: '--no-repro flag',
+			timestamp: new Date().toISOString(),
+		};
+	}
+
+	const traceState = {
+		issueNumber: issueInfo.number,
+		lastTransition: null as string | null,
+		completed: false,
+	};
+
+	// Two-artifact transactional write with rollback
+	let oldTraceState: string | null = null;
+	try {
+		oldTraceState = _internals.readFileSync(
+			path.join(swarmDir, 'issue-trace-state.json'),
+			'utf-8',
+		);
+	} catch {
+		/* absent — first time */
+	}
+
+	try {
+		_internals.mkdirSync(swarmDir, { recursive: true }); // drift-test:exempt — .swarm/ root bootstrap for issue persistence
+		atomicWriteFileSync(
+			swarmDir,
+			'issue-trace-state.json',
+			JSON.stringify(traceState, null, 2),
+		);
+		atomicWriteFileSync(
+			swarmDir,
+			'issue-reference.json',
+			JSON.stringify(issueReference, null, 2),
+		);
+	} catch (e) {
+		// Rollback trace-state to previous state
+		if (oldTraceState !== null) {
+			try {
+				atomicWriteFileSync(swarmDir, 'issue-trace-state.json', oldTraceState);
+			} catch {
+				/* restore failed */
+			}
+		} else {
+			try {
+				_internals.unlinkSync(path.join(swarmDir, 'issue-trace-state.json'));
+			} catch {
+				/* unlink failed */
+			}
+		}
+		// Clean up any partially-written issue-reference.json
+		try {
+			_internals.unlinkSync(path.join(swarmDir, 'issue-reference.json'));
+		} catch {
+			/* may not exist */
+		}
+		const errMsg = e instanceof Error ? e.message : String(e);
+		return `Error: Failed to persist issue reference durably: ${errMsg}\n\n${USAGE}`;
 	}
 
 	// Build flags string

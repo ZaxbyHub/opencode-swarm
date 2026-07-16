@@ -80,6 +80,10 @@ exists, fill in its sections. Otherwise write a body with at least:
 
 Use a PR title in the same conventional-commit form as your commit.
 
+Before generating the PR body, check if `.swarm/issue-reference.json` exists. If it
+does and contains a `number` field, auto-populate `Closes #<number>` as the first line
+of the PR body. If the file does not exist, fall back to `Closes #<issue-number>`.
+
 ## Step 6 — Close out CI
 
 After the PR is open, watch its checks. If CI fails, read the logs, reproduce

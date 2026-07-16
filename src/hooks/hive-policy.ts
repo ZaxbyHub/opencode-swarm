@@ -26,7 +26,6 @@
  */
 
 import type {
-	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	PromotionEvidenceRecord,
 	SwarmKnowledgeEntry,
