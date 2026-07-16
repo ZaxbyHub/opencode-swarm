@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.121.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.1...v7.121.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* **delegation:** wire spec FR/acceptance content into coder and reviewer delegations ([2b179f2](https://github.com/ZaxbyHub/opencode-swarm/commit/2b179f200ebef4a3296df8e9775a034b640d4863))
+
 ## [7.121.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.0...v7.121.1) (2026-07-16)
 
 
