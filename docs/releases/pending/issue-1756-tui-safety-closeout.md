@@ -14,6 +14,10 @@
 - Removed the leaking state-module mock from the reset command suite and
   restored that suite to the isolated CI matrix.
 - Repaired UTF-8 BOM and mojibake damage in runtime source and curator prompts.
+- Preserved the two `src/index.ts` `chat.message` diagnostic sites as explicit
+  `DEBUG_SWARM`-gated, inline-rationalized exceptions. They were audited rather
+  than migrated to `log()`, correcting the earlier fragment's inaccurate
+  migration claim while retaining their actual PR5 history.
 
 ## Why
 

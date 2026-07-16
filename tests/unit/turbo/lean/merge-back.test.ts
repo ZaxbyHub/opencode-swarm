@@ -375,8 +375,6 @@ describe('mergeLaneBranch', () => {
 			return mockProc(0, '', '');
 		};
 
-		const warnSpy = (console.warn = vi.fn() as unknown as typeof console.warn);
-
 		const result = await mergeLaneBranch(fakeDir, fakeBranch, 'cherry-pick');
 
 		expect(result).toEqual({ merged: true, strategy: 'cherry-pick' });
@@ -386,8 +384,6 @@ describe('mergeLaneBranch', () => {
 		);
 		expect(cherryPickCall).toBeDefined();
 		expect(cherryPickCall![2]).toBe(fakeBranch);
-
-		warnSpy.mockRestore?.();
 	});
 });
 
