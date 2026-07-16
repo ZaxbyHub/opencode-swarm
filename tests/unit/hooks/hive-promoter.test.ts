@@ -45,6 +45,7 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { KNOWLEDGE_SCHEMA_VERSION } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
 
 const realReadKnowledge = _internals.readSwarmEntries;
@@ -370,6 +371,75 @@ describe('hive-promoter (transactional, #1847)', () => {
 			expect(hive[0].id).toBe('hive-existing');
 		});
 
+		// PRR-007: the hive dedup-merge (appending the losing swarm source id to a
+		// surviving hive entry's `lineage.merged_from`) must no longer be a silent,
+		// unaudited mutation. It routes through the shared curation policy as an
+		// audited pass-through and stages a distinct `type:'merge'` audit line to
+		// the hive events log — while the merge itself still happens.
+		//
+		// Falsification: if the audit emission (stageMergeAudit / audit.push) were
+		// removed, `merged_from` would still be set but NO `"type":"merge"` line
+		// would appear in the events log — this test's audit assertions would fail.
+		it("PRR-007: a dedup-merge emits a 'merge' audit event and still records merged_from", async () => {
+			const entry = makeSwarmEntry();
+			// The surviving hive entry MUST carry lineage for the merge path to fire.
+			const existing: HiveKnowledgeEntry = {
+				id: 'hive-existing',
+				tier: 'hive',
+				lesson: entry.lesson,
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'established',
+				confirmed_by: [],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00Z',
+				updated_at: '2026-01-01T00:00:00Z',
+				source_project: 'otherProject',
+				encounter_score: 1.0,
+				lineage: { actor: 'auto', source_entry_id: 'src-old' },
+			};
+			await writeHiveEntries([existing]);
+
+			const summary = await checkHivePromotions(
+				[entry],
+				makeConfig(),
+				swarmDir,
+			);
+
+			// The merge happened: no new entry, and the losing source id is recorded.
+			expect(summary.new_promotions).toBe(0);
+			const hive = await readRawHive();
+			expect(hive).toHaveLength(1);
+			expect(hive[0].id).toBe('hive-existing');
+			expect(hive[0].lineage?.merged_from).toContain(entry.id);
+
+			// The merge is audited: a distinct type:'merge' event line was appended
+			// to the hive events log documenting the surviving/merged ids.
+			const eventsPath = path.join(
+				path.dirname(resolveHiveKnowledgePath()),
+				'shared-knowledge-events.jsonl',
+			);
+			const eventsRaw = await fsPromises
+				.readFile(eventsPath, 'utf-8')
+				.catch(() => '');
+			const mergeEvents = eventsRaw
+				.split('\n')
+				.filter((l) => l.trim().length > 0)
+				.map((l) => JSON.parse(l) as Record<string, unknown>)
+				.filter((e) => e.type === 'merge');
+			expect(mergeEvents).toHaveLength(1);
+			expect(mergeEvents[0].action).toBe('merge');
+			expect(mergeEvents[0].entry_id).toBe('hive-existing');
+			expect(mergeEvents[0].merged_from).toBe(entry.id);
+		});
+
 		it('carries actionable-directive fields across promotion', async () => {
 			const entry = makeSwarmEntry({
 				triggers: ['coder modifying src'],
@@ -615,8 +685,10 @@ describe('hive-promoter (transactional, #1847)', () => {
 			expect(hive[0].tier).toBe('hive');
 			expect(hive[0].lineage?.actor).toBe('manual');
 			expect(hive[0].lineage?.source_cohort_id).toBe(FIXED_COHORT.cohortId);
-			// schema_version is KNOWLEDGE_SCHEMA_VERSION, not hardcoded 1 (M3 fix).
-			expect(hive[0].schema_version).toBe(2);
+			// schema_version tracks KNOWLEDGE_SCHEMA_VERSION, not a hardcoded
+			// literal (M3 fix) — assert against the constant so the bump can't
+			// silently drift the test (#1848 review F-10).
+			expect(hive[0].schema_version).toBe(KNOWLEDGE_SCHEMA_VERSION);
 			// source_project = basename of directory.
 			expect(hive[0].source_project).toBe(path.basename(swarmDir));
 		});

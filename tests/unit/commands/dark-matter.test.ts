@@ -34,6 +34,10 @@ mock.module('../../../src/tools/co-change-analyzer.js', () => ({
 }));
 
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	// #1848 review PRR-001a: curator.ts (transitively loaded) imports
+	// computeContentHash; expose the named export so this non-spreading mock
+	// doesn't SyntaxError at load. Deterministic content-derived stub.
+	computeContentHash: (lesson: string) => String(lesson).slice(0, 12),
 	getPlatformConfigDir: mock(() => ''),
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
 	resolveSwarmRejectedPath: mock(

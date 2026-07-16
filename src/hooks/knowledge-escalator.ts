@@ -336,11 +336,38 @@ export async function maybeQuarantineOnContradiction(
 		}
 
 		const { quarantineEntry } = await import('./knowledge-validator.js');
+		// #1848 §2 (IR-4 fix): contradiction-quarantine uses cohort-wide evidence
+		// (the contradiction count is over the link-aware event window). Route
+		// through the cohort-safe policy so unknown-owner legacy entries are
+		// protected and a sibling worktree cannot quarantine another's entry from
+		// local-only signals. Best-effort config load: fall back to undefined
+		// when the schema module is unavailable (mock-leak resilient).
+		let policyConfig: unknown;
+		try {
+			const { KnowledgeConfigSchema } = await import('../config/schema.js');
+			// F-06: parse the project's real config so the cohort config-fingerprint
+			// guard compares actual settings, not defaults-vs-defaults.
+			const { loadPluginConfigWithMeta } = await import('../config/index.js');
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			policyConfig = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+		} catch {
+			policyConfig = undefined;
+		}
 		await quarantineEntry(
 			directory,
 			entryId,
 			`repeat_contradiction: ${count} contradicted events in ${windowDays}d`,
 			'auto',
+			{
+				input: {
+					directory,
+					action: 'quarantine' as const,
+					entryId,
+					reason: `repeat_contradiction: ${count} in ${windowDays}d`,
+					evidenceScope: 'cohort-wide' as const,
+				},
+				context: { config: policyConfig, entry: entry as never } as never,
+			},
 		);
 		return { quarantined: true, entryId, contradictionsInWindow: count };
 	} catch {

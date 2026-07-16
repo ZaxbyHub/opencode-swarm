@@ -1,5 +1,6 @@
 /** Core storage layer for the opencode-swarm v6.17 two-tier knowledge system. */
 
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as os from 'node:os';
@@ -21,6 +22,7 @@ import type {
 	KnowledgeEntryBase,
 	RejectedLesson,
 	RetrievalOutcome,
+	RewriteHistoryRecord,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
@@ -73,6 +75,17 @@ export function resolveSwarmRetractionsPath(directory: string): string {
 	return path.join(
 		resolveKnowledgeStoreDir(directory),
 		'knowledge-retractions.jsonl',
+	);
+}
+
+// Returns path to knowledge-rewrites.jsonl (link-aware, #1848 §3).
+// Cohort-scoped append-only audit log of immutable before/after rewrite+merge
+// history. NOT a KNOWLEDGE_FAMILY migration member (append-only audit, not
+// id-mergeable); cohort-shared naturally via resolveKnowledgeStoreDir.
+export function resolveRewriteHistoryPath(directory: string): string {
+	return path.join(
+		resolveKnowledgeStoreDir(directory),
+		'knowledge-rewrites.jsonl',
 	);
 }
 
@@ -250,7 +263,25 @@ export function normalizeEntry<T>(raw: T): T {
 	if (!Array.isArray(obj.tags)) {
 		obj.tags = [];
 	}
+	// #1848 §3 (v3): default the revision counter to 0 for legacy entries.
+	// 0 means "no CAS history yet" — the first mutation (authorized separately
+	// by the curation-policy layer) stamps revision 1. We deliberately do NOT
+	// synthesize `producer` (absent = unknown-owner = protected), and we do NOT
+	// compute `content_hash` here (computed at write/mutation time only to avoid
+	// per-read SHA-256 over thousands of cohort entries — see C-7 fix).
+	if (typeof obj.revision !== 'number' || Number.isNaN(obj.revision)) {
+		obj.revision = 0;
+	}
 	return raw;
+}
+
+/**
+ * Compute a 12-hex SHA-256 prefix of a lesson string (issue #1848 §3).
+ * Used as the `content_hash` CAS token, stamped at write/mutation time only.
+ * Mirrors the style of `lessonRevision()` in hive-promoter.ts.
+ */
+export function computeContentHash(lesson: string): string {
+	return createHash('sha256').update(lesson, 'utf8').digest('hex').slice(0, 12);
 }
 
 // Reads from the swarm-level rejected lessons file
@@ -283,6 +314,42 @@ export async function appendRetractionRecord(
 	record: KnowledgeRetractionRecord,
 ): Promise<void> {
 	await appendKnowledge(resolveSwarmRetractionsPath(directory), record);
+}
+
+/**
+ * Append an immutable rewrite/merge history record to the cohort-scoped audit
+ * log (issue #1848 §3). FIFO-capped at 2000 entries so the audit trail is
+ * bounded. Fail-open: a history-append failure must not abort the mutation that
+ * already committed (the mutation is the source of truth; history is audit).
+ */
+export async function appendRewriteHistory(
+	directory: string,
+	record: RewriteHistoryRecord,
+): Promise<void> {
+	const filePath = resolveRewriteHistoryPath(directory);
+	const MAX_REWRITE_HISTORY = 2000;
+	await transactKnowledge<RewriteHistoryRecord>(filePath, (entries) => {
+		const next = [...entries, record];
+		return next.length > MAX_REWRITE_HISTORY
+			? next.slice(next.length - MAX_REWRITE_HISTORY)
+			: next;
+	}).catch((err) => {
+		// Fail-open: history is audit, not source of truth.
+		logger.log(
+			`[knowledge-store] appendRewriteHistory failed (non-blocking): ${String(err)}`,
+		);
+	});
+}
+
+/**
+ * Read rewrite/merge history records (issue #1848 §3). Used for audit/recovery.
+ */
+export async function readRewriteHistory(
+	directory: string,
+): Promise<RewriteHistoryRecord[]> {
+	return readKnowledge<RewriteHistoryRecord>(
+		resolveRewriteHistoryPath(directory),
+	);
 }
 
 // ============================================================================
@@ -422,6 +489,101 @@ export async function transactKnowledge<T>(
 		},
 		mutate,
 	);
+}
+
+/**
+ * Compare-and-swap guarded mutation for a single entry (issue #1848 §3).
+ *
+ * Runs inside the existing directory lock (lock-before-read). Finds the entry
+ * by `id`. If `expectedRevision`/`expectedContentHash` are provided and the
+ * current entry's revision/content_hash do not match, the mutation is SKIPPED
+ * and `{committed:false, casFailed:true}` is returned — a stale curator plan is
+ * rejected, NOT silently applied. This closes the lost-update hazard where a
+ * plan generated from a stale snapshot overwrites an entry a sibling worktree
+ * just updated.
+ *
+ * On an accepted mutation: bumps `revision`, recomputes `content_hash`, stamps
+ * `updated_at`, and (when `apply` returns a `RewriteHistoryRecord`) appends the
+ * immutable before/after audit record. Authorization is the CALLER's
+ * responsibility (run `authorizeCuration` BEFORE calling this); CAS enforces
+ * the revision contract INSIDE the transaction.
+ *
+ * Legacy entry (revision 0/undefined): CAS with `expectedRevision === undefined`
+ * is allowed (the first authorized mutation stamps revision 1). The
+ * unknown-owner-protected case never reaches here because authorizeCuration
+ * returns a proposal instead of authorizing.
+ */
+export async function transactKnowledgeWithCas<
+	T extends {
+		id: string;
+		revision?: number;
+		content_hash?: string;
+		lesson?: string;
+		updated_at?: string;
+	},
+>(
+	directory: string,
+	filePath: string,
+	entryId: string,
+	expectedRevision: number | undefined,
+	expectedContentHash: string | undefined,
+	apply: (entry: T) => {
+		mutated: T;
+		rewriteHistory?: RewriteHistoryRecord;
+	} | null,
+): Promise<{ committed: boolean; casFailed: boolean }> {
+	let committed = false;
+	let casFailed = false;
+	const rewrote = await transactKnowledge<T>(filePath, (entries) => {
+		const idx = entries.findIndex((e) => e?.id === entryId);
+		if (idx === -1) return null; // entry not found — no-op
+		const entry = entries[idx];
+		// CAS check: if a revision/content-hash expectation was provided, the
+		// current entry must match. A mismatch means the snapshot the plan was
+		// built on is stale → skip, do NOT silently overwrite.
+		if (
+			expectedRevision !== undefined &&
+			(entry.revision ?? 0) !== expectedRevision
+		) {
+			casFailed = true;
+			return null;
+		}
+		if (
+			expectedContentHash !== undefined &&
+			(entry.content_hash ?? '') !== expectedContentHash
+		) {
+			casFailed = true;
+			return null;
+		}
+		const result = apply(entry);
+		if (result === null) return null;
+		// Stamp the CAS revision + content hash on the accepted mutation.
+		const stamped: T = {
+			...result.mutated,
+			revision: (entry.revision ?? 0) + 1,
+			updated_at: new Date().toISOString(),
+		};
+		if (typeof stamped.lesson === 'string') {
+			(stamped as { content_hash?: string }).content_hash = computeContentHash(
+				stamped.lesson,
+			);
+		}
+		// Append rewrite history (fire-and-forget after the txn commits — but
+		// we capture the record here so it's consistent with the mutation).
+		if (result.rewriteHistory) {
+			// Queue the history append; the txn write is the source of truth.
+			// We do this synchronously-captured but asynchronously-appended
+			// below (outside the lock) to keep the critical section short.
+			queueMicrotask(() => {
+				appendRewriteHistory(directory, result.rewriteHistory!).catch(() => {});
+			});
+		}
+		const next = entries.slice();
+		next[idx] = stamped;
+		committed = true;
+		return next;
+	});
+	return { committed: committed && rewrote, casFailed };
 }
 
 // Read all archived/quarantined entry IDs from the swarm AND hive knowledge stores.
@@ -1102,12 +1264,37 @@ async function applyConfidenceFloorAction(
 	// entries are collected (see hive note above).
 	if (action === 'quarantine' && toQuarantine.length > 0) {
 		const { quarantineEntry } = await import('./knowledge-validator.js');
+		// #1848 §2: confidence-floor quarantine uses cohort-wide outcome signals
+		// (the rollups are from the link-aware event log). Route through the
+		// cohort-safe policy so unknown-owner legacy entries are protected.
+		const { KnowledgeConfigSchema } = await import('../config/schema.js');
+		// F-06: parse the project's real config so the cohort config-fingerprint
+		// guard compares actual settings, not defaults-vs-defaults. Best-effort:
+		// fall back to schema defaults on any load/parse error.
+		let config: ReturnType<typeof KnowledgeConfigSchema.parse>;
+		try {
+			const { loadPluginConfigWithMeta } = await import('../config/index.js');
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+		} catch {
+			config = KnowledgeConfigSchema.parse({});
+		}
 		for (const { id } of toQuarantine) {
 			await quarantineEntry(
 				directory,
 				id,
 				'confidence_floor_negative_outcome',
 				'auto',
+				{
+					input: {
+						directory,
+						action: 'quarantine',
+						entryId: id,
+						reason: 'confidence_floor_negative_outcome',
+						evidenceScope: 'cohort-wide',
+					},
+					context: { config, entry: null },
+				},
 			).catch((err) => {
 				logger.log(
 					'[knowledge-store] confidence-floor quarantine failed (best-effort):',

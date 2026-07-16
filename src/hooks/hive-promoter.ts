@@ -27,6 +27,8 @@ import path from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import type { CohortIdentity } from '../knowledge/cohort-identity.js';
 import { resolveCohortId } from '../knowledge/cohort-identity.js';
+import { authorizeCuration } from '../knowledge/curation-policy.js';
+import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {
 	describeEligibilityRoute,
@@ -359,6 +361,13 @@ export async function checkHivePromotions(
 		});
 	}
 
+	// PRR-007: the global hive data dir — passed to `authorizeCuration` for the
+	// dedup-merge pass-through. It is unlinked (the global hive has no link
+	// pointer), so authorization resolves to `config-skipped-unlinked` without a
+	// lock acquire or event read (no deadlock against the held hive lock).
+	// Resolved OUTSIDE the transaction; the resolver only reads env, no lock.
+	const hiveDir = resolveHiveDataDir();
+
 	const result = await _internals.transactHiveStore<{
 		newPromotions: number;
 		encounters: number;
@@ -415,26 +424,38 @@ export async function checkHivePromotions(
 				// F-001: preserve provenance — record that this swarm entry was a
 				// near-duplicate of an existing hive entry. Do not auto-collapse
 				// conflicting lessons; just record the link for audit.
+				// PRR-007: route this lineage mutation through the ONE shared
+				// curation policy (audited pass-through) and stage an audit line so
+				// the merge is no longer a silent, unaudited bypass of that policy.
 				if (existingDup.lineage) {
-					const mergedFrom = existingDup.lineage.merged_from ?? [];
-					if (!mergedFrom.includes(swarmEntry.id)) {
-						existingDup.lineage.merged_from = [...mergedFrom, swarmEntry.id];
-						existingDup.updated_at = new Date().toISOString();
+					const mergeAudit = await authorizeAndRecordHiveMerge({
+						survivingEntry: existingDup,
+						losingSourceId: swarmEntry.id,
+						config,
+						hiveDir,
+					});
+					if (mergeAudit) {
 						merges++;
+						audit.push(mergeAudit);
 					}
 				}
 				continue;
 			}
 			if (isDuplicateOfAdded(swarmBigram, config.dedup_threshold)) {
 				// Same-run duplicate of a just-promoted entry — record on the
-				// most-recently-added entry's lineage if possible.
+				// most-recently-added entry's lineage if possible. PRR-007: same
+				// audited pass-through as the existing-hive merge above.
 				const lastAdded = entries[entries.length - 1];
 				if (lastAdded?.lineage) {
-					const mergedFrom = lastAdded.lineage.merged_from ?? [];
-					if (!mergedFrom.includes(swarmEntry.id)) {
-						lastAdded.lineage.merged_from = [...mergedFrom, swarmEntry.id];
-						lastAdded.updated_at = new Date().toISOString();
+					const mergeAudit = await authorizeAndRecordHiveMerge({
+						survivingEntry: lastAdded,
+						losingSourceId: swarmEntry.id,
+						config,
+						hiveDir,
+					});
+					if (mergeAudit) {
 						merges++;
+						audit.push(mergeAudit);
 					}
 				}
 				continue;
@@ -651,6 +672,110 @@ function stagePromotionAudit(args: {
 	return { line: JSON.stringify(event) };
 }
 
+/** Build a staged dedup-merge audit line (pre-serialized JSON). PRR-007: the
+ *  hive dedup-merge appends the losing swarm source id to the surviving hive
+ *  entry's `lineage.merged_from`; this records that mutation so it is no longer
+ *  silent/unaudited. Uses a distinct `type:'merge'` marker: `recomputeCounters`
+ *  and `learning-metrics` only consume retrieval/receipt/outcome types, so this
+ *  never inflates any retrieval/contradiction/receipt counter — and the hive
+ *  events log is a separate file from the per-project counter baseline. */
+function stageMergeAudit(args: {
+	survivingEntryId: string;
+	mergedFromId: string;
+	authorized: boolean;
+	authorizationBasis: string;
+}): HiveAuditEntry {
+	const event = {
+		type: 'merge',
+		schema_version: 1,
+		event_id: crypto.randomUUID(),
+		timestamp: new Date().toISOString(),
+		entry_id: args.survivingEntryId,
+		action: 'merge',
+		merged_from: args.mergedFromId,
+		authorized: args.authorized,
+		authorization_basis: args.authorizationBasis,
+	};
+	return { line: JSON.stringify(event) };
+}
+
+/**
+ * Audited pass-through for the non-destructive hive dedup-merge (PRR-007 /
+ * #1848 criterion #8). Records the losing swarm source id on the surviving hive
+ * entry's `lineage.merged_from` and returns a staged audit line documenting it.
+ *
+ * Routes the merge through the ONE shared curation policy (`authorizeCuration`,
+ * `action:'merge'`) so it genuinely "shares the policy" — but it is a
+ * PASS-THROUGH, not a gate. The global hive is unlinked and cross-project, its
+ * entries carry no `producer`/`cohort_id` owner, and the merge is
+ * non-destructive (it only APPENDS a source id; it never deletes or overwrites a
+ * lesson). For the unlinked hive dir `authorizeCuration` returns
+ * `authorized:true` with basis `config-skipped-unlinked` — a real authorization,
+ * not a block. A merge is therefore NEVER aborted on a policy decision (aborting
+ * would regress hive dedup); if the decision is ever unexpectedly not-authorized,
+ * the merge still proceeds and the anomaly is captured in the audit basis so it
+ * is visible.
+ *
+ * Returns the staged audit entry to append, or `undefined` when the source id is
+ * already recorded (idempotent no-op → no duplicate merge/audit).
+ */
+async function authorizeAndRecordHiveMerge(args: {
+	survivingEntry: HiveKnowledgeEntry;
+	losingSourceId: string;
+	config: KnowledgeConfig;
+	hiveDir: string;
+}): Promise<HiveAuditEntry | undefined> {
+	const { survivingEntry, losingSourceId, config, hiveDir } = args;
+	const mergedFrom = survivingEntry.lineage?.merged_from ?? [];
+	if (mergedFrom.includes(losingSourceId)) return undefined; // idempotent
+
+	// Share the ONE curation policy. Pass-through (not a gate): see docstring for
+	// why an unlinked, owner-less, non-destructive hive merge is authorized rather
+	// than blocked. Fail-open: if authorization itself throws, still merge (the
+	// finding's core is the SILENT bypass — the audit record below resolves it).
+	let authorized = true;
+	let basis = 'config-skipped-unlinked';
+	try {
+		const decision = await _internals.authorizeCuration(
+			{
+				directory: hiveDir,
+				action: 'merge',
+				entryId: survivingEntry.id,
+				reason: `hive dedup-merge: near-duplicate source ${losingSourceId}`,
+				// Hive dedup is inherently a cross-project consolidation decision.
+				evidenceScope: 'cohort-wide',
+			},
+			{
+				config,
+				entry: {
+					id: survivingEntry.id,
+					// Hive entries have no producer provenance (cross-project,
+					// owner-less) — this is why the merge is pass-through, not gated.
+					producer: null,
+					status: survivingEntry.status,
+				},
+			},
+		);
+		authorized = decision.authorized;
+		basis = decision.basis;
+	} catch (err) {
+		authorized = false;
+		basis = `authorize-error:${err instanceof Error ? err.message : String(err)}`;
+	}
+
+	// Perform the merge REGARDLESS of the decision (non-destructive; never abort).
+	survivingEntry.lineage = survivingEntry.lineage ?? { actor: 'auto' };
+	survivingEntry.lineage.merged_from = [...mergedFrom, losingSourceId];
+	survivingEntry.updated_at = new Date().toISOString();
+
+	return stageMergeAudit({
+		survivingEntryId: survivingEntry.id,
+		mergedFromId: losingSourceId,
+		authorized,
+		authorizationBasis: basis,
+	});
+}
+
 export const _internals = {
 	readSwarmEntries: (directory: string) =>
 		readKnowledge<SwarmKnowledgeEntry>(resolveSwarmKnowledgePath(directory)),
@@ -661,6 +786,9 @@ export const _internals = {
 	resolveCohortId,
 	transactHiveStore,
 	validateLesson,
+	// PRR-007: the shared curation policy the dedup-merge routes through (as an
+	// audited pass-through). DI seam so tests can assert the merge shares it.
+	authorizeCuration,
 	/** Loads validated terminal-application evidence per swarm entry id. Empty
 	 *  until #1849 produces real receipts (conservative: no synthetic credit). */
 	loadPromotionEvidence: async (

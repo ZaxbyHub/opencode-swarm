@@ -10,6 +10,7 @@
 
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import {
 	readKnowledgeEvents,
@@ -18,6 +19,7 @@ import {
 import {
 	getLinkedLocalKnowledgeStatus,
 	readLinkPointer,
+	resolveKnowledgeStoreDir,
 	resolveLinkDir,
 } from '../hooks/knowledge-link.js';
 import {
@@ -128,6 +130,35 @@ export interface KnowledgeDebugMeta {
 			reason?: string;
 			promotion_event_id?: string;
 		}>;
+	};
+	/**
+	 * Cohort-safe curation health (issue #1848). Surfaces the fair scan
+	 * cursor progress and cohort config-fingerprint agreement so an operator
+	 * knows whether entries are being starved and whether cohort members
+	 * share curation semantics.
+	 */
+	curation: {
+		/** Fair scan generation (monotonic sweep counter). 0 = no cursor yet. */
+		scan_generation: number;
+		/** True when the last sweep completed (next sweep starts fresh). */
+		scan_completed: boolean;
+		/** Approximate count of entries still eligible to visit this generation. */
+		scan_remaining_estimate: number;
+		/** True when this worktree's config fingerprint matches the cohort's.
+		 * `null` when unlinked or no cohort fingerprint is stored. */
+		config_fingerprint_match: boolean | null;
+		/** Count of entries with producer provenance (v3+). */
+		entries_with_provenance: number;
+		/** Count of legacy entries without provenance (protected by default). */
+		entries_unknown_owner: number;
+		/**
+		 * Pending curation proposals persisted to `curation-proposals.jsonl`
+		 * (PRR-008): destructive actions that were blocked (unknown-owner,
+		 * config-mismatch, insufficient evidence) and recorded for a cohort
+		 * member to later confirm. Never surfaced before; operators need to see
+		 * that blocked destructive intent is queued.
+		 */
+		pending_proposals: number;
 	};
 }
 
@@ -360,7 +391,129 @@ export async function computeKnowledgeDebug(
 			override_promotions: hiveOverridePromotions,
 			override_entries: hiveOverrideEntries,
 		},
+		// KC-03: provenance coverage is a swarm/cohort-tier concept — `producer`
+		// provenance is only ever written to swarm entries. Hive entries never
+		// carry it (by design), so merging them in would miscount every hive
+		// entry as "unknown owner". Pass SWARM raw entries only.
+		curation: await computeCurationDiagnostics(directory, swarmRaw.entries),
 	};
+}
+
+/**
+ * #1848: compute the cohort-safe curation diagnostics block — fair scan cursor
+ * progress, config fingerprint agreement, and provenance coverage. All
+ * best-effort (fail-open to zeros/nulls).
+ */
+async function computeCurationDiagnostics(
+	directory: string,
+	entries: Array<{ producer?: unknown }>,
+): Promise<KnowledgeDebugMeta['curation']> {
+	// Scan cursor status (best-effort).
+	let scanGeneration = 0;
+	let scanCompleted = false;
+	let scanRemaining = 0;
+	try {
+		const { getScanStatus } = await import('../knowledge/scan-cursor.js');
+		const status = await getScanStatus(directory);
+		scanGeneration = status.generation;
+		scanCompleted = status.completed;
+		scanRemaining = status.remaining_estimate;
+	} catch {
+		/* best-effort */
+	}
+
+	// Config fingerprint agreement (best-effort).
+	let configMatch: boolean | null = null;
+	try {
+		const { isLinked } = await import('../hooks/knowledge-link.js');
+		if (isLinked(directory)) {
+			const { KnowledgeConfigSchema } = await import('../config/schema.js');
+			// F-06: fingerprint agreement must be computed against this worktree's
+			// REAL knowledge config, not schema defaults — otherwise every operator
+			// who tuned any knowledge setting is reported as a false "mismatch".
+			// Best-effort: fall back to defaults if the config can't be loaded.
+			let config: ReturnType<typeof KnowledgeConfigSchema.parse>;
+			try {
+				const { loadPluginConfigWithMeta } = await import('../config/index.js');
+				const loaded = loadPluginConfigWithMeta(directory);
+				config = KnowledgeConfigSchema.parse(loaded.config.knowledge ?? {});
+			} catch {
+				config = KnowledgeConfigSchema.parse({});
+			}
+			const { cohortConfigFingerprint } = await import(
+				'../knowledge/config-fingerprint.js'
+			);
+			const { buildConfigFingerprintInput, readCohortConfigFingerprint } =
+				await import('../knowledge/curation-policy.js');
+			const currentFp = cohortConfigFingerprint(
+				buildConfigFingerprintInput(config),
+			);
+			const cohortFp = await readCohortConfigFingerprint(directory);
+			configMatch = cohortFp === null ? null : currentFp === cohortFp;
+		}
+	} catch {
+		/* best-effort */
+	}
+
+	// Provenance coverage. KC-03: `entries` is the SWARM-only set (hive entries
+	// never carry `producer`, so counting them would inflate unknown-owner).
+	let withProvenance = 0;
+	let unknownOwner = 0;
+	for (const e of entries) {
+		if (e.producer != null) withProvenance++;
+		else unknownOwner++;
+	}
+
+	// PRR-008: count pending curation proposals persisted by authorizeCuration to
+	// the cohort-scoped `curation-proposals.jsonl`. These represent blocked
+	// destructive intent awaiting confirmation and were never surfaced anywhere.
+	const pendingProposals = await countPendingProposals(directory);
+
+	return {
+		scan_generation: scanGeneration,
+		scan_completed: scanCompleted,
+		scan_remaining_estimate: scanRemaining,
+		config_fingerprint_match: configMatch,
+		entries_with_provenance: withProvenance,
+		entries_unknown_owner: unknownOwner,
+		pending_proposals: pendingProposals,
+	};
+}
+
+/**
+ * Count pending proposals in the store-scoped `curation-proposals.jsonl`
+ * (PRR-008). Best-effort: returns 0 on any error, missing file, or unresolvable
+ * store dir. Counts records whose `status` is `pending` (the only status
+ * authorizeCuration writes); non-JSON lines are ignored defensively.
+ */
+async function countPendingProposals(directory: string): Promise<number> {
+	let proposalsPath: string;
+	try {
+		proposalsPath = join(
+			resolveKnowledgeStoreDir(directory),
+			'curation-proposals.jsonl',
+		);
+	} catch {
+		return 0;
+	}
+	if (!existsSync(proposalsPath)) return 0;
+	try {
+		const content = await readFile(proposalsPath, 'utf-8');
+		let n = 0;
+		for (const line of content.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			try {
+				const parsed = JSON.parse(trimmed) as { status?: unknown };
+				if (parsed.status === 'pending') n++;
+			} catch {
+				/* ignore corrupt line */
+			}
+		}
+		return n;
+	} catch {
+		return 0;
+	}
 }
 
 /** Count non-blank JSONL lines in a file. Returns 0 on any error or null path. */
@@ -423,6 +576,7 @@ export async function checkKnowledgeHealth(
 	const lr = debug.learning;
 	const co = debug.cohort;
 	const hv = debug.hive;
+	const cu = debug.curation;
 	const cohortTag = co.linked
 		? ` | cohort[linked id=${co.link_id}${
 				co.cohort_id ? ` cohort=${co.cohort_id}` : ''
@@ -436,6 +590,24 @@ export async function checkKnowledgeHealth(
 		hv.entries_with_lineage > 0 || hv.override_promotions > 0
 			? ` | hive[lineage=${hv.entries_with_lineage} overrides=${hv.override_promotions}]`
 			: ' | hive[local]';
+	// O-007 (F-08/F-16/PRR-008): surface the curation diagnostics computed by
+	// computeCurationDiagnostics — previously computed but never rendered, so the
+	// entire feature was invisible to operators. Shows fair-scan cursor progress,
+	// config-fingerprint agreement, provenance coverage, and pending proposals.
+	const scanPart = cu.scan_completed
+		? `scan[gen=${cu.scan_generation} complete]`
+		: `scan[gen=${cu.scan_generation} remaining=${cu.scan_remaining_estimate}]`;
+	const fpPart =
+		cu.config_fingerprint_match === null
+			? 'fp=n/a'
+			: cu.config_fingerprint_match
+				? 'fp=match'
+				: 'fp=MISMATCH';
+	const provenanceTotal = cu.entries_with_provenance + cu.entries_unknown_owner;
+	const curationTag =
+		` | curation[${scanPart} ${fpPart} ` +
+		`provenance=${cu.entries_with_provenance}/${provenanceTotal} ` +
+		`proposals=${cu.pending_proposals}]`;
 	const summary =
 		`active=${sb.active} archived=${sb.archived} quarantined=${sb.quarantined} ` +
 		`rejected=${sb.rejected} | events=${debug.event_count} (retrieved/7d=${debug.retrieval_events_7d}) | ` +
@@ -444,7 +616,8 @@ export async function checkKnowledgeHealth(
 		`insights_pending=${lr.insight_candidates_pending}] | ` +
 		`schema=${JSON.stringify(debug.schema_versions)}` +
 		cohortTag +
-		hiveTag;
+		hiveTag +
+		curationTag;
 
 	const warnings: string[] = [];
 	// A degraded cohort identity (machine-local, not portable) must be visible —
@@ -498,6 +671,22 @@ export async function checkKnowledgeHealth(
 			`${hv.override_promotions} hive entr(y/ies) promoted via --force override (failed gates: ${gates}${
 				sample?.reason ? `; reason: "${sample.reason.slice(0, 60)}"` : ''
 			})`,
+		);
+	}
+	// O-007 F-16: a config-fingerprint MISMATCH means linked cohort members will
+	// curate with different semantics — a genuine cross-worktree hazard the
+	// operator must reconcile before destructive curation.
+	if (cu.config_fingerprint_match === false) {
+		warnings.push(
+			'cohort config fingerprint mismatch: this worktree curates with different knowledge semantics than the cohort — align knowledge config across linked worktrees',
+		);
+	}
+	// PRR-008: pending proposals are blocked destructive actions awaiting cohort
+	// confirmation. They were persisted but never surfaced — an operator needs to
+	// see that curation intent is queued and unresolved.
+	if (cu.pending_proposals > 0) {
+		warnings.push(
+			`${cu.pending_proposals} pending curation proposal(s) awaiting confirmation (blocked destructive actions recorded in curation-proposals.jsonl)`,
 		);
 	}
 

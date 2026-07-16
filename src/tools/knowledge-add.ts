@@ -7,6 +7,7 @@ import {
 	reinforceSwarmKnowledgeEntry,
 } from '../hooks/knowledge-reinforcement.js';
 import {
+	computeContentHash,
 	findNearDuplicate,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
@@ -15,12 +16,15 @@ import type {
 	KnowledgeCategory,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
+import { KNOWLEDGE_SCHEMA_VERSION } from '../hooks/knowledge-types.js';
 import {
 	appendUnactionable,
 	validateActionability,
 	validateActionableFields,
 	validateLesson,
 } from '../hooks/knowledge-validator.js';
+import { resolveCohortId } from '../knowledge/cohort-identity.js';
+import { resolveWorktreeId } from '../knowledge/worktree-identity.js';
 import { loadPlan } from '../plan/manager.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -188,7 +192,29 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				// plan load failure must not prevent knowledge storage
 			}
 
+			// #1848 §1: stamp producer provenance + revision + content_hash at
+			// creation so the cohort-safe curation policy can make ownership
+			// decisions. Best-effort: resolveWorktreeId/resolveCohortId are
+			// fail-open (return transient/'unknown' on I/O failure); provenance
+			// is stamped as null if either fails, which the policy treats as
+			// unknown-owner (protected by default — the creator can still act
+			// because it just wrote it; the protection applies to OTHER worktrees).
+			let producer: SwarmKnowledgeEntry['producer'] = null;
+			try {
+				const [worktreeId, cohort] = await Promise.all([
+					resolveWorktreeId(directory),
+					resolveCohortId(directory),
+				]);
+				producer = {
+					cohort_id: cohort.cohortId,
+					worktree_id: worktreeId,
+				};
+			} catch {
+				/* fail-open: null producer → unknown-owner (protected by policy) */
+			}
+
 			// Construct the entry
+			const nowIso = new Date().toISOString();
 			const entry: SwarmKnowledgeEntry = {
 				id: randomUUID(),
 				tier: 'swarm',
@@ -205,9 +231,12 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 					succeeded_after_count: 0,
 					failed_after_count: 0,
 				},
-				schema_version: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				schema_version: KNOWLEDGE_SCHEMA_VERSION,
+				producer,
+				revision: 1,
+				content_hash: computeContentHash(lesson),
+				created_at: nowIso,
+				updated_at: nowIso,
 				auto_generated: false,
 				hive_eligible: false,
 				...actionable,

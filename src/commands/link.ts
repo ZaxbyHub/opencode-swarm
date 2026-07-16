@@ -20,7 +20,10 @@
  * after the migration commits.
  */
 
+import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { loadPluginConfigWithMeta } from '../config';
+import { KnowledgeConfigSchema } from '../config/schema.js';
 import {
 	type LinkPointer,
 	readLinkPointer,
@@ -32,6 +35,8 @@ import {
 	type CohortIdentity,
 	resolveCohortId,
 } from '../knowledge/cohort-identity.js';
+import { cohortConfigFingerprint } from '../knowledge/config-fingerprint.js';
+import { buildConfigFingerprintInput } from '../knowledge/curation-policy.js';
 import { migrateKnowledgeFamily } from '../knowledge/family-migration.js';
 import { criticalWarn } from '../utils/logger.js';
 
@@ -172,6 +177,36 @@ export async function handleLinkCommand(
 		return `❌ Failed to write link pointer: ${
 			error instanceof Error ? error.message : String(error)
 		}`;
+	}
+
+	// #1848 §3 / RC-6: compute and persist the cohort config fingerprint so the
+	// curation-policy layer can detect cohort config divergence and fail closed
+	// on destructive curation. Written to the cohort-scoped link dir as the
+	// single source of truth all members compare against. Best-effort: a write
+	// failure does not abort the link (the policy falls back to permissive when
+	// no fingerprint is stored).
+	try {
+		// #1848 §3 / F-06: fingerprint the REAL cohort config (from opencode.json),
+		// not bare schema defaults. `/swarm link` writes the single source of truth
+		// that all cohort members compare against; fingerprinting defaults here
+		// would make every worktree with real config look "mismatched".
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+		const fingerprint = cohortConfigFingerprint(
+			buildConfigFingerprintInput(config),
+		);
+		await mkdir(linkDir, { recursive: true });
+		await writeFile(
+			path.join(linkDir, 'cohort-config.json'),
+			JSON.stringify(
+				{ fingerprint, updated_at: new Date().toISOString() },
+				null,
+				2,
+			),
+			'utf-8',
+		);
+	} catch {
+		/* best-effort — policy falls back to permissive when absent */
 	}
 
 	const relinkNote = existing

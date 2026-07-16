@@ -92,6 +92,14 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 			'test-id',
 			'test reason',
 			'user',
+			// F-02: cohort-safety curationContext threaded through the command.
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'quarantine',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 	});
 
@@ -104,7 +112,17 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 			'test-id',
 		]);
 		expect(result).toContain('test-id');
-		expect(mockRestoreEntry).toHaveBeenCalledWith('/test/dir', 'test-id');
+		expect(mockRestoreEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			'test-id',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'restore',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
+		);
 	});
 
 	it('knowledge (no subcommand) returns help text with both command descriptions', async () => {

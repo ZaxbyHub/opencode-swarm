@@ -9,6 +9,7 @@ import {
 	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
+import type { CurationContext } from '../knowledge/curation-policy.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
 import { warn } from '../utils/logger.js';
@@ -115,6 +116,22 @@ function recordSeenRetroSection(
 function hashContent(content: string): string {
 	return createHash('sha1').update(content).digest('hex');
 }
+
+/** #1848: load the resolved KnowledgeConfig for the curation policy. */
+async function loadConfigForPolicyCurator(directory: string) {
+	const { KnowledgeConfigSchema } = await import('../config/schema.js');
+	// F-06: parse the project's real config so the cohort config-fingerprint
+	// guard compares actual settings, not defaults-vs-defaults. Best-effort:
+	// fall back to schema defaults on any load/parse error.
+	try {
+		const { loadPluginConfigWithMeta } = await import('../config/index.js');
+		const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+		return KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+	} catch {
+		return KnowledgeConfigSchema.parse({});
+	}
+}
+
 async function canonicalExistingPath(candidate: string): Promise<string> {
 	let resolved = path.resolve(candidate);
 	try {
@@ -411,6 +428,9 @@ async function processRetractions(
 					typeof value === 'string' && value.length > 0,
 			),
 	);
+	// F-06: load the resolved config ONCE before the loops (do not reload
+	// per-iteration — the loaded config is identical for every entry).
+	const policyConfig = await loadConfigForPolicyCurator(directory);
 	for (const retractionText of retractions) {
 		const normalizedRetraction = normalize(retractionText);
 		const matchedSwarmIds: string[] = [];
@@ -419,11 +439,29 @@ async function processRetractions(
 			const normalizedLesson = normalize(entry.lesson);
 			if (normalizedLesson === normalizedRetraction) {
 				matchedSwarmIds.push(entry.id);
+				// #1848 §2: route retraction-driven quarantine through the
+				// cohort-safe policy. Retractions originate from the local retro
+				// section (local-session evidence); the policy protects entries
+				// owned by sibling worktrees (absence of local evidence ≠ negative).
 				await quarantineEntry(
 					directory,
 					entry.id,
 					`Retracted by architect: ${retractionText}`,
 					'architect',
+					{
+						input: {
+							directory,
+							action: 'retract',
+							entryId: entry.id,
+							reason: retractionText,
+							evidenceScope: 'local-session',
+							actorRole: 'architect',
+						},
+						context: {
+							config: policyConfig,
+							entry,
+						} as CurationContext,
+					},
 				);
 				// biome-ignore lint/suspicious/noConsole: Non-blocking quarantine action log — provides visibility into curator decisions without blocking the operation
 				console.info(

@@ -7,6 +7,7 @@ import {
 	resetGlobalEventBus,
 } from '../../../src/background/event-bus.js';
 import {
+	_internals,
 	applyCuratorKnowledgeUpdates,
 	checkPhaseCompliance,
 	filterPhaseEvents,
@@ -1688,6 +1689,174 @@ invalid json here
 			const updatedContent = readKnowledgeJsonl(tempDir);
 			expect(updatedContent[0].status).toBe('archived');
 			expect(updatedContent[0].updated_at).not.toBe('2026-01-01T00:00:00Z');
+		});
+
+		// #1848 §4 (F-09/PRR-003): the fair-scan generation stamp is the second
+		// idempotency layer. An entry already curated in the current generation
+		// (e.g. a batch re-claimed after a crash) must be SKIPPED so the mutation
+		// does not compound; a fresh entry must be curated AND stamped with the
+		// generation so the next sweep can detect it.
+		it('F-09: skips entries already curated this generation and stamps fresh ones', async () => {
+			const entries: SwarmKnowledgeEntry[] = [
+				{
+					id: 'GEN-STALE',
+					tier: 'swarm',
+					lesson: 'Already curated in generation 5',
+					category: 'testing',
+					tags: [],
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 3,
+					created_at: '2026-01-01T00:00:00Z',
+					updated_at: '2026-01-01T00:00:00Z',
+					hive_eligible: false,
+					project_name: 'test-project',
+					last_curated_generation: 5,
+				},
+				{
+					id: 'GEN-FRESH',
+					tier: 'swarm',
+					lesson: 'Not yet curated in generation 5',
+					category: 'testing',
+					tags: [],
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 3,
+					created_at: '2026-01-01T00:00:00Z',
+					updated_at: '2026-01-01T00:00:00Z',
+					hive_eligible: false,
+					project_name: 'test-project',
+				},
+			];
+			createKnowledgeFile(tempDir, entries);
+
+			const recommendations: KnowledgeRecommendation[] = [
+				{ action: 'archive', entry_id: 'GEN-STALE', lesson: '', reason: 'x' },
+				{ action: 'archive', entry_id: 'GEN-FRESH', lesson: '', reason: 'x' },
+			];
+
+			// generation=5: GEN-STALE was already curated in gen 5 → skipped;
+			// GEN-FRESH is new → archived and stamped with 5.
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				recommendations,
+				defaultKnowledgeConfig,
+				5,
+			);
+
+			expect(result.applied).toBe(1);
+			expect(result.skipped).toBe(1);
+
+			const updated = readKnowledgeJsonl(tempDir);
+			const stale = updated.find((e) => e.id === 'GEN-STALE');
+			const fresh = updated.find((e) => e.id === 'GEN-FRESH');
+			// Already-curated entry left untouched (idempotency).
+			expect(stale?.status).toBe('candidate');
+			expect(stale?.updated_at).toBe('2026-01-01T00:00:00Z');
+			// Fresh entry curated AND stamped with the current generation.
+			expect(fresh?.status).toBe('archived');
+			expect(fresh?.last_curated_generation).toBe(5);
+		});
+
+		// #1848 §3 (F-05/PRR-004): per-entry revision CAS. The pre-transaction
+		// authorization runs over an UNLOCKED snapshot, so an entry can change
+		// between authorize and apply. The fix captures the revision authorized
+		// against and re-checks it inside the locked transaction: a drifted entry
+		// must be SKIPPED (never clobbered) and counted as skipped EXACTLY ONCE.
+		//
+		// Falsification: this test drives drift by overriding the DI seam
+		// `_internals.readKnowledge` (the pre-authorization snapshot read ONLY) to
+		// report a stale revision (1) while the on-disk entry — read fresh inside
+		// the locked transaction via the real `transactKnowledge` — is at revision
+		// 2. Before the CAS fix the archive applied unconditionally (applied:1,
+		// entry archived); with the fix it is drift-rejected (applied:0, skipped:1,
+		// entry untouched).
+		it('F-05: skips a destructive mutation whose revision drifted after authorization (counted once)', async () => {
+			const entries: SwarmKnowledgeEntry[] = [
+				{
+					id: 'CAS-DRIFT',
+					tier: 'swarm',
+					lesson: 'Entry whose revision drifts between authorize and apply',
+					category: 'testing',
+					tags: [],
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 3,
+					created_at: '2026-01-01T00:00:00Z',
+					updated_at: '2026-01-01T00:00:00Z',
+					hive_eligible: false,
+					project_name: 'test-project',
+					// Fresh, on-disk revision. The locked transaction reads THIS.
+					revision: 2,
+				},
+			];
+			createKnowledgeFile(tempDir, entries);
+
+			// Override ONLY the pre-authorization snapshot read so authorization
+			// captures a STALE revision (1). The locked transaction still reads the
+			// real file (revision 2) via `transactKnowledge`, so the in-transaction
+			// CAS observes 2 !== 1 → drift.
+			const realReadKnowledge = _internals.readKnowledge;
+			_internals.readKnowledge = (async <T>(filePath: string): Promise<T[]> => {
+				const rows = (await realReadKnowledge<SwarmKnowledgeEntry>(
+					filePath,
+				)) as SwarmKnowledgeEntry[];
+				return rows.map((r) =>
+					r.id === 'CAS-DRIFT' ? { ...r, revision: 1 } : r,
+				) as unknown as T[];
+			}) as typeof _internals.readKnowledge;
+
+			try {
+				const recommendations: KnowledgeRecommendation[] = [
+					{
+						action: 'archive',
+						entry_id: 'CAS-DRIFT',
+						lesson: '',
+						reason: 'drifted',
+					},
+				];
+
+				const result = await applyCuratorKnowledgeUpdates(
+					tempDir,
+					recommendations,
+					defaultKnowledgeConfig,
+				);
+
+				// Drift-rejected: nothing applied, counted as skipped EXACTLY once.
+				expect(result.applied).toBe(0);
+				expect(result.skipped).toBe(1);
+			} finally {
+				_internals.readKnowledge = realReadKnowledge;
+			}
+
+			// The entry must be untouched: still a candidate at revision 2 (the CAS
+			// return-entry path writes nothing for the drifted entry).
+			const updated = readKnowledgeJsonl(tempDir);
+			const drifted = updated.find((e) => e.id === 'CAS-DRIFT');
+			expect(drifted?.status).toBe('candidate');
+			expect(drifted?.revision).toBe(2);
+			expect(drifted?.updated_at).toBe('2026-01-01T00:00:00Z');
 		});
 
 		// G11 (issue #1717): curator-archive recommendations now route through

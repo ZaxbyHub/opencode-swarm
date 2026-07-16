@@ -15,6 +15,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { claimNextScanBatch } from '../knowledge/scan-cursor.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
@@ -29,7 +30,6 @@ import { readKnowledge, resolveSwarmKnowledgePath } from './knowledge-store.js';
 import type {
 	KnowledgeCategory,
 	KnowledgeConfig,
-	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
@@ -120,12 +120,28 @@ async function collectKnowledgeSummary(
 	directory: string,
 	scope: 'session' | 'project' = 'project',
 	sessionID?: string,
+	out?: { generation?: number },
 ): Promise<KnowledgeEventSummary[]> {
-	const entries = await readKnowledge<KnowledgeEntryBase>(
-		resolveSwarmKnowledgePath(directory),
-		MAX_KNOWLEDGE_ENTRIES,
-	);
-	let events = await readKnowledgeEvents(directory, MAX_KNOWLEDGE_ENTRIES * 4);
+	// #1848 §4: replace the fixed oldest-~500 window with a durable, fair scan
+	// cursor. Every eligible record is eventually visited; progress survives
+	// restart; concurrent append/update does not permanently skip entries. The
+	// cursor atomically claims a batch (read+advance in one step) so concurrent
+	// cohort postmortems do not duplicate work.
+	const batch = await claimNextScanBatch(directory, MAX_KNOWLEDGE_ENTRIES);
+	// #1848 §4 (F-09): surface the claimed batch's generation so the curation
+	// apply path can stamp `last_curated_generation` on mutated entries. This is
+	// an out-param (not a return-shape change) to keep the array contract callers
+	// and tests depend on.
+	if (out) out.generation = batch.generation;
+	const entries = batch.entries;
+	// Read events scoped to this batch's entry ids (not a fixed 4× window).
+	const batchIds = new Set(entries.map((e) => e.id));
+	let events = (await readKnowledgeEvents(directory)).filter((e) => {
+		const kid =
+			(e as { knowledge_id?: string }).knowledge_id ??
+			(e as { entry_id?: string }).entry_id;
+		return kid != null && batchIds.has(kid);
+	});
 	if (scope === 'session' && sessionID) {
 		events = events.filter(
 			(e) => (e as { session_id?: string }).session_id === sessionID,
@@ -446,6 +462,7 @@ async function executePostMortemActions(
 	directory: string,
 	parsed: ParsedPostMortemActions,
 	options: PostMortemOptions,
+	generation?: number,
 ): Promise<{ result: PostMortemActionResult; warnings: string[] }> {
 	const warnings: string[] = [];
 	const result: PostMortemActionResult = {
@@ -459,13 +476,15 @@ async function executePostMortemActions(
 		proposals_skipped: 0,
 	};
 	const knowledgeConfig =
-		options.knowledgeConfig ?? (await _internals.loadDefaultKnowledgeConfig());
+		options.knowledgeConfig ??
+		(await _internals.loadDefaultKnowledgeConfig(directory));
 	if (parsed.recommendations.length > 0) {
 		try {
 			const knowledgeResult = await _internals.applyCuratorKnowledgeUpdates(
 				directory,
 				parsed.recommendations,
 				knowledgeConfig,
+				generation,
 			);
 			result.knowledge_applied = knowledgeResult.applied;
 			result.knowledge_skipped = knowledgeResult.skipped;
@@ -1092,20 +1111,34 @@ export async function runCuratorPostMortem(
 	try {
 		// Collect evidence
 		let knowledgeSummary: KnowledgeEventSummary[] = [];
+		// #1848 §4 (F-09): capture the fair-scan-cursor generation for the batch
+		// curated this sweep so executePostMortemActions can stamp mutated entries.
+		const scanCursor: { generation?: number } = {};
 		try {
 			knowledgeSummary = await collectKnowledgeSummary(
 				directory,
 				scope,
 				options.sessionID,
+				scanCursor,
 			);
 		} catch {
 			warnings.push('Failed to collect knowledge summary.');
 		}
-		if (knowledgeSummary.length > MAX_KNOWLEDGE_ENTRIES) {
-			warnings.push(
-				`Knowledge entries capped at ${MAX_KNOWLEDGE_ENTRIES} (had ${knowledgeSummary.length}); older entries truncated.`,
-			);
-			knowledgeSummary = knowledgeSummary.slice(0, MAX_KNOWLEDGE_ENTRIES);
+		// #1848 §4: the fair scan cursor returns a bounded batch; report the
+		// remaining eligible work so the operator knows future sweeps will visit
+		// the rest. The old fixed-window silently starved entries beyond 500.
+		try {
+			const { getScanStatus } = await import('../knowledge/scan-cursor.js');
+			const scanStatus = await getScanStatus(directory);
+			if (scanStatus.remaining_estimate > 0) {
+				warnings.push(
+					`Fair scan: reviewed ${knowledgeSummary.length} entries this sweep ` +
+						`(generation ${scanStatus.generation}); ${scanStatus.remaining_estimate} ` +
+						`more eligible entries will be visited in future curation sweeps.`,
+				);
+			}
+		} catch {
+			/* scan status is best-effort diagnostics */
 		}
 
 		let curatorDigest: string | null = null;
@@ -1220,6 +1253,7 @@ export async function runCuratorPostMortem(
 					directory,
 					parsedActions,
 					options,
+					scanCursor.generation,
 				);
 				actionResult = executed.result;
 				warnings.push(...executed.warnings);
@@ -1362,20 +1396,33 @@ export const _internals = {
 	executePostMortemActions,
 	verifyPostMortemKnowledgeActions,
 	repairPostMortemActions,
-	loadDefaultKnowledgeConfig: async (): Promise<KnowledgeConfig> => {
+	loadDefaultKnowledgeConfig: async (
+		directory: string,
+	): Promise<KnowledgeConfig> => {
 		const { KnowledgeConfigSchema } = await import('../config/schema.js');
-		return KnowledgeConfigSchema.parse({});
+		// F-06: load the project's real knowledge config instead of always
+		// returning schema defaults. Best-effort: on any load/parse failure fall
+		// back to defaults so the post-mortem never fails on config problems.
+		try {
+			const { loadPluginConfigWithMeta } = await import('../config/index.js');
+			const loaded = loadPluginConfigWithMeta(directory);
+			return KnowledgeConfigSchema.parse(loaded.config.knowledge ?? {});
+		} catch {
+			return KnowledgeConfigSchema.parse({});
+		}
 	},
 	applyCuratorKnowledgeUpdates: async (
 		directory: string,
 		recommendations: KnowledgeRecommendation[],
 		knowledgeConfig: KnowledgeConfig,
+		generation?: number,
 	) => {
 		const { applyCuratorKnowledgeUpdates } = await import('./curator.js');
 		return applyCuratorKnowledgeUpdates(
 			directory,
 			recommendations,
 			knowledgeConfig,
+			generation,
 		);
 	},
 	checkHivePromotions: async (

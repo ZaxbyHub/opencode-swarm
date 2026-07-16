@@ -26,10 +26,20 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
+	transactKnowledgeWithCas,
 } from '../hooks/knowledge-store.js';
-import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import type {
+	CurationAction,
+	CurationEvidenceScope,
+	KnowledgeEntryBase,
+} from '../hooks/knowledge-types.js';
 import { quarantineEntry } from '../hooks/knowledge-validator.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from '../hooks/skill-invalidator.js';
+import {
+	authorizeCuration,
+	type CurationAuthorizationInput,
+	type CurationContext,
+} from '../knowledge/curation-policy.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -38,6 +48,20 @@ type ArchiveMode = (typeof MODES)[number];
 
 const TIERS = ['swarm', 'hive'] as const;
 type ArchiveTier = (typeof TIERS)[number];
+
+/**
+ * #1848: load the resolved KnowledgeConfig for the curation policy.
+ *
+ * F-06: load the REAL project config (ownership quorum, protected-owner rules,
+ * etc.) instead of bare schema defaults, so authorizeCuration sees the project's
+ * actual cohort-safety settings. `loadPluginConfigWithMeta` is synchronous.
+ */
+async function loadConfigForPolicy(directory: string) {
+	const { KnowledgeConfigSchema } = await import('../config/schema.js');
+	const { loadPluginConfigWithMeta } = await import('../config/index.js');
+	const { config: loaded } = loadPluginConfigWithMeta(directory);
+	return KnowledgeConfigSchema.parse(loaded.knowledge ?? {});
+}
 
 export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -133,7 +157,8 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					const swarmEntries = await readKnowledge<KnowledgeEntryBase>(
 						resolveSwarmKnowledgePath(directory),
 					);
-					if (!swarmEntries.some((e) => e.id === id)) {
+					const target = swarmEntries.find((e) => e.id === id);
+					if (!target) {
 						return JSON.stringify({
 							success: false,
 							message: 'entry not found',
@@ -141,7 +166,23 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 					}
 					const reportedBy: 'architect' | 'user' | 'auto' =
 						ctx?.agent === 'architect' ? 'architect' : 'user';
-					await quarantineEntry(directory, id, reason, reportedBy);
+					// #1848 §2: route quarantine through the cohort-safe policy.
+					const curationInput: CurationAuthorizationInput = {
+						directory,
+						action: 'quarantine' as CurationAction,
+						entryId: id,
+						reason,
+						evidenceScope: 'cohort-wide' as CurationEvidenceScope,
+						actorRole: ctx?.agent,
+					};
+					const curationContext: CurationContext = {
+						config: await loadConfigForPolicy(directory),
+						entry: target,
+					};
+					await quarantineEntry(directory, id, reason, reportedBy, {
+						input: curationInput,
+						context: curationContext,
+					});
 				} catch (err) {
 					return JSON.stringify({
 						success: false,
@@ -173,67 +214,196 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			const now = new Date().toISOString();
 			let resultStatus: string | undefined;
 
-			try {
-				await transactKnowledge<KnowledgeEntryBase>(
-					knowledgePath,
-					(entries) => {
-						const target = entries.find((e) => e.id === id);
-						if (!target) return null;
-						found = true;
-						previousStatus = target.status;
+			// PRR-002: revision + content_hash captured from the pre-authorization
+			// read, used to CAS-guard the swarm archive mutation so a concurrent
+			// update between authorize and mutate cannot be silently clobbered.
+			let casExpectedRevision: number | undefined;
+			let casExpectedContentHash: string | undefined;
 
-						if (mode === 'purge') {
-							// Defense-in-depth: hard-delete is irreversible. Emit a prominent
-							// warning even though allow_purge:true was already required. The
-							// archived event below is the audit trail.
-							warn(
-								`[knowledge_archive] PURGE: hard-deleting ${tier} entry id=${id} actor=${
-									ctx?.agent ?? 'unknown'
-								} reason=${reason}`,
-							);
-							resultStatus = 'purged';
-							return entries.filter((e) => e.id !== id);
-						}
+			// #1848 §2: cohort-safe authorization for archive/purge (swarm tier).
+			// Hive-tier entries are cross-project and already gated by hive-policy
+			// at promotion; the destructive archive here is the operator path and
+			// remains available. For swarm tier, route through authorizeCuration.
+			if (tier === 'swarm') {
+				// #1848 review F-14: honor the tool's {success:false, error}
+				// contract on I/O failure during the pre-authorization read
+				// (same class of bug as knowledge-remove F-13); an unguarded
+				// throw would escape to createSwarmTool's outer wrapper and drop
+				// the `.error` field.
+				let preEntries: KnowledgeEntryBase[];
+				try {
+					preEntries = await readKnowledge<KnowledgeEntryBase>(knowledgePath);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : 'Unknown error';
+					return JSON.stringify({ success: false, error: message });
+				}
+				const preTarget = preEntries.find((e) => e.id === id) ?? null;
+				// Skip authorization for a missing entry — let the existing
+				// not-found path handle it (avoids a misleading policy error).
+				if (preTarget) {
+					// F-03: purge no longer auto-synthesizes a `manual-override` from
+					// `allow_purge:true`. `allow_purge` remains the LOCAL admin confirmation
+					// required to ATTEMPT a purge (checked above), but it must not bypass
+					// cohort ownership/quorum. Purge now routes through authorizeCuration
+					// with NO override — identical to archive — so the normal ladder
+					// applies: unlinked/owner → authorized; cross-owner in a linked
+					// cohort → blocked (returns a proposal) and the not-authorized path
+					// below reports it. F-03 (#1848 review): purge no longer synthesizes
+					// a manual-override from allow_purge, so no ownership/quorum bypass
+					// occurs here — the archive tool exposes no override input.
+					const curationInput: CurationAuthorizationInput = {
+						directory,
+						action: mode as CurationAction,
+						entryId: id,
+						reason,
+						evidenceScope: 'cohort-wide' as CurationEvidenceScope,
+						actorRole: ctx?.agent,
+					};
+					const curationContext: CurationContext = {
+						config: await loadConfigForPolicy(directory),
+						entry: preTarget,
+					};
+					const decision = await authorizeCuration(
+						curationInput,
+						curationContext,
+					);
+					if (!decision.authorized) {
+						return JSON.stringify({
+							success: false,
+							error: `Cohort-safety policy blocked this ${mode}: ${decision.detail}`,
+							basis: decision.basis,
+						});
+					}
+					// PRR-002: capture the authorized entry's revision + content_hash so
+					// the swarm archive mutation below can CAS against them (rejecting a
+					// stale plan if the entry changed between here and the mutation).
+					casExpectedRevision = preTarget.revision;
+					casExpectedContentHash = preTarget.content_hash;
+				} // end if (preTarget)
+			} // end if (tier === 'swarm')
 
-						// PRR-015 / G6 (#1716): guard against re-archiving an already-
-						// archived entry. A duplicate/late archive call would otherwise
-						// record `archived_from: 'archived'` (self-referential), breaking
-						// unarchive's status recovery. Preserve the existing archived_from
-						// and skip the rewrite. Matches curator path (curator.ts:1692-1699).
-						if (target.status === 'archived') {
+			if (tier === 'swarm' && mode === 'archive') {
+				// PRR-002: CAS-guarded swarm archive. transactKnowledgeWithCas is the
+				// natural home for the single-entry ARCHIVE mutation — it enforces the
+				// revision/content_hash contract INSIDE the directory lock, closing the
+				// authorize→mutate TOCTOU. Legacy entries (revision undefined/0) are
+				// permitted: expectedRevision===undefined skips the revision check.
+				let casResult: { committed: boolean; casFailed: boolean };
+				try {
+					casResult = await transactKnowledgeWithCas<KnowledgeEntryBase>(
+						directory,
+						knowledgePath,
+						id,
+						casExpectedRevision,
+						casExpectedContentHash,
+						(entry) => {
+							found = true;
+							previousStatus = entry.status;
+							// PRR-015 / G6 (#1716): never re-archive an already-archived
+							// entry (would record self-referential archived_from). Return
+							// null → no-op commit; the success path reports 'archived'.
+							if (entry.status === 'archived') {
+								resultStatus = 'archived';
+								return null;
+							}
+							// G6 (#1716): record `archived_from` so `unarchiveEntry` can
+							// restore the prior status.
 							resultStatus = 'archived';
-							return entries;
-						}
-						// G6 (#1716): record `archived_from` so `unarchiveEntry` can
-						// restore the prior status. Only the `archive` mode reaches here
-						// (quarantine was short-circuited above; purge returns early).
-						resultStatus = 'archived';
-						return entries.map((e) =>
-							e.id === id
-								? {
-										...e,
-										status: 'archived' as const,
-										archived_from: target.status,
-										archived_at: now,
-										updated_at: now,
-									}
-								: e,
-						);
-					},
-				);
-			} catch (err) {
-				return JSON.stringify({
-					success: false,
-					error: err instanceof Error ? err.message : 'Unknown error',
-				});
-			}
+							return {
+								mutated: {
+									...entry,
+									status: 'archived' as const,
+									archived_from: entry.status,
+									archived_at: now,
+									updated_at: now,
+								},
+							};
+						},
+					);
+				} catch (err) {
+					return JSON.stringify({
+						success: false,
+						error: err instanceof Error ? err.message : 'Unknown error',
+					});
+				}
+				if (casResult.casFailed) {
+					// The entry's revision/content_hash changed between authorization
+					// and mutation (a sibling worktree updated it). Reject the stale
+					// plan rather than clobbering the newer entry.
+					return JSON.stringify({
+						success: false,
+						error:
+							'entry changed since authorization (revision/content-hash mismatch); stale archive plan rejected',
+					});
+				}
+			} else {
+				// Purge (swarm or hive) and hive-tier archive keep the plain
+				// single-transaction path (CAS is scoped to the swarm archive mutation).
+				try {
+					await transactKnowledge<KnowledgeEntryBase>(
+						knowledgePath,
+						(entries) => {
+							const target = entries.find((e) => e.id === id);
+							if (!target) return null;
+							found = true;
+							previousStatus = target.status;
+
+							if (mode === 'purge') {
+								// Defense-in-depth: hard-delete is irreversible. Emit a prominent
+								// warning even though allow_purge:true was already required. The
+								// archived event below is the audit trail.
+								warn(
+									`[knowledge_archive] PURGE: hard-deleting ${tier} entry id=${id} actor=${
+										ctx?.agent ?? 'unknown'
+									} reason=${reason}`,
+								);
+								resultStatus = 'purged';
+								return entries.filter((e) => e.id !== id);
+							}
+
+							// PRR-015 / G6 (#1716): guard against re-archiving an already-
+							// archived entry. A duplicate/late archive call would otherwise
+							// record `archived_from: 'archived'` (self-referential), breaking
+							// unarchive's status recovery. Preserve the existing archived_from
+							// and skip the rewrite. Matches curator path (curator.ts:1692-1699).
+							if (target.status === 'archived') {
+								resultStatus = 'archived';
+								return entries;
+							}
+							// G6 (#1716): record `archived_from` so `unarchiveEntry` can
+							// restore the prior status. Only the `archive` mode reaches here
+							// (quarantine was short-circuited above; purge returns early).
+							resultStatus = 'archived';
+							return entries.map((e) =>
+								e.id === id
+									? {
+											...e,
+											status: 'archived' as const,
+											archived_from: target.status,
+											archived_at: now,
+											updated_at: now,
+										}
+									: e,
+							);
+						},
+					);
+				} catch (err) {
+					return JSON.stringify({
+						success: false,
+						error: err instanceof Error ? err.message : 'Unknown error',
+					});
+				}
+			} // end else (purge / hive-tier archive plain transaction)
 			if (!found) {
 				return JSON.stringify({ success: false, message: 'entry not found' });
 			}
 
 			// G11 (issue #1717): route through the shared tombstone + retire/stale
 			// invalidator so this path cannot diverge from the curator archive
-			// path and knowledge-remove. Fire-and-forget (fail-open).
+			// path and knowledge-remove. Fire-and-forget (fail-open). The standard
+			// archived tombstone (who/why/mode/previous_status) is the audit record;
+			// F-03 removed the manual-override bypass, so there is no override to
+			// separately audit.
 			await writeArchiveTombstoneAndInvalidateSkills({
 				directory,
 				entryId: id,

@@ -93,12 +93,29 @@ function readJson<T>(filePath: string): T | null {
 	}
 }
 
-/** Id key extractor for append-union members (event id / entry id). */
+/**
+ * Default id key extractor for append members (event id / entry id). Members
+ * that carry no top-level `id` (append-only audit logs) override this via their
+ * `keyOf` selector on the manifest.
+ */
 function lineId(obj: unknown): string | null {
 	if (!obj || typeof obj !== 'object') return null;
 	const o = obj as Record<string, unknown>;
 	if (typeof o.id === 'string' && o.id.length > 0) return o.id;
 	return null;
+}
+
+/**
+ * Resolve the dedup-key selector for a member: its explicit `keyOf` when
+ * present, else the default `id` selector. Centralising this guarantees the
+ * append merge, the validator, and every consumer key a member identically —
+ * and that every pre-existing (no-`keyOf`) member keeps its exact `id`-keyed
+ * behavior.
+ */
+function keySelectorFor(
+	member: KnowledgeFamilyMember,
+): (obj: unknown) => string | null {
+	return member.keyOf ?? lineId;
 }
 
 /**
@@ -284,22 +301,26 @@ function weightedConfidence(
 }
 
 /**
- * Append-union: append source lines whose id is not already present on the
- * destination. Lines without an id field are skipped (we cannot dedup them
- * safely, and every family member here is id-keyed).
+ * Append-union / append-concat: append source lines whose key is not already
+ * present on the destination. The key is extracted by `keyOf` — the member's id
+ * field by default (`append-union`), or a composite selector for non-`id`
+ * append-only audit logs (`append-concat`). Lines whose key is `null` (no
+ * derivable key / malformed) are skipped: we cannot dedup them safely, and a
+ * keyless line is unaddressable. Idempotent on retry/relink for both strategies.
  */
 function appendUnionById<T>(
 	destination: T[],
 	source: T[],
+	keyOf: (obj: unknown) => string | null = lineId,
 ): { merged: T[]; added: number; skipped: number } {
 	const result = [...destination];
 	const seen = new Set(
-		result.map(lineId).filter((x): x is string => x !== null),
+		result.map(keyOf).filter((x): x is string => x !== null),
 	);
 	let added = 0;
 	let skipped = 0;
 	for (const src of source) {
-		const id = lineId(src);
+		const id = keyOf(src);
 		if (!id || seen.has(id)) {
 			skipped++;
 			continue;
@@ -374,6 +395,7 @@ function validateSerialized(
 			return false;
 		}
 	}
+	const keyOf = keySelectorFor(member);
 	for (const line of serialized.split('\n')) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
@@ -383,14 +405,12 @@ function validateSerialized(
 		} catch {
 			return false;
 		}
-		// Every family member line must carry a stable `id` (the merge strategies
-		// and the hot path both key off it). A line without an id would be
-		// unaddressable for retraction/dedup — reject it.
-		if (
-			!parsed ||
-			typeof parsed !== 'object' ||
-			typeof (parsed as Record<string, unknown>).id !== 'string'
-		) {
+		// Every family member line must carry a stable dedup key (the merge
+		// strategies and the hot path both key off it). For id-keyed members that
+		// key IS the string `id`; for non-`id` append-only audit logs it is the
+		// member's composite `keyOf`. A line whose key cannot be derived would be
+		// unaddressable for dedup/retraction — reject it.
+		if (!parsed || typeof parsed !== 'object' || keyOf(parsed) === null) {
 			return false;
 		}
 		// The store member additionally requires a `lesson` string (the field the
@@ -433,10 +453,16 @@ function mergeMember(
 			);
 			return { merged: r.merged, added: r.added, skipped: r.skipped };
 		}
-		case 'append-union': {
+		case 'append-union':
+		case 'append-concat': {
+			// Both are key-dedup unions of append-only JSONL logs. `append-union`
+			// keys off the member's `id` (default selector); `append-concat` keys
+			// off the member's composite `keyOf` for non-`id` audit logs. Existing
+			// (no-`keyOf`) members resolve to the exact `id` behavior as before.
 			const r = appendUnionById(
 				(destinationData as unknown[]) ?? [],
 				(sourceData as unknown[]) ?? [],
+				keySelectorFor(member),
 			);
 			return { merged: r.merged, added: r.added, skipped: r.skipped };
 		}
@@ -596,5 +622,6 @@ export const _internals = {
 	mergeEntryFields,
 	serialize,
 	validateSerialized,
+	keySelectorFor,
 	MIGRATION_LOCK_STALE_MS,
 };

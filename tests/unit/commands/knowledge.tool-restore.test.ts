@@ -42,7 +42,18 @@ describe('handleKnowledgeRestoreCommand', () => {
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		await handleKnowledgeRestoreCommand('/test/dir', ['test-id']);
 		expect(mockRestoreEntry).toHaveBeenCalledTimes(1);
-		expect(mockRestoreEntry).toHaveBeenCalledWith('/test/dir', 'test-id');
+		expect(mockRestoreEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			'test-id',
+			// F-02: cohort-safety curationContext threaded through the command.
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'restore',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
+		);
 	});
 
 	it('returns success message with entryId on successful restore', async () => {
@@ -75,7 +86,17 @@ describe('handleKnowledgeRestoreCommand', () => {
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
 			'abc123def456',
 		]);
-		expect(mockRestoreEntry).toHaveBeenCalledWith('/test/dir', fullId);
+		expect(mockRestoreEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			fullId,
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'restore',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
+		);
 		expect(result).toBe(`✅ Entry ${fullId} restored successfully.`);
 	});
 
@@ -105,7 +126,17 @@ describe('handleKnowledgeRestoreCommand', () => {
 			'archived-id',
 		]);
 		expect(mockUnarchiveEntry).toHaveBeenCalledTimes(1);
-		expect(mockUnarchiveEntry).toHaveBeenCalledWith('/test/dir', 'archived-id');
+		expect(mockUnarchiveEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			'archived-id',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'unarchive',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
+		);
 		expect(mockRestoreEntry).not.toHaveBeenCalled();
 		expect(result).toContain('archived-id');
 		expect(result).toContain('established');
@@ -158,6 +189,13 @@ describe('handleKnowledgeRestoreCommand', () => {
 		expect(mockUnarchiveEntry).toHaveBeenCalledWith(
 			'/test/dir',
 			'colliding-id',
+			expect.objectContaining({
+				input: expect.objectContaining({
+					action: 'unarchive',
+					evidenceScope: 'local-session',
+					actorRole: 'user',
+				}),
+			}),
 		);
 		expect(mockRestoreEntry).not.toHaveBeenCalled();
 		expect(result).toContain('colliding-id');
