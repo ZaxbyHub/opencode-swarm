@@ -106,6 +106,58 @@ describe('validateCoderReviewerAcceptanceField (unit)', () => {
 		expect(result.valid).toBe(false);
 		expect(result.reason).toBe('acceptance_field_missing');
 	});
+
+	// ---- multi-line ACCEPTANCE section (PR #1864 review feedback) ----
+	// A bare `ACCEPTANCE:` header whose content follows on subsequent lines (a
+	// plausible verbatim-copy format for a wrapped/multi-line FR body) must NOT
+	// be false-blocked as empty.
+	it('accepts a bare ACCEPTANCE header with content on the following line', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\nACCEPTANCE:\n- **FR-001 — Foo.** The system SHALL render the widget.',
+		);
+		expect(result.valid).toBe(true);
+		expect(result.reason).toBeUndefined();
+	});
+
+	it('accepts a multi-line ACCEPTANCE body terminated by a following field header', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\nACCEPTANCE:\n- **FR-001 — Foo.** The system SHALL do X.\n- **FR-002 — Bar.** And also Y.\nSKILLS: none',
+		);
+		expect(result.valid).toBe(true);
+	});
+
+	it('accepts a bare ACCEPTANCE header with a leading blank line then content', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\nACCEPTANCE:\n\nthe widget renders correctly and is covered by a test',
+		);
+		expect(result.valid).toBe(true);
+	});
+
+	it('accepts a CRLF-authored multi-line ACCEPTANCE section', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\r\nACCEPTANCE:\r\n- **FR-001.** The system SHALL do X.\r\nSKILLS: none\r\n',
+		);
+		expect(result.valid).toBe(true);
+	});
+
+	// Bypass resistance: a bare header immediately followed by another field
+	// header has NO content of its own — the next field's content must not be
+	// miscounted as ACCEPTANCE content.
+	it('rejects a bare ACCEPTANCE header immediately followed by another field header', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\nACCEPTANCE:\nSKILLS: none',
+		);
+		expect(result.valid).toBe(false);
+		expect(result.reason).toBe('acceptance_field_empty');
+	});
+
+	it('rejects a bare ACCEPTANCE header followed only by blank lines then a field header', () => {
+		const result = validateCoderReviewerAcceptanceField(
+			'TASK: x\nACCEPTANCE:\n   \n\nOUTPUT: a diff',
+		);
+		expect(result.valid).toBe(false);
+		expect(result.reason).toBe('acceptance_field_empty');
+	});
 });
 
 describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => {
@@ -152,6 +204,20 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 				},
 			}),
 		).rejects.toThrow('ACCEPTANCE_FIELD_REQUIRED');
+	});
+
+	it('(a2) allows a coder dispatch whose ACCEPTANCE is a multi-line section', async () => {
+		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		ensureAgentSession('sess-coder-multiline', 'architect');
+		await expect(
+			hooks.toolBefore(toolBeforeInput('sess-coder-multiline'), {
+				args: {
+					subagent_type: 'coder',
+					prompt:
+						'TASK: implement it\nACCEPTANCE:\n- **FR-001 — Foo.** The system SHALL render the widget.\nSKILLS: none',
+				},
+			}),
+		).resolves.toBeUndefined();
 	});
 
 	// ---- reviewer (d) ----

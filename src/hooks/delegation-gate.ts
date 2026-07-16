@@ -500,14 +500,23 @@ export function appendDelegationEnvelopeAdvisory(
  * mechanism is left fully intact for the old envelope format and other
  * delegation types.
  *
- * A dispatch passes only when an `ACCEPTANCE:` line exists AND carries non-empty,
- * non-whitespace content on that line. The `$` line-terminator is intentionally
- * omitted from the regex: `.` already stops at a newline so `(.*)` captures
- * exactly the inline field content, and omitting `$` keeps a trailing `\r`
- * (CRLF-authored prompts) from defeating the match. Multi-line FR bodies are not
- * validated line-by-line — the coder/reviewer INPUT FORMAT contract puts the
- * field content on the `ACCEPTANCE:` line itself, and "the field is never empty"
- * is the only invariant enforced here.
+ * A dispatch passes when an `ACCEPTANCE:` line exists AND the field carries
+ * non-empty, non-whitespace content — either INLINE on the header line (the
+ * architect-instructed same-line format) OR on the lines that FOLLOW a bare
+ * `ACCEPTANCE:` header, up to (but excluding) the next INPUT-FORMAT field header
+ * (`^[A-Z][A-Z0-9_]*:`, e.g. `SKILLS:`) or end of input. The multi-line form is
+ * a plausible way to paste a verbatim FR/SC body that spans lines (PR #1864
+ * review feedback), so treating a bare header + following content as EMPTY would
+ * false-block a good-faith copy. The next-field-header terminator ensures
+ * content belonging to the NEXT field (e.g. `SKILLS: none`) is never miscounted
+ * as ACCEPTANCE content — an empty `ACCEPTANCE:` immediately followed by another
+ * field is still correctly rejected as empty. Prompts are split on `\r?\n` so a
+ * trailing `\r` (CRLF-authored prompts) never leaks into the captured content.
+ *
+ * Only NON-EMPTINESS is enforced here; verbatim-coverage of the mapped FR/SC
+ * bodies is a SEPARATE, later check ({@link checkAcceptanceCoversFrRefs}) that
+ * already newline-normalizes the whole prompt, so multi-line ACCEPTANCE content
+ * is visible to it regardless.
  *
  * @param promptText the assembled delegation prompt (all text-bearing Task args
  *   joined).
@@ -519,17 +528,40 @@ export function validateCoderReviewerAcceptanceField(promptText: string): {
 	valid: boolean;
 	reason?: 'acceptance_field_missing' | 'acceptance_field_empty';
 } {
-	// `^ACCEPTANCE:` anchored to a line start (m flag) so an incidental
-	// "ACCEPTANCE:" appearing mid-line (e.g. inside a CONSTRAINT sentence) is not
-	// mistaken for the field header. No `$` anchor — see the doc comment above.
-	const match = /^ACCEPTANCE:[ \t]*(.*)/im.exec(promptText);
-	if (!match) {
-		return { valid: false, reason: 'acceptance_field_missing' };
-	}
-	if (match[1].trim().length === 0) {
+	// Split on CR?LF so a trailing `\r` never leaks into captured content and so
+	// a bare `ACCEPTANCE:` header's following lines can be scanned individually.
+	const lines = promptText.split(/\r?\n/);
+	// `^ACCEPTANCE:` anchored to a line start so an incidental "ACCEPTANCE:"
+	// appearing mid-line (e.g. inside a CONSTRAINT sentence) is not mistaken for
+	// the field header. Case-insensitive to match the architect's authored case.
+	const headerRe = /^ACCEPTANCE:[ \t]*(.*)$/i;
+	// A subsequent INPUT-FORMAT field header (TASK:/FILE:/CONSTRAINT:/SKILLS:/…):
+	// an all-caps token immediately followed by a colon at line start. Terminates
+	// the ACCEPTANCE section so content belonging to the NEXT field is never
+	// counted as ACCEPTANCE content.
+	const nextFieldRe = /^[A-Z][A-Z0-9_]*:/;
+
+	for (let i = 0; i < lines.length; i++) {
+		const match = headerRe.exec(lines[i]);
+		if (!match) continue;
+
+		// Inline content on the header line itself (the common same-line format).
+		if (match[1].trim().length > 0) {
+			return { valid: true };
+		}
+		// Bare `ACCEPTANCE:` — accept content on the following lines up to the
+		// next field header / end of input (multi-line verbatim-copy format).
+		for (let j = i + 1; j < lines.length; j++) {
+			if (nextFieldRe.test(lines[j])) break; // next field starts
+			if (lines[j].trim().length > 0) {
+				return { valid: true };
+			}
+		}
+		// Header present, but no inline content and no content before the next
+		// field header / EOF.
 		return { valid: false, reason: 'acceptance_field_empty' };
 	}
-	return { valid: true };
+	return { valid: false, reason: 'acceptance_field_missing' };
 }
 
 /**
