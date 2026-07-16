@@ -590,6 +590,35 @@ const PLAN_CRITIC_TASK_SIGNALS = [
 	'plan approval',
 ] as const;
 
+/**
+ * Returns whether the plan in the given directory has a valid plan-critic
+ * approval. Does not throw — returns `false` for any failure (fail-closed).
+ */
+export async function isPlanCriticApproved(
+	directory: string,
+): Promise<boolean> {
+	try {
+		const plan = await loadPlanJsonOnly(directory);
+		if (!plan) return false;
+
+		const planId = derivePlanId(plan);
+		const approved = await loadLastPlanCriticApprovedSnapshot(
+			directory,
+			planId,
+		);
+		if (!approved) return false;
+		if (
+			approved.approval?.verdict !== 'APPROVED' ||
+			approved.approval?.source !== 'plan_critic_gate'
+		)
+			return false;
+		if (approved.payloadHash !== computePlanStructureHash(plan)) return false;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function assertPlanCriticApprovedForExecution(
 	directory: string,
 	plan: Plan | null,

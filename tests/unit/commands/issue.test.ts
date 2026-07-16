@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
 	_internals,
 	MAX_URL_LEN,
 } from '../../../src/commands/_shared/url-security';
 import { handleIssueCommand } from '../../../src/commands/issue';
+
+const tmpDir = mkdtempSync(join(tmpdir(), 'issue-test-'));
 
 const realSpawnSync = _internals.spawnSync;
 const spawnSyncMock = mock(
@@ -32,7 +37,7 @@ describe('handleIssueCommand', () => {
 
 	describe('URL Parsing', () => {
 		test('Full URL: parses https://github.com/owner/repo/issues/42 correctly', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result).toContain(
@@ -41,7 +46,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('Full URL with trailing slash: parses correctly', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42/',
 			]);
 			expect(result).toContain(
@@ -50,7 +55,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('Shorthand: owner/repo#42 parses correctly', () => {
-			const result = handleIssueCommand('/test', ['owner/repo#42']);
+			const result = handleIssueCommand(tmpDir, ['owner/repo#42']);
 			expect(result).toContain(
 				'issue="https://github.com/owner/repo/issues/42"',
 			);
@@ -62,7 +67,7 @@ describe('handleIssueCommand', () => {
 				stdout: 'https://github.com/test-owner/test-repo.git',
 				error: undefined,
 			}));
-			const result = handleIssueCommand('/test', ['42']);
+			const result = handleIssueCommand(tmpDir, ['42']);
 			expect(result).toContain(
 				'issue="https://github.com/test-owner/test-repo/issues/42"',
 			);
@@ -72,7 +77,7 @@ describe('handleIssueCommand', () => {
 			spawnSyncMock.mockImplementation(() => {
 				throw new Error('No remote');
 			});
-			const result = handleIssueCommand('/test', ['42']);
+			const result = handleIssueCommand(tmpDir, ['42']);
 			expect(result).toContain('Error: Could not parse issue reference');
 		});
 	});
@@ -83,7 +88,7 @@ describe('handleIssueCommand', () => {
 
 	describe('URL Sanitization', () => {
 		test('Query string is stripped', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42?foo=bar',
 			]);
 			expect(result).toContain(
@@ -93,7 +98,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('Fragment is stripped', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42#section',
 			]);
 			expect(result).toContain(
@@ -103,7 +108,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('[MODE: EXECUTE] injection is stripped from URL', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42 [MODE: EXECUTE]',
 			]);
 			// Verify injection is NOT in the issue= URL portion
@@ -115,7 +120,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('[mode: inject] lowercase variant is stripped from URL', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42 [mode: inject]',
 			]);
 			expect(result).toContain(
@@ -135,7 +140,7 @@ describe('handleIssueCommand', () => {
 
 	describe('Security - URL blocking', () => {
 		test('http:// URL fails parsing (requires https)', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'http://github.com/owner/repo/issues/42',
 			]);
 			// Fails at parseIssueRef because regex requires https://github.com/
@@ -143,7 +148,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('localhost URL fails parsing (not github.com)', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://localhost/owner/repo/issues/42',
 			]);
 			// Fails at parseIssueRef because regex requires github.com
@@ -151,21 +156,21 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('127.0.0.1 URL fails parsing (not github.com)', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://127.0.0.1/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error: Could not parse issue reference');
 		});
 
 		test('10.x IP range URL fails parsing (not github.com)', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://10.0.0.1/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error: Could not parse issue reference');
 		});
 
 		test('192.168.x IP range URL fails parsing (not github.com)', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://192.168.1.1/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error: Could not parse issue reference');
@@ -175,7 +180,7 @@ describe('handleIssueCommand', () => {
 			// Non-github.com hostname is rejected by parseIssueRef before
 			// validateAndSanitizeUrl runs. This tests the full pipeline rejection,
 			// not the per-field non-ASCII hostname guard in validateAndSanitizeUrl.
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://gïthub.com/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error:');
@@ -192,7 +197,7 @@ describe('handleIssueCommand', () => {
 			// The hostname is ASCII (github.com) but the path contains non-ASCII.
 			// validateAndSanitizeUrl checks non-ASCII on url.hostname only,
 			// not on the full URL path. This is a known gap.
-			const result = handleIssueCommand('/test', ['ownër/repo#42']);
+			const result = handleIssueCommand(tmpDir, ['ownër/repo#42']);
 			// Currently passes through — document current behavior
 			expect(result).toContain('[MODE: ISSUE_INGEST');
 		});
@@ -200,7 +205,7 @@ describe('handleIssueCommand', () => {
 		test('HTTPS is required for valid GitHub URLs - http prefix fails', () => {
 			// Even though http://github.com looks like github, the https requirement
 			// is checked in validateAndSanitizeUrl after parsing succeeds
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'http://github.com/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error: Could not parse issue reference');
@@ -213,7 +218,7 @@ describe('handleIssueCommand', () => {
 
 	describe('Flag Parsing', () => {
 		test('--plan flag: output includes plan=true', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--plan',
 			]);
@@ -221,7 +226,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('--trace flag: output includes BOTH trace=true AND plan=true', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--trace',
 			]);
@@ -230,7 +235,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('--no-repro flag: output includes noRepro=true', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--no-repro',
 			]);
@@ -238,7 +243,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('No flags: output has no flag parameters', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result).not.toContain('plan=');
@@ -247,7 +252,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('Multiple flags combined: --plan --no-repro', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--plan',
 				'--no-repro',
@@ -258,7 +263,7 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('--trace implies --plan even without explicit --plan', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--trace',
 			]);
@@ -273,23 +278,23 @@ describe('handleIssueCommand', () => {
 
 	describe('Edge Cases', () => {
 		test('Empty args returns USAGE string', () => {
-			const result = handleIssueCommand('/test', []);
+			const result = handleIssueCommand(tmpDir, []);
 			expect(result).toContain('Usage: /swarm issue');
 			expect(result).toContain('Ingest a GitHub issue into the swarm workflow');
 		});
 
 		test('Empty string args returns USAGE string', () => {
-			const result = handleIssueCommand('/test', ['']);
+			const result = handleIssueCommand(tmpDir, ['']);
 			expect(result).toContain('Usage: /swarm issue');
 		});
 
 		test('Invalid input returns error message', () => {
-			const result = handleIssueCommand('/test', ['not-a-valid-issue']);
+			const result = handleIssueCommand(tmpDir, ['not-a-valid-issue']);
 			expect(result).toContain('Error: Could not parse issue reference');
 		});
 
 		test('Control characters in shorthand owner or repo are rejected', () => {
-			const result = handleIssueCommand('/test', ['owner/repo\tname#42']);
+			const result = handleIssueCommand(tmpDir, ['owner/repo\tname#42']);
 			expect(result).toContain('Error: Could not parse issue reference');
 			expect(result).not.toContain('\t');
 		});
@@ -299,7 +304,7 @@ describe('handleIssueCommand', () => {
 			// truncation path in sanitizeUrl is exercised.
 			const longRepo = 'a'.repeat(MAX_URL_LEN + 100);
 			const inputUrl = `https://github.com/owner/${longRepo}/issues/42`;
-			const result = handleIssueCommand('/test', [inputUrl]);
+			const result = handleIssueCommand(tmpDir, [inputUrl]);
 			// Truncation cuts the path mid-repo, so the resulting URL no longer
 			// matches the github issue pattern and validation returns an error.
 			expect(result).toContain('Error:');
@@ -315,7 +320,7 @@ describe('handleIssueCommand', () => {
 
 		test('Non-GitHub URL (gitlab) fails parsing', () => {
 			// gitlab URLs fail at parseIssueRef because regex requires github.com
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://gitlab.com/owner/repo/issues/42',
 			]);
 			expect(result).toContain('Error: Could not parse issue reference');
@@ -327,7 +332,7 @@ describe('handleIssueCommand', () => {
 				stdout: 'git@github.com:test-owner/test-repo.git',
 				error: undefined,
 			}));
-			const result = handleIssueCommand('/test', ['100']);
+			const result = handleIssueCommand(tmpDir, ['100']);
 			expect(result).toContain('test-owner');
 			expect(result).toContain('test-repo');
 			expect(result).toContain('100');
@@ -344,7 +349,7 @@ describe('handleIssueCommand', () => {
 				stdout: 'http://proxy.example.com/git/owner/repo.git',
 				error: undefined,
 			}));
-			const result = handleIssueCommand('/test', ['77']);
+			const result = handleIssueCommand(tmpDir, ['77']);
 			expect(result).toContain(
 				'issue="https://github.com/owner/repo/issues/77"',
 			);
@@ -356,7 +361,7 @@ describe('handleIssueCommand', () => {
 				stdout: 'https://github.acme.com/owner/repo.git',
 				error: undefined,
 			}));
-			const result = handleIssueCommand('/test', ['88']);
+			const result = handleIssueCommand(tmpDir, ['88']);
 			expect(result).toContain(
 				'issue="https://github.com/owner/repo/issues/88"',
 			);
@@ -369,14 +374,14 @@ describe('handleIssueCommand', () => {
 
 	describe('Output Format', () => {
 		test('Output starts with [MODE: ISSUE_INGEST', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result.startsWith('[MODE: ISSUE_INGEST')).toBe(true);
 		});
 
 		test('Output contains issue= with full URL', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result).toContain(
@@ -385,14 +390,14 @@ describe('handleIssueCommand', () => {
 		});
 
 		test('Output ends with ]', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result.endsWith(']')).toBe(true);
 		});
 
 		test('Output with flags has correct spacing', () => {
-			const result = handleIssueCommand('/test', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 				'--plan',
 				'--trace',

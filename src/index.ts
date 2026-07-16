@@ -91,6 +91,7 @@ import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
 import { runInitOrphanRecovery } from './hooks/init-orphan-recovery.js';
 import { createInitOrphanRecoveryAdvisoryHook } from './hooks/init-orphan-recovery-advisory';
+import { createIssueTraceHook } from './hooks/issue-trace.js';
 import {
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
@@ -820,6 +821,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// CC command intercept: handle Claude Code command interception
 	const ccCommandInterceptHook = createCcCommandInterceptHook({});
+
+	// Issue trace: mode-transition workflow for traced GitHub issues
+	const issueTraceHook = createIssueTraceHook(config, ctx.directory);
 
 	// Watchdog: scope-guard + delegation-ledger
 	const watchdogConfig = WatchdogConfigSchema.parse(config.watchdog ?? {});
@@ -1886,6 +1890,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				fullAutoInterceptHook?.messagesTransform,
 				ccCommandInterceptHook?.messagesTransform,
 				delegationGateHooks.messagesTransform,
+				issueTraceHook.messagesTransform,
 				delegationSanitizerHook,
 				memoryLifecycleHooks.messagesTransform,
 				knowledgeInjectorHook, // v6.17 knowledge injection

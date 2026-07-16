@@ -942,6 +942,8 @@ ACTION: Load skill ${bundledProjectSkillFileReference('issue-ingest')} immediate
 HARD CONSTRAINTS:
 - Preserve issue evidence, flag missing repro details, and route non-mega swarms through the active swarm's agents.
 
+RECOVERY: At mode entry, read .swarm/issue-reference.json to recover the source issue URL, number, and flags (plan/trace/noRepro) if the mode signal has been lost or context was compacted.
+
 ### MODE: PLAN
 Activates when: workflow mode detection selects PLAN; the user asks to create, ingest, validate, or continue an implementation plan; or MODE: ISSUE_INGEST transitions with \`plan=true\` or \`trace=true\`.
 
@@ -973,6 +975,8 @@ Execution preferences (auto-proceed phase transitions):
 - \`auto_proceed\` (boolean, default false): When true, the architect auto-advances to the next phase without asking "Ready for Phase N+1?". Runtime toggle via /swarm auto-proceed on|off.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 - Preserve task granularity, test task deduplication, phase count guidance, and TRACEABILITY CHECK rules from the loaded skill.
+
+RECOVERY: Read .swarm/issue-reference.json to recover the source issue URL and number for plan traceability if context was compacted.
 
 ### MODE: CRITIC-GATE
 Activates before implementation begins or when a plan needs independent review.
@@ -1014,6 +1018,8 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 
 The full retrospective protocol lives in ${bundledProjectSkillFileReference('phase-wrap')}. Before calling \`phase_complete\`, load MODE: PHASE-WRAP and follow its RETROSPECTIVE GATE section. Calling \`phase_complete(N)\` without a valid \`retro-N\` bundle will be blocked with reason \`RETROSPECTIVE_MISSING\`.
 
+RECOVERY: Read .swarm/issue-reference.json if context was compacted to recover the source issue reference.
+
 ### MODE: PHASE-WRAP
 Activates when a phase is ready to close.
 
@@ -1034,6 +1040,8 @@ HARD CONSTRAINTS:
 - If auto-proceed is OFF AND nudge flag is true: just ask "Ready for Phase [N+1]?" as before.
 - SC-001: auto-proceed only skips the phase-transition confirmation. The architect MUST still stop for blocked tasks, user questions, clarification needs, and any decision requiring human input. This behavior is NOT affected by the auto_proceed setting.
 - Full-auto mode (critic oversight) is independent — its existing "Do NOT ask Ready for Phase N+1?" override continues to work. auto_proceed has no additional effect under full-auto.
+
+RECOVERY: Read .swarm/issue-reference.json for retrospective context and commit-pr Closes #N population.
 
 > **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in autonomous oversight mode.
 
@@ -1070,6 +1078,11 @@ Swarm: {{SWARM_ID}}
 
 ## Patterns
 - <pattern name>: <how and when to use it in this codebase>
+
+## Source Issue
+- URL: <read from .swarm/issue-reference.json>
+- Number: <read from .swarm/issue-reference.json>
+Read .swarm/issue-reference.json if it exists; populate this section with the GitHub issue URL, number, and flags.trace for workflow intent recovery.
 
 \`\`\`
 

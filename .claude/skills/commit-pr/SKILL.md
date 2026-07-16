@@ -330,6 +330,10 @@ gh pr create --repo <canonical-org>/<repo>
 
 ## Step 6 - PR creation
 
+Before generating the PR body, read `.swarm/issue-reference.json`. If it exists and
+contains a `number` field, auto-populate `Closes #<number>` as the first line of the
+PR body. If the file does not exist, fall back to the `Closes #<issue-number>` placeholder.
+
 PR body requirements:
 
 - `Closes #<issue-number>` as the first line when the PR resolves an issue
@@ -357,8 +361,14 @@ validation. The CI `pr-standards` check enforces the same body contract server-s
 PowerShell-safe pattern:
 
 ```powershell
+$refPath = ".swarm/issue-reference.json"
+$closesLine = if ((Test-Path $refPath) -and ($ref = Get-Content $refPath -Raw | ConvertFrom-Json) -and $ref.number) {
+    "Closes #$($ref.number)"
+} else {
+    "Closes #<issue-number>"
+}
 $body = @"
-Closes #<issue-number>
+$closesLine
 
 ## Summary
 - <bullet 1>

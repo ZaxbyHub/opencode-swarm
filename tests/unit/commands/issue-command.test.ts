@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 // ARCHITECT_PROMPT is defined in architect.ts but not exported
 // We read the source file directly to verify its contents
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { handleIssueCommand } from '../../../src/commands/issue';
 import {
 	COMMAND_REGISTRY,
@@ -63,6 +64,8 @@ function extractArchitectPrompt(): string {
 }
 
 const ARCHITECT_PROMPT = extractArchitectPrompt();
+
+const tmpDir = mkdtempSync(join(tmpdir(), 'issue-command-test-'));
 
 // PR #1060 extracted the ISSUE_INGEST mode's phase-by-phase protocol out of
 // the inline ARCHITECT_PROMPT and into a loaded skill file — the architect
@@ -129,7 +132,7 @@ describe('Task 5.2 — Registry Registration', () => {
 
 		test('8. Calling the issue handler with a valid issue URL returns a string starting with "[MODE: ISSUE_INGEST"', () => {
 			// Simulate a valid issue URL input
-			const result = handleIssueCommand('/fake/dir', [
+			const result = handleIssueCommand(tmpDir, [
 				'https://github.com/owner/repo/issues/42',
 			]);
 			expect(result).toStartWith('[MODE: ISSUE_INGEST');
