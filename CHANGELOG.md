@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.121.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.120.0...v7.121.0) (2026-07-16)
+
+
+### Features
+
+* **drift-check:** add recurrence-guard detectors and parity tests ([#1808](https://github.com/ZaxbyHub/opencode-swarm/issues/1808)) ([4b1dcc0](https://github.com/ZaxbyHub/opencode-swarm/commit/4b1dcc0514a7f29a0d5cbebde3e00ac4c8cd197d))
+
 ## [7.120.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.119.0...v7.120.0) (2026-07-16)
 
 
