@@ -19,6 +19,7 @@
 import { subscribe } from '../background/pr-subscriptions.js';
 import type { PrMonitorConfig } from '../config/schema.js';
 import { log } from '../utils';
+import { resolveToolAfterContext } from './host-boundary';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
 
 /** Only scan a bounded slice of tool output (defense against huge outputs). */
@@ -30,7 +31,14 @@ const PR_URL_PATTERN =
 
 export interface PrAutoSubscribeHook {
 	toolAfter: (
-		input: { tool: string; sessionID?: string; args?: unknown },
+		input: {
+			tool: string;
+			sessionID?: string;
+			args?: unknown;
+			/** (#1849) SDK tool.execute.after input carries callID (not args); used
+			 * to recover the snapshot args via resolveToolAfterContext. */
+			callID?: string;
+		},
 		output: { output?: unknown; args?: unknown },
 	) => Promise<void>;
 }
@@ -86,7 +94,18 @@ export function createPrAutoSubscribeHook(
 				const tool = normalizeToolNameLowerCase(input.tool ?? '');
 				if (tool !== 'bash' && tool !== 'shell') return;
 
-				const args = (input.args ?? output.args) as
+				// (#1849) tool.execute.after input has NO args — recover from the
+				// callID snapshot. Fall back to input.args/output.args for direct-call
+				// test fixtures (the production host never populates input.args here).
+				const recovered =
+					typeof input.callID === 'string' && input.sessionID
+						? resolveToolAfterContext({
+								tool: input.tool,
+								sessionID: input.sessionID,
+								callID: input.callID,
+							}).args
+						: undefined;
+				const args = (recovered ?? input.args ?? output.args) as
 					| Record<string, unknown>
 					| undefined;
 				const command = typeof args?.command === 'string' ? args.command : '';
