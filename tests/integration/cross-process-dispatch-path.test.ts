@@ -233,7 +233,13 @@ console.log('LANE_CUSTOM_VAR=' + (env.CUSTOM_VAR ?? 'UNSET'));
 		});
 		spawnedChildren.push(child);
 
-		const output = await waitForChildOutput(child, /LANE_PORT=\d+/);
+		// The child prints LANE_PORT then LANE_CUSTOM_VAR on two separate
+		// console.log lines. Wait for the LAST-printed line (LANE_CUSTOM_VAR) so
+		// both lines are guaranteed to be in the captured buffer before we assert.
+		// Waiting on LANE_PORT (the first line) raced: waitForChildOutput could
+		// resolve on the first stdout chunk ("LANE_PORT=8001\n") before the second
+		// line arrived, so the LANE_CUSTOM_VAR assertion flaked in CI.
+		const output = await waitForChildOutput(child, /LANE_CUSTOM_VAR=/);
 		expect(output).toMatch(/LANE_PORT=8001/);
 		expect(output).toMatch(/LANE_CUSTOM_VAR=lane-value/);
 	});
