@@ -254,7 +254,7 @@ export const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
  */
 export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	slug: string;
-	kind: 'identical' | 'divergent' | 'opencode-only' | 'adapter';
+	kind: 'identical' | 'divergent' | 'opencode-only' | 'adapter' | 'agents-only';
 	canonical?: '.claude' | '.opencode';
 	extraIdenticalPaths?: string[];
 	/**
@@ -276,31 +276,38 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	{
 		slug: 'commit-pr',
 		kind: 'divergent',
+		extraIdenticalPaths: [
+			'.github/skills/commit-pr/SKILL.md',
+			'.agents/skills/commit-pr/SKILL.md',
+		],
 		reason:
-			"Intentional per-tree divergence (#1692): .claude/skills/commit-pr is the repo-INTERNAL publication protocol enforced by .github/workflows/pr-standards.yml (invariant audit, release fragments, bun/biome tiers, canonical-remote heuristic). .opencode/skills/commit-pr is the PORTABLE, project-agnostic version bundled into end-user projects via BUNDLED_PROJECT_SKILLS — it must NOT carry this repo's internal references (AGENTS.md, bun/biome, docs/releases/pending, ZaxbyHub), so the two trees intentionally differ.",
+			"Intentional per-tree divergence (#1692): .claude/skills/commit-pr is the repo-INTERNAL publication protocol enforced by .github/workflows/pr-standards.yml (invariant audit, release fragments, bun/biome tiers, canonical-remote heuristic). .opencode/skills/commit-pr is the PORTABLE, project-agnostic version bundled into end-user projects via BUNDLED_PROJECT_SKILLS — it must NOT carry this repo's internal references (AGENTS.md, bun/biome, docs/releases/pending, ZaxbyHub), so the two trees intentionally differ. .github/skills/commit-pr is a GitHub/Copilot adapter shim that delegates to .claude; .agents/skills/commit-pr is a Codex adapter shim that also delegates to .claude.",
 	},
 	{
 		slug: 'engineering-conventions',
 		kind: 'divergent',
+		extraIdenticalPaths: ['.agents/skills/engineering-conventions/SKILL.md'],
 		sharedSafetyHeadings: [
 			'## SAST baseline capturing',
 			'### Critical safety guard',
 			'## Agent prompt strings — escaping pitfalls',
 		],
 		reason:
-			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source. The `.claude` tree additionally carries the "Bounded is not free" nuance in invariant 1; `.opencode` now mirrors it. Designated safety sections — "## SAST baseline capturing" (with its "### Critical safety guard") and "## Agent prompt strings — escaping pitfalls" — are now parity-enforced across BOTH trees via `sharedSafetyHeadings`: drift:check fails if any of them exists in one tree but is absent from the other, closing the M13 safety-drift gap where the divergent branch did existence-only checks.',
+			'Intentional per-runtime divergence: .claude is titled "(Claude Code)" and carries an `effort:` frontmatter field; .opencode targets the OpenCode agent. Both point at AGENTS.md as the authoritative source. The `.claude` tree additionally carries the "Bounded is not free" nuance in invariant 1; `.opencode` now mirrors it. Designated safety sections — "## SAST baseline capturing" (with its "### Critical safety guard") and "## Agent prompt strings — escaping pitfalls" — are now parity-enforced across BOTH trees via `sharedSafetyHeadings`: drift:check fails if any of them exists in one tree but is absent from the other, closing the M13 safety-drift gap where the divergent branch did existence-only checks. .agents/skills/engineering-conventions is a Codex adapter shim that delegates to .opencode.',
 	},
 	{
 		slug: 'swarm-implement',
 		kind: 'divergent',
+		extraIdenticalPaths: ['.agents/skills/swarm-implement/SKILL.md'],
 		reason:
-			'.opencode is the canonical implementation workflow; .claude and .agents are thin adapters that delegate to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
+			'.opencode is the canonical implementation workflow; .claude is a thin adapter that delegates to it; .agents/skills/swarm-implement is a Codex-specific adapter shim also delegating to .opencode. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
 	},
 	{
 		slug: 'writing-tests',
 		kind: 'divergent',
+		extraIdenticalPaths: ['.agents/skills/writing-tests/SKILL.md'],
 		reason:
-			'.opencode is the canonical published test-authoring protocol; .claude is a thin adapter that delegates to it. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
+			'.opencode is the canonical published test-authoring protocol; .claude is a thin adapter that delegates to it; .agents/skills/writing-tests is a Codex-specific adapter shim also delegating to .opencode. Classified divergent because ADDITIONAL contracts do not yet model adapter shims.',
 	},
 	{
 		slug: 'running-tests',
@@ -312,8 +319,9 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		slug: 'swarm',
 		kind: 'divergent',
 		canonical: '.opencode',
+		extraIdenticalPaths: ['.agents/skills/swarm/SKILL.md'],
 		reason:
-			'MODE: SWARM is the canonical OpenCode swarm workflow (behavior model); .claude/skills/swarm is a thin runtime adapter that documents the /swarm command and its subcommands. Both exist but serve different purposes — .opencode is the canonical workflow definition, .claude is the command-interface adapter.',
+			'MODE: SWARM is the canonical OpenCode swarm workflow (behavior model); .claude/skills/swarm is a thin runtime adapter that documents the /swarm command and its subcommands. Both exist but serve different purposes — .opencode is the canonical workflow definition, .claude is the command-interface adapter. .agents/skills/swarm is a Codex-specific workflow adapter that delegates to .opencode.',
 	},
 	{
 		slug: 'test-file-split',
@@ -338,6 +346,126 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		expectedCanonicalRef: '.opencode/skills/ci-fix-monitor/SKILL.md',
 		reason:
 			'.opencode is the canonical protocol (a static, non-architect-MODE support skill composed by swarm-ci-monitor); .agents/skills/ci-fix-monitor is a thin Codex adapter shim that reads "Read .opencode/skills/ci-fix-monitor/SKILL.md for the full protocol." There is no .claude copy, so identical/divergent (which both require one) do not fit — same "adapter shim not yet modeled by ADDITIONAL contracts" situation as swarm-implement/writing-tests, generalized here into an explicit adapter kind (issue #1806).',
+	},
+	// ---------------------------------------------------------------------------
+	// .agents-only skills — no .opencode counterpart; live in .claude and/or
+	// .agents trees. Drift-check enforces extraIdenticalPaths existence for this kind
+	// (see detectSkillMirrorDrift in scripts/drift-check.ts).
+	// ---------------------------------------------------------------------------
+	{
+		slug: 'issue-tracer',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/issue-tracer/SKILL.md',
+			'.agents/skills/issue-tracer/SKILL.md',
+		],
+		reason:
+			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical protocol, .agents is a Codex-specific adapter with different tool references and execution notes.',
+	},
+	{
+		slug: 'qa-sweep',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/qa-sweep/SKILL.md',
+			'.agents/skills/qa-sweep/SKILL.md',
+		],
+		reason:
+			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical audit structure, .agents is a Codex-specific adapter translating it to Codex tool names.',
+	},
+	{
+		slug: 'research-first',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/research-first/SKILL.md',
+			'.agents/skills/research-first/SKILL.md',
+		],
+		reason:
+			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical research protocol, .agents is a Codex-specific adapter.',
+	},
+	{
+		slug: 'tech-debt-ci-review',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/tech-debt-ci-review/SKILL.md',
+			'.agents/skills/tech-debt-ci-review/SKILL.md',
+		],
+		reason:
+			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical audit structure, .agents is a Codex-specific adapter.',
+	},
+	{
+		slug: 'unswarm',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/unswarm/SKILL.md',
+			'.agents/skills/unswarm/SKILL.md',
+		],
+		reason:
+			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical command semantics, .agents is a Codex-specific adapter with modified workflow posture.',
+	},
+	{
+		slug: 'orchestrating-subagents',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.claude/skills/orchestrating-subagents/SKILL.md'],
+		reason:
+			'Orphaned .claude-only skill: .claude/skills/orchestrating-subagents/SKILL.md exists; .agents/skills/orchestrating-subagents/ does not exist. No .opencode counterpart.',
+	},
+	{
+		slug: 'durable-session-state',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.claude/skills/durable-session-state/SKILL.md'],
+		reason:
+			'Orphaned .claude-only skill: .claude/skills/durable-session-state/SKILL.md exists; .agents/skills/durable-session-state/ does not exist. No .opencode counterpart.',
+	},
+	{
+		slug: 'rust-crate-ci',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.claude/skills/rust-crate-ci/SKILL.md'],
+		reason:
+			'Orphaned .claude-only skill: .claude/skills/rust-crate-ci/SKILL.md exists; .agents/skills/rust-crate-ci/ does not exist. Covers the runners/swarm-sandbox-runner Rust crate CI.',
+	},
+	{
+		slug: 'editing-skills',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.claude/skills/editing-skills/SKILL.md'],
+		reason:
+			'Orphaned .claude-only skill: .claude/skills/editing-skills/SKILL.md exists; .agents/skills/editing-skills/ does not exist. No .opencode counterpart.',
+	},
+	{
+		slug: 'pr-review-fix',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.agents/skills/pr-review-fix/SKILL.md'],
+		reason:
+			'.agents-only skill with no .opencode or .claude counterpart. The .agents shim references .opencode/swarm-pr-feedback as its canonical reference.',
+	},
+	{
+		slug: 'contributing',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.agents/skills/contributing/SKILL.md'],
+		reason:
+			'.agents-only skill: .opencode/contributing/SKILL.md exists (outside skills/ tree) and is the canonical contribution checklist; .agents/skills/contributing/SKILL.md is a Codex adapter referencing it. No .claude counterpart.',
+	},
+	{
+		slug: 'guardrail-patterns',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.agents/skills/guardrail-patterns/SKILL.md'],
+		reason:
+			'.agents-only skill with no .claude counterpart. The .agents shim references .opencode/skills/generated/guardrail-patterns as its canonical reference.',
+	},
+	{
+		slug: 'mock-to-internals-migration',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.agents/skills/mock-to-internals-migration/SKILL.md',
+		],
+		reason:
+			'.agents-only skill with no .claude counterpart. The .agents shim references .opencode/skills/generated/mock-to-internals-migration as its canonical reference.',
+	},
+	{
+		slug: 'subprocess-safety',
+		kind: 'agents-only',
+		extraIdenticalPaths: ['.agents/skills/subprocess-safety/SKILL.md'],
+		reason:
+			'.agents-only skill with no .opencode or .claude counterpart. This is the canonical Codex subprocess-safety protocol consolidated from AGENTS.md Invariant 3.',
 	},
 ];
 
