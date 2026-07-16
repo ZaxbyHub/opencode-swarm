@@ -469,13 +469,17 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		// MUST recover the prompt from the callID snapshot (set in toolBefore).
 		await plugin.hooks['tool.execute.after'](
 			{ tool: 'Task', sessionID: SESSION, callID: CALL },
-			{ output: `Done.\nKNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678` },
+			{
+				output: `Done.\nKNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678`,
+			},
 		);
 		// The ack was reconciled via the recovered prompt → an `applied` event
 		// exists for the shown id (proving the after path is NOT dead).
 		const events = await readKnowledgeEvents(dir);
 		const applied = events.filter(
-			(e) => e.type === 'applied' && e.knowledge_id === 'a1b2c3d4-e2e5-4184-9abc-def012345678',
+			(e) =>
+				e.type === 'applied' &&
+				e.knowledge_id === 'a1b2c3d4-e2e5-4184-9abc-def012345678',
 		);
 		expect(applied.length).toBeGreaterThanOrEqual(1);
 	});

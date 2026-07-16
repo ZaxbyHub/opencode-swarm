@@ -161,11 +161,9 @@ describe('collectDelegateAcks', () => {
 		// (#1849) Seed the retrieved event the directive block's trace_id
 		// references, with the shown IDs as result_ids + matching session id,
 		// so the shared receipt validator accepts the acks.
-		await seedRetrieved(
-			dir,
-			[ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA],
-			{ sessionId: 'sess-1' },
-		);
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-1',
+		});
 
 		const result = await collectDelegateAcks({
 			directory: dir,
@@ -194,11 +192,9 @@ describe('collectDelegateAcks', () => {
 		].join('\n');
 
 		// (#1849) Seed the retrieved trace so the validator accepts the acks.
-		await seedRetrieved(
-			dir,
-			[ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA],
-			{ sessionId: 'sess-2' },
-		);
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-2',
+		});
 
 		const result = await collectDelegateAcks({
 			directory: dir,
@@ -243,11 +239,9 @@ describe('collectDelegateAcks', () => {
 		// (#1849) Seed the retrieved trace so the validator accepts the shown-ID
 		// acks. ID_NEVER_SHOWN is intentionally NOT in result_ids so it is
 		// rejected by the membership check (anti-spoofing).
-		await seedRetrieved(
-			dir,
-			[ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA],
-			{ sessionId: 'sess-3' },
-		);
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-3',
+		});
 
 		const result = await collectDelegateAcks({
 			directory: dir,
@@ -270,11 +264,9 @@ describe('collectDelegateAcks', () => {
 
 	it('extracts the task id from the prompt envelope', async () => {
 		// (#1849) Seed the retrieved trace so the validator accepts the ack.
-		await seedRetrieved(
-			dir,
-			[ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA],
-			{ sessionId: 'sess-4' },
-		);
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-4',
+		});
 
 		await collectDelegateAcks({
 			directory: dir,

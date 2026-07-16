@@ -16,12 +16,12 @@ import type {
 	MessageWithParts,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
-import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 // (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
 // last user message's info.agent (fallback) — never from a role:'system'
 // message. The fixture sets swarmState.activeAgent and stamps a consistent
 // sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const SESSION_ID = 'linked-injection-session';
 

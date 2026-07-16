@@ -87,7 +87,10 @@ import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
 import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
-import { deleteStoredInputArgs, setStoredInputArgs } from './hooks/guardrails.js';
+import {
+	deleteStoredInputArgs,
+	setStoredInputArgs,
+} from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import {
 	type MessageArrayLike,
@@ -2305,7 +2308,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					await safeHook(() =>
 						collectDelegateAcksAfter(
 							ctx.directory,
-							{ tool: input.tool, sessionID: input.sessionID, args: afterCtx.args },
+							{
+								tool: input.tool,
+								sessionID: input.sessionID,
+								args: afterCtx.args,
+							},
 							output,
 						),
 					)(input, output);
@@ -2314,7 +2321,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					await safeHook(() =>
 						collectReviewerVerdictsAfter(
 							ctx.directory,
-							{ tool: input.tool, sessionID: input.sessionID, args: afterCtx.args },
+							{
+								tool: input.tool,
+								sessionID: input.sessionID,
+								args: afterCtx.args,
+							},
 							output,
 						),
 					)(input, output);
@@ -2342,7 +2353,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				await safeHook(async () => {
 					await collectReviewerReceiptAfter(
 						ctx.directory,
-						{ tool: input.tool, sessionID: input.sessionID, args: afterCtx.args },
+						{
+							tool: input.tool,
+							sessionID: input.sessionID,
+							args: afterCtx.args,
+						},
 						output,
 					);
 				})(input, output);
