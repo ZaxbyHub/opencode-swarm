@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.121.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.0...v7.121.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **issue-ingest:** persist issue reference durably and wire deterministic --trace transition ([39eaf2a](https://github.com/ZaxbyHub/opencode-swarm/commit/39eaf2a6de5f6951130194143b80b515dccdaf70))
+* **issue-ingest:** persist issue reference durably and wire deterministic --trace transition ([3bade65](https://github.com/ZaxbyHub/opencode-swarm/commit/3bade65203b0bfc469ddc7820d9533af577fd5ea)), closes [#1688](https://github.com/ZaxbyHub/opencode-swarm/issues/1688)
+
 ## [7.121.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.120.0...v7.121.0) (2026-07-16)
 
 
