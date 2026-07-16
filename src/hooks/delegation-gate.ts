@@ -532,6 +532,130 @@ export function validateCoderReviewerAcceptanceField(promptText: string): {
 	return { valid: true };
 }
 
+/**
+ * FR-001/FR-002/FR-005/SC-001/SC-002/SC-006 (issue #1687): pull the verbatim
+ * requirement BODY for a single spec id (`FR-###` / `SC-###`) out of `spec.md`.
+ *
+ * spec.md requirements are bold-prefixed bullets, one per (possibly wrapped)
+ * bullet, e.g.
+ *   `- **FR-000 — Structured task-to-FR mapping.** The plan task model SHALL ...`
+ *   `- **SC-000 (FR-000).** Given a plan ..., then ...`
+ * The requirement BODY is the text AFTER the FIRST closing `**` of the leading
+ * bold span — i.e. everything past the `**...**` id/title prefix. Handles both
+ * FR-### and SC-### uniformly (no special-casing) and stitches on any
+ * immediately-following continuation lines of a wrapped bullet until the next
+ * bullet / next FR-|SC- bullet / a blank line / a markdown heading.
+ *
+ * @returns the raw (untrimmed) body string, or `null` when the id is not present
+ *   in the spec (unknown/typo/renamed) — the caller treats null as fail-open skip.
+ */
+export function extractSpecRequirementBodyById(
+	specText: string,
+	id: string,
+): string | null {
+	// Escape regex metacharacters in the id (`-` etc.) so it matches literally.
+	const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const lines = specText.split(/\r?\n/);
+	// Leading bold span containing the id: optional list marker, whitespace, `**`,
+	// optional whitespace, then the id at a word boundary (so `FR-001` does not
+	// match `FR-0012`, and the id must open the bold span — not appear inside a
+	// parenthetical like SC-000's `(FR-000)`).
+	const headerRe = new RegExp(`^\\s*[-*]?\\s*\\*\\*\\s*${escapedId}\\b`);
+	let headerIdx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (headerRe.test(lines[i])) {
+			headerIdx = i;
+			break;
+		}
+	}
+	if (headerIdx === -1) return null;
+
+	const headerLine = lines[headerIdx];
+	// Body starts after the FIRST closing `**` of the leading bold span. Using
+	// indexOf from just past the opening `**` grabs the closing marker even when
+	// the body itself later contains its own bold spans.
+	const openIdx = headerLine.indexOf('**');
+	const closeIdx = openIdx === -1 ? -1 : headerLine.indexOf('**', openIdx + 2);
+	if (closeIdx === -1) return null; // malformed bullet — treat as not found
+	let body = headerLine.slice(closeIdx + 2);
+
+	// Stitch wrapped-bullet continuation lines (current spec has none, but be safe).
+	for (let i = headerIdx + 1; i < lines.length; i++) {
+		const line = lines[i];
+		if (line.trim().length === 0) break; // blank line
+		if (/^#/.test(line)) break; // markdown heading
+		if (/^\s*[-*]\s/.test(line)) break; // next bullet
+		if (/^\s*[-*]?\s*\*\*\s*(?:FR|SC)-/.test(line)) break; // next FR/SC bullet
+		body += ` ${line}`;
+	}
+	return body;
+}
+
+/**
+ * FR-001/FR-002 (issue #1687): symmetric normalization applied identically to
+ * BOTH the extracted spec body AND the ACCEPTANCE prompt text before the
+ * substring-coverage compare. Asymmetric normalization would false-block, so this
+ * is deliberately the single shared normalizer. Strips markdown emphasis/code
+ * markers and leading list markers, folds punctuation the architect's LLM copy
+ * routinely substitutes (dash-width, curly-vs-straight quotes) so a good-faith
+ * verbatim copy is not false-blocked on a `—`→`--` or `'`→`'` swap, collapses
+ * ALL whitespace (incl. newlines) to single spaces, trims, and lowercases. Every
+ * fold is symmetric (both sides go through this one function), so it can only
+ * REDUCE false-blocks — it never opens a bypass, since covered/uncovered still
+ * differ by whole words, not punctuation.
+ */
+export function normalizeAcceptanceText(s: string): string {
+	return (
+		s
+			.replace(/`/g, '') // inline code backticks
+			.replace(/\*\*/g, '') // bold markers
+			.replace(/\*/g, '') // italic / list-star markers
+			.replace(/^[ \t]*[-*][ \t]+/gm, '') // leading list markers "- " / "* "
+			// Fold punctuation variants AFTER the leading-list-marker strip so a
+			// content em-dash normalized to a hyphen is never mistaken for a bullet.
+			.replace(/[‘’]/g, "'") // curly single quotes -> straight
+			.replace(/[“”]/g, '"') // curly double quotes -> straight
+			.replace(/[—–]/g, '-') // em/en dash -> hyphen
+			.replace(/-{2,}/g, '-') // collapse hyphen runs (incl. `--` for an em-dash)
+			.replace(/\s+/g, ' ') // collapse all whitespace (incl. newlines)
+			.trim()
+			.toLowerCase()
+	);
+}
+
+/**
+ * FR-001/FR-002/FR-005/SC-001/SC-002/SC-006 (issue #1687): mechanical coverage
+ * check that the ACCEPTANCE text CONTAINS the verbatim requirement body for each
+ * mapped spec id. Fail-open by construction:
+ *  - an id not present in spec.md (unknown/typo/renamed) is SKIPPED, never blocked;
+ *  - an id whose body normalizes to empty is SKIPPED (neither trivially covered
+ *    nor a miss);
+ *  - each id is checked INDEPENDENTLY (per-id substring), because the architect
+ *    concatenates multiple requirement bodies with an UNSPECIFIED separator — a
+ *    whole-string equality compare would false-block multi-FR tasks.
+ *
+ * @returns `{ covered: true }` when every id is present-and-covered or skipped;
+ *   `{ covered: false, missingId }` naming the FIRST id whose body is not a
+ *   substring of the ACCEPTANCE text.
+ */
+export function checkAcceptanceCoversFrRefs(params: {
+	acceptanceText: string;
+	frRefs: string[];
+	specText: string;
+}): { covered: boolean; missingId?: string } {
+	const normalizedAcceptance = normalizeAcceptanceText(params.acceptanceText);
+	for (const id of params.frRefs) {
+		const body = extractSpecRequirementBodyById(params.specText, id);
+		if (body === null) continue; // unknown id — fail-open skip
+		const normalizedBody = normalizeAcceptanceText(body);
+		if (normalizedBody.length === 0) continue; // empty body — skip
+		if (!normalizedAcceptance.includes(normalizedBody)) {
+			return { covered: false, missingId: id };
+		}
+	}
+	return { covered: true };
+}
+
 interface MessageInfo {
 	role: string;
 	agent?: string;
@@ -1508,6 +1632,59 @@ export function createDelegationGateHook(
 						`FR-###/SC-### requirement text from spec.md when the task maps to one or more spec requirements, or a ` +
 						`one-line task-derived statement of what DONE looks like otherwise (see the INPUT FORMAT in ` +
 						`src/agents/${inputFormatFile}.ts). Add an ACCEPTANCE: line to the delegation prompt and re-dispatch.`,
+				);
+			}
+
+			// FR-001/FR-002/FR-005/SC-001/SC-002/SC-006 (#1687): beyond "ACCEPTANCE
+			// is non-empty", verify the ACCEPTANCE text actually COVERS the verbatim
+			// requirement body for EACH spec FR-###/SC-### the plan task maps to.
+			// Self-contained + FAIL-OPEN: it loads the plan and resolves the task-id
+			// locally (reviewer returns at the coder-only guard below and never reaches
+			// the existing below-guard load, so this MUST live above it to gate reviewer
+			// too). A false-positive BLOCK halts a real swarm, so EVERY precondition
+			// failure => skip (no block), and only a clear, high-confidence mismatch
+			// throws. The whole resolution runs inside try/catch: any unexpected error
+			// (fs/parse/etc.) is swallowed and treated as covered.
+			let coverageResult: { covered: boolean; missingId?: string } | undefined;
+			let coverageTaskId: string | null = null;
+			try {
+				const coveragePlan = await _internals.loadPlanJsonOnly(directory);
+				if (coveragePlan) {
+					const coveragePlanTaskIds = new Set(
+						coveragePlan.phases.flatMap((phase) =>
+							phase.tasks.map((t) => t.id),
+						),
+					);
+					coverageTaskId = resolveDelegatedPlanTaskId(
+						args,
+						coveragePlanTaskIds,
+					);
+					if (coverageTaskId) {
+						const coverageTask = coveragePlan.phases
+							.flatMap((phase) => phase.tasks)
+							.find((t) => t.id === coverageTaskId);
+						const frRefs = coverageTask?.fr_refs;
+						// FR-004: a non-spec task (no fr_refs) stays dispatchable — skip.
+						if (coverageTask && Array.isArray(frRefs) && frRefs.length > 0) {
+							const specText = await fs.promises.readFile(
+								path.join(directory, '.swarm', 'spec.md'),
+								'utf8',
+							);
+							coverageResult = checkAcceptanceCoversFrRefs({
+								acceptanceText: acceptancePromptText,
+								frRefs,
+								specText,
+							});
+						}
+					}
+				}
+			} catch {
+				// Fail-open: never let this check break dispatch by accident.
+				coverageResult = undefined;
+			}
+			if (coverageResult && coverageResult.covered === false) {
+				throw new Error(
+					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not contain the verbatim requirement text for ${coverageResult.missingId} from .swarm/spec.md. The architect must copy ${coverageResult.missingId}'s full requirement text byte-for-byte into ACCEPTANCE (see ACCEPTANCE FIELD RESOLUTION in src/agents/architect.ts and the INPUT FORMAT in src/agents/${targetAgent}.ts), then re-dispatch.`,
 				);
 			}
 		}
