@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.121.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.2...v7.121.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* **tui:** address issue 1756 review feedback ([bb482bf](https://github.com/ZaxbyHub/opencode-swarm/commit/bb482bf530c545ba4f7973fed9a36800777b517d))
+* **tui:** complete issue 1756 safety closeout ([8e5af25](https://github.com/ZaxbyHub/opencode-swarm/commit/8e5af25d31cdea921d9b611711d731bc22474f40))
+
 ## [7.121.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.1...v7.121.2) (2026-07-16)
 
 
