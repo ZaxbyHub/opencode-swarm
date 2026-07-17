@@ -925,7 +925,9 @@ describe('WindowsSandboxExecutor', () => {
 			const wrapped = decodeWrappedScript(
 				executor.wrapCommand('echo hello', []),
 			);
-			expect(wrapped).toMatch(/cmd\.exe'\s+\/d\s+\/s\s+\/c\s+\$command/i);
+			expect(wrapped).toMatch(
+				/cmd\.exe'\s+\/d\s+\/v:off\s+\/s\s+\/c\s+\$command/i,
+			);
 		});
 
 		test('Copy-Item is treated as PS-native and uses Invoke-Expression', () => {
