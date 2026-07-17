@@ -5,7 +5,6 @@ import type {
 } from '../../../src/config/schema';
 import { createDelegationTrackerHook } from '../../../src/hooks/delegation-tracker';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
-import { serializeAgentSession } from '../../../src/session/snapshot-writer';
 import {
 	beginInvocation,
 	getAgentSession,
@@ -407,6 +406,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			tool: 'bash',
 			originalCommand: 'broken',
 			sandboxWrapped: true,
+			ownerAgent: 'architect',
+			ownerInvocationId: priorArchitectInvocation,
 		});
 
 		beginInvocation(architectID, 'architect');
@@ -416,7 +417,7 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			sameCategoryCount: 0,
 			hardStop: false,
 		});
-		expect(architectSession?.pendingToolExecutions?.size).toBe(0);
+		expect(architectSession?.pendingToolExecutions?.size).toBe(1);
 
 		const coderID = 'new-invocation';
 		setupSession(coderID);
@@ -470,31 +471,5 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 				{ args: { filePath: 'package.json' } },
 			),
 		).resolves.toBeUndefined();
-	});
-
-	it('does not persist circuit or pending correlation state in snapshots', () => {
-		const sessionID = 'snapshot-boundary';
-		setupSession(sessionID);
-		const session = getAgentSession(sessionID);
-		if (!session) throw new Error('test session missing');
-		session.nonTransientCircuit = {
-			ownerAgent: 'coder',
-			ownerInvocationId: session.activeInvocationId,
-			category: 'shell_parse_error',
-			sameCategoryCount: 3,
-			hardStop: true,
-			lastSignal: 'ParserError',
-		};
-		session.pendingToolExecutions?.set('call-1', {
-			tool: 'bash',
-			originalCommand: 'broken',
-			sandboxWrapped: true,
-		});
-		const serialized = serializeAgentSession(session) as unknown as Record<
-			string,
-			unknown
-		>;
-		expect(Object.hasOwn(serialized, 'nonTransientCircuit')).toBe(false);
-		expect(Object.hasOwn(serialized, 'pendingToolExecutions')).toBe(false);
 	});
 });

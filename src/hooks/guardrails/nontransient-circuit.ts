@@ -267,24 +267,24 @@ export function recordNonTransientFailure(
 		? 1
 		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
 	circuit.hardStop = circuit.sameCategoryCount >= threshold;
-	if (!wasHardStopped && circuit.hardStop) {
+	const enteredHardStop = !wasHardStopped && circuit.hardStop;
+	if (enteredHardStop) {
 		telemetry.loopDetected(
 			sessionID,
 			circuit.ownerAgent,
 			`nontransient:${category}`,
 		);
+		session.pendingAdvisoryMessages ??= [];
+		session.pendingAdvisoryMessages.push(
+			'NON-TRANSIENT STOP (' +
+				category +
+				', ' +
+				circuit.sameCategoryCount +
+				'/' +
+				threshold +
+				'): STOP. Do not retry this failure with another command or tool. Report the blocker and wait for corrected input, environment, or scope.',
+		);
 	}
-
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
-		'NON-TRANSIENT STOP (' +
-			category +
-			', ' +
-			circuit.sameCategoryCount +
-			'/' +
-			threshold +
-			'): STOP. Do not retry this failure with another command or tool. Report the blocker and wait for corrected input, environment, or scope.',
-	);
 	return circuit;
 }
 
@@ -325,6 +325,8 @@ export function rememberToolExecution(
 	ensureCircuitSession(sessionID);
 	const session = getAgentSession(sessionID);
 	if (!session) return;
+	const owner = currentOwner(sessionID);
+	if (!owner) return;
 	session.pendingToolExecutions ??= new Map();
 	if (
 		session.pendingToolExecutions.size >= MAX_PENDING_EXECUTIONS_PER_SESSION
@@ -337,7 +339,21 @@ export function rememberToolExecution(
 		tool,
 		originalCommand,
 		sandboxWrapped: false,
+		ownerAgent: owner.agent,
+		ownerInvocationId: owner.invocationId,
 	});
+}
+
+export function isToolExecutionCurrent(
+	sessionID: string,
+	execution: PendingToolExecution,
+): boolean {
+	const owner = currentOwner(sessionID);
+	return (
+		owner !== null &&
+		execution.ownerAgent === owner.agent &&
+		execution.ownerInvocationId === owner.invocationId
+	);
 }
 
 export function markToolExecutionSandboxWrapped(

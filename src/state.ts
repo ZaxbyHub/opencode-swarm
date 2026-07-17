@@ -412,6 +412,8 @@ export interface PendingToolExecution {
 	tool: string;
 	originalCommand: string;
 	sandboxWrapped: boolean;
+	ownerAgent: string;
+	ownerInvocationId: number;
 }
 
 function createNonTransientCircuitState(
@@ -978,7 +980,6 @@ export function ensureAgentSession(
 				agentName,
 				0,
 			);
-			session.pendingToolExecutions = new Map();
 
 			// Initialize window tracking if missing (migration from old state)
 			if (!session.windows) {
@@ -1230,7 +1231,9 @@ export function beginInvocation(
 	session.lastInvocationIdByAgent[stripped] = newId;
 	session.activeInvocationId = newId;
 	session.nonTransientCircuit = createNonTransientCircuitState(stripped, newId);
-	session.pendingToolExecutions = new Map();
+	// Keep bounded correlation records from the prior invocation so a late
+	// tool-after result can be identified and ignored instead of poisoning this
+	// fresh circuit. Entries are consumed on return or evicted at the map cap.
 
 	// Architect never creates budget windows (unlimited).
 	if (stripped === ORCHESTRATOR_NAME) {

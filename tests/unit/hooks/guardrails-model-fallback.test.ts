@@ -215,9 +215,7 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 		expect(swarmState.pendingEvents).toBe(initialPendingEvents);
 	});
 
@@ -382,9 +380,7 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 	});
 
 	// Test 14: output.error is undefined → no advisory
@@ -404,9 +400,7 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 	});
 
 	// -------------------------------------------------------------------------

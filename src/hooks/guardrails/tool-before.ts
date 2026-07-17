@@ -1090,13 +1090,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			toolArgs.command = wrappedCommand;
 			markToolExecutionSandboxWrapped(sessionID, callID);
 
-			const envOverrides = executor.getEnvOverrides();
-			if (Object.keys(envOverrides).length > 0) {
-				const existingEnv =
-					(toolArgs.env as Record<string, string | null> | undefined) ?? {};
-				toolArgs.env = { ...existingEnv, ...envOverrides };
-			}
-
 			void appendGuardrailDecision(
 				{
 					type: 'sandbox_wrap',

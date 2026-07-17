@@ -33,10 +33,12 @@ function makeTaskArgs(subagentType: string, prompt = 'Fix the bug') {
 	return { subagent_type: subagentType, prompt };
 }
 
-function expectNonTransientStop(
+function expectNoNonTransientStop(
 	session: ReturnType<typeof ensureAgentSession>,
 ) {
-	expect(session.pendingAdvisoryMessages?.[0]).toContain('NON-TRANSIENT STOP');
+	expect(session.pendingAdvisoryMessages?.join('\n')).not.toContain(
+		'NON-TRANSIENT STOP',
+	);
 }
 
 async function setupSubagentSessionWithWindow(
@@ -122,7 +124,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		const elapsed = Date.now() - startTime;
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 		// Should complete very quickly
 		expect(elapsed).toBeLessThan(500);
 	}, 5000);
@@ -149,9 +151,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		expect(session.pendingAdvisoryMessages?.length).toBe(1);
 	});
 
-	// -------------------------------------------------------------------------
 	// Attack 4: output.error is a number (e.g., 429)
-	// -------------------------------------------------------------------------
 	test('ADVERSARIAL: output.error is a number (429) should not crash or match', async () => {
 		const sessionId = 'session-error-number';
 		const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -190,7 +190,7 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Array is not a string
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -415,7 +415,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -436,7 +436,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -457,7 +457,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -478,7 +478,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -556,6 +556,6 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expectNonTransientStop(session);
+		expectNoNonTransientStop(session);
 	});
 });

@@ -194,15 +194,14 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 		});
 	});
 
-	it('merges executor environment overrides into the shell tool arguments', async () => {
+	it('leaves unsupported shell args.env untouched because the wrapper owns its environment', async () => {
 		getExecutorMock.mockImplementation(async () => ({
 			isAvailable: () => true,
 			mechanism: 'test-wrapper',
 			wrapCommand: () => 'wrapped-command',
-			getEnvOverrides: () => ({
-				PATH: 'C:\\safe-bin',
-				DYLD_INSERT_LIBRARIES: null,
-			}),
+			getEnvOverrides: () => {
+				throw new Error('unsupported host args.env path must not be queried');
+			},
 		}));
 		const hooks = createGuardrailsHooks(directory, {
 			enabled: true,
@@ -235,8 +234,8 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 		expect(args.command).toBe('wrapped-command');
 		expect(args.env).toEqual({
 			KEEP: 'preserved',
-			PATH: 'C:\\safe-bin',
-			DYLD_INSERT_LIBRARIES: null,
+			PATH: 'unsafe',
+			DYLD_INSERT_LIBRARIES: 'injected',
 		});
 	});
 });

@@ -41,6 +41,7 @@ import {
 import {
 	classifyToolOutcome,
 	clearNonTransientCircuit,
+	isToolExecutionCurrent,
 	recordNonTransientFailure,
 	takeToolExecution,
 } from './nontransient-circuit';
@@ -517,6 +518,12 @@ export function createGuardrailsHooks(
 				input.sessionID,
 				input.callID,
 			);
+			if (
+				correlatedExecution &&
+				!isToolExecutionCurrent(input.sessionID, correlatedExecution)
+			) {
+				return;
+			}
 			// OpenCode should provide a ToolResult-shaped object, but malformed or
 			// third-party hook payloads must not crash the plugin's after-hook. Keep a
 			// safe shape for downstream bookkeeping while classifying it as unknown so
