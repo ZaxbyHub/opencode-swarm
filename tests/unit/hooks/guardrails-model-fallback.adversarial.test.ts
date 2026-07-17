@@ -33,6 +33,12 @@ function makeTaskArgs(subagentType: string, prompt = 'Fix the bug') {
 	return { subagent_type: subagentType, prompt };
 }
 
+function expectNonTransientStop(
+	session: ReturnType<typeof ensureAgentSession>,
+) {
+	expect(session.pendingAdvisoryMessages?.[0]).toContain('NON-TRANSIENT STOP');
+}
+
 async function setupSubagentSessionWithWindow(
 	hooks: ReturnType<typeof createGuardrailsHooks>,
 	sessionId: string,
@@ -92,10 +98,8 @@ describe('guardrails model fallback adversarial tests', () => {
 		expect(elapsed).toBeLessThan(1000);
 	}, 5000); // 5 second timeout for safety
 
-	// -------------------------------------------------------------------------
 	// Attack 2: ReDoS pattern with nested quantifiers (a+)+b
 	// Tests catastrophic backtracking in TRANSIENT_MODEL_ERROR_PATTERN
-	// -------------------------------------------------------------------------
 	test('ADVERSARIAL: output.error with ReDoS pattern (a+)+b should not cause catastrophic backtracking', async () => {
 		const sessionId = 'session-redos';
 		const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -117,16 +121,12 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 		const elapsed = Date.now() - startTime;
 
-		// Should NOT match (no transient error keywords)
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 		// Should complete very quickly
 		expect(elapsed).toBeLessThan(500);
 	}, 5000);
 
-	// -------------------------------------------------------------------------
 	// Attack 3: Type confusion - output.error is an object instead of string
 	// -------------------------------------------------------------------------
 	test('ADVERSARIAL: output.error is an object (type confusion) should not crash or match', async () => {
@@ -190,9 +190,7 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Array is not a string
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -416,11 +414,8 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Empty string is a string, but TRANSIENT_MODEL_ERROR_PATTERN.test('') returns false
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -441,9 +436,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -464,9 +457,7 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -486,11 +477,8 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Infinity is not a string
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 
 	// -------------------------------------------------------------------------
@@ -568,8 +556,6 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain(
-			'NON-TRANSIENT STOP',
-		);
+		expectNonTransientStop(session);
 	});
 });

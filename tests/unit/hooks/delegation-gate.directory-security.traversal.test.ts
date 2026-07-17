@@ -123,20 +123,20 @@ describe('delegation-gate: directory traversal prevention', () => {
 	});
 
 	it('should not allow access outside project directory', async () => {
-		// Attempt to traverse outside project
-		const parentDir = path.dirname(tempDir);
-		const hook2 = createDelegationGateHook(makeConfig(), parentDir);
-
-		ensureAgentSession('test-session');
-
-		// Missing project-local plan identity must fail closed.
-		await expect(
-			callToolBefore(hook2, 'Task', 'test-session', {
-				subagent_type: 'mega_coder',
-				task_id: '1.1',
-				prompt: 'ACCEPTANCE: task complete and covered by tests',
-			}),
-		).rejects.toThrow('SCOPE_NOT_DECLARED');
+		const outsideDir = makeTempProject('delegation-gate-outside-');
+		try {
+			const hook2 = createDelegationGateHook(makeConfig(), outsideDir);
+			ensureAgentSession('test-session');
+			await expect(
+				callToolBefore(hook2, 'Task', 'test-session', {
+					subagent_type: 'mega_coder',
+					task_id: '1.1',
+					prompt: 'ACCEPTANCE: task complete and covered by tests',
+				}),
+			).rejects.toThrow('SCOPE_NOT_DECLARED');
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
 	});
 
 	it('should reject path with null bytes', async () => {

@@ -31,10 +31,6 @@ import {
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
 ): GuardrailsConfig {
@@ -260,24 +256,18 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 		});
 	});
 
-	// -------------------------------------------------------------------------
 	// scope_violation — bash write targeting a path outside declared scope
-	//
-	// The scope_violation is reached when:
 	//   1. checkShellWriteScope runs (bash/shell with detected writes)
 	//   2. checkFileAuthorityWithRules passes (path is allowed for the agent)
 	//   3. isInDeclaredScope returns false (path outside declared scope)
-	//
 	// On Windows, absolute Unix paths like /tmp/out.txt resolve outside the cwd
 	// and are caught by checkFileAuthorityWithRules (file_write), not scope_violation.
 	// We use a relative sibling directory (lib/) that is inside the cwd but
 	// outside the declared scope (src/).
-	// -------------------------------------------------------------------------
 	describe('scope_violation', () => {
 		it('throws a scope_violation error AND appends a scope_violation JSONL entry', async () => {
 			const hooks = createGuardrailsHooks(tempDir, nullConfig());
 
-			// Use test_engineer because:
 			// - test_engineer has blockedPrefix ['src/'] but can write to lib/
 			//   (lib/ is not in blockedPrefix, blockedZones, or allowedGlobs)
 			// - With declaredScope=['src/'], writing to lib/ passes authority

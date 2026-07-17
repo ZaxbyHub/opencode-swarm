@@ -490,7 +490,6 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			originalCommand: 'broken',
 			sandboxWrapped: true,
 		});
-
 		const serialized = serializeAgentSession(session) as unknown as Record<
 			string,
 			unknown
