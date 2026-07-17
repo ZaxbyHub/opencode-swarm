@@ -28,8 +28,9 @@ Read and follow `../../../.opencode/skills/issue-tracer/SKILL.md` as the canonic
   final critic (Phase 4.6) run only when a separate subagent/delegation
   mechanism is available and authorized. When none is available, record the
   unavailability and run the labeled fallback pass from
-  `references/critic-gate.md` ("Fallback self-critic/self-review/final-critic:
-  independent … unavailable"), disclosed in the artifact and final response.
+  `.opencode/skills/issue-tracer/references/critic-gate.md` ("Fallback
+  self-critic/self-review/final-critic: independent … unavailable"),
+  disclosed in the artifact and final response.
 - For `opencode-swarm` specifically, read `AGENTS.md` and
   `docs/engineering-invariants.md` for touched invariants, use repo shell
   commands (not broad OpenCode `test_runner` scopes) for validation, and load

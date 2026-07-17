@@ -107,6 +107,14 @@ Do not force a blocking approval gate for ordinary implementation work the user 
 
 ## Required Artifacts
 
+Derive `<issue-slug>` from the issue number/title before using it anywhere in
+this workflow: lowercase, kebab-case, `[a-z0-9-]` only (for example, issue
+#1849 "Real host injection" → `1849-real-host-injection`). Never embed raw
+issue-title text (spaces, punctuation, shell metacharacters) into a slug —
+`trace-init.sh` enforces this same allowlist and exits non-zero on anything
+else, but every other `<issue-slug>` usage site in this document (state
+directory paths, the branch name below) assumes an already-sanitized slug.
+
 For deep issue tracing, create a resumable trace directory. Initialize it (and its VCS exclusion) with `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>` (run from the repo root), which creates the tree under `.agents/issue-traces/<issue-slug>/` and adds that path to `.git/info/exclude` (a local exclusion, never a tracked `.gitignore` edit inside a fix PR):
 
 ```text

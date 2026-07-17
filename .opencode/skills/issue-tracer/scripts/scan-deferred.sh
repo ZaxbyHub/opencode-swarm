@@ -39,10 +39,28 @@ fi
 # changes are scanned. Fall back to the base tip if merge-base is unavailable.
 mb="$(git merge-base "$base" HEAD 2>/dev/null || echo "$base")"
 
-# Deferred-work markers on added lines only.
-pattern='^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'
+# Validate $mb resolves to a real commit before diffing against it. Without
+# this, an unresolvable base (a bad ref, or a dash-prefixed base arg git
+# rejects as an invalid option) falls through `git merge-base`'s failure into
+# the `echo "$base"` fallback above, and `set -eu` alone (no pipefail) would
+# let a subsequently-failing `git diff` be silently swallowed by the `|| true`
+# below — reporting a false "clean" instead of a real gate failure.
+if ! git rev-parse --verify --quiet "$mb^{commit}" >/dev/null; then
+  echo "scan-deferred: base ref '$mb' (resolved from '$base') does not resolve to a commit" >&2
+  exit 2
+fi
 
-hits="$(git diff "$mb" | grep -nE "$pattern" || true)"
+# Deferred-work markers on added lines only, excluding unified-diff file
+# headers ("+++ a/<path>", "+++ b/<path>", "+++ /dev/null"). Those lines also
+# start with '+' like an added content line, so an unqualified `^\+` pattern
+# false-positives on any added/renamed/modified file whose PATH contains a
+# marker word (e.g. "+++ b/todo-list.ts"). The exclusion is scoped to the
+# three literal header forms so it never suppresses a genuine added line that
+# happens to start with literal "+++" content.
+pattern='^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'
+header_pattern='^\+\+\+ (a/|b/|/dev/null)'
+
+hits="$(git diff "$mb" | grep -vE "$header_pattern" | grep -nE "$pattern" || true)"
 
 if [ -n "$hits" ]; then
   echo "scan-deferred: deferred-work markers found on added lines (base=$base):" >&2

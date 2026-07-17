@@ -26,13 +26,15 @@ canonical workflow.
 - Independent gates (Phase 3 plan critic, Phase 4.5 implementation review,
   Phase 4.6 final critic) use the `Agent` / `Task` subagent tool. Launch a
   separate context for each; give the reviewer only the diff and the artifacts
-  named in the canonical `references/critic-gate.md`, never your own reasoning
-  narrative.
+  named in the canonical
+  `.opencode/skills/issue-tracer/references/critic-gate.md`, never your own
+  reasoning narrative.
 - When running AS the `.claude/agents/issue-tracer.md` subagent, Claude Code
   cannot spawn nested subagents. Record that limitation as the delegation
-  failure, run the labeled fallback pass from `references/critic-gate.md`
-  ("Fallback self-critic/self-review/final-critic: independent … unavailable"),
-  and disclose it in the artifact and final response.
+  failure, run the labeled fallback pass from
+  `.opencode/skills/issue-tracer/references/critic-gate.md` ("Fallback
+  self-critic/self-review/final-critic: independent … unavailable"), and
+  disclose it in the artifact and final response.
 - Trace directory and its VCS exclusion are created by the canonical
   `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>` (run from
   the repo root; writes `.git/info/exclude`); the deferred-work gate is
