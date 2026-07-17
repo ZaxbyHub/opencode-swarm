@@ -517,6 +517,14 @@ export function createGuardrailsHooks(
 				input.sessionID,
 				input.callID,
 			);
+			// OpenCode should provide a ToolResult-shaped object, but malformed or
+			// third-party hook payloads must not crash the plugin's after-hook. Keep a
+			// safe shape for downstream bookkeeping while classifying it as unknown so
+			// it cannot erase an existing non-transient circuit.
+			const malformedOutput = !output || typeof output !== 'object';
+			const safeOutput = malformedOutput
+				? { title: '', output: '', metadata: null }
+				: output;
 			// v6.12: Gate completion tracking (moved above window check for architect sessions)
 			const session = swarmState.agentSessions.get(input.sessionID);
 			if (session) {
@@ -531,7 +539,7 @@ export function createGuardrailsHooks(
 
 					// Track gate failures for Task 2.5
 					const outputStr =
-						typeof output.output === 'string' ? output.output : '';
+						typeof safeOutput.output === 'string' ? safeOutput.output : '';
 
 					// Check if this is a skip condition (all tools ran === false)
 					let isSkipCondition = false;
@@ -551,8 +559,8 @@ export function createGuardrailsHooks(
 
 					const hasFailure =
 						!isSkipCondition &&
-						(output.output === null ||
-							output.output === undefined ||
+						(safeOutput.output === null ||
+							safeOutput.output === undefined ||
 							outputStr.includes('FAIL') ||
 							outputStr.includes('error') ||
 							outputStr.toLowerCase().includes('gates_passed: false'));
@@ -568,7 +576,7 @@ export function createGuardrailsHooks(
 						// v6.22 Task 2.1: Advance workflow state when pre_check_batch passes
 						if (input.tool === 'pre_check_batch') {
 							const successStr =
-								typeof output.output === 'string' ? output.output : '';
+								typeof safeOutput.output === 'string' ? safeOutput.output : '';
 							let isPassed = false;
 							try {
 								const result = JSON.parse(successStr);
@@ -727,11 +735,13 @@ export function createGuardrailsHooks(
 				}
 			}
 
-			const outcome = classifyToolOutcome(
-				input,
-				output as typeof output & Record<string, unknown>,
-				correlatedExecution,
-			);
+			const outcome = malformedOutput
+				? ({ kind: 'unknown', signal: '' } as const)
+				: classifyToolOutcome(
+						input,
+						safeOutput as typeof output & Record<string, unknown>,
+						correlatedExecution,
+					);
 			if (outcome.kind === 'fatal') {
 				recordNonTransientFailure(
 					input.sessionID,

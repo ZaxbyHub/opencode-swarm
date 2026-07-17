@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
@@ -6,8 +6,11 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-const TEST_DIR = '/tmp';
+let TEST_DIR = '';
+let cleanup = () => {};
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -34,10 +37,28 @@ function makeBashOutput(command: string) {
 	return { args: { command } };
 }
 
+function setDeclaredScope(scope: string[]): void {
+	installActiveScopeBinding({
+		directory: TEST_DIR,
+		childSessionId: 'test-session',
+		taskId: '1.1',
+		files: scope,
+	});
+}
+
 describe('destructive command guard', () => {
 	beforeEach(() => {
 		resetSwarmState();
-		startAgentSession('test-session', 'coder');
+		const created = createSafeTestDir('destructive-command-guard-');
+		TEST_DIR = created.dir;
+		cleanup = created.cleanup;
+		startAgentSession('test-session', 'coder', TEST_DIR);
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		cleanup();
+		cleanup = () => {};
 	});
 
 	describe('rm -rf commands', () => {
@@ -329,9 +350,7 @@ describe('destructive command guard', () => {
 			test('rm -rf plugins/oxlint-plugin-effect with scope → ALLOWED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session)
-					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				setDeclaredScope(['plugins/oxlint-plugin-effect']);
 				const input = makeBashInput(
 					'test-session',
 					'rm -rf plugins/oxlint-plugin-effect',
@@ -357,9 +376,7 @@ describe('destructive command guard', () => {
 			test('rm -rf mixed targets — one in scope, one not → BLOCKED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session)
-					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				setDeclaredScope(['plugins/oxlint-plugin-effect']);
 				const input = makeBashInput(
 					'test-session',
 					'rm -rf plugins/oxlint-plugin-effect src/other-dir',
@@ -377,9 +394,7 @@ describe('destructive command guard', () => {
 			test('rmdir /s plugins with scope → ALLOWED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session)
-					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				setDeclaredScope(['plugins/oxlint-plugin-effect']);
 				const input = makeBashInput(
 					'test-session',
 					'rmdir /s plugins/oxlint-plugin-effect',
@@ -393,9 +408,7 @@ describe('destructive command guard', () => {
 			test('del /s plugins with scope → ALLOWED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session)
-					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				setDeclaredScope(['plugins/oxlint-plugin-effect']);
 				const input = makeBashInput(
 					'test-session',
 					'del /s plugins/oxlint-plugin-effect',
@@ -409,9 +422,7 @@ describe('destructive command guard', () => {
 			test('Remove-Item -Recurse plugins with scope → ALLOWED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session)
-					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				setDeclaredScope(['plugins/oxlint-plugin-effect']);
 				const input = makeBashInput(
 					'test-session',
 					'Remove-Item -Recurse plugins/oxlint-plugin-effect',
@@ -448,8 +459,7 @@ describe('destructive command guard', () => {
 			test('rm -rf system path not in scope → still BLOCKED even with scope declared', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session) session.declaredCoderScope = ['plugins'];
+				setDeclaredScope(['plugins']);
 				const input = makeBashInput('test-session', 'rm -rf /etc');
 				const output = makeBashOutput('rm -rf /etc');
 				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
@@ -462,8 +472,7 @@ describe('destructive command guard', () => {
 			test('rsync --delete plugins-dest with scope → ALLOWED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-				const session = getAgentSession('test-session');
-				if (session) session.declaredCoderScope = ['plugins'];
+				setDeclaredScope(['plugins']);
 				const input = makeBashInput(
 					'test-session',
 					'rsync -av --delete src/other plugins',

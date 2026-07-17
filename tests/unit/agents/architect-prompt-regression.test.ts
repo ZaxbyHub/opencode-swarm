@@ -43,14 +43,15 @@ describe('architect prompt — critical rules regression (Task 3.3)', () => {
 			expect(hasPreDelegationRule).toBe(true);
 		});
 
-		test('prompt explains declare_scope persists to disk for cross-process delegation', () => {
+		test('prompt explains the identity-bound scope authorization contract', () => {
 			// The architect must understand that declare_scope writes to .swarm/scopes/ and
 			// survives cross-process delegation — without this, the architect may skip it
 			// thinking it's purely in-memory.
-			const hasPersistenceExplanation =
-				/\.swarm\/scopes\/scope-/.test(ARCHITECT_SOURCE) &&
-				/taskId/.test(ARCHITECT_SOURCE);
-			expect(hasPersistenceExplanation).toBe(true);
+			const hasBindingExplanation =
+				/exact workspace, plan generation, task, parent session, and Task call/.test(
+					ARCHITECT_SOURCE,
+				) && /taskId/.test(ARCHITECT_SOURCE);
+			expect(hasBindingExplanation).toBe(true);
 		});
 	});
 

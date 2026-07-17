@@ -146,12 +146,12 @@ ${largeContent}`;
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
 			const { swarmState } = await import('../../../src/state');
 			swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
-
-			// Create a patch that's exactly 1MB
-			const content = 'x'.repeat(1_000_000 - 50); // Account for the header text
-			const patchContent = `*** Update File: src/test.ts
-${content}`;
-
+			// Create a valid native patch that's exactly 1 MB.
+			const prefix = '*** Begin Patch\n*** Add File: src/test.ts\n+';
+			const suffix = '\n*** End Patch';
+			const content = 'x'.repeat(1_000_000 - prefix.length - suffix.length);
+			const patchContent = `${prefix}${content}${suffix}`;
+			expect(patchContent.length).toBe(1_000_000);
 			const input = makeInput(sessionId, 'apply_patch', 'call-1');
 			const output = makeOutput({ input: patchContent });
 
@@ -520,9 +520,9 @@ index 1234567..89abcdef 100644
 
 			const input = makeInput(sessionId, 'apply_patch', 'call-1');
 			const output = makeOutput({ input: '' });
-
-			// Should NOT throw - empty patch
-			await hooks.toolBefore(input, output);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/WRITE TARGET UNVERIFIABLE|no recognizable write targets/i,
+			);
 		});
 
 		it('patch with only whitespace → no error', async () => {
@@ -536,9 +536,9 @@ index 1234567..89abcdef 100644
 
 			const input = makeInput(sessionId, 'apply_patch', 'call-1');
 			const output = makeOutput({ input: '   \n\t\n   ' });
-
-			// Should NOT throw - whitespace only
-			await hooks.toolBefore(input, output);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/WRITE TARGET UNVERIFIABLE|no recognizable write targets/i,
+			);
 		});
 
 		it('pre_check_batch with gates_passed: true but non-object JSON → handled gracefully', async () => {

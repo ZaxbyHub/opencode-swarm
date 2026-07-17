@@ -76,7 +76,7 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: [`src/task-${task.id}.ts`],
 				})),
 			},
 		],
@@ -246,7 +246,7 @@ describe('delegation-gate: completion gate — edge cases', () => {
 		}
 	});
 
-	it('should not throw when plan has no tasks', async () => {
+	it('fails closed when plan has no task to authorize the coder', async () => {
 		const plan: Plan = {
 			schema_version: '1.0.0' as const,
 			title: 'Empty Plan',
@@ -271,17 +271,12 @@ describe('delegation-gate: completion gate — edge cases', () => {
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '2.1',
-			});
-		} catch {
-			threw = true;
-		}
-
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|task/i);
 	});
 
 	it('should not throw when taskWorkflowStates has stale entries from previous phases', async () => {

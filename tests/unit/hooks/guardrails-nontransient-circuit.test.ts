@@ -118,6 +118,32 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
 	});
 
+	it('preserves a permanent-failure streak across a malformed after-hook payload', async () => {
+		const sessionID = 'malformed-after';
+		setupSession(sessionID);
+		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			await hooks.toolAfter(
+				{
+					tool: 'bash',
+					sessionID,
+					callID: `malformed-${attempt}`,
+					args: { command: `failing-command-${attempt}` },
+				},
+				shellResult('permission denied', 2),
+			);
+		}
+		await hooks.toolAfter(
+			{ tool: 'read', sessionID, callID: 'malformed-result' },
+			undefined as never,
+		);
+		expect(circuit(sessionID)).toMatchObject({
+			category: 'general_permanent',
+			sameCategoryCount: 2,
+			hardStop: false,
+		});
+	});
+
 	it('uses explicit hook errors for command-not-found classification', async () => {
 		const sessionID = 'explicit-error';
 		setupSession(sessionID);

@@ -2222,6 +2222,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					);
 				}
 
+				const trackingSession = swarmState.agentSessions.get(input.sessionID);
+				// Preserve the public audit taxonomy while sharing one target resolver.
+				const auditContext = trackingSession?.delegationActive
+					? 'delegated'
+					: 'direct';
+				const auditOperation = [
+					'apply_patch',
+					'swarm_apply_patch',
+					'patch',
+				].includes(normalizeToolName(input.tool))
+					? 'patch'
+					: 'write';
+
 				// Log config file write attempts
 				if (
 					isConfigFilePath(
@@ -2240,7 +2253,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						agent: agentName,
 						path: normalizedPath,
 						allowed: authorityCheck.allowed,
-						type: 'direct_write',
+						type: `${auditContext}_${auditOperation}`,
 					};
 					if (!authorityCheck.allowed && 'reason' in authorityCheck) {
 						logEntry.reason = (
@@ -2250,7 +2263,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					warn('Config file write attempt', logEntry);
 				}
 
-				const trackingSession = swarmState.agentSessions.get(input.sessionID);
 				if (
 					trackingSession?.delegationActive &&
 					!trackingSession.modifiedFilesThisCoderTask.includes(targetPath)

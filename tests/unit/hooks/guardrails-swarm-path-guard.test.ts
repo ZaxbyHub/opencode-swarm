@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { pendingCoderScopeByTaskId } from '../../../src/hooks/delegation-gate';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
 const TEST_DIR = realpathSync(
 	mkdtempSync(join(tmpdir(), 'guardrail-swarm-path-')),
@@ -43,7 +43,7 @@ function makeBashOutput(command: string) {
 describe('destructive command guard - .swarm path protection (sections 16-21)', () => {
 	beforeEach(() => {
 		resetSwarmState();
-		startAgentSession('test-session', 'coder');
+		startAgentSession('test-session', 'architect');
 	});
 
 	// ============================================================
@@ -426,15 +426,15 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
 
-		test('cp .swarm/file.txt /tmp/ → ALLOWED (cp without rm)', async () => {
+		test('cp .swarm/file.txt /tmp/ fails closed at workspace containment', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'cp .swarm/file.txt /tmp/');
 			const output = makeBashOutput('cp .swarm/file.txt /tmp/');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 
-		test('cp src/file.txt /tmp/ && rm src/other.txt → ALLOWED (neither targets .swarm/)', async () => {
+		test('cp src/file.txt /tmp/ && rm src/other.txt fails closed at workspace containment', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -444,7 +444,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const output = makeBashOutput(
 				'cp src/file.txt /tmp/ && rm src/other.txt',
 			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 	});
 
@@ -881,19 +881,21 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 		// The scope-exemption at tool-before.ts:511-513 has TWO branches:
 		//   branch 1: isInDeclaredScope(target, declaredScope, cwd)
 		//   branch 2: isPathUnderSwarmWorktreeBase(target, cwd, worktreeBaseDirOverrides)
-		// This test exercises branch 1 by seeding declaredScope via pendingCoderScopeByTaskId
-		// and passing an EMPTY worktreeBaseDirOverrides so only branch 1 can succeed.
+		// This test exercises branch 1 with an identity-bound active scope and an
+		// EMPTY worktreeBaseDirOverrides list, so only branch 1 can succeed.
 		// ─────────────────────────────────────────────────────────────
 		test('git worktree remove --force via declaredScope exemption (no worktreeBaseDirOverrides) → ALLOWED', async () => {
-			// Create a worktree that is NOT under any worktree base directory
-			const { worktreePath } = makeWorktreeFixture();
-			// Verify it is NOT inside TEST_DIR/.swarm/worktrees (makeWorktreeFixture uses tmpdir)
-			// Seed declaredScope via pendingCoderScopeByTaskId so branch 1 fires
+			const worktreePath = 'scoped-worktree';
+			mkdirSync(join(TEST_DIR, worktreePath), { recursive: true });
+			startAgentSession('test-session', 'coder');
 			const session = swarmState.agentSessions.get('test-session')!;
-			session.currentTaskId = '1.1';
-			pendingCoderScopeByTaskId.set('1.1', [worktreePath]);
+			installActiveScopeBinding({
+				directory: TEST_DIR,
+				childSessionId: 'test-session',
+				taskId: '1.1',
+				files: [worktreePath],
+			});
 			const config = defaultConfig();
-			// EMPTY worktreeBaseDirOverrides → branch 2 CANNOT trigger
 			const hooks = createGuardrailsHooks(
 				TEST_DIR,
 				undefined,
@@ -905,9 +907,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-			// Cleanup: unset currentTaskId so it doesn't bleed into other tests
 			session.currentTaskId = null;
-			pendingCoderScopeByTaskId.delete('1.1');
 		});
 
 		// ─────────────────────────────────────────────────────────────
@@ -1157,12 +1157,12 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 	// block_destructive_commands: false bypasses new .swarm guards
 	// ============================================================
 	describe('block_destructive_commands: false bypasses new .swarm guards', () => {
-		test('mv .swarm/file /tmp/ allowed when block_destructive_commands is false', async () => {
+		test('mv .swarm/file /tmp/ still fails workspace containment when destructive blocking is false', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'mv .swarm/file /tmp/');
 			const output = makeBashOutput('mv .swarm/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 
 		test('rm .swarm/file allowed when block_destructive_commands is false', async () => {

@@ -252,7 +252,7 @@ async function writeAdvFixturePlan(dir: string): Promise<void> {
 						size: 'small' as const,
 						description: 'Mapped to FR-001 only',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/task-1.1.ts'],
 						fr_refs: ['FR-001'],
 					},
 					{
@@ -262,7 +262,7 @@ async function writeAdvFixturePlan(dir: string): Promise<void> {
 						size: 'small' as const,
 						description: 'Mapped to FR-001 and SC-006',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/task-2.1.ts'],
 						fr_refs: ['FR-001', 'SC-006'],
 					},
 					{
@@ -272,7 +272,7 @@ async function writeAdvFixturePlan(dir: string): Promise<void> {
 						size: 'small' as const,
 						description: 'Unmapped',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/task-3.1.ts'],
 					},
 				],
 			},
@@ -371,7 +371,7 @@ describe('ADVERSARIAL: toolBefore integration', () => {
 							size: 'small' as const,
 							description: 'Markup task',
 							depends: [],
-							files_touched: [],
+							files_touched: ['src/task-1.1.ts'],
 							fr_refs: ['FR-MARKUP'],
 						},
 					],
@@ -485,16 +485,15 @@ describe('ADVERSARIAL: toolBefore integration', () => {
 		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*SC-006/s);
 	});
 
-	// -- Fail-open: ambiguous task-id resolution --------------------------------
+	// -- Fail-closed: ambiguous task-id resolution ------------------------------
 
-	it('coder: TASK line references TWO distinct valid plan task ids => ambiguous => resolves (fail-open) despite garbage ACCEPTANCE', async () => {
+	it('coder: TASK line references two valid task ids without task_id => fails closed', async () => {
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-adv-ambiguous', 'architect');
 		// No explicit task_id field; the TASK: line mentions BOTH "1.1" (mapped,
 		// FR-001) and "3.1" (unmapped) — both are valid plan task ids, so
-		// resolveDelegatedPlanTaskId's ambiguity guard must return null, and the
-		// coverage check must be skipped entirely (fail-open), even though the
-		// ACCEPTANCE text below would fail coverage for 1.1 if it were resolved.
+		// resolveDelegatedPlanTaskId's ambiguity guard must not guess which task
+		// scope should authorize the coder.
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-adv-ambiguous'), {
 				args: {
@@ -503,6 +502,6 @@ describe('ADVERSARIAL: toolBefore integration', () => {
 						'TASK: migrate 1.1 and 3.1 together\nACCEPTANCE: lorem ipsum dolor sit amet',
 				},
 			}),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|task_id/i);
 	});
 });

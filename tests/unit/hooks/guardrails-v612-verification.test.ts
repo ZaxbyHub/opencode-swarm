@@ -301,7 +301,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 			}
 		});
 
-		it('session created by guardrails hook is exempt from guardrails (architect)', async () => {
+		it('guardrails does not synthesize an architect session for unknown callers', async () => {
 			const guardrailsConfig = GuardrailsConfigSchema.parse({
 				enabled: true,
 				max_tool_calls: 1, // Very low limit
@@ -310,17 +310,17 @@ describe('v6.1.2 Guardrails Remediation', () => {
 
 			resetSwarmState();
 
-			// Tool call without activeAgent - should fallback to architect
+			// A read-only call without activeAgent remains fail-open but must not mint
+			// architect authority or session identity.
 			await hooks.toolBefore(
 				{ tool: 'bash', sessionID: 'fallback-session', callID: 'c1' },
 				{ args: {} },
 			);
 
-			// Verify session is architect
 			const session = swarmState.agentSessions.get('fallback-session');
-			expect(session?.agentName).toBe(ORCHESTRATOR_NAME);
+			expect(session).toBeUndefined();
 
-			// Architect should NOT have a guardrails window
+			// No synthetic session means no guardrails window either.
 			const window = getActiveWindow('fallback-session');
 			expect(window).toBeUndefined();
 		});

@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { createGuardrailsHooks as createGuardrailsHooksBase } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	getTaskState,
@@ -9,6 +9,14 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+let testDir = '';
+let cleanup = () => {};
+
+function createGuardrailsHooks(config: GuardrailsConfig) {
+	return createGuardrailsHooksBase(testDir, undefined, config);
+}
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -41,6 +49,15 @@ function makeOutput(args: unknown = { filePath: '/test.ts' }) {
 describe('guardrails self-coding detection gate (Task 7A.2)', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		const created = createSafeTestDir('guardrails-self-coding-');
+		testDir = created.dir;
+		cleanup = created.cleanup;
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		cleanup();
+		cleanup = () => {};
 	});
 
 	describe('verification tests - isSourceCodePath gating', () => {
@@ -226,10 +243,10 @@ describe('guardrails self-coding detection gate (Task 7A.2)', () => {
 	});
 
 	describe('non-architect sessions are unaffected', () => {
-		it('coder writes to src/test.ts → should NOT increment architectWriteCount', async () => {
+		it('build agent writes to src/test.ts → should NOT increment architectWriteCount', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', 'coder');
+			startAgentSession('test-session', 'build');
 
 			const input = makeInput('test-session', 'write', 'call-1');
 			const output = makeOutput({ filePath: 'src/test.ts' });
@@ -262,7 +279,10 @@ describe('guardrails self-coding detection gate (Task 7A.2)', () => {
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'patch', 'call-1');
-			const output = makeOutput({ filePath: 'src/test.ts' });
+			const output = makeOutput({
+				patch:
+					'*** Begin Patch\n*** Add File: src/test.ts\n+test\n*** End Patch',
+			});
 
 			await hooks.toolBefore(input, output);
 
