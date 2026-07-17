@@ -321,9 +321,11 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
 			const output = makeOutput({
-				input: `*** Update File: src/index.ts
+				input: `*** Begin Patch
+*** Update File: src/index.ts
 --- a/src/index.ts
-+++ b/src/index.ts`,
++++ b/src/index.ts
+*** End Patch`,
 			});
 
 			// Should NOT throw - just increments architectWriteCount
