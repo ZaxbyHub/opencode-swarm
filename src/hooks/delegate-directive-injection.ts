@@ -124,7 +124,7 @@ export async function injectDelegateDirectivesBefore(
 				`Phase ${plan.current_phase ?? 1}`)
 			: undefined;
 
-		const { entries } = await injectForDelegate({
+		const { entries, trace_id } = await injectForDelegate({
 			directory,
 			agent: targetAgent,
 			expectedTools: defaultExpectedToolsForAgent(targetAgent),
@@ -135,7 +135,13 @@ export async function injectDelegateDirectivesBefore(
 		});
 
 		const prefixParts: string[] = [];
-		const delegateBlock = buildDelegateDirectiveBlock(entries, config);
+		// (#1849 RC-4) Thread the retrieval trace_id into the rendered block so the
+		// delegate can cite it and the ack-collector recovers the original trace.
+		const delegateBlock = buildDelegateDirectiveBlock(
+			entries,
+			config,
+			trace_id,
+		);
 		if (delegateBlock) prefixParts.push(delegateBlock);
 
 		// Reviewer delegations also receive the per-phase "directives to verify"

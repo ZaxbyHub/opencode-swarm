@@ -22,13 +22,14 @@ import {
 	readPriorDriftReports,
 } from './curator-drift.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
+import { resolveMessageTransformContext } from './host-boundary.js';
 import { recordKnowledgeShown } from './knowledge-application.js';
 import {
 	buildEscalationBriefing,
 	readRecentEscalations,
 } from './knowledge-escalator.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
-import type { ProjectContext, RankedEntry } from './knowledge-reader.js';
+import type { RankedEntry } from './knowledge-reader.js';
 import { recordLessonsShown } from './knowledge-reader.js';
 import { confirmEntriesPhase, readRejectedLessons } from './knowledge-store.js';
 import type {
@@ -257,6 +258,7 @@ export const DELEGATE_DIRECTIVE_BLOCK_TAG = '<delegate_knowledge_directives>';
 export function buildDelegateDirectiveBlock(
 	entries: RankedEntry[],
 	cfg: KnowledgeConfig,
+	traceId?: string,
 ): string | null {
 	if (entries.length === 0) return null;
 	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
@@ -297,6 +299,12 @@ export function buildDelegateDirectiveBlock(
 		'  KNOWLEDGE_N_A:<id> reason=<why> — it did not apply to your task',
 	);
 	lines.push('Omitting a critical id is a contract violation.');
+	// (#1849 RC-4) Carry the retrieval trace_id into the block so a delegate can
+	// cite it in a knowledge_receipt and the delegate-ack-collector can recover
+	// the ORIGINAL retrieval trace (rather than minting an untied one).
+	if (traceId) {
+		lines.push(`trace_id: ${traceId}`);
+	}
 	for (const e of sorted) {
 		const priority = e.directive_priority ?? 'medium';
 		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
@@ -348,6 +356,28 @@ export function parseDelegateDirectiveBlock(
 		}
 	}
 	return out;
+}
+
+/**
+ * Recover the `trace_id` rendered into a `<delegate_knowledge_directives>` block
+ * (issue #1849 RC-4). Returns undefined when the block is absent or when it
+ * predates the trace_id header (backward-compatible with older prompts). The
+ * delegate-ack-collector uses this to attribute acks to the ORIGINAL retrieval
+ * trace instead of minting an untied one.
+ */
+export function parseDelegateDirectiveTraceId(
+	text: string,
+): string | undefined {
+	if (!text || !text.includes(DELEGATE_DIRECTIVE_BLOCK_TAG)) return undefined;
+	const start = text.indexOf(DELEGATE_DIRECTIVE_BLOCK_TAG);
+	const endTag = '</delegate_knowledge_directives>';
+	const endIdx = text.indexOf(endTag, start);
+	const body = endIdx >= 0 ? text.slice(start, endIdx) : text.slice(start);
+	for (const line of body.split('\n')) {
+		const m = /^trace_id:\s*(\S+)\s*$/m.exec(line);
+		if (m) return m[1];
+	}
+	return undefined;
 }
 
 export interface InjectForDelegateParams {
@@ -479,6 +509,35 @@ export async function injectForDelegate(
 				}
 			}
 		}
+		// (#1849 R1) Empty delegate retrieval: emit a retrieved event with empty
+		// result_ids (carrying the trace_id) + a no_relevant terminal so the
+		// delegate cycle is accountable. Fail-open.
+		if (capped.length === 0) {
+			try {
+				await _internals.recordKnowledgeEvent(directory, {
+					type: 'retrieved',
+					trace_id: search.trace_id,
+					session_id: sessionId ?? 'unknown',
+					phase: params.phase ?? taskTitle,
+					agent,
+					query: taskTitle ?? '',
+					retrieval_mode: 'delegate_inject',
+					result_ids: [],
+					ranks: {},
+					scores: {},
+				});
+				await _internals.recordKnowledgeEvent(directory, {
+					type: 'no_relevant',
+					trace_id: search.trace_id,
+					session_id: sessionId ?? 'unknown',
+					phase: params.phase ?? taskTitle,
+					agent,
+					reason: 'empty delegate retrieval',
+				});
+			} catch {
+				/* non-blocking */
+			}
+		}
 		return { entries: capped, trace_id: search.trace_id };
 	} catch {
 		return { entries: [], trace_id: '' };
@@ -538,7 +597,7 @@ async function injectForDelegateIntoMessages(
 		? (extractCurrentPhaseFromPlan(plan) ?? `Phase ${plan.current_phase ?? 1}`)
 		: undefined;
 
-	const { entries } = await injectForDelegate({
+	const { entries, trace_id } = await injectForDelegate({
 		directory,
 		agent: agentName,
 		expectedTools: defaultExpectedToolsForAgent(agentName),
@@ -547,7 +606,9 @@ async function injectForDelegateIntoMessages(
 		phase: phaseLabel,
 		config,
 	});
-	const block = buildDelegateDirectiveBlock(entries, config);
+	// (#1849 RC-4) Thread the retrieval trace_id into the rendered block so the
+	// delegate can cite it and the ack-collector recovers the original trace.
+	const block = buildDelegateDirectiveBlock(entries, config, trace_id);
 	if (!block) return;
 	injectKnowledgeMessage(output, block);
 }
@@ -782,15 +843,21 @@ export function createKnowledgeInjectorHook(
 						? Math.floor(maxInjectChars * 0.5) // moderate: 20–60% — half budget
 						: Math.floor(maxInjectChars * 0.25); // low: 5–20% — quarter budget
 
-			// Agent check — architects go through the orchestrator path below;
-			// delegated subagents go through the per-agent directive path; all
-			// other (unrecognized) agents return early.
-			const systemMsg = output.messages.find((m) => m.info?.role === 'system');
-			const agentName = systemMsg?.info?.agent;
-			const sessionId = systemMsg?.info?.sessionID;
+			// (#1849) Identity recovery via the host-boundary adapter. The SDK
+			// `experimental.chat.messages.transform` input is `{}` and the
+			// `Message` union has NO `role:'system'` variant — so the pre-#1849
+			// `output.messages.find(role==='system')` lookup was always undefined,
+			// `agentName` was always undefined, and the `no_agent_name` skip fired
+			// every architect turn (the dark-in-production root cause, #1768).
+			// The adapter recovers agent from swarmState.activeAgent (primary, set
+			// by chat.message) with the last user message's info.agent as a
+			// first-turn fallback, and sessionID from any message's info.sessionID.
+			const mctx = resolveMessageTransformContext(output);
+			const agentName = mctx.agent;
+			const sessionId = mctx.sessionID;
 			if (!agentName) {
-				// (#1768) the chat.messages.transform event carried no system agent
-				// label — a prime candidate for the dark-in-production symptom.
+				// (#1768/#1849) Genuine empty case: no swarmState entry AND no user
+				// message carrying info.agent. Diagnostic tombstone only.
 				recordInjectionSkip(directory, 'no_agent_name', { sessionId });
 				return;
 			}
@@ -798,7 +865,7 @@ export function createKnowledgeInjectorHook(
 			// FR-002: unified injection budget — draw from shared ceiling so
 			// system-enhancer + knowledge-injector combined stay within budget.
 			if (unifiedInjectionTokens !== undefined) {
-				const sessionID = systemMsg?.info?.sessionID;
+				const sessionID = sessionId;
 				const seDemand = sessionID ? getSystemEnhancerDemand(sessionID) : 0;
 				const allocation = allocateInjectionBudget(seDemand, effectiveBudget, {
 					totalBudgetTokens: unifiedInjectionTokens,
@@ -812,7 +879,7 @@ export function createKnowledgeInjectorHook(
 					config,
 					output,
 					agentName,
-					systemMsg?.info?.sessionID,
+					sessionId,
 				);
 				return;
 			}
@@ -861,7 +928,7 @@ export function createKnowledgeInjectorHook(
 			if (cacheKey === lastSeenCacheKey && cachedInjectionText !== null) {
 				// Same context, cached text available — re-inject (handles compaction).
 				injectKnowledgeMessage(output, cachedInjectionText);
-				const sessionID = systemMsg?.info?.sessionID;
+				const sessionID = sessionId;
 				if (sessionID) {
 					if (cachedCriticalIds.length > 0) {
 						setCriticalShownIds(sessionID, {
@@ -880,12 +947,6 @@ export function createKnowledgeInjectorHook(
 			cachedShownIds = [];
 			cachedCriticalIds = [];
 
-			// Build legacy ProjectContext for the lesson-block fallback path.
-			const _context: ProjectContext = {
-				projectName,
-				currentPhase: phaseDescription,
-			};
-
 			// Retrieve action-aware ranked entries (uses triggers/applies_to/priority).
 			const searchFn =
 				_internals.searchKnowledge === defaultSearchKnowledge
@@ -897,7 +958,7 @@ export function createKnowledgeInjectorHook(
 				context: retrievalCtx,
 				mode: 'auto_injection',
 				agent: 'architect',
-				sessionId: systemMsg?.info?.sessionID,
+				sessionId: sessionId,
 				emitEvent: false,
 			});
 			// Change 5 (Task 6.1): the ≥0.8 hard confidence pre-filter is REMOVED.
@@ -950,7 +1011,7 @@ export function createKnowledgeInjectorHook(
 
 			// If no knowledge entries AND no drift/briefing, nothing to inject
 			if (filteredEntries.length === 0) {
-				const sessionID = systemMsg?.info?.sessionID;
+				const sessionID = sessionId;
 				if (sessionID) {
 					clearCriticalShownIds(sessionID);
 				}
@@ -965,7 +1026,48 @@ export function createKnowledgeInjectorHook(
 					sessionId: sessionID,
 					phase: currentPhase,
 				});
-				if (freshPreamble === null) return;
+				// (#1849 R1) Every retrieval attempt — including an empty one — must
+				// leave one durable terminal accounting path. Emit a `retrieved`
+				// event with empty result_ids (carrying the real trace_id) so a
+				// receipt can reference it, then a `no_relevant` terminal tombstone
+				// when there is genuinely nothing to inject (no drift/briefing
+				// fallback either). Fail-open: recording errors never block injection.
+				try {
+					await _internals.recordKnowledgeEvent(directory, {
+						type: 'retrieved',
+						trace_id: search.trace_id,
+						session_id: sessionID ?? 'unknown',
+						phase: retrievalCtx.currentPhase,
+						task_id: retrievalCtx.taskId,
+						agent: 'architect',
+						query:
+							retrievalCtx.lastUserMessage ?? retrievalCtx.currentPhase ?? '',
+						retrieval_mode: 'auto_injection',
+						result_ids: [],
+						ranks: {},
+						scores: {},
+					});
+				} catch {
+					/* non-blocking — diagnostics only */
+				}
+				if (freshPreamble === null) {
+					// Real empty retrieval: file a `no_relevant` terminal so the cycle
+					// is accountable in diagnostics and the trace is closeable.
+					try {
+						await _internals.recordKnowledgeEvent(directory, {
+							type: 'no_relevant',
+							trace_id: search.trace_id,
+							session_id: sessionID ?? 'unknown',
+							phase: retrievalCtx.currentPhase,
+							task_id: retrievalCtx.taskId,
+							agent: 'architect',
+							reason: 'empty auto-injection retrieval',
+						});
+					} catch {
+						/* non-blocking */
+					}
+					return;
+				}
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
 				injectKnowledgeMessage(output, cachedInjectionText);
@@ -1032,7 +1134,7 @@ export function createKnowledgeInjectorHook(
 			if (cachedShownIds.length === 0) {
 				recordInjectionSkip(directory, 'rendered_id_match_failed', {
 					agent: agentName,
-					sessionId: systemMsg?.info?.sessionID,
+					sessionId: sessionId,
 					phase: currentPhase,
 					extra: {
 						filteredCount: filteredEntries.length,
@@ -1127,7 +1229,7 @@ export function createKnowledgeInjectorHook(
 			// v2: Populate in-memory currentCriticalShownIds so the toolBefore
 			// enforcement gate can read O(1) without re-scanning JSONL.
 			// Keyed by sessionID — the gate consults this exact key.
-			const sessionID = systemMsg?.info?.sessionID;
+			const sessionID = sessionId;
 			if (sessionID) {
 				const criticalIds = filteredEntries
 					.filter((e) => renderedDirectiveIdSet.has(e.id))
@@ -1167,7 +1269,7 @@ export function createKnowledgeInjectorHook(
 				await _internals.recordKnowledgeEvent(directory, {
 					type: 'retrieved',
 					trace_id: search.trace_id,
-					session_id: systemMsg?.info?.sessionID ?? 'unknown',
+					session_id: sessionId ?? 'unknown',
 					phase: retrievalCtx.currentPhase,
 					task_id: retrievalCtx.taskId,
 					agent: 'architect',

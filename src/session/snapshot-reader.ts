@@ -206,6 +206,10 @@ export function deserializeAgentSession(
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
 		prSubscriptions: new Map(),
+		// (issue #1849) cohort id cache: undefined on older snapshots — callers
+		// re-resolve on cache-miss via a bounded fallback.
+		cachedCohortId:
+			typeof s.cachedCohortId === 'string' ? s.cachedCohortId : undefined,
 	};
 }
 

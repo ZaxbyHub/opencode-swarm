@@ -233,4 +233,44 @@ describe('createPrAutoSubscribeHook — toolAfter', () => {
 		expect(mockSubscribe).toHaveBeenCalledTimes(2);
 		expect(mockSubscribe.mock.calls[0]).toEqual(mockSubscribe.mock.calls[1]);
 	});
+
+	test('(#1849) recovers args from the callID snapshot when input has NO args (real SDK toolAfter shape)', async () => {
+		// The SDK tool.execute.after input is {tool,sessionID,callID} — NO args.
+		// The hook must recover the bash command from the snapshot taken in toolBefore.
+		const { setStoredInputArgs, deleteStoredInputArgs } = await import(
+			'../../../src/hooks/guardrails/stored-input-args'
+		);
+		const CALL = 'call-snapshot-1849';
+		setStoredInputArgs(CALL, { command: 'gh pr create --title "feat"' });
+		try {
+			const hook = createPrAutoSubscribeHook(TEST_DIR, makeConfig());
+			await hook.toolAfter(
+				// Real SDK shape: NO args on input; callID present.
+				{ tool: 'bash', sessionID: 'sess-1', callID: CALL },
+				{ output: PR_OUTPUT },
+			);
+			expect(mockSubscribe).toHaveBeenCalledTimes(1);
+			expect(mockSubscribe).toHaveBeenCalledWith(TEST_DIR, {
+				sessionID: 'sess-1',
+				prNumber: 155,
+				repoFullName: 'owner/repo',
+				prUrl: 'https://github.com/owner/repo/pull/155',
+				maxSubscriptions: 20,
+			});
+		} finally {
+			deleteStoredInputArgs(CALL);
+		}
+	});
+
+	test('(#1849, falsifiable) without a snapshot and without input.args, no subscribe fires', async () => {
+		// Neither the snapshot nor input.args supply the command → the hook cannot
+		// see `gh pr create` → returns early. This proves the snapshot is the
+		// load-bearing recovery path, not a side effect.
+		const hook = createPrAutoSubscribeHook(TEST_DIR, makeConfig());
+		await hook.toolAfter(
+			{ tool: 'bash', sessionID: 'sess-1', callID: 'never-snapshotted-1849' },
+			{ output: PR_OUTPUT },
+		);
+		expect(mockSubscribe).not.toHaveBeenCalled();
+	});
 });

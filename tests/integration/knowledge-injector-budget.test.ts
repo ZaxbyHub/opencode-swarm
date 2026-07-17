@@ -19,6 +19,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../src/state';
+
+const SESSION_ID = 'budget-session';
 
 // ---------------------------------------------------------------------------
 // Constants (mirror knowledge-injector.ts)
@@ -124,11 +131,11 @@ function makeMessages(totalChars: number): MessageWithParts[] {
 	const userPad = Math.max(1, totalChars - sysText.length);
 	return [
 		{
-			info: { role: 'system', agent: 'architect' },
+			info: { role: 'system', agent: 'architect', sessionID: SESSION_ID },
 			parts: [{ type: 'text', text: sysText }],
 		},
 		{
-			info: { role: 'user' },
+			info: { role: 'user', sessionID: SESSION_ID },
 			parts: [{ type: 'text', text: 'x'.repeat(userPad) }],
 		},
 	];
@@ -159,9 +166,12 @@ describe('Knowledge injector budget regression', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(path.join(swarmDir, 'plan.json'), PLAN_JSON);
 		fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), KNOWLEDGE_JSONL);
+		// (#1849) Map the session to the architect so identity resolves.
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 	});
 
 	afterEach(() => {
+		swarmState.activeAgent.delete(SESSION_ID);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 

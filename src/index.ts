@@ -78,6 +78,7 @@ import {
 import { createAutoReviewHook } from './hooks/auto-review.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
+import { cacheCohortIdAtMessage } from './hooks/cohort-cache.js';
 import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { collectDelegateAcksAfter } from './hooks/delegate-ack-collector.js';
@@ -86,8 +87,17 @@ import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
 import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
-import { deleteStoredInputArgs } from './hooks/guardrails.js';
+import {
+	deleteStoredInputArgs,
+	setStoredInputArgs,
+} from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
+import {
+	type MessageArrayLike,
+	resolveMessageTransformContext,
+	resolveToolAfterContext,
+	resolveToolBeforeContext,
+} from './hooks/host-boundary.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
 import { runInitOrphanRecovery } from './hooks/init-orphan-recovery.js';
 import { createInitOrphanRecoveryAdvisoryHook } from './hooks/init-orphan-recovery-advisory';
@@ -1864,18 +1874,22 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		'experimental.chat.messages.transform': composeHandlers(
 			...[
 				// Delegation ledger: inject summary when architect session resumes
-				(input: unknown, _output: unknown): Promise<void> => {
+				(_input: unknown, output: unknown): Promise<void> => {
 					if (process.env.DEBUG_SWARM)
 						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
 						console.error(`[DIAG] messagesTransform START`);
-					const p = input as { sessionID?: string };
-					if (p.sessionID) {
-						const archAgent = swarmState.activeAgent.get(p.sessionID);
-						const archSession = swarmState.agentSessions.get(p.sessionID);
+					// (#1849) The SDK messages.transform input is `{}` — sessionID is
+					// NOT on input. Recover it from output.messages[].info.sessionID.
+					const mctx = resolveMessageTransformContext(
+						output as MessageArrayLike,
+					);
+					if (mctx.sessionID) {
+						const archAgent = swarmState.activeAgent.get(mctx.sessionID);
+						const archSession = swarmState.agentSessions.get(mctx.sessionID);
 						const agentName = archAgent ?? archSession?.agentName ?? '';
 						if (stripKnownSwarmPrefix(agentName) === ORCHESTRATOR_NAME) {
 							try {
-								delegationLedgerHook.onArchitectResume(p.sessionID);
+								delegationLedgerHook.onArchitectResume(mctx.sessionID);
 							} catch {
 								/* non-blocking */
 							}
@@ -1897,33 +1911,39 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
 				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
 				// each via the dedup-aware path. Best-effort; never throws.
-				(input: unknown, output: unknown): Promise<void> => {
+				(_input: unknown, output: unknown): Promise<void> => {
 					try {
-						const p = input as { sessionID?: string };
+						// (#1849) sessionID from output.messages[].info, not input.
+						const mctx = resolveMessageTransformContext(
+							output as MessageArrayLike,
+						);
 						return knowledgeApplicationTransformScan(
 							ctx.directory,
 							output as {
 								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
 							},
-							p.sessionID,
+							mctx.sessionID,
 						);
 					} catch {
 						return Promise.resolve();
 					}
 				},
 				// v2: scan for skill propagation warnings and compliance tracking
-				(input: unknown, output: unknown): Promise<void> => {
+				(_input: unknown, output: unknown): Promise<void> => {
 					try {
 						if (!skillPropagationConfig.enabled) {
 							return Promise.resolve();
 						}
-						const p = input as { sessionID?: string };
+						// (#1849) sessionID from output.messages[].info, not input.
+						const mctx = resolveMessageTransformContext(
+							output as MessageArrayLike,
+						);
 						return skillPropagationTransformScan(
 							ctx.directory,
 							output as {
 								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
 							},
-							p.sessionID,
+							mctx.sessionID,
 							skillPropagationConfig,
 						);
 					} catch {
@@ -2115,8 +2135,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			await knowledgeApplicationGateBefore(
 				ctx.directory,
 				{
+					// (#1849) tool.execute.before input has no agent/sessionID-derived
+					// agent; use the host-boundary adapter (reads swarmState.activeAgent).
 					tool: input.tool,
-					agent: input.agent,
+					agent: resolveToolBeforeContext(
+						input as { tool: string; sessionID: string; callID: string },
+						output as { args?: unknown },
+					).agent,
 					sessionID: input.sessionID,
 				},
 				KnowledgeApplicationConfigSchema.parse(
@@ -2134,10 +2159,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			const skillResult = await skillPropagationGateBefore(
 				ctx.directory,
 				{
+					// (#1849) agent + args via the host-boundary adapter.
 					tool: input.tool,
-					agent: input.agent,
+					agent: resolveToolBeforeContext(
+						input as { tool: string; sessionID: string; callID: string },
+						output as { args?: unknown },
+					).agent,
 					sessionID: input.sessionID,
-					args: input.args,
+					args:
+						resolveToolBeforeContext(
+							input as { tool: string; sessionID: string; callID: string },
+							output as { args?: unknown },
+						).args ?? undefined,
 				},
 				skillPropagationConfig,
 			);
@@ -2166,13 +2199,20 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    same usage attribution as the gate's site 4a) + real taskID
 			//    (not the architect + synthetic 'injection' literal the inline
 			//    block used).
+			// (#1849) Resolve the real mutable args from output.args (the SDK
+			// mutation target), not input.args (which the host never populates).
+			const toolBeforeCtx = resolveToolBeforeContext(
+				input as { tool: string; sessionID: string; callID: string },
+				output as { args?: unknown },
+			);
+			const toolBeforeArgs = toolBeforeCtx.args ?? {};
 			injectSkillsIntoDelegation(
 				ctx.directory,
-				input.args as Record<string, unknown>,
+				toolBeforeArgs,
 				skillResult.recommendedSkills,
 				stripKnownSwarmPrefix(
-					parseDelegationArgs(input.args)?.targetAgent ?? '',
-				) || String(input.agent),
+					parseDelegationArgs(toolBeforeArgs)?.targetAgent ?? '',
+				) || toolBeforeCtx.agent,
 				input.sessionID,
 				{ quiet: config.quiet },
 			);
@@ -2187,12 +2227,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					ctx.directory,
 					{
 						tool: input.tool,
-						agent: input.agent,
+						agent: toolBeforeCtx.agent,
 						sessionID: input.sessionID,
-						args: input.args,
+						args: toolBeforeArgs,
 					},
 					knowledgeConfig,
 				);
+				// (#1849) Re-snapshot output.args AFTER directive injection so the
+				// tool.execute.after ack collector recovers the FINAL prompt (with
+				// the <delegate_knowledge_directives> block + trace_id). The guardrails
+				// snapshot at step 1 captured the PRE-injection args; without this
+				// re-snapshot the after path could not find the directive block and the
+				// entire delegate-ack reconciliation would be dark in production.
+				setStoredInputArgs(input.callID, output.args);
 			}
 
 			// v6.29: One-time 50% context pressure warning
@@ -2231,6 +2278,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 			const normalizedTool = normalizeToolName(input.tool);
 			const isTaskTool = normalizedTool === 'Task' || normalizedTool === 'task';
+			// (#1849) Resolve tool.execute.after args ONCE from the callID snapshot
+			// (the SDK toolAfter input has NO args). Reused by the knowledge ack/
+			// verdict/receipt collectors below so they see the delegation prompt +
+			// subagent_type.
+			const afterCtx = resolveToolAfterContext(
+				input as { tool: string; sessionID: string; callID: string },
+			);
 
 			const hookChain = async (): Promise<void> => {
 				await activityHooks.toolAfter(input, output);
@@ -2246,14 +2300,34 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// Per-delegate ack collection (Change 1, Task 1.5): reconcile the
 				// directives shown to a returning subagent against its ack markers.
 				// Fail-open; never blocks. Only acts on Task tool calls.
+				// (#1849) tool.execute.after input has NO args — recover them from the
+				// callID snapshot taken in toolBefore (guardrails/tool-before.ts) via
+				// the host-boundary adapter, so the ack/verdict collectors see the
+				// delegation prompt + subagent_type.
 				if (knowledgeConfig.enabled) {
 					await safeHook(() =>
-						collectDelegateAcksAfter(ctx.directory, input, output),
+						collectDelegateAcksAfter(
+							ctx.directory,
+							{
+								tool: input.tool,
+								sessionID: input.sessionID,
+								args: afterCtx.args,
+							},
+							output,
+						),
 					)(input, output);
 					// Reviewer DIRECTIVE_COMPLIANCE reconciliation (Change 2, Task 2.3):
 					// parse a returning reviewer's per-ID verdicts into knowledge events.
 					await safeHook(() =>
-						collectReviewerVerdictsAfter(ctx.directory, input, output),
+						collectReviewerVerdictsAfter(
+							ctx.directory,
+							{
+								tool: input.tool,
+								sessionID: input.sessionID,
+								args: afterCtx.args,
+							},
+							output,
+						),
 					)(input, output);
 					// Micro-reflector (Change 6, Task 5.1): on a delegate failure/partial
 					// return, emit 0-2 v3 insight candidates from the trajectory +
@@ -2274,8 +2348,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// Reviewer receipt collection: persist a returning reviewer Task's
 				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;
 				// independent of the knowledge system.
+				// (#1849) tool.execute.after input has NO args — pass the snapshot-
+				// recovered args so the collector can parse subagent_type/prompt.
 				await safeHook(async () => {
-					await collectReviewerReceiptAfter(ctx.directory, input, output);
+					await collectReviewerReceiptAfter(
+						ctx.directory,
+						{
+							tool: input.tool,
+							sessionID: input.sessionID,
+							args: afterCtx.args,
+						},
+						output,
+					);
 				})(input, output);
 				// Auto-review (opt-in): fire-and-forget execution-diff review by
 				// the reviewer model at task/phase boundaries.
@@ -2344,7 +2428,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 				// Record tool call for debugging spiral detection
 				try {
-					recordToolCall(normalizedTool, input.args, input.sessionID);
+					// (#1849) tool.execute.after input has no args; recover from the
+					// callID snapshot taken in toolBefore (guardrails/tool-before.ts).
+					recordToolCall(
+						normalizedTool,
+						resolveToolAfterContext(
+							input as { tool: string; sessionID: string; callID: string },
+						).args,
+						input.sessionID,
+					);
 				} catch {
 					// non-fatal
 				}
@@ -2595,6 +2687,20 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
 					);
 				await delegationHandler(input, output);
+
+				// (#1849) Resolve + cache the canonical cohort id once per session
+				// at chat.message (where sessionID + agent are reliably present), so
+				// the system-enhancer's cohort-identity line and the
+				// PromotionEvidenceRecord writer never re-run resolveCohortId (git)
+				// on a hot path. Fail-open + bounded; ignored error leaves the cache
+				// unset and callers fall back to readLinkPointer / re-resolve-once.
+				if (input?.sessionID) {
+					try {
+						await cacheCohortIdAtMessage(ctx.directory, input.sessionID);
+					} catch {
+						/* non-blocking — cache stays unset */
+					}
+				}
 
 				// Full-Auto v2 cadence: increment architect-turn counter and, when a
 				// cadence trigger fires (every N turns / minutes / near-limit

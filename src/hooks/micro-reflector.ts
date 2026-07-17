@@ -25,6 +25,7 @@ import { sanitizeTaskId } from '../evidence/manager.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
+import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
 import { transactFile } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
@@ -431,6 +432,9 @@ export interface MicroReflectorInput {
 	tool: unknown;
 	args?: unknown;
 	sessionID?: unknown;
+	/** (#1849) callID from the SDK tool.execute.after input — used to recover the
+	 * snapshot args (the SDK toolAfter input has NO args field). */
+	callID?: unknown;
 }
 export interface MicroReflectorOutput {
 	output?: unknown;
@@ -456,15 +460,24 @@ export async function microReflectorAfter(
 	if (!isTaskTool(input.tool)) return;
 	const transcript = typeof output.output === 'string' ? output.output : '';
 	if (!transcript) return;
+	// (#1849) tool.execute.after input has NO args — recover them from the
+	// callID snapshot (the SDK toolAfter input is {tool,sessionID,callID}). Fall
+	// back to input.args only for direct-call test fixtures that pass args
+	// inline (the production host never populates input.args here).
+	const recovered =
+		typeof input.callID === 'string'
+			? (getStoredInputArgs(input.callID) as
+					| Record<string, unknown>
+					| undefined)
+			: undefined;
 	const argsRecord =
-		input.args && typeof input.args === 'object'
-			? (input.args as Record<string, unknown>)
-			: null;
+		recovered ?? (input.args as Record<string, unknown> | undefined) ?? null;
+	const argsForParse = argsRecord ?? input.args;
 	const prompt =
 		argsRecord && typeof argsRecord.prompt === 'string'
 			? argsRecord.prompt
 			: '';
-	const parsed = parseDelegationArgs(input.args);
+	const parsed = parseDelegationArgs(argsForParse);
 	const agent = parsed ? stripKnownSwarmPrefix(parsed.targetAgent) : 'unknown';
 	const taskId = extractTaskId(prompt);
 	const trajectory = taskId ? await readTaskTrajectory(directory, taskId) : [];

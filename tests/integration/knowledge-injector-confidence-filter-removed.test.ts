@@ -16,6 +16,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../src/state';
+
+const SESSION_ID = 'cf-session';
 
 const PLAN = JSON.stringify({
 	schema_version: '1.0.0',
@@ -92,10 +99,13 @@ function createRelativeTempDir(): string {
 function architectMessages(): MessageWithParts[] {
 	return [
 		{
-			info: { role: 'system', agent: 'architect' },
+			info: { role: 'system', agent: 'architect', sessionID: SESSION_ID },
 			parts: [{ type: 'text', text: 'System prompt for architect' }],
 		},
-		{ info: { role: 'user' }, parts: [{ type: 'text', text: 'do the work' }] },
+		{
+			info: { role: 'user', sessionID: SESSION_ID },
+			parts: [{ type: 'text', text: 'do the work' }],
+		},
 	];
 }
 
@@ -113,9 +123,12 @@ describe('confidence filter removed (Task 6.1)', () => {
 		dir = createRelativeTempDir();
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(dir, '.swarm', 'plan.json'), PLAN);
+		// (#1849) Map the session to the architect so identity resolves.
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 	});
 
 	afterEach(() => {
+		swarmState.activeAgent.delete(SESSION_ID);
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

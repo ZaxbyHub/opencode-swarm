@@ -85,6 +85,18 @@ export interface KnowledgeDebugMeta {
 		escalated_directives: number;
 		/** Knowledge-event volume bucketed by type (applied/ignored/violated/...). */
 		events_by_type: Record<string, number>;
+		/**
+		 * (#1849) Shown vs explicitly-applied accountability (never conflated) +
+		 * empty-trace terminals, so the retrieval loop's accounting is visible.
+		 */
+		shown_vs_applied: {
+			shown: number;
+			applied_explicit: number;
+			ignored: number;
+			contradicted: number;
+			violated: number;
+			no_relevant: number;
+		};
 	};
 	/**
 	 * Cohort/link health (issue #1846). Makes the linked store and its health
@@ -374,6 +386,16 @@ export async function computeKnowledgeDebug(
 			enforced_directives: enforcedDirectives,
 			escalated_directives: escalatedDirectives,
 			events_by_type: eventsByType,
+			// (#1849) Shown vs explicitly-applied (never conflated) + empty-trace
+			// terminals, so the retrieval loop's accountability is visible.
+			shown_vs_applied: {
+				shown: eventsByType.retrieved ?? 0,
+				applied_explicit: eventsByType.applied ?? 0,
+				ignored: eventsByType.ignored ?? 0,
+				contradicted: eventsByType.contradicted ?? 0,
+				violated: eventsByType.violated ?? 0,
+				no_relevant: eventsByType.no_relevant ?? 0,
+			},
 		},
 		cohort: {
 			linked: cohortLinked,

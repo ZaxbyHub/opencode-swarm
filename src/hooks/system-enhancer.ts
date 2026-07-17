@@ -211,11 +211,12 @@ import {
 } from '../services/injection-budget.js';
 import { telemetry } from '../telemetry';
 import { _internals as coChangeInternals } from '../tools/co-change-analyzer.js';
-import { warn } from '../utils';
+import { log, warn } from '../utils';
 import {
 	detectAdversarialPair,
 	formatAdversarialWarning,
 } from './adversarial-detector';
+import { readCachedCohortId } from './cohort-cache';
 import { sanitizeContextText } from './context-sanitizer';
 import {
 	type ContentType,
@@ -231,6 +232,7 @@ import {
 	extractDecisions,
 	extractPlanCursor,
 } from './extractors';
+import { isLinked, readLinkPointer } from './knowledge-link';
 import { _internals as knowledgeStoreInternals } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
 import {
@@ -687,6 +689,48 @@ export function createSystemEnhancerHook(
 							OPENCODE_NATIVE_AGENTS.has(sessionAgent.toLowerCase() as never)
 						) {
 							return;
+						}
+
+						// (#1849 G) Linked-cohort identity line for the architect. The line
+						// is advisory and reads ONLY already-cached state: the cohort id
+						// (resolved once at chat.message and cached on the session) + the
+						// link pointer (a cheap file read, no git). On a cache miss (first
+						// turn before chat.message has populated it, or a restored old
+						// snapshot) the line is SKIPPED rather than awaiting a git-spawning
+						// resolveCohortId — the line renders on the next turn once the cache
+						// is warm. This keeps the system.transform hot path free of git
+						// (AGENTS.md "Bounded is not free"). Fail-open.
+						if (
+							_input.sessionID &&
+							(!sessionAgent ||
+								stripKnownSwarmPrefix(sessionAgent).toLowerCase() ===
+									'architect')
+						) {
+							try {
+								if (isLinked(directory)) {
+									const cohortId = readCachedCohortId(_input.sessionID);
+									if (cohortId) {
+										const pointer = readLinkPointer(directory);
+										const health = pointer?.degraded
+											? 'degraded (machine-local)'
+											: 'linked (portable)';
+										output.system.push(
+											`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
+										);
+									} else {
+										// (#BOT-HIGH-1) Cohort line skipped: cache miss on turn 1
+										// (chat.message hasn't populated cachedCohortId yet) or a
+										// restored old snapshot. Debug-gated log so operators can
+										// diagnose why the line is absent via /swarm diagnose.
+										log(
+											'[system-enhancer] cohort identity line skipped: cachedCohortId not yet resolved',
+											{ sessionID: _input.sessionID },
+										);
+									}
+								}
+							} catch {
+								/* non-blocking — cohort line is advisory */
+							}
 						}
 					}
 

@@ -20,10 +20,21 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
+import { ensureCohortIdCached } from './cohort-cache.js';
 import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
 import { newTraceId, recordKnowledgeEvent } from './knowledge-events.js';
-import { parseDelegateDirectiveBlock } from './knowledge-injector.js';
+import {
+	parseDelegateDirectiveBlock,
+	parseDelegateDirectiveTraceId,
+} from './knowledge-injector.js';
+import { readLinkPointer } from './knowledge-link.js';
+import {
+	type ReceiptItem,
+	validateReceipt,
+} from './knowledge-receipt-validator.js';
+import type { PromotionEvidenceRecord } from './knowledge-types.js';
+import { appendPromotionEvidence } from './promotion-evidence-store.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -99,23 +110,158 @@ export async function collectDelegateAcks(params: {
 		const violatedIds = new Set<string>();
 		const sessionId = params.sessionId ?? 'unknown';
 		const taskId = params.taskId ?? extractTaskId(params.prompt);
-		const traceId = newTraceId();
+		// (#1849 RC-4/R2) Recover the ORIGINAL retrieval trace_id from the
+		// directive block instead of minting an untied one. This links ack events
+		// back to the delegate retrieval's `retrieved` event, which the shared
+		// receipt validator requires (trace-existence + cited-ID membership). Fall
+		// back to a fresh trace only for legacy prompts without the trace header.
+		const recoveredTraceId = parseDelegateDirectiveTraceId(params.prompt);
+		const traceId = recoveredTraceId ?? newTraceId();
+		// (#PRR-008) Legacy prompts (no trace_id header) have no matching `retrieved`
+		// event, so validateReceipt would ALWAYS return trace_not_found and drop
+		// every ack — then the unacknowledged-critical loop would falsely escalate
+		// criticals the delegate DID ack. For legacy prompts, skip validation and
+		// emit acks directly (the pre-#1849 behavior). Validation only applies when
+		// a real directive-block trace_id was recovered.
+		const isLegacyPrompt = recoveredTraceId === undefined;
 
+		// (#1849 R2) Build the candidate items (one per acknowledged shown
+		// directive) and route them through the SHARED validator so the ack path
+		// gets the same trace-existence / session / idempotency / conflict
+		// guarantees as the knowledge_receipt tool. Anti-spoofing (only-shown
+		// IDs) is preserved by filtering to shownById before validating.
+		const ackItems: ReceiptItem[] = [];
+		const ackByItemId = new Map<
+			string,
+			{ id: string; result: string; reason?: string }
+		>();
 		for (const ack of acks) {
 			// Anti-spoofing: only honor acks for directives that were actually shown.
 			if (!shownById.has(ack.id)) continue;
-			ackedIds.add(ack.id);
-			await recordKnowledgeEvent(params.directory, {
-				type: ack.result,
+			// Only terminal outcomes the validator accepts are routed; others
+			// (e.g. 'acknowledged') fall through to direct emit below for compat.
+			if (
+				ack.result === 'applied' ||
+				ack.result === 'ignored' ||
+				ack.result === 'violated' ||
+				ack.result === 'n_a' ||
+				ack.result === 'contradicted'
+			) {
+				ackItems.push({ id: ack.id, outcome: ack.result, reason: ack.reason });
+				ackByItemId.set(ack.id, ack);
+			}
+		}
+
+		// (#PRR-003) Track emitted event_ids per knowledge_id for the
+		// PromotionEvidenceRecord pairing (applied/violated/contradicted only).
+		const eventIdByKnowledgeId = new Map<string, string>();
+
+		if (isLegacyPrompt) {
+			// (#PRR-008) Legacy path: emit acks directly without validation
+			// (no trace to validate against). Anti-spoofing (shownById) still holds.
+			for (const ack of acks) {
+				if (!shownById.has(ack.id)) continue;
+				if (!ackByItemId.has(ack.id)) continue;
+				ackedIds.add(ack.id);
+				const written = await recordKnowledgeEvent(params.directory, {
+					type: ack.result,
+					trace_id: traceId,
+					knowledge_id: ack.id,
+					session_id: sessionId,
+					task_id: taskId,
+					agent: params.agent,
+					reason: ack.reason,
+				});
+				if (written?.event_id)
+					eventIdByKnowledgeId.set(ack.id, written.event_id);
+				if (ack.result === 'violated') violatedIds.add(ack.id);
+				result.emitted.push({ id: ack.id, type: ack.result });
+			}
+		} else {
+			const validation = await validateReceipt({
+				directory: params.directory,
 				trace_id: traceId,
-				knowledge_id: ack.id,
 				session_id: sessionId,
 				task_id: taskId,
 				agent: params.agent,
-				reason: ack.reason,
+				items: ackItems,
+				no_relevant_knowledge: false,
 			});
-			if (ack.result === 'violated') violatedIds.add(ack.id);
-			result.emitted.push({ id: ack.id, type: ack.result });
+
+			if (validation.ok) {
+				for (const item of validation.accepted) {
+					const ack = ackByItemId.get(item.id);
+					if (!ack) continue;
+					ackedIds.add(item.id);
+					const written = await recordKnowledgeEvent(params.directory, {
+						type: item.outcome,
+						trace_id: traceId,
+						knowledge_id: item.id,
+						session_id: sessionId,
+						task_id: taskId,
+						agent: params.agent,
+						reason: ack.reason,
+					});
+					if (written?.event_id)
+						eventIdByKnowledgeId.set(item.id, written.event_id);
+					if (item.outcome === 'violated') violatedIds.add(item.id);
+					result.emitted.push({ id: item.id, type: item.outcome });
+				}
+				// Idempotent skips: already recorded with the same outcome — do not
+				// re-emit or double-count, but mark them acked so the unacknowledged
+				// escalation below does not flag them.
+				for (const item of validation.idempotent_skips) {
+					ackedIds.add(item.id);
+				}
+			}
+			// (#PRR-008) If validation did NOT succeed (ok:false) on a REAL trace, the
+			// ackedItems the delegate DID explicitly acknowledge (ackByItemId) are
+			// still treated as acked for the unacknowledged-critical loop below — a
+			// transient validation failure must not falsely escalate a critical the
+			// delegate explicitly acknowledged. We do not emit terminals (the
+			// validator audited the rejection), but we preserve the acked set.
+			if (!validation.ok) {
+				for (const id of ackByItemId.keys()) {
+					ackedIds.add(id);
+				}
+			}
+		}
+
+		// (#PRR-003) Write PromotionEvidenceRecords for the delegate-ack path's
+		// accepted applied/violated/contradicted items, mirroring the
+		// knowledge_receipt tool so the dominant delegate-application path feeds
+		// evaluatePromotionPolicy. Cohort id resolved once-bounded + cached.
+		try {
+			const cohortId = await ensureCohortIdCached(params.directory, sessionId);
+			const linkId = readLinkPointer(params.directory)?.linkId;
+			const now = new Date().toISOString();
+			const evidenceRecords: PromotionEvidenceRecord[] = [];
+			for (const [kid, eid] of eventIdByKnowledgeId) {
+				// Find the outcome for this knowledge_id from the emitted acks.
+				const ack = ackByItemId.get(kid);
+				if (!ack || !cohortId) continue;
+				const outcome = ack.result;
+				if (
+					outcome !== 'applied' &&
+					outcome !== 'violated' &&
+					outcome !== 'contradicted'
+				) {
+					continue;
+				}
+				evidenceRecords.push({
+					cohort_id: cohortId,
+					source_link_id: linkId,
+					entry_id: kid,
+					retrieval_trace_id: traceId,
+					receipt_outcome: outcome,
+					receipt_event_id: eid,
+					phase: undefined,
+					timestamp: now,
+				});
+			}
+			await appendPromotionEvidence(params.directory, evidenceRecords);
+		} catch {
+			/* non-blocking — evidence is a derived consumer */
 		}
 
 		// Any critical that was shown but never acknowledged is a contract

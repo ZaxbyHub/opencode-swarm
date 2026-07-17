@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	swarmState.activeAgent.clear();
 	mock.restore();
 });
 
@@ -22,6 +23,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../../src/state';
+
+const SESSION_ID = 'drift-session';
 
 // ============================================================================
 // Mocks Setup
@@ -89,13 +97,19 @@ import { getRunMemorySummary } from '../../../src/services/run-memory.js';
 function makeOutput(agentName: string = 'architect'): {
 	messages: MessageWithParts[];
 } {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path)
+	// and stamp a consistent sessionID on every message.
+	if (agentName) swarmState.activeAgent.set(SESSION_ID, agentName);
 	return {
 		messages: [
 			{
-				info: { role: 'system', agent: agentName },
+				info: { role: 'system', agent: agentName, sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'System prompt' }],
 			},
-			{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+			{
+				info: { role: 'user', sessionID: SESSION_ID },
+				parts: [{ type: 'text', text: 'hello' }],
+			},
 		],
 	};
 }

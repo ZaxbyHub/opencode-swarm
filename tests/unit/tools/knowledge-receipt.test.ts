@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	appendKnowledgeEvent,
 	type ReceiptEvent,
 	readKnowledgeEvents,
 } from '../../../src/hooks/knowledge-events';
@@ -53,6 +54,20 @@ describe('knowledge_receipt', () => {
 	});
 
 	it('emits applied / ignored / contradicted events with the shared trace_id', async () => {
+		// (#1849) Seed the retrieval trace the receipt references so the shared
+		// validator's trace-existence + cited-ID membership checks pass.
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 'trace-xyz',
+			session_id: 'sess-1',
+			agent: 'coder',
+			query: 'q',
+			retrieval_mode: 'auto_injection',
+			result_ids: ['k-applied', 'k-ignored', 'k-bad'],
+			ranks: { 'k-applied': 1, 'k-ignored': 2, 'k-bad': 3 },
+			scores: { 'k-applied': 1, 'k-ignored': 1, 'k-bad': 1 },
+			timestamp: new Date().toISOString(),
+		});
 		const raw = await knowledge_receipt.execute(
 			{
 				trace_id: 'trace-xyz',
@@ -107,7 +122,7 @@ describe('knowledge_receipt', () => {
 		expect(byType.contradicted.reason).toContain('archive');
 	});
 
-	it('accepts a no_relevant_knowledge receipt without emitting receipt events', async () => {
+	it('accepts a no_relevant_knowledge receipt and files one durable no_relevant terminal', async () => {
 		const raw = await knowledge_receipt.execute(
 			{ trace_id: 'none', no_relevant_knowledge: true } as never,
 			ctx(dir),
@@ -115,7 +130,11 @@ describe('knowledge_receipt', () => {
 		const parsed = JSON.parse(raw);
 		expect(parsed.recorded).toBe(true);
 		expect(parsed.no_relevant_knowledge).toBe(true);
-		expect(parsed.event_ids).toHaveLength(0);
+		// (#1849) no_relevant now files exactly ONE durable terminal event so the
+		// empty-retrieval cycle is accountable (previously zero events).
+		expect(parsed.event_ids).toHaveLength(1);
+		const events = await readKnowledgeEvents(dir);
+		expect(events.some((e) => e.type === 'no_relevant')).toBe(true);
 	});
 
 	it('persists new_lessons through the knowledge_add path', async () => {

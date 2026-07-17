@@ -15,6 +15,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../src/state';
+
+const SESSION_ID = 'long-session';
 
 // ---------------------------------------------------------------------------
 // Constants (mirror the values in knowledge-injector.ts)
@@ -115,12 +122,15 @@ function createMessages(
 	totalChars: number,
 	agentName = 'architect',
 ): MessageWithParts[] {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path)
+	// and stamp a consistent sessionID on every message.
+	swarmState.activeAgent.set(SESSION_ID, agentName);
 	const systemMsg: MessageWithParts = {
-		info: { role: 'system', agent: agentName },
+		info: { role: 'system', agent: agentName, sessionID: SESSION_ID },
 		parts: [{ type: 'text', text: 'System prompt' }],
 	};
 	const userMsg: MessageWithParts = {
-		info: { role: 'user' },
+		info: { role: 'user', sessionID: SESSION_ID },
 		parts: [{ type: 'text', text: 'x'.repeat(Math.max(1, totalChars - 13)) }],
 	};
 	return [systemMsg, userMsg];
@@ -150,6 +160,7 @@ describe('Knowledge injection long session integration', () => {
 	});
 
 	afterEach(() => {
+		swarmState.activeAgent.delete(SESSION_ID);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -202,21 +213,22 @@ describe('Knowledge injection long session integration', () => {
 
 	it('places injected message just before the last user message', async () => {
 		const hook = createKnowledgeInjectorHook(tempDir, config);
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 		const messages: MessageWithParts[] = [
 			{
-				info: { role: 'system', agent: 'architect' },
+				info: { role: 'system', agent: 'architect', sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'System prompt' }],
 			},
 			{
-				info: { role: 'user' },
+				info: { role: 'user', sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'First user message' }],
 			},
 			{
-				info: { role: 'assistant' },
+				info: { role: 'assistant', sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'Assistant reply' }],
 			},
 			{
-				info: { role: 'user' },
+				info: { role: 'user', sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'Second user message' }],
 			},
 		];

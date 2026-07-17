@@ -14,13 +14,32 @@
  */
 
 import { z } from 'zod';
+import { ensureCohortIdCached } from '../hooks/cohort-cache.js';
 import {
 	type KnowledgeEventInput,
 	recordKnowledgeEvent,
 } from '../hooks/knowledge-events.js';
+import { readLinkPointer } from '../hooks/knowledge-link.js';
+import {
+	type ReceiptItem,
+	validateReceipt,
+} from '../hooks/knowledge-receipt-validator.js';
+import type { PromotionEvidenceRecord } from '../hooks/knowledge-types.js';
+import { appendPromotionEvidence } from '../hooks/promotion-evidence-store.js';
 import { log } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 import { knowledge_add } from './knowledge-add.js';
+
+/** Read the link pointer id if present, fail-open. */
+async function readLinkPointerSafe(
+	directory: string,
+): Promise<string | undefined> {
+	try {
+		return readLinkPointer(directory)?.linkId;
+	} catch {
+		return undefined;
+	}
+}
 
 const IGNORE_REASONS = [
 	'not_relevant',
@@ -143,14 +162,77 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			};
 
 			const recordedEventIds: string[] = [];
-			const emit = async (event: KnowledgeEventInput): Promise<void> => {
+			// (#PRR-001) emit returns the written event_id (or '' on write failure)
+			// so promotion-evidence pairing is exact per-item, not fragile tail-slice
+			// arithmetic that misaligns when a write fails or no_relevant precedes.
+			const emit = async (event: KnowledgeEventInput): Promise<string> => {
 				const written = await recordKnowledgeEvent(directory, event);
-				if (written && written.event_id !== undefined)
-					recordedEventIds.push(written.event_id);
+				const id = written?.event_id ?? '';
+				if (id) recordedEventIds.push(id);
+				return id;
 			};
+			// Map knowledge_id -> receipt_event_id for the accepted applied/violated/
+			// contradicted items (the only outcomes that feed PromotionEvidenceRecord).
+			const eventIdByKnowledgeId = new Map<string, string>();
+
+			// (#1849) Validate the receipt against the authoritative event log
+			// BEFORE emitting. Reject forged / expired / conflicting / non-trace
+			// receipts; idempotent retries are accepted as skips (not re-emitted).
+			// `no_relevant_knowledge` files one durable `no_relevant` terminal.
+			// A lessons-only receipt (no items, no no_relevant, but new_lessons) is
+			// meaningful and skips items-validation — it just persists lessons.
+			const validationItems = [
+				...applied.map((i) => ({ id: i.id, outcome: 'applied' as const })),
+				...ignored.map((i) => ({ id: i.id, outcome: 'ignored' as const })),
+				...contradicted.map((i) => ({
+					id: i.id,
+					outcome: 'contradicted' as const,
+				})),
+			];
+			const needsValidation = validationItems.length > 0 || noRelevant;
+			let acceptedIds = new Set<string>();
+			let closesNoRelevant = false;
+			let acceptedItems: ReceiptItem[] = [];
+			if (needsValidation) {
+				const validation = await validateReceipt({
+					directory,
+					trace_id: traceId,
+					session_id: sessionId,
+					task_id: taskId,
+					phase,
+					agent,
+					items: validationItems,
+					no_relevant_knowledge: noRelevant,
+				});
+
+				if (!validation.ok) {
+					// Rejection: the validator audited it. Return a clear JSON error to
+					// the agent without emitting any terminal events.
+					return JSON.stringify({
+						recorded: false,
+						rejected: true,
+						reason: validation.reason,
+						detail: validation.detail,
+						rejected_items: validation.rejected_items,
+					});
+				}
+				acceptedIds = new Set(validation.accepted.map((i) => i.id));
+				closesNoRelevant = validation.closes_no_relevant;
+				acceptedItems = validation.accepted;
+			}
+
+			// `no_relevant` terminal for an empty/real-empty trace.
+			if (closesNoRelevant) {
+				await emit({
+					type: 'no_relevant',
+					...base,
+					reason: 'no relevant knowledge surfaced by the trace',
+				});
+			}
 
 			for (const item of applied) {
-				await emit({
+				if (!acceptedIds.has(item.id)) continue;
+				const eid = await emit({
 					type: 'applied',
 					...base,
 					knowledge_id: item.id,
@@ -163,8 +245,10 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 							: undefined,
 					},
 				});
+				if (eid) eventIdByKnowledgeId.set(item.id, eid);
 			}
 			for (const item of ignored) {
+				if (!acceptedIds.has(item.id)) continue;
 				await emit({
 					type: 'ignored',
 					...base,
@@ -173,13 +257,53 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				});
 			}
 			for (const item of contradicted) {
-				await emit({
+				if (!acceptedIds.has(item.id)) continue;
+				const eid = await emit({
 					type: 'contradicted',
 					...base,
 					knowledge_id: item.id,
 					reason: `${item.proposed_action}: ${item.evidence}`,
 					evidence: { summary: item.evidence },
 				});
+				if (eid) eventIdByKnowledgeId.set(item.id, eid);
+			}
+
+			// (#1849 §B2) Derive PromotionEvidenceRecords from validated
+			// applied/contradicted receipts and persist them so #1847's
+			// evaluatePromotionPolicy finally consumes real evidence. cohort_id is
+			// resolved once-bounded + cached; never re-runs git per receipt.
+			// (#PRR-001) Pairing is EXACT per-item via eventIdByKnowledgeId (captured
+			// at emit time), not fragile tail-slice cursor arithmetic.
+			if (acceptedItems.length > 0) {
+				try {
+					const cohortId = await ensureCohortIdCached(directory, sessionId);
+					const linkId = await readLinkPointerSafe(directory);
+					const now = new Date().toISOString();
+					const evidenceRecords: PromotionEvidenceRecord[] = [];
+					for (const item of acceptedItems) {
+						// Only applied/contradicted feed promotion evidence here (violated
+						// comes from the delegate-ack path; ignored/n_a do not).
+						if (item.outcome !== 'applied' && item.outcome !== 'contradicted') {
+							continue;
+						}
+						const receiptEventId = eventIdByKnowledgeId.get(item.id);
+						if (!cohortId || !receiptEventId) continue;
+						evidenceRecords.push({
+							cohort_id: cohortId,
+							source_link_id: linkId,
+							entry_id: item.id,
+							retrieval_trace_id: traceId,
+							receipt_outcome:
+								item.outcome === 'applied' ? 'applied' : 'contradicted',
+							receipt_event_id: receiptEventId,
+							phase,
+							timestamp: now,
+						});
+					}
+					await appendPromotionEvidence(directory, evidenceRecords);
+				} catch {
+					/* non-blocking — evidence is a derived consumer */
+				}
 			}
 
 			// Persist new lessons through the normal validation/dedup path.
