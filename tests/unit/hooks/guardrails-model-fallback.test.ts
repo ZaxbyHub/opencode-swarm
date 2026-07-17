@@ -215,7 +215,9 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 		expect(swarmState.pendingEvents).toBe(initialPendingEvents);
 	});
 
@@ -380,10 +382,11 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// output.output is null, so hasError is true, but errorContent will be null
-		// null doesn't match the regex, so no advisory should be injected
+		// Missing output is a permanent, non-transient failure, not a fallback.
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -403,10 +406,11 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// output.output is undefined, so hasError is true, but errorContent will be undefined
-		// undefined doesn't match the regex, so no advisory should be injected
+		// Missing output is a permanent, non-transient failure, not a fallback.
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------

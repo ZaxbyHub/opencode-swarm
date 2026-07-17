@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import type {
 	GuardrailsConfig,
 	PluginConfig,
@@ -13,6 +13,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { telemetry } from '../../../src/telemetry';
 
 const TEST_DIRECTORY = process.cwd();
 
@@ -116,6 +117,56 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 				{ args: { filePath: 'package.json' } },
 			),
 		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
+	});
+
+	it('emits loop telemetry exactly once when each circuit transitions to hard stop', async () => {
+		const loopDetected = spyOn(telemetry, 'loopDetected').mockImplementation(
+			() => {},
+		);
+		try {
+			const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
+			setupSession('parser-telemetry');
+			for (let attempt = 1; attempt <= 2; attempt++) {
+				await hooks.toolAfter(
+					{
+						tool: 'bash',
+						sessionID: 'parser-telemetry',
+						callID: `parser-${attempt}`,
+						args: { command: 'broken' },
+					},
+					shellResult('ParserError: MissingEndCurlyBrace', 1),
+				);
+			}
+
+			setupSession('general-telemetry');
+			for (let attempt = 1; attempt <= 4; attempt++) {
+				await hooks.toolAfter(
+					{
+						tool: 'bash',
+						sessionID: 'general-telemetry',
+						callID: `general-${attempt}`,
+						args: { command: `failing-${attempt}` },
+					},
+					shellResult('permission denied', 2),
+				);
+			}
+
+			expect(loopDetected).toHaveBeenCalledTimes(2);
+			expect(loopDetected).toHaveBeenNthCalledWith(
+				1,
+				'parser-telemetry',
+				'coder',
+				'nontransient:shell_parse_error',
+			);
+			expect(loopDetected).toHaveBeenNthCalledWith(
+				2,
+				'general-telemetry',
+				'coder',
+				'nontransient:general_permanent',
+			);
+		} finally {
+			loopDetected.mockRestore();
+		}
 	});
 
 	it('preserves a permanent-failure streak across a malformed after-hook payload', async () => {

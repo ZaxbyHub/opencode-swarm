@@ -17,6 +17,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
 const TEST_DIR = os.tmpdir();
 
@@ -57,10 +58,13 @@ function architectSession(id: string): void {
 }
 
 function setDeclaredScope(sessionId: string, scope: string[]): void {
-	const session = getAgentSession(sessionId);
-	if (session) {
-		session.declaredCoderScope = scope;
-	}
+	if (scope.length === 0) return;
+	installActiveScopeBinding({
+		directory: TEST_DIR,
+		childSessionId: sessionId,
+		taskId: '1.1',
+		files: scope,
+	});
 }
 
 describe('guardrails shell write scope enforcement', () => {
@@ -567,7 +571,7 @@ describe('guardrails shell write scope enforcement', () => {
 	// -------------------------------------------------------------------------
 
 	describe('edge case: no declared scope — backward compatibility', () => {
-		it('allows write when session has no declared scope', async () => {
+		it('blocks write when session has no identity-bound scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s50');
 			// No setDeclaredScope call — declaredCoderScope remains null
@@ -577,10 +581,10 @@ describe('guardrails shell write scope enforcement', () => {
 					makeBashInput('s50'),
 					makeOutput('echo hello > /etc/config.txt'),
 				),
-			).resolves.toBeUndefined();
+			).rejects.toThrow(/WRITE BLOCKED|scope binding/);
 		});
 
-		it('allows write when declared scope is empty array', async () => {
+		it('blocks write when declared scope is empty', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s51');
 			setDeclaredScope('s51', []); // empty scope
@@ -590,7 +594,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeBashInput('s51'),
 					makeOutput('echo hello > /tmp/out.txt'),
 				),
-			).resolves.toBeUndefined();
+			).rejects.toThrow(/WRITE BLOCKED|scope binding/);
 		});
 	});
 
@@ -780,8 +784,7 @@ describe('guardrails shell write scope enforcement', () => {
 			coderSession('s70');
 			setDeclaredScope('s70', ['src/']);
 
-			// write tool should not be blocked by shell write scope check
-			// (it has its own authority check)
+			// This assertion isolates the shell-specific integration layer.
 			await expect(
 				hooks.toolBefore(
 					{ tool: 'write', sessionID: 's70', callID: 'c1' },
@@ -858,7 +861,9 @@ describe('guardrails shell write scope enforcement', () => {
 				),
 			);
 			if (process.platform === 'win32') {
-				await result.rejects.toThrow(/sandbox.*unsafe characters/i);
+				await result.rejects.toThrow(
+					/sandbox.*unsafe characters|NON-TRANSIENT CIRCUIT BREAKER/i,
+				);
 			} else {
 				await result.resolves.toBeUndefined();
 			}

@@ -7,6 +7,7 @@ import {
 	type PendingToolExecution,
 	swarmState,
 } from '../../state';
+import { telemetry } from '../../telemetry';
 
 const SAME_CATEGORY_HARD_STOP_THRESHOLD = 3;
 const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
@@ -253,6 +254,7 @@ export function recordNonTransientFailure(
 	const circuit = ensureCircuit(sessionID);
 	const session = getAgentSession(sessionID);
 	if (!circuit || !session) return null;
+	const wasHardStopped = circuit.hardStop;
 
 	if (circuit.category === category) {
 		circuit.sameCategoryCount++;
@@ -265,6 +267,13 @@ export function recordNonTransientFailure(
 		? 1
 		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
 	circuit.hardStop = circuit.sameCategoryCount >= threshold;
+	if (!wasHardStopped && circuit.hardStop) {
+		telemetry.loopDetected(
+			sessionID,
+			circuit.ownerAgent,
+			`nontransient:${category}`,
+		);
+	}
 
 	session.pendingAdvisoryMessages ??= [];
 	session.pendingAdvisoryMessages.push(

@@ -3,13 +3,19 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { getPendingCoderScope } from '../../../src/hooks/delegation-gate';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard';
 import {
 	createScopeBinding,
 	getAuthorizedScopeBinding,
+	getScopeBinding,
 	registerScopeBinding,
 } from '../../../src/scope/scope-binding';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	ensureAgentSession,
+	getAgentSession,
+	resetSwarmState,
+} from '../../../src/state';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -151,6 +157,36 @@ describe('coder scope preflight', () => {
 		await expect(dispatch('TASK: 1.1', 'mega_coder')).rejects.toThrow(
 			'SCOPE_NOT_DECLARED',
 		);
+	});
+
+	test('blocks Phase-1 mega_coder dispatch before any plan or scope state exists', async () => {
+		expect(fs.existsSync(path.join(directory, '.swarm', 'plan.json'))).toBe(
+			false,
+		);
+		await expect(dispatch('TASK: 1.1', 'mega_coder')).rejects.toThrow(
+			'SCOPE_NOT_DECLARED',
+		);
+
+		const absentPlanIdentity = planWith(['src/must-not-be-authorized.ts']);
+		expect(getPendingCoderScope(directory, '1.1')).toBeNull();
+		expect(
+			getScopeBinding({
+				directory,
+				plan: absentPlanIdentity,
+				taskId: '1.1',
+				ownerSessionId: 'parent',
+				ownerMessageId: 'task-call',
+			}),
+		).toBeNull();
+		expect(
+			getAuthorizedScopeBinding({
+				directory,
+				plan: absentPlanIdentity,
+				taskId: '1.1',
+				activeSessionId: 'child',
+			}),
+		).toBeNull();
+		expect(getAgentSession('child')).toBeUndefined();
 	});
 
 	test('scope preflight remains mandatory when delegation_gate is disabled', async () => {

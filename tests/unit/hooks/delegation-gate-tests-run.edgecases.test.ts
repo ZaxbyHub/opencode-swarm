@@ -48,6 +48,7 @@ async function writePlanJson(
 			status?: string;
 			depends?: string[];
 			phase?: number;
+			filesTouched?: string[];
 		}>;
 		currentPhase?: number;
 	},
@@ -74,7 +75,9 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: task.filesTouched ?? [
+						`src/tasks/${task.id.replace('.', '-')}.ts`,
+					],
 				})),
 			},
 		],

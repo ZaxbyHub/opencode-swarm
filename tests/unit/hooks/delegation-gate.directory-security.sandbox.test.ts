@@ -210,7 +210,7 @@ describe('delegation-gate: sandbox escape prevention', () => {
 		expect(threw).toBe(false);
 	});
 
-	it('should handle unicode normalization path attempts', async () => {
+	it('should reject unicode path traversal attempts', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 
@@ -227,10 +227,10 @@ describe('delegation-gate: sandbox escape prevention', () => {
 			threw = true;
 		}
 
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 
-	it('should handle mixed path separator attempts', async () => {
+	it('should reject mixed path separator traversal attempts', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 
@@ -246,6 +246,6 @@ describe('delegation-gate: sandbox escape prevention', () => {
 			threw = true;
 		}
 
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 });

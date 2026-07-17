@@ -136,14 +136,45 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 	};
 
 	const lines = payload.split('\n');
-	const native = lines.some((line) => line.trim() === '*** Begin Patch');
+	const beginIndices: number[] = [];
+	const endIndices: number[] = [];
+	const nativeOperationIndices: number[] = [];
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] ?? '';
+		const trimmed = line.trim();
+		if (trimmed === '*** Begin Patch') beginIndices.push(index);
+		if (trimmed === '*** End Patch') endIndices.push(index);
+		if (
+			/^\*\*\* (?:Update|Add|Delete) File:/i.test(line) ||
+			/^\*\*\* Move (?:to|from):/i.test(line)
+		) {
+			nativeOperationIndices.push(index);
+		}
+	}
+	const native =
+		beginIndices.length > 0 ||
+		endIndices.length > 0 ||
+		nativeOperationIndices.length > 0;
 	if (native) {
-		let sawEnd = false;
-		for (const line of lines) {
-			if (line.trim() === '*** End Patch') {
-				sawEnd = true;
-				continue;
-			}
+		if (beginIndices.length === 0)
+			return 'Native patch is missing *** Begin Patch';
+		if (endIndices.length === 0) return 'Native patch is missing *** End Patch';
+		if (beginIndices.length !== 1 || endIndices.length !== 1)
+			return 'Native patch framing must contain exactly one begin and end marker';
+		const beginIndex = beginIndices[0] ?? -1;
+		const endIndex = endIndices[0] ?? -1;
+		if (beginIndex >= endIndex)
+			return 'Native patch has invalid begin/end marker ordering';
+		if (
+			nativeOperationIndices.some(
+				(index) => index <= beginIndex || index >= endIndex,
+			)
+		) {
+			return 'Native patch contains an operation outside begin/end markers';
+		}
+
+		for (let index = beginIndex + 1; index < endIndex; index++) {
+			const line = lines[index] ?? '';
 			const match = line.match(/^\*\*\* (Update|Add|Delete) File:\s*(.*)$/);
 			if (match) {
 				const error = add(match[2] ?? '', (match[1] ?? '').toLowerCase());
@@ -156,7 +187,6 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 				if (error) return error;
 			}
 		}
-		if (!sawEnd) return 'Native patch is missing *** End Patch';
 	} else {
 		for (const line of lines) {
 			const git = line.match(/^diff --git\s+(.+)$/);

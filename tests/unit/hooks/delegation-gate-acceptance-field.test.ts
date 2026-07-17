@@ -19,18 +19,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import type { Plan } from '../../../src/config/plan-schema';
 import {
 	createDelegationGateHook,
 	validateCoderReviewerAcceptanceField,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
-
-// A directory with no .swarm/plan.json — loadPlanJsonOnly returns null, so the
-// coder branch past the acceptance gate is a no-op (no plan-critic/reviewer
-// gate fires). This isolates the acceptance-field check as the only gate under
-// test for an otherwise-idle session.
-const TEST_DIR = '/test/project-1687-acceptance';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(): PluginConfig {
 	return {
@@ -161,30 +160,66 @@ describe('validateCoderReviewerAcceptanceField (unit)', () => {
 });
 
 describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => {
-	beforeEach(() => {
+	let testDir: string;
+
+	beforeEach(async () => {
 		resetSwarmState();
+		testDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'acceptance-field-')),
+		);
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Acceptance field integration',
+			swarm: 'test',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Implementation',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending',
+							size: 'small',
+							description: 'Exercise the acceptance gate',
+							depends: [],
+							files_touched: ['src/foo.ts'],
+						},
+					],
+				},
+			],
+		};
+		fs.writeFileSync(
+			path.join(testDir, '.swarm', 'plan.json'),
+			JSON.stringify(plan),
+		);
+		await recordPlanCriticApproval(testDir, plan);
 	});
 	afterEach(() => {
 		resetSwarmState();
+		fs.rmSync(testDir, { recursive: true, force: true });
 	});
 
 	// ---- coder (a/b/c) ----
 	it('(a) allows a coder dispatch that carries a non-empty ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-coder-ok', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-coder-ok'), {
 				args: {
 					subagent_type: 'coder',
 					prompt:
-						'TASK: implement it\nACCEPTANCE: FR-001 the feature works and is tested',
+						'TASK: 1.1\nACCEPTANCE: FR-001 the feature works and is tested',
 				},
 			}),
 		).resolves.toBeUndefined();
 	});
 
 	it('(b) blocks a coder dispatch with no ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-coder-missing', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-coder-missing'), {
@@ -194,7 +229,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(c) blocks a coder dispatch with a whitespace-only ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-coder-empty', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-coder-empty'), {
@@ -207,14 +242,14 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(a2) allows a coder dispatch whose ACCEPTANCE is a multi-line section', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-coder-multiline', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-coder-multiline'), {
 				args: {
 					subagent_type: 'coder',
 					prompt:
-						'TASK: implement it\nACCEPTANCE:\n- **FR-001 — Foo.** The system SHALL render the widget.\nSKILLS: none',
+						'TASK: 1.1\nACCEPTANCE:\n- **FR-001 — Foo.** The system SHALL render the widget.\nSKILLS: none',
 				},
 			}),
 		).resolves.toBeUndefined();
@@ -222,7 +257,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 
 	// ---- reviewer (d) ----
 	it('(d1) allows a reviewer dispatch that carries a non-empty ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-rev-ok', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-rev-ok'), {
@@ -236,7 +271,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(d2) blocks a reviewer dispatch with no ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-rev-missing', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-rev-missing'), {
@@ -246,7 +281,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(d3) blocks a reviewer dispatch with an empty ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-rev-empty', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-rev-empty'), {
@@ -259,7 +294,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('blocks a prefixed coder target (mega_coder) missing ACCEPTANCE', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-mega', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-mega'), {
@@ -270,7 +305,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 
 	// ---- scope discipline (e) ----
 	it('(e1) does NOT gate an sme dispatch that lacks an ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-sme', 'architect');
 		// resolves (no throw of ANY kind) proves the acceptance gate never fired —
 		// strictly stronger than asserting "not ACCEPTANCE_FIELD_REQUIRED".
@@ -282,7 +317,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(e2) does NOT gate an explorer dispatch that lacks an ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-explorer', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-explorer'), {
@@ -292,7 +327,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('(e3) does NOT gate a critic dispatch that lacks an ACCEPTANCE field', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-critic', 'architect');
 		await expect(
 			hooks.toolBefore(toolBeforeInput('sess-critic'), {
@@ -302,7 +337,7 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	});
 
 	it('does not fire for a non-Task tool even with a coder-looking arg', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), TEST_DIR);
+		const hooks = createDelegationGateHook(makeConfig(), testDir);
 		ensureAgentSession('sess-nontask', 'architect');
 		await expect(
 			hooks.toolBefore(

@@ -491,8 +491,8 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 				hooks.toolBefore(input, { args: { cmd: ['apply', malicious] } }),
 			).rejects.toThrow(/apply_patch would introduce a script/);
 		});
-		test('apply_patch with `cmd` array of length 1 (no payload at cmd[1]) is silently allowed', async () => {
-			// Defensive: missing cmd[1] must not throw a TypeError or leak.
+		test('apply_patch with `cmd` array of length 1 fails closed as unverifiable', async () => {
+			// Missing cmd[1] cannot prove a complete target set.
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			const input = {
 				tool: 'apply_patch',
@@ -501,7 +501,7 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 			};
 			await expect(
 				hooks.toolBefore(input, { args: { cmd: ['apply'] } }),
-			).resolves.toBeUndefined();
+			).rejects.toThrow(/WRITE TARGET UNVERIFIABLE/);
 		});
 
 		// PR #896 follow-up review #3: field-divergence + filePath

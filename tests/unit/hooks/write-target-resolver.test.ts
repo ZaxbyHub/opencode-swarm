@@ -126,6 +126,25 @@ describe('write-target resolver registry — issue #1875', () => {
 		}
 	});
 
+	test('rejects unframed, duplicated, reordered, and out-of-frame native operations', () => {
+		for (const patch of [
+			'*** Update File: ../../../etc/passwd\n--- a/test\n+++ b/test',
+			'*** End Patch\n*** Update File: src/a.ts',
+			'*** Begin Patch\n*** Update File: src/a.ts',
+			'*** End Patch\n*** Begin Patch\n*** Update File: src/a.ts',
+			'*** Begin Patch\n*** Begin Patch\n*** Update File: src/a.ts\n*** End Patch',
+			'*** Update File: ../../../etc/passwd\n*** Begin Patch\n*** Update File: src/a.ts\n*** End Patch',
+			'*** Begin Patch\n*** Update File: src/a.ts\n*** End Patch\n*** Delete File: ../../../etc/passwd',
+		]) {
+			const result = resolveWriteTargets(
+				'apply_patch',
+				{ patch },
+				{ directory: process.cwd() },
+			);
+			expect(result.status).toBe('unverifiable');
+		}
+	});
+
 	test('enforces an aggregate cap across multiple cmd payloads', () => {
 		const payload = `--- a/src/a.ts\n+++ b/src/a.ts\n${'x'.repeat(
 			Math.floor(MAX_PATCH_AGGREGATE_BYTES / 3) + 1,

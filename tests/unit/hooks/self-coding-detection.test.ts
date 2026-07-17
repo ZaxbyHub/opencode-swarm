@@ -256,7 +256,11 @@ describe('architect self-coding detection (Task 2.1)', () => {
 			sessionID: sessionId,
 			callID: 'call-3',
 		};
-		const toolOutput3 = { args: { filePath: 'src/c.ts', content: 'c' } };
+		const toolOutput3 = {
+			args: {
+				input: '*** Begin Patch\n*** Add File: src/c.ts\n+c\n*** End Patch',
+			},
+		};
 		await hook.toolBefore(toolInput3 as any, toolOutput3 as any);
 		expect(session.architectWriteCount).toBe(3);
 	});
@@ -1662,8 +1666,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = {}; // No args
 
-		// Hook handles missing args gracefully (no filePath to check)
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		// No write count increment because no filePath was found
@@ -1681,8 +1686,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = { args: { filePath: null } };
 
-		// Hook handles null filePath gracefully
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		expect(session.architectWriteCount).toBe(0);
@@ -1699,8 +1705,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = { args: { filePath: undefined } };
 
-		// Hook handles undefined filePath gracefully
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		expect(session.architectWriteCount).toBe(0);
@@ -1717,8 +1724,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = { args: { filePath: '', content: 'test' } };
 
-		// Hook handles empty string filePath gracefully
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		// Empty string is falsy in isOutsideSwarmDir check
@@ -1736,8 +1744,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		const toolInput = { tool: 'write', sessionID: sessionId, callID: 'call-1' };
 		const toolOutput = { args: { filePath: 12345 as any, content: 'test' } };
 
-		// Hook handles non-string filePath gracefully (type check)
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		// Non-string is ignored due to typeof check
@@ -1757,8 +1766,9 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 			args: { filePath: { path: 'evil' } as any, content: 'test' },
 		};
 
-		// Hook handles object filePath gracefully (type check)
-		await hook.toolBefore(toolInput as any, toolOutput as any);
+		await expect(
+			hook.toolBefore(toolInput as any, toolOutput as any),
+		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 		const session = ensureAgentSession(sessionId);
 		expect(session.architectWriteCount).toBe(0);
@@ -1960,7 +1970,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 		};
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
-		).rejects.toThrow('WRITE BLOCKED');
+		).rejects.toThrow(/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/);
 
 		const session = ensureAgentSession(sessionId);
 		// Should detect as outside .swarm/ since null byte is before .swarm/

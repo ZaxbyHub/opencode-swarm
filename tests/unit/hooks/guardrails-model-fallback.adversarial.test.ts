@@ -119,7 +119,9 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Should NOT match (no transient error keywords)
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 		// Should complete very quickly
 		expect(elapsed).toBeLessThan(500);
 	}, 5000);
@@ -164,9 +166,9 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Number is not a string, typeof !== 'string', so regex.test() is never called
-		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		// Structured numeric 429 is normalized and handled as transient.
+		expect(session.model_fallback_index).toBe(1);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain('MODEL FALLBACK');
 	});
 
 	// -------------------------------------------------------------------------
@@ -188,7 +190,9 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Array is not a string
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -414,7 +418,9 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Empty string is a string, but TRANSIENT_MODEL_ERROR_PATTERN.test('') returns false
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -435,7 +441,9 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -456,7 +464,9 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -478,7 +488,9 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		// Infinity is not a string
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 
 	// -------------------------------------------------------------------------
@@ -556,6 +568,8 @@ describe('guardrails model fallback adversarial tests', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages?.[0]).toContain(
+			'NON-TRANSIENT STOP',
+		);
 	});
 });

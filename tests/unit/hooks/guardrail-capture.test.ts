@@ -29,6 +29,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -284,8 +285,12 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 			startAgentSession('s-scope', 'test_engineer');
 			swarmState.activeAgent.set('s-scope', 'test_engineer');
 
-			const session = getAgentSession('s-scope')!;
-			session.declaredCoderScope = ['src/'];
+			installActiveScopeBinding({
+				directory: tempDir,
+				childSessionId: 's-scope',
+				taskId: '1.1',
+				files: ['src/'],
+			});
 
 			// echo hello > lib/output.txt — inside cwd, but outside declaredScope src/
 			// Authority check passes (lib/ is not blocked for test_engineer).
@@ -466,8 +471,12 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 			startAgentSession('s-propagate2', 'test_engineer');
 			swarmState.activeAgent.set('s-propagate2', 'test_engineer');
 
-			const session = getAgentSession('s-propagate2')!;
-			session.declaredCoderScope = ['src/'];
+			installActiveScopeBinding({
+				directory: tempDir,
+				childSessionId: 's-propagate2',
+				taskId: '1.1',
+				files: ['src/'],
+			});
 
 			// The error must be thrown (not swallowed by the audit capture)
 			await expect(
