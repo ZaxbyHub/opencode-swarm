@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
+import { loadDatabaseCtor } from '../db/sqlite-loader.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import {
@@ -75,16 +76,11 @@ import type {
 	ResolvedCuratorMemoryDecision,
 } from './types';
 
-// See src/db/project-db.ts for the portability rationale. The main plugin bundle
-// is Node-ESM-loadable, so the Bun SQLite driver must be resolved only when the
-// SQLite memory provider is selected and initialized.
-let _DatabaseCtor: typeof Database | null = null;
-function loadDatabaseCtor(): typeof Database {
-	if (_DatabaseCtor) return _DatabaseCtor;
-	const req = createRequire(import.meta.url);
-	_DatabaseCtor = (req('bun:sqlite') as { Database: typeof Database }).Database;
-	return _DatabaseCtor;
-}
+// The runtime SQLite driver is resolved by the shared, runtime-portable loader
+// (`../db/sqlite-loader.ts`): native `bun:sqlite` under Bun, a `node:sqlite` adapter
+// under Node (issue #1873 / invariant #2). Resolved lazily inside `doInitialize` so
+// the bundle keeps no top-level `bun:` import (issue #675) and the driver loads only
+// when the SQLite memory provider is actually selected.
 
 type EventOperation =
 	| 'upsert'
@@ -1454,7 +1450,10 @@ export class SQLiteMemoryProvider
 	private getStoredModelVersion(): string | null {
 		const row = this.requireDb()
 			.query<{ value: string }, [string]>(
-				`SELECT value FROM embedding_config WHERE key = 'model_version' LIMIT 1`,
+				// Parameterized (was a hard-coded key literal): node:sqlite rejects a
+				// bound param when the SQL has no placeholder ("column index out of
+				// range"), unlike bun:sqlite which tolerates it (issue #1873).
+				`SELECT value FROM embedding_config WHERE key = ? LIMIT 1`,
 			)
 			.get('model_version');
 		return row?.value ?? null;
@@ -1560,7 +1559,9 @@ export class SQLiteMemoryProvider
 		// One-time guard: skip if backfill was already completed in a prior init.
 		const metaRow = db
 			.query<{ value: string }, [string]>(
-				"SELECT value FROM _meta WHERE key = 'scope_key_backfilled'",
+				// Parameterized — see getStoredModelVersion (issue #1873): a bound
+				// param against a placeholder-less query throws under node:sqlite.
+				'SELECT value FROM _meta WHERE key = ?',
 			)
 			.get('scope_key_backfilled');
 		if (metaRow?.value === '1') return;
@@ -1608,7 +1609,9 @@ export class SQLiteMemoryProvider
 		// One-time guard: skip if backfill was already completed in a prior init.
 		const metaRow = db
 			.query<{ value: string }, [string]>(
-				"SELECT value FROM _meta WHERE key = 'recall_run_id_backfilled'",
+				// Parameterized — see getStoredModelVersion (issue #1873): a bound
+				// param against a placeholder-less query throws under node:sqlite.
+				'SELECT value FROM _meta WHERE key = ?',
 			)
 			.get('recall_run_id_backfilled');
 		if (metaRow?.value === '1') return;

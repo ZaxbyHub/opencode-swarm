@@ -1,0 +1,47 @@
+# Fix: opencode-swarm now runs under Node (Electron sidecar), not only Bun
+
+## What
+
+Resolves #1873. OpenCode Desktop loads the plugin inside a **Node.js** Electron
+`utilityProcess` sidecar, but the SQLite layer resolved the Bun-only
+`bun:sqlite` module with no fallback. Under Node this threw
+`Cannot find module 'bun:sqlite'`, so every SQLite-backed tool failed:
+`swarm_memory_recall`, `get_qa_gate_profile` / `set_qa_gates`,
+`get_approved_plan`, and any project- or global-scoped database operation.
+
+The three duplicated `loadDatabaseCtor()` helpers are now a single
+runtime-portable loader (`src/db/sqlite-loader.ts`):
+
+- Under **Bun**, it returns the native `bun:sqlite` `Database` — behavior is
+  unchanged.
+- Under **Node** (flag-free `node:sqlite` in Node 22.13+ / Electron 42+), it
+  wraps the built-in `node:sqlite` `DatabaseSync` in a small adapter that
+  presents the exact `bun:sqlite` `Database` API the codebase uses (`run`,
+  `query().get/all/iterate`, `transaction`, `inTransaction`, `loadExtension`,
+  `close`). No new dependency; `node:sqlite` is a Node built-in (added behind
+  `--experimental-sqlite` in 22.5, unflagged in 22.13).
+- If neither driver is available, it throws one clear diagnostic instead of a
+  cryptic module-not-found.
+
+Also fixed a latent portability bug the Node path surfaced: three memory-provider
+meta lookups hard-coded a key in the SQL while still passing it as a bound
+parameter. `bun:sqlite` tolerates the extra bind; `node:sqlite` rejects it
+(`SQLITE_RANGE`). Those queries are now parameterized.
+
+Known caveat under the Node fallback: dense (vector) recall via the optional
+`@sqlite/sqlite-vec` extension may be unavailable under `node:sqlite` (it is an
+optional dependency and not always loadable); memory recall then degrades
+gracefully to the lexical/FTS path — the same behavior as when the extension is
+absent under Bun.
+
+## Preventing recurrence
+
+- `tests/unit/build/bundle-portability.test.ts` now also fails on any new
+  un-fenced `bun:` runtime `require`/`import()` in source (outside the single
+  sanctioned loader) and asserts the shipped bundle keeps a `node:sqlite`
+  fallback beside `bun:sqlite`. The prior check only caught *top-level* `bun:`
+  imports, which a lazy `require` slipped past.
+- `scripts/repro-1873.mjs` (wired as `bun run repro:1873` and a **merge-queue** CI
+  smoke step on Linux/macOS/Windows) drives the real project DB, global DB, and
+  SQLite memory provider under Node and asserts they work through the
+  `node:sqlite` adapter.

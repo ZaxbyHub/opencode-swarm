@@ -751,6 +751,13 @@ jobs:
       - name: Smoke tests
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         run: bun test tests/smoke --timeout 120000
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        # Pin a Node with flag-free node:sqlite (22.13+) for the #1873 repro below,
+        # which drives the DB layer under Node via the node:sqlite fallback. Matches
+        # the node-version used by the package-check job.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        with:
+          node-version: "22"
       - name: Issue #704 repro — Desktop init under Node
         # Loads the compiled dist/ under Node (the runtime OpenCode Desktop's
         # sidecar uses on macOS) and asserts the plugin's `server()` resolves
@@ -759,3 +766,11 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: node scripts/repro-704.mjs
+      - name: Issue #1873 repro — SQLite under Node
+        # Drives the REAL project DB, global DB, and SQLite memory provider under
+        # Node (no bun:sqlite) via the node:sqlite adapter. Pre-fix this threw
+        # "Cannot find module 'bun:sqlite'" from every SQLite-backed tool. Runs on
+        # Linux, macOS, Windows. `bun run` builds the harness entry, `node` runs it.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: bun run repro:1873
