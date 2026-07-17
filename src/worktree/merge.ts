@@ -10,6 +10,7 @@
  * @module merge-back
  */
 
+import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
@@ -262,7 +263,7 @@ export async function mergeLaneBranch(
 			} else {
 				// No common ancestor (e.g. unrelated histories) — fall back
 				// to cherry-picking just the branch tip with a warning.
-				log(
+				advisoryWarn(
 					'[worktree] mergeLaneBranch: git merge-base failed for cherry-pick; falling back to tip-only cherry-pick',
 				);
 				result = await runGit(['cherry-pick', branchName], primaryDir);

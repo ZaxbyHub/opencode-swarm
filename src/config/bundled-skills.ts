@@ -1,4 +1,4 @@
-﻿import { randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
@@ -74,7 +74,7 @@ function describeBundledSkillSyncFailure(err: unknown): string {
 // ---------------------------------------------------------------------------
 // Async materialization for the plugin-init path. The plugin-init path must be
 // bounded by `withTimeout` (AGENTS.md Invariant 1). `withTimeout` is
-// `Promise.race`, so it can only bound work that actually yields â€” a synchronous
+// `Promise.race`, so it can only bound work that actually yields — a synchronous
 // copy loop wrapped in an async IIFE still runs to completion on one tick and is
 // NOT bounded. This implementation uses `fs/promises` with real await points
 // between files so the timeout is enforceable at file boundaries.

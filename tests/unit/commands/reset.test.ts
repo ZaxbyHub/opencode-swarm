@@ -5,70 +5,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// ── Mocks (must precede the SUT import; state mock for singleton preservation test) ──
-// reset command itself does not import state (unlike close.ts), but we mock surrounding
-// state to verify that the reset command path leaves the 7 init singletons intact.
-type MockSwarmState = {
-	activeToolCalls: Map<string, unknown>;
-	toolAggregates: Map<string, unknown>;
-	activeAgent: Map<string, unknown>;
-	delegationChains: Map<string, unknown>;
-	pendingEvents: number;
-	lastBudgetPct: number;
-	agentSessions: Map<string, unknown>;
-	pendingRehydrations: Set<unknown>;
-	opencodeClient: unknown;
-	fullAutoEnabledInConfig: boolean;
-	curatorInitAgentNames: string[];
-	curatorPhaseAgentNames: string[];
-	skillImproverAgentNames: string[];
-	specWriterAgentNames: string[];
-	generatedAgentNames: string[];
-	currentCriticalShownIds: Map<string, unknown>;
-	knowledgeAckDedup: Set<unknown>;
-	environmentProfiles: Map<string, unknown>;
-};
-
-let mockedSwarmState: MockSwarmState = {} as MockSwarmState;
-
-mock.module('../../../src/state.js', () => {
-	mockedSwarmState = {
-		activeToolCalls: new Map<string, unknown>(),
-		toolAggregates: new Map<string, unknown>(),
-		activeAgent: new Map<string, unknown>(),
-		delegationChains: new Map<string, unknown>(),
-		pendingEvents: 0,
-		lastBudgetPct: 0,
-		agentSessions: new Map<string, unknown>(),
-		pendingRehydrations: new Set<unknown>(),
-		opencodeClient: null,
-		fullAutoEnabledInConfig: false,
-		curatorInitAgentNames: [] as string[],
-		curatorPhaseAgentNames: [] as string[],
-		skillImproverAgentNames: [] as string[],
-		specWriterAgentNames: [] as string[],
-		generatedAgentNames: [] as string[],
-		currentCriticalShownIds: new Map<string, unknown>(),
-		knowledgeAckDedup: new Set<unknown>(),
-		environmentProfiles: new Map<string, unknown>(),
-	};
-	return {
-		swarmState: mockedSwarmState,
-		endAgentSession: () => {},
-		// Guard: reset command path must never invoke swarmState reset (bare or preserving).
-		// Only close.ts uses resetSwarmStatePreservingSingletons to keep the 7 init singletons.
-		resetSwarmState: () => {
-			throw new Error('reset command path must not call resetSwarmState');
-		},
-		resetSwarmStatePreservingSingletons: () => {
-			throw new Error(
-				'reset command path must not call resetSwarmStatePreservingSingletons',
-			);
-		},
-	};
-});
-
+// The only cross-module mock in this file is the scoped node:fs error simulation.
+// The reset command does not import state; this suite verifies the real singleton
+// remains intact without a process-global state mock.
 import { handleResetCommand } from '../../../src/commands/reset';
+import { swarmState } from '../../../src/state';
 
 describe('handleResetCommand', () => {
 	let tempDir: string;
@@ -79,8 +20,7 @@ describe('handleResetCommand', () => {
 	});
 
 	afterEach(async () => {
-		// Restore cross-module mocks (state.js) to prevent leakage to other tests in file.
-		// Per writing-tests skill and AGENTS.md test isolation rules.
+		// Restore the node:fs mock used by the EBUSY/EACCES cases below.
 		mock.restore();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
@@ -364,28 +304,7 @@ describe('handleResetCommand', () => {
 	// Verifies that the reset command path does not disturb the 7 module-scoped
 	// singletons that are preserved by resetSwarmStatePreservingSingletons (used by close).
 	// reset command only clears .swarm/ files + automation; swarmState singletons must survive.
-	test('singleton preservation through reset command path - 7 init singletons survive (mock surrounding state)', async () => {
-		// Re-initialize mockedSwarmState (mock.module runs once at load; afterEach
-		// mock.restore() may have cleared it, so re-assign the fields we need).
-		mockedSwarmState = {
-			activeToolCalls: new Map<string, unknown>(),
-			toolAggregates: new Map<string, unknown>(),
-			activeAgent: new Map<string, unknown>(),
-			delegationChains: new Map<string, unknown>(),
-			pendingEvents: 0,
-			opencodeClient: null,
-			curatorInitAgentNames: [] as string[],
-			curatorPhaseAgentNames: [] as string[],
-			skillImproverAgentNames: [] as string[],
-			specWriterAgentNames: [] as string[],
-			generatedAgentNames: [] as string[],
-			lastBudgetPct: 0,
-			agentSessions: new Map<string, unknown>(),
-			pendingRehydrations: new Set<Promise<void>>(),
-			fullAutoEnabledInConfig: false,
-			environmentProfiles: new Map<string, unknown>(),
-		} as MockSwarmState;
-
+	test('singleton preservation through reset command path - 7 init singletons survive', async () => {
 		// Create .swarm/plan.md so the reset command actually deletes it.
 		await mkdir(join(tempDir, '.swarm'), { recursive: true });
 		await writeFile(join(tempDir, '.swarm', 'plan.md'), '# test');
@@ -393,38 +312,54 @@ describe('handleResetCommand', () => {
 		// Set sentinel values for the 7 preserved singletons (populated at plugin init).
 		// Also seed transient state that a bare resetSwarmState would clear.
 		const sentinelClient = { __reset_test: 'preserved-opencode-client' };
-		mockedSwarmState.opencodeClient = sentinelClient;
-		mockedSwarmState.fullAutoEnabledInConfig = true;
-		mockedSwarmState.curatorInitAgentNames = ['reset_init_a', 'reset_init_b'];
-		mockedSwarmState.curatorPhaseAgentNames = ['reset_phase_x'];
-		mockedSwarmState.skillImproverAgentNames = ['reset_skill_y'];
-		mockedSwarmState.specWriterAgentNames = ['reset_spec_z'];
-		mockedSwarmState.generatedAgentNames = ['reset_gen_1', 'reset_gen_2'];
-		mockedSwarmState.pendingEvents = 999;
-		mockedSwarmState.lastBudgetPct = 42;
-		mockedSwarmState.activeToolCalls.set('reset-test-call', { tool: 'y' });
+		const original = {
+			opencodeClient: swarmState.opencodeClient,
+			fullAutoEnabledInConfig: swarmState.fullAutoEnabledInConfig,
+			curatorInitAgentNames: swarmState.curatorInitAgentNames,
+			curatorPhaseAgentNames: swarmState.curatorPhaseAgentNames,
+			skillImproverAgentNames: swarmState.skillImproverAgentNames,
+			specWriterAgentNames: swarmState.specWriterAgentNames,
+			generatedAgentNames: swarmState.generatedAgentNames,
+			pendingEvents: swarmState.pendingEvents,
+			lastBudgetPct: swarmState.lastBudgetPct,
+		};
+		try {
+			swarmState.opencodeClient = sentinelClient as never;
+			swarmState.fullAutoEnabledInConfig = true;
+			swarmState.curatorInitAgentNames = ['reset_init_a', 'reset_init_b'];
+			swarmState.curatorPhaseAgentNames = ['reset_phase_x'];
+			swarmState.skillImproverAgentNames = ['reset_skill_y'];
+			swarmState.specWriterAgentNames = ['reset_spec_z'];
+			swarmState.generatedAgentNames = ['reset_gen_1', 'reset_gen_2'];
+			swarmState.pendingEvents = 999;
+			swarmState.lastBudgetPct = 42;
+			swarmState.activeToolCalls.set('reset-test-call', { tool: 'y' });
 
-		const result = await handleResetCommand(tempDir, ['--confirm']);
+			const result = await handleResetCommand(tempDir, ['--confirm']);
 
-		// Reset command still performs its file/automation work.
-		expect(result).toContain('## Swarm Reset Complete');
-		expect(result).toContain('✅ Deleted plan.md');
+			// Reset command still performs its file/automation work.
+			expect(result).toContain('## Swarm Reset Complete');
+			expect(result).toContain('✅ Deleted plan.md');
 
-		// All 7 singletons must survive the reset command path (proves no bare or
-		// preserving reset of swarmState was triggered by handleResetCommand).
-		expect(mockedSwarmState.opencodeClient).toBe(sentinelClient);
-		expect(mockedSwarmState.fullAutoEnabledInConfig).toBe(true);
-		expect(mockedSwarmState.curatorInitAgentNames).toEqual([
-			'reset_init_a',
-			'reset_init_b',
-		]);
-		expect(mockedSwarmState.curatorPhaseAgentNames).toEqual(['reset_phase_x']);
-		expect(mockedSwarmState.skillImproverAgentNames).toEqual(['reset_skill_y']);
-		expect(mockedSwarmState.specWriterAgentNames).toEqual(['reset_spec_z']);
-		expect(mockedSwarmState.generatedAgentNames).toEqual([
-			'reset_gen_1',
-			'reset_gen_2',
-		]);
+			// All 7 singletons must survive the reset command path (proves no bare or
+			// preserving reset of swarmState was triggered by handleResetCommand).
+			expect(swarmState.opencodeClient).toBe(sentinelClient);
+			expect(swarmState.fullAutoEnabledInConfig).toBe(true);
+			expect(swarmState.curatorInitAgentNames).toEqual([
+				'reset_init_a',
+				'reset_init_b',
+			]);
+			expect(swarmState.curatorPhaseAgentNames).toEqual(['reset_phase_x']);
+			expect(swarmState.skillImproverAgentNames).toEqual(['reset_skill_y']);
+			expect(swarmState.specWriterAgentNames).toEqual(['reset_spec_z']);
+			expect(swarmState.generatedAgentNames).toEqual([
+				'reset_gen_1',
+				'reset_gen_2',
+			]);
+		} finally {
+			Object.assign(swarmState, original);
+			swarmState.activeToolCalls.delete('reset-test-call');
+		}
 	});
 
 	// ── EBUSY / LOCKED FILE ERROR HANDLING (FR-007) ──────────────────────────────

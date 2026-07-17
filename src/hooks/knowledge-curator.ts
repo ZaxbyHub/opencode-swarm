@@ -1,4 +1,4 @@
-﻿/** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
+/** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -69,7 +69,7 @@ const seenRetroSections = new Map<
 	string,
 	{ value: string; timestamp: number }
 >();
-// AGENTS.md Â§8: module-level state must have an explicit eviction strategy, not
+// AGENTS.md §8: module-level state must have an explicit eviction strategy, not
 // only time-based pruning. A burst of distinct sessions inside the 24h window
 // would otherwise grow this map without bound. Cap the entry count and evict the
 // oldest-timestamp entries (LRU-by-recency) once the cap is exceeded.
@@ -515,19 +515,19 @@ export function buildV3EnrichmentPrompt(
 ): string {
 	return [
 		'Convert this prose lesson into an actionable knowledge directive.',
-		'Output ONLY a single JSON object â€” no code fences, no commentary.',
+		'Output ONLY a single JSON object — no code fences, no commentary.',
 		'',
 		'MANDATORY fields (the directive is rejected without them):',
 		'- At least ONE scope field non-empty:',
-		'  "applies_to_agents": string[] â€” roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
-		'  "applies_to_tools": string[] â€” tool names from: edit, write, patch, bash, read, grep, glob',
+		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
 		'- At least ONE predicate field non-empty:',
-		'  "forbidden_actions": string[] â€” concrete actions to never take',
-		'  "required_actions": string[] â€” concrete actions to always take',
-		'  "verification_checks": string[] â€” checks a reviewer can run',
+		'  "forbidden_actions": string[] — concrete actions to never take',
+		'  "required_actions": string[] — concrete actions to always take',
+		'  "verification_checks": string[] — checks a reviewer can run',
 		'',
 		'OPTIONAL fields:',
-		'  "triggers": string[] â€” short phrases that should surface this lesson',
+		'  "triggers": string[] — short phrases that should surface this lesson',
 		'  "directive_priority": "low" | "medium" | "high" | "critical"',
 		'',
 		'Example output:',
@@ -556,8 +556,8 @@ function buildV3BatchEnrichmentPrompt(
 		'',
 		'For EACH element, mandatory requirements:',
 		'- At least ONE scope field non-empty:',
-		'  "applies_to_agents": string[] â€” roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
-		'  "applies_to_tools": string[] â€” tool names from: edit, write, patch, bash, read, grep, glob',
+		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
 		'- At least ONE predicate field non-empty:',
 		'  "forbidden_actions": string[] | "required_actions": string[] | "verification_checks": string[]',
 		'',
@@ -809,7 +809,7 @@ interface EnrichmentLessonInput {
  * One retry on schema failure (with a RETRY message naming the missing
  * fields). Quota-gated per call via the dedicated knowledge-enrichment quota.
  * Returns null when
- * enrichment is unavailable (quota exhausted) or fails twice â€” the caller
+ * enrichment is unavailable (quota exhausted) or fails twice — the caller
  * quarantines the entry. Never throws.
  */
 export async function enrichLessonToV3(params: {
@@ -852,7 +852,7 @@ export async function enrichLessonToV3(params: {
 					err instanceof Error ? err.message : String(err)
 				}`,
 			);
-			// LLM/transport error: do not retry on a second transport failure path â€”
+			// LLM/transport error: do not retry on a second transport failure path —
 			// the loop's second iteration is the single retry budget either way.
 		}
 	}
@@ -882,7 +882,7 @@ async function appendCuratorSkippedEvent(
 	}
 }
 // ============================================================================
-// Meso reflector â€” micro-reflection insight consumption (Change 6, Task 5.2)
+// Meso reflector — micro-reflection insight consumption (Change 6, Task 5.2)
 // ============================================================================
 /** Max insight candidates folded into the store per phase boundary. */
 export const MESO_INSIGHT_BATCH_LIMIT = 20;
@@ -1139,7 +1139,7 @@ export async function curateAndStoreSwarm(
 			project_name: projectName,
 			auto_generated: true,
 		};
-		// Layer 5 â€” Mandatory v3 actionability (Change 4). No new entry reaches the
+		// Layer 5 — Mandatory v3 actionability (Change 4). No new entry reaches the
 		// active store without >=1 machine-checkable predicate AND >=1 scope tag.
 		// Plain-prose lessons are enriched via the curator LLM (one retry); entries
 		// that still fail are quarantined to the unactionable queue (recoverable by
@@ -1229,7 +1229,7 @@ export async function curateAndStoreSwarm(
 			// Defense-in-depth (Phase 5 review): the insight-candidates queue is an
 			// on-disk file that could be tampered between the micro-reflector's write
 			// and this read, so re-apply BOTH gates the micro-reflector applied at
-			// write time â€” shape (validateActionableFields: length caps, name
+			// write time — shape (validateActionableFields: length caps, name
 			// patterns, injection/control-char checks) AND presence
 			// (validateActionability). insightCandidateToEntry already copies only an
 			// explicit field allowlist (verification_predicate is never carried), so
@@ -1323,7 +1323,7 @@ export async function curateAndStoreSwarm(
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
 	// Change 5 / Task 6.2: refresh the tag co-occurrence synonym map from the
 	// post-write corpus so retrieval can expand queries along learned synonyms.
-	// Only when the corpus actually changed (something stored) â€” a no-op curation
+	// Only when the corpus actually changed (something stored) — a no-op curation
 	// run leaves the tag distribution untouched. Best-effort: a failure here must
 	// never break curation, and the retrieval read path degrades to no-expansion
 	// when the map is absent. The map is bounded by synonym_map_max_pairs.
@@ -1434,15 +1434,15 @@ export async function runAutoPromotion(
 /**
  * G7 (#1716): Auto-demote swarm entries that have sustained a net-negative
  * outcome signal over consecutive phase EVALUATIONS (i.e. consecutive
- * `runAutoDemotion` invocations with distinct phase numbers â€” a skipped phase
- * in between still counts, matching the issue's "â‰¥3 consecutive" intent as
+ * `runAutoDemotion` invocations with distinct phase numbers — a skipped phase
+ * in between still counts, matching the issue's "≥3 consecutive" intent as
  * implemented against evaluation cadence, not wall-clock phase contiguity).
  *
  * Companion to {@link runAutoPromotion}. For each `promoted` entry:
  *  1. Dedupe by phase: if `entry.last_demotion_phase === phaseNumber`, this
  *     entry has already been processed for this phase (handles the case where
  *     `curateAndStoreSwarm` is invoked multiple times in the same logical
- *     phase â€” e.g. phase-complete + close). Skip the counter update.
+ *     phase — e.g. phase-complete + close). Skip the counter update.
  *  2. Otherwise compute the outcome signal. If at/below
  *     `config.promoted_demotion_signal_threshold`, increment
  *     `recent_negative_phase_count`; else reset it to 0.
@@ -1486,7 +1486,7 @@ export async function runAutoDemotion(
 		// changed. Three real state transitions: counter increments, counter
 		// resets from a non-zero value (the entry "recovered" this phase), or
 		// demotion fires. A consistently-positive entry that stays at 0 between
-		// phases is a no-op â€” its `last_demotion_phase` update is the only
+		// phases is a no-op — its `last_demotion_phase` update is the only
 		// change and isn't worth a rewrite (the dedupe gate keys off it but a
 		// missing update is harmless: the next phase just re-evaluates).
 		const counterChanged = next !== prevCount;
@@ -1501,9 +1501,9 @@ export async function runAutoDemotion(
 		entry.recent_negative_phase_count = next;
 		entry.last_demotion_phase = phaseNumber;
 		if (willDemote) {
-			// Demote: promoted â†’ established. The boost-table raise (G7.2) means
+			// Demote: promoted → established. The boost-table raise (G7.2) means
 			// an `established` entry (+0.10) outranks a `candidate` (+0.0) but
-			// is outranked by a still-`promoted` entry (+0.15) â€” satisfying the
+			// is outranked by a still-`promoted` entry (+0.15) — satisfying the
 			// issue's intent that demoted entries no longer get the promoted boost.
 			entry.status = 'established';
 			entry.hive_eligible = false;
@@ -1648,7 +1648,7 @@ export function createKnowledgeCuratorHook(
 	return safeHook(handler);
 }
 // ============================================================================
-// DI Seam â€” _internals
+// DI Seam — _internals
 // ============================================================================
 export const _internals: {
 	isWriteToEvidenceFile: typeof isWriteToEvidenceFile;

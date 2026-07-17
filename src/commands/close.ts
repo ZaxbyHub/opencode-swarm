@@ -1,4 +1,4 @@
-﻿import * as child_process from 'node:child_process';
+import * as child_process from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';

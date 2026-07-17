@@ -5,11 +5,18 @@
  * when no actionable input is given.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleDesignDocsCommand } from '../../../src/commands/design-docs';
+import {
+	_internals,
+	handleDesignDocsCommand,
+} from '../../../src/commands/design-docs';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 // A project dir with design_docs enabled, so the gate lets the signal through.
@@ -21,6 +28,7 @@ let disabledDir: string;
 // cannot leak into loadPluginConfigWithMeta()'s user-config lookup and make
 // the "disabled" gate test non-deterministic across machines.
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
+const realLoadPluginConfigWithMeta = _internals.loadPluginConfigWithMeta;
 
 beforeAll(() => {
 	isolatedEnv = createIsolatedTestEnv();
@@ -38,6 +46,11 @@ afterAll(() => {
 	fs.rmSync(enabledDir, { recursive: true, force: true });
 	fs.rmSync(disabledDir, { recursive: true, force: true });
 	isolatedEnv.cleanup();
+});
+
+afterEach(() => {
+	_internals.loadPluginConfigWithMeta = realLoadPluginConfigWithMeta;
+	clearDeferredWarnings();
 });
 
 describe('handleDesignDocsCommand — opt-in gate', () => {
@@ -71,6 +84,20 @@ describe('handleDesignDocsCommand — opt-in gate', () => {
 		} finally {
 			fs.rmSync(malformedDir, { recursive: true, force: true });
 		}
+	});
+
+	it('buffers an advisory when config loading throws and still falls through', async () => {
+		clearDeferredWarnings();
+		_internals.loadPluginConfigWithMeta = () => {
+			throw new Error('forced config loader failure');
+		};
+
+		const out = await handleDesignDocsCommand(disabledDir, ['--update']);
+		expect(out).toContain('[MODE: DESIGN_DOCS');
+		expect(getDeferredWarnings()).toHaveLength(1);
+		expect(getDeferredWarnings()[0]).toContain(
+			'Could not read opencode-swarm.json',
+		);
 	});
 });
 

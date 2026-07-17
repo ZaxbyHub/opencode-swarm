@@ -112,36 +112,6 @@
 			}
 		},
 		{
-			"includes": ["src/hooks/delegation-gate/worktree-isolation.ts"],
-			"linter": {
-				"rules": {
-					"suspicious": {
-						"noConsole": "off"
-					}
-				}
-			}
-		},
-		{
-			"includes": ["src/hooks/knowledge-store.ts"],
-			"linter": {
-				"rules": {
-					"suspicious": {
-						"noConsole": "off"
-					}
-				}
-			}
-		},
-		{
-			"includes": ["src/hooks/skill-usage-log.ts"],
-			"linter": {
-				"rules": {
-					"suspicious": {
-						"noConsole": "off"
-					}
-				}
-			}
-		},
-		{
 			"includes": [
 				"src/commands/archive.error-handling.test.ts",
 				"src/commands/benchmark.error-handling.test.ts",

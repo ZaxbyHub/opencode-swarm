@@ -1018,11 +1018,7 @@ export function getAgentConfigs(
 		config?.default_agent,
 	);
 	if (resolution.warning) {
-		if (!quiet) {
-			log(resolution.warning);
-		} else {
-			addDeferredWarning(resolution.warning);
-		}
+		advisoryWarn(resolution.warning);
 	}
 	// Diagnostic invariant: a non-empty generated agent set must produce at least
 	// one primary. resolvePrimaryAgentNames already guarantees this; this is a
@@ -1035,6 +1031,33 @@ export function getAgentConfigs(
 			log(diagnostic);
 		} else {
 			addDeferredWarning(diagnostic);
+		}
+	}
+
+	// Council enablement is config-global, so validate the architect override once
+	// per invocation rather than once per generated architect in multi-swarm mode.
+	// Repeating the same advisory can exhaust the bounded warning buffer and hide
+	// later, distinct operator guidance.
+	const architectOverride = toolFilterOverrides.architect;
+	if (
+		toolFilterEnabled &&
+		config?.council?.enabled !== true &&
+		architectOverride !== undefined
+	) {
+		const councilTools = [
+			'declare_council_criteria',
+			'submit_council_verdicts',
+			'submit_phase_council_verdicts',
+			'write_final_council_evidence',
+		];
+		const present = councilTools.filter((tool) =>
+			architectOverride.includes(tool),
+		);
+		if (present.length > 0) {
+			advisoryWarn(
+				`[opencode-swarm] tool_filter.overrides.architect includes ${present.join(', ')} but council.enabled is not true. ` +
+					`The runtime gate will reject these calls. Either set council.enabled=true, or remove ${present.join(', ')} from the architect override.`,
+			);
 		}
 	}
 
@@ -1175,31 +1198,6 @@ export function getAgentConfigs(
 						const skillToolsSet = new Set<string>(skillTools);
 						allowedTools = allowedTools.filter((t) => !skillToolsSet.has(t));
 					}
-				}
-			}
-
-			// Symmetric validation: when council is OFF but the user override
-			// INCLUDES the council tools, the runtime gate in
-			// src/tools/convene-council.ts will reject any model attempt to call
-			// them. Warn so the user knows the tools are present in the override
-			// but unusable at runtime.
-			if (
-				baseAgentName === 'architect' &&
-				config?.council?.enabled !== true &&
-				override !== undefined
-			) {
-				const councilTools = [
-					'declare_council_criteria',
-					'submit_council_verdicts',
-					'submit_phase_council_verdicts',
-					'write_final_council_evidence',
-				];
-				const present = councilTools.filter((t) => override.includes(t));
-				if (present.length > 0 && !quiet) {
-					advisoryWarn(
-						`[opencode-swarm] tool_filter.overrides.architect includes ${present.join(', ')} but council.enabled is not true. ` +
-							`The runtime gate will reject these calls. Either set council.enabled=true, or remove ${present.join(', ')} from the architect override.`,
-					);
 				}
 			}
 

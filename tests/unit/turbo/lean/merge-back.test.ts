@@ -9,6 +9,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { LeanTurboConfig } from '../../../../src/config/schema';
 import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../../src/services/warning-buffer';
+import {
 	_internals,
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
@@ -62,6 +66,7 @@ function stubSpawn(exitCode: number, stdout = '', stderr = '') {
 /** Restores the real bunSpawn after every test. */
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	clearDeferredWarnings();
 });
 
 // ---------------------------------------------------------------------------
@@ -331,42 +336,29 @@ describe('mergeLaneBranch', () => {
 			return mockProc(0, '', '');
 		};
 
-		// Enable debug mode so log() actually calls console.log
-		const originalDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		clearDeferredWarnings();
+		const result = await mergeLaneBranch(fakeDir, fakeBranch, 'cherry-pick');
 
-		try {
-			const result = await mergeLaneBranch(fakeDir, fakeBranch, 'cherry-pick');
+		expect(result).toEqual({ merged: true, strategy: 'cherry-pick' });
+		expect(callCount).toBe(2);
 
-			expect(result).toEqual({ merged: true, strategy: 'cherry-pick' });
-			expect(callCount).toBe(2);
+		// Verify merge-base was attempted
+		const mergeBaseCall = spawnCalls.find(
+			(args) => args[0] === 'git' && args[1] === 'merge-base',
+		);
+		expect(mergeBaseCall).toBeDefined();
 
-			// Verify merge-base was attempted
-			const mergeBaseCall = spawnCalls.find(
-				(args) => args[0] === 'git' && args[1] === 'merge-base',
-			);
-			expect(mergeBaseCall).toBeDefined();
+		// Verify fallback used tip-only cherry-pick (not a range)
+		const cherryPickCall = spawnCalls.find(
+			(args) => args[0] === 'git' && args[1] === 'cherry-pick',
+		);
+		expect(cherryPickCall).toBeDefined();
+		expect(cherryPickCall![2]).toBe(fakeBranch);
+		expect(cherryPickCall![2]).not.toContain('..');
 
-			// Verify fallback used tip-only cherry-pick (not a range)
-			const cherryPickCall = spawnCalls.find(
-				(args) => args[0] === 'git' && args[1] === 'cherry-pick',
-			);
-			expect(cherryPickCall).toBeDefined();
-			expect(cherryPickCall![2]).toBe(fakeBranch);
-			expect(cherryPickCall![2]).not.toContain('..');
-
-			expect(consoleLogSpy).toHaveBeenCalledWith(
-				expect.stringContaining('merge-base failed'),
-			);
-		} finally {
-			consoleLogSpy.mockRestore();
-			if (originalDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = originalDebug;
-			}
-		}
+		expect(getDeferredWarnings()).toEqual([
+			expect.stringContaining('merge-base failed'),
+		]);
 	});
 
 	test('cherry-pick merge-base returns empty stdout falls back to tip-only', async () => {
@@ -383,8 +375,6 @@ describe('mergeLaneBranch', () => {
 			return mockProc(0, '', '');
 		};
 
-		const warnSpy = (console.warn = vi.fn() as unknown as typeof console.warn);
-
 		const result = await mergeLaneBranch(fakeDir, fakeBranch, 'cherry-pick');
 
 		expect(result).toEqual({ merged: true, strategy: 'cherry-pick' });
@@ -394,8 +384,6 @@ describe('mergeLaneBranch', () => {
 		);
 		expect(cherryPickCall).toBeDefined();
 		expect(cherryPickCall![2]).toBe(fakeBranch);
-
-		warnSpy.mockRestore?.();
 	});
 });
 
