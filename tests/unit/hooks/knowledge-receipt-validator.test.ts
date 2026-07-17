@@ -154,6 +154,50 @@ describe('receipt validator', () => {
 		expect(r.reason).toBe('expired');
 	});
 
+	test('(#PRR-009) rejects a receipt with a malformed/unparseable trace timestamp (fail-closed)', async () => {
+		const traceId = newTraceId();
+		// Seed a trace with a garbage timestamp directly via appendKnowledgeEvent.
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: traceId,
+			session_id: SESSION,
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'auto_injection',
+			result_ids: ['k1'],
+			ranks: { k1: 1 },
+			scores: { k1: 1 },
+			timestamp: 'not-a-real-date',
+		});
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }]),
+		);
+		expect(r.ok).toBe(false);
+		if (r.ok) return;
+		expect(r.reason).toBe('expired');
+		expect(r.detail).toContain('unparseable');
+	});
+
+	test('(#PRR-007) intra-receipt duplicate id in applied+ignored is a conflicting-terminal rejection', async () => {
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		// Same id in two outcome arrays within one receipt.
+		const r = await validateReceipt(
+			ctx(dir, traceId, [
+				{ id: 'k1', outcome: 'applied' },
+				{ id: 'k1', outcome: 'ignored' },
+			]),
+		);
+		// The first applied is accepted; the second ignored is rejected as
+		// duplicate_conflicting_terminal (one terminal per (trace, knowledge_id)).
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		expect(r.accepted).toHaveLength(1);
+		expect(r.accepted[0].outcome).toBe('applied');
+		expect(r.rejected_items).toBeDefined();
+		expect(r.rejected_items?.[0].reason).toBe('duplicate_conflicting_terminal');
+	});
+
 	test('idempotent retry: same outcome for same (trace, id) is accepted as a skip, not re-counted', async () => {
 		const traceId = newTraceId();
 		await seedTrace(dir, traceId, ['k1']);

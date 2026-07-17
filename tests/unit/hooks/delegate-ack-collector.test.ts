@@ -244,6 +244,13 @@ describe('delegate-ack-collector', () => {
 		});
 
 		it('records violated type when transcript contains KNOWLEDGE_VIOLATED marker', async () => {
+			// (#PRR-006) Seed the retrieved trace so the validator ACCEPTS the
+			// KNOWLEDGE_VIOLATED ack as a validated terminal (was passing for the
+			// wrong reason: no seed → trace_not_found → violated came from the
+			// unacknowledged-critical fallback, not the marker).
+			await seedRetrieved(dir, [ID_APPLIED, ID_CRITICAL], {
+				sessionId: 'sess-3',
+			});
 			const transcript = [
 				`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
 				`KNOWLEDGE_VIOLATED:${ID_CRITICAL} reason=intentional violation`,
@@ -262,6 +269,46 @@ describe('delegate-ack-collector', () => {
 
 			const byId = new Map(result.emitted.map((e) => [e.id, e.type]));
 			expect(byId.get(ID_CRITICAL)).toBe('violated');
+		});
+
+		it('(#PRR-008) does NOT falsely escalate an acked critical when validation fails (wrong session)', async () => {
+			// Seed a trace under a DIFFERENT session so validateReceipt returns
+			// wrong_session (ok:false). The delegate explicitly acked ID_CRITICAL
+			// with KNOWLEDGE_APPLIED — the ok:false branch must preserve it in
+			// ackedIds so the unacknowledged-critical loop does NOT escalate it.
+			await seedRetrieved(dir, [ID_CRITICAL], { sessionId: 'other-session' });
+			const transcript = `KNOWLEDGE_APPLIED:${ID_CRITICAL}`;
+			const result = await collectDelegateAcks({
+				directory: dir,
+				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
+				transcript,
+				agent: 'coder',
+				sessionId: 'sess-prr008', // different from the seeded trace's session
+			});
+			// The critical was explicitly acked → must NOT appear as unacknowledged.
+			expect(result.unacknowledgedCriticals).not.toContain(ID_CRITICAL);
+		});
+
+		it('(#PRR-003) writes a PromotionEvidenceRecord for a delegate applied ack', async () => {
+			// The delegate-ack path must write promotion evidence symmetrically
+			// with the knowledge_receipt tool. Seed a trace + ack ID_APPLIED →
+			// verify loadPromotionEvidenceByEntry returns a record.
+			await seedRetrieved(dir, [ID_APPLIED], { sessionId: 'sess-prr003' });
+			await collectDelegateAcks({
+				directory: dir,
+				prompt: buildPrompt([rankedEntry(ID_APPLIED, 'high')]),
+				transcript: `KNOWLEDGE_APPLIED:${ID_APPLIED}`,
+				agent: 'coder',
+				sessionId: 'sess-prr003',
+			});
+			const { loadPromotionEvidenceByEntry } = await import(
+				'../../../src/hooks/promotion-evidence-store'
+			);
+			const evidence = await loadPromotionEvidenceByEntry(dir);
+			const records = evidence[ID_APPLIED] ?? [];
+			expect(records.length).toBeGreaterThanOrEqual(1);
+			expect(records[0].entry_id).toBe(ID_APPLIED);
+			expect(records[0].receipt_outcome).toBe('applied');
 		});
 
 		it('extracts the task id from the prompt envelope when taskId is not provided', async () => {

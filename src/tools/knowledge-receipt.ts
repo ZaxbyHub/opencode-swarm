@@ -162,11 +162,18 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			};
 
 			const recordedEventIds: string[] = [];
-			const emit = async (event: KnowledgeEventInput): Promise<void> => {
+			// (#PRR-001) emit returns the written event_id (or '' on write failure)
+			// so promotion-evidence pairing is exact per-item, not fragile tail-slice
+			// arithmetic that misaligns when a write fails or no_relevant precedes.
+			const emit = async (event: KnowledgeEventInput): Promise<string> => {
 				const written = await recordKnowledgeEvent(directory, event);
-				if (written && written.event_id !== undefined)
-					recordedEventIds.push(written.event_id);
+				const id = written?.event_id ?? '';
+				if (id) recordedEventIds.push(id);
+				return id;
 			};
+			// Map knowledge_id -> receipt_event_id for the accepted applied/violated/
+			// contradicted items (the only outcomes that feed PromotionEvidenceRecord).
+			const eventIdByKnowledgeId = new Map<string, string>();
 
 			// (#1849) Validate the receipt against the authoritative event log
 			// BEFORE emitting. Reject forged / expired / conflicting / non-trace
@@ -225,7 +232,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 
 			for (const item of applied) {
 				if (!acceptedIds.has(item.id)) continue;
-				await emit({
+				const eid = await emit({
 					type: 'applied',
 					...base,
 					knowledge_id: item.id,
@@ -238,6 +245,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 							: undefined,
 					},
 				});
+				if (eid) eventIdByKnowledgeId.set(item.id, eid);
 			}
 			for (const item of ignored) {
 				if (!acceptedIds.has(item.id)) continue;
@@ -250,42 +258,35 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			}
 			for (const item of contradicted) {
 				if (!acceptedIds.has(item.id)) continue;
-				await emit({
+				const eid = await emit({
 					type: 'contradicted',
 					...base,
 					knowledge_id: item.id,
 					reason: `${item.proposed_action}: ${item.evidence}`,
 					evidence: { summary: item.evidence },
 				});
+				if (eid) eventIdByKnowledgeId.set(item.id, eid);
 			}
 
 			// (#1849 §B2) Derive PromotionEvidenceRecords from validated
-			// applied/violated/contradicted receipts and persist them so #1847's
+			// applied/contradicted receipts and persist them so #1847's
 			// evaluatePromotionPolicy finally consumes real evidence. cohort_id is
 			// resolved once-bounded + cached; never re-runs git per receipt.
+			// (#PRR-001) Pairing is EXACT per-item via eventIdByKnowledgeId (captured
+			// at emit time), not fragile tail-slice cursor arithmetic.
 			if (acceptedItems.length > 0) {
 				try {
 					const cohortId = await ensureCohortIdCached(directory, sessionId);
 					const linkId = await readLinkPointerSafe(directory);
 					const now = new Date().toISOString();
-					// Map emitted events to their receipt_event_id by order of emit.
-					// recordKnowledgeEvent assigns event_id sequentially per append;
-					// we pair accepted items with the tail of recordedEventIds.
 					const evidenceRecords: PromotionEvidenceRecord[] = [];
-					let cursor = recordedEventIds.length - acceptedItems.length;
 					for (const item of acceptedItems) {
+						// Only applied/contradicted feed promotion evidence here (violated
+						// comes from the delegate-ack path; ignored/n_a do not).
 						if (item.outcome !== 'applied' && item.outcome !== 'contradicted') {
-							// Only applied/contradicted (and violated, not filed here) feed
-							// promotion evidence per the PromotionEvidenceRecord schema.
-							if (item.outcome === 'violated') {
-								// fall through to record
-							} else {
-								cursor++;
-								continue;
-							}
+							continue;
 						}
-						const receiptEventId = recordedEventIds[cursor] ?? '';
-						cursor++;
+						const receiptEventId = eventIdByKnowledgeId.get(item.id);
 						if (!cohortId || !receiptEventId) continue;
 						evidenceRecords.push({
 							cohort_id: cohortId,
@@ -293,11 +294,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 							entry_id: item.id,
 							retrieval_trace_id: traceId,
 							receipt_outcome:
-								item.outcome === 'applied'
-									? 'applied'
-									: item.outcome === 'violated'
-										? 'violated'
-										: 'contradicted',
+								item.outcome === 'applied' ? 'applied' : 'contradicted',
 							receipt_event_id: receiptEventId,
 							phase,
 							timestamp: now,

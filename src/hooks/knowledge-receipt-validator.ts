@@ -100,8 +100,9 @@ export type ReceiptValidationResult =
 
 /**
  * Receipt validity window. A receipt must be filed within this many
- * milliseconds of the retrieval trace's timestamp. Generous default (30 min)
- * covers slow agents; configurable downstream via the issue's diagnostics.
+ * milliseconds of the retrieval trace's timestamp. Generous constant (30 min)
+ * covers slow agents. NOTE: this is a compile-time constant, NOT configurable
+ * via the config schema — raise an issue if runtime configurability is needed.
  */
 export const RECEIPT_VALIDITY_MS = 30 * 60 * 1000;
 
@@ -179,6 +180,12 @@ export async function validateReceipt(
 
 	// 5. Real-empty (`'none'`) trace: accept the no_relevant terminal, no trace
 	//    lookup. No items allowed (enforced above).
+	// (#PRR-010) Tradeoff: the 'none' sentinel does NOT consult the event log
+	// for live retrieved events on the session. An agent COULD file no_relevant
+	// to leave a real trace's surfaced knowledge unclosed. This is accepted as a
+	// marginal-value gap: an agent can equally omit the receipt entirely, and
+	// forcing a live-trace cross-check here would couple the sentinel path to a
+	// full log scan. The real-trace path (step 6+) enforces the full contract.
 	if (ctx.trace_id === NO_TRACE_SENTINEL || ctx.trace_id === '') {
 		if (items.length > 0) {
 			return reject(
@@ -212,12 +219,17 @@ export async function validateReceipt(
 		);
 	}
 
-	// 8. Validity window.
-	const ageMs = Date.now() - Date.parse(trace.timestamp);
-	if (Number.isFinite(ageMs) && ageMs > RECEIPT_VALIDITY_MS) {
+	// 8. Validity window. Fail-CLOSED on an unparseable timestamp (#PRR-009): a
+	// malformed/corrupt trace.timestamp must not silently bypass the expiry
+	// bound. NaN age → reject expired (the trace is not provably in-window).
+	const parsed = Date.parse(trace.timestamp);
+	const ageMs = Date.now() - parsed;
+	if (!Number.isFinite(parsed) || ageMs > RECEIPT_VALIDITY_MS) {
 		return reject(
 			'expired',
-			`trace age ${Math.round(ageMs / 1000)}s exceeds ${RECEIPT_VALIDITY_MS / 1000}s`,
+			Number.isFinite(parsed)
+				? `trace age ${Math.round(ageMs / 1000)}s exceeds ${RECEIPT_VALIDITY_MS / 1000}s`
+				: `trace timestamp '${trace.timestamp}' is unparseable (fail-closed)`,
 		);
 	}
 
@@ -272,6 +284,12 @@ export async function validateReceipt(
 			continue;
 		}
 		accepted.push(item);
+		// (#PRR-007) Mark this (trace, id) as accepted IN THIS RECEIPT so a
+		// duplicate id in a second array (e.g. applied[] + ignored[]) is caught
+		// as a conflicting terminal rather than accepted twice. Without this,
+		// the prior map (built from the log only) sees undefined for both and
+		// accepts both, violating one-terminal-per-(trace,knowledge_id).
+		prior.set(item.id, item.outcome);
 	}
 
 	if (

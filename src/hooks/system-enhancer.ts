@@ -211,7 +211,7 @@ import {
 } from '../services/injection-budget.js';
 import { telemetry } from '../telemetry';
 import { _internals as coChangeInternals } from '../tools/co-change-analyzer.js';
-import { warn } from '../utils';
+import { log, warn } from '../utils';
 import {
 	detectAdversarialPair,
 	formatAdversarialWarning,
@@ -716,6 +716,15 @@ export function createSystemEnhancerHook(
 											: 'linked (portable)';
 										output.system.push(
 											`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
+										);
+									} else {
+										// (#BOT-HIGH-1) Cohort line skipped: cache miss on turn 1
+										// (chat.message hasn't populated cachedCohortId yet) or a
+										// restored old snapshot. Debug-gated log so operators can
+										// diagnose why the line is absent via /swarm diagnose.
+										log(
+											'[system-enhancer] cohort identity line skipped: cachedCohortId not yet resolved',
+											{ sessionID: _input.sessionID },
 										);
 									}
 								}

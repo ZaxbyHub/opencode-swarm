@@ -178,8 +178,16 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		];
 		// Must not throw and must not depend on a role:'system' message.
 		await messagesTransform({}, { messages });
-		// The adapter recovered the prefixed architect — proving the host-boundary
-		// path works (no no_agent_name skip for a real-shape payload).
+		// (#PRR-005) Strengthen: assert the transform did NOT emit a no_agent_name
+		// skip (the #1768/#1849 dark-path symptom). A no-op transform that swallowed
+		// the recovered agent would leave this skip in the event log. Read it back.
+		const events = await readKnowledgeEvents(dir);
+		const noAgentSkips = events.filter(
+			(e) =>
+				e.type === 'injection_skip' &&
+				(e as { reason?: string }).reason === 'no_agent_name',
+		);
+		expect(noAgentSkips).toHaveLength(0);
 	});
 
 	test('3+4. tool.execute.before uses REAL SDK shape: args mutated via output.args with trace_id + IDs', async () => {
@@ -482,5 +490,52 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 				e.knowledge_id === 'a1b2c3d4-e2e5-4184-9abc-def012345678',
 		);
 		expect(applied.length).toBeGreaterThanOrEqual(1);
+	});
+
+	test('12. (#PRR-004) knowledge_receipt writes a PromotionEvidenceRecord readable by loadPromotionEvidenceByEntry', async () => {
+		const traceId = 'trace-1849-promo';
+		const promoId = 'd1e2f3a4-b5c6-4789-9abc-def01234567e';
+		await seedTrace(dir, traceId, [promoId]);
+		const toolCtx = {
+			sessionID: SESSION,
+			agent: 'coder',
+			directory: dir,
+		} as never;
+		// File a validated applied receipt — this should produce a
+		// PromotionEvidenceRecord persisted to .swarm/knowledge-promotion-evidence.jsonl.
+		const r = await knowledge_receipt.execute(
+			{
+				trace_id: traceId,
+				applied: [{ id: promoId, how: 'used the lesson' }],
+			} as never,
+			toolCtx,
+		);
+		const out = JSON.parse(typeof r === 'string' ? r : JSON.stringify(r));
+		expect(out.recorded).toBe(true);
+		// Read the events log to get the actual applied event_id (for PRR-001 exact
+		// pairing assertion below).
+		const events = await readKnowledgeEvents(dir);
+		// Read the promotion-evidence store back and verify the record exists.
+		const { loadPromotionEvidenceByEntry } = await import(
+			'../../src/hooks/promotion-evidence-store'
+		);
+		const evidenceByEntry = await loadPromotionEvidenceByEntry(dir);
+		const records = evidenceByEntry[promoId] ?? [];
+		expect(records.length).toBeGreaterThanOrEqual(1);
+		const rec = records[0];
+		expect(rec.entry_id).toBe(promoId);
+		expect(rec.retrieval_trace_id).toBe(traceId);
+		expect(rec.receipt_outcome).toBe('applied');
+		expect(rec.receipt_event_id).toBeTruthy();
+		expect(rec.cohort_id).toBeTruthy();
+		// (#PRR-001 exact pairing) The receipt_event_id must match the ACTUAL
+		// applied event's event_id in the knowledge-events log — not just be
+		// truthy. This pins the per-item eventIdByKnowledgeId map against the
+		// old fragile cursor arithmetic.
+		const appliedEvent = events.find(
+			(e) => e.type === 'applied' && e.knowledge_id === promoId,
+		);
+		expect(appliedEvent).toBeDefined();
+		expect(appliedEvent?.event_id).toBe(rec.receipt_event_id);
 	});
 });
