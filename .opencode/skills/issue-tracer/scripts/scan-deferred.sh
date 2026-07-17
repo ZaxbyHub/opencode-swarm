@@ -61,21 +61,31 @@ fi
 # false-positives on any added/renamed/modified file whose PATH contains a
 # marker word (e.g. "+++ b/todo-list.ts").
 #
-# The exclusion is position-aware, not a bare content match: a line is only
-# treated as a real file header when it immediately follows a line starting
-# with "--- " (the header's mandatory pre-image partner). A content-only
-# match (e.g. `^\+\+\+ (a/|b/|/dev/null)`) would ALSO swallow a genuine
-# ADDED line whose file content literally starts with "++ b/" or "++ a/" or
-# "++ /dev/null" — git prefixes every added line with its own '+', turning
-# that content into a diff line textually indistinguishable from a real
-# header. A line starting with '-' can never be added-line content (git
-# always prefixes additions with '+'), so anchoring on the preceding "--- "
-# line closes that gap without losing the original false-positive fix.
+# The exclusion is anchored to each file's "diff --git" boundary, not a bare
+# content match and not merely "immediately follows a '---' line": a real
+# "+++ ..." header can ONLY appear between a file's "diff --git a/X b/X"
+# line and that same file's first "@@" hunk marker — content lines never
+# appear there. A content-only match (`^\+\+\+ (a/|b/|/dev/null)`) would
+# ALSO swallow a genuine ADDED line whose file content literally starts with
+# "++ b/" etc. (git's own '+' prefix turns that into a "+++"-shaped line). A
+# naive fix anchoring only on "the immediately preceding line starts with
+# '--- '" is itself spoofable: a REMOVED line whose original content was
+# "-- ..." renders as "--- ..." (git's '-' prefix + the original two
+# dashes), and a following genuine added TODO shaped like "++ b/... TODO"
+# would then be wrongly excluded as a "double-spoofed" header pair — even
+# though both lines are ordinary hunk content, not a real header. Gating the
+# whole state machine on "are we still between 'diff --git' and the first
+# '@@' for this file" closes that gap: neither a "diff --git " boundary line
+# nor an "@@" hunk marker can ever be produced by added/removed content
+# (git never prefixes those with +/-/space), so this anchor is unspoofable
+# from either direction.
 pattern='^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'
 
 hits="$(git diff "$mb" | awk '
-  /^--- / { preimage = 1; next }
-  preimage && /^\+\+\+ (a\/|b\/|\/dev\/null)/ { preimage = 0; next }
+  /^diff --git / { in_header = 1; preimage = 0; print; next }
+  in_header && /^@@ / { in_header = 0 }
+  in_header && /^--- / { preimage = 1; next }
+  in_header && preimage && /^\+\+\+ (a\/|b\/|\/dev\/null)/ { preimage = 0; next }
   { preimage = 0; print }
 ' | grep -nE "$pattern" || true)"
 

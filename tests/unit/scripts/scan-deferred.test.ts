@@ -209,6 +209,45 @@ describe('scan-deferred.sh — Full-Resolution Contract deferred-work gate (PR #
 		expect(result.stderr).toInclude('TODO: sneaky');
 	});
 
+	test('F-A1 double-spoof: a spoofed "--- " anchor (from removed-line content) cannot smuggle a genuine added marker past the header exclusion', async () => {
+		// A stricter attack on the position-aware fix above: instead of
+		// spoofing only the "+++" side, spoof BOTH sides of the pair. A
+		// REMOVED line whose original content was "-- old context marker
+		// line" renders in the diff as "--- old context marker line" (git's
+		// own '-' prefix + the original two dashes) — textually
+		// indistinguishable from a real "--- a/<path>" pre-image header. If
+		// the exclusion were anchored only on "the immediately preceding
+		// line starts with '--- '" (rather than on the file's actual
+		// "diff --git" boundary), this spoofed anchor would make the
+		// following genuine "++ b/... TODO ..." added line (rendered as
+		// "+++ b/... TODO ...") look like a real header pair and get wrongly
+		// excluded, even though both lines are ordinary hunk content nowhere
+		// near the file's real header. The fix must anchor on the file's
+		// "diff --git"/first-"@@" boundary, not just line-adjacency, to
+		// resist this.
+		const repo = track(makeRepo('scan-deferred-header-double-spoof-'));
+		writeFile(
+			repo,
+			'src/foo.ts',
+			'line one\n-- old context marker line\nline three\n',
+		);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'seed base content');
+		git(repo, 'branch', '-f', 'origin/main');
+
+		writeFile(
+			repo,
+			'src/foo.ts',
+			'line one\n++ b/fake TODO fix this\nline three\n',
+		);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'double-spoof attempt');
+
+		const result = await runScript(repo, ['origin/main']);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toInclude('TODO fix this');
+	});
+
 	test('F-B: an unresolvable base ref fails loudly instead of reporting false-clean', async () => {
 		const repo = track(makeRepo('scan-deferred-bad-base-'));
 		writeFile(repo, 'src/foo.ts', 'export const x = 1;\n');
