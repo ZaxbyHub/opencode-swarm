@@ -141,6 +141,29 @@ describe('guardrails config-file logging', () => {
 			);
 			warnSpy.mockRestore();
 		});
+
+		it('preserves direct_patch audit type for native apply_patch', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			setupBuildSession();
+			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
+
+			await hooks.toolBefore(
+				makeInput('test-session', 'apply_patch', 'call-patch'),
+				makeOutput({
+					input:
+						'*** Begin Patch\n*** Update File: tsconfig.json\n@@\n-old\n+new\n*** End Patch',
+				}),
+			);
+
+			expect(warnSpy).toHaveBeenCalledWith(
+				'Config file write attempt',
+				expect.objectContaining({
+					path: 'tsconfig.json',
+					type: 'direct_patch',
+				}),
+			);
+			warnSpy.mockRestore();
+		});
 	});
 
 	// -------------------------------------------------------------------------
@@ -233,17 +256,17 @@ describe('guardrails config-file logging', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test 4: warn triggered for delegated writes to config files
+	// Test 4: delegated context preserves the delegated audit type
 	// -------------------------------------------------------------------------
-	describe('delegated config-file writes trigger warn', () => {
+	describe('delegated config-file writes trigger the canonical warn', () => {
 		function setupDelegatedBuildSession(sessionID = 'test-session'): void {
 			swarmState.activeAgent.set(sessionID, 'build');
 			startAgentSession(sessionID, 'build');
+			beginInvocation(sessionID, 'build');
 			const session = getAgentSession(sessionID);
 			if (session) {
 				session.delegationActive = true; // delegated write path
 			}
-			beginInvocation(sessionID, 'build');
 		}
 
 		it('warns for delegated write to .eslintrc (glob match)', async () => {
@@ -284,6 +307,29 @@ describe('guardrails config-file logging', () => {
 				expect.objectContaining({
 					type: 'delegated_write',
 					path: 'tsconfig.json',
+				}),
+			);
+			warnSpy.mockRestore();
+		});
+
+		it('preserves delegated_patch audit type for native apply_patch', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			setupDelegatedBuildSession();
+			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
+
+			await hooks.toolBefore(
+				makeInput('test-session', 'apply_patch', 'call-patch'),
+				makeOutput({
+					input:
+						'*** Begin Patch\n*** Update File: tsconfig.json\n@@\n-old\n+new\n*** End Patch',
+				}),
+			);
+
+			expect(warnSpy).toHaveBeenCalledWith(
+				'Config file write attempt',
+				expect.objectContaining({
+					path: 'tsconfig.json',
+					type: 'delegated_patch',
 				}),
 			);
 			warnSpy.mockRestore();

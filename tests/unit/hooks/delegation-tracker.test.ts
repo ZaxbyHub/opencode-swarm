@@ -510,9 +510,7 @@ describe('DelegationTrackerHook', () => {
 
 			await hook({ sessionID: sessionId, agent: 'coder' }, {});
 
-			// Active agent should be set
 			expect(swarmState.activeAgent.get(sessionId)).toBe('coder');
-			// Invocation window should be created
 			expect(getActiveWindow(sessionId)).toBeDefined();
 		});
 
@@ -525,14 +523,16 @@ describe('DelegationTrackerHook', () => {
 			expect(getActiveWindow(sessionId)).toBeDefined();
 		});
 
-		it('architect is never tracked regardless of guardrails flag', async () => {
+		it('architect advances its safety boundary without a budget window', async () => {
 			const hook = createDelegationTrackerHook(defaultConfig, true);
 			const sessionId = 'test-session';
 
 			await hook({ sessionID: sessionId, agent: 'architect' }, {});
 
-			// Architect should never have an invocation window
 			expect(getActiveWindow(sessionId)).toBeUndefined();
+			expect(swarmState.agentSessions.get(sessionId)?.activeInvocationId).toBe(
+				1,
+			);
 		});
 	});
 

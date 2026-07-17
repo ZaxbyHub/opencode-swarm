@@ -23,36 +23,49 @@
  *       * plan.json size capped at MAX_PLAN_BYTES (DoS cap)
  *       * Windows reserved device names rejected (CON, NUL, LPT1, …)
  *
- * RESIDUAL RISKS — explicitly accepted (#520 tracks full syscall-layer remediation):
- *   1. Bash / interpreter writes bypass the tool-layer authority check. This
- *      module does not protect against a coder process running `sed -i`,
- *      `echo >`, `python -c`, etc. Mitigation is prompt-only (see coder.ts
- *      WRITE BLOCKED PROTOCOL) until #520 lands.
- *   2. Platform-portability of symlink guards:
+ * AUTHORITY BOUNDARY:
+ *   - Direct-write tools and statically detected shell/interpreter write targets
+ *     resolve through the same active Task-correlated binding.
+ *   - A coder write with no binding or an unverifiable target fails closed with
+ *     SCOPE_NOT_DECLARED/SCOPE_VIOLATION. Shell syntax is not an authority bypass.
+ *   - This is command-level containment, not an operating-system syscall sandbox.
+ *
+ * RESIDUAL RISKS:
+ *   1. Platform-portability of symlink guards:
  *        - realpath resolves POSIX symlinks and Windows junctions, but the
  *          Windows behaviour is not covered by CI (Linux-only test matrix).
  *        - O_NOFOLLOW is a no-op on Windows (falls back to 0). The realpath
  *          containment check on `.swarm/scopes/` remains the primary guard
  *          on that platform; leaf-file TOCTOU on Windows is not closed.
- *   3. Stale lockfile DoS: a crashed writer leaves a lock for up to
+ *   2. Stale lockfile DoS: a crashed writer leaves a lock for up to
  *      LOCK_STALE_MS (30s). During that window, concurrent `declare_scope`
  *      calls fail silently and the architect relies on in-memory state.
  *      Acceptable because in-memory state remains authoritative inside the
  *      live process; disk is a fallback.
- *   4. Temp-file leak: a crash between `Bun.write(tmp)` and `renameSync`
+ *   3. Temp-file leak: a crash between `Bun.write(tmp)` and `renameSync`
  *      leaves `scope-{id}.json.tmp.{ts}.{rand}` files. No sweeper runs today;
  *      accumulation is bounded by `/swarm close` (which rm -rf's .swarm/scopes/).
  *
- * NOT a standalone security boundary. Tool-layer write interception is now
- * implemented in shell-write-detect.ts (Phases 1-2). This module closes the
- * cross-process gap and the plan-as-scope gap. The syscall-layer fix (#520)
- * remains the durable long-term boundary.
+ * NOT a standalone syscall security boundary. Shell-write detection and the
+ * central write-target resolver provide command-level interception; this module
+ * supplies the durable, identity-bound authority they consume.
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { type Plan, PlanSchema } from '../config/plan-schema';
+import { computePlanStructureHash } from '../plan/ledger';
+import { derivePlanId } from '../plan/utils';
 import { bunWrite } from '../utils/bun-compat';
+import {
+	canonicalWorkspaceIdentity,
+	getAuthorizedScopeBinding,
+	normalizeScopeFiles,
+	registerScopeBinding,
+	type ScopeBinding,
+} from './scope-binding';
 
 const SCOPE_SCHEMA_VERSION = 1 as const;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -98,8 +111,15 @@ export interface PersistedScope {
 	files: string[];
 }
 
+export type PersistedScopeBinding = ScopeBinding;
+
 function getScopesDir(directory: string): string {
 	return path.join(directory, SCOPES_DIR);
+}
+
+function normalizePathForComparison(value: string): string {
+	const normalized = path.resolve(value);
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 /**
@@ -126,11 +146,85 @@ function isSafeTaskId(taskId: string): boolean {
 function isScopesDirSafe(directory: string, scopesDir: string): boolean {
 	try {
 		const resolvedWorkspace = fs.realpathSync(directory);
+		const expectedSwarmDir = path.join(resolvedWorkspace, '.swarm');
+		const expectedScopesDir = path.join(expectedSwarmDir, 'scopes');
+		const swarmStat = fs.lstatSync(expectedSwarmDir);
+		const scopesStat = fs.lstatSync(expectedScopesDir);
+		if (
+			!swarmStat.isDirectory() ||
+			swarmStat.isSymbolicLink() ||
+			!scopesStat.isDirectory() ||
+			scopesStat.isSymbolicLink()
+		)
+			return false;
+
 		const resolvedScopes = fs.realpathSync(scopesDir);
+		if (
+			normalizePathForComparison(resolvedScopes) !==
+			normalizePathForComparison(expectedScopesDir)
+		)
+			return false;
 		const rel = path.relative(resolvedWorkspace, resolvedScopes);
 		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Resolve a scope file that is safe to unlink. Cleanup is fail-closed because
+ * following a swapped `.swarm/scopes` junction could delete an attacker-chosen
+ * file outside the workspace. The canonical workspace path avoids traversing a
+ * caller-supplied workspace alias, and both parents plus the leaf must remain
+ * ordinary, non-symlink filesystem entries immediately before unlink.
+ */
+function resolveSafeScopeFileForUnlink(
+	directory: string,
+	targetPath: string,
+): string | null {
+	try {
+		const resolvedWorkspace = fs.realpathSync(directory);
+		const scopesDir = path.join(resolvedWorkspace, SCOPES_DIR);
+		if (!isScopesDirSafe(resolvedWorkspace, scopesDir)) return null;
+
+		const candidate = path.resolve(targetPath);
+		const resolvedCandidate = fs.realpathSync(candidate);
+		if (
+			normalizePathForComparison(path.dirname(candidate)) !==
+				normalizePathForComparison(scopesDir) ||
+			normalizePathForComparison(resolvedCandidate) !==
+				normalizePathForComparison(candidate)
+		)
+			return null;
+
+		const relative = path.relative(resolvedWorkspace, resolvedCandidate);
+		if (
+			relative.length === 0 ||
+			relative === '..' ||
+			relative.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relative)
+		)
+			return null;
+
+		const leafStat = fs.lstatSync(candidate);
+		if (!leafStat.isFile() || leafStat.isSymbolicLink()) return null;
+
+		// Revalidate both parent and leaf immediately before the caller unlinks.
+		if (!isScopesDirSafe(resolvedWorkspace, scopesDir)) return null;
+		const finalResolvedCandidate = fs.realpathSync(candidate);
+		const finalLeafStat = fs.lstatSync(candidate);
+		if (
+			normalizePathForComparison(finalResolvedCandidate) !==
+				normalizePathForComparison(candidate) ||
+			!finalLeafStat.isFile() ||
+			finalLeafStat.isSymbolicLink() ||
+			finalLeafStat.dev !== leafStat.dev ||
+			finalLeafStat.ino !== leafStat.ino
+		)
+			return null;
+		return candidate;
+	} catch {
+		return null;
 	}
 }
 
@@ -139,6 +233,24 @@ function getScopeFilePath(directory: string, taskId: string): string {
 		throw new Error(`Invalid taskId for scope persistence: ${taskId}`);
 	}
 	return path.join(getScopesDir(directory), `scope-${taskId}.json`);
+}
+
+function getBindingFilePath(
+	directory: string,
+	taskId: string,
+	ownerSessionId: string,
+): string {
+	if (!isSafeTaskId(taskId) || !ownerSessionId.trim()) {
+		throw new Error('Invalid identity for scope binding persistence');
+	}
+	const ownerHash = createHash('sha256')
+		.update(ownerSessionId)
+		.digest('hex')
+		.slice(0, 24);
+	return path.join(
+		getScopesDir(directory),
+		`binding-${taskId}-${ownerHash}.json`,
+	);
 }
 
 /**
@@ -210,6 +322,265 @@ export async function writeScopeToDisk(
 			}
 		}
 	}
+}
+
+/**
+ * Persist an identity-bound v2 authorization record. The v1 writer remains for
+ * compatibility with older non-authorization consumers, but strict Task
+ * preflight and declare_scope use only this schema.
+ */
+export async function writeScopeBindingToDisk(
+	directory: string,
+	binding: ScopeBinding,
+): Promise<void> {
+	if (!isSafeTaskId(binding.taskId) || binding.version !== 2) return;
+	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+	const files = normalizeScopeFiles(binding.files);
+	if (
+		!workspaceIdentity ||
+		workspaceIdentity !== binding.workspaceIdentity ||
+		!files ||
+		!binding.ownerSessionId ||
+		!binding.ownerMessageId ||
+		binding.expiresAt <= Date.now()
+	)
+		return;
+
+	const scopesDir = getScopesDir(directory);
+	const scopePath = getBindingFilePath(
+		directory,
+		binding.taskId,
+		binding.ownerSessionId,
+	);
+	try {
+		fs.mkdirSync(scopesDir, { recursive: true });
+	} catch {
+		return;
+	}
+	if (!isScopesDirSafe(directory, scopesDir)) return;
+
+	const content = JSON.stringify({ ...binding, files }, null, 2);
+	try {
+		const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT;
+		const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+		const fd = fs.openSync(scopePath, flags | nofollow);
+		fs.closeSync(fd);
+	} catch {
+		return;
+	}
+
+	let release: (() => Promise<void>) | undefined;
+	try {
+		release = await lockfile.lock(scopePath, {
+			stale: LOCK_STALE_MS,
+			retries: { retries: 3, minTimeout: 50, maxTimeout: 200 },
+			realpath: false,
+		});
+		await atomicWrite(scopePath, content);
+	} catch {
+		// Persistence is fail-closed at read time; live binding remains available.
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock already released or stale */
+			}
+		}
+	}
+}
+
+/** Read and fully validate a v2 binding; v1 records never authorize here. */
+export function readScopeBindingFromDisk(input: {
+	directory: string;
+	taskId: string;
+	plan: Plan;
+	ownerSessionId: string;
+	parentCallId?: string;
+	requireDispatchCorrelation?: boolean;
+	requireDeclaration?: boolean;
+}): ScopeBinding | null {
+	if (!isSafeTaskId(input.taskId)) return null;
+	const scopesDir = getScopesDir(input.directory);
+	if (!isScopesDirSafe(input.directory, scopesDir)) return null;
+	let scopePath: string;
+	try {
+		scopePath = getBindingFilePath(
+			input.directory,
+			input.taskId,
+			input.ownerSessionId,
+		);
+	} catch {
+		return null;
+	}
+	const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+	let fd: number;
+	try {
+		fd = fs.openSync(scopePath, fs.constants.O_RDONLY | nofollow);
+	} catch {
+		return null;
+	}
+
+	let raw = '';
+	try {
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile() || stat.size > MAX_SCOPE_BYTES) return null;
+		const buffer = Buffer.alloc(stat.size);
+		fs.readSync(fd, buffer, 0, stat.size, 0);
+		raw = buffer.toString('utf8');
+	} catch {
+		return null;
+	} finally {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			/* already closed */
+		}
+	}
+
+	let parsed: Partial<ScopeBinding>;
+	try {
+		parsed = JSON.parse(raw) as Partial<ScopeBinding>;
+	} catch {
+		return null;
+	}
+	const now = Date.now();
+	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
+	const files = Array.isArray(parsed.files)
+		? normalizeScopeFiles(
+				parsed.files.filter((file): file is string => typeof file === 'string'),
+			)
+		: null;
+	if (
+		parsed.version !== 2 ||
+		parsed.taskId !== input.taskId ||
+		!workspaceIdentity ||
+		parsed.workspaceIdentity !== workspaceIdentity ||
+		parsed.planId !== derivePlanId(input.plan) ||
+		parsed.planStructureHash !== computePlanStructureHash(input.plan) ||
+		typeof parsed.declaredAt !== 'number' ||
+		parsed.declaredAt > now ||
+		typeof parsed.expiresAt !== 'number' ||
+		parsed.expiresAt <= now ||
+		!parsed.ownerSessionId ||
+		!parsed.ownerMessageId ||
+		!parsed.source ||
+		!files ||
+		parsed.ownerSessionId !== input.ownerSessionId ||
+		(input.requireDispatchCorrelation === true &&
+			(typeof parsed.dispatchCallId !== 'string' ||
+				parsed.dispatchCallId.length === 0 ||
+				parsed.activation !== 'active' ||
+				parsed.ownerMessageId !== parsed.dispatchCallId ||
+				typeof parsed.parentOwnerSessionId !== 'string' ||
+				parsed.parentOwnerSessionId.length === 0 ||
+				parsed.ownerSessionId === parsed.parentOwnerSessionId ||
+				parsed.parentCallId !== parsed.dispatchCallId)) ||
+		(input.requireDeclaration === true &&
+			(parsed.activation !== 'declaration' ||
+				parsed.dispatchCallId !== undefined)) ||
+		(input.parentCallId !== undefined &&
+			parsed.parentCallId !== input.parentCallId)
+	)
+		return null;
+
+	return { ...(parsed as ScopeBinding), files };
+}
+
+/** Remove one identity-bound authorization without disturbing sibling sessions. */
+export function clearScopeBindingFromDisk(input: {
+	directory: string;
+	taskId: string;
+	ownerSessionId: string;
+}): void {
+	try {
+		const resolvedWorkspace = fs.realpathSync(input.directory);
+		const scopePath = getBindingFilePath(
+			resolvedWorkspace,
+			input.taskId,
+			input.ownerSessionId,
+		);
+		const safePath = resolveSafeScopeFileForUnlink(
+			resolvedWorkspace,
+			scopePath,
+		);
+		if (!safePath) return;
+		fs.unlinkSync(safePath);
+	} catch {
+		/* missing, invalid, or already removed */
+	}
+}
+
+/**
+ * Resolve authorization against the current durable plan projection. This is
+ * synchronous so guardrail paths can use one exact source without reviving the
+ * legacy session/v1/plan fallback chain.
+ */
+function readCurrentPlan(directory: string): Plan | null {
+	try {
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		const stat = fs.statSync(planPath);
+		if (!stat.isFile() || stat.size > MAX_PLAN_BYTES) return null;
+		const parsed = PlanSchema.safeParse(
+			JSON.parse(fs.readFileSync(planPath, 'utf8')),
+		);
+		return parsed.success ? parsed.data : null;
+	} catch {
+		return null;
+	}
+}
+
+function resolveAuthorizedScopeBindingForPlan(input: {
+	directory: string;
+	plan: Plan;
+	taskId: string;
+	activeSessionId: string;
+}): ScopeBinding | null {
+	const inMemory = getAuthorizedScopeBinding(input);
+	if (inMemory) return inMemory;
+	const durable = readScopeBindingFromDisk({
+		directory: input.directory,
+		taskId: input.taskId,
+		plan: input.plan,
+		ownerSessionId: input.activeSessionId,
+		requireDispatchCorrelation: true,
+	});
+	if (durable) registerScopeBinding(durable);
+	return durable;
+}
+
+export function resolveAuthorizedScopeBinding(input: {
+	directory: string;
+	taskId: string;
+	activeSessionId: string;
+}): ScopeBinding | null {
+	const plan = readCurrentPlan(input.directory);
+	return plan ? resolveAuthorizedScopeBindingForPlan({ ...input, plan }) : null;
+}
+
+/**
+ * Recover one unambiguous child binding after an in-memory session restart.
+ * Every candidate is still checked against current plan identity, exact child
+ * session ownership, Task-call correlation, TTL, and active state.
+ */
+export function resolveAuthorizedScopeBindingForSession(input: {
+	directory: string;
+	activeSessionId: string;
+}): ScopeBinding | null {
+	const plan = readCurrentPlan(input.directory);
+	if (!plan) return null;
+	const matches: ScopeBinding[] = [];
+	for (const task of plan.phases.flatMap((phase) => phase.tasks)) {
+		const binding = resolveAuthorizedScopeBindingForPlan({
+			directory: input.directory,
+			plan,
+			taskId: task.id,
+			activeSessionId: input.activeSessionId,
+		});
+		if (binding) matches.push(binding);
+		if (matches.length > 1) return null;
+	}
+	return matches[0] ?? null;
 }
 
 /**

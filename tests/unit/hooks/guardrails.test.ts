@@ -14,6 +14,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import * as utilsModule from '../../../src/utils';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
 // Resolve through realpathSync so the test cwd matches the canonical path
 // production code compares against. On macOS, os.tmpdir() returns
@@ -233,6 +234,7 @@ describe('guardrails circuit breaker', () => {
 		it('does not flag different tools', async () => {
 			const config = defaultConfig({ max_repetitions: 3 });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			startAgentSession('test-session', 'architect');
 			// Path must resolve inside TEST_DIR so the write-tool authority
 			// containment check does not reject `edit`. The test is about repetition
 			// logic across different tools, not path semantics.
@@ -317,7 +319,7 @@ describe('guardrails circuit breaker', () => {
 	// but the logic is thoroughly validated in the fallback test suite.
 
 	describe('toolBefore - auto session creation', () => {
-		it('auto-creates session if none exists', async () => {
+		it('does not invent a privileged session for a no-op tool call', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 
@@ -330,9 +332,7 @@ describe('guardrails circuit breaker', () => {
 			// Session should now exist — seeded as ORCHESTRATOR_NAME (architect) since no
 			// activeAgent is set, so the ?? ORCHESTRATOR_NAME fallback applies.
 			// The architect is exempt from guardrails, so no window is created.
-			const session = getAgentSession('new-session');
-			expect(session).toBeDefined();
-			expect(session?.agentName).toBe('architect');
+			expect(getAgentSession('new-session')).toBeUndefined();
 
 			// Architect is exempt — no invocation window is created
 			const window = getActiveWindow('new-session');
@@ -2397,27 +2397,23 @@ describe('guardrails circuit breaker', () => {
 			resetSwarmState();
 		});
 
-		// VERIFICATION TESTS (7 test cases)
-
 		describe('Verification Tests', () => {
 			it('Test 1: apply_patch with Codex-style `*** Update File: <path>` → architectWriteCount increments', async () => {
-				// Mock: Set up architect session
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				swarmState.activeAgent.set('test-session', 'architect');
 				startAgentSession('test-session', 'architect');
 				const session = getAgentSession('test-session');
 
-				// Spy on warn function
 				const warnSpy = vi
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.input containing `*** Update File: src/foo.ts`
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
-						input: '*** Update File: src/foo.ts\nSome code changes',
+						input:
+							'*** Begin Patch\n*** Update File: src/foo.ts\n@@\n-old\n+new\n*** End Patch',
 					}),
 				);
 
@@ -2483,13 +2479,12 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.cmd = ["apply_patch", "*** Update File: src/index.ts ..."]
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
 						cmd: [
 							'apply_patch',
-							'*** Update File: src/index.ts\nCode changes here',
+							'*** Begin Patch\n*** Update File: src/index.ts\n@@\n-old\n+new\n*** End Patch',
 						],
 					}),
 				);
@@ -2519,11 +2514,11 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.input containing `*** Update File: .swarm/context.md`
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
-						input: '*** Update File: .swarm/context.md\nContext changes',
+						input:
+							'*** Begin Patch\n*** Update File: .swarm/context.md\n@@\n-old\n+new\n*** End Patch',
 					}),
 				);
 
@@ -2550,7 +2545,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.patch containing multiple files: `+++ b/src/foo.ts` and `+++ b/src/bar.ts`
 				const multiFilePatch = `
 --- a/src/foo.ts
 +++ b/src/foo.ts
@@ -2593,10 +2587,12 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: patch args.input containing `*** Update File: src/test.ts`
 				await hooks.toolBefore(
 					makeInput('test-session', 'patch', 'call-1'),
-					makeOutput({ input: '*** Update File: src/test.ts\nCode changes' }),
+					makeOutput({
+						input:
+							'*** Begin Patch\n*** Update File: src/test.ts\n@@\n-old\n+new\n*** End Patch',
+					}),
 				);
 
 				// Verify: architectWriteCount increments
@@ -2625,7 +2621,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: write tool with args.filePath = 'src/test.ts'
 				await hooks.toolBefore(
 					makeInput('test-session', 'write', 'call-1'),
 					makeOutput({ filePath: 'src/test.ts' }),
@@ -2652,8 +2647,6 @@ describe('guardrails circuit breaker', () => {
 			});
 		});
 
-		// ADVERSARIAL TESTS (5 test cases)
-
 		describe('Adversarial Tests', () => {
 			it('Attack Vector 1: Can attacker bypass detection by using malformed patch content?', async () => {
 				const config = defaultConfig();
@@ -2666,15 +2659,15 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Attempt: apply_patch with patch content that has no `***` or `+++` markers
-				await hooks.toolBefore(
-					makeInput('test-session', 'apply_patch', 'call-1'),
-					makeOutput({
-						input: 'Garbage patch content with no markers\nJust random text',
-					}),
-				);
+				await expect(
+					hooks.toolBefore(
+						makeInput('test-session', 'apply_patch', 'call-1'),
+						makeOutput({
+							input: 'Garbage patch content with no markers\nJust random text',
+						}),
+					),
+				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
-				// Expected: No paths extracted, no count increment
 				expect(session?.architectWriteCount).toBe(0);
 
 				// Expected: No warning fired
@@ -2697,13 +2690,13 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Attempt: apply_patch with `++ a/src/foo.ts` (wrong marker, should be `+++` and `b/`)
-				await hooks.toolBefore(
-					makeInput('test-session', 'apply_patch', 'call-1'),
-					makeOutput({ input: '++ a/src/foo.ts\nWrong marker format' }),
-				);
+				await expect(
+					hooks.toolBefore(
+						makeInput('test-session', 'apply_patch', 'call-1'),
+						makeOutput({ input: '++ a/src/foo.ts\nWrong marker format' }),
+					),
+				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
-				// Expected: Regex doesn't match, no detection
 				expect(session?.architectWriteCount).toBe(0);
 
 				// Expected: No warning
@@ -2715,9 +2708,7 @@ describe('guardrails circuit breaker', () => {
 				warnSpy.mockRestore();
 			});
 
-			it('Attack Vector 3: /dev/null is detected by *** Update File: pattern (implementation behavior)', async () => {
-				// NOTE: This test documents actual implementation behavior
-				// The /dev/null filter only applies to +++ b/ pattern, not to *** Update File: pattern
+			it('Attack Vector 3: /dev/null is detected then fails closed as unverifiable', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				swarmState.activeAgent.set('test-session', 'architect');
@@ -2741,10 +2732,10 @@ describe('guardrails circuit breaker', () => {
 							makeInput('test-session', 'apply_patch', 'call-1'),
 							makeOutput({
 								patch:
-									'*** Update File: /dev/null\n+++ b/dev/null\nTrying to inject /dev/null',
+									'*** Begin Patch\n*** Update File: /dev/null\n@@\n-old\n+new\n*** End Patch',
 							}),
 						),
-					).rejects.toThrow('WRITE BLOCKED');
+					).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 					// Actual behavior: /dev/null IS detected by *** Update File: pattern (not filtered)
 					// Implementation note: /dev/null filter only applies to +++ b/ pattern
@@ -2766,13 +2757,18 @@ describe('guardrails circuit breaker', () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 
-				// Attempt: Coder with delegationActive=true, fire apply_patch with source code file
 				swarmState.activeAgent.set('test-session', 'coder');
 				startAgentSession('test-session', 'coder');
 				const session = getAgentSession('test-session');
 				if (session) {
 					session.delegationActive = true; // Simulate active delegation
 				}
+				installActiveScopeBinding({
+					directory: TEST_DIR,
+					childSessionId: 'test-session',
+					taskId: '1.1',
+					files: ['src/real.ts'],
+				});
 
 				const warnSpy = vi
 					.spyOn(utilsModule, 'warn')
@@ -2780,7 +2776,10 @@ describe('guardrails circuit breaker', () => {
 
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
-					makeOutput({ input: '*** Update File: src/real.ts\nCode changes' }),
+					makeOutput({
+						input:
+							'*** Begin Patch\n*** Update File: src/real.ts\n@@\n-old\n+new\n*** End Patch',
+					}),
 				);
 
 				// Expected: Coder is not architect, so self-coding detection doesn't apply

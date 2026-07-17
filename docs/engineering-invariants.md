@@ -91,6 +91,12 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established:** distinguish transient infrastructure/provider errors from agent logic errors. `transientRetryCount` (default budget 5) is independent of `consecutiveErrors` and resets per invocation. Transient retry and model fallback are independent.
 - **Maps to AGENTS.md:** invariant 9 (guardrails / retry semantics).
 
+### Issue #1875 — non-transient retry loops + unbound write scope
+
+- **Symptom:** proven parser, command-not-found, sandbox-wrapper, and repeated permanent failures could be retried indefinitely, while a coder delegation with empty, stale, v1, or identity-mismatched scope could reach child-state publication without an exact active authorization binding.
+- **Invariants established:** non-transient circuit state is owned by the active agent invocation and never persisted. `shell_parse_error`, `command_not_found`, and `sandbox_wrapper_failure` hard-stop on the first classified failure; only `general_permanent` uses the three-consecutive-same-category threshold. Successful, neutral, degraded, or transient outcomes may clear an open streak but never a hard stop. The false-to-true transition emits `telemetry.loopDetected` and exactly one `NON-TRANSIENT STOP` advisory; after that transition, agents must stop tool calls and report the blocker until a verified new invocation or session reset. Write-capable coder delegation requires an exact active v2 scope binding correlated to the current session and Task call; empty scope, v1 fallback, stale plan/task identity, or another session's declaration fails closed with `SCOPE_NOT_DECLARED`, before child state is published.
+- **Maps to AGENTS.md:** invariants 5 (plan durability), 8 (session state), and 9 (guardrails / retry semantics).
+
 ### v7.0.1 — `SWARM_PLAN` relocation + cache eviction completeness
 
 - **Symptom:** runtime artifacts at the project root caused git pollution; OpenCode users on Windows / macOS still couldn't update because lock files (`bun.lock`, `bun.lockb`, `package-lock.json`) prevented re-resolution.

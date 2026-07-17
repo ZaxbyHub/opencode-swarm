@@ -123,65 +123,48 @@ describe('delegation-gate: directory traversal prevention', () => {
 	});
 
 	it('should not allow access outside project directory', async () => {
-		const hook = createDelegationGateHook(makeConfig(), tempDir);
-
-		// Attempt to traverse outside project
-		const parentDir = path.dirname(tempDir);
-		const hook2 = createDelegationGateHook(makeConfig(), parentDir);
-
-		const session = ensureAgentSession('test-session');
-
-		// Should not throw — hook should handle invalid paths gracefully
-		let threw = false;
+		const outsideDir = makeTempProject('delegation-gate-outside-');
 		try {
-			await callToolBefore(hook2, 'Task', 'test-session', {
-				subagent_type: 'mega_coder',
-				task_id: '1.1',
-				prompt: 'ACCEPTANCE: task complete and covered by tests',
-			});
-		} catch {
-			threw = true;
+			const hook2 = createDelegationGateHook(makeConfig(), outsideDir);
+			ensureAgentSession('test-session');
+			await expect(
+				callToolBefore(hook2, 'Task', 'test-session', {
+					subagent_type: 'mega_coder',
+					task_id: '1.1',
+					prompt: 'ACCEPTANCE: task complete and covered by tests',
+				}),
+			).rejects.toThrow('SCOPE_NOT_DECLARED');
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
 		}
-
-		expect(threw).toBe(false);
 	});
 
-	it('should handle path with null bytes safely', async () => {
+	it('should reject path with null bytes', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
-		const session = ensureAgentSession('test-session');
+		ensureAgentSession('test-session');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
 				prompt:
-					'TASK: 1.1\nFILE: ../etc/passwd\nACCEPTANCE: task complete and covered by tests',
-			});
-		} catch {
-			threw = true;
-		}
-
-		expect(threw).toBe(false);
+					'TASK: 1.1\nFILE: src/bad\u0000path.ts\nACCEPTANCE: task complete and covered by tests',
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 
-	it('should handle absolute path attempts', async () => {
+	it('should reject absolute path attempts', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
-		const session = ensureAgentSession('test-session');
+		ensureAgentSession('test-session');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1',
 				prompt:
 					'TASK: 1.1\nFILE: /absolute/path\nACCEPTANCE: task complete and covered by tests',
-			});
-		} catch {
-			threw = true;
-		}
-
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 });
 

@@ -158,11 +158,11 @@ If a tool modifies a file, it is a CODER tool. Delegate.
 1a. SCOPE DISCIPLINE — call declare_scope BEFORE every coder delegation AND before any test_engineer delegation that will write new test files.
   - Before you delegate a coding task, call declare_scope with { taskId, files } where \`files\` is the exact list of paths the coder is allowed to write. Bundle any generated/lockfile paths that the change will produce (e.g. package-lock.json, Cargo.lock, dist/*).
   - Before you delegate to test_engineer with an instruction to CREATE or MODIFY test files, call declare_scope with { taskId, files } listing the exact test file path(s) (e.g. src/auth/login.test.ts, tests/unit/foo.spec.ts) the test_engineer is expected to write.
-  - If coder or test_engineer returns "WRITE BLOCKED" for a path outside the declared list: call declare_scope again with the missing path added. Do NOT instruct the coder to use bash, sed, echo, cat, tee, dd, or any interpreter eval (python -c, node -e, bun -e, ruby -e) to bypass the block. Those routes bypass the authority check and violate scope discipline.
-  - Never wrap a file write in eval, bash -c, sh -c, a subshell, or a heredoc-to-file redirect. Those are bash workarounds and are banned even when scope appears to permit them — the write-authority guard is tool-scoped; bash is unguarded and must not be used as a write path.
+  - If coder or test_engineer returns "WRITE BLOCKED" for a path outside the declared list: call declare_scope again with the missing path added. Do NOT instruct the coder to use bash, sed, echo, cat, tee, dd, or any interpreter eval (python -c, node -e, bun -e, ruby -e) to bypass the block. Alternate mechanisms cannot create write authority and violate scope discipline.
+  - Never wrap a file write in eval, bash -c, sh -c, a subshell, or a heredoc-to-file redirect as a workaround. Shell and interpreter targets are scope-checked when they can be proven, and unverifiable write payloads fail closed.
   - Do NOT use mv, Move-Item, move, ren, Rename-Item, or cp-then-rm chains to relocate, rename, or delete files under \`.swarm/\` as a workaround for blocked destructive commands. Those are file-move shell bypasses and are banned. Use the tool's dedicated tools (\`.swarm/\` file management or evidence manager tools) instead.
   - If you cannot enumerate files up front (e.g. a broad refactor), declare the containing directories — declare_scope accepts directory entries and grants containment.
-  - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder or test_engineer process reads an empty scope and every Edit/Write is denied.
+  - Rationale: coder Task preflight binds scope to the exact workspace, plan generation, task, parent session, and Task call. Missing or malformed scope blocks delegation with SCOPE_NOT_DECLARED; conflicting lower-precedence FILE:/plan paths block with SCOPE_CONFLICT before the coder starts.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
    Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required. This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
@@ -176,7 +176,7 @@ If a tool modifies a file, it is a CODER tool. Delegate.
 <!-- BEHAVIORAL_GUIDANCE_START -->
 BATCHING DETECTION — you are batching if your coder delegation contains ANY of:
     - The word "and" connecting two actions ("update X AND add Y")
-    - Multiple FILE paths ("FILE: src/a.ts, src/b.ts, src/c.ts")
+    - Multiple objectives hidden behind a comma-separated FILE value (use one complete relative path per FILE: line)
     - Multiple TASK objectives ("TASK: Refactor the processor and update the config")
     - Phrases like "also", "while you're at it", "additionally", "as well"
 
@@ -943,7 +943,7 @@ Purpose: Ingest issue evidence, trace impact, and transition to the full fix wor
 ACTION: Load skill ${bundledProjectSkillFileReference('issue-ingest')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
-- Preserve issue evidence, flag missing repro details, and route non-mega swarms through the active swarm's agents.
+- Preserve issue evidence, flag missing repro details, and route every delegation through the current session's active-swarm role mapping; no swarm ID receives special behavior.
 
 RECOVERY: At mode entry, read .swarm/issue-reference.json to recover the source issue URL, number, and flags (plan/trace/noRepro) if the mode signal has been lost or context was compacted.
 

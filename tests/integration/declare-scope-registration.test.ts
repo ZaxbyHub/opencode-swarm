@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Plan } from '../../src/config/plan-schema';
 import { ensureAgentSession, resetSwarmState } from '../../src/state';
 import { declare_scope } from '../../src/tools';
 import { executeDeclareScope } from '../../src/tools/declare-scope';
@@ -16,14 +17,27 @@ describe('declare_scope tool registration integration', () => {
 		// Create required .swarm directory
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 
-		// Write a minimal plan.json with task "1.1"
-		const plan = {
+		// Write a schema-valid plan.json with task "1.1".
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Declare scope integration fixture',
+			swarm: 'fixture-swarm',
+			current_phase: 1,
 			phases: [
 				{
 					id: 1,
 					name: 'Phase 1',
+					status: 'in_progress',
 					tasks: [
-						{ id: '1.1', description: 'Test task 1.1', status: 'pending' },
+						{
+							id: '1.1',
+							phase: 1,
+							description: 'Test task 1.1',
+							status: 'pending',
+							size: 'small',
+							depends: [],
+							files_touched: ['src/test.ts', 'src/utils.ts'],
+						},
 					],
 				},
 			],

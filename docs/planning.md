@@ -53,7 +53,7 @@ Every task in `.swarm/plan.md` must define these four fields:
 - `ACCEPTANCE CRITERIA` must be a bullet list specific enough for the test engineer to write a unit test.
 - `CONSTRAINT` is optional but recommended when the task touches shared code.
 
-> **`FILE:` has runtime significance beyond documentation.** The swarm extracts all `FILE:` paths from a coder delegation to populate `session.declaredCoderScope`. If the coder modifies files outside of those declared paths, the scope enforcement system flags the violation. Always declare the correct target file — omitting `FILE:` or pointing to a directory disables scope containment for that task.
+> **`FILE:` has runtime significance beyond documentation.** Coder Task preflight requires one unambiguous plan task and a non-empty scope. A matching `declare_scope` binding is authoritative and `FILE:`/plan paths must be its subsets; otherwise plan `files_touched` is authoritative; only when both are absent may a complete list of one relative path per `FILE:` line define scope. Missing or malformed scope fails with `SCOPE_NOT_DECLARED`, and disagreement fails with `SCOPE_CONFLICT`, before the coder starts. Bindings are specific to the workspace, plan generation, task, parent session, and Task call; worktree lanes derive a child-root binding rather than reusing root authority.
 
 ### Task Sizing
 

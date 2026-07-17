@@ -85,7 +85,7 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: ['src/foo.ts'],
 				})),
 			},
 		],
@@ -345,24 +345,19 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			expect(threw).toBe(true);
 		});
 
-		it('explicit invalid task_id should return null — no text fallback (bypass fix)', async () => {
+		it('explicit invalid task_id should fail closed without text fallback (bypass fix)', async () => {
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'coder_delegated');
 
-			let threw = false;
-			try {
-				await callToolBefore(hook, 'Task', 'test-session', {
+			await expect(
+				callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
 					task_id: 'not-valid',
 					prompt:
 						'TASK: 1.2\nFILE: src/foo.ts\nACCEPTANCE: task complete and covered by tests',
-				});
-			} catch {
-				threw = true;
-			}
-
-			expect(threw).toBe(false);
+				}),
+			).rejects.toThrow('SCOPE_NOT_DECLARED');
 		});
 
 		it('prompt with same task ID in multiple text fields — deduplication works (bypass fix)', async () => {

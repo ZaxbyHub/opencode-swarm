@@ -1341,6 +1341,79 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		event: async (input: { event: unknown }): Promise<void> => {
 			try {
 				rememberAssistantUsageEvent(input);
+				const lifecycleEvent = input.event as
+					| {
+							type?: string;
+							properties?: {
+								sessionID?: string;
+								sessionId?: string;
+								id?: string;
+								status?: string | { type?: string };
+								part?: {
+									id?: string;
+									callID?: string;
+									type?: string;
+									tool?: string;
+									state?: {
+										metadata?: {
+											parentSessionId?: string;
+											sessionId?: string;
+										};
+									};
+								};
+								info?: { id?: string; sessionID?: string };
+							};
+					  }
+					| undefined;
+				if (lifecycleEvent?.type === 'message.part.updated') {
+					const part = lifecycleEvent.properties?.part;
+					const metadata = part?.state?.metadata;
+					const partTool =
+						typeof part?.tool === 'string'
+							? normalizeToolName(part.tool)?.toLowerCase()
+							: undefined;
+					if (
+						part?.type === 'tool' &&
+						partTool === 'task' &&
+						typeof part.callID === 'string' &&
+						part.callID.trim() !== '' &&
+						typeof metadata?.parentSessionId === 'string' &&
+						typeof metadata?.sessionId === 'string'
+					) {
+						await delegationGateHooks.taskMetadata({
+							callID: part.callID,
+							parentSessionID: metadata.parentSessionId,
+							childSessionID: metadata.sessionId,
+						});
+					}
+				}
+				const lifecycleStatus = lifecycleEvent?.properties?.status;
+				const isTerminalSessionEvent =
+					lifecycleEvent?.type === 'session.deleted' ||
+					lifecycleEvent?.type === 'session.removed' ||
+					lifecycleEvent?.type === 'session.idle' ||
+					lifecycleEvent?.type === 'session.error' ||
+					(lifecycleEvent?.type === 'session.status' &&
+						(lifecycleStatus === 'idle' ||
+							(typeof lifecycleStatus === 'object' &&
+								(lifecycleStatus.type === 'idle' ||
+									lifecycleStatus.type === 'error'))));
+				if (isTerminalSessionEvent) {
+					const properties = lifecycleEvent.properties;
+					const sessionID =
+						properties?.sessionID ??
+						properties?.sessionId ??
+						properties?.info?.sessionID ??
+						properties?.info?.id ??
+						properties?.id;
+					if (sessionID) {
+						delegationGateHooks.sessionEnded(
+							sessionID,
+							lifecycleEvent.type === 'session.deleted' ||
+								lifecycleEvent.type === 'session.removed',
+						);
+					}
+				}
 				// PR wake delivery: session.idle flushes that session's queued PR
 				// events. No-op unless prompt-mode delivery is registered.
 				if (prEventDelivery) {

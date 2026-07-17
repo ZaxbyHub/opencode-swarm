@@ -5,23 +5,24 @@
  * NOT as session crash. Verified from guardrails.ts multiple existing throw sites.
  * Safe blocking pattern: throw new Error(`SCOPE VIOLATION: ...`)
  *
- * Fires BEFORE write/edit tools execute. When a non-architect agent attempts to
- * modify a file outside the declared task scope, blocks the call and injects an advisory.
+ * Fires BEFORE write/edit tools execute. When a coder attempts to modify a file
+ * outside its Task-correlated scope, blocks the call and injects an advisory.
  */
 
 import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { resolveScopeWithFallbacks } from '../scope/scope-persistence';
+import {
+	resolveAuthorizedScopeBinding,
+	resolveAuthorizedScopeBindingForSession,
+} from '../scope/scope-persistence';
 import { type AgentSessionState, swarmState } from '../state';
-import { pendingCoderScopeByTaskId } from './delegation-gate.js';
 import { normalizeToolName } from './normalize-tool-name';
+import { resolveWriteTargets } from './write-target-resolver';
 
-// NOTE: bash/shell tools are intentionally excluded from WRITE_TOOLS.
-// A coder agent using bash with shell redirections (echo > file, cp, sed -i) can
-// bypass this scope check. This is a known architectural limitation — bash commands
-// are opaque to static scope analysis. Post-hoc detection via guardrails.ts
-// diff-scope validation provides secondary coverage.
+// bash/shell tools are intentionally excluded from WRITE_TOOLS because the main
+// guardrails hook has a dedicated shell-write parser. That path uses the same
+// active Task-correlated binding and fails closed for coder writes with no scope.
 
 // Tools that write files — scope guard watches these
 // Derived from shared WRITE_TOOL_NAMES constant — do not edit here
@@ -71,56 +72,52 @@ export function createScopeGuardHook(
 
 			const agentName = activeAgent ?? session?.agentName ?? 'unknown';
 
-			const isArchitect =
-				stripKnownSwarmPrefix(agentName) === ORCHESTRATOR_NAME;
+			const agentRole = stripKnownSwarmPrefix(agentName);
+			const isArchitect = agentRole === ORCHESTRATOR_NAME;
 			if (isArchitect) return; // Architect writes are always allowed
+			// Scope bindings are a coder Task contract. Other roles remain governed
+			// by the universal/lstat and per-agent authority checks in guardrails.
+			if (agentRole !== 'coder') return;
 
-			// Get declared scope for this session.
-			// v6.33.1 CRIT-1: check session first, then fallback map by taskId.
-			// v6.71.1 (#519): extend with disk persistence + plan-as-scope so
-			// scope survives cross-process delegation and architect plans become
-			// a durable scope source.
-			const taskId = session?.currentTaskId ?? null;
-			const declaredScope = resolveScopeWithFallbacks({
+			// Resolve the complete write set before looking up scope. Missing or
+			// novel argument shapes must not become a no-scope bypass.
+			const targets = _internals.resolveWriteTargets(toolName, output.args, {
 				directory,
-				taskId,
-				inMemoryScope: session?.declaredCoderScope,
-				pendingMapScope: taskId ? pendingCoderScopeByTaskId.get(taskId) : null,
 			});
-			if (!declaredScope || declaredScope.length === 0) return; // No scope declared — allow
+			if (targets.status === 'unverifiable') {
+				throw new Error(
+					`WRITE TARGET UNVERIFIABLE: ${agentName} invoked ${toolName}: ${targets.reason}`,
+				);
+			}
+			if (targets.paths.length === 0) return;
 
-			// Get the file path(s) from args — collect ALL candidate paths from ALL supported keys
-			const argsObj = output.args as Record<string, unknown> | undefined;
-			const candidatePaths: string[] = [];
-
-			// Collect single-string paths from ALL supported keys
-			const singlePathKeys = ['path', 'filePath', 'file'];
-			for (const key of singlePathKeys) {
-				const val = argsObj?.[key];
-				if (typeof val === 'string' && val) {
-					candidatePaths.push(val);
-				}
+			// Resolve only an exact active child binding. If plugin memory restarted,
+			// recover one unique binding from disk against the current plan identity.
+			let taskId = _internals.resolveTaskId(session);
+			const binding = taskId
+				? _internals.resolveAuthorizedScopeBinding({
+						directory,
+						taskId,
+						activeSessionId: sessionId,
+					})
+				: _internals.resolveAuthorizedScopeBindingForSession({
+						directory,
+						activeSessionId: sessionId,
+					});
+			if (!taskId && binding && session) {
+				taskId = binding.taskId;
+				session.currentTaskId = binding.taskId;
+				session.declaredCoderScope = [...binding.files];
+			}
+			const declaredScope = binding?.files ?? null;
+			if (!declaredScope || declaredScope.length === 0) {
+				throw new Error(
+					`SCOPE_NOT_DECLARED: ${agentName} cannot invoke ${toolName} without a validated scope for task ${taskId ?? 'unknown'}.`,
+				);
 			}
 
-			// Collect array paths from all supported array keys
-			let hasArrayKeys = false;
-			const arrayPathKeys = ['files', 'paths', 'targetFiles'];
-			for (const key of arrayPathKeys) {
-				const val = argsObj?.[key];
-				if (Array.isArray(val)) {
-					hasArrayKeys = true;
-					for (const item of val) {
-						if (typeof item === 'string' && item) {
-							candidatePaths.push(item);
-						}
-					}
-				}
-			}
-
-			if (candidatePaths.length === 0 && !hasArrayKeys) return; // Can't determine path — allow
-
-			// Validate every collected path
-			for (const rawPath of candidatePaths) {
+			// Validate every resolved target from the shared registry.
+			for (const rawPath of targets.paths) {
 				const filePath = sanitizePath(rawPath);
 				if (!isFileInScope(filePath, declaredScope, directory)) {
 					reportScopeViolation(
@@ -201,7 +198,14 @@ function sanitizePath(raw: string): string {
  * Internal implementation details exposed for unit testing.
  * DO NOT use these in production code.
  */
-export const _internals = { sanitizePath };
+export const _internals = {
+	sanitizePath,
+	resolveWriteTargets,
+	resolveAuthorizedScopeBinding,
+	resolveAuthorizedScopeBindingForSession,
+	resolveTaskId: (session: AgentSessionState | undefined): string | null =>
+		session?.currentTaskId ?? null,
+};
 
 /**
  * Report a scope violation for an out-of-scope file path.

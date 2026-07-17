@@ -1,34 +1,33 @@
-/**
- * scope-guard-array-paths.test.ts
- *
- * Tests for array-path parameter handling in scope-guard hook (Task 1.1 apply-patch feature):
- * 1. Single-string path extraction still works (existing behavior)
- * 2. Array-path extraction works for files[], paths[], targetFiles[]
- * 3. Mixed args (both single and array) are handled correctly
- * 4. Empty arrays are skipped (no false violations)
- * 5. Non-string elements in arrays are skipped
- * 6. Scope violation is reported for out-of-scope paths in arrays
- * 7. In-scope paths in arrays pass without violation
- */
-
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	installLegacyScopeGuardTargetSeam,
+	installScopeGuardBindingSeam,
+} from '../../tests/helpers/scope-guard-binding-seam';
 import { ensureAgentSession, resetSwarmState, swarmState } from '../state';
-import { createScopeGuardHook } from './scope-guard';
+import {
+	createScopeGuardHook,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 const SESSION_ID = 'test-session-array-paths';
 const WORKSPACE_DIR = '/workspace';
 
 describe('scope-guard array-path parameter handling', () => {
+	let restoreScopeBindingSeam: (() => void) | undefined;
+	let restoreTargetSeam: (() => void) | undefined;
 	beforeEach(() => {
 		resetSwarmState();
+		restoreScopeBindingSeam = installScopeGuardBindingSeam(scopeGuardInternals);
+		restoreTargetSeam = installLegacyScopeGuardTargetSeam(scopeGuardInternals);
 	});
 
 	afterEach(() => {
+		restoreScopeBindingSeam?.();
+		restoreTargetSeam?.();
 		resetSwarmState();
 	});
 
 	// ─────────────────────────────────────────────────────────────
-	// Scenario 1: Single-string path extraction still works
 	// ─────────────────────────────────────────────────────────────
 	describe('Scenario 1: Single-string path extraction (existing behavior)', () => {
 		it('1a. path parameter triggers scope check', async () => {

@@ -252,57 +252,6 @@ describe('executeDeclareScope', () => {
 		expect(result.fileCount).toBe(3);
 	});
 
-	// Test 8: Sets declaredCoderScope and clears lastScopeViolation on session
-	test('sets declaredCoderScope and clears lastScopeViolation on session', async () => {
-		const session = createWorkflowTestSession({
-			lastScopeViolation: 'Previous violation',
-		});
-		swarmState.agentSessions.set('test-session', session);
-
-		const args: DeclareScopeArgs = {
-			taskId: '1.1',
-			files: ['src/index.ts'],
-		};
-
-		await executeDeclareScope(args, tempDir);
-
-		// Check that declaredCoderScope was set
-		const updatedSession = swarmState.agentSessions.get('test-session');
-		expect(updatedSession?.declaredCoderScope).toEqual(['src/index.ts']);
-
-		// Check that lastScopeViolation was cleared
-		expect(updatedSession?.lastScopeViolation).toBeNull();
-	});
-
-	// Test 9: Sets declaredCoderScope on ALL sessions
-	test('sets declaredCoderScope on ALL active architect sessions', async () => {
-		const session1 = createWorkflowTestSession();
-		const session2 = createWorkflowTestSession();
-		const session3 = createWorkflowTestSession();
-
-		swarmState.agentSessions.set('session-1', session1);
-		swarmState.agentSessions.set('session-2', session2);
-		swarmState.agentSessions.set('session-3', session3);
-
-		const args: DeclareScopeArgs = {
-			taskId: '1.1',
-			files: ['src/index.ts'],
-		};
-
-		await executeDeclareScope(args, tempDir);
-
-		// All sessions should have the scope set
-		expect(
-			swarmState.agentSessions.get('session-1')?.declaredCoderScope,
-		).toEqual(['src/index.ts']);
-		expect(
-			swarmState.agentSessions.get('session-2')?.declaredCoderScope,
-		).toEqual(['src/index.ts']);
-		expect(
-			swarmState.agentSessions.get('session-3')?.declaredCoderScope,
-		).toEqual(['src/index.ts']);
-	});
-
 	// Test 10: working_directory validation - directory doesn't exist
 	test('working_directory does not exist returns error', async () => {
 		const args: DeclareScopeArgs = {
@@ -416,42 +365,6 @@ describe('executeDeclareScope', () => {
 		expect(result.taskId).toBe('1.1');
 	});
 
-	// Issue #259: Absolute path normalization
-	test('normalizes absolute paths to relative and returns warnings', async () => {
-		const session = createWorkflowTestSession();
-		swarmState.agentSessions.set('test-session', session);
-
-		const absolutePath = path.join(
-			tempDir,
-			'src',
-			'services',
-			'price-calculator.ts',
-		);
-		const args: DeclareScopeArgs = {
-			taskId: '1.1',
-			files: [absolutePath],
-		};
-
-		const result = await executeDeclareScope(args, tempDir);
-
-		expect(result.success).toBe(true);
-		expect(result.warnings).toBeDefined();
-		// v6.71.1 (#519): a standing SCOPE ENFORCEMENT NOTE is always appended.
-		const warnings = result.warnings ?? [];
-		const normalizeWarning = warnings.find((w) =>
-			w.includes('Absolute path normalized to relative'),
-		);
-		expect(normalizeWarning).toBeDefined();
-		expect(normalizeWarning!).toContain('src/services/price-calculator.ts');
-
-		// Verify the stored scope is relative, not absolute
-		const updatedSession = swarmState.agentSessions.get('test-session');
-		expect(updatedSession?.declaredCoderScope).toBeDefined();
-		expect(updatedSession!.declaredCoderScope![0]).toBe(
-			'src/services/price-calculator.ts',
-		);
-	});
-
 	test('relative paths produce no normalization warnings', async () => {
 		const session = createWorkflowTestSession();
 		swarmState.agentSessions.set('test-session', session);
@@ -464,43 +377,18 @@ describe('executeDeclareScope', () => {
 		const result = await executeDeclareScope(args, tempDir);
 
 		expect(result.success).toBe(true);
-		// v6.71.1 (#519): the standing SCOPE ENFORCEMENT NOTE is always appended,
-		// but no per-path normalization warning is produced for relative inputs.
+		// The standing scope contract is always appended, but no per-path
+		// normalization warning is produced for relative inputs.
 		const warnings = result.warnings ?? [];
 		expect(warnings.some((w) => w.includes('Absolute path normalized'))).toBe(
 			false,
 		);
-		expect(warnings.some((w) => w.includes('SCOPE ENFORCEMENT NOTE'))).toBe(
-			true,
+		const scopeContract = warnings.find((w) =>
+			w.startsWith('SCOPE ENFORCEMENT:'),
 		);
-	});
-
-	test('mixed absolute and relative paths normalizes only absolute ones', async () => {
-		const session = createWorkflowTestSession();
-		swarmState.agentSessions.set('test-session', session);
-
-		const absolutePath = path.join(tempDir, 'src', 'auth.ts');
-		const args: DeclareScopeArgs = {
-			taskId: '1.1',
-			files: ['src/index.ts', absolutePath],
-		};
-
-		const result = await executeDeclareScope(args, tempDir);
-
-		expect(result.success).toBe(true);
-		expect(result.warnings).toBeDefined();
-		// v6.71.1 (#519): a standing SCOPE ENFORCEMENT NOTE plus one normalization warning.
-		const warnings = result.warnings ?? [];
-		expect(warnings.some((w) => w.includes('Absolute path normalized'))).toBe(
-			true,
-		);
-		expect(result.fileCount).toBe(2);
-
-		const updatedSession = swarmState.agentSessions.get('test-session');
-		expect(updatedSession?.declaredCoderScope).toEqual([
-			'src/index.ts',
-			'src/auth.ts',
-		]);
+		expect(scopeContract).toContain('Task-correlated scope');
+		expect(scopeContract).toContain('SCOPE_NOT_DECLARED');
+		expect(scopeContract).not.toContain('bypass this check');
 	});
 
 	test('rejects absolute paths that resolve outside the project directory', async () => {

@@ -1,38 +1,30 @@
-/**
- * scope-guard-mixed-args.test.ts
- *
- * Regression tests for the first-match-wins bypass fix in scope-guard hook.
- *
- * PRIOR BUG (F#): When both a single-string path key (path/filePath/file) AND
- * an array key (files/paths/targetFiles) were present in args, only the single-string
- * path was validated and the array was silently ignored. An attacker could bypass
- * scope by putting an in-scope path in `path` and out-of-scope paths in `files[]`.
- *
- * FIX: Both single-string AND array paths are now collected into candidatePaths and
- * ALL are validated. The first violation throws, blocking the tool call.
- *
- * These tests verify the fix covers ALL 6 bypass scenarios:
- * 1. Mixed args: path in-scope + files[] out-of-scope → VIOLATION
- * 2. Mixed args: filePath out-of-scope + paths[] in-scope → VIOLATION
- * 3. Multiple arrays: files[] in-scope + targetFiles[] out-of-scope → VIOLATION
- * 4. All paths in-scope across all keys → no violation
- * 5. Empty arrays alongside valid single path → no false violation
- * 6. Non-string array elements are safely skipped
- */
-
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	installLegacyScopeGuardTargetSeam,
+	installScopeGuardBindingSeam,
+} from '../../tests/helpers/scope-guard-binding-seam';
 import { ensureAgentSession, resetSwarmState, swarmState } from '../state';
-import { createScopeGuardHook } from './scope-guard';
+import {
+	createScopeGuardHook,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 const SESSION_ID = 'test-session-mixed-args';
 const WORKSPACE_DIR = '/workspace';
 
+let restoreScopeBindingSeam: (() => void) | undefined;
+let restoreTargetSeam: (() => void) | undefined;
+
 describe('scope-guard mixed-args bypass — regression: first-match-wins bypass (F#)', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		restoreScopeBindingSeam = installScopeGuardBindingSeam(scopeGuardInternals);
+		restoreTargetSeam = installLegacyScopeGuardTargetSeam(scopeGuardInternals);
 	});
 
 	afterEach(() => {
+		restoreScopeBindingSeam?.();
+		restoreTargetSeam?.();
 		resetSwarmState();
 	});
 

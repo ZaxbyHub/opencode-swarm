@@ -13,20 +13,31 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { installScopeGuardBindingSeam } from '../../tests/helpers/scope-guard-binding-seam';
 import { ensureAgentSession, resetSwarmState, swarmState } from '../state';
 import { pendingCoderScopeByTaskId } from './delegation-gate';
-import { createScopeGuardHook, isFileInScope } from './scope-guard';
+import {
+	createScopeGuardHook,
+	isFileInScope,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 const SESSION_ID = 'test-session-scope-guard';
 const ARCHITECT_SESSION_ID = 'architect-session';
 const WORKSPACE_DIR = '/workspace';
 
 describe('scope-guard hook (Task 3.1)', () => {
+	let restoreScopeBindingSeam: (() => void) | undefined;
 	beforeEach(() => {
 		resetSwarmState();
+		restoreScopeBindingSeam = installScopeGuardBindingSeam(
+			scopeGuardInternals,
+			(taskId) => pendingCoderScopeByTaskId.get(taskId) ?? null,
+		);
 	});
 
 	afterEach(() => {
+		restoreScopeBindingSeam?.();
 		resetSwarmState();
 	});
 
@@ -107,7 +118,7 @@ describe('scope-guard hook (Task 3.1)', () => {
 	// ─────────────────────────────────────────────────────────────
 	// Test 4: Returns early when declaredCoderScope is null
 	// ─────────────────────────────────────────────────────────────
-	it('4. Returns early when declaredCoderScope is null (no scope declared)', async () => {
+	it('4. Blocks when no identity-bound scope is declared', async () => {
 		ensureAgentSession(SESSION_ID, 'coder');
 		// Ensure declaredCoderScope is null (default)
 		const session = swarmState.agentSessions.get(SESSION_ID);
@@ -129,7 +140,7 @@ describe('scope-guard hook (Task 3.1)', () => {
 				},
 				{ args: { path: '/workspace/any-file.ts' } },
 			);
-		}).not.toThrow();
+		}).toThrow(/SCOPE_NOT_DECLARED/);
 	});
 
 	// ─────────────────────────────────────────────────────────────
@@ -252,7 +263,7 @@ describe('scope-guard hook (Task 3.1)', () => {
 	// ─────────────────────────────────────────────────────────────
 	// Test 7b (CRIT-1): No fallback when currentTaskId does not match Map key
 	// ─────────────────────────────────────────────────────────────
-	it('7b (CRIT-1). No fallback when currentTaskId has no entry in Map (null scope returned)', async () => {
+	it('7b (CRIT-1). No fallback entry fails closed', async () => {
 		// When currentTaskId is set but has no entry in pendingCoderScopeByTaskId,
 		// the guard should return early (allow) since scope resolves to null.
 
@@ -283,7 +294,7 @@ describe('scope-guard hook (Task 3.1)', () => {
 				},
 				{ args: { path: '/workspace/any/file.ts' } },
 			);
-		}).not.toThrow();
+		}).toThrow(/SCOPE_NOT_DECLARED/);
 	});
 
 	// ─────────────────────────────────────────────────────────────
@@ -316,12 +327,11 @@ describe('scope-guard hook (Task 3.1)', () => {
 				},
 				{ args: { path: maliciousPath } },
 			);
-		}).toThrow(/SCOPE VIOLATION/);
+		}).toThrow(/WRITE TARGET UNVERIFIABLE/);
 
 		// The violation message should have \r\n replaced with underscore
 		// to prevent log injection attacks
-		expect(advisoryMessage).not.toContain('\r');
-		expect(advisoryMessage).not.toContain('\n');
+		expect(advisoryMessage).toBe('');
 	});
 
 	// ─────────────────────────────────────────────────────────────

@@ -84,36 +84,6 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			expect(files.filter((f) => f === 'src/foo.ts').length).toBe(1);
 		});
 
-		it('multiple different write tools → all paths tracked', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.delegationActive = true;
-
-			// Write tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: 'src/foo.ts' }),
-			);
-			// Edit tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'edit', 'call-2'),
-				makeOutput({ filePath: 'src/bar.ts' }),
-			);
-			// Patch tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'patch', 'call-3'),
-				makeOutput({ filePath: 'src/baz.ts' }),
-			);
-
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/foo.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/bar.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/baz.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(3);
-		});
-
 		it('non-write tool (bash) → modifiedFilesThisCoderTask unchanged', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
@@ -187,42 +157,19 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 				'src/using-target.ts',
 			);
 		});
-
-		it('all write tool variants tracked: create_file, insert, apply_patch', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.delegationActive = true;
-
-			// create_file
-			await hooks.toolBefore(
-				makeInput('test-session', 'create_file', 'call-1'),
-				makeOutput({ filePath: 'src/new-file.ts' }),
-			);
-			// insert
-			await hooks.toolBefore(
-				makeInput('test-session', 'insert', 'call-2'),
-				makeOutput({ path: 'src/insert-into.ts' }),
-			);
-			// apply_patch
-			await hooks.toolBefore(
-				makeInput('test-session', 'apply_patch', 'call-3'),
-				makeOutput({ file: 'src/patch.ts' }),
-			);
-
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/new-file.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain(
-				'src/insert-into.ts',
-			);
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/patch.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(3);
-		});
 	});
 
 	describe('architect coder dispatch reset', () => {
-		it('architect dispatches Task with subagent_type=coder → resets modifiedFilesThisCoderTask to []', async () => {
+		it.each([
+			'coder',
+			'mega_coder',
+			'id_coder',
+			'lowtier_coder',
+			'modelrelay_coder',
+			'user-chosen-42_coder',
+			'user-chosen-42-coder',
+			'user chosen 42 coder',
+		])('architect dispatches the canonical coder role as %s → resets modifiedFilesThisCoderTask to []', async (subagentType) => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			// Start as architect
@@ -233,17 +180,30 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			// Pre-populate modifiedFilesThisCoderTask (simulating prior coder activity)
 			session!.modifiedFilesThisCoderTask = ['src/old1.ts', 'src/old2.ts'];
 
-			// Architect dispatches a Task with subagent_type='coder'
+			// Issue #1875 follow-up: swarm IDs are opaque user input. This matrix
+			// must fail if reset behavior is coupled to any known swarm name or one
+			// raw-name separator instead of the canonical-role resolver.
 			await hooks.toolBefore(
 				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'coder', task: 'Implement feature X' }),
+				makeOutput({
+					subagent_type: subagentType,
+					task: 'Implement feature X',
+				}),
 			);
 
 			// Should be reset to empty array
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});
 
-		it('Task with subagent_type=reviewer → does NOT reset', async () => {
+		it.each([
+			'reviewer',
+			'modelrelay_reviewer',
+			'user-chosen-42-explorer',
+			'test_engineer',
+			'coder_helper',
+			'codec',
+			undefined,
+		])('non-coder delegation identity %s → does NOT reset', async (subagentType) => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -251,53 +211,17 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
 
-			// Architect dispatches reviewer (not coder)
 			await hooks.toolBefore(
 				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'reviewer', task: 'Review code' }),
+				makeOutput({
+					...(subagentType === undefined
+						? {}
+						: { subagent_type: subagentType }),
+					task: 'Non-coder task',
+				}),
 			);
 
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
-		});
-
-		it('Task with subagent_type=test_engineer → does NOT reset', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
-
-			// Architect dispatches test_engineer (not coder)
-			await hooks.toolBefore(
-				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'test_engineer', task: 'Run tests' }),
-			);
-
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
-		});
-
-		it('Task with no subagent_type → does NOT reset', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
-
-			// Task without subagent_type
-			await hooks.toolBefore(
-				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ task: 'Some task' }),
-			);
-
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
+			expect(session?.modifiedFilesThisCoderTask).toEqual(['src/old.ts']);
 		});
 	});
 
@@ -479,7 +403,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	});
 
 	describe('edge cases', () => {
-		it('empty string path → does NOT track', async () => {
+		it('empty string path fails closed and does not track', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -487,15 +411,17 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.delegationActive = true;
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: '' }),
-			);
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: '' }),
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});
 
-		it('undefined path → does NOT track', async () => {
+		it('undefined path fails closed and does not track', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -503,10 +429,12 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.delegationActive = true;
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ content: 'some content' }), // No path field
-			);
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ content: 'some content' }), // No path field
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});

@@ -80,7 +80,7 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: ['src/index.ts'],
 				})),
 			},
 		],

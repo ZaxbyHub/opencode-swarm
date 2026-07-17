@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-// Mirrored from destructive-command-guard.test.ts
-const TEST_DIR = '/tmp';
+const TEST_DIR = createSafeTestDir('destructive-command-lstat-').dir;
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -34,17 +34,16 @@ function makeBashOutput(command: string) {
 	return { args: { command } };
 }
 
-// Symlink creation requires elevated privileges on Windows — skip those tests there.
 const testUnlessWindows = process.platform === 'win32' ? test.skip : test;
 
 beforeEach(() => {
 	resetSwarmState();
-	startAgentSession('test-session', 'coder');
+	startAgentSession('test-session', 'coder', TEST_DIR);
 });
 
-// ---------------------------------------------------------------------------
+afterAll(() => fs.rmSync(TEST_DIR, { recursive: true, force: true }));
+
 // Group 1: Junction / symlink CREATION blocking
-// ---------------------------------------------------------------------------
 describe('junction and symlink creation blocking', () => {
 	test('mklink /J with external absolute target → BLOCKED', async () => {
 		// On Linux, path.resolve('/tmp', 'C:\\path') treats the Windows path as relative,
@@ -156,6 +155,7 @@ describe('junction and symlink creation blocking', () => {
 	});
 
 	test('ln (no -s flag, hardlink) → ALLOWED', async () => {
+		startAgentSession('test-session', 'architect');
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 		const output = { args: { command: 'ln source.txt hardlink.txt' } };
 		await expect(
@@ -167,8 +167,7 @@ describe('junction and symlink creation blocking', () => {
 	});
 
 	test('ln -s relative/inside target → ALLOWED (resolves inside cwd)', async () => {
-		// Relative target that stays inside cwd is allowed.
-		// path.resolve(TEST_DIR='/tmp', 'real-target') = '/tmp/real-target' — inside cwd.
+		startAgentSession('test-session', 'architect');
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 		const output = { args: { command: 'ln -s real-target mylink' } };
 		await expect(
@@ -630,6 +629,7 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 	});
 
 	test('ln -s /etc/passwd mylink allowed when flag is false', async () => {
+		startAgentSession('test-session', 'architect');
 		const hooks = createGuardrailsHooks(
 			TEST_DIR,
 			undefined,

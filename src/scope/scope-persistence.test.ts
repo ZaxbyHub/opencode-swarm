@@ -368,7 +368,7 @@ describe('prompt hardening regression (#519)', () => {
 		expect(prompt).toContain('declare_scope');
 		expect(prompt).toContain('SCOPE DISCIPLINE');
 		expect(prompt).toMatch(/WRITE BLOCKED/);
-		expect(prompt).toMatch(/bash workaround/i);
+		expect(prompt).toMatch(/do not instruct.*bash.*sed.*echo.*cat.*tee/is);
 		expect(prompt).toMatch(/file-move.*shell.*b(ypass|an)/i);
 	});
 });

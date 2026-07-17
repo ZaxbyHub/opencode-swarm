@@ -76,7 +76,7 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: [`src/tasks/${task.id.replace('.', '-')}.ts`],
 				})),
 			},
 		],
@@ -137,40 +137,28 @@ describe('delegation-gate: state machine adversarial — injection attempts', ()
 		}
 	});
 
-	it('should handle task_id with null characters', async () => {
+	it('should fail closed for task_id with null characters', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
-		const session = ensureAgentSession('test-session');
+		ensureAgentSession('test-session');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.1\x00null',
-			});
-		} catch {
-			threw = true;
-		}
-
-		// Should not throw — null chars should be sanitized
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 
-	it('should handle very long task_id strings', async () => {
+	it('should fail closed for very long task_id strings', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
-		const session = ensureAgentSession('test-session');
+		ensureAgentSession('test-session');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.' + 'a'.repeat(10000),
-			});
-		} catch {
-			threw = true;
-		}
-
-		// Should not throw — extremely long IDs should be handled
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 
 	it('should handle prompt with embedded null bytes', async () => {
@@ -178,18 +166,13 @@ describe('delegation-gate: state machine adversarial — injection attempts', ()
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
 				prompt: 'TASK: 1.1\x00null\x00bytes',
-			});
-		} catch {
-			threw = true;
-		}
-
-		expect(threw).toBe(true);
+			}),
+		).rejects.toThrow('TASK_COMPLETION_GATE_VIOLATION');
 	});
 
 	it('should handle unicode in task identifiers', async () => {
@@ -197,18 +180,13 @@ describe('delegation-gate: state machine adversarial — injection attempts', ()
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
 				prompt: 'TASK: 1.1\nFILE: src/文件.ts',
-			});
-		} catch {
-			threw = true;
-		}
-
-		expect(threw).toBe(true);
+			}),
+		).rejects.toThrow('TASK_COMPLETION_GATE_VIOLATION');
 	});
 });
 

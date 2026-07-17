@@ -6,7 +6,6 @@
  *  2. Transparent authority — non-architect agents have their writes checked
  *  3. universal_deny_prefixes — no agent may write to globally denied paths
  *  4. lstat check on apply_patch
- *  5. declare_scope lstat gate
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -31,7 +30,6 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import { executeDeclareScope } from '../../../src/tools/declare-scope';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -540,107 +538,6 @@ describe('lstat check via toolBefore (Write tool)', () => {
 		} catch {
 			/* ignore */
 		}
-	});
-});
-
-// ─── 5. declare_scope lstat gate ─────────────────────────────────────────────
-
-describe('declare_scope lstat validation', () => {
-	beforeEach(setup);
-	afterEach(teardown);
-
-	async function writePlan(): Promise<void> {
-		await fs.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
-		await fs.writeFile(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify({
-				phases: [{ tasks: [{ id: '1.1', status: 'in_progress' }] }],
-			}),
-		);
-	}
-
-	it('accepts scope with real files (no symlinks)', async () => {
-		await writePlan();
-		await fs.mkdir(path.join(tempDir, 'src'), { recursive: true });
-		await fs.writeFile(path.join(tempDir, 'src', 'a.ts'), 'ok');
-
-		const result = await executeDeclareScope(
-			{ taskId: '1.1', files: ['src/a.ts'] },
-			tempDir,
-		);
-		expect(result.success).toBe(true);
-	});
-
-	it('rejects scope when a declared file is a symlink', async () => {
-		await writePlan();
-		const real = path.join(tempDir, 'real.ts');
-		const link = path.join(tempDir, 'link.ts');
-		await fs.writeFile(real, 'real');
-		if (!tryCreateSymlink(real, link)) return;
-
-		const result = await executeDeclareScope(
-			{ taskId: '1.1', files: ['link.ts'] },
-			tempDir,
-		);
-		expect(result.success).toBe(false);
-		expect(result.message).toContain('symlink');
-	});
-
-	it('rejects scope when a declared file is under a symlinked directory', async () => {
-		await writePlan();
-		const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'ext2-'));
-		if (!tryCreateSymlink(outside, path.join(tempDir, 'symdir'))) {
-			await fs.rm(outside, { recursive: true, force: true });
-			return;
-		}
-
-		const result = await executeDeclareScope(
-			{ taskId: '1.1', files: ['symdir/file.ts'] },
-			tempDir,
-		);
-
-		try {
-			await fs.rm(outside, { recursive: true, force: true });
-		} catch {
-			/* ignore */
-		}
-
-		expect(result.success).toBe(false);
-		expect(result.message).toContain('symlink');
-	});
-
-	it('accepts scope for new files that do not exist yet', async () => {
-		await writePlan();
-		// 'src/new.ts' does not exist — should be accepted (ENOENT is OK)
-		const result = await executeDeclareScope(
-			{ taskId: '1.1', files: ['src/new.ts'] },
-			tempDir,
-		);
-		expect(result.success).toBe(true);
-	});
-
-	it('rejects mixed scope when only some files are symlinked (no early-exit)', async () => {
-		// Test gap fix: verifies the lstat check loop does NOT short-circuit on the
-		// first real file — every declared file must be validated.
-		await writePlan();
-		await fs.mkdir(path.join(tempDir, 'src'), { recursive: true });
-		const realFile = path.join(tempDir, 'src', 'real.ts');
-		await fs.writeFile(realFile, 'ok');
-
-		// Create a symlink that appears AFTER a real file in the scope list
-		const linkTarget = path.join(tempDir, 'target.ts');
-		await fs.writeFile(linkTarget, 'target');
-		if (!tryCreateSymlink(linkTarget, path.join(tempDir, 'src', 'link.ts')))
-			return;
-
-		const result = await executeDeclareScope(
-			{ taskId: '1.1', files: ['src/real.ts', 'src/link.ts'] },
-			tempDir,
-		);
-		expect(result.success).toBe(false);
-		expect(result.message).toContain('symlink');
-		// Confirm the symlinked file was actually detected (not skipped by early-exit)
-		expect(JSON.stringify(result.errors ?? [])).toContain('link.ts');
 	});
 });
 

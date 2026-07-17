@@ -256,21 +256,21 @@ export function createFullAutoDelegationHook(
 			// Adversarial review C1+H3 fix: use the registry-aware strict
 			// canonical role extractor when a generated-agent registry is
 			// available, AND additionally reject names whose prefix portion
-			// is empty / whitespace-only / separator-only. This blocks two
+			// is empty. This blocks two
 			// classes of bypass:
 			//   * `not_an_architect` collapsing to `architect` via the
 			//     bare suffix scan (the strict variant requires the name
 			//     to be in the registry of actually-generated agents).
-			//   * `_coder`, `-coder`, ` coder` (separator-only prefix)
+			//   * `_coder`, `-coder`, ` coder` (zero-length swarm ID)
 			//     resolving to `coder` regardless of registry.
 			const generatedAgentRegistry = swarmState.generatedAgentNames;
 			const canonicalRole =
 				generatedAgentRegistry.length > 0
 					? resolveGeneratedAgentRole(subagentRaw, generatedAgentRegistry)
 					: getCanonicalAgentRole(subagentRaw);
-			// Reject delegations whose prefix portion is missing or contains
-			// only separator characters. Real generated names always have a
-			// non-trivial swarm-ID prefix (e.g. `banana_coder`).
+			// Reject only a missing prefix. Swarm IDs are user-defined and the
+			// schema permits punctuation- or whitespace-only non-empty IDs, so
+			// this path must not invent a narrower ASCII naming policy.
 			if (
 				subagentRaw &&
 				canonicalRole !== subagentRaw &&
@@ -280,7 +280,7 @@ export function createFullAutoDelegationHook(
 					0,
 					subagentRaw.length - canonicalRole.length - 1,
 				);
-				if (!prefix || !/[A-Za-z0-9]/.test(prefix)) {
+				if (!prefix) {
 					throw new Error(
 						`FULL_AUTO_DELEGATION_DENY: subagent name '${subagentRaw}' has no valid prefix before the canonical role '${canonicalRole}'. Generated agent names must include a non-empty swarm prefix.`,
 					);
@@ -308,18 +308,8 @@ export function createFullAutoDelegationHook(
 			// the args.files / args.scope payload. The check is keyed on the
 			// CANONICAL role, so `bananaSwarm_coder` is treated identically to
 			// the unprefixed `coder` for the scope requirement.
-			if (canonicalRole === 'coder') {
-				const session = swarmState.agentSessions.get(sessionID);
-				const declared = session?.declaredCoderScope;
-				const argScope =
-					Array.isArray((args as Record<string, unknown>).files) ||
-					Array.isArray((args as Record<string, unknown>).scope);
-				if ((!declared || declared.length === 0) && !argScope) {
-					throw new Error(
-						`FULL_AUTO_DELEGATION_DENY: coder delegation '${subagentRaw}' requires declared scope. Call declare_scope first or include 'files' in the Task arguments.`,
-					);
-				}
-			}
+			// The shared delegation gate performs the identity-aware coder scope
+			// preflight for standard and prefixed Full-Auto agents alike.
 
 			// Outbound check 3: protected paths in delegation prompt.
 			if (promptText && typeof promptText === 'string') {

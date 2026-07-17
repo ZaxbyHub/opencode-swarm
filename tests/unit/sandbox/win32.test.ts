@@ -17,9 +17,7 @@ import * as path from 'node:path';
 
 const isWin = process.platform === 'win32';
 
-// ---------------------------------------------------------------------------
 // Windows executor — NativeWindowsSandboxExecutor
-// ---------------------------------------------------------------------------
 
 import { NativeWindowsSandboxExecutor } from '../../../src/sandbox/win32/native-sandbox-executor';
 import {
@@ -40,15 +38,11 @@ afterEach(() => {
 	_resetProbeCache();
 });
 
-// ---------------------------------------------------------------------------
 // Windows edge-cases — real implementations
-// ---------------------------------------------------------------------------
 
 import * as edge from '../../../src/sandbox/win32/edge-cases';
 
-// ---------------------------------------------------------------------------
 // WindowsSandboxExecutor — restricted-environment-executor.ts
-// ---------------------------------------------------------------------------
 
 import { SandboxError } from '../../../src/sandbox/executor';
 import {
@@ -71,14 +65,14 @@ function mockProbeAvailable() {
 		() => true;
 }
 
-// ---------------------------------------------------------------------------
-// Test suite — NativeWindowsSandboxExecutor
-// ---------------------------------------------------------------------------
+function decodeWrappedScript(wrapped: string): string {
+	const payload = /-EncodedCommand\s+([A-Za-z0-9+/=]+)/.exec(wrapped)?.[1];
+	return payload ? Buffer.from(payload, 'base64').toString('utf16le') : wrapped;
+}
 
+// Test suite — NativeWindowsSandboxExecutor
 describe('NativeWindowsSandboxExecutor', () => {
-	// -----------------------------------------------------------------------
 	// 1. Constructor — mechanism property
-	// -----------------------------------------------------------------------
 
 	describe('constructor', () => {
 		test.skipIf(!isWin)(
@@ -89,9 +83,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 					runnerInternals as { findRunnerBinary: () => string | null }
 				).findRunnerBinary = () => null;
 				_resetProbeCache();
-
 				const executor = new NativeWindowsSandboxExecutor([]);
-				// Without the runner binary, falls back to powershell-wrapper
 				expect(
 					executor.mechanism === 'powershell-wrapper' ||
 						executor.mechanism.startsWith('native-runner/'),
@@ -110,9 +102,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
 	// 2. isAvailable()
-	// -----------------------------------------------------------------------
 
 	describe('isAvailable()', () => {
 		test.skipIf(!isWin)(
@@ -142,9 +132,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
 	// 3. wrapCommand()
-	// -----------------------------------------------------------------------
 
 	describe('wrapCommand()', () => {
 		test.skipIf(!isWin)('wraps with PowerShell when runner unavailable', () => {
@@ -183,9 +171,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
 	// 3b. wrapCommand() envOverrides forwarding
-	// -----------------------------------------------------------------------
 
 	describe('wrapCommand() envOverrides forwarding', () => {
 		test.skipIf(!isWin)(
@@ -203,7 +189,9 @@ describe('NativeWindowsSandboxExecutor', () => {
 				});
 				// Should forward to PowerShell fallback which sets $env:MY_VAR
 				expect(wrapped.toLowerCase()).toContain('powershell');
-				expect(wrapped).toContain("$env:MY_VAR = 'my_value';");
+				expect(decodeWrappedScript(wrapped)).toContain(
+					"$env:MY_VAR = 'my_value';",
+				);
 			},
 		);
 
@@ -328,7 +316,9 @@ describe('NativeWindowsSandboxExecutor', () => {
 					MY_VAR: "it's",
 				});
 				// Single quotes in PowerShell single-quoted strings are escaped by doubling
-				expect(wrapped).toContain("$env:MY_VAR = 'it''s';");
+				expect(decodeWrappedScript(wrapped)).toContain(
+					"$env:MY_VAR = 'it''s';",
+				);
 			},
 		);
 
@@ -353,9 +343,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		);
 	});
 
-	// -----------------------------------------------------------------------
 	// 4. getEnvOverrides()
-	// -----------------------------------------------------------------------
 
 	describe('getEnvOverrides()', () => {
 		test.skipIf(!isWin)('returns env var scrubbing', () => {
@@ -385,9 +373,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
 	// 5. disable()
-	// -----------------------------------------------------------------------
 
 	describe('disable()', () => {
 		test.skipIf(!isWin)('sets disabled and isAvailable() returns false', () => {
@@ -415,9 +401,7 @@ describe('NativeWindowsSandboxExecutor', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------------
 	// 6. hasNativeRunner / probeResult
-	// -----------------------------------------------------------------------
 
 	describe('probeResult', () => {
 		test('probeResult is always defined', () => {
@@ -444,10 +428,8 @@ describe('NativeWindowsSandboxExecutor', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectPathTraversal
 // Path traversal detection for Windows paths
-// ---------------------------------------------------------------------------
 
 describe('detectPathTraversal', () => {
 	test.skipIf(!isWin)('returns true for ../ traversal attempt', () => {
@@ -487,10 +469,8 @@ describe('detectPathTraversal', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectRegistryEscape
 // Windows registry escape detection
-// ---------------------------------------------------------------------------
 
 describe('detectRegistryEscape', () => {
 	test.skipIf(!isWin)('returns true for HKLM\\... escape attempt', () => {
@@ -545,10 +525,8 @@ describe('detectRegistryEscape', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectPowerShellEscape
 // PowerShell escape and bypass detection
-// ---------------------------------------------------------------------------
 
 describe('detectPowerShellEscape', () => {
 	test.skipIf(!isWin)(
@@ -623,10 +601,8 @@ describe('detectPowerShellEscape', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectWMIEscape
 // WMI (Windows Management Instrumentation) escape detection
-// ---------------------------------------------------------------------------
 
 describe('detectWMIEscape', () => {
 	test.skipIf(!isWin)(
@@ -692,10 +668,8 @@ describe('detectWMIEscape', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectServiceEscalation
 // Windows service privilege escalation detection
-// ---------------------------------------------------------------------------
 
 describe('detectServiceEscalation', () => {
 	test.skipIf(!isWin)('returns true for sc create escape', () => {
@@ -759,10 +733,8 @@ describe('detectServiceEscalation', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectDLLHijacking
 // DLL search order hijacking detection
-// ---------------------------------------------------------------------------
 
 describe('detectDLLHijacking', () => {
 	test.skipIf(!isWin)('returns true for path with null byte injection', () => {
@@ -820,10 +792,8 @@ describe('detectDLLHijacking', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // edge-cases — detectTokenManipulation
 // Windows access token manipulation detection
-// ---------------------------------------------------------------------------
 
 describe('detectTokenManipulation', () => {
 	test.skipIf(!isWin)(
@@ -894,9 +864,7 @@ describe('detectTokenManipulation', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // WindowsSandboxExecutor — PATH resolution and PS-native command branching
-// ---------------------------------------------------------------------------
 
 describe('WindowsSandboxExecutor', () => {
 	describe('getEnvOverrides() PATH resolution', () => {
@@ -914,21 +882,27 @@ describe('WindowsSandboxExecutor', () => {
 			process.env.SystemRoot = 'C:\\Windows';
 			const executor = new WindowsSandboxExecutor([]);
 			const path = executor.getEnvOverrides().PATH ?? '';
-			expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+			expect(path.split(';').slice(0, 2).join(';')).toBe(
+				'C:\\Windows\\System32;C:\\Windows',
+			);
 		});
 
 		test('PATH falls back to C:\\Windows when SystemRoot is missing', () => {
 			delete process.env.SystemRoot;
 			const executor = new WindowsSandboxExecutor([]);
 			const path = executor.getEnvOverrides().PATH ?? '';
-			expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+			expect(path.split(';').slice(0, 2).join(';')).toBe(
+				'C:\\Windows\\System32;C:\\Windows',
+			);
 		});
 
 		test('PATH uses non-standard SystemRoot when it is valid', () => {
 			process.env.SystemRoot = 'D:\\WinNT';
 			const executor = new WindowsSandboxExecutor([]);
 			const path = executor.getEnvOverrides().PATH ?? '';
-			expect(path).toBe('D:\\WinNT\\System32;D:\\WinNT');
+			expect(path.split(';').slice(0, 2).join(';')).toBe(
+				'D:\\WinNT\\System32;D:\\WinNT',
+			);
 		});
 	});
 
@@ -937,7 +911,9 @@ describe('WindowsSandboxExecutor', () => {
 			mockProbeAvailable();
 			const executor = new WindowsSandboxExecutor([]);
 			expect(executor.isAvailable()).toBe(true); // Fail loud if mock did not apply
-			const wrapped = executor.wrapCommand('Remove-Item foo.txt', []);
+			const wrapped = decodeWrappedScript(
+				executor.wrapCommand('Remove-Item foo.txt', []),
+			);
 			expect(wrapped.toLowerCase()).toContain('invoke-expression');
 			expect(wrapped).not.toMatch(/cmd\s+\/c\s+"/i);
 		});
@@ -946,15 +922,21 @@ describe('WindowsSandboxExecutor', () => {
 			mockProbeAvailable();
 			const executor = new WindowsSandboxExecutor([]);
 			expect(executor.isAvailable()).toBe(true); // Fail loud if mock did not apply
-			const wrapped = executor.wrapCommand('echo hello', []);
-			expect(wrapped).toMatch(/cmd\s+\/c\s+"/i);
+			const wrapped = decodeWrappedScript(
+				executor.wrapCommand('echo hello', []),
+			);
+			expect(wrapped).toMatch(
+				/cmd\.exe'\s+\/d\s+\/v:off\s+\/s\s+\/c\s+\$command/i,
+			);
 		});
 
 		test('Copy-Item is treated as PS-native and uses Invoke-Expression', () => {
 			mockProbeAvailable();
 			const executor = new WindowsSandboxExecutor([]);
 			expect(executor.isAvailable()).toBe(true); // Fail loud if mock did not apply
-			const wrapped = executor.wrapCommand('Copy-Item src.txt dest.txt', []);
+			const wrapped = decodeWrappedScript(
+				executor.wrapCommand('Copy-Item src.txt dest.txt', []),
+			);
 			expect(wrapped.toLowerCase()).toContain('invoke-expression');
 		});
 	});
@@ -965,8 +947,10 @@ describe('WindowsSandboxExecutor', () => {
 			const executor = new WindowsSandboxExecutor([]);
 			const wrapped = executor.wrapCommand('echo hello', []);
 			// Should NOT have any user-defined per-call env vars (only system vars like TEMP, PATH)
-			expect(wrapped).not.toContain('$env:MY_VAR');
-			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain('$env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain(
+				'Remove-Item Env:MY_VAR',
+			);
 		});
 
 		test('undefined envOverrides produces no per-call env variable commands', () => {
@@ -978,16 +962,20 @@ describe('WindowsSandboxExecutor', () => {
 				undefined,
 				undefined,
 			);
-			expect(wrapped).not.toContain('$env:MY_VAR');
-			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain('$env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain(
+				'Remove-Item Env:MY_VAR',
+			);
 		});
 
 		test('empty envOverrides {} produces no per-call env variable commands', () => {
 			mockProbeAvailable();
 			const executor = new WindowsSandboxExecutor([]);
 			const wrapped = executor.wrapCommand('echo hello', [], undefined, {});
-			expect(wrapped).not.toContain('$env:MY_VAR');
-			expect(wrapped).not.toContain('Remove-Item Env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain('$env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).not.toContain(
+				'Remove-Item Env:MY_VAR',
+			);
 		});
 
 		test('string value emits $env:KEY = VALUE in the PowerShell script', () => {
@@ -997,7 +985,9 @@ describe('WindowsSandboxExecutor', () => {
 				MY_VAR: 'my_value',
 			});
 			// Should have $env:MY_VAR = 'my_value';
-			expect(wrapped).toContain("$env:MY_VAR = 'my_value';");
+			expect(decodeWrappedScript(wrapped)).toContain(
+				"$env:MY_VAR = 'my_value';",
+			);
 		});
 
 		test('null value emits Remove-Item Env:KEY in the PowerShell script', () => {
@@ -1007,7 +997,7 @@ describe('WindowsSandboxExecutor', () => {
 				MY_VAR: null,
 			});
 			// Should have Remove-Item Env:MY_VAR
-			expect(wrapped).toContain('Remove-Item Env:MY_VAR');
+			expect(decodeWrappedScript(wrapped)).toContain('Remove-Item Env:MY_VAR');
 		});
 
 		test('multiple env overrides are all present', () => {
@@ -1017,8 +1007,8 @@ describe('WindowsSandboxExecutor', () => {
 				VAR_A: 'value_a',
 				VAR_B: null,
 			});
-			expect(wrapped).toContain("$env:VAR_A = 'value_a';");
-			expect(wrapped).toContain('Remove-Item Env:VAR_B');
+			expect(decodeWrappedScript(wrapped)).toContain("$env:VAR_A = 'value_a';");
+			expect(decodeWrappedScript(wrapped)).toContain('Remove-Item Env:VAR_B');
 		});
 
 		test('value with spaces is preserved in single-quoted PowerShell string', () => {
@@ -1028,7 +1018,9 @@ describe('WindowsSandboxExecutor', () => {
 				MY_VAR: 'hello world',
 			});
 			// PowerShell single-quoted strings preserve content verbatim
-			expect(wrapped).toContain("$env:MY_VAR = 'hello world';");
+			expect(decodeWrappedScript(wrapped)).toContain(
+				"$env:MY_VAR = 'hello world';",
+			);
 		});
 
 		test('value with single quotes doubles them for PS string escaping', () => {
@@ -1038,14 +1030,14 @@ describe('WindowsSandboxExecutor', () => {
 				MY_VAR: "o'clock",
 			});
 			// Single quotes in PS single-quoted strings are escaped by doubling
-			expect(wrapped).toContain("$env:MY_VAR = 'o''clock';");
+			expect(decodeWrappedScript(wrapped)).toContain(
+				"$env:MY_VAR = 'o''clock';",
+			);
 		});
 	});
 });
 
-// ---------------------------------------------------------------------------
 // getSafeWindowsPath — SystemRoot validation
-// ---------------------------------------------------------------------------
 
 describe('getSafeWindowsPath SystemRoot validation', () => {
 	const originalSystemRoot = process.env.SystemRoot;
@@ -1062,28 +1054,36 @@ describe('getSafeWindowsPath SystemRoot validation', () => {
 		delete process.env.SystemRoot;
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'C:\\Windows\\System32;C:\\Windows',
+		);
 	});
 
 	test('uses C:\\Windows when SystemRoot is empty string', () => {
 		process.env.SystemRoot = '';
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'C:\\Windows\\System32;C:\\Windows',
+		);
 	});
 
 	test('uses C:\\Windows when SystemRoot is relative path', () => {
 		process.env.SystemRoot = '..\\Windows';
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'C:\\Windows\\System32;C:\\Windows',
+		);
 	});
 
 	test('uses C:\\Windows when SystemRoot contains semicolon (PATH injection)', () => {
 		process.env.SystemRoot = 'C:\\Windows;C:\\evil';
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'C:\\Windows\\System32;C:\\Windows',
+		);
 		expect(path).not.toContain('C:\\evil');
 	});
 
@@ -1091,20 +1091,22 @@ describe('getSafeWindowsPath SystemRoot validation', () => {
 		process.env.SystemRoot = 'D:\\WinNT';
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('D:\\WinNT\\System32;D:\\WinNT');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'D:\\WinNT\\System32;D:\\WinNT',
+		);
 	});
 
 	test('uses C:\\Windows when SystemRoot contains quote characters', () => {
 		process.env.SystemRoot = 'C:\\Windows"';
 		const executor = new WindowsSandboxExecutor([]);
 		const path = executor.getEnvOverrides().PATH ?? '';
-		expect(path).toBe('C:\\Windows\\System32;C:\\Windows');
+		expect(path.split(';').slice(0, 2).join(';')).toBe(
+			'C:\\Windows\\System32;C:\\Windows',
+		);
 	});
 });
 
-// ---------------------------------------------------------------------------
 // WindowsSandboxExecutor — PowerShell command-body safety validation
-// ---------------------------------------------------------------------------
 
 describe('WindowsSandboxExecutor wrapCommand unsafe PS body detection', () => {
 	test('throws UNSAFE_PS_COMMAND for statement separator', () => {

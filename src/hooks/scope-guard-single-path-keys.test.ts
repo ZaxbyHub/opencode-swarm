@@ -21,18 +21,32 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	installLegacyScopeGuardTargetSeam,
+	installScopeGuardBindingSeam,
+} from '../../tests/helpers/scope-guard-binding-seam';
 import { ensureAgentSession, resetSwarmState, swarmState } from '../state';
-import { createScopeGuardHook } from './scope-guard';
+import {
+	createScopeGuardHook,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 const SESSION_ID = 'test-session-single-path-keys';
 const WORKSPACE_DIR = '/workspace';
 
+let restoreScopeBindingSeam: (() => void) | undefined;
+let restoreTargetSeam: (() => void) | undefined;
+
 describe('scope-guard single-path multi-key iteration — regression: first-match-wins bypass (F#)', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		restoreScopeBindingSeam = installScopeGuardBindingSeam(scopeGuardInternals);
+		restoreTargetSeam = installLegacyScopeGuardTargetSeam(scopeGuardInternals);
 	});
 
 	afterEach(() => {
+		restoreScopeBindingSeam?.();
+		restoreTargetSeam?.();
 		resetSwarmState();
 	});
 

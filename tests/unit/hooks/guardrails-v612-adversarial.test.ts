@@ -265,7 +265,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 			expect(session?.agentName).toBe('architect');
 		});
 
-		it('activeAgent undefined for brand new session uses ORCHESTRATOR_NAME', async () => {
+		it('activeAgent undefined for brand new session does not invent architect authority', async () => {
 			const guardrailsConfig = GuardrailsConfigSchema.parse({
 				enabled: true,
 				max_tool_calls: 5,
@@ -282,9 +282,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				{ args: {} },
 			);
 
-			// Session should be architect
-			const session = swarmState.agentSessions.get('brand-new-session');
-			expect(session?.agentName).toBe('architect');
+			expect(swarmState.agentSessions.has('brand-new-session')).toBe(false);
 
 			// Architect should not have a window
 			const window = getActiveWindow('brand-new-session');

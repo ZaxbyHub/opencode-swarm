@@ -71,6 +71,14 @@ describe('getCanonicalAgentRole — arbitrary user-defined swarm IDs', () => {
 		expect(getCanonicalAgentRole('reviewerx')).toBe('reviewerx');
 	});
 
+	test.each([
+		'_coder',
+		'-coder',
+		' coder',
+	])('rejects separator-only generated identity %j', (input) => {
+		expect(getCanonicalAgentRole(input)).toBe(input);
+	});
+
 	test('does not assume any specific user prefix (no hardcoded prefix list)', () => {
 		// Any string ending with `_<canonical>` resolves regardless of the
 		// prefix component. None of these prefixes are special.

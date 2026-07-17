@@ -105,7 +105,11 @@ describe('REVIEWER_PROMPT — REUSE RE-VERIFICATION', () => {
 	});
 
 	it('does not modify EXPLORER FINDINGS content', () => {
-		expect(prompt).toContain('Explorer agent outputs (from @mega_explorer)');
+		expect(prompt).toContain('Explorer agent outputs may contain observations');
+		expect(prompt).toContain(
+			"regardless of the active swarm's user-defined ID",
+		);
+		expect(prompt).not.toContain('@mega_explorer');
 	});
 
 	it('does not modify REVIEW REASONING content', () => {

@@ -74,7 +74,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 		];
 
 		for (const { name, value } of maliciousValues) {
-			it(`should not crash with ${name} in filePath`, async () => {
+			it(`should fail closed with ${name} in filePath`, async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(config);
 
@@ -85,8 +85,9 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				const input = makeInput('session-1', 'write', 'call-1');
 				const output = { args: { filePath: value } };
 
-				// Should not throw
-				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					'WRITE TARGET UNVERIFIABLE',
+				);
 			});
 
 			it(`should not add ${name} to modifiedFilesThisCoderTask`, async () => {
@@ -102,14 +103,16 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				const input = makeInput('session-1', 'write', 'call-1');
 				const output = { args: { filePath: value } };
 
-				await hooks.toolBefore(input, output);
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					'WRITE TARGET UNVERIFIABLE',
+				);
 
 				// Array should remain empty (no valid string path added)
 				expect(session!.modifiedFilesThisCoderTask).toEqual([]);
 			});
 		}
 
-		it('should handle all path field variations with null', async () => {
+		it('should fail closed on all invalid path field variations', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -131,7 +134,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			for (const output of variations) {
 				await expect(
 					hooks.toolBefore(makeInput('session-1', 'write', 'call-1'), output),
-				).resolves.toBeUndefined();
+				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			}
 		});
 	});
@@ -185,7 +188,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			// tracking runs earlier and may record the path before the guard
 			// throws — that's benign because the throw aborts the write.
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				'WRITE BLOCKED',
+				/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/,
 			);
 		});
 
@@ -239,7 +242,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			// may record the path before the guard fires; the throw still
 			// aborts the write.
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				'WRITE BLOCKED',
+				/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/,
 			);
 			expect(session).toBeDefined();
 		});
@@ -260,7 +263,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				hooks.toolBefore(makeInput('session-1', 'write', 'call-1'), {
 					args: { filePath: pathWithNulls },
 				}),
-			).rejects.toThrow('WRITE BLOCKED');
+			).rejects.toThrow(/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/);
 
 			expect(session).toBeDefined();
 		});
@@ -325,14 +328,14 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 5 — subagent_type bypass attempts', () => {
 		const bypassAttempts = [
 			{ name: 'coder_evil', value: 'coder_evil', shouldReset: false },
-			{ name: 'CODER (uppercase)', value: 'CODER', shouldReset: false },
+			{ name: 'CODER (uppercase)', value: 'CODER', shouldReset: true },
 			{ name: 'coder with prefix space', value: ' coder', shouldReset: false },
 			{ name: 'coder with suffix space', value: 'coder ', shouldReset: false },
 			{ name: 'coder with both spaces', value: ' coder ', shouldReset: false },
 			{ name: 'c0der (zero substitution)', value: 'c0der', shouldReset: false },
 			{ name: 'cođer (unicode)', value: 'cođer', shouldReset: false },
 			{ name: 'exact coder', value: 'coder', shouldReset: true },
-			{ name: 'Coder (capitalized)', value: 'Coder', shouldReset: false },
+			{ name: 'Coder (capitalized)', value: 'Coder', shouldReset: true },
 		];
 
 		for (const { name, value, shouldReset } of bypassAttempts) {
@@ -591,46 +594,20 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	// ATTACK VECTOR 10: Write tool with args as string instead of object
 	// ============================================================
 	describe('Attack Vector 10 — Write tool with args as string', () => {
-		it('should not crash with string args', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			// Use architect to avoid circuit breaker
-			startAgentSession('session-1', 'architect');
-			swarmState.activeAgent.set('session-1', 'architect');
-
-			const input = makeInput('session-1', 'write', 'call-1');
-			const output = { args: 'some random string' };
-
-			// Should not throw
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
-
-		it('should not crash with number args', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			startAgentSession('session-1', 'architect');
-			swarmState.activeAgent.set('session-1', 'architect');
-
-			const input = makeInput('session-1', 'write', 'call-1');
-			const output = { args: 12345 };
-
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
-
-		it('should not crash with array args', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			startAgentSession('session-1', 'architect');
-			swarmState.activeAgent.set('session-1', 'architect');
-
-			const input = makeInput('session-1', 'write', 'call-1');
-			const output = { args: ['file1.ts', 'file2.ts'] };
-
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
+		for (const [name, args] of [
+			['string', 'some random string'],
+			['number', 12345],
+			['array', ['file1.ts', 'file2.ts']],
+		] as const) {
+			it(`should fail closed with ${name} args`, async () => {
+				const hooks = createGuardrailsHooks(defaultConfig());
+				startAgentSession('session-1', 'architect');
+				swarmState.activeAgent.set('session-1', 'architect');
+				await expect(
+					hooks.toolBefore(makeInput('session-1', 'write', 'call-1'), { args }),
+				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
+			});
+		}
 
 		it('should not add to array with invalid args structure', async () => {
 			const config = defaultConfig();
@@ -643,7 +620,9 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const input = makeInput('session-1', 'write', 'call-1');
 			const output = { args: 'just a string' };
 
-			await hooks.toolBefore(input, output);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				'WRITE TARGET UNVERIFIABLE',
+			);
 
 			// Should not add anything (string doesn't have path fields)
 			expect(session!.modifiedFilesThisCoderTask).toEqual([]);
@@ -654,13 +633,9 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	// ATTACK VECTOR 11: Path with only whitespace
 	// ============================================================
 	describe('Attack Vector 11 — Path with only whitespace', () => {
-		// PR #501 + #496 (coder.allowedPrefix removal): coder no longer has a
-		// positive-prefix whitelist, so whitespace-only paths are no longer
-		// rejected by the authority check. They still resolve inside cwd and
-		// do not escape the sandbox, so the hook records them and returns.
-		// These tests previously asserted a WRITE BLOCKED throw; they now
-		// assert the resolve-and-track path.
-		it('should accept whitespace-only path (tracked, contained in cwd)', async () => {
+		// The complete-target resolver rejects empty/control-only target strings
+		// before authority and tracking so malformed paths cannot become bypasses.
+		it('should reject whitespace-only path', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -671,11 +646,13 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const input = makeInput('session-1', 'write', 'call-1');
 			const output = { args: { filePath: '   ' } };
 
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-			expect(session!.modifiedFilesThisCoderTask).toContain('   ');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				'WRITE TARGET UNVERIFIABLE',
+			);
+			expect(session!.modifiedFilesThisCoderTask).toEqual([]);
 		});
 
-		it('should accept tab-only path (tracked, contained in cwd)', async () => {
+		it('should reject tab-only path', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -686,11 +663,13 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const input = makeInput('session-1', 'write', 'call-1');
 			const output = { args: { filePath: '\t\t' } };
 
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-			expect(session!.modifiedFilesThisCoderTask).toContain('\t\t');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				'WRITE TARGET UNVERIFIABLE',
+			);
+			expect(session!.modifiedFilesThisCoderTask).toEqual([]);
 		});
 
-		it('should accept newline-only path (tracked, contained in cwd)', async () => {
+		it('should reject newline-only path', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -701,8 +680,10 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const input = makeInput('session-1', 'write', 'call-1');
 			const output = { args: { filePath: '\n\n' } };
 
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-			expect(session!.modifiedFilesThisCoderTask).toContain('\n\n');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				'WRITE TARGET UNVERIFIABLE',
+			);
+			expect(session!.modifiedFilesThisCoderTask).toEqual([]);
 		});
 
 		it('should accept path with surrounding whitespace (tracked, contained in cwd)', async () => {
@@ -771,7 +752,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	// EDGE CASE: Path field priority
 	// ============================================================
 	describe('Edge Case — Path field priority', () => {
-		it('should use filePath over path', async () => {
+		it('should track filePath and path as a complete target set', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -783,12 +764,13 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				args: { filePath: 'src/from-filePath.ts', path: 'src/from-path.ts' },
 			});
 
-			expect(session!.modifiedFilesThisCoderTask).toEqual([
-				'src/from-filePath.ts',
-			]);
+			expect(session!.modifiedFilesThisCoderTask).toEqual(
+				expect.arrayContaining(['src/from-filePath.ts', 'src/from-path.ts']),
+			);
+			expect(session!.modifiedFilesThisCoderTask).toHaveLength(2);
 		});
 
-		it('should use path over file', async () => {
+		it('should track path and file as a complete target set', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -800,10 +782,13 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				args: { path: 'src/from-path.ts', file: 'src/from-file.ts' },
 			});
 
-			expect(session!.modifiedFilesThisCoderTask).toEqual(['src/from-path.ts']);
+			expect(session!.modifiedFilesThisCoderTask).toEqual(
+				expect.arrayContaining(['src/from-path.ts', 'src/from-file.ts']),
+			);
+			expect(session!.modifiedFilesThisCoderTask).toHaveLength(2);
 		});
 
-		it('should use file over target', async () => {
+		it('should track file and target as a complete target set', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -815,7 +800,10 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 				args: { file: 'src/from-file.ts', target: 'src/from-target.ts' },
 			});
 
-			expect(session!.modifiedFilesThisCoderTask).toEqual(['src/from-file.ts']);
+			expect(session!.modifiedFilesThisCoderTask).toEqual(
+				expect.arrayContaining(['src/from-file.ts', 'src/from-target.ts']),
+			);
+			expect(session!.modifiedFilesThisCoderTask).toHaveLength(2);
 		});
 
 		it('should fall back to target when others missing', async () => {

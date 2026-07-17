@@ -215,7 +215,7 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		await hooks.toolAfter(input as any, output as any);
 
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 		expect(swarmState.pendingEvents).toBe(initialPendingEvents);
 	});
 
@@ -363,7 +363,6 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		expect(session.model_fallback_index).toBe(0);
 	});
 
-	// -------------------------------------------------------------------------
 	// Test 13: output.error is null → no advisory (null doesn't match regex)
 	// -------------------------------------------------------------------------
 	test('toolAfter with output.error = null → no advisory', async () => {
@@ -380,13 +379,10 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// output.output is null, so hasError is true, but errorContent will be null
-		// null doesn't match the regex, so no advisory should be injected
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 	});
 
-	// -------------------------------------------------------------------------
 	// Test 14: output.error is undefined → no advisory
 	// -------------------------------------------------------------------------
 	test('toolAfter with output.error = undefined → no advisory', async () => {
@@ -403,10 +399,8 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// output.output is undefined, so hasError is true, but errorContent will be undefined
-		// undefined doesn't match the regex, so no advisory should be injected
 		expect(session.model_fallback_index).toBe(0);
-		expect(session.pendingAdvisoryMessages?.length).toBe(0);
+		expect(session.pendingAdvisoryMessages ?? []).toHaveLength(0);
 	});
 
 	// -------------------------------------------------------------------------

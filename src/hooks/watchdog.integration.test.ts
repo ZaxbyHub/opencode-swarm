@@ -8,14 +8,19 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { installScopeGuardBindingSeam } from '../../tests/helpers/scope-guard-binding-seam';
 import { resetSwarmState, startAgentSession, swarmState } from '../state';
 import { createDelegationLedgerHook } from './delegation-ledger';
 import { detectLoop } from './loop-detector';
-import { createScopeGuardHook } from './scope-guard';
+import {
+	createScopeGuardHook,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 // Session IDs for test isolation
 const CODER_SID = 'watchdog-test-coder';
 const ARCH_SID = 'watchdog-test-arch';
+let restoreScopeGuardBinding = () => {};
 
 describe('Watchdog Integration Tests', () => {
 	// Advisory collector for mock
@@ -30,15 +35,21 @@ describe('Watchdog Integration Tests', () => {
 		advisories.length = 0;
 
 		// Set up architect session first (architect writes are always allowed)
-		startAgentSession(ARCH_SID, 'swarm:architect');
-		swarmState.activeAgent.set(ARCH_SID, 'swarm:architect');
+		startAgentSession(ARCH_SID, 'architect');
+		swarmState.activeAgent.set(ARCH_SID, 'architect');
 
 		// Set up coder session
-		startAgentSession(CODER_SID, 'swarm:coder');
-		swarmState.activeAgent.set(CODER_SID, 'swarm:coder');
+		startAgentSession(CODER_SID, 'coder');
+		swarmState.activeAgent.set(CODER_SID, 'coder');
+		// This legacy integration fixture exercises scope path enforcement. Keep
+		// identity-binding authorization itself in the dedicated v2 tests.
+		restoreScopeGuardBinding =
+			installScopeGuardBindingSeam(scopeGuardInternals);
 	});
 
 	afterEach(() => {
+		restoreScopeGuardBinding();
+		restoreScopeGuardBinding = () => {};
 		// Clean up sessions
 		swarmState.agentSessions.delete(CODER_SID);
 		swarmState.agentSessions.delete(ARCH_SID);

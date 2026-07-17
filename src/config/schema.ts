@@ -103,7 +103,10 @@ export function getCanonicalAgentRole(
 	for (const role of CANONICAL_ROLES_LONGEST_FIRST) {
 		for (const sep of SEPARATORS) {
 			const suffix = sep + role;
-			if (normalized.endsWith(suffix)) {
+			// A separator alone is not a swarm identity. Require at least one
+			// character before it so malformed `_coder`, `-coder`, and ` coder`
+			// inputs cannot impersonate a generated agent name.
+			if (normalized.length > suffix.length && normalized.endsWith(suffix)) {
 				return role as AgentName;
 			}
 		}

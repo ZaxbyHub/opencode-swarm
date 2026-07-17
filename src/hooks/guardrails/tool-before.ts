@@ -23,7 +23,10 @@ import {
 } from '../../config/schema';
 import { getExecutor } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
-import { resolveScopeWithFallbacks } from '../../scope/scope-persistence';
+import {
+	resolveAuthorizedScopeBinding,
+	resolveAuthorizedScopeBindingForSession,
+} from '../../scope/scope-persistence';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -34,7 +37,6 @@ import {
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
-import { pendingCoderScopeByTaskId } from '../delegation-gate.js';
 import { detectLoop } from '../loop-detector';
 import { normalizeToolName } from '../normalize-tool-name';
 import {
@@ -44,6 +46,7 @@ import {
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
+import { resolveWriteTargets as resolveFileWriteTargets } from '../write-target-resolver';
 import { appendGuardrailDecision } from './audit-log';
 import {
 	DC_SAFE_TARGETS,
@@ -62,6 +65,14 @@ import {
 	hashArgs,
 } from './file-authority';
 import { enforceSpecDriftGate } from './index';
+import {
+	assertNonTransientCircuitAllowsTool,
+	forgetToolExecution,
+	markToolExecutionSandboxWrapped,
+	nonTransientHardStopMessage,
+	recordNonTransientFailure,
+	rememberToolExecution,
+} from './nontransient-circuit';
 import { setStoredInputArgs } from './stored-input-args';
 
 // ---- Types ----
@@ -129,17 +140,27 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	} = ctx;
 
 	/**
-	 * Resolves declared coder scope from session state, disk persistence, and plan-as-scope.
+	 * Resolves only an active, child-owned, Task-correlated v2 binding.
+	 * Legacy v1 disk/session entries are intentionally not authorization sources.
 	 */
 	function resolveDeclaredScope(sessionID: string): string[] | null {
 		const session = swarmState.agentSessions.get(sessionID);
 		const taskId = session?.currentTaskId ?? null;
-		return resolveScopeWithFallbacks({
-			directory: effectiveDirectory,
-			taskId,
-			inMemoryScope: session?.declaredCoderScope,
-			pendingMapScope: taskId ? pendingCoderScopeByTaskId.get(taskId) : null,
-		});
+		const binding = taskId
+			? resolveAuthorizedScopeBinding({
+					directory: effectiveDirectory,
+					taskId,
+					activeSessionId: sessionID,
+				})
+			: resolveAuthorizedScopeBindingForSession({
+					directory: effectiveDirectory,
+					activeSessionId: sessionID,
+				});
+		if (!taskId && binding && session) {
+			session.currentTaskId = binding.taskId;
+			session.declaredCoderScope = [...binding.files];
+		}
+		return binding?.files ?? null;
 	}
 
 	/**
@@ -938,16 +959,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			);
 		}
 
-		const isArch =
-			stripKnownSwarmPrefix(shellWriteAgent).toLowerCase() === 'architect';
-		// Previously a no-scope non-architect agent returned here, skipping BOTH
-		// the universal-deny-prefix check AND file-authority (issue #1778 H3
-		// MEDIUM). Now the universal-deny prefixes (protecting .git/.swarm/.env/
-		// etc.) are ALWAYS enforced below; only the declared-scope authority is
-		// relaxed for no-scope agents, so their legitimate shell writes are not
-		// over-blocked while the critical deny list is no longer bypassable.
+		const shellWriteRole = stripKnownSwarmPrefix(shellWriteAgent).toLowerCase();
+		const isArch = shellWriteRole === 'architect';
+		const isCoder = shellWriteRole === 'coder';
+		if (isCoder && (!declaredScope || declaredScope.length === 0)) {
+			throw new Error(
+				`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding.`,
+			);
+		}
+		// Coders fail closed without a Task-correlated scope. Other non-architect
+		// roles retain legacy no-scope leniency, but universal deny prefixes still
+		// apply to them (issue #1778 H3).
 		const noScopeLenient =
-			!isArch && (!declaredScope || declaredScope.length === 0);
+			!isArch && !isCoder && (!declaredScope || declaredScope.length === 0);
 
 		const resolvedWrites = resolveWriteTargets(
 			detectionCommand,
@@ -1016,6 +1040,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	 */
 	async function applySandboxExecution(
 		sessionID: string,
+		callID: string,
 		tool: string,
 		args: unknown,
 		agent: string,
@@ -1063,6 +1088,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		try {
 			const wrappedCommand = executor.wrapCommand(rawCommand, resolved.paths);
 			toolArgs.command = wrappedCommand;
+			markToolExecutionSandboxWrapped(sessionID, callID);
 
 			void appendGuardrailDecision(
 				{
@@ -1076,17 +1102,20 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				},
 				{ auditPath, enabled: auditEnabled },
 			);
-
-			const envOverrides = executor.getEnvOverrides();
-			if (Object.keys(envOverrides).length > 0) {
-				const existingEnv =
-					(toolArgs.env as Record<string, string | null> | undefined) ?? {};
-				toolArgs.env = { ...existingEnv, ...envOverrides };
-			}
 		} catch (err) {
-			throw new Error(
-				`[sandbox] BLOCKED: Failed to wrap command with ${executor.mechanism}: ${err}. Command will not be executed unsandboxed.`,
+			forgetToolExecution(sessionID, callID);
+			const message =
+				`[sandbox] BLOCKED: Failed to wrap command with ${executor.mechanism}: ${err}. ` +
+				'Command will not be executed unsandboxed.';
+			const circuit = recordNonTransientFailure(
+				sessionID,
+				'sandbox_wrapper_failure',
+				message,
 			);
+			if (circuit?.hardStop) {
+				throw new Error(nonTransientHardStopMessage(circuit));
+			}
+			throw new Error(message);
 		}
 	}
 
@@ -1256,116 +1285,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		args: unknown,
 	): void {
 		const currentSession = swarmState.agentSessions.get(sessionID);
-		if (currentSession?.delegationActive) {
-			if (isWriteTool(tool)) {
-				const delegArgs = args as Record<string, unknown> | undefined;
-				const delegTargetPath = (delegArgs?.filePath ??
-					delegArgs?.path ??
-					delegArgs?.file ??
-					delegArgs?.target) as string | undefined;
-				if (typeof delegTargetPath === 'string' && delegTargetPath.length > 0) {
-					const agentName = swarmState.activeAgent.get(sessionID) ?? 'unknown';
-					const cwd = effectiveDirectory;
-					const authorityCheck = checkFileAuthorityWithRules(
-						agentName,
-						delegTargetPath,
-						cwd,
-						precomputedAuthorityRules,
-						{ declaredScope: resolveDeclaredScope(sessionID) },
-					);
-					if (!authorityCheck.allowed) {
-						throw new Error(
-							`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${delegTargetPath}". Reason: ${authorityCheck.reason}`,
-						);
-					}
-
-					if (
-						isConfigFilePath(
-							delegTargetPath,
-							cwd,
-							authorityConfig?.verifier_config_paths,
-						)
-					) {
-						const normalizedPath = path
-							.relative(path.resolve(cwd), path.resolve(cwd, delegTargetPath))
-							.replace(/\\/g, '/');
-						const logEntry: Record<string, unknown> = {
-							agent: agentName,
-							path: normalizedPath,
-							allowed: authorityCheck.allowed,
-							type: 'delegated_write',
-						};
-						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
-							logEntry.reason = (
-								authorityCheck as { allowed: false; reason: string }
-							).reason;
-						}
-						warn('Config file write attempt', logEntry);
-					}
-
-					if (
-						!currentSession.modifiedFilesThisCoderTask.includes(delegTargetPath)
-					) {
-						currentSession.modifiedFilesThisCoderTask.push(delegTargetPath);
-					}
-				}
-			}
-			if (
-				tool === 'apply_patch' ||
-				tool === 'swarm_apply_patch' ||
-				tool === 'patch'
-			) {
-				const agentName = swarmState.activeAgent.get(sessionID) ?? 'unknown';
-				const cwd = effectiveDirectory;
-				for (const p of extractPatchTargetPaths(tool, args)) {
-					const authorityCheck = checkFileAuthorityWithRules(
-						agentName,
-						p,
-						cwd,
-						precomputedAuthorityRules,
-						{ declaredScope: resolveDeclaredScope(sessionID) },
-					);
-
-					if (
-						isConfigFilePath(p, cwd, authorityConfig?.verifier_config_paths)
-					) {
-						const normalizedPath = path
-							.relative(path.resolve(cwd), path.resolve(cwd, p))
-							.replace(/\\/g, '/');
-						const logEntry: Record<string, unknown> = {
-							agent: agentName,
-							path: normalizedPath,
-							allowed: authorityCheck.allowed,
-							type: 'delegated_patch',
-						};
-						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
-							logEntry.reason = (
-								authorityCheck as { allowed: false; reason: string }
-							).reason;
-						}
-						warn('Config file write attempt', logEntry);
-					}
-
-					if (!authorityCheck.allowed) {
-						throw new Error(
-							`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`,
-						);
-					}
-					if (!currentSession.modifiedFilesThisCoderTask.includes(p)) {
-						currentSession.modifiedFilesThisCoderTask.push(p);
-					}
-				}
-			}
-		} else if (isArchitect(sessionID)) {
+		if (!currentSession?.delegationActive && isArchitect(sessionID)) {
 			const coderDelegArgs = args as Record<string, unknown> | undefined;
-			const rawSubagentType = coderDelegArgs?.subagent_type;
 			const coderDeleg = isAgentDelegation(tool, coderDelegArgs);
-			if (
-				coderDeleg.isDelegation &&
-				coderDeleg.targetAgent === 'coder' &&
-				typeof rawSubagentType === 'string' &&
-				(rawSubagentType === 'coder' || rawSubagentType.endsWith('_coder'))
-			) {
+			if (coderDeleg.isDelegation && coderDeleg.targetAgent === 'coder') {
 				const coderSession = swarmState.agentSessions.get(sessionID);
 				if (coderSession) {
 					coderSession.modifiedFilesThisCoderTask = [];
@@ -1905,6 +1828,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		input: { tool: string; sessionID: string; callID: string },
 		output: { args: unknown },
 	): Promise<void> => {
+		assertNonTransientCircuitAllowsTool(input.sessionID);
+		// Establish the lazy fallback invocation before recording this tool's
+		// before/after correlation. Beginning it later would clear the command we
+		// just stored, losing whether a parser error came from the sandbox wrapper.
+		const hasKnownSession =
+			swarmState.agentSessions.has(input.sessionID) ||
+			swarmState.activeAgent.has(input.sessionID);
+		const resolvedSessionWindow = hasKnownSession
+			? resolveSessionAndWindow(input.sessionID)
+			: null;
+
 		// v6.35.1: Runaway output detector — reset counter on any tool call
 		consecutiveNoToolTurns.set(input.sessionID, 0);
 
@@ -2115,8 +2049,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const rawAgent = swarmState.activeAgent.get(input.sessionID);
 			return rawAgent ? stripKnownSwarmPrefix(rawAgent) : 'unknown';
 		})();
+		rememberToolExecution(
+			input.sessionID,
+			input.callID,
+			input.tool,
+			rawShellCommand,
+		);
 		await applySandboxExecution(
 			input.sessionID,
+			input.callID,
 			input.tool,
 			output.args,
 			agentNameForSandbox,
@@ -2128,24 +2069,35 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Issue #853 Layer B: structural spec-drift block
 		enforceSpecDriftGate(effectiveDirectory, input.tool);
 
-		// Plan state + scope protection — architect-only
+		// Preserve architect plan/config protection even when a malformed payload
+		// cannot be fully resolved for the universal guard pass below.
 		if (isArchitect(input.sessionID) && isWriteTool(input.tool)) {
 			handlePlanAndScopeProtection(input.sessionID, input.tool, output.args);
 		}
 
+		// Issue #1875: resolve the complete write set once, before any authority,
+		// lstat, universal-deny, scope, or tracking decision. Non-architect write
+		// shapes that cannot be proven are blocked rather than becoming bypasses.
+		let resolvedFileTargets: string[] | null = null;
+		if (isWriteTool(input.tool)) {
+			const resolution = resolveFileWriteTargets(
+				normalizeToolName(input.tool),
+				output.args,
+				{ directory: effectiveDirectory },
+			);
+			if (resolution.status === 'unverifiable') {
+				// Universal deny, containment, and lstat checks cannot be proven when
+				// the complete write set is unknown. This is unsafe for every role,
+				// including architect; plan/config guards remain additional checks.
+				throw new Error(`WRITE TARGET UNVERIFIABLE: ${resolution.reason}`);
+			} else {
+				resolvedFileTargets = resolution.paths;
+			}
+		}
+
 		// Authority + lstat + universal-deny checks for ALL agents on Write/Edit
 		if (isWriteTool(input.tool)) {
-			const toolArgs = output.args as Record<string, unknown> | undefined;
-			const targetPath =
-				toolArgs?.filePath ??
-				toolArgs?.path ??
-				toolArgs?.file ??
-				toolArgs?.target ??
-				// extract_code_blocks writes into output_dir (issue #1778 C1) —
-				// route it through declared-scope / lstat / universal-deny like
-				// other write tools instead of leaving its target invisible.
-				toolArgs?.output_dir;
-			if (typeof targetPath === 'string' && targetPath.length > 0) {
+			for (const targetPath of resolvedFileTargets ?? []) {
 				const agentName = swarmState.activeAgent.get(input.sessionID);
 				if (!agentName) {
 					throw new Error(
@@ -2257,6 +2209,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					);
 				}
 
+				const trackingSession = swarmState.agentSessions.get(input.sessionID);
+				// Preserve the public audit taxonomy while sharing one target resolver.
+				const auditContext = trackingSession?.delegationActive
+					? 'delegated'
+					: 'direct';
+				const auditOperation = [
+					'apply_patch',
+					'swarm_apply_patch',
+					'patch',
+				].includes(normalizeToolName(input.tool))
+					? 'patch'
+					: 'write';
+
 				// Log config file write attempts
 				if (
 					isConfigFilePath(
@@ -2275,7 +2240,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						agent: agentName,
 						path: normalizedPath,
 						allowed: authorityCheck.allowed,
-						type: 'direct_write',
+						type: `${auditContext}_${auditOperation}`,
 					};
 					if (!authorityCheck.allowed && 'reason' in authorityCheck) {
 						logEntry.reason = (
@@ -2284,148 +2249,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					}
 					warn('Config file write attempt', logEntry);
 				}
-			}
-		}
 
-		// Authority + lstat + universal-deny for apply_patch / swarm_apply_patch / patch
-		if (
-			input.tool === 'apply_patch' ||
-			input.tool === 'swarm_apply_patch' ||
-			input.tool === 'patch'
-		) {
-			const patchAgentName =
-				swarmState.activeAgent.get(input.sessionID) ?? 'unknown';
-			if (!swarmState.activeAgent.has(input.sessionID)) {
-				throw new Error(
-					`WRITE BLOCKED: No active agent registered for session "${input.sessionID}". Call startAgentSession before issuing write tool calls.`,
-				);
-			}
-			for (const p of extractPatchTargetPaths(input.tool, output.args)) {
-				const lstatBlock = checkWriteTargetForSymlink(p, effectiveDirectory);
-				if (lstatBlock) {
-					void appendGuardrailDecision(
-						{
-							type: 'file_write',
-							ts: new Date().toISOString(),
-							sessionID: input.sessionID,
-							agent: patchAgentName,
-							tool: input.tool,
-							path: p,
-							reason: lstatBlock,
-							resolvedScope: (() => {
-								const scope = resolveDeclaredScope(input.sessionID);
-								return scope != null && scope.length > 0
-									? scope.join(', ')
-									: '';
-							})(),
-						},
-						{
-							auditPath: shellAuditPath,
-							enabled: shellAuditEnabled,
-						},
-					);
-					throw new Error(lstatBlock);
-				}
-
-				if (universalDenyPrefixes.length > 0) {
-					const normalizedP = path
-						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, p),
-						)
-						.replace(/\\/g, '/');
-					for (const prefix of universalDenyPrefixes) {
-						if (normalizedP.toLowerCase().startsWith(prefix.toLowerCase())) {
-							void appendGuardrailDecision(
-								{
-									type: 'file_write',
-									ts: new Date().toISOString(),
-									sessionID: input.sessionID,
-									agent: patchAgentName,
-									tool: input.tool,
-									path: p,
-									reason: `Path is under universal deny prefix "${prefix}"`,
-									resolvedScope: (() => {
-										const scope = resolveDeclaredScope(input.sessionID);
-										return scope != null && scope.length > 0
-											? scope.join(', ')
-											: '';
-									})(),
-								},
-								{
-									auditPath: shellAuditPath,
-									enabled: shellAuditEnabled,
-								},
-							);
-							throw new Error(
-								`WRITE BLOCKED: Agent "${patchAgentName}" is not authorised to write "${p}" (via patch). Reason: Path is under universal deny prefix "${prefix}"`,
-							);
-						}
-					}
-				}
-
-				const patchDeclaredScope = resolveDeclaredScope(input.sessionID);
-
-				const authorityCheck = checkFileAuthorityWithRules(
-					patchAgentName,
-					p,
-					effectiveDirectory,
-					precomputedAuthorityRules,
-					{ declaredScope: patchDeclaredScope },
-				);
-				if (!authorityCheck.allowed) {
-					void appendGuardrailDecision(
-						{
-							type: 'file_write',
-							ts: new Date().toISOString(),
-							sessionID: input.sessionID,
-							agent: patchAgentName,
-							tool: input.tool,
-							path: p,
-							reason: authorityCheck.reason,
-							resolvedScope: (() => {
-								const scope = patchDeclaredScope;
-								return scope != null && scope.length > 0
-									? scope.join(', ')
-									: '';
-							})(),
-						},
-						{
-							auditPath: shellAuditPath,
-							enabled: shellAuditEnabled,
-						},
-					);
-					throw new Error(
-						`WRITE BLOCKED: Agent "${patchAgentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`,
-					);
-				}
-
-				// Log config file write attempts for direct patches
 				if (
-					isConfigFilePath(
-						p,
-						effectiveDirectory,
-						authorityConfig?.verifier_config_paths,
-					)
+					trackingSession?.delegationActive &&
+					!trackingSession.modifiedFilesThisCoderTask.includes(targetPath)
 				) {
-					const normalizedPath = path
-						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, p),
-						)
-						.replace(/\\/g, '/');
-					const logEntry: Record<string, unknown> = {
-						agent: patchAgentName,
-						path: normalizedPath,
-						allowed: authorityCheck.allowed,
-						type: 'direct_patch',
-					};
-					if (!authorityCheck.allowed && 'reason' in authorityCheck) {
-						logEntry.reason = (
-							authorityCheck as { allowed: false; reason: string }
-						).reason;
-					}
-					warn('Config file write attempt', logEntry);
+					trackingSession.modifiedFilesThisCoderTask.push(targetPath);
 				}
 			}
 		}
@@ -2441,7 +2270,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		}
 
 		// Resolve session — returns null if architect-exempt
-		const resolved = resolveSessionAndWindow(input.sessionID);
+		const resolved = resolvedSessionWindow;
 		if (!resolved) return;
 
 		const { agentConfig, window } = resolved;

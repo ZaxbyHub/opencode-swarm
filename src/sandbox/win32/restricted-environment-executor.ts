@@ -17,6 +17,7 @@
  * native Windows APIs (CreateAppContainerToken, CreateRestrictedToken) are required.
  */
 
+import { Buffer } from 'node:buffer';
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -35,6 +36,73 @@ const SANDBOX_UNAVAILABLE_CODES = new Set([
 	'ENOSPC',
 ]);
 
+const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
+const UNSAFE_PATH_CHARACTERS = new Set([
+	':',
+	'"',
+	"'",
+	';',
+	'&',
+	'|',
+	'<',
+	'>',
+	'^',
+	'%',
+	'!',
+	'?',
+	'*',
+	'`',
+	'$',
+]);
+
+function containsUnsafePathSyntax(value: string): boolean {
+	return [...value].some(
+		(character) =>
+			character.charCodeAt(0) < 32 || UNSAFE_PATH_CHARACTERS.has(character),
+	);
+}
+
+/**
+ * Return a syntactically valid local SystemRoot without probing the filesystem.
+ * The fallback preserves the historical behavior for missing or tampered values.
+ */
+function getSafeSystemRoot(): string {
+	const raw = process.env.SystemRoot;
+	if (
+		typeof raw !== 'string' ||
+		!/^[A-Za-z]:[\\/]/.test(raw) ||
+		containsUnsafePathSyntax(raw.slice(2)) ||
+		raw
+			.slice(3)
+			.split(/[\\/]+/)
+			.some((segment) => segment === '.' || segment === '..')
+	) {
+		return DEFAULT_SYSTEM_ROOT;
+	}
+
+	const normalized = path.win32.normalize(raw);
+	return normalized.length > 3 ? normalized.replace(/\\+$/, '') : normalized;
+}
+
+function getWindowsExecutablePaths(): {
+	systemRoot: string;
+	cmdExe: string;
+	powerShellExe: string;
+} {
+	const systemRoot = getSafeSystemRoot();
+	return {
+		systemRoot,
+		cmdExe: path.win32.join(systemRoot, 'System32', 'cmd.exe'),
+		powerShellExe: path.win32.join(
+			systemRoot,
+			'System32',
+			'WindowsPowerShell',
+			'v1.0',
+			'powershell.exe',
+		),
+	};
+}
+
 /**
  * Check whether the Windows sandbox mechanism is present and functional.
  * Uses spawnSync to probe synchronously without throwing.
@@ -47,12 +115,17 @@ function probeWindowsSandbox(): boolean {
 	try {
 		// Probe by checking if we can spawn a basic cmd command.
 		// If this fails, the Windows sandbox is unavailable.
-		const result = spawnSync('cmd', ['/c', 'echo', 'ok'], {
-			windowsHide: true,
-			encoding: 'utf-8',
-			timeout: 5000,
-			stdio: ['ignore', 'pipe', 'ignore'] as SpawnSyncOptions['stdio'],
-		});
+		const result = spawnSync(
+			getWindowsExecutablePaths().cmdExe,
+			['/d', '/s', '/c', 'echo ok'],
+			{
+				cwd: os.tmpdir(),
+				windowsHide: true,
+				encoding: 'utf-8',
+				timeout: 5000,
+				stdio: ['ignore', 'pipe', 'ignore'] as SpawnSyncOptions['stdio'],
+			},
+		);
 
 		if (result.error) {
 			const code = (result.error as NodeJS.ErrnoException).code as
@@ -89,36 +162,62 @@ export const _internals: { probeWindowsSandbox: typeof probeWindowsSandbox } = {
 } as const;
 
 /**
- * Escape a string for safe embedding inside a PowerShell double-quoted string.
- * PowerShell string escaping: escape backtick, dollar sign, and double quote.
+ * Escape a string for safe embedding inside a PowerShell single-quoted string.
+ * PowerShell treats every character except a single quote literally in this context;
+ * embedded single quotes are represented by two consecutive single quotes.
  */
-function psStringEscape(s: string): string {
-	return s.replace(/[`"$]/g, '`$&');
+function psSingleQuoteEscape(s: string): string {
+	return s.replace(/'/g, "''");
 }
 
 /**
- * Resolve the safe Windows PATH using the actual SystemRoot environment variable,
- * falling back to `C:\Windows` when SystemRoot is not set (non-standard installations).
- *
- * Validation is required to prevent PATH injection via a tampered SystemRoot value.
- * The following are rejected and cause a fallback to `C:\Windows`:
- *   - undefined / null (use fallback)
- *   - empty string (use fallback)
- *   - relative paths (use fallback)
- *   - paths containing PATH separators (`;`) (use fallback)
- *   - paths containing shell metacharacters such as quotes, angle brackets, pipes,
- *     or glob characters (use fallback)
- *
- * When validation fails, the safe default `C:\Windows` is used defensively.
+ * Validate and normalize one inherited Windows PATH entry without filesystem I/O.
+ * PATH filtering is functional sanitization rather than a trust boundary: retain
+ * local drive-rooted tool directories, but reject entries whose syntax can change
+ * command or PATH parsing.
+ */
+function normalizeInheritedPathEntry(rawEntry: string): string | null {
+	const entry = rawEntry.trim();
+	if (
+		!/^[A-Za-z]:[\\/]/.test(entry) ||
+		containsUnsafePathSyntax(entry.slice(2)) ||
+		entry
+			.slice(3)
+			.split(/[\\/]+/)
+			.some((segment) => segment === '.' || segment === '..')
+	) {
+		return null;
+	}
+
+	const normalized = path.win32.normalize(entry);
+	return normalized.length > 3 ? normalized.replace(/\\+$/, '') : normalized;
+}
+
+/**
+ * Build a usable, deterministic Windows PATH without blocking filesystem probes.
+ * Validated SystemRoot directories are ordered first, followed by syntactically
+ * local inherited entries with case-insensitive de-duplication.
  */
 function getSafeWindowsPath(): string {
-	const raw = process.env.SystemRoot;
-	const isValid =
-		typeof raw === 'string' &&
-		raw.length > 0 &&
-		/^[A-Za-z]:[\\/](?:[^\\/;"'<>|*?\r\n]+[\\/]?)*$/.test(raw);
-	const sysRoot = isValid ? raw : 'C:\\Windows';
-	return `${sysRoot}\\System32;${sysRoot}`;
+	const { systemRoot } = getWindowsExecutablePaths();
+	const candidates = [
+		path.win32.join(systemRoot, 'System32'),
+		systemRoot,
+		...(process.env.PATH ?? '').split(';'),
+	];
+	const seen = new Set<string>();
+	const safeEntries: string[] = [];
+
+	for (const candidate of candidates) {
+		const normalized = normalizeInheritedPathEntry(candidate);
+		if (!normalized) continue;
+		const identity = normalized.toLowerCase();
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		safeEntries.push(normalized);
+	}
+
+	return safeEntries.join(';');
 }
 
 /**
@@ -257,7 +356,7 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 	 *
 	 * The wrapper:
 	 *   - Sets scoped temp directory (%TEMP%, %TMP%)
-	 *   - Restricts PATH to safe system paths only
+	 *   - Preserves syntactically safe local PATH entries after system paths
 	 *   - Removes dangerous environment variables that could be used to bypass restrictions
 	 *   - Applies per-call envOverrides (set or unset)
 	 *   - Executes PowerShell-native cmdlets (filesystem cmdlets only) via Invoke-Expression,
@@ -331,13 +430,17 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 			);
 		}
 
-		// Safe PATH for Windows: only essential system directories.
-		// Uses SystemRoot env var so non-standard installations (e.g., D:\Windows) work.
+		// Keep validated inherited developer-tool directories after system paths.
+		// This is syntax-only so wrapping cannot block on filesystem probes.
 		const safePath = getSafeWindowsPath();
+		const { cmdExe, powerShellExe } = getWindowsExecutablePaths();
 
-		// Escape values for PowerShell embedding
-		const escapedTemp = psStringEscape(temp);
-		const escapedCommand = psStringEscape(command);
+		// Transport the original command as opaque UTF-8 Base64. It is never
+		// interpolated into PowerShell syntax or the outer -Command string.
+		const commandBase64 = Buffer.from(command, 'utf8').toString('base64');
+		const escapedTemp = psSingleQuoteEscape(temp);
+		const escapedPath = psSingleQuoteEscape(safePath);
+		const escapedCmdExe = psSingleQuoteEscape(cmdExe);
 
 		// Build per-call env override commands for the PowerShell script.
 		// String values: $env:KEY = 'VALUE'; (single-quoted, embedded in PS string)
@@ -357,36 +460,58 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 						`Remove-Item Env:${key} -Force -ErrorAction SilentlyContinue;`,
 					);
 				} else {
-					// Escape single quotes for embedding in a PowerShell single-quoted string
-					const psEscaped = value.replace(/'/g, "''");
+					const psEscaped = psSingleQuoteEscape(value);
 					envOverrideLines.push(`$env:${key} = '${psEscaped}';`);
 				}
 			}
 		}
 
-		// Choose execution strategy: PowerShell-native cmdlets must run directly inside
-		// the PS script; other commands are wrapped with cmd /c for standard shell behaviour.
+		// PowerShell-native cmdlets run only after their existing strict validation.
+		// Other commands use the absolute system command interpreter and propagate
+		// its exact status through the nested PowerShell process.
 		const commandExec = isPowerShellNativeCommand(command)
-			? `Invoke-Expression "${escapedCommand}"`
-			: `cmd /c "${escapedCommand}"`;
+			? `Invoke-Expression $command;
+  exit 0;`
+			: `$batchPath = $null;
+  $batchLocationPushed = $false;
+  try {
+    if ($command.Contains([char]13) -or $command.Contains([char]10)) {
+      $batchName = 'opencode-swarm-' + [Guid]::NewGuid().ToString('N') + '.cmd';
+      $batchPath = Join-Path $env:TEMP $batchName;
+      [IO.File]::WriteAllText($batchPath, $command, [Text.UTF8Encoding]::new($false));
+      Push-Location -LiteralPath $env:TEMP;
+      $batchLocationPushed = $true;
+      & '${escapedCmdExe}' /d /v:off /s /c ('call "' + $batchName + '"');
+    } else {
+      & '${escapedCmdExe}' /d /v:off /s /c $command;
+    }
+    $childExitCode = $LASTEXITCODE;
+  } finally {
+    if ($batchLocationPushed) {
+      Pop-Location;
+    }
+    if ($null -ne $batchPath) {
+      Remove-Item -LiteralPath $batchPath -Force -ErrorAction SilentlyContinue;
+    }
+  }
+  if ($null -eq $childExitCode) {
+    throw 'cmd.exe did not report an exit code';
+  }
+  exit [int]$childExitCode;`;
 
-		// PowerShell script that sets up the restricted environment and runs the command
-		// Uses -NoProfile to skip loading PowerShell profile scripts for faster startup
-		// Uses -WindowStyle Hidden to suppress the PowerShell window
+		// The intact script is encoded as UTF-16LE for Windows PowerShell's
+		// -EncodedCommand contract. No line or quote normalization is performed.
 		const envOverrideBlock =
 			envOverrideLines.length > 0 ? `\n  ${envOverrideLines.join('\n  ')}` : '';
 		const psScript = `
 $ErrorActionPreference = 'Stop';
+$ProgressPreference = 'SilentlyContinue';
 try {
-  # Set scoped temp directory
   $env:TEMP = '${escapedTemp}';
   $env:TMP = '${escapedTemp}';
 
-  # Restrict PATH to safe system paths only
-  $env:PATH = '${safePath}';
+  $env:PATH = '${escapedPath}';
 
-  # Remove dangerous environment variables that could be used to bypass restrictions
-  # Note: LD_PRELOAD, DYLD_* don't apply on Windows but we clear them for completeness
   $dangerousVars = @(
     'LD_PRELOAD',
     'DYLD_INSERT_LIBRARIES',
@@ -403,30 +528,31 @@ try {
   ${envOverrideBlock}
 
   # Execute the command — PS-native cmdlets via Invoke-Expression, others via the standard command interpreter
+  $commandBytes = [Convert]::FromBase64String('${commandBase64}');
+  $command = [Text.Encoding]::UTF8.GetString($commandBytes);
   ${commandExec};
 } catch {
-  Write-Error $_.Exception.Message;
+  [Console]::Error.WriteLine($_.Exception.Message);
   exit 1;
 }`;
 
-		// Execute via PowerShell with bypass execution policy
-		return `powershell -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command "${psScript
-			.replace(/\n/g, ' ')
-			.trim()}"`;
+		const encodedScript = Buffer.from(psScript, 'utf16le').toString('base64');
+		const escapedPowerShellExe = psSingleQuoteEscape(powerShellExe);
+		return `& '${escapedPowerShellExe}' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${encodedScript}; exit $LASTEXITCODE`;
 	}
 
 	/**
 	 * Return environment variable overrides required for the Windows sandbox.
 	 *
 	 * Security measures:
-	 *   - PATH is restricted to essential Windows system directories only
+	 *   - PATH starts with essential Windows system directories, then retains
+	 *     syntactically safe local inherited tool directories
 	 *   - TEMP/TMP are set to null (will be set to scoped temp at runtime via wrapCommand)
 	 *   - Dangerous variables that don't apply to Windows are cleared for completeness
 	 */
 	getEnvOverrides(): Record<string, string | null> {
 		return {
-			// Restrict PATH to essential system directories only.
-			// Uses SystemRoot env var for non-standard Windows installations.
+			// Mirror the path embedded by wrapCommand for direct executor consumers.
 			PATH: getSafeWindowsPath(),
 			// Scoped temp directory is set at runtime via wrapCommand
 			TEMP: null,

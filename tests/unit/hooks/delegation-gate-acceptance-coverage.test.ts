@@ -271,7 +271,7 @@ async function writeFixturePlan(dir: string): Promise<void> {
 						size: 'small' as const,
 						description: 'Mapped task',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/mapped-task.ts'],
 						fr_refs: ['FR-001'],
 					},
 					{
@@ -281,7 +281,7 @@ async function writeFixturePlan(dir: string): Promise<void> {
 						size: 'small' as const,
 						description: 'Unmapped task',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/unmapped-task.ts'],
 					},
 				],
 			},

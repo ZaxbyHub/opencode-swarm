@@ -46,9 +46,11 @@ import {
 	shouldPauseForDenials,
 	terminateFullAutoRun,
 } from '../full-auto/state';
-import { resolveScopeWithFallbacks } from '../scope/scope-persistence';
+import {
+	resolveAuthorizedScopeBinding,
+	resolveAuthorizedScopeBindingForSession,
+} from '../scope/scope-persistence';
 import { swarmState } from '../state';
-import { pendingCoderScopeByTaskId } from './delegation-gate.js';
 import {
 	consumePendingInputWarning,
 	peekPendingInputWarning,
@@ -137,15 +139,21 @@ export function createFullAutoPermissionHook(
 			const normalizedAgentName = stripKnownSwarmPrefix(activeAgent);
 
 			const taskId = session?.currentTaskId ?? null;
-			const declaredScope =
-				resolveScopeWithFallbacks({
-					directory,
-					taskId,
-					inMemoryScope: session?.declaredCoderScope,
-					pendingMapScope: taskId
-						? pendingCoderScopeByTaskId.get(taskId)
-						: null,
-				}) ?? null;
+			const binding = taskId
+				? resolveAuthorizedScopeBinding({
+						directory,
+						taskId,
+						activeSessionId: sessionID,
+					})
+				: resolveAuthorizedScopeBindingForSession({
+						directory,
+						activeSessionId: sessionID,
+					});
+			if (!taskId && binding && session) {
+				session.currentTaskId = binding.taskId;
+				session.declaredCoderScope = [...binding.files];
+			}
+			const declaredScope = binding?.files ?? null;
 
 			const argsObj =
 				(output.args as Record<string, unknown> | undefined) ?? undefined;

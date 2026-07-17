@@ -8,9 +8,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { PlanSchema } from '../config/plan-schema';
 import { checkWriteTargetForSymlink } from '../hooks/guardrails';
-import { writeScopeToDisk } from '../scope/scope-persistence';
-import { swarmState } from '../state';
+import {
+	createScopeBinding,
+	registerScopeBinding,
+} from '../scope/scope-binding';
+import { writeScopeBindingToDisk } from '../scope/scope-persistence';
+import { ensureAgentSession } from '../state';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 
@@ -87,6 +92,7 @@ export function validateFiles(files: string[]): string[] {
 export async function executeDeclareScope(
 	args: DeclareScopeArgs,
 	fallbackDir?: string,
+	owner?: { sessionID: string; messageID: string; agentName?: string },
 ): Promise<DeclareScopeResult> {
 	// Step 1: Validate taskId format
 	const taskIdError = validateTaskIdFormat(args.taskId);
@@ -245,9 +251,9 @@ export async function executeDeclareScope(
 		};
 	}
 
-	let planContent: { phases?: { tasks?: { id: string; status: string }[] }[] };
+	let rawPlanContent: unknown;
 	try {
-		planContent = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
+		rawPlanContent = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
 	} catch {
 		return {
 			success: false,
@@ -255,6 +261,15 @@ export async function executeDeclareScope(
 			errors: ['plan.json is not valid JSON'],
 		};
 	}
+	const parsedPlan = PlanSchema.safeParse(rawPlanContent);
+	if (!parsedPlan.success) {
+		return {
+			success: false,
+			message: 'Failed to validate plan.json',
+			errors: ['plan.json does not match the supported plan schema'],
+		};
+	}
+	const planContent = parsedPlan.data;
 
 	const allTasks =
 		planContent.phases?.flatMap(
@@ -346,29 +361,46 @@ export async function executeDeclareScope(
 		};
 	}
 
-	// Step 8: Set declaredCoderScope on ALL active architect sessions
-	// Also clear lastScopeViolation for fresh start
-	for (const [_sessionId, session] of swarmState.agentSessions) {
+	// Step 8: Bind authorization only to the authenticated caller. Direct
+	// test/CLI calls without ToolContext are validation-only and never persist.
+	if (owner?.sessionID && owner.messageID) {
+		const binding = createScopeBinding({
+			directory: dir,
+			plan: planContent,
+			taskId: args.taskId,
+			files: mergedFiles,
+			ownerSessionId: owner.sessionID,
+			ownerMessageId: owner.messageID,
+			source: 'declare_scope',
+		});
+		if (!binding) {
+			return {
+				success: false,
+				message: 'Failed to bind scope to the calling session',
+				errors: ['Scope identity could not be validated'],
+			};
+		}
+		registerScopeBinding(binding);
+		const session = ensureAgentSession(
+			owner.sessionID,
+			owner.agentName ?? 'architect',
+			dir,
+		);
 		session.declaredCoderScope = mergedFiles;
 		session.lastScopeViolation = null;
+		await writeScopeBindingToDisk(dir, binding);
 	}
 
-	// Step 9 (#519, v6.71.1): persist scope to disk so it survives cross-process
-	// delegation. In-memory state is lost when a coder session starts in a
-	// separate process — persisting here lets scope-guard / authority checks in
-	// the coder process read the architect's declared scope via the disk fallback.
-	// Failure is silent: in-memory state remains authoritative for the live process.
-	void writeScopeToDisk(dir, args.taskId, mergedFiles).catch(() => {
-		/* non-blocking — persistence is defense in depth */
-	});
+	// Ownerless calls intentionally do not persist authorization.
 
-	// v6.71.1: surface the tool-layer vs syscall-layer limitation to the caller
-	// so architects know that bash-based writes are not currently enforced.
-	// Syscall-layer enforcement is tracked in #520.
+	// Keep the caller-facing contract aligned with the production guards. Direct
+	// writes and detected shell/interpreter writes share the same active,
+	// Task-correlated binding; unresolvable coder write payloads fail closed.
 	warnings.push(
-		'SCOPE ENFORCEMENT NOTE: Scope is enforced at the Edit/Write/Patch tool layer only. ' +
-			'Bash-based writes (sed -i, echo >, cat > <<HEREDOC, etc.) bypass this check — ' +
-			'see issue #520 for the syscall-layer follow-up.',
+		'SCOPE ENFORCEMENT: This declaration is bound to the caller session and current plan. ' +
+			'Direct writes and statically detected shell/interpreter writes must stay inside the active ' +
+			'Task-correlated scope; missing or unverifiable coder write authority fails closed with ' +
+			'SCOPE_NOT_DECLARED or SCOPE_VIOLATION.',
 	);
 
 	return {
@@ -409,9 +441,13 @@ export const declare_scope: ToolDefinition = createSwarmTool({
 			.optional()
 			.describe('Working directory where the plan is located'),
 	},
-	execute: async (args: unknown, _directory: string) => {
+	execute: async (args: unknown, _directory: string, ctx) => {
 		return JSON.stringify(
-			await executeDeclareScope(args as DeclareScopeArgs, _directory),
+			await executeDeclareScope(args as DeclareScopeArgs, _directory, {
+				sessionID: ctx?.sessionID ?? '',
+				messageID: ctx?.messageID ?? '',
+				agentName: ctx?.agent,
+			}),
 			null,
 			2,
 		);

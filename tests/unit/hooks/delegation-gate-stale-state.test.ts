@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	ensureAgentSession,
@@ -18,6 +19,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(): PluginConfig {
 	return {
@@ -50,10 +52,12 @@ function makeToolBeforeArgs(
 		{
 			args: {
 				subagent_type: agentName,
+				task_id: '9.1',
 				// ACCEPTANCE line keeps the #1687 coder/reviewer pre-dispatch gate
 				// inert here so these stale-state tests exercise their original
 				// assertions unchanged (issue #1687, FR-003).
-				prompt: 'do work\nACCEPTANCE: task complete and covered by tests',
+				prompt:
+					'TASK: 9.1 do work\nACCEPTANCE: task complete and covered by tests',
 			},
 		},
 	];
@@ -61,16 +65,51 @@ function makeToolBeforeArgs(
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	return fs.realpathSync(dir);
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
+
+async function writeScopedPlan(dir: string): Promise<void> {
+	const plan: Plan = {
+		schema_version: '1.0.0',
+		title: 'Stale State Test Plan',
+		swarm: 'test-swarm',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'in_progress',
+				tasks: [
+					{
+						id: '9.1',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Exercise stale-state transitions',
+						depends: [],
+						files_touched: ['src/stale-state.ts'],
+					},
+				],
+			},
+		],
+	};
+	fs.writeFileSync(
+		path.join(dir, '.swarm', 'plan.json'),
+		JSON.stringify(plan, null, 2),
+	);
+	await recordPlanCriticApproval(dir, plan);
 }
 
 describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 	const SESSION_ID = 'test-session';
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		resetSwarmState();
 		tempDir = makeTempProject('stale-state-gate-');
+		await writeScopedPlan(tempDir);
 	});
 
 	afterEach(() => {

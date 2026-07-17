@@ -24,6 +24,13 @@ describe('issue-reference.json recovery directives', () => {
 		expect(issueIngestSection).toContain('issue-reference.json');
 		expect(issueIngestSection).toContain('RECOVERY:');
 		expect(issueIngestSection).toContain('plan/trace/noRepro');
+		expect(issueIngestSection).toContain(
+			"route every delegation through the current session's active-swarm role mapping",
+		);
+		expect(issueIngestSection).toContain(
+			'no swarm ID receives special behavior',
+		);
+		expect(issueIngestSection).not.toContain('non-mega');
 	});
 
 	it('MODE: PLAN section contains issue-reference.json recovery directive', () => {

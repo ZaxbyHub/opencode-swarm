@@ -39,7 +39,7 @@ function makePlan(overrides?: Partial<Plan>): Plan {
 						size: 'small',
 						description: 'Implement issue fix',
 						depends: [],
-						files_touched: [],
+						files_touched: ['src/index.ts'],
 					},
 				],
 			},

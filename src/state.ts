@@ -47,6 +47,8 @@ import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
+import { clearScopeBindings } from './scope/scope-binding.js';
+import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { recordSessionStart } from './session/session-start-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
 import { AgentRunContext } from './state/agent-run-context.js';
@@ -179,6 +181,13 @@ export interface AgentSessionState {
 	lastInvocationIdByAgent: Record<string, number>;
 	/** Active invocation windows keyed by "${agentName}:${invId}" */
 	windows: Record<string, InvocationWindow>;
+	/**
+	 * In-memory only circuit for known non-transient tool failures. Deliberately
+	 * omitted from snapshots so a restarted host never inherits a stale stop.
+	 */
+	nonTransientCircuit?: NonTransientCircuitState;
+	/** Bounded in-memory correlation for original commands replaced by wrappers. */
+	pendingToolExecutions?: Map<string, PendingToolExecution>;
 
 	/** Last tool-call threshold at which a compaction hint was issued */
 	lastCompactionHint: number;
@@ -384,6 +393,43 @@ export interface AgentSessionState {
 	cachedCohortId?: string;
 }
 
+export type NonTransientErrorCategory =
+	| 'shell_parse_error'
+	| 'command_not_found'
+	| 'sandbox_wrapper_failure'
+	| 'general_permanent';
+
+export interface NonTransientCircuitState {
+	ownerAgent: string;
+	ownerInvocationId: number;
+	category: NonTransientErrorCategory | null;
+	sameCategoryCount: number;
+	hardStop: boolean;
+	lastSignal: string | null;
+}
+
+export interface PendingToolExecution {
+	tool: string;
+	originalCommand: string;
+	sandboxWrapped: boolean;
+	ownerAgent: string;
+	ownerInvocationId: number;
+}
+
+function createNonTransientCircuitState(
+	agentName: string,
+	invocationId: number,
+): NonTransientCircuitState {
+	return {
+		ownerAgent: stripKnownSwarmPrefix(agentName),
+		ownerInvocationId: invocationId,
+		category: null,
+		sameCategoryCount: 0,
+		hardStop: false,
+		lastSignal: null,
+	};
+}
+
 /**
  * Represents a single agent invocation window with isolated guardrail budgets.
  * Each time the architect delegates to an agent, a new window is created.
@@ -561,6 +607,13 @@ export function resetSwarmState(): void {
 	// map so a /swarm close + new session with a colliding taskId (e.g. "1.1")
 	// cannot inherit stale scope from the previous swarm.
 	clearPendingCoderScope();
+	for (const binding of clearScopeBindings()) {
+		clearScopeBindingFromDisk({
+			directory: binding.workspaceIdentity,
+			taskId: binding.taskId,
+			ownerSessionId: binding.ownerSessionId,
+		});
+	}
 	resetStandardWorktreeIsolationState();
 	resetRealtimeLearningNudgeState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
@@ -734,6 +787,8 @@ export function startAgentSession(
 		activeInvocationId: 0,
 		lastInvocationIdByAgent: {},
 		windows: {},
+		nonTransientCircuit: createNonTransientCircuitState(agentName, 0),
+		pendingToolExecutions: new Map(),
 		lastCompactionHint: 0,
 		// v6.12 Anti-Process-Violation Detection
 		architectWriteCount: 0,
@@ -869,6 +924,18 @@ export function startAgentSession(
  * @param sessionId - The session identifier to remove
  */
 export function endAgentSession(sessionId: string): void {
+	const removedBindings = clearScopeBindings(
+		(binding) =>
+			binding.ownerSessionId === sessionId ||
+			binding.parentOwnerSessionId === sessionId,
+	);
+	for (const binding of removedBindings) {
+		clearScopeBindingFromDisk({
+			directory: binding.workspaceIdentity,
+			taskId: binding.taskId,
+			ownerSessionId: binding.ownerSessionId,
+		});
+	}
 	swarmState.agentSessions.delete(sessionId);
 	clearRealtimeLearningNudgeSession(sessionId);
 }
@@ -909,6 +976,10 @@ export function ensureAgentSession(
 			telemetry.agentActivated(sessionId, agentName, oldName);
 			session.delegationActive = false;
 			session.lastAgentEventTime = now;
+			session.nonTransientCircuit = createNonTransientCircuitState(
+				agentName,
+				0,
+			);
 
 			// Initialize window tracking if missing (migration from old state)
 			if (!session.windows) {
@@ -923,6 +994,15 @@ export function ensureAgentSession(
 			session.activeInvocationId = 0;
 			session.lastInvocationIdByAgent = {};
 			session.windows = {};
+		}
+		if (session.nonTransientCircuit === undefined) {
+			session.nonTransientCircuit = createNonTransientCircuitState(
+				session.agentName,
+				session.activeInvocationId ?? 0,
+			);
+		}
+		if (session.pendingToolExecutions === undefined) {
+			session.pendingToolExecutions = new Map();
 		}
 
 		// FR-009: The `=== undefined` migration guards below are intentional
@@ -1123,7 +1203,8 @@ export function updateAgentEventTime(sessionId: string): void {
 /**
  * Begin a new invocation window for the given agent.
  * Increments invocation ID, creates fresh budget counters.
- * Returns null for architect (unlimited, no window).
+ * Returns null for architect (unlimited, no budget window), while still
+ * advancing the invocation identity and clearing invocation-local safety state.
  *
  * @param sessionId - Session identifier
  * @param agentName - Agent name (with or without swarm prefix)
@@ -1140,17 +1221,24 @@ export function beginInvocation(
 		);
 	}
 
-	// Architect never creates windows (unlimited)
 	const stripped = stripKnownSwarmPrefix(agentName);
-	if (stripped === ORCHESTRATOR_NAME) {
-		return null;
-	}
 
-	// Increment invocation ID for this agent
+	// Advance every agent's invocation identity. Architects do not receive a
+	// budget window, but non-transient STOP state and before/after correlation
+	// must never leak into a corrected follow-up turn.
 	const lastId = session.lastInvocationIdByAgent[stripped] || 0;
 	const newId = lastId + 1;
 	session.lastInvocationIdByAgent[stripped] = newId;
 	session.activeInvocationId = newId;
+	session.nonTransientCircuit = createNonTransientCircuitState(stripped, newId);
+	// Keep bounded correlation records from the prior invocation so a late
+	// tool-after result can be identified and ignored instead of poisoning this
+	// fresh circuit. Entries are consumed on return or evicted at the map cap.
+
+	// Architect never creates budget windows (unlimited).
+	if (stripped === ORCHESTRATOR_NAME) {
+		return null;
+	}
 
 	// Create new window
 	const now = Date.now();

@@ -50,6 +50,7 @@ async function writePlanJson(
 			status?: string;
 			depends?: string[];
 			phase?: number;
+			filesTouched?: string[];
 		}>;
 		currentPhase?: number;
 	},
@@ -76,7 +77,9 @@ async function writePlanJson(
 					size: 'small' as const,
 					description: `Task ${task.id}`,
 					depends: task.depends ?? [],
-					files_touched: [],
+					files_touched: task.filesTouched ?? [
+						`src/tasks/${task.id.replace('.', '-')}.ts`,
+					],
 				})),
 			},
 		],
@@ -210,7 +213,7 @@ describe('delegation-gate: state machine adversarial — plan corruption', () =>
 		}
 	});
 
-	it('should handle corrupted plan JSON gracefully', async () => {
+	it('should fail closed when plan JSON is corrupted', async () => {
 		// Write invalid JSON
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
@@ -221,38 +224,26 @@ describe('delegation-gate: state machine adversarial — plan corruption', () =>
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
-			});
-		} catch {
-			threw = true;
-		}
-
-		// Should not throw — corrupted plan should be handled
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 
-	it('should handle missing plan.json gracefully', async () => {
+	it('should fail closed when plan.json is missing', async () => {
 		// No plan.json written
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		let threw = false;
-		try {
-			await callToolBefore(hook, 'Task', 'test-session', {
+		await expect(
+			callToolBefore(hook, 'Task', 'test-session', {
 				subagent_type: 'mega_coder',
 				task_id: '1.2',
-			});
-		} catch {
-			threw = true;
-		}
-
-		// Should not throw — missing plan should be handled
-		expect(threw).toBe(false);
+			}),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
 
 	it('should handle plan with missing task entries', async () => {

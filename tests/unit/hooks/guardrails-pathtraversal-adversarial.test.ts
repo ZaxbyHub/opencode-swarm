@@ -96,7 +96,7 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ tool: 'write', sessionID: 'null-byte-test', callID: 'c1' },
 					{ args: { filePath: maliciousPath } },
 				),
-			).rejects.toThrow('WRITE BLOCKED');
+			).rejects.toThrow(/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/);
 		});
 
 		it('should reject URL-encoded traversal (%2e%2e/src/evil.ts)', async () => {
@@ -249,7 +249,7 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ tool: 'write', sessionID: 'backslash-test', callID: 'c1' },
 					{ args: { filePath: maliciousPath } },
 				),
-			).rejects.toThrow('WRITE BLOCKED');
+			).rejects.toThrow(/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/);
 		});
 
 		it('should reject traversal with null byte before extension (src/evil.ts\\x00.md)', async () => {
@@ -272,7 +272,7 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ tool: 'write', sessionID: 'null-ext-test', callID: 'c1' },
 					{ args: { filePath: maliciousPath } },
 				),
-			).rejects.toThrow('WRITE BLOCKED');
+			).rejects.toThrow(/WRITE TARGET UNVERIFIABLE|WRITE BLOCKED/);
 		});
 
 		it('should reject path with overlong UTF-8 sequences', async () => {
@@ -697,12 +697,12 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('empty-path-test', 'architect');
 			beginInvocation('empty-path-test', 'architect');
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'empty-path-test', callID: 'c1' },
-				{ args: { filePath: '' } },
-			);
-
-			// Empty path should not trigger detection (no path to check)
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'empty-path-test', callID: 'c1' },
+					{ args: { filePath: '' } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('empty-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -717,12 +717,12 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('undefined-path-test', 'architect');
 			beginInvocation('undefined-path-test', 'architect');
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'undefined-path-test', callID: 'c1' },
-				{ args: { filePath: undefined } },
-			);
-
-			// Undefined path should not trigger detection
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'undefined-path-test', callID: 'c1' },
+					{ args: { filePath: undefined } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('undefined-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -737,12 +737,12 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('null-path-test', 'architect');
 			beginInvocation('null-path-test', 'architect');
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'null-path-test', callID: 'c1' },
-				{ args: { filePath: null } },
-			);
-
-			// Null path should not trigger detection
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'null-path-test', callID: 'c1' },
+					{ args: { filePath: null } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('null-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -757,12 +757,12 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('number-path-test', 'architect');
 			beginInvocation('number-path-test', 'architect');
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'number-path-test', callID: 'c1' },
-				{ args: { filePath: 12345 } },
-			);
-
-			// Number path should not crash (typeof check should fail)
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'number-path-test', callID: 'c1' },
+					{ args: { filePath: 12345 } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('number-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -777,12 +777,12 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('object-path-test', 'architect');
 			beginInvocation('object-path-test', 'architect');
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'object-path-test', callID: 'c1' },
-				{ args: { filePath: { toString: () => 'src/evil.ts' } } },
-			);
-
-			// Object path should not crash (typeof check should fail)
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'object-path-test', callID: 'c1' },
+					{ args: { filePath: { toString: () => 'src/evil.ts' } } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('object-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -836,7 +836,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('control-char-test', 'architect');
 			beginInvocation('control-char-test', 'architect');
 
-			// Various control characters
 			const controlChars = [
 				'\x01',
 				'\x02',
@@ -849,13 +848,14 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			];
 			const maliciousPath = `src${controlChars.join('')}/test.ts`;
 
-			await hooks.toolBefore(
-				{ tool: 'write', sessionID: 'control-char-test', callID: 'c1' },
-				{ args: { filePath: maliciousPath } },
-			);
-
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'write', sessionID: 'control-char-test', callID: 'c1' },
+					{ args: { filePath: maliciousPath } },
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 			const session = getAgentSession('control-char-test');
-			expect(session?.architectWriteCount).toBeGreaterThanOrEqual(1);
+			expect(session?.architectWriteCount).toBe(1);
 		});
 	});
 });

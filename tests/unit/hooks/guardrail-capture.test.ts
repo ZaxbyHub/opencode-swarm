@@ -29,10 +29,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -259,24 +256,18 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 		});
 	});
 
-	// -------------------------------------------------------------------------
 	// scope_violation — bash write targeting a path outside declared scope
-	//
-	// The scope_violation is reached when:
 	//   1. checkShellWriteScope runs (bash/shell with detected writes)
 	//   2. checkFileAuthorityWithRules passes (path is allowed for the agent)
 	//   3. isInDeclaredScope returns false (path outside declared scope)
-	//
 	// On Windows, absolute Unix paths like /tmp/out.txt resolve outside the cwd
 	// and are caught by checkFileAuthorityWithRules (file_write), not scope_violation.
 	// We use a relative sibling directory (lib/) that is inside the cwd but
 	// outside the declared scope (src/).
-	// -------------------------------------------------------------------------
 	describe('scope_violation', () => {
 		it('throws a scope_violation error AND appends a scope_violation JSONL entry', async () => {
 			const hooks = createGuardrailsHooks(tempDir, nullConfig());
 
-			// Use test_engineer because:
 			// - test_engineer has blockedPrefix ['src/'] but can write to lib/
 			//   (lib/ is not in blockedPrefix, blockedZones, or allowedGlobs)
 			// - With declaredScope=['src/'], writing to lib/ passes authority
@@ -284,8 +275,12 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 			startAgentSession('s-scope', 'test_engineer');
 			swarmState.activeAgent.set('s-scope', 'test_engineer');
 
-			const session = getAgentSession('s-scope')!;
-			session.declaredCoderScope = ['src/'];
+			installActiveScopeBinding({
+				directory: tempDir,
+				childSessionId: 's-scope',
+				taskId: '1.1',
+				files: ['src/'],
+			});
 
 			// echo hello > lib/output.txt — inside cwd, but outside declaredScope src/
 			// Authority check passes (lib/ is not blocked for test_engineer).
@@ -466,8 +461,12 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 			startAgentSession('s-propagate2', 'test_engineer');
 			swarmState.activeAgent.set('s-propagate2', 'test_engineer');
 
-			const session = getAgentSession('s-propagate2')!;
-			session.declaredCoderScope = ['src/'];
+			installActiveScopeBinding({
+				directory: tempDir,
+				childSessionId: 's-propagate2',
+				taskId: '1.1',
+				files: ['src/'],
+			});
 
 			// The error must be thrown (not swallowed by the audit capture)
 			await expect(

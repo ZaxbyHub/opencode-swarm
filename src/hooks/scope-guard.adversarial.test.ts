@@ -1,11 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	installLegacyScopeGuardTargetSeam,
+	installScopeGuardBindingSeam,
+} from '../../tests/helpers/scope-guard-binding-seam';
 import type { AgentSessionState } from '../state';
 import { swarmState } from '../state';
-import { createScopeGuardHook } from './scope-guard';
+import {
+	createScopeGuardHook,
+	_internals as scopeGuardInternals,
+} from './scope-guard';
 
 const SID = 'adv-test-session';
+let restoreScopeBindingSeam: (() => void) | undefined;
+let restoreTargetSeam: (() => void) | undefined;
 
 beforeEach(() => {
+	restoreScopeBindingSeam = installScopeGuardBindingSeam(scopeGuardInternals);
+	restoreTargetSeam = installLegacyScopeGuardTargetSeam(scopeGuardInternals);
 	swarmState.agentSessions.set(SID, {
 		agentName: 'mega_coder',
 		declaredCoderScope: ['src/tools/update-task-status.ts'],
@@ -18,6 +29,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreScopeBindingSeam?.();
+	restoreTargetSeam?.();
 	swarmState.agentSessions.delete(SID);
 	swarmState.activeAgent.delete(SID);
 });

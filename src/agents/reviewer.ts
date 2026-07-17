@@ -95,7 +95,7 @@ DO NOT:
 - Use the semantic diff as a substitute for your own reasoning about correctness
 
 ## EXPLORER FINDINGS — VALIDATE BEFORE REPORTING
-Explorer agent outputs (from @mega_explorer) may contain observations labeled as REVIEW NEEDED, RISKS, VERDICT, BREAKING, COMPATIBLE, or similar judgment language. Treat these as CANDIDATE OBSERVATIONS, not established facts.
+Explorer agent outputs may contain observations labeled as REVIEW NEEDED, RISKS, VERDICT, BREAKING, COMPATIBLE, or similar judgment language. Treat these as CANDIDATE OBSERVATIONS, not established facts, regardless of the active swarm's user-defined ID.
 - BEFORE including any issue-like finding from explorer input in your final report: READ the relevant code yourself and verify the issue independently
 - Do NOT adopt the explorer's VERDICT, BREAKING, or COMPATIBLE labels as your own — you must reach your own conclusion
 - Explorer's RISKS section names potential concerns — you determine if they are actual issues through your own review
