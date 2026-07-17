@@ -21,82 +21,26 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { getStoredInputArgs } from '../../src/hooks/guardrails';
 import {
 	appendKnowledgeEvent,
 	readKnowledgeEvents,
 	recomputeCounters,
 } from '../../src/hooks/knowledge-events';
-import OpenCodeSwarmPlugin from '../../src/index';
-import { swarmState } from '../../src/state';
+import { resetSwarmState, swarmState } from '../../src/state';
 import { knowledge_receipt } from '../../src/tools/knowledge-receipt';
+import {
+	bootKnowledgeHost,
+	createKnowledgeProject,
+} from '../helpers/knowledge-real-host';
 
 const SESSION = 'sess-e2e-1849';
 const SESSION_PREFIXED = 'sess-e2e-cohort';
 const CALL = 'call-e2e-1849';
-
-function ctxFor(directory: string) {
-	return {
-		client: {} as unknown,
-		project: {} as unknown,
-		directory,
-		worktree: directory,
-		serverUrl: new URL('http://localhost:3000'),
-		$: {} as unknown,
-	};
-}
-
-function tmpProject(): string {
-	const d = realpathSync(mkdtempSync(path.join(tmpdir(), 'swarm-e2e-1849-')));
-	mkdirSync(path.join(d, '.swarm'), { recursive: true });
-	return d;
-}
-
-async function bootPlugin(directory: string): Promise<{
-	hooks: Record<string, (...args: unknown[]) => Promise<unknown>>;
-	tool: Record<
-		string,
-		{ execute: (args: unknown, dir: string, ctx: unknown) => Promise<unknown> }
-	>;
-}> {
-	const opencodeDir = path.join(directory, '.opencode');
-	mkdirSync(opencodeDir, { recursive: true });
-	writeFileSync(
-		path.join(opencodeDir, 'opencode-swarm.json'),
-		JSON.stringify(
-			{ version_check: false, knowledge: { enabled: true } },
-			null,
-			2,
-		),
-	);
-	const result = await (
-		OpenCodeSwarmPlugin as unknown as {
-			server: (
-				ctx: ReturnType<typeof ctxFor>,
-			) => Promise<Record<string, unknown>>;
-		}
-	).server(ctxFor(directory));
-	return {
-		hooks: result as unknown as Record<
-			string,
-			(...args: unknown[]) => Promise<unknown>
-		>,
-		tool: (result.tool ?? {}) as Record<
-			string,
-			{
-				execute: (args: unknown, dir: string, ctx: unknown) => Promise<unknown>;
-			}
-		>,
-	};
-}
+const DELEGATE_KNOWLEDGE_LESSON =
+	'issue 1849 host boundary delegate lesson qz7';
 
 /** Seed a retrieved event so receipts can reference its trace + result_ids. */
 async function seedTrace(
@@ -121,17 +65,15 @@ async function seedTrace(
 
 describe('issue #1849 — real-host boundary end-to-end through src/index.ts', () => {
 	let dir: string;
-	let plugin: Awaited<ReturnType<typeof bootPlugin>>;
+	let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
 
 	beforeEach(async () => {
-		dir = tmpProject();
-		plugin = await bootPlugin(dir);
+		resetSwarmState();
+		dir = createKnowledgeProject();
+		plugin = await bootKnowledgeHost(dir);
 	});
 	afterEach(() => {
-		swarmState.activeAgent.delete(SESSION);
-		swarmState.activeAgent.delete(SESSION_PREFIXED);
-		swarmState.agentSessions.delete(SESSION);
-		swarmState.agentSessions.delete(SESSION_PREFIXED);
+		resetSwarmState();
 		// Best-effort cleanup; Windows EBUSY is common here because the plugin
 		// spins background timers that briefly hold the temp dir. Never fail the
 		// test on cleanup — the OS reaps tmpdir eventually.
@@ -196,9 +138,9 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		writeFileSync(
 			kp,
 			`${JSON.stringify({
-				id: 'k-delegate-1',
+				id: 'b1111111-1111-4111-8111-111111111111',
 				tier: 'swarm',
-				lesson: 'delegate test lesson',
+				lesson: DELEGATE_KNOWLEDGE_LESSON,
 				category: 'process',
 				tags: [],
 				scope: 'global',
@@ -226,7 +168,8 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		// is the mutable target.
 		const output = {
 			args: {
-				prompt: 'ACCEPTANCE: the feature is implemented\nImplement the feature',
+				task_id: '1.1',
+				prompt: `ACCEPTANCE: the feature is implemented\nImplement the ${DELEGATE_KNOWLEDGE_LESSON} feature`,
 				subagent_type: 'coder',
 			},
 		};
@@ -234,16 +177,27 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 			{ tool: 'Task', sessionID: SESSION, callID: CALL },
 			output,
 		);
-		// The delegation directive (if any) was injected via output.args — proving
-		// the adapter read output.args (not input.args). At minimum, output.args
-		// must still be a mutable object (the host reads it back).
-		expect(output.args).toBeTruthy();
-		expect(typeof output.args).toBe('object');
-		// If a delegate directive block was injected, it carries a trace_id header.
-		const prompt = String(output.args.prompt ?? '');
-		if (prompt.includes('<delegate_knowledge_directives>')) {
+		// Require the directive, trace, and uniquely seeded lesson in output.args;
+		// otherwise a dead injector could make this host-boundary test pass.
+		try {
+			expect(output.args).toBeTruthy();
+			expect(typeof output.args).toBe('object');
+			const prompt = String(output.args.prompt ?? '');
+			expect(prompt).toContain('<delegate_knowledge_directives>');
 			expect(prompt).toMatch(/trace_id:\s*\S+/);
+			expect(prompt).toContain(`lesson: ${DELEGATE_KNOWLEDGE_LESSON}`);
+			expect(prompt).toMatch(
+				/- id:\s*[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i,
+			);
+		} finally {
+			// Pair every successful prehook with its terminal posthook so the exact
+			// call snapshot and published scope are revoked even if an assertion fails.
+			await plugin.hooks['tool.execute.after'](
+				{ tool: 'Task', sessionID: SESSION, callID: CALL },
+				{ output: 'Done.' },
+			);
 		}
+		expect(getStoredInputArgs(CALL)).toBeUndefined();
 	});
 
 	test('5+6. knowledge_receipt validates + idempotent retry does not double count', async () => {
@@ -446,41 +400,35 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		// tool.execute.before: real SDK shape. output.args holds the delegation
 		// prompt. The fail-closed chain snapshots output.args via guardrails.
 		const delegationPrompt = {
-			prompt: 'ACCEPTANCE: the feature is implemented\nImplement the feature',
-			subagent_type: 'coder',
+			task_id: '1.1',
+			prompt:
+				'ACCEPTANCE: the feature is implemented\nImplement the e2e ack lesson feature',
+			subagent_type: 'user-chosen-42_coder',
 		};
 		const beforeOutput = { args: { ...delegationPrompt } };
 		await plugin.hooks['tool.execute.before'](
 			{ tool: 'Task', sessionID: SESSION, callID: CALL },
 			beforeOutput,
 		);
-		// If a directive block was injected, capture the trace_id it carries.
-		const injectedPrompt = String(beforeOutput.args.prompt ?? '');
-		const traceMatch = /trace_id:\s*(\S+)/.exec(injectedPrompt);
-		const traceId = traceMatch?.[1];
-		if (!traceId) {
-			// No directive injected (retrieval didn't match) — skip the ack
-			// assertion but still prove toolAfter does not throw.
-			await expect(
-				plugin.hooks['tool.execute.after'](
-					{ tool: 'Task', sessionID: SESSION, callID: CALL },
-					{ output: `KNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678` },
-				),
-			).resolves.toBeUndefined();
-			return;
+		let terminalOutput = 'Done.';
+		try {
+			const injectedPrompt = String(beforeOutput.args.prompt ?? '');
+			expect(injectedPrompt).toContain('<delegate_knowledge_directives>');
+			expect(injectedPrompt).toContain('a1b2c3d4-e2e5-4184-9abc-def012345678');
+			const traceId = /trace_id:\s*(\S+)/.exec(injectedPrompt)?.[1];
+			expect(traceId).toBeTruthy();
+			if (!traceId) throw new Error('injected directive lacks trace_id');
+			await seedTrace(dir, traceId, ['a1b2c3d4-e2e5-4184-9abc-def012345678']);
+			terminalOutput =
+				'Done.\nKNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678';
+		} finally {
+			// The real host emits exactly one terminal posthook per successful prehook.
+			await plugin.hooks['tool.execute.after'](
+				{ tool: 'Task', sessionID: SESSION, callID: CALL },
+				{ output: terminalOutput },
+			);
 		}
-		// Seed a retrieved event for that trace + the shown id so the validator
-		// accepts the ack (the directive block already references this trace).
-		await seedTrace(dir, traceId, ['a1b2c3d4-e2e5-4184-9abc-def012345678']);
-
-		// tool.execute.after: REAL SDK shape — NO args on input. The ack collector
-		// MUST recover the prompt from the callID snapshot (set in toolBefore).
-		await plugin.hooks['tool.execute.after'](
-			{ tool: 'Task', sessionID: SESSION, callID: CALL },
-			{
-				output: `Done.\nKNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678`,
-			},
-		);
+		expect(getStoredInputArgs(CALL)).toBeUndefined();
 		// The ack was reconciled via the recovered prompt → an `applied` event
 		// exists for the shown id (proving the after path is NOT dead).
 		const events = await readKnowledgeEvents(dir);

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { PluginConfig } from '../../src/config';
 import { createDelegationGateHook } from '../../src/hooks/delegation-gate';
 import type { DelegationEntry } from '../../src/state';
@@ -9,6 +12,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state';
+import { writeApprovedPlan } from '../helpers/approved-plan';
 import { withFrozenClock } from '../helpers/test-clock.js';
 
 /**
@@ -28,8 +32,6 @@ function simulateCoderDelegation(sessionId: string): void {
 	swarmState.delegationChains.set(sessionId, [...existing, entry]);
 }
 
-const TEST_DIR = '/test/project';
-
 function makeConfig(): PluginConfig {
 	return {
 		hooks: {
@@ -39,20 +41,35 @@ function makeConfig(): PluginConfig {
 }
 
 describe('runtime reviewer gate', () => {
-	beforeEach(() => {
+	let testDir: string;
+
+	beforeEach(async () => {
 		resetSwarmState();
+		testDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-gate-int-')),
+		);
+		await writeApprovedPlan(testDir, [
+			{ id: '1.1', files: ['src/index.ts'] },
+			{ id: '3.1', files: ['src/index.ts'] },
+		]);
 	});
 
 	afterEach(() => {
 		resetSwarmState();
+		fs.rmSync(testDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 50,
+		});
 	});
 
 	test('blocks coder re-delegation when state is coder_delegated', async () => {
 		const config = makeConfig();
-		const hooks = createDelegationGateHook(config, TEST_DIR);
+		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-1';
 
-		const session = ensureAgentSession(sessionId, 'architect');
+		const session = ensureAgentSession(sessionId, 'architect', testDir);
 		// Set task 1.1 to coder_delegated (coder already ran, no reviewer)
 		advanceTaskState(session, '1.1', 'coder_delegated');
 		// Simulate that the coder delegation happened in this session
@@ -67,6 +84,7 @@ describe('runtime reviewer gate', () => {
 		const output = {
 			args: {
 				subagent_type: 'coder',
+				task_id: '1.1',
 				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
 			},
 		};
@@ -78,10 +96,10 @@ describe('runtime reviewer gate', () => {
 
 	test('allows coder delegation when state is idle (first delegation)', async () => {
 		const config = makeConfig();
-		const hooks = createDelegationGateHook(config, TEST_DIR);
+		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-2';
 
-		ensureAgentSession(sessionId, 'architect');
+		ensureAgentSession(sessionId, 'architect', testDir);
 		// State is idle by default (no taskWorkflowStates entries)
 
 		const input = {
@@ -92,6 +110,7 @@ describe('runtime reviewer gate', () => {
 		const output = {
 			args: {
 				subagent_type: 'coder',
+				task_id: '1.1',
 				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
 			},
 		};
@@ -102,10 +121,10 @@ describe('runtime reviewer gate', () => {
 
 	test('allows coder delegation after reviewer has run (state reviewer_run)', async () => {
 		const config = makeConfig();
-		const hooks = createDelegationGateHook(config, TEST_DIR);
+		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-3';
 
-		const session = ensureAgentSession(sessionId, 'architect');
+		const session = ensureAgentSession(sessionId, 'architect', testDir);
 		// Advance through states: idle → coder_delegated → reviewer_run
 		advanceTaskState(session, '1.1', 'coder_delegated');
 		advanceTaskState(session, '1.1', 'reviewer_run');
@@ -118,6 +137,7 @@ describe('runtime reviewer gate', () => {
 		const output = {
 			args: {
 				subagent_type: 'coder',
+				task_id: '1.1',
 				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
 			},
 		};
@@ -128,10 +148,10 @@ describe('runtime reviewer gate', () => {
 
 	test('turbo mode bypasses the block', async () => {
 		const config = makeConfig();
-		const hooks = createDelegationGateHook(config, TEST_DIR);
+		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-4';
 
-		const session = ensureAgentSession(sessionId, 'architect');
+		const session = ensureAgentSession(sessionId, 'architect', testDir);
 		advanceTaskState(session, '1.1', 'coder_delegated');
 
 		// Enable turbo mode
@@ -145,6 +165,7 @@ describe('runtime reviewer gate', () => {
 		const output = {
 			args: {
 				subagent_type: 'coder',
+				task_id: '1.1',
 				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
 			},
 		};
@@ -155,10 +176,10 @@ describe('runtime reviewer gate', () => {
 
 	test('Tier 3 tasks are NOT bypassed even in turbo mode', async () => {
 		const config = makeConfig();
-		const hooks = createDelegationGateHook(config, TEST_DIR);
+		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-5';
 
-		const session = ensureAgentSession(sessionId, 'architect');
+		const session = ensureAgentSession(sessionId, 'architect', testDir);
 		// Task 3.1 is a Tier 3 task
 		advanceTaskState(session, '3.1', 'coder_delegated');
 		// Simulate that the coder delegation happened in this session
@@ -175,6 +196,7 @@ describe('runtime reviewer gate', () => {
 		const output = {
 			args: {
 				subagent_type: 'coder',
+				task_id: '3.1',
 				prompt: 'Fix the bug\nACCEPTANCE: task complete and covered by tests',
 			},
 		};
