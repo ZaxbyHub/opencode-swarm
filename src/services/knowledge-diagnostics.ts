@@ -22,6 +22,7 @@ import {
 	resolveKnowledgeStoreDir,
 	resolveLinkDir,
 } from '../hooks/knowledge-link.js';
+import { readMemoryLinkPointer } from '../memory/memory-link.js';
 import {
 	readKnowledge,
 	readRejectedLessons,
@@ -171,6 +172,25 @@ export interface KnowledgeDebugMeta {
 		 * that blocked destructive intent is queued.
 		 */
 		pending_proposals: number;
+	};
+	/**
+	 * #1850: memory cohort link health. Distinct from the knowledge `cohort`
+	 * block so diagnostics can report knowledge-link and memory-link
+	 * independently. Carries provider/config fingerprint agreement so an
+	 * operator can detect cohort divergence. No record text is emitted here
+	 * (diagnostics-no-leakage discipline, acceptance #13).
+	 */
+	memory: {
+		linked: boolean;
+		pointer_version: 1 | 2 | null;
+		link_id: string | null;
+		cohort_id: string | null;
+		identity_source: 'remote' | 'git-common-dir' | 'path' | null;
+		degraded: boolean;
+		shared_root: string | null;
+		generation: number | null;
+		/** Provider name from config ('sqlite' | 'local-jsonl'). */
+		provider: string | null;
 	};
 }
 
@@ -418,7 +438,76 @@ export async function computeKnowledgeDebug(
 		// carry it (by design), so merging them in would miscount every hive
 		// entry as "unknown owner". Pass SWARM raw entries only.
 		curation: await computeCurationDiagnostics(directory, swarmRaw.entries),
+		// #1850: memory cohort link health (distinct from knowledge link).
+		memory: computeMemoryCohortDiagnostics(directory),
 	};
+}
+
+/**
+ * #1850: best-effort memory cohort diagnostics. Reads the memory-link pointer
+ * and config to surface link state + provider. Fail-open to the unlinked shape.
+ * Does NOT read memory record contents (no-leakage discipline, acceptance #13).
+ */
+function computeMemoryCohortDiagnostics(directory: string): {
+	linked: boolean;
+	pointer_version: 1 | 2 | null;
+	link_id: string | null;
+	cohort_id: string | null;
+	identity_source: 'remote' | 'git-common-dir' | 'path' | null;
+	degraded: boolean;
+	shared_root: string | null;
+	generation: number | null;
+	provider: string | null;
+} {
+	try {
+		const pointer = readMemoryLinkPointer(directory);
+		let provider: string | null = null;
+		try {
+			const { loadPluginConfig } = require('../config/loader.js') as {
+				loadPluginConfig: (dir: string) => { memory?: { provider?: string } };
+			};
+			const cfg = loadPluginConfig(directory);
+			provider = cfg.memory?.provider ?? null;
+		} catch {
+			/* best-effort */
+		}
+		if (pointer) {
+			return {
+				linked: true,
+				pointer_version: pointer.version,
+				link_id: pointer.linkId,
+				cohort_id: pointer.cohortId ?? null,
+				identity_source: pointer.identitySource ?? null,
+				degraded: pointer.degraded ?? false,
+				shared_root: pointer.linkId ? resolveLinkDir(pointer.linkId) : null,
+				generation: pointer.generation ?? null,
+				provider,
+			};
+		}
+		return {
+			linked: false,
+			pointer_version: null,
+			link_id: null,
+			cohort_id: null,
+			identity_source: null,
+			degraded: false,
+			shared_root: null,
+			generation: null,
+			provider,
+		};
+	} catch {
+		return {
+			linked: false,
+			pointer_version: null,
+			link_id: null,
+			cohort_id: null,
+			identity_source: null,
+			degraded: false,
+			shared_root: null,
+			generation: null,
+			provider: null,
+		};
+	}
 }
 
 /**

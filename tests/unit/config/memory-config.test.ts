@@ -114,6 +114,8 @@ describe('MemoryConfigSchema', () => {
 				},
 				latencyBudgetMs: 250,
 			},
+			// #1850: cohort memory sharing default-off.
+			link: { enabled: false },
 			hardDelete: false,
 		});
 	});

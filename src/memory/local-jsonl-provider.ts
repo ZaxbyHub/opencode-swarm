@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import {
 	appendFile,
 	mkdir,
@@ -70,20 +70,35 @@ export class LocalJsonlMemoryProvider
 {
 	readonly name = 'local-jsonl';
 	private readonly rootDirectory: string;
+	/**
+	 * #1850: when set, the provider serves a cohort-shared store. Cohort roots
+	 * bypass `validateSwarmPath` (constructed by the resolver from a sanitized
+	 * linkId). `null` for local-root providers (today's behavior).
+	 */
+	private readonly cohortRoot: string | null;
 	private readonly config: MemoryConfig;
 	private initialized = false;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
 
-	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
+	constructor(
+		rootDirectory: string,
+		config: Partial<MemoryConfig> = {},
+		vettedCohortRoot?: string | null,
+	) {
 		this.rootDirectory = rootDirectory;
+		this.cohortRoot = vettedCohortRoot ?? null;
 		this.config = { ...DEFAULT_MEMORY_CONFIG, ...config };
 	}
 
+	/**
+	 * #1850 (critic GAP-5): explicit cohort-root path branch.
+	 * - cohort root → `<cohortRoot>/<filename>` (NO validateSwarmPath).
+	 * - local root → existing behavior: strip `.swarm/`, validateSwarmPath.
+	 */
 	private pathFor(
 		file: 'memories' | 'proposals' | 'audit' | 'reward-events',
 	): string {
-		const storageDir = this.config.storageDir.replace(/^\.swarm[/\\]?/, '');
 		const filename =
 			file === 'memories'
 				? 'memories.jsonl'
@@ -92,6 +107,10 @@ export class LocalJsonlMemoryProvider
 					: file === 'audit'
 						? 'audit.jsonl'
 						: 'reward-events.jsonl';
+		if (this.cohortRoot) {
+			return path.join(this.cohortRoot, filename);
+		}
+		const storageDir = this.config.storageDir.replace(/^\.swarm[/\\]?/, '');
 		return validateSwarmPath(
 			this.rootDirectory,
 			path.join(storageDir, filename),
@@ -151,6 +170,7 @@ export class LocalJsonlMemoryProvider
 		this.memories.set(next.id, next);
 		await appendJsonl(this.pathFor('memories'), next);
 		await this.audit('upsert', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
@@ -176,6 +196,7 @@ export class LocalJsonlMemoryProvider
 			await appendJsonl(this.pathFor('memories'), tombstone);
 		}
 		await this.audit('delete', id, reason);
+		this.bumpCohortGeneration();
 	}
 
 	async recall(request: RecallRequest): Promise<RecallResultItem[]> {
@@ -247,6 +268,7 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		const record: MemoryRewardEvent = { ...event, id: randomUUID() };
 		await appendJsonl(this.pathFor('reward-events'), record);
+		this.bumpCohortGeneration();
 	}
 
 	async listRewardEvents(
@@ -300,6 +322,7 @@ export class LocalJsonlMemoryProvider
 		this.proposals.set(next.id, next);
 		await appendJsonl(this.pathFor('proposals'), next);
 		await this.audit('proposal', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
@@ -427,6 +450,7 @@ export class LocalJsonlMemoryProvider
 			change.reason,
 			buildCuratorDecisionEvent(change, proposal),
 		);
+		this.bumpCohortGeneration();
 		return change;
 	}
 
@@ -437,6 +461,7 @@ export class LocalJsonlMemoryProvider
 			Array.from(this.memories.values()),
 		);
 		await this.audit('compact', 'memories');
+		this.bumpCohortGeneration();
 	}
 
 	async compactMaintenance(
@@ -478,6 +503,7 @@ export class LocalJsonlMemoryProvider
 			'removed deleted, superseded, and expired scratch memories',
 			result,
 		);
+		this.bumpCohortGeneration();
 		return result;
 	}
 
@@ -496,6 +522,22 @@ export class LocalJsonlMemoryProvider
 			timestamp: new Date().toISOString(),
 		};
 		await appendJsonl(this.pathFor('audit'), event);
+	}
+
+	/**
+	 * #1850 (critic CONCERN-1): bump the cohort generation marker so sibling
+	 * worktrees observe this write on their next revalidation. Called at the
+	 * provider layer so ALL write paths invalidate peers. Local writes are
+	 * no-ops. Best-effort: a bump failure must never block the write.
+	 */
+	private bumpCohortGeneration(): void {
+		if (!this.cohortRoot) return;
+		try {
+			const markerPath = path.join(this.cohortRoot, 'memory.gen');
+			writeFileSync(markerPath, String(Date.now()), 'utf-8');
+		} catch {
+			/* best-effort — peer revalidation has TTL + pointer-stat backstops */
+		}
 	}
 
 	private activeMemory(memoryId: string): MemoryRecord {

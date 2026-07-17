@@ -53,6 +53,10 @@ export async function handleMemoryCommand(
 		'- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration',
 		'- `/swarm memory evaluate --json` - run the golden recall evaluation fixtures and emit a JSON report',
 		'- `/swarm memory consolidation-log [--limit <n>]` - summarize recent episodic→semantic consolidation passes (max 50 per query)',
+		// #1850: cohort memory sharing commands.
+		'- `/swarm memory link [name]` - share memory across linked worktrees (requires `memory.link.enabled: true`)',
+		'- `/swarm memory link status` - show the memory link state (distinct from knowledge link)',
+		'- `/swarm memory unlink` - stop sharing memory; copies the cohort family back to local',
 	].join('\n');
 }
 

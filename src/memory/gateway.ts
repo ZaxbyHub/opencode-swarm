@@ -15,8 +15,16 @@ import type {
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
 } from './provider';
-import { getOrCreateProvider } from './provider-pool';
-import { redactSecrets } from './redaction';
+import {
+	getOrCreateProvider,
+	getOrCreateProviderForRoot,
+} from './provider-pool';
+import { computeRedactionPolicyVersion, redactSecrets } from './redaction';
+import {
+	type VettedMemoryRoot,
+	isCohortRoot,
+	resolveVettedMemoryRoot,
+} from './storage-root';
 import {
 	computeMemoryContentHash,
 	createBundleId,
@@ -77,6 +85,12 @@ export interface RecallMemoryInput {
 export class MemoryGateway {
 	private readonly config: MemoryConfig;
 	private readonly provider: MemoryProvider & Partial<MemoryProposalStore>;
+	/**
+	 * #1850: the resolved vetted memory root. Used by `deriveAllowedScopes` to
+	 * emit a cohort scope when cohort sharing is active, and by `propose` to
+	 * stamp provenance. Resolved once at construction (sync pointer read).
+	 */
+	private readonly vettedRoot: VettedMemoryRoot;
 	private readonly now: () => Date;
 	private disposed = false;
 
@@ -85,9 +99,10 @@ export class MemoryGateway {
 		options: MemoryGatewayOptions = {},
 	) {
 		this.config = resolveMemoryConfig(options.config ?? DEFAULT_MEMORY_CONFIG);
+		this.vettedRoot = resolveVettedMemoryRoot(context.directory, this.config);
 		this.provider =
 			options.provider ??
-			createConfiguredMemoryProvider(context.directory, this.config);
+			createConfiguredMemoryProviderForRoot(this.vettedRoot, this.config);
 		this.now = options.now ?? (() => new Date());
 	}
 
@@ -115,6 +130,17 @@ export class MemoryGateway {
 				repoRoot: resolvedRoot,
 			},
 		];
+		// #1850: when cohort sharing is active, emit a cohort scope. The
+		// cohortId is the canonical #1846 id shared by all sibling worktrees,
+		// so a record written by worktree A is visible to worktree B's recall
+		// (the scope key matches). Per-session/per-run scopes below remain
+		// worktree-local (acceptance #9).
+		if (isCohortRoot(this.vettedRoot)) {
+			scopes.push({
+				type: 'cohort',
+				cohortId: this.vettedRoot.cohortId,
+			});
+		}
 		if (this.context.runId || this.context.sessionID) {
 			scopes.push({
 				type: 'run',
@@ -431,6 +457,17 @@ export class MemoryGateway {
 			expiresAt,
 			contentHash: computeMemoryContentHash(recordBase),
 			metadata: input.metadata ?? {},
+			// #1850: provenance (acceptance #13). Stamped on every record so
+			// cohort members can attribute and verify redaction policy.
+			cohortId: isCohortRoot(this.vettedRoot)
+				? this.vettedRoot.cohortId
+				: undefined,
+			producerSessionId: this.context.sessionID,
+			producerAgentRole: this.context.agentRole,
+			redactionPolicyVersion: computeRedactionPolicyVersion(
+				this.config.redaction.rejectDurableSecrets,
+			),
+			providerVersion: this.provider.name,
 		};
 		return record;
 	}
@@ -496,9 +533,13 @@ export class MemoryGateway {
 	private resolveRecordScope(scope?: MemoryScopeRef): MemoryScopeRef {
 		const allowedScopes = this.deriveAllowedScopes();
 		if (!scope) {
-			// Curator-supplied NewMemoryRecord omits scope by default; bind it to
-			// the repository scope derived from this gateway context.
-			const defaultScope = allowedScopes[1] ?? allowedScopes[0];
+			// #1850: when cohort sharing is active, default durable records to
+			// the cohort scope so they are shared across sibling worktrees
+			// (acceptance #8). Curator-supplied NewMemoryRecord omits scope by
+			// default. Fall back to the repository scope (today's behavior)
+			// when not cohort-linked.
+			const cohortScope = allowedScopes.find((s) => s.type === 'cohort');
+			const defaultScope = cohortScope ?? allowedScopes[1] ?? allowedScopes[0];
 			if (!defaultScope) {
 				throw new MemoryValidationError(
 					'memory scope is not available for this context',
@@ -530,10 +571,27 @@ export function createConfiguredMemoryProvider(
 	directory: string,
 	config: MemoryConfig,
 ): MemoryProvider & MemoryProposalStore {
+	// #1850: resolve the vetted root so cohort sharing is honored. Callers
+	// that pass a raw directory get today's behavior unless a memory-link
+	// pointer is active AND config.link.enabled is true.
+	const root = resolveVettedMemoryRoot(directory, config);
+	return createConfiguredMemoryProviderForRoot(root, config);
+}
+
+/**
+ * #1850: cohort-aware provider factory. Takes a resolved `VettedMemoryRoot` so
+ * callers that have already resolved (e.g. the finalize-reward sweep) skip the
+ * redundant pointer read. Both overloads converge here.
+ */
+export function createConfiguredMemoryProviderForRoot(
+	root: VettedMemoryRoot,
+	config: MemoryConfig,
+): MemoryProvider & MemoryProposalStore {
 	if (config.provider === 'sqlite') {
-		return getOrCreateProvider(directory, config);
+		return getOrCreateProviderForRoot(root, config);
 	}
-	return new LocalJsonlMemoryProvider(directory, config);
+	const cohortRoot = root.kind === 'cohort' ? root.cohortRoot : null;
+	return new LocalJsonlMemoryProvider(root.directory, config, cohortRoot);
 }
 
 function sourceFromEvidence(

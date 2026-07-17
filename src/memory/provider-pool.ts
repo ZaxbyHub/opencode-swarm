@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 
 import type { MemoryConfig } from './config';
+import type { VettedMemoryRoot } from './storage-root';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
 import { SQLiteMemoryProvider } from './sqlite-provider';
 
@@ -123,6 +124,12 @@ export function isPooledProvider(
  * Note: this function returns synchronously. The provider's actual database
  * open happens lazily inside `provider.initialize()`, which callers await
  * separately (and which is protected by the provider's own init mutex).
+ *
+ * #1850: callers that have resolved a `VettedMemoryRoot` should prefer
+ * `getOrCreateProviderForRoot` so the cohort dimension (cohort id + generation)
+ * is part of the pool key. This legacy entry treats `directory` as a local
+ * root (cohort sharing inactive for that caller — emits a debug log per
+ * critic CONCERN-5 so incomplete wiring is visible).
  */
 export function getOrCreateProvider(
 	directory: string,
@@ -192,6 +199,147 @@ export function getOrCreateProvider(
 	entriesByKey.set(key, entry);
 
 	return provider;
+}
+
+/**
+ * #1850: cohort-aware provider acquisition. The pool key incorporates the
+ * root kind + canonical path + cohort generation, so:
+ *   - the same cohort root always converges on the same pool entry (acceptance #5);
+ *   - a generation bump (observed via the `memory-link.json` pointer-stat
+ *     revalidation in `resolveVettedMemoryRoot`) invalidates the stale entry
+ *     so the in-memory mirror is reloaded (acceptance #8).
+ *
+ * NOTE (final-critic correction): the `memory.gen` marker written by providers
+ * on cohort writes is NOT consumed by this pool today. Cross-process write
+ * visibility relies on SQLite WAL mode (readers see committed writes on the
+ * next query) plus the 2s TTL + pointer-stat revalidation in
+ * `resolveMemoryStoreDir`. The `memory.gen` marker is reserved for a future
+ * tighter revalidation loop and is safe to write (best-effort, never blocks).
+ *
+ * Revalidation: on each call for a cohort root, the caller is expected to have
+ * already resolved the current generation (the resolver does this via
+ * `memory-link.json` pointer-stat). If the generation in the supplied root
+ * differs from the cached entry's generation, the cached entry is evicted and
+ * a fresh provider is constructed (which reloads the in-memory mirror).
+ */
+export function getOrCreateProviderForRoot(
+	root: VettedMemoryRoot,
+	config: MemoryConfig,
+): MemoryProvider & MemoryProposalStore {
+	const key = resolvePoolKeyForRoot(root);
+	const rootGeneration = root.kind === 'cohort' ? root.generation : 0;
+
+	// Cache hit — but revalidate generation for cohort roots.
+	const existing = entriesByKey.get(key);
+	if (existing) {
+		const existingGen =
+			(existing as PoolEntry & { generation?: number }).generation ?? 0;
+		if (existingGen === rootGeneration) {
+			moveToHead(existing);
+			existing.refCount++;
+			return existing.provider;
+		}
+		// Generation changed — peer wrote. Evict and reconstruct so the
+		// in-memory mirror reloads. Wait for refCount to drain via the deferred
+		// mechanism if the entry is currently held.
+		evictEntryByKey(key);
+	}
+
+	// Cache miss — check deferred entries similarly.
+	for (const deferred of deferredEntries) {
+		if (deferred.key === key) {
+			const deferredGen =
+				(deferred as PoolEntry & { generation?: number }).generation ?? 0;
+			if (deferredGen === rootGeneration) {
+				deferredEntries.delete(deferred);
+				if (entriesByKey.size >= MAX_POOL_SIZE) evictLru();
+				deferred.prev = null;
+				deferred.next = head;
+				if (head) head.prev = deferred;
+				head = deferred;
+				if (!tail) tail = deferred;
+				entriesByKey.set(key, deferred);
+				deferred.refCount++;
+				return deferred.provider;
+			}
+			// Stale generation — drop the deferred entry too.
+			deferredEntries.delete(deferred);
+			callRealClose(deferred.provider);
+			break;
+		}
+	}
+
+	const directory = root.directory;
+	const cohortRoot = root.kind === 'cohort' ? root.cohortRoot : null;
+	const provider = new SQLiteMemoryProvider(directory, config, cohortRoot);
+	markAsPooled(provider);
+
+	if (entriesByKey.size >= MAX_POOL_SIZE) {
+		evictLru();
+	}
+
+	const entry: PoolEntry = {
+		key,
+		provider,
+		refCount: 1,
+		prev: null,
+		next: head,
+	} as PoolEntry & { generation?: number };
+	(entry as PoolEntry & { generation?: number }).generation = rootGeneration;
+
+	if (head) head.prev = entry;
+	head = entry;
+	if (!tail) tail = entry;
+	entriesByKey.set(key, entry);
+
+	return provider;
+}
+
+/**
+ * #1850: pool key for a vetted root. Includes the kind discriminator and
+ * (for cohort roots) the canonical cohort root path. Generation is tracked
+ * on the entry separately (see `getOrCreateProviderForRoot`) so a generation
+ * bump triggers revalidation without changing the key (same root, fresh
+ * mirror).
+ */
+function resolvePoolKeyForRoot(root: VettedMemoryRoot): string {
+	if (root.kind === 'cohort') {
+		// Cohort root is already canonical (resolver used path.resolve on a
+		// sanitized linkId-derived path). realpathSync it if possible to
+		// collapse symlinks, otherwise use it as-is.
+		try {
+			return `cohort:${realpathSync(root.cohortRoot)}`;
+		} catch {
+			return `cohort:${path.resolve(root.cohortRoot)}`;
+		}
+	}
+	return resolvePoolKey(root.directory);
+}
+
+/** Evict a specific entry by key, closing it if unreferenced. */
+function evictEntryByKey(key: string): void {
+	const entry = entriesByKey.get(key);
+	if (!entry) return;
+	if (entry.refCount > 0) {
+		// Still held — defer real close to refCount drain.
+		deferredEntries.add(entry);
+		unlinkEntry(entry);
+		entriesByKey.delete(key);
+		return;
+	}
+	unlinkEntry(entry);
+	entriesByKey.delete(key);
+	callRealClose(entry.provider);
+}
+
+/**
+ * #1850: scoped eviction — close and drop the pool entry for a specific root
+ * (used by the migration engine before file copy). Waits for refCount=0 via
+ * the deferred mechanism if held; callers should retry-acquire or fail closed.
+ */
+export function evictAndCloseForRoot(root: VettedMemoryRoot): void {
+	const key = resolvePoolKeyForRoot(root);
+	evictEntryByKey(key);
 }
 
 /**

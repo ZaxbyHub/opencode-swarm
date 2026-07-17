@@ -1,5 +1,24 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
+// #1850 Linked Knowledge 5/5: cohort memory sharing.
+export {
+	type MemoryLinkPointer,
+	MEMORY_LINK_POINTER_FILENAME,
+	readMemoryLinkPointer,
+	removeMemoryLinkPointer,
+	writeMemoryLinkPointer,
+	resolveMemoryStoreDir,
+	invalidateMemoryStoreDirCache,
+	isMemoryLinked,
+} from './memory-link';
+export {
+	type VettedMemoryRoot,
+	resolveVettedMemoryRoot,
+	wrapLocalRoot,
+	isCohortRoot,
+	isLocalRoot,
+	rootStoragePath,
+} from './storage-root';
 export { MemoryDisabledError, MemoryValidationError } from './errors';
 export {
 	evaluateMemoryRecallFixtures,
@@ -18,6 +37,7 @@ export type {
 } from './gateway';
 export {
 	createConfiguredMemoryProvider,
+	createConfiguredMemoryProviderForRoot,
 	createMemoryGateway,
 	MemoryGateway,
 } from './gateway';
@@ -66,7 +86,13 @@ export {
 	type MemoryRecallPlan,
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
-export { findSecrets, redactSecrets } from './redaction';
+export {
+	findSecrets,
+	redactSecrets,
+	computeRedactionPolicyVersion,
+	computeMemoryCohortFingerprint,
+	buildMemoryCohortFingerprintInput,
+} from './redaction';
 export {
 	MEMORY_RECALL_PROFILES,
 	type MemoryRecallProfile,

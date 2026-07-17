@@ -39,19 +39,18 @@ import {
 	KNOWLEDGE_FAMILY,
 	type KnowledgeFamilyMember,
 } from './family-manifest.js';
+import {
+	MIGRATION_LOCK_RETRIES,
+	MIGRATION_LOCK_STALE_MS,
+} from './family-migration-shared.js';
 
 const DEDUP_THRESHOLD = 0.6;
 
 /**
- * Lock config for the migration critical section. The default knowledge-store
- * `stale: 5000` (5 s) is too short for an 8-file merge under load; a long
- * merge would have its lock stolen by a concurrent writer mid-flight (critic
- * C9). 30 s comfortably covers worst-case merges of large knowledge corpora.
+ * Lock config for the migration critical section. Re-exported from
+ * `family-migration-shared.ts` (issue #1850) so the memory family migration
+ * engine reuses the SAME values. See the shared module for rationale.
  */
-const MIGRATION_LOCK_STALE_MS = 30_000;
-const MIGRATION_LOCK_RETRIES = {
-	retries: { retries: 10, minTimeout: 100, maxTimeout: 500 },
-};
 
 export interface FamilyMigrationCounts {
 	/** Per-member counts (filename → {merged, skipped}). */
