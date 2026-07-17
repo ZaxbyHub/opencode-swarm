@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.122.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.122.0...v7.122.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* align arbitrary swarm identity checks ([c568294](https://github.com/ZaxbyHub/opencode-swarm/commit/c568294ed6c57ffee16a933659e240a0eb5c42a9))
+* close issue 1875 review gaps ([78e86fd](https://github.com/ZaxbyHub/opencode-swarm/commit/78e86fd626ca4937e646aa05a7c59aae9a237801))
+* **guardrails:** close issue 1875 audit gaps ([8f1fddb](https://github.com/ZaxbyHub/opencode-swarm/commit/8f1fddbf72d6e775ebb9f4e7825240a53bade6a0))
+* **guardrails:** close non-transient command retry loop ([3664318](https://github.com/ZaxbyHub/opencode-swarm/commit/366431804f5691e20613e61287121e7535e4dcd6))
+* **guardrails:** isolate nontransient invocation state ([4fc29a8](https://github.com/ZaxbyHub/opencode-swarm/commit/4fc29a8d83d388191ee82f0a83856a2c0c333d9b))
+* **guardrails:** stop non-transient command loops ([a6eff96](https://github.com/ZaxbyHub/opencode-swarm/commit/a6eff9673eb59665011456db87681c393b6a1c31))
+* keep coder behavior swarm-name agnostic ([f29b06f](https://github.com/ZaxbyHub/opencode-swarm/commit/f29b06f375636e0d3eee241e9417cd98f16f0fcd))
+
 ## [7.122.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.4...v7.122.0) (2026-07-17)
 
 
