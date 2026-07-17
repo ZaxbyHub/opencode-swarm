@@ -30,6 +30,10 @@ function isDenied(
 	return !result.allowed;
 }
 
+function frameNativePatch(body: string): string {
+	return `*** Begin Patch\n${body}\n*** End Patch`;
+}
+
 describe('guardrails-authority - File Authority Enforcement', () => {
 	let tempDir: string;
 
@@ -2404,12 +2408,12 @@ describe('patch-style write authority enforcement', () => {
 			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
 
 			// apply_patch with *** Update File format targeting blocked path
-			const patchContent = `*** Update File: .swarm/plan.md
+			const patchContent = frameNativePatch(`*** Update File: .swarm/plan.md
 --- a/.swarm/plan.md
 +++ b/.swarm/plan.md
 @@ -1 +1 @@
 -# Plan
-+# Plan updated`;
++# Plan updated`);
 
 			await expect(
 				hooks.toolBefore(
@@ -2430,11 +2434,11 @@ describe('patch-style write authority enforcement', () => {
 			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
 
 			// apply_patch with *** Update File format targeting allowed path
-			const patchContent = `*** Update File: src/foo.ts
+			const patchContent = frameNativePatch(`*** Update File: src/foo.ts
 --- a/src/foo.ts
 +++ b/src/foo.ts
 @@ -1 +1 @@
-+// new line`;
++// new line`);
 
 			// Should NOT throw - src/foo.ts is not blocked by any DENY rule.
 			await hooks.toolBefore(
@@ -2454,11 +2458,11 @@ describe('patch-style write authority enforcement', () => {
 			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
 
 			// apply_patch with *** Update File format - explorer is read-only
-			const patchContent = `*** Update File: src/foo.ts
+			const patchContent = frameNativePatch(`*** Update File: src/foo.ts
 --- a/src/foo.ts
 +++ b/src/foo.ts
 @@ -1 +1 @@
-+// new line`;
++// new line`);
 
 			await expect(
 				hooks.toolBefore(
@@ -2621,11 +2625,11 @@ index 1234567..abcdefg 100644
 			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
 
 			// apply_patch with *** Update File format targeting src/
-			const patchContent = `*** Update File: src/file.ts
+			const patchContent = frameNativePatch(`*** Update File: src/file.ts
 --- a/src/file.ts
 +++ b/src/file.ts
 @@ -1 +1 @@
-+// new line`;
++// new line`);
 
 			// Should NOT throw - architect has no allowedPrefix restriction for src/
 			await hooks.toolBefore(
@@ -2643,12 +2647,12 @@ index 1234567..abcdefg 100644
 			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
 
 			// apply_patch targeting .swarm/plan.md - handlePlanAndScopeProtection runs first
-			const patchContent = `*** Update File: .swarm/plan.md
+			const patchContent = frameNativePatch(`*** Update File: .swarm/plan.md
 --- a/.swarm/plan.md
 +++ b/.swarm/plan.md
 @@ -1 +1 @@
 -# Plan
-+# Plan updated`;
++# Plan updated`);
 
 			// Should throw PLAN STATE VIOLATION - handlePlanAndScopeProtection runs before authority check
 			await expect(
@@ -2690,12 +2694,12 @@ index 1234567..abcdefg 100644
 			);
 
 			// Write to blockedExact path via apply_patch should throw
-			const patchContent = `*** Update File: .swarm/context.md
+			const patchContent = frameNativePatch(`*** Update File: .swarm/context.md
 --- a/.swarm/context.md
 +++ b/.swarm/context.md
 @@ -1 +1 @@
 -content
-+updated`;
++updated`);
 
 			await expect(
 				hooks.toolBefore(
@@ -2733,12 +2737,13 @@ index 1234567..abcdefg 100644
 			);
 
 			// Write to adjacent path (different filename) should NOT throw blockedExact
-			const patchContent = `*** Update File: .swarm/context.md.bak
+			const patchContent =
+				frameNativePatch(`*** Update File: .swarm/context.md.bak
 --- a/.swarm/context.md.bak
 +++ b/.swarm/context.md.bak
 @@ -1 +1 @@
 -backup
-+updated`;
++updated`);
 
 			// Should NOT throw - .swarm/context.md.bak is NOT in blockedExact
 			// With blockedPrefix cleared and .swarm/ allowed, only blockedExact applies
@@ -2818,12 +2823,12 @@ describe('patch authority hardening', () => {
 
 		// Generate patch with > 1MB payload (1_000_001 chars)
 		const largeContent = 'x'.repeat(1_000_001);
-		const patchContent = `*** Update File: src/file.ts
+		const patchContent = frameNativePatch(`*** Update File: src/file.ts
 --- a/src/file.ts
 +++ b/src/file.ts
 @@ -1 +1 @@
 -old
-+${largeContent}`;
++${largeContent}`);
 
 		await expect(
 			hooks.toolBefore(
@@ -2847,12 +2852,12 @@ describe('patch authority hardening', () => {
 
 		// Generate patch with > 1MB payload (1_000_001 chars)
 		const largeContent = 'y'.repeat(1_000_001);
-		const patchContent = `*** Update File: src/file.ts
+		const patchContent = frameNativePatch(`*** Update File: src/file.ts
 --- a/src/file.ts
 +++ b/src/file.ts
 @@ -1 +1 @@
 -old
-+${largeContent}`;
++${largeContent}`);
 
 		await expect(
 			hooks.toolBefore(
@@ -2879,12 +2884,12 @@ describe('patch authority hardening', () => {
 
 		// filePath is allowed (src/allowed.ts), but patch content targets blocked .swarm/plan.md
 		// Both filePath and patch content checks run independently
-		const patchContent = `*** Update File: .swarm/plan.md
+		const patchContent = frameNativePatch(`*** Update File: .swarm/plan.md
 --- a/.swarm/plan.md
 +++ b/.swarm/plan.md
 @@ -1 +1 @@
 -# Plan
-+# Plan updated`;
++# Plan updated`);
 
 		await expect(
 			hooks.toolBefore(
@@ -2911,11 +2916,11 @@ describe('patch authority hardening', () => {
 
 		// filePath is allowed (src/allowed.ts) and patch content also targets allowed path (src/other.ts)
 		// Both independent checks should pass
-		const patchContent = `*** Update File: src/other.ts
+		const patchContent = frameNativePatch(`*** Update File: src/other.ts
 --- a/src/other.ts
 +++ b/src/other.ts
 @@ -1 +1 @@
-+// new line`;
++// new line`);
 
 		// Should NOT throw - both filePath and patch content are allowed
 		await hooks.toolBefore(
