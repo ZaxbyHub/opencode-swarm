@@ -329,6 +329,7 @@ export function rememberToolExecution(
 	if (!owner) return;
 	session.pendingToolExecutions ??= new Map();
 	if (
+		!session.pendingToolExecutions.has(callID) &&
 		session.pendingToolExecutions.size >= MAX_PENDING_EXECUTIONS_PER_SESSION
 	) {
 		const oldest = session.pendingToolExecutions.keys().next().value;

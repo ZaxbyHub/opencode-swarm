@@ -109,6 +109,9 @@ Every PR that touches a relevant area must list which of these invariants it tou
 - Transient errors use bounded retry (`max_transient_retries`, default 5) **before** counting toward `consecutiveErrors` / circuit-breaker accounting.
 - `transientRetryCount` resets per invocation. Do not persist it across invocations.
 - Transient retry and model fallback are independent — neither subsumes the other.
+- Non-transient shell failures are invocation-owned and fail closed: parser, command-not-found, and sandbox-wrapper failures hard-stop immediately; `general_permanent` hard-stops on the third consecutive same-category failure. Once stopped, successful or neutral late results cannot clear the circuit; only a verified new invocation/session reset may continue.
+- A non-transient hard stop emits `telemetry.loopDetected` and one `NON-TRANSIENT STOP` advisory on the false-to-true transition. Agents must STOP tool calls, report the blocker, and await corrected input, environment, or scope.
+- Write authorization requires an exact active v2 scope binding correlated to the current session and Task call. Empty scope, v1 scope, stale plan/task identity, and another session's declaration fail closed with `SCOPE_NOT_DECLARED`; no child state is published before this preflight passes.
 
 ### 10. Chat / system-message hook contracts
 

@@ -124,28 +124,19 @@ describe('C1 — delegation guard rejects names whose canonical role is reached 
 		).resolves.toBeUndefined();
 	});
 
-	test('without a registry, fuzzy-matched names with negation prefix still pass via canonical role — but H3 separator-prefix check still rejects empty prefixes', async () => {
-		// When swarmState.generatedAgentNames is empty (registry unavailable),
-		// the delegation hook falls back to bare suffix matching. This is
-		// documented behavior for back-compat. The H3 check still rejects
-		// pathological prefixes (empty, separator-only). `not_an_architect`
-		// has a non-trivial prefix, so it would pass the H3 check — but
-		// production deployments will have the registry populated at plugin
-		// init, gating this case.
+	test('rejects a separator-only empty swarm identity before canonical role matching', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
-		// Empty registry (worst-case)
 		swarmState.generatedAgentNames = [];
 		const hook = createFullAutoDelegationHook({
 			config: makeConfig(),
 			directory: tmpDir,
 		});
-		// `_architect` has empty prefix — H3 fix rejects it
 		await expect(
 			hook.toolBefore(
 				{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
 				{ args: { subagent_type: '_architect' } },
 			),
-		).rejects.toThrow(/no valid prefix/);
+		).rejects.toThrow(/unknown subagent '_architect'/);
 	});
 });
 

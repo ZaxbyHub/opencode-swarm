@@ -473,16 +473,23 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 			? `Invoke-Expression $command;
   exit 0;`
 			: `$batchPath = $null;
+  $batchLocationPushed = $false;
   try {
     if ($command.Contains([char]13) -or $command.Contains([char]10)) {
-      $batchPath = Join-Path $env:TEMP ('opencode-swarm-' + [Guid]::NewGuid().ToString('N') + '.cmd');
+      $batchName = 'opencode-swarm-' + [Guid]::NewGuid().ToString('N') + '.cmd';
+      $batchPath = Join-Path $env:TEMP $batchName;
       [IO.File]::WriteAllText($batchPath, $command, [Text.UTF8Encoding]::new($false));
-      & '${escapedCmdExe}' /d /s /c ('call "' + $batchPath + '"');
+      Push-Location -LiteralPath $env:TEMP;
+      $batchLocationPushed = $true;
+      & '${escapedCmdExe}' /d /v:off /s /c ('call "' + $batchName + '"');
     } else {
-      & '${escapedCmdExe}' /d /s /c $command;
+      & '${escapedCmdExe}' /d /v:off /s /c $command;
     }
     $childExitCode = $LASTEXITCODE;
   } finally {
+    if ($batchLocationPushed) {
+      Pop-Location;
+    }
     if ($null -ne $batchPath) {
       Remove-Item -LiteralPath $batchPath -Force -ErrorAction SilentlyContinue;
     }

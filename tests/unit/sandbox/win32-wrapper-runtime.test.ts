@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -105,6 +106,52 @@ describe('Windows fallback wrapper transport', () => {
 	});
 
 	test.skipIf(!isWindows)(
+		'does not expose a percent-expanded temp path to cmd call reparsing',
+		() => {
+			const expansionName = 'SWARM_F003_C3D4';
+			const originalExpansion = process.env[expansionName];
+			const tempDir = path.join(os.tmpdir(), `%${expansionName}%`);
+			mkdirSync(tempDir, { recursive: true });
+			process.env[expansionName] = 'x" & echo F003_INJECTED & rem "';
+			try {
+				const { result } = executeThroughOpenCodeShape(
+					'echo intended-first\r\necho intended-second',
+					tempDir,
+				);
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(result.stdout).toContain('intended-first');
+				expect(result.stdout).toContain('intended-second');
+				expect(result.stdout).not.toContain('F003_INJECTED');
+			} finally {
+				if (originalExpansion === undefined) delete process.env[expansionName];
+				else process.env[expansionName] = originalExpansion;
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test.skipIf(!isWindows)(
+		'preserves multiline execution from temp paths containing legal cmd metacharacters',
+		() => {
+			const tempDir = path.join(os.tmpdir(), 'swarm-! caret^ amp&');
+			mkdirSync(tempDir, { recursive: true });
+			try {
+				const { result } = executeThroughOpenCodeShape(
+					'echo metachar-first\r\necho metachar-second',
+					tempDir,
+				);
+				expect(result.error).toBeUndefined();
+				expect(result.status).toBe(0);
+				expect(result.stdout).toContain('metachar-first');
+				expect(result.stdout).toContain('metachar-second');
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test.skipIf(!isWindows)(
 		'preserves developer tools and separately transports quotes and Unicode',
 		() => {
 			const command = `node -e "process.stdout.write('snowman ☃; hash #')"`;
@@ -165,6 +212,9 @@ describe('Windows fallback wrapper transport', () => {
 
 		expect(script).toContain(`[Convert]::FromBase64String('${commandBase64}')`);
 		expect(script).toContain('\\System32\\cmd.exe');
+		expect(script).toContain("('call \"' + $batchName + '\"')");
+		expect(script).not.toContain("('call \"' + $batchPath + '\"')");
+		expect(script).toContain('/d /v:off /s /c');
 		expect(script).toContain('$LASTEXITCODE');
 		expect(script).not.toContain(command);
 	});
