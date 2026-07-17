@@ -8,23 +8,14 @@
 
 import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
+import { loadDatabaseCtor } from './sqlite-loader.js';
 
-// `bun:sqlite` is a Bun built-in. A static `import { Database } from 'bun:sqlite'`
-// is hoisted into the published bundle's top-level ESM imports and breaks plugin
-// loading under any host whose dynamic `import()` goes through Node's default ESM
-// resolver — which throws ERR_UNSUPPORTED_ESM_URL_SCHEME for the `bun:` scheme
-// before any plugin code runs (issue #675). Resolve the constructor lazily so the
-// module graph never references `bun:sqlite` at evaluation time. Bun supports
-// `require('bun:sqlite')` synchronously, keeping our public API sync.
-let _DatabaseCtor: typeof Database | null = null;
-function loadDatabaseCtor(): typeof Database {
-	if (_DatabaseCtor) return _DatabaseCtor;
-	const req = createRequire(import.meta.url);
-	_DatabaseCtor = (req('bun:sqlite') as { Database: typeof Database }).Database;
-	return _DatabaseCtor;
-}
+// The `import type { Database }` above is erased at build. The runtime driver is
+// resolved by the shared, runtime-portable loader (`./sqlite-loader.ts`): native
+// `bun:sqlite` under Bun, a `node:sqlite` adapter under Node (issue #1873 /
+// invariant #2). Keeping the resolution lazy (via the loader) also preserves the
+// issue #675 guarantee that the bundle has no top-level `bun:` import.
 
 interface Migration {
 	version: number;

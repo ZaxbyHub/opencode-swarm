@@ -8,20 +8,14 @@
 
 import type { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { getPlatformConfigDir } from '../hooks/knowledge-store.js';
+import { loadDatabaseCtor } from './sqlite-loader.js';
 
-// See `./project-db.ts` for the full rationale. Lazy-resolve `bun:sqlite` so the
-// published bundle never has a top-level static import that breaks plugin loading
-// under Node's default ESM resolver (issue #675).
-let _DatabaseCtor: typeof Database | null = null;
-function loadDatabaseCtor(): typeof Database {
-	if (_DatabaseCtor) return _DatabaseCtor;
-	const req = createRequire(import.meta.url);
-	_DatabaseCtor = (req('bun:sqlite') as { Database: typeof Database }).Database;
-	return _DatabaseCtor;
-}
+// The runtime SQLite driver comes from the shared, runtime-portable loader
+// (`./sqlite-loader.ts`): native `bun:sqlite` under Bun, a `node:sqlite` adapter
+// under Node (issue #1873 / invariant #2). The `import type { Database }` above is
+// erased at build, so the bundle keeps no top-level `bun:` import (issue #675).
 
 interface Migration {
 	version: number;

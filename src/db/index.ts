@@ -7,6 +7,9 @@
  *   normalized directory path.
  * - `qa-gate-profile`: service layer for per-plan QA gate profiles stored
  *   in the project DB.
+ * - `sqlite-loader`: runtime-portable SQLite `Database` constructor resolver
+ *   (native `bun:sqlite` under Bun, a `node:sqlite` adapter under Node — issue
+ *   #1873). Used by `global-db`, `project-db`, and the memory SQLite provider.
  */
 
 export {
@@ -33,3 +36,4 @@ export {
 	type QaGates,
 	setGates,
 } from './qa-gate-profile.js';
+export { loadDatabaseCtor } from './sqlite-loader.js';
