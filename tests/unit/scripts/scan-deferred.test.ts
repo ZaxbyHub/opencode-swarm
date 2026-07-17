@@ -167,6 +167,48 @@ describe('scan-deferred.sh — Full-Resolution Contract deferred-work gate (PR #
 		expect(result.stderr).toInclude('TODO: real marker');
 	});
 
+	test('multiple deferred-work markers in a single diff are all reported, not just the first', async () => {
+		const repo = track(makeRepo('scan-deferred-multi-hit-'));
+		writeFile(repo, 'src/a.ts', '// TODO: first marker\n');
+		writeFile(repo, 'src/b.ts', '// FIXME: second marker\n');
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add two markers in one diff');
+
+		const result = await runScript(repo, ['origin/main']);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toInclude('TODO: first marker');
+		expect(result.stderr).toInclude('FIXME: second marker');
+	});
+
+	test('F-A1 residual gap: an added content line that itself reads like a diff header ("++ b/...") is wrongly swallowed by the header exclusion, hiding a genuine marker', async () => {
+		// This is NOT a unified-diff header line — it is ordinary added file
+		// content whose first two characters happen to be "++ " immediately
+		// followed by "b/". `git diff` prefixes every added line with its own
+		// single '+', so the emitted diff line reads
+		// "+++ b/fake-header TODO: sneaky" — textually indistinguishable from
+		// a genuine `+++ b/<path>` header line, because header_pattern
+		// matches on text alone with no hunk-position awareness.
+		//
+		// The F-A1 fix's own comment claims the exclusion "never suppresses a
+		// genuine added line that happens to start with literal +++
+		// content" — this is a concrete counterexample: a real "TODO: sneaky"
+		// marker on an added line is dropped from `hits` and the gate reports
+		// false-clean. Confirmed against real `git diff` output; not
+		// reproducible with content starting with three literal '+' (that
+		// case is already covered by "still catches a real marker in a file
+		// whose path also contains a marker word" above and stays safe
+		// because git's own '+' prefix pushes it to four total '+' chars,
+		// which does not match header_pattern).
+		const repo = track(makeRepo('scan-deferred-header-overbroad-'));
+		writeFile(repo, 'src/sneaky.ts', '++ b/fake-header TODO: sneaky\n');
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add content that mimics a diff header');
+
+		const result = await runScript(repo, ['origin/main']);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toInclude('TODO: sneaky');
+	});
+
 	test('F-B: an unresolvable base ref fails loudly instead of reporting false-clean', async () => {
 		const repo = track(makeRepo('scan-deferred-bad-base-'));
 		writeFile(repo, 'src/foo.ts', 'export const x = 1;\n');

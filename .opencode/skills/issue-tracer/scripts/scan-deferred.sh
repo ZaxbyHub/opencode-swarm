@@ -59,13 +59,25 @@ fi
 # headers ("+++ a/<path>", "+++ b/<path>", "+++ /dev/null"). Those lines also
 # start with '+' like an added content line, so an unqualified `^\+` pattern
 # false-positives on any added/renamed/modified file whose PATH contains a
-# marker word (e.g. "+++ b/todo-list.ts"). The exclusion is scoped to the
-# three literal header forms so it never suppresses a genuine added line that
-# happens to start with literal "+++" content.
+# marker word (e.g. "+++ b/todo-list.ts").
+#
+# The exclusion is position-aware, not a bare content match: a line is only
+# treated as a real file header when it immediately follows a line starting
+# with "--- " (the header's mandatory pre-image partner). A content-only
+# match (e.g. `^\+\+\+ (a/|b/|/dev/null)`) would ALSO swallow a genuine
+# ADDED line whose file content literally starts with "++ b/" or "++ a/" or
+# "++ /dev/null" — git prefixes every added line with its own '+', turning
+# that content into a diff line textually indistinguishable from a real
+# header. A line starting with '-' can never be added-line content (git
+# always prefixes additions with '+'), so anchoring on the preceding "--- "
+# line closes that gap without losing the original false-positive fix.
 pattern='^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'
-header_pattern='^\+\+\+ (a/|b/|/dev/null)'
 
-hits="$(git diff "$mb" | grep -vE "$header_pattern" | grep -nE "$pattern" || true)"
+hits="$(git diff "$mb" | awk '
+  /^--- / { preimage = 1; next }
+  preimage && /^\+\+\+ (a\/|b\/|\/dev\/null)/ { preimage = 0; next }
+  { preimage = 0; print }
+' | grep -nE "$pattern" || true)"
 
 if [ -n "$hits" ]; then
   echo "scan-deferred: deferred-work markers found on added lines (base=$base):" >&2
