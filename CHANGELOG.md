@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.121.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.3...v7.121.4) (2026-07-17)
+
+
+### Bug Fixes
+
+* **db:** add node:sqlite fallback so the plugin runs under Node sidecar ([1c999bd](https://github.com/ZaxbyHub/opencode-swarm/commit/1c999bd799568ee164a1f12fcb73c8d6319fef6c))
+* **db:** add node:sqlite fallback so the plugin runs under Node sidecar ([149a0aa](https://github.com/ZaxbyHub/opencode-swarm/commit/149a0aab94302f53167357ffb2b0442ed142b5c4))
+
 ## [7.121.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.2...v7.121.3) (2026-07-17)
 
 
