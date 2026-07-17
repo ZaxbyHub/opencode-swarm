@@ -8,6 +8,12 @@
 # Usage:
 #   trace-init.sh <issue-slug>
 set -eu
+# Force the C locale: POSIX bracket-range collation (e.g. [a-z]) is
+# locale-dependent, not fixed-ASCII. Under some runner locales (observed on
+# macOS CI), "dictionary order" collation makes [a-z] also match uppercase
+# letters, silently defeating the slug allowlist below. C locale guarantees
+# strict ASCII-only ranges regardless of the invoking environment.
+export LC_ALL=C
 
 slug="${1:-}"
 if [ -z "$slug" ]; then

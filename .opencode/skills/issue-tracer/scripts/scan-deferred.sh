@@ -11,6 +11,11 @@
 # If base-ref is omitted, it is resolved from origin/HEAD, then origin/main,
 # origin/master, main, master (first that exists wins).
 set -eu
+# Force the C locale for the same reason as trace-init.sh: POSIX bracket-range
+# collation is locale-dependent, and grep -E pattern matching can be affected
+# by locale too. This script has no bracket-range slug validation today, but
+# C locale keeps its regex/grep behavior deterministic across CI runners.
+export LC_ALL=C
 
 base="${1:-}"
 
