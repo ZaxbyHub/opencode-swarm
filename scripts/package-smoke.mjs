@@ -51,6 +51,7 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'fork-pr-operations',
 	'parallel-work-check',
 	'ci-fix-monitor',
+	'issue-tracer',
 ];
 
 export const REQUIRED_EVALUATION_FIXTURE_IDS = [

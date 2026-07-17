@@ -347,21 +347,22 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		reason:
 			'.opencode is the canonical protocol (a static, non-architect-MODE support skill composed by swarm-ci-monitor); .agents/skills/ci-fix-monitor is a thin Codex adapter shim that reads "Read .opencode/skills/ci-fix-monitor/SKILL.md for the full protocol." There is no .claude copy, so identical/divergent (which both require one) do not fit — same "adapter shim not yet modeled by ADDITIONAL contracts" situation as swarm-implement/writing-tests, generalized here into an explicit adapter kind (issue #1806).',
 	},
+	{
+		slug: 'issue-tracer',
+		kind: 'adapter',
+		adapterPaths: [
+			'.claude/skills/issue-tracer/SKILL.md',
+			'.agents/skills/issue-tracer/SKILL.md',
+		],
+		expectedCanonicalRef: '../../../.opencode/skills/issue-tracer/SKILL.md',
+		reason:
+			'Canonicalized (issue-tracer v2, issue-tracer-skill-update): .opencode/skills/issue-tracer/SKILL.md is the single agent-neutral protocol (Full-Resolution Contract, Phase 4.2 recurrence sweep, gate-integrity edits); .claude and .agents are thin adapter shims that reference it via the ../../../ relative path (modeled on the swarm-pr-review adapter shape). Bundled to npm consumers via BUNDLED_PROJECT_SKILLS + package.json#files.',
+	},
 	// ---------------------------------------------------------------------------
 	// .agents-only skills — no .opencode counterpart; live in .claude and/or
 	// .agents trees. Drift-check enforces extraIdenticalPaths existence for this kind
 	// (see detectSkillMirrorDrift in scripts/drift-check.ts).
 	// ---------------------------------------------------------------------------
-	{
-		slug: 'issue-tracer',
-		kind: 'agents-only',
-		extraIdenticalPaths: [
-			'.claude/skills/issue-tracer/SKILL.md',
-			'.agents/skills/issue-tracer/SKILL.md',
-		],
-		reason:
-			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical protocol, .agents is a Codex-specific adapter with different tool references and execution notes.',
-	},
 	{
 		slug: 'qa-sweep',
 		kind: 'agents-only',
