@@ -566,16 +566,10 @@ describe('guardrails shell write scope enforcement', () => {
 		});
 	});
 
-	// -------------------------------------------------------------------------
-	// Edge cases: no declared scope = allow all writes (backward compat)
-	// -------------------------------------------------------------------------
-
 	describe('edge case: no declared scope — backward compatibility', () => {
 		it('blocks write when session has no identity-bound scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s50');
-			// No setDeclaredScope call — declaredCoderScope remains null
-
 			await expect(
 				hooks.toolBefore(
 					makeBashInput('s50'),

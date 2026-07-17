@@ -2397,23 +2397,18 @@ describe('guardrails circuit breaker', () => {
 			resetSwarmState();
 		});
 
-		// VERIFICATION TESTS (7 test cases)
-
 		describe('Verification Tests', () => {
 			it('Test 1: apply_patch with Codex-style `*** Update File: <path>` → architectWriteCount increments', async () => {
-				// Mock: Set up architect session
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				swarmState.activeAgent.set('test-session', 'architect');
 				startAgentSession('test-session', 'architect');
 				const session = getAgentSession('test-session');
 
-				// Spy on warn function
 				const warnSpy = vi
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.input containing `*** Update File: src/foo.ts`
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
@@ -2484,7 +2479,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.cmd = ["apply_patch", "*** Update File: src/index.ts ..."]
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
@@ -2520,7 +2514,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.input containing `*** Update File: .swarm/context.md`
 				await hooks.toolBefore(
 					makeInput('test-session', 'apply_patch', 'call-1'),
 					makeOutput({
@@ -2552,7 +2545,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: apply_patch args.patch containing multiple files: `+++ b/src/foo.ts` and `+++ b/src/bar.ts`
 				const multiFilePatch = `
 --- a/src/foo.ts
 +++ b/src/foo.ts
@@ -2595,7 +2587,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: patch args.input containing `*** Update File: src/test.ts`
 				await hooks.toolBefore(
 					makeInput('test-session', 'patch', 'call-1'),
 					makeOutput({
@@ -2630,7 +2621,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Mock: write tool with args.filePath = 'src/test.ts'
 				await hooks.toolBefore(
 					makeInput('test-session', 'write', 'call-1'),
 					makeOutput({ filePath: 'src/test.ts' }),
@@ -2657,8 +2647,6 @@ describe('guardrails circuit breaker', () => {
 			});
 		});
 
-		// ADVERSARIAL TESTS (5 test cases)
-
 		describe('Adversarial Tests', () => {
 			it('Attack Vector 1: Can attacker bypass detection by using malformed patch content?', async () => {
 				const config = defaultConfig();
@@ -2671,7 +2659,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Attempt: apply_patch with patch content that has no `***` or `+++` markers
 				await expect(
 					hooks.toolBefore(
 						makeInput('test-session', 'apply_patch', 'call-1'),
@@ -2681,7 +2668,6 @@ describe('guardrails circuit breaker', () => {
 					),
 				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
-				// Expected: No paths extracted, no count increment
 				expect(session?.architectWriteCount).toBe(0);
 
 				// Expected: No warning fired
@@ -2704,7 +2690,6 @@ describe('guardrails circuit breaker', () => {
 					.spyOn(utilsModule, 'warn')
 					.mockImplementation(() => {});
 
-				// Attempt: apply_patch with `++ a/src/foo.ts` (wrong marker, should be `+++` and `b/`)
 				await expect(
 					hooks.toolBefore(
 						makeInput('test-session', 'apply_patch', 'call-1'),
@@ -2712,7 +2697,6 @@ describe('guardrails circuit breaker', () => {
 					),
 				).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
-				// Expected: Regex doesn't match, no detection
 				expect(session?.architectWriteCount).toBe(0);
 
 				// Expected: No warning
@@ -2773,7 +2757,6 @@ describe('guardrails circuit breaker', () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 
-				// Attempt: Coder with delegationActive=true, fire apply_patch with source code file
 				swarmState.activeAgent.set('test-session', 'coder');
 				startAgentSession('test-session', 'coder');
 				const session = getAgentSession('test-session');

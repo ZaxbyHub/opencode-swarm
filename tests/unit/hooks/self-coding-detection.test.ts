@@ -1643,9 +1643,6 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 	});
 });
 
-// ============================================
-// ADVERSARIAL TESTS: Malformed Inputs
-// ============================================
 describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -1669,9 +1666,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
 		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 		const session = ensureAgentSession(sessionId);
-		// No write count increment because no filePath was found
 		expect(session.architectWriteCount).toBe(0);
 	});
 
@@ -1689,7 +1684,6 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
 		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 		const session = ensureAgentSession(sessionId);
 		expect(session.architectWriteCount).toBe(0);
 	});
@@ -1708,7 +1702,6 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
 		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 		const session = ensureAgentSession(sessionId);
 		expect(session.architectWriteCount).toBe(0);
 	});
@@ -1727,9 +1720,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
 		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 		const session = ensureAgentSession(sessionId);
-		// Empty string is falsy in isOutsideSwarmDir check
 		expect(session.architectWriteCount).toBe(0);
 	});
 
@@ -1747,9 +1738,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 		await expect(
 			hook.toolBefore(toolInput as any, toolOutput as any),
 		).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 		const session = ensureAgentSession(sessionId);
-		// Non-string is ignored due to typeof check
 		expect(session.architectWriteCount).toBe(0);
 	});
 

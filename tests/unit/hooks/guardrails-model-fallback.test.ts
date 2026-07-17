@@ -365,7 +365,6 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 		expect(session.model_fallback_index).toBe(0);
 	});
 
-	// -------------------------------------------------------------------------
 	// Test 13: output.error is null → no advisory (null doesn't match regex)
 	// -------------------------------------------------------------------------
 	test('toolAfter with output.error = null → no advisory', async () => {
@@ -382,14 +381,12 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Missing output is a permanent, non-transient failure, not a fallback.
 		expect(session.model_fallback_index).toBe(0);
 		expect(session.pendingAdvisoryMessages?.[0]).toContain(
 			'NON-TRANSIENT STOP',
 		);
 	});
 
-	// -------------------------------------------------------------------------
 	// Test 14: output.error is undefined → no advisory
 	// -------------------------------------------------------------------------
 	test('toolAfter with output.error = undefined → no advisory', async () => {
@@ -406,7 +403,6 @@ describe('guardrails model fallback retry logic (toolAfter)', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// Missing output is a permanent, non-transient failure, not a fallback.
 		expect(session.model_fallback_index).toBe(0);
 		expect(session.pendingAdvisoryMessages?.[0]).toContain(
 			'NON-TRANSIENT STOP',

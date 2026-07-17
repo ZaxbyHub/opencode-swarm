@@ -703,8 +703,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: '' } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
-			// Empty path should not trigger detection (no path to check)
 			const session = getAgentSession('empty-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -725,8 +723,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: undefined } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
-			// Undefined path should not trigger detection
 			const session = getAgentSession('undefined-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -747,8 +743,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: null } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
-			// Null path should not trigger detection
 			const session = getAgentSession('null-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -769,8 +763,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: 12345 } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
-			// Number path should not crash (typeof check should fail)
 			const session = getAgentSession('number-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -791,8 +783,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: { toString: () => 'src/evil.ts' } } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
-			// Object path should not crash (typeof check should fail)
 			const session = getAgentSession('object-path-test');
 			expect(session?.architectWriteCount).toBe(0);
 		});
@@ -846,7 +836,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 			startAgentSession('control-char-test', 'architect');
 			beginInvocation('control-char-test', 'architect');
 
-			// Various control characters
 			const controlChars = [
 				'\x01',
 				'\x02',
@@ -865,7 +854,6 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 					{ args: { filePath: maliciousPath } },
 				),
 			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
-
 			const session = getAgentSession('control-char-test');
 			expect(session?.architectWriteCount).toBe(1);
 		});

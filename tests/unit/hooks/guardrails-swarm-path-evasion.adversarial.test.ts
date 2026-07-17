@@ -35,11 +35,12 @@ function makeBashOutput(command: string) {
 	return { args: { command } };
 }
 
+async function expectScopeBlocked(result: Promise<void>): Promise<void> {
+	await expect(result).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
+}
+
 /**
  * Adversarial security tests for the new guardrail blocks (sections 16-21).
- *
- * These tests verify the guardrail correctly handles evasion attempts.
- * Tests are categorized by evasion technique type.
  *
  * IMPORTANT: These tests document KNOWN BYPASSES in the current implementation.
  * The guardrail does NOT currently handle:
@@ -184,9 +185,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				const input = makeBashInput('test-session', 'mv ./swarm/file /tmp/');
 				const output = makeBashOutput('mv ./swarm/file /tmp/');
-				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-					/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-				);
+				await expectScopeBlocked(hooks.toolBefore(input, output));
 			});
 
 			test('rm .swarm/evidence/4.1.json → BLOCKED (non-recursive rm)', async () => {
@@ -313,9 +312,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const output = makeBashOutput(
 				'cp src/file.txt /tmp/ && rm src/other.txt',
 			);
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 	});
 
@@ -471,9 +468,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'mv .swarm/file /tmp/');
 			const output = makeBashOutput('mv .swarm/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('rm .swarm/file → ALLOWED when block_destructive_commands=false', async () => {
@@ -514,9 +509,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				'cp .swarm/file /tmp/ && rm .swarm/file',
 			);
 			const output = makeBashOutput('cp .swarm/file /tmp/ && rm .swarm/file');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('rsync --remove-source-files .swarm/ /tmp/ → ALLOWED when block_destructive_commands=false', async () => {
@@ -604,9 +597,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'cp .swarm/file /tmp/');
 			const output = makeBashOutput('cp .swarm/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('rsync -av /tmp/ .swarm/backup/ → ALLOWED (no --delete flag)', async () => {
@@ -803,9 +794,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', "m'v' .swarm/file /tmp/");
 			const output = makeBashOutput("m'v' .swarm/file /tmp/");
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('SECURITY BYPASS: "mv" .swarm/file NOT blocked (quoted command name evades)', async () => {
@@ -814,9 +803,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', '"mv" .swarm/file /tmp/');
 			const output = makeBashOutput('"mv" .swarm/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test("SECURITY BYPASS: sh -c 'mv .swarm/file /tmp/' NOT blocked (wrapper evades)", async () => {
@@ -837,9 +824,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'mv .//swarm/file /tmp/');
 			const output = makeBashOutput('mv .//swarm/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('SECURITY BYPASS: mv $SWARM_DIR/file NOT blocked (unresolvable var - fail OPEN)', async () => {
@@ -848,9 +833,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'mv $SWARM_DIR/file /tmp/');
 			const output = makeBashOutput('mv $SWARM_DIR/file /tmp/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/SCOPE_NOT_DECLARED|WRITE BLOCKED/,
-			);
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('SECURITY BYPASS: fullwidth mv (\uff46\uff56) NOT blocked (NFKC normalization insufficient)', async () => {
