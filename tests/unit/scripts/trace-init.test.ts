@@ -89,6 +89,46 @@ function makeRepo(prefix: string): string {
 	return repoDir;
 }
 
+/**
+ * Build a `git` shim directory that rejects any `--path-format=...` flag
+ * (mirroring how git < 2.31 rejects the option) while delegating every
+ * other invocation to the real `git` on PATH. Prepending this directory to
+ * PATH forces trace-init.sh's primary
+ * `git rev-parse --path-format=absolute --git-common-dir` resolution to
+ * fail, exercising the plain `--git-common-dir` fallback branch (with its
+ * manual absolutization) that is otherwise never executed in this suite —
+ * the test environment's real git (>= 2.31) always succeeds on the primary
+ * path, so without this shim the fallback branch has zero coverage.
+ */
+function makeOldGitShim(): string {
+	const realGit = Bun.spawnSync({
+		cmd: ['sh', '-c', 'command -v git'],
+		env: process.env,
+		stdout: 'pipe',
+	})
+		.stdout.toString()
+		.trim();
+	const shimDir = fs.mkdtempSync(
+		path.join(os.tmpdir(), 'trace-init-old-git-shim-'),
+	);
+	const shimScript = [
+		'#!/usr/bin/env bash',
+		'for arg in "$@"; do',
+		'  case "$arg" in',
+		'    --path-format=*)',
+		'      echo "git: unrecognized option: $arg" >&2',
+		'      exit 129',
+		'      ;;',
+		'  esac',
+		'done',
+		`exec "${realGit}" "$@"`,
+		'',
+	].join('\n');
+	fs.writeFileSync(path.join(shimDir, 'git'), shimScript);
+	fs.chmodSync(path.join(shimDir, 'git'), 0o755);
+	return shimDir;
+}
+
 describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)', () => {
 	test('creates the trace dir and seeds state.md', async () => {
 		const repo = track(makeRepo('trace-init-basic-'));
@@ -235,5 +275,115 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 			stderr: 'pipe',
 		});
 		expect(checkIgnore.exitCode).toBe(0);
+	});
+
+	test('F-D1: refuses a committed symlink escape at a deeper ancestor (.agents/issue-traces itself, not .agents)', async () => {
+		// Distinguishes the containment check's ancestor-walk from the
+		// already-covered case where `.agents` itself is the symlink: here
+		// `.agents` is a real, committed directory and only the nested
+		// `issue-traces` path is a symlink escaping the repo. The while-loop
+		// in trace-init.sh must stop its ancestor walk one level deeper and
+		// still catch it.
+		const outer = track(
+			fs.realpathSync(
+				fs.mkdtempSync(
+					path.join(os.tmpdir(), 'trace-init-symlink-deep-outer-'),
+				),
+			),
+		);
+		const attackerTarget = path.join(outer, 'attacker-target-deep');
+		fs.mkdirSync(attackerTarget);
+		const repo = path.join(outer, 'victim-deep');
+		fs.mkdirSync(repo);
+		git(repo, 'init', '-q', '-b', 'main');
+		git(repo, 'config', 'user.email', 'test@example.com');
+		git(repo, 'config', 'user.name', 'Test');
+		fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'init');
+		fs.mkdirSync(path.join(repo, '.agents'));
+		fs.symlinkSync(attackerTarget, path.join(repo, '.agents', 'issue-traces'));
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add deeper symlink escape');
+
+		const result = await runScript(repo, ['evil-slug-deep']);
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toContain('outside the repo root');
+		expect(fs.readdirSync(attackerTarget)).toHaveLength(0);
+	});
+
+	test('F-E1: falls back to plain --git-common-dir (with manual absolutization) when git predates --path-format, and still lands the exclude entry in the shared common dir', async () => {
+		const mainRepo = track(makeRepo('trace-init-worktree-oldgit-main-'));
+		const worktreeParent = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'trace-init-worktree-oldgit-linked-'),
+		);
+		const linkedWorktree = path.join(worktreeParent, 'linked');
+		track(worktreeParent);
+		git(
+			mainRepo,
+			'worktree',
+			'add',
+			'-q',
+			'-b',
+			'feature-oldgit',
+			linkedWorktree,
+		);
+
+		const shimDir = track(makeOldGitShim());
+		const proc = Bun.spawn({
+			cmd: ['bash', SCRIPT, 'old-git-slug'],
+			cwd: linkedWorktree,
+			env: { ...process.env, PATH: `${shimDir}:${process.env.PATH ?? ''}` },
+			stdout: 'pipe',
+			stderr: 'pipe',
+		});
+		const [stdout, stderr] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		const exitCode = await proc.exited;
+
+		expect(exitCode).toBe(0);
+		expect(stderr).not.toContain('unrecognized option');
+		expect(stderr).not.toContain('could not resolve the git directory');
+
+		// Same assertion as the primary-path F-E1 test above: the exclude
+		// entry must land in the SHARED common dir, not the worktree-private
+		// admin dir, even when resolved via the fallback branch.
+		const sharedExclude = path.join(mainRepo, '.git/info/exclude');
+		expect(fs.readFileSync(sharedExclude, 'utf-8')).toContain(
+			'.agents/issue-traces/',
+		);
+		const privateExclude = path.join(
+			mainRepo,
+			'.git/worktrees/linked/info/exclude',
+		);
+		expect(
+			fs.existsSync(privateExclude) &&
+				fs
+					.readFileSync(privateExclude, 'utf-8')
+					.includes('.agents/issue-traces/'),
+		).toBe(false);
+	});
+
+	test('residual (non-blocking, PR #1880 review): .agents already existing as a plain regular file fails safe — non-zero exit, no trace dir created — even though the diagnostic is a raw shell error rather than a clean trace-init message', async () => {
+		// Known limitation: the containment check's ancestor-walk `cd`s into
+		// the nearest existing ancestor. When that ancestor is a plain file
+		// (not a directory, not a symlink), `cd` fails with bash's own
+		// "Not a directory" message and `set -eu` aborts the script — exit
+		// code 1, not the script's clean `exit 2` diagnostic. This test
+		// pins the safety property that actually matters (no directory is
+		// created, no write escapes, the script never reports success) so a
+		// future change cannot silently turn this into a false success.
+		// Upgrading the diagnostic itself is optional follow-up, not a
+		// correctness blocker, since the script already fails closed.
+		const repo = track(makeRepo('trace-init-agents-regular-file-'));
+		fs.writeFileSync(path.join(repo, '.agents'), 'not a directory\n');
+
+		const result = await runScript(repo, ['some-slug']);
+		expect(result.exitCode).not.toBe(0);
+		expect(fs.readFileSync(path.join(repo, '.agents'), 'utf-8')).toBe(
+			'not a directory\n',
+		);
 	});
 });
