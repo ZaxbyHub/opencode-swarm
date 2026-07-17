@@ -17,6 +17,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../../src/state';
+
+const SESSION_ID = 'drift-adv-session';
 
 // ============================================================================
 // Mocks Setup
@@ -275,6 +282,7 @@ afterEach(() => {
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
 	injectorInternals.readRecentEscalations = realReadRecentEscalations;
 	injectorInternals.buildEscalationBriefing = realBuildEscalationBriefing;
+	swarmState.activeAgent.clear();
 	mock.clearAllMocks();
 });
 
@@ -321,13 +329,19 @@ function resetMocks(): void {
 function makeOutput(agentName: string = 'architect'): {
 	messages: MessageWithParts[];
 } {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path)
+	// and stamp a consistent sessionID on every message.
+	if (agentName) swarmState.activeAgent.set(SESSION_ID, agentName);
 	return {
 		messages: [
 			{
-				info: { role: 'system', agent: agentName },
+				info: { role: 'system', agent: agentName, sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'System prompt' }],
 			},
-			{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+			{
+				info: { role: 'user', sessionID: SESSION_ID },
+				parts: [{ type: 'text', text: 'hello' }],
+			},
 		],
 	};
 }
@@ -864,13 +878,21 @@ describe('Adversarial: Context budget stressed', () => {
 		extractCurrentPhaseFromPlan.mockReturnValue('Phase 2: Implementation');
 
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 		const output = {
 			messages: [
 				{
-					info: { role: 'system', agent: 'architect' },
+					info: {
+						role: 'system',
+						agent: 'architect',
+						sessionID: SESSION_ID,
+					},
 					parts: [{ type: 'text', text: boundarySystemPrompt }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: '' }] },
+				{
+					info: { role: 'user', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: '' }],
+				},
 			],
 		};
 

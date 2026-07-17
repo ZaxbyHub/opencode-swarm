@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { collectDelegateAcks } from '../../../src/hooks/delegate-ack-collector.js';
 import {
+	appendKnowledgeEvent,
 	type KnowledgeEvent,
 	readKnowledgeEvents,
 } from '../../../src/hooks/knowledge-events.js';
@@ -83,6 +84,11 @@ function entry(
 	} as RankedEntry;
 }
 
+// (#1849) Fixed trace_id shared between the directive block and the seeded
+// `retrieved` event, so the shared receipt validator finds the trace and the
+// shown IDs as result_ids.
+const FIXED_TRACE_ID = 'trace-fixed-1849-parser';
+
 function buildPrompt(): string {
 	const block = buildDelegateDirectiveBlock(
 		[
@@ -92,8 +98,29 @@ function buildPrompt(): string {
 			entry(ID_NA, 'high'),
 		],
 		config(),
+		FIXED_TRACE_ID,
 	);
 	return `${block}\n\nTASK_ID: task-42\nImplement the thing.`;
+}
+
+/** Seed a retrieved event so the validator's trace-existence + membership checks pass. */
+async function seedRetrieved(
+	directory: string,
+	resultIds: string[],
+	opts: { sessionId?: string } = {},
+): Promise<void> {
+	await appendKnowledgeEvent(directory, {
+		type: 'retrieved',
+		trace_id: FIXED_TRACE_ID,
+		session_id: opts.sessionId ?? 'sess',
+		agent: 'coder',
+		query: 'delegate task',
+		retrieval_mode: 'delegate_inject',
+		result_ids: resultIds,
+		ranks: Object.fromEntries(resultIds.map((id, i) => [id, i + 1])),
+		scores: Object.fromEntries(resultIds.map((id) => [id, 1])),
+		timestamp: new Date().toISOString(),
+	});
 }
 
 function receipts(
@@ -131,6 +158,13 @@ describe('collectDelegateAcks', () => {
 			`KNOWLEDGE_APPLIED:${ID_CRITICAL}`,
 		].join('\n');
 
+		// (#1849) Seed the retrieved event the directive block's trace_id
+		// references, with the shown IDs as result_ids + matching session id,
+		// so the shared receipt validator accepts the acks.
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-1',
+		});
+
 		const result = await collectDelegateAcks({
 			directory: dir,
 			prompt: buildPrompt(),
@@ -156,6 +190,11 @@ describe('collectDelegateAcks', () => {
 			`KNOWLEDGE_IGNORED:${ID_IGNORED} reason=not applicable`,
 			// ID_CRITICAL deliberately NOT acknowledged.
 		].join('\n');
+
+		// (#1849) Seed the retrieved trace so the validator accepts the acks.
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-2',
+		});
 
 		const result = await collectDelegateAcks({
 			directory: dir,
@@ -197,6 +236,13 @@ describe('collectDelegateAcks', () => {
 			`KNOWLEDGE_N_A:${ID_CRITICAL} reason=out of scope`,
 		].join('\n');
 
+		// (#1849) Seed the retrieved trace so the validator accepts the shown-ID
+		// acks. ID_NEVER_SHOWN is intentionally NOT in result_ids so it is
+		// rejected by the membership check (anti-spoofing).
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-3',
+		});
+
 		const result = await collectDelegateAcks({
 			directory: dir,
 			prompt: buildPrompt(),
@@ -217,6 +263,11 @@ describe('collectDelegateAcks', () => {
 	});
 
 	it('extracts the task id from the prompt envelope', async () => {
+		// (#1849) Seed the retrieved trace so the validator accepts the ack.
+		await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
+			sessionId: 'sess-4',
+		});
+
 		await collectDelegateAcks({
 			directory: dir,
 			prompt: buildPrompt(),

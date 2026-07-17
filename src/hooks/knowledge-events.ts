@@ -106,11 +106,26 @@ export interface ReceiptEvent {
 		| 'n_a'
 		/** Architect explicitly accepted an unresolved critical violation at
 		 *  phase_complete (Change 2, Task 2.4). Audit-only; never affects rollups. */
-		| 'override';
+		| 'override'
+		/**
+		 * Terminal accounting event for an EMPTY retrieval (issue #1849): an agent
+		 * considered a trace that surfaced no relevant knowledge and explicitly filed
+		 * `no_relevant_knowledge`. This closes the "every retrieval attempt has one
+		 * durable terminal accounting path, including empty result" contract. Audit
+		 * only — `recomputeCounters` intentionally does NOT mutate any per-entry
+		 * counter (there is no `knowledge_id` to credit; this is a trace-level
+		 * tombstone, not application credit).
+		 */
+		| 'no_relevant';
 	schema_version?: number;
 	event_id: string;
 	trace_id: string;
-	knowledge_id: string;
+	/**
+	 * The considered knowledge entry. Optional for the `no_relevant` terminal
+	 * (issue #1849), which is a trace-level tombstone for an empty retrieval and
+	 * references no specific entry.
+	 */
+	knowledge_id?: string;
 	timestamp: string;
 	session_id: string;
 	phase?: string;
@@ -248,6 +263,12 @@ export const RECEIPT_EVENT_TYPES: ReadonlySet<string> = new Set([
 	'violated',
 	'n_a',
 	'override',
+	/**
+	 * `no_relevant` (issue #1849) is a trace-level terminal, not a per-entry
+	 * receipt, but it is part of the receipt/terminal family. Callers that want
+	 * strictly per-entry verbs should subtract this.
+	 */
+	'no_relevant',
 ]);
 
 // ============================================================================
@@ -817,32 +838,43 @@ export function recomputeCounters(
 				break;
 			}
 			case 'acknowledged': {
+				if (!e.knowledge_id) break;
 				const r = get(map, e.knowledge_id);
 				r.acknowledged_count += 1;
 				r.last_acknowledged_at = maxIso(r.last_acknowledged_at, e.timestamp);
 				break;
 			}
 			case 'applied': {
+				if (!e.knowledge_id) break;
 				const r = get(map, e.knowledge_id);
 				r.applied_explicit_count += 1;
 				r.last_applied_at = maxIso(r.last_applied_at, e.timestamp);
 				break;
 			}
 			case 'ignored':
+				if (!e.knowledge_id) break;
 				get(map, e.knowledge_id).ignored_count += 1;
 				break;
 			case 'violated': {
+				if (!e.knowledge_id) break;
 				const r = get(map, e.knowledge_id);
 				r.violated_count += 1;
 				r.violation_timestamps.push(e.timestamp);
 				break;
 			}
 			case 'contradicted':
+				if (!e.knowledge_id) break;
 				get(map, e.knowledge_id).contradicted_count += 1;
 				break;
 			case 'n_a':
 				// Recorded for auditability; intentionally neutral (no penalty).
+				if (!e.knowledge_id) break;
 				get(map, e.knowledge_id).n_a_count += 1;
+				break;
+			case 'no_relevant':
+				// (issue #1849) Terminal tombstone for an EMPTY retrieval. Trace-level:
+				// there is no knowledge_id to credit, so NO per-entry counter mutates.
+				// Surfaced separately via `countEmptyTraceTerminals` for diagnostics.
 				break;
 			case 'outcome': {
 				if (!e.knowledge_id) break;
@@ -908,6 +940,21 @@ export function countViolationsInWindow(
 		if (!Number.isNaN(t) && t >= cutoff) count += 1;
 	}
 	return count;
+}
+
+/**
+ * Count the durable `no_relevant` terminal events (issue #1849) in the given
+ * event list — the trace-level tombstones recording that a retrieval surfaced
+ * nothing relevant and was explicitly accounted for. Pure helper for
+ * diagnostics (`/swarm status`, `knowledge_recall debug`). NOT a per-entry
+ * counter; there is no `knowledge_id` to credit.
+ */
+export function countEmptyTraceTerminals(events: KnowledgeEvent[]): number {
+	let n = 0;
+	for (const e of events) {
+		if (e.type === 'no_relevant') n += 1;
+	}
+	return n;
 }
 
 /**

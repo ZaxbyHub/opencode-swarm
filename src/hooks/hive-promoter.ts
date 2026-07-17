@@ -55,6 +55,7 @@ import type {
 } from './knowledge-types.js';
 import { isActiveStatus, KNOWLEDGE_SCHEMA_VERSION } from './knowledge-types.js';
 import { validateLesson } from './knowledge-validator.js';
+import { loadPromotionEvidenceByEntry } from './promotion-evidence-store.js';
 import { safeHook } from './utils.js';
 
 /** Carry a swarm entry's actionable-directive metadata onto a promoted hive
@@ -279,10 +280,12 @@ export async function checkHivePromotions(
 	// It never throws (path fallback always succeeds).
 	const sourceCohort = await _internals.resolveCohortId(directory);
 
-	// Validated terminal-application evidence is empty until #1849 produces real
-	// receipts. Loaded outside the lock. Legacy swarm entries get NO synthetic
-	// credit — an empty list simply does not add to the count.
-	const evidence = await _internals.loadPromotionEvidence(swarmEntries);
+	// (#1849) Validated terminal-application evidence is now produced by the
+	// knowledge_receipt tool + delegate-ack-collector (via validateReceipt) and
+	// persisted to .swarm/knowledge-promotion-evidence.jsonl. Loaded outside the
+	// lock. Legacy swarm entries with no evidence get NO synthetic credit — an
+	// empty list simply does not add to the count.
+	const evidence = await _internals.loadPromotionEvidence(directory);
 
 	const diagnostics: string[] = [];
 
@@ -783,11 +786,13 @@ export const _internals = {
 	// PRR-007: the shared curation policy the dedup-merge routes through (as an
 	// audited pass-through). DI seam so tests can assert the merge shares it.
 	authorizeCuration,
-	/** Loads validated terminal-application evidence per swarm entry id. Empty
-	 *  until #1849 produces real receipts (conservative: no synthetic credit). */
+	/** (#1849) Loads validated terminal-application evidence per swarm entry id
+	 *  from .swarm/knowledge-promotion-evidence.jsonl. Empty when no validated
+	 *  receipts exist yet (conservative: no synthetic credit). */
 	loadPromotionEvidence: async (
-		_swarmEntries: SwarmKnowledgeEntry[],
-	): Promise<Record<string, PromotionEvidenceRecord[]>> => ({}),
+		directory: string,
+	): Promise<Record<string, PromotionEvidenceRecord[]>> =>
+		loadPromotionEvidenceByEntry(directory),
 	/** Loads the default KnowledgeConfig (schema defaults) for manual promotion
 	 *  paths when the command did not load one. */
 	loadDefaultKnowledgeConfig: () => KnowledgeConfigSchema.parse({}),

@@ -7,13 +7,21 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IncrementalVerifyConfig } from '../config/schema';
+import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { spawnAsync } from './spawn-helper';
 export type { IncrementalVerifyConfig };
 export { detectTypecheckCommand };
 
 export interface IncrementalVerifyHook {
 	toolAfter: (
-		input: { tool: string; sessionID: string; args?: unknown },
+		input: {
+			tool: string;
+			sessionID: string;
+			args?: unknown;
+			/** (#1849) SDK tool.execute.after input carries callID (not args); used
+			 * to recover the snapshot args via resolveToolAfterContext. */
+			callID?: string;
+		},
 		output: { output?: unknown; args?: unknown },
 	) => Promise<void>;
 }
@@ -158,8 +166,17 @@ export function createIncrementalVerifyHook(
 			if (!config.enabled) return;
 			if (input.tool !== 'Task') return;
 
-			// Identify which agent was delegated to
-			const args = (input.args ?? output.args) as
+			// (#1849) Identify which agent was delegated to. The SDK
+			// tool.execute.after input has NO args (and the after output has no
+			// args either), so recover from the callID snapshot taken in toolBefore.
+			// Fall back to input.args/output.args only for direct-call test fixtures.
+			const recovered =
+				typeof input.callID === 'string'
+					? (getStoredInputArgs(input.callID) as
+							| Record<string, unknown>
+							| undefined)
+					: undefined;
+			const args = (recovered ?? input.args ?? output.args) as
 				| Record<string, unknown>
 				| undefined;
 			const subagentType =

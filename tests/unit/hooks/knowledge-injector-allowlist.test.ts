@@ -20,6 +20,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	swarmState.activeAgent.clear();
 	mock.restore();
 });
 
@@ -29,6 +30,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../../src/state';
+
+const SESSION_ID = 'allowlist-session';
 
 // ============================================================================
 // Mocks
@@ -138,14 +146,17 @@ function makeEntry(lesson = 'Always use TypeScript strict mode'): RankedEntry {
 }
 
 function makeOutput(agentName: string): { messages: MessageWithParts[] } {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path)
+	// and stamp a consistent sessionID on every message.
+	if (agentName) swarmState.activeAgent.set(SESSION_ID, agentName);
 	return {
 		messages: [
 			{
-				info: { role: 'system', agent: agentName },
+				info: { role: 'system', agent: agentName, sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'system prompt' }],
 			},
 			{
-				info: { role: 'user' },
+				info: { role: 'user', sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'user message' }],
 			},
 		],
@@ -279,26 +290,42 @@ describe('Knowledge injection — architect vs delegate vs none', () => {
 	}
 
 	it('injects nothing when agent name is empty string', async () => {
+		// (#1849) No activeAgent mapped and the user message carries no
+		// info.agent → identity cannot be resolved → no_agent_name skip.
+		swarmState.activeAgent.delete(SESSION_ID);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output: { messages: MessageWithParts[] } = {
 			messages: [
 				{
-					info: { role: 'system', agent: '' },
+					info: { role: 'system', agent: '', sessionID: SESSION_ID },
 					parts: [{ type: 'text', text: 'sys' }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] },
+				{
+					info: { role: 'user', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: 'hi' }],
+				},
 			],
 		};
 		await hook({} as never, output);
 		expect(hasAnyInjection(output)).toBe(false);
 	});
 
-	it('injects nothing when system message has no agent field', async () => {
+	it('injects nothing when no activeAgent is mapped and no user message carries agent', async () => {
+		// (#1849) The pre-1849 premise (a role:'system' message with no agent)
+		// is no longer the identity source. The new premise: no activeAgent AND
+		// no user message with info.agent → identity unresolved → skip.
+		swarmState.activeAgent.delete(SESSION_ID);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output: { messages: MessageWithParts[] } = {
 			messages: [
-				{ info: { role: 'system' }, parts: [{ type: 'text', text: 'sys' }] },
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] },
+				{
+					info: { role: 'system', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: 'sys' }],
+				},
+				{
+					info: { role: 'user', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: 'hi' }],
+				},
 			],
 		};
 		await hook({} as never, output);

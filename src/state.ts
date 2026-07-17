@@ -378,6 +378,19 @@ export interface AgentSessionState {
 	// PR Monitor subscriptions (Phase 1)
 	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
 	prSubscriptions: Map<string, PrSubscriptionState>;
+
+	// Linked Knowledge (#1849)
+	/**
+	 * Cached canonical cohort id for this session's directory (issue #1849).
+	 * Resolved once at `chat.message` (where sessionID + agent are reliably
+	 * present) and reused by the system-enhancer's cohort-identity line and the
+	 * PromotionEvidenceRecord writer — so neither re-runs `resolveCohortId`
+	 * (which spawns git) on a per-turn / per-receipt hot path. Persisted through
+	 * snapshots so restored sessions keep the value. `undefined` when not yet
+	 * resolved (pre-existing sessions, restored old snapshots, or resolution
+	 * failed); callers must handle the miss with a bounded fallback.
+	 */
+	cachedCohortId?: string;
 }
 
 export type NonTransientErrorCategory =

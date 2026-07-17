@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.122.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.4...v7.122.0) (2026-07-17)
+
+
+### Features
+
+* **knowledge:** real-host injection + trustworthy receipt accounting ([#1849](https://github.com/ZaxbyHub/opencode-swarm/issues/1849)) ([aa17ee9](https://github.com/ZaxbyHub/opencode-swarm/commit/aa17ee9b9995e2ff8c0ded22f3dd6fd506982e2f))
+
 ## [7.121.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.121.3...v7.121.4) (2026-07-17)
 
 

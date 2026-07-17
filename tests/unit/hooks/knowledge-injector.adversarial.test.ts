@@ -28,6 +28,13 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
+// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
+// last user message's info.agent (fallback) — never from a role:'system'
+// message. Fixtures set swarmState.activeAgent and stamp a consistent
+// sessionID on every message.
+import { swarmState } from '../../../src/state';
+
+const SESSION_ID = 'adv-session';
 
 // ============================================================================
 // MOCK CONVERSION NOTES
@@ -321,6 +328,7 @@ beforeEach(() => {
 afterEach(() => {
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
+	swarmState.activeAgent.clear();
 });
 
 // ============================================================================
@@ -331,13 +339,19 @@ function makeOutput(
 	agentName: string = 'architect',
 	extraChars: number = 0,
 ): { messages: MessageWithParts[] } {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path)
+	// and stamp a consistent sessionID on every message.
+	if (agentName) swarmState.activeAgent.set(SESSION_ID, agentName);
 	return {
 		messages: [
 			{
-				info: { role: 'system', agent: agentName },
+				info: { role: 'system', agent: agentName, sessionID: SESSION_ID },
 				parts: [{ type: 'text', text: 'x'.repeat(extraChars) }],
 			},
-			{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+			{
+				info: { role: 'user', sessionID: SESSION_ID },
+				parts: [{ type: 'text', text: 'hello' }],
+			},
 		],
 	};
 }
@@ -713,13 +727,21 @@ describe('Adversarial: Null/undefined lesson text field', () => {
 
 	it('Test 7: message part with text: undefined → totalChars calculation does not throw', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 		const output = {
 			messages: [
 				{
-					info: { role: 'system', agent: 'architect' },
+					info: {
+						role: 'system',
+						agent: 'architect',
+						sessionID: SESSION_ID,
+					},
 					parts: [{ type: 'text', text: undefined as unknown as string }],
 				},
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+				{
+					info: { role: 'user', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: 'hello' }],
+				},
 			],
 		};
 
@@ -757,10 +779,17 @@ describe('Adversarial: Empty parts array', () => {
 
 	it('Test 8: message with parts: [] → no error, hook proceeds normally', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
 		const output = {
 			messages: [
-				{ info: { role: 'system', agent: 'architect' }, parts: [] },
-				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+				{
+					info: { role: 'system', agent: 'architect', sessionID: SESSION_ID },
+					parts: [],
+				},
+				{
+					info: { role: 'user', sessionID: SESSION_ID },
+					parts: [{ type: 'text', text: 'hello' }],
+				},
 			],
 		};
 

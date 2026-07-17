@@ -12,6 +12,7 @@ import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { swarmState } from '../../../src/state';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
+const SESSION = 'session-1';
 let tempDir: string;
 let originalSearch: typeof _internals.searchKnowledge;
 let originalRecordEvent: typeof _internals.recordKnowledgeEvent;
@@ -51,6 +52,7 @@ beforeEach(() => {
 	tempDir = mkdtempSync(path.join('.tmp-tests', 'swarm-kinj-'));
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	originalSearch = _internals.searchKnowledge;
 	originalRecordEvent = _internals.recordKnowledgeEvent;
 	originalRecordShown = _internals.recordKnowledgeShown;
@@ -61,24 +63,28 @@ afterEach(() => {
 	_internals.recordKnowledgeEvent = originalRecordEvent;
 	_internals.recordKnowledgeShown = originalRecordShown;
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
 	rmSync('.tmp-tests', { recursive: true, force: true });
 });
 
 describe('knowledge injector retrieved events', () => {
 	function outputForUser(text: string): { messages?: MessageWithParts[] } {
+		// (#1849) Drive identity via swarmState.activeAgent (the production path)
+		// and stamp a consistent sessionID on every message.
+		swarmState.activeAgent.set(SESSION, 'architect');
 		return {
 			messages: [
 				{
 					info: {
 						role: 'system',
 						agent: 'architect',
-						sessionID: 'session-1',
+						sessionID: SESSION,
 					},
 					parts: [{ type: 'text', text: 'system' }],
 				},
 				{
-					info: { role: 'user' },
+					info: { role: 'user', sessionID: SESSION },
 					parts: [{ type: 'text', text }],
 				},
 			],
@@ -119,18 +125,19 @@ describe('knowledge injector retrieved events', () => {
 			enabled: true,
 			inject_char_budget: 1200,
 		});
+		swarmState.activeAgent.set(SESSION, 'architect');
 		const output: { messages?: MessageWithParts[] } = {
 			messages: [
 				{
 					info: {
 						role: 'system',
 						agent: 'architect',
-						sessionID: 'session-1',
+						sessionID: SESSION,
 					},
 					parts: [{ type: 'text', text: 'system' }],
 				},
 				{
-					info: { role: 'user' },
+					info: { role: 'user', sessionID: SESSION },
 					parts: [{ type: 'text', text: 'please continue' }],
 				},
 			],

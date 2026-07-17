@@ -31,6 +31,7 @@ import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { swarmState } from '../../../src/state';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
+const SESSION = 's-1';
 let tempDir: string;
 let originalSearch: typeof _internals.searchKnowledge;
 let originalRecordEvent: typeof _internals.recordKnowledgeEvent;
@@ -71,6 +72,7 @@ beforeEach(() => {
 	tempDir = mkdtempSync(path.join(os.tmpdir(), 'swarm-shown-'));
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	originalSearch = _internals.searchKnowledge;
 	originalRecordEvent = _internals.recordKnowledgeEvent;
 	originalRecordShown = _internals.recordKnowledgeShown;
@@ -85,20 +87,24 @@ afterEach(() => {
 	_internals.recordLessonsShown = originalRecordLessonsShown;
 	_internals.confirmEntriesPhase = originalConfirmEntriesPhase;
 	swarmState.currentCriticalShownIds.clear();
+	swarmState.activeAgent.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
 function architectOutput(userText = 'please continue'): {
 	messages?: MessageWithParts[];
 } {
+	// (#1849) Drive identity via swarmState.activeAgent (the production path,
+	// set by chat.message) and stamp a consistent sessionID on every message.
+	swarmState.activeAgent.set(SESSION, 'architect');
 	return {
 		messages: [
 			{
-				info: { role: 'system', agent: 'architect', sessionID: 's-1' },
+				info: { role: 'system', agent: 'architect', sessionID: SESSION },
 				parts: [{ type: 'text', text: 'system' }],
 			},
 			{
-				info: { role: 'user' },
+				info: { role: 'user', sessionID: SESSION },
 				parts: [{ type: 'text', text: userText }],
 			},
 		],
