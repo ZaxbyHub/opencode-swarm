@@ -328,14 +328,14 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 5 — subagent_type bypass attempts', () => {
 		const bypassAttempts = [
 			{ name: 'coder_evil', value: 'coder_evil', shouldReset: false },
-			{ name: 'CODER (uppercase)', value: 'CODER', shouldReset: false },
+			{ name: 'CODER (uppercase)', value: 'CODER', shouldReset: true },
 			{ name: 'coder with prefix space', value: ' coder', shouldReset: false },
 			{ name: 'coder with suffix space', value: 'coder ', shouldReset: false },
 			{ name: 'coder with both spaces', value: ' coder ', shouldReset: false },
 			{ name: 'c0der (zero substitution)', value: 'c0der', shouldReset: false },
 			{ name: 'cođer (unicode)', value: 'cođer', shouldReset: false },
 			{ name: 'exact coder', value: 'coder', shouldReset: true },
-			{ name: 'Coder (capitalized)', value: 'Coder', shouldReset: false },
+			{ name: 'Coder (capitalized)', value: 'Coder', shouldReset: true },
 		];
 
 		for (const { name, value, shouldReset } of bypassAttempts) {

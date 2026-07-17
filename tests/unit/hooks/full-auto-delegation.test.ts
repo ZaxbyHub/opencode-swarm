@@ -112,6 +112,8 @@ describe('outbound delegation — arbitrary user-defined swarm IDs', () => {
 		['customer123_critic_oversight', 'critic_oversight accepted'],
 		['my swarm_test_engineer', 'space-separator works'],
 		['payments-team_critic_drift_verifier', 'compound role accepted'],
+		['!!!_coder', 'punctuation-only swarm ID accepted'],
+		['-_coder', 'separator-character swarm ID accepted'],
 	];
 
 	for (const [name, label] of arbitraryAccepted) {
