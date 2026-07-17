@@ -226,7 +226,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		// is the mutable target.
 		const output = {
 			args: {
-				prompt: 'Implement the feature',
+				prompt: 'ACCEPTANCE: the feature is implemented\nImplement the feature',
 				subagent_type: 'coder',
 			},
 		};
@@ -446,7 +446,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		// tool.execute.before: real SDK shape. output.args holds the delegation
 		// prompt. The fail-closed chain snapshots output.args via guardrails.
 		const delegationPrompt = {
-			prompt: 'Implement the feature',
+			prompt: 'ACCEPTANCE: the feature is implemented\nImplement the feature',
 			subagent_type: 'coder',
 		};
 		const beforeOutput = { args: { ...delegationPrompt } };
