@@ -320,8 +320,9 @@ export const SKILL_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 /**
  * Canonical set of tool names that write/modify file contents.
  * Used by scope-guard.ts and guardrails.ts to detect write operations.
- * NOTE: bash/shell tools are intentionally excluded — bash commands are opaque
- * to static scope analysis. Post-hoc detection via guardrails diff-scope provides secondary coverage.
+ * NOTE: bash/shell tools are intentionally excluded from this direct-write set.
+ * Their detected write targets are analyzed separately by shell-write-detect before
+ * execution; an unresolvable detected target fails closed instead of gaining authority here.
  */
 export const WRITE_TOOL_NAMES = [
 	'write',

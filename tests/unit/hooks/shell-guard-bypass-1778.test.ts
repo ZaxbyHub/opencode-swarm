@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
-import * as os from 'node:os';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { Plan } from '../../../src/config/plan-schema';
 import type {
 	AuthorityConfig,
 	GuardrailsConfig,
@@ -10,10 +12,17 @@ import {
 	dcStripOneWrapper,
 } from '../../../src/hooks/guardrails/destructive-command';
 import {
+	claimScopeBindingForChild,
+	createScopeBinding,
+	registerScopeBinding,
+} from '../../../src/scope/scope-binding';
+import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
+	swarmState,
 } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 /**
  * Issue #1778 H3: the last-line-of-defense shell guards were bypassable.
@@ -21,7 +30,31 @@ import {
  * bypass is closed while legitimate commands (fd-redirects) still pass.
  */
 
-const TEST_DIR = os.tmpdir();
+let testDir = '';
+let cleanup = () => {};
+const plan: Plan = {
+	schema_version: '1.0.0',
+	title: 'Shell guard fixture',
+	swarm: 'test',
+	phases: [
+		{
+			id: 1,
+			name: 'Test',
+			status: 'in_progress',
+			tasks: [
+				{
+					id: '1.1',
+					phase: 1,
+					status: 'pending',
+					size: 'small',
+					description: 'Shell guard',
+					depends: [],
+					files_touched: ['src'],
+				},
+			],
+		},
+	],
+};
 
 function defaultConfig(): GuardrailsConfig {
 	return {
@@ -43,18 +76,59 @@ function makeOutput(command: string) {
 	return { args: { command } };
 }
 function coderSession(id: string): void {
-	startAgentSession(id, 'coder');
+	startAgentSession(id, 'coder', testDir);
+	swarmState.activeAgent.set(id, 'coder');
 }
 function setDeclaredScope(sessionId: string, scope: string[]): void {
 	const session = getAgentSession(sessionId);
-	if (session) session.declaredCoderScope = scope;
+	if (!session) throw new Error('test session missing');
+	session.currentTaskId = '1.1';
+	session.declaredCoderScope = scope;
+	const parentSessionId = `${sessionId}-parent`;
+	const callId = `${sessionId}-call`;
+	const pending = createScopeBinding({
+		directory: testDir,
+		plan,
+		taskId: '1.1',
+		files: scope,
+		ownerSessionId: parentSessionId,
+		ownerMessageId: callId,
+		dispatchCallId: callId,
+		source: 'plan',
+	});
+	if (!pending) throw new Error('scope fixture was not created');
+	registerScopeBinding(pending);
+	if (
+		!claimScopeBindingForChild({
+			directory: testDir,
+			parentSessionId,
+			childSessionId: sessionId,
+			dispatchCallId: callId,
+		})
+	)
+		throw new Error('scope fixture was not activated');
 }
 
 describe('shell guard bypasses closed (#1778 H3)', () => {
-	beforeEach(() => resetSwarmState());
+	beforeEach(() => {
+		resetSwarmState();
+		const created = createSafeTestDir('shell-guard-');
+		testDir = created.dir;
+		cleanup = created.cleanup;
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(testDir, '.swarm', 'plan.json'),
+			JSON.stringify(plan),
+		);
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		cleanup();
+	});
 
 	it('blocks a write hidden inside bash -c that is outside declared scope', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-bashc');
 		setDeclaredScope('h3-bashc', ['src/']);
 
@@ -67,7 +141,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 	});
 
 	it('blocks a write hidden inside eval that is outside declared scope', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-eval');
 		setDeclaredScope('h3-eval', ['src/']);
 
@@ -79,29 +153,29 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 		).rejects.toThrow(/outside declared scope|not authorised|unresolvable/);
 	});
 
-	it('enforces universal-deny prefixes for a no-scope agent (was skipped)', async () => {
+	it('fails closed before any coder shell write when scope is absent', async () => {
 		const authority: AuthorityConfig = {
 			universal_deny_prefixes: ['.git'],
 		} as AuthorityConfig;
 		const hooks = createGuardrailsHooks(
-			TEST_DIR,
+			testDir,
 			undefined,
 			defaultConfig(),
 			authority,
 		);
 		coderSession('h3-noscope');
-		// No declared scope set — previously returned early, skipping deny checks.
+		// No active Task-correlated scope exists.
 
 		await expect(
 			hooks.toolBefore(
 				makeBashInput('h3-noscope'),
-				makeOutput('echo pwn > .git/hooks/pre-commit'),
+				makeOutput('echo pwn > ordinary-output.txt'),
 			),
-		).rejects.toThrow(/universal deny prefix|not authorised/);
+		).rejects.toThrow(/SCOPE_NOT_DECLARED/);
 	});
 
 	it('blocks rm with stacked non-rf flags (rm -rfv) on an unsafe path', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-rmrfv');
 		setDeclaredScope('h3-rmrfv', ['src/']);
 
@@ -114,7 +188,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 	});
 
 	it('blocks rm -vrf (flag order variant) on an unsafe path', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-rmvrf');
 		setDeclaredScope('h3-rmvrf', ['src/']);
 
@@ -127,7 +201,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 	});
 
 	it('blocks a destructive command hidden after a lone & separator', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-amp');
 		setDeclaredScope('h3-amp', ['src/']);
 
@@ -140,7 +214,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 	});
 
 	it('allows an in-scope write with a trailing fd-redirect (2>&1)', async () => {
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+		const hooks = createGuardrailsHooks(testDir, undefined, defaultConfig());
 		coderSession('h3-fd');
 		setDeclaredScope('h3-fd', ['src/']);
 
@@ -192,7 +266,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 		for (const cmd of ['rm -r /etc', 'rm -f /etc/passwd', 'rm -R /etc']) {
 			it(`blocks "${cmd}"`, async () => {
 				const hooks = createGuardrailsHooks(
-					TEST_DIR,
+					testDir,
 					undefined,
 					defaultConfig(),
 				);

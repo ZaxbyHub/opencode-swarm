@@ -56,6 +56,17 @@ export type { AgentDefinition } from './architect';
 // Track agents for which we've already warned about missing config
 const warnedAgents = new Set<string>();
 
+const NONTRANSIENT_STOP_PROTOCOL = [
+	'',
+	'## NON-TRANSIENT TOOL FAILURE PROTOCOL — MANDATORY',
+	'Apply this protocol when a tool reports ParserError, ParseError, MissingEndCurlyBrace, CommandNotFoundException, a command-not-found/not-recognized error, or [sandbox] BLOCKED.',
+	'It also applies when guardrails report NON-TRANSIENT STOP or NON-TRANSIENT CIRCUIT BREAKER — including the third same-category permanent failure:',
+	'1. STOP. Do not retry the same operation with a different command, shell, tool, quoting style, or wrapper.',
+	'2. Treat the failure as structural, not transient. Do not spend retry budget on it.',
+	'3. Report BLOCKED with the exact error category and the command/tool that failed.',
+	'4. Wait for corrected input, environment, scope, or a verified new invocation before continuing.',
+].join('\n');
+
 // Module-level map of swarm agents config for runtime fallback resolution by guardrails
 // Keyed by swarmId: "default" for the default swarm, "local", "fast", "precise", etc. for named swarms
 const _swarmAgentsMap = new Map<
@@ -798,6 +809,7 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	// getAgentConfigs() over the default prompts.
 	for (const agent of agents) {
 		if (typeof agent.config.prompt === 'string') {
+			agent.config.prompt += NONTRANSIENT_STOP_PROTOCOL;
 			try {
 				assertNoUnresolvedPlaceholders(agent.config.prompt, agent.name);
 			} catch (err) {

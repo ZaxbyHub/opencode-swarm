@@ -46,6 +46,11 @@ function mockProbeAvailable() {
 		() => true;
 }
 
+function decodeWrappedScript(wrapped: string): string {
+	const payload = /-EncodedCommand\s+([A-Za-z0-9+/=]+)/.exec(wrapped)?.[1];
+	return payload ? Buffer.from(payload, 'base64').toString('utf16le') : wrapped;
+}
+
 // ---------------------------------------------------------------------------
 // Supplementary envOverride tests
 // ---------------------------------------------------------------------------
@@ -66,7 +71,7 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 				});
 				// PowerShell single-quoted strings preserve content verbatim
 				// So the value a=b=c should appear as-is in $env:FOO = 'a=b=c';
-				expect(wrapped).toContain("$env:FOO = 'a=b=c';");
+				expect(decodeWrappedScript(wrapped)).toContain("$env:FOO = 'a=b=c';");
 			},
 		);
 
@@ -78,7 +83,7 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
 					X: '=',
 				});
-				expect(wrapped).toContain("$env:X = '=';");
+				expect(decodeWrappedScript(wrapped)).toContain("$env:X = '=';");
 			},
 		);
 
@@ -91,7 +96,9 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 					DOLLAR: '$HOME',
 				});
 				// PowerShell single-quoted strings do NOT expand variables
-				expect(wrapped).toContain("$env:DOLLAR = '$HOME';");
+				expect(decodeWrappedScript(wrapped)).toContain(
+					"$env:DOLLAR = '$HOME';",
+				);
 			},
 		);
 
@@ -103,7 +110,7 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
 					SEMI: 'a;b',
 				});
-				expect(wrapped).toContain("$env:SEMI = 'a;b';");
+				expect(decodeWrappedScript(wrapped)).toContain("$env:SEMI = 'a;b';");
 			},
 		);
 	});
@@ -122,8 +129,8 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 					$FOO: 'value',
 				});
 				// $FOO is not a valid env var name — must not appear in PS script
-				expect(wrapped).not.toContain('$FOO');
-				expect(wrapped).not.toContain('$env:$');
+				expect(decodeWrappedScript(wrapped)).not.toContain('$FOO');
+				expect(decodeWrappedScript(wrapped)).not.toContain('$env:$');
 			},
 		);
 
@@ -135,8 +142,8 @@ describe('WindowsSandboxExecutor — envOverride verification (supplementary)', 
 				const wrapped = executor.wrapCommand('echo hello', [], undefined, {
 					'FOO&BAR': 'value',
 				});
-				expect(wrapped).not.toContain('FOO&BAR');
-				expect(wrapped).not.toContain('$env:FOO');
+				expect(decodeWrappedScript(wrapped)).not.toContain('FOO&BAR');
+				expect(decodeWrappedScript(wrapped)).not.toContain('$env:FOO');
 			},
 		);
 	});

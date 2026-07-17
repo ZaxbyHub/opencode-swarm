@@ -30,8 +30,24 @@ import {
 	loadLastPlanCriticApprovedSnapshot,
 	takeSnapshotEvent,
 } from '../plan/ledger';
-import { loadPlanJsonOnly } from '../plan/manager';
+import { loadPlanJsonOnly, savePlan } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import {
+	canonicalWorkspaceIdentity,
+	claimScopeBindingForChild,
+	clearScopeBindings,
+	createScopeBinding,
+	deriveChildScopeBinding,
+	getScopeBinding,
+	MAX_PENDING_SCOPE_BINDINGS,
+	registerScopeBinding,
+	resolveCoderScopeSources,
+} from '../scope/scope-binding';
+import {
+	clearScopeBindingFromDisk,
+	readScopeBindingFromDisk,
+	writeScopeBindingToDisk,
+} from '../scope/scope-persistence';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
@@ -55,6 +71,7 @@ import { isStrictTaskId } from '../validation/task-id';
 import {
 	awaitingMergeByCallID,
 	checkStandardWorktreeSerializationRelease,
+	cleanupStandardWorktreeForCallId,
 	finishStandardWorktreeDispatch,
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
@@ -114,7 +131,67 @@ const EvidenceTaskIdPlanSchema = z
  * that cleanup, a `/swarm close` followed by a new session with a colliding
  * taskId (e.g. "1.1") would inherit stale scope from the previous swarm.
  */
-export const pendingCoderScopeByTaskId = new Map<string, string[]>();
+class BoundedPendingScopeMap extends Map<string, string[]> {
+	private readonly expiresAtByKey = new Map<string, number>();
+	private sweepExpired(now = Date.now()): void {
+		for (const [key, expiresAt] of this.expiresAtByKey) {
+			if (expiresAt <= now) this.delete(key);
+		}
+	}
+	override set(key: string, value: string[]): this {
+		this.sweepExpired();
+		this.delete(key);
+		super.set(key, value);
+		this.expiresAtByKey.set(key, Date.now() + 5 * 60_000);
+		while (this.size > MAX_PENDING_SCOPE_BINDINGS) {
+			const oldest = this.keys().next().value as string | undefined;
+			if (!oldest) break;
+			this.delete(oldest);
+		}
+		return this;
+	}
+	override get(key: string): string[] | undefined {
+		this.sweepExpired();
+		return super.get(key);
+	}
+	override has(key: string): boolean {
+		this.sweepExpired();
+		return super.has(key);
+	}
+	override delete(key: string): boolean {
+		this.expiresAtByKey.delete(key);
+		return super.delete(key);
+	}
+	override clear(): void {
+		this.expiresAtByKey.clear();
+		super.clear();
+	}
+}
+
+/** @deprecated Compatibility-only test fixture; never consulted by production. */
+export const pendingCoderScopeByTaskId = new BoundedPendingScopeMap();
+
+function pendingScopeKey(directory: string, taskId: string): string | null {
+	const workspace = canonicalWorkspaceIdentity(directory);
+	return workspace ? `${workspace}\0${taskId}` : null;
+}
+
+export function setPendingCoderScope(
+	directory: string,
+	taskId: string,
+	files: string[],
+): void {
+	const key = pendingScopeKey(directory, taskId);
+	if (key) pendingCoderScopeByTaskId.set(key, files);
+}
+
+export function getPendingCoderScope(
+	directory: string,
+	taskId: string,
+): string[] | null {
+	const key = pendingScopeKey(directory, taskId);
+	return key ? (pendingCoderScopeByTaskId.get(key) ?? null) : null;
+}
 
 /**
  * v6.70.0 gap-closure: clears the pending coder-scope map. Exported as a
@@ -123,6 +200,80 @@ export const pendingCoderScopeByTaskId = new Map<string, string[]>();
  */
 export function clearPendingCoderScope(): void {
 	pendingCoderScopeByTaskId.clear();
+}
+
+interface PreparedCoderScope {
+	plan: Plan;
+	taskId: string;
+	declaredFiles: string[] | null;
+	binding: NonNullable<ReturnType<typeof createScopeBinding>>;
+}
+
+async function prepareCoderScope(
+	directory: string,
+	input: { sessionID: string; callID: string },
+	args: Record<string, unknown>,
+): Promise<PreparedCoderScope> {
+	const plan = await loadPlanJsonOnly(directory);
+	const planTaskIds = plan
+		? new Set(
+				plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
+			)
+		: new Set<string>();
+	const taskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+	if (!plan || !taskId) {
+		throw new Error(
+			'SCOPE_NOT_DECLARED: coder delegation requires one unambiguous plan task ID and a non-empty scope from declare_scope, plan files_touched, or complete FILE: directives.',
+		);
+	}
+	const directives = extractTaskFileDirectives(args);
+	if (directives.present && !directives.files) {
+		throw new Error(
+			'SCOPE_NOT_DECLARED: FILE: directives are present but empty or ambiguous; provide one complete relative path per FILE: line.',
+		);
+	}
+	const explicitBinding =
+		getScopeBinding({
+			directory,
+			plan,
+			taskId,
+			ownerSessionId: input.sessionID,
+		}) ??
+		readScopeBindingFromDisk({
+			directory,
+			plan,
+			taskId,
+			ownerSessionId: input.sessionID,
+			requireDeclaration: true,
+		});
+	const declaredFiles = getPlanTaskDeclaredFiles(plan, taskId);
+	const resolved = resolveCoderScopeSources({
+		explicitFiles: explicitBinding?.files,
+		planFiles: declaredFiles,
+		fileDirectiveFiles: directives.files,
+	});
+	if (!resolved.ok) {
+		throw new Error(
+			`${resolved.code}: ${resolved.code === 'SCOPE_CONFLICT' ? 'coder scope sources disagree or a lower-precedence source exceeds the authoritative scope.' : 'coder delegation has no complete, valid, non-empty scope.'}`,
+		);
+	}
+	const binding = createScopeBinding({
+		directory,
+		plan,
+		taskId,
+		files: resolved.files,
+		ownerSessionId: input.sessionID,
+		ownerMessageId: input.callID,
+		dispatchCallId: input.callID,
+		activation: 'pending_child',
+		source: resolved.source,
+	});
+	if (!binding) {
+		throw new Error(
+			'SCOPE_NOT_DECLARED: coder scope could not be bound to this Task invocation.',
+		);
+	}
+	return { plan, taskId, declaredFiles, binding };
 }
 
 /**
@@ -1024,6 +1175,25 @@ function resolveDelegatedPlanTaskId(
 	return null;
 }
 
+function extractTaskFileDirectives(args: Record<string, unknown>): {
+	present: boolean;
+	files: string[] | null;
+} {
+	const files = new Set<string>();
+	let present = false;
+	for (const field of [args.prompt, args.description, args.task, args.input]) {
+		if (typeof field !== 'string') continue;
+		for (const line of field.split(/\r?\n/)) {
+			if (!/^\s*FILE\s*:/i.test(line)) continue;
+			present = true;
+			const value = line.replace(/^\s*FILE\s*:\s*/i, '').trim();
+			if (!value || /[,;|]/.test(value)) return { present: true, files: null };
+			files.add(value);
+		}
+	}
+	return { present, files: present && files.size > 0 ? [...files] : null };
+}
+
 /**
  * Parses structured per-task verdict lines from agent dispatch output.
  *
@@ -1454,6 +1624,12 @@ export function createDelegationGateHook(
 		},
 		output: unknown,
 	) => Promise<void>;
+	taskMetadata: (input: {
+		callID: string;
+		parentSessionID: string;
+		childSessionID: string;
+	}) => Promise<void>;
+	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -1481,6 +1657,158 @@ export function createDelegationGateHook(
 		BackgroundTaskChangeContext
 	>();
 	const coderObservedFilesByCallID = new Map<string, string[] | null>();
+	const publishedScopeBindingsByCallID = new Map<
+		string,
+		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
+	>();
+	const sameScopeBindingIdentity = (
+		left: PreparedCoderScope['binding'],
+		right: PreparedCoderScope['binding'],
+	): boolean =>
+		left.workspaceIdentity === right.workspaceIdentity &&
+		left.planStructureHash === right.planStructureHash &&
+		left.taskId === right.taskId &&
+		left.ownerSessionId === right.ownerSessionId &&
+		left.ownerMessageId === right.ownerMessageId &&
+		left.dispatchCallId === right.dispatchCallId;
+	const publishScopeBinding = async (
+		callID: string,
+		bindingDirectory: string,
+		binding: PreparedCoderScope['binding'],
+	): Promise<void> => {
+		registerScopeBinding(binding);
+		await writeScopeBindingToDisk(bindingDirectory, binding);
+		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
+		entries.push({ directory: bindingDirectory, binding });
+		publishedScopeBindingsByCallID.delete(callID);
+		publishedScopeBindingsByCallID.set(callID, entries);
+		while (publishedScopeBindingsByCallID.size > MAX_PENDING_SCOPE_BINDINGS) {
+			const oldest = publishedScopeBindingsByCallID.keys().next().value;
+			if (oldest === undefined) break;
+			const evicted = publishedScopeBindingsByCallID.get(oldest) ?? [];
+			publishedScopeBindingsByCallID.delete(oldest);
+			clearScopeBindings((binding) =>
+				evicted.some((entry) =>
+					sameScopeBindingIdentity(binding, entry.binding),
+				),
+			);
+			for (const entry of evicted) {
+				clearScopeBindingFromDisk({
+					directory: entry.directory,
+					taskId: entry.binding.taskId,
+					ownerSessionId: entry.binding.ownerSessionId,
+				});
+			}
+		}
+	};
+	const clearPublishedScopeBindings = (callID: string): void => {
+		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
+		publishedScopeBindingsByCallID.delete(callID);
+		clearScopeBindings((binding) =>
+			entries.some((entry) => sameScopeBindingIdentity(binding, entry.binding)),
+		);
+		for (const entry of entries) {
+			clearScopeBindingFromDisk({
+				directory: entry.directory,
+				taskId: entry.binding.taskId,
+				ownerSessionId: entry.binding.ownerSessionId,
+			});
+		}
+	};
+	const taskMetadata = async (input: {
+		callID: string;
+		parentSessionID: string;
+		childSessionID: string;
+	}): Promise<void> => {
+		const result = claimScopeBindingForChild({
+			directory,
+			parentSessionId: input.parentSessionID,
+			childSessionId: input.childSessionID,
+			dispatchCallId: input.callID,
+		});
+		if (!result) return;
+		clearScopeBindingFromDisk({
+			directory,
+			taskId: result.previous.taskId,
+			ownerSessionId: result.previous.ownerSessionId,
+		});
+		await writeScopeBindingToDisk(directory, result.claimed);
+		const entries = publishedScopeBindingsByCallID.get(input.callID) ?? [];
+		for (const entry of entries) {
+			if (
+				entry.directory === directory &&
+				entry.binding.ownerSessionId === result.previous.ownerSessionId &&
+				entry.binding.taskId === result.previous.taskId
+			) {
+				entry.binding = result.claimed;
+			}
+		}
+		const childSession = ensureAgentSession(
+			input.childSessionID,
+			'coder',
+			directory,
+		);
+		childSession.currentTaskId = result.claimed.taskId;
+		childSession.declaredCoderScope = [...result.claimed.files];
+	};
+	const sessionEnded = (
+		sessionID: string,
+		includeOwnedChildren = false,
+	): void => {
+		if (!sessionID) return;
+		const removed = clearScopeBindings(
+			(binding) =>
+				binding.ownerSessionId === sessionID ||
+				(includeOwnedChildren && binding.parentOwnerSessionId === sessionID),
+		);
+		for (const binding of removed) {
+			clearScopeBindingFromDisk({
+				directory: binding.workspaceIdentity,
+				taskId: binding.taskId,
+				ownerSessionId: binding.ownerSessionId,
+			});
+		}
+		if (
+			removed.some(
+				(binding) =>
+					binding.ownerSessionId === sessionID &&
+					binding.activation === 'active',
+			)
+		) {
+			const endedSession = swarmState.agentSessions.get(sessionID);
+			if (endedSession) {
+				endedSession.currentTaskId = null;
+				endedSession.declaredCoderScope = null;
+			}
+		}
+		for (const [callID, entries] of publishedScopeBindingsByCallID) {
+			const remaining = entries.filter(
+				(entry) =>
+					entry.binding.ownerSessionId !== sessionID &&
+					(!includeOwnedChildren ||
+						entry.binding.parentOwnerSessionId !== sessionID),
+			);
+			if (remaining.length === 0) publishedScopeBindingsByCallID.delete(callID);
+			else if (remaining.length !== entries.length)
+				publishedScopeBindingsByCallID.set(callID, remaining);
+		}
+	};
+	const clearPublishedScopeBindingsForTask = (
+		taskId: string,
+		parentSessionId: string,
+	): void => {
+		for (const [callID, entries] of publishedScopeBindingsByCallID) {
+			if (
+				entries.some(
+					(entry) =>
+						entry.binding.taskId === taskId &&
+						(entry.binding.ownerSessionId === parentSessionId ||
+							entry.binding.parentOwnerSessionId === parentSessionId),
+				)
+			)
+				clearPublishedScopeBindings(callID);
+		}
+	};
 	const clearCoderTaskChangeContext = (callID: string): void => {
 		coderTaskChangeContextByCallID.delete(callID);
 		coderObservedFilesByCallID.delete(callID);
@@ -1528,12 +1856,30 @@ export function createDelegationGateHook(
 			): Promise<void> => {
 				// No-op when delegation gate is disabled
 			},
-			toolBefore: async (): Promise<void> => {
-				// No-op when delegation gate is disabled
+			toolBefore: async (input, output): Promise<void> => {
+				const normalized = normalizeToolName(input.tool);
+				const args = output.args as Record<string, unknown> | undefined;
+				if (
+					(normalized !== 'Task' && normalized !== 'task') ||
+					!args ||
+					typeof args.subagent_type !== 'string' ||
+					stripKnownSwarmPrefix(args.subagent_type) !== 'coder'
+				)
+					return;
+				const prepared = await prepareCoderScope(directory, input, args);
+				await publishScopeBinding(input.callID, directory, prepared.binding);
 			},
-			toolAfter: async (): Promise<void> => {
-				// No-op when delegation gate is disabled
+			toolAfter: async (input, output): Promise<void> => {
+				if (
+					(normalizeToolName(input.tool) === 'Task' ||
+						normalizeToolName(input.tool) === 'task') &&
+					outputLooksLikeBackgroundRunning(output)
+				)
+					return;
+				clearPublishedScopeBindings(input.callID);
 			},
+			taskMetadata,
+			sessionEnded,
 		};
 	}
 
@@ -1756,10 +2102,10 @@ export function createDelegationGateHook(
 		const session = ensureAgentSession(input.sessionID);
 		if (!session || !session.taskWorkflowStates) return;
 
-		// Load the plan once up front. Both the reviewer-gate parallel exemption
-		// below and the standard worktree precreate path need execution_profile;
-		// loading here avoids a second read.
-		const plan = await _internals.loadPlanJsonOnly(directory);
+		// Scope preflight is mandatory and independent of the optional workflow
+		// gates. It creates a staged binding but does not publish authorization.
+		const preparedScope = await prepareCoderScope(directory, input, args);
+		const { plan, taskId: incomingCoderTaskId } = preparedScope;
 		const profile = plan?.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
 		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
@@ -1771,16 +2117,9 @@ export function createDelegationGateHook(
 			parallelEnabled &&
 			effectiveMaxConcurrent > 1 &&
 			!hasActiveLeanTurbo(input.sessionID);
-		const planTaskIds = plan
-			? new Set(plan.phases.flatMap((phase) => phase.tasks.map((t) => t.id)))
-			: new Set<string>();
-		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
-
 		await assertPlanCriticApprovedForExecution(directory, plan);
-		const incomingCoderDeclaredFiles = getPlanTaskDeclaredFiles(
-			plan,
-			incomingCoderTaskId,
-		);
+		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
+		const correlatedBinding = preparedScope.binding;
 
 		// Reviewer gate: block coder re-delegation when a prior coder task awaits
 		// review. In parallel mode (parallelization_enabled), dispatching a coder
@@ -1885,6 +2224,7 @@ export function createDelegationGateHook(
 		}
 		if (!parallelModeActive) {
 			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
+			await publishScopeBinding(input.callID, directory, correlatedBinding);
 			return;
 		}
 
@@ -1892,9 +2232,7 @@ export function createDelegationGateHook(
 		// FR-102: pass declared scope (from pending map populated by FILE: extraction
 		// or prior declare_scope) so provisionWorktree can materialize it into the
 		// lane's .swarm/scopes/ for durability across plugin restart.
-		const laneScope = resolvedTaskId
-			? (pendingCoderScopeByTaskId.get(resolvedTaskId) ?? null)
-			: null;
+		const laneScope = correlatedBinding.files;
 		await precreateStandardWorktreeSession({
 			config,
 			directory,
@@ -1912,6 +2250,49 @@ export function createDelegationGateHook(
 		});
 		const standardDispatch = standardWorktreeByCallID.get(input.callID);
 		if (standardDispatch) {
+			if (resolvedTaskId) {
+				try {
+					const childSessionId =
+						typeof args.task_id === 'string' ? args.task_id.trim() : '';
+					if (!childSessionId || childSessionId === input.sessionID) {
+						throw new Error(
+							'SCOPE_CHILD_IDENTITY_MISSING: worktree dispatch did not return a distinct child session id',
+						);
+					}
+					// Materialize the current authoritative plan in the isolated root via
+					// the ledger-aware writer. Strict child authorization never trusts a
+					// binding-era snapshot or a raw hand-written plan projection.
+					await savePlan(standardDispatch.handle.worktreePath, plan, {
+						preserveCompletedStatuses: false,
+					});
+					const childBinding = deriveChildScopeBinding(correlatedBinding, {
+						childDirectory: standardDispatch.handle.worktreePath,
+						childSessionId,
+						parentCallId: input.callID,
+					});
+					await publishScopeBinding(
+						input.callID,
+						standardDispatch.handle.worktreePath,
+						childBinding,
+					);
+					const childSession = ensureAgentSession(
+						childSessionId,
+						'coder',
+						standardDispatch.handle.worktreePath,
+					);
+					childSession.currentTaskId = childBinding.taskId;
+					childSession.declaredCoderScope = [...childBinding.files];
+				} catch (error) {
+					clearPublishedScopeBindings(input.callID);
+					await cleanupStandardWorktreeForCallId(
+						input.callID,
+						'denied',
+						directory,
+						resolveWorktreeIsolationConfig(config).worktree_dir,
+					);
+					throw error;
+				}
+			}
 			rememberCoderTaskChangeContext(
 				input.callID,
 				incomingCoderDeclaredFiles,
@@ -1921,6 +2302,7 @@ export function createDelegationGateHook(
 			// Isolation may degrade to the project root; capture only after the
 			// provisioning attempt and before the upstream coder begins execution.
 			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
+			await publishScopeBinding(input.callID, directory, correlatedBinding);
 		}
 	};
 
@@ -1935,13 +2317,21 @@ export function createDelegationGateHook(
 		},
 		_output: unknown,
 	): Promise<void> => {
-		if (!input.sessionID) return;
+		const normalized = normalizeToolName(input.tool);
+		const isTaskTool = normalized === 'Task' || normalized === 'task';
+		if (!input.sessionID) {
+			if (isTaskTool && !outputLooksLikeBackgroundRunning(_output))
+				clearPublishedScopeBindings(input.callID);
+			return;
+		}
 		const session = swarmState.agentSessions.get(input.sessionID);
-		if (!session) return;
+		if (!session) {
+			if (isTaskTool && !outputLooksLikeBackgroundRunning(_output))
+				clearPublishedScopeBindings(input.callID);
+			return;
+		}
 
 		// Detect task tool calls
-		const normalized = normalizeToolName(input.tool);
-
 		// Cache council-active status; if true, per-task Stage B advancement is
 		// replaced by the council verdict path — reviewer/test_engineer may still
 		// be dispatched as council members but do not advance state via the
@@ -1970,6 +2360,29 @@ export function createDelegationGateHook(
 				const completionTaskId =
 					typeof rawTaskId === 'string' ? rawTaskId.trim() : null;
 				if (completionTaskId && isStrictTaskId(completionTaskId)) {
+					const removed = clearScopeBindings(
+						(binding) =>
+							binding.taskId === completionTaskId &&
+							(binding.ownerSessionId === input.sessionID ||
+								binding.parentOwnerSessionId === input.sessionID),
+					);
+					for (const binding of removed) {
+						clearScopeBindingFromDisk({
+							directory: binding.workspaceIdentity,
+							taskId: binding.taskId,
+							ownerSessionId: binding.ownerSessionId,
+						});
+						if (binding.activation === 'active') {
+							const childSession = swarmState.agentSessions.get(
+								binding.ownerSessionId,
+							);
+							if (childSession) {
+								childSession.currentTaskId = null;
+								childSession.declaredCoderScope = null;
+							}
+						}
+					}
+					clearPublishedScopeBindingsForTask(completionTaskId, input.sessionID);
 					try {
 						const completionSession = ensureAgentSession(input.sessionID);
 						await advanceTaskStateAndPersist(
@@ -2161,6 +2574,8 @@ export function createDelegationGateHook(
 		}
 
 		if (normalized === 'Task' || normalized === 'task') {
+			// The delegated tool has returned (success or failure). Revoke the exact
+			// Task-call authorization before any merge/QA bookkeeping runs.
 			// Primary source: input.args from OpenCode's tool.execute.after hook (authoritative)
 			// Fallback: stored args from guardrails toolBefore (legacy path)
 			const standardDispatch = standardWorktreeByCallID.get(input.callID);
@@ -2178,6 +2593,8 @@ export function createDelegationGateHook(
 				| undefined;
 			const subagentType =
 				directArgs?.subagent_type ?? storedArgs?.subagent_type;
+			const backgroundResultIsRunning =
+				outputLooksLikeBackgroundRunning(_output);
 
 			// Issue #1151: background swarm Task handling.
 			// A background swarm Task returns a "running" placeholder; it must NEVER advance
@@ -2192,7 +2609,7 @@ export function createDelegationGateHook(
 				isKnownCanonicalRole(stripKnownSwarmPrefix(subagentType)) &&
 				(isBackgroundTrue(directArgs?.background) ||
 					isBackgroundTrue(storedArgs?.background) ||
-					outputLooksLikeBackgroundRunning(_output))
+					backgroundResultIsRunning)
 			) {
 				if (backgroundSubagentsEnabled) {
 					try {
@@ -2272,8 +2689,12 @@ export function createDelegationGateHook(
 				}
 				clearCoderTaskChangeContext(input.callID);
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+				if (!backgroundResultIsRunning)
+					clearPublishedScopeBindings(input.callID);
 				return;
 			}
+			// A non-background Task result is terminal for this exact dispatch.
+			clearPublishedScopeBindings(input.callID);
 
 			if (typeof subagentType === 'string') {
 				try {
@@ -3073,13 +3494,6 @@ export function createDelegationGateHook(
 				session.declaredCoderScope =
 					declaredFiles.length > 0 ? declaredFiles : null;
 
-				// v6.33.1 CRIT-1: Also store in fallback map for scope-guard access
-				if (declaredFiles.length > 0 && currentTaskId) {
-					pendingCoderScopeByTaskId.set(currentTaskId, declaredFiles);
-				} else {
-					pendingCoderScopeByTaskId.delete(currentTaskId);
-				}
-
 				// OBSERVE-ONLY (Phase 2): Record coder delegation in task state machine for telemetry.
 				// Error swallowing is intentional — Phase 3 enforcement gates will check state directly
 				// at enforcement time. A transition failure here means state is already recorded or a
@@ -3346,5 +3760,7 @@ ${warningLines.join('\n')}`;
 			messages.splice(batchWarnInsertIdx, 0, batchWarnMessage);
 		},
 		toolAfter,
+		taskMetadata,
+		sessionEnded,
 	};
 }

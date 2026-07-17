@@ -1128,7 +1128,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 | `command.execute.before` | `safeHook(commandHandler)` | Handle `/swarm` slash commands |
 | `tool.execute.before` | `safeHook(activityHooks.toolBefore)` | Track tool usage per agent; append written file paths to `modifiedFilesThisCoderTask`; reset tracking on coder delegation |
 | `tool.execute.after` | `safeHook(activityHooks.toolAfter)` | Record tool results + trigger flush; advance per-task state machine on gate completions; populate `lastGateOutcome`; check scope containment after coder task; set `lastScopeViolation` on drift |
-| `chat.message` | `safeHook(delegationHandler)` | Track active agent per session; extract FILE: directives into `declaredCoderScope`; advance state to `coder_delegated` on new coder delegation |
+| `chat.message` | `safeHook(delegationHandler)` | Track active agent per session and advance state to `coder_delegated`; observed FILE text is not itself authorization |
 
 ### Composition Constraint
 
@@ -1644,11 +1644,11 @@ Architect-only tool that pre-declares which files a coder delegation is allowed 
 - `working_directory` must exist and contain `.swarm/plan.json`
 - `taskId` must exist in the plan; task must not already be in `'complete'` state
 
-**On success:** Sets `session.declaredCoderScope = mergedFiles` (files + whitelist) and `session.lastScopeViolation = null` on ALL active architect sessions. Returns `{ success: true, taskId, fileCount }`.
+**On success:** Creates an identity-bound scope for only the calling session and current workspace/plan generation/task, sets that session's compatibility projection, and returns `{ success: true, taskId, fileCount }`. Ownerless direct calls validate and report but never authorize a live session.
 
 **On failure:** Returns structured error with `{ success: false, message, errors[] }`.
 
-**Automatic alternative:** `delegation-gate.ts` extracts FILE: directive values from any coder delegation envelope and stores them as `session.declaredCoderScope` automatically. An explicit `declare_scope` call is only needed when scope must be declared before the delegation text is composed.
+**Task preflight:** Every standard, prefixed, or Full-Auto coder dispatch resolves exactly one plan task. A matching explicit binding is authoritative and plan/`FILE:` paths must be subsets; otherwise plan `files_touched` is authoritative; otherwise a complete set of one relative path per `FILE:` line is used. Missing/malformed scope throws `SCOPE_NOT_DECLARED`; disagreement throws `SCOPE_CONFLICT`. Authorization is bound to canonical workspace, plan identity/structure, task, parent session, and Task call, with bounded TTL/FIFO state. Worktree lanes derive a child-root binding rather than reusing root authority.
 
 ### Scope Containment Enforcement
 
@@ -1679,7 +1679,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
   - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Per-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'complete'`. Transitions are forward-only; `complete` can only be reached from `tests_run`.
   - `lastGateOutcome: { gate, taskId, passed, timestamp } | null` — Most recent gate result, populated by `guardrails/index.ts` toolAfter. Used for deliberation preamble injection in Phase 4 context engineering.
-  - `declaredCoderScope: string[] | null` — File paths from the coder delegation FILE: directives or explicit `declare_scope` tool call (Phase 5). Null means no scope has been declared.
+  - `declaredCoderScope: string[] | null` — Compatibility projection of the current identity-bound scope for this session. It is not independently authoritative.
   - `lastScopeViolation: string | null` — Last scope containment violation message (Phase 5). Set when coder modifies >2 files outside declared scope; cleared after warning is injected.
   - `modifiedFilesThisCoderTask: string[]` — File paths the architect has written during the current coder task (Phase 5). Reset to `[]` when the next coder delegation starts.
   - `scopeViolationDetected?: boolean` — One-shot flag (Phase 5). Set when a scope violation is found; cleared immediately after the warning is injected into the next architect message.

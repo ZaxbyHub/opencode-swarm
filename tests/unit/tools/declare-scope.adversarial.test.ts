@@ -1054,50 +1054,6 @@ describe('declare-scope adversarial tests', () => {
 
 	// ========== GROUP 15: Successful scope declaration ==========
 	describe('Group 15: Successful scope declaration behavior', () => {
-		it('sets declaredCoderScope on all sessions on success', async () => {
-			const session1 = createWorkflowTestSession();
-			const session2 = createWorkflowTestSession();
-			swarmState.agentSessions.set('session-1', session1);
-			swarmState.agentSessions.set('session-2', session2);
-
-			const args: DeclareScopeArgs = {
-				taskId: '1.1',
-				files: ['src/file1.ts', 'src/file2.ts'],
-				whitelist: ['src/allowed.ts'],
-			};
-
-			const result = await executeDeclareScope(args, tempDir);
-			expect(result.success).toBe(true);
-			expect(result.fileCount).toBe(3);
-
-			// Both sessions should have the scope set
-			expect(session1.declaredCoderScope).toEqual([
-				'src/file1.ts',
-				'src/file2.ts',
-				'src/allowed.ts',
-			]);
-			expect(session2.declaredCoderScope).toEqual([
-				'src/file1.ts',
-				'src/file2.ts',
-				'src/allowed.ts',
-			]);
-		});
-
-		it('clears lastScopeViolation on success', async () => {
-			const session = createWorkflowTestSession() as any;
-			session.lastScopeViolation = { file: 'src/bad.ts', action: 'write' };
-			swarmState.agentSessions.set('session-with-violation', session);
-
-			const args: DeclareScopeArgs = {
-				taskId: '1.1',
-				files: ['src/file.ts'],
-			};
-
-			const result = await executeDeclareScope(args, tempDir);
-			expect(result.success).toBe(true);
-			expect(session.lastScopeViolation).toBeNull();
-		});
-
 		it('returns correct fileCount with files only', async () => {
 			const args: DeclareScopeArgs = {
 				taskId: '1.1',

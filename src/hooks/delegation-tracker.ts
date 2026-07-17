@@ -35,23 +35,16 @@ export function createDelegationTrackerHook(
 	): Promise<void> => {
 		const now = Date.now();
 
-		// If no agent is specified, the architect is taking over (delegation ended)
-		// Update activeAgent to architect and reset session startTime so duration limit doesn't apply
+		// If no agent is specified, the architect is taking over on a new turn.
+		// This is also a verified invocation boundary: fatal non-transient stops
+		// belong to the prior turn and must not poison the corrected architect turn.
 		if (!input.agent || input.agent === '') {
-			const session = swarmState.agentSessions.get(input.sessionID);
-
-			// Only reset if delegation was actually active (prevents spurious resets)
-			if (session?.delegationActive) {
-				session.delegationActive = false;
-				// Set activeAgent to architect to ensure duration exemption applies
-				swarmState.activeAgent.set(input.sessionID, ORCHESTRATOR_NAME);
-				// Reset session with architect name to reset startTime for accurate duration tracking
-				ensureAgentSession(input.sessionID, ORCHESTRATOR_NAME);
-				// Update agent event timestamp for stale detection
-				updateAgentEventTime(input.sessionID);
-			} else if (!session) {
-				// Initialize session if missing (e.g. first message)
-				ensureAgentSession(input.sessionID, ORCHESTRATOR_NAME);
+			const session = ensureAgentSession(input.sessionID, ORCHESTRATOR_NAME);
+			session.delegationActive = false;
+			swarmState.activeAgent.set(input.sessionID, ORCHESTRATOR_NAME);
+			updateAgentEventTime(input.sessionID);
+			if (guardrailsEnabled) {
+				beginInvocation(input.sessionID, ORCHESTRATOR_NAME);
 			}
 			return;
 		}
@@ -84,10 +77,12 @@ export function createDelegationTrackerHook(
 		// Record agent dispatch for phase completion tracking
 		recordPhaseAgentDispatch(input.sessionID, agentName);
 
-		// Start new invocation window for non-architect agents
+		// Start a new invocation boundary for every agent. Architect remains
+		// budget-unlimited (beginInvocation returns null), but still needs fresh
+		// non-transient circuit and tool-correlation state for a corrected turn.
 		// CRITICAL: Always call beginInvocation, even if same agent as previous
 		// (handles architect → coder → architect → coder re-invocation pattern)
-		if (!isArchitect && guardrailsEnabled) {
+		if (guardrailsEnabled) {
 			beginInvocation(input.sessionID, agentName);
 		}
 

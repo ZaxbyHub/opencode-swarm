@@ -48,16 +48,14 @@ describe('file-extractor', () => {
 		it('skips private functions starting with _', () => {
 			const code = `def _private_function():\n    pass`;
 			const result = extractFilename(code, 'python', 0);
-			// Should fallback to timestamp-based name
-			expect(result).toMatch(/^output_1_.*\.py$/);
+			// Deterministic fallback keeps preflight authorization and execution aligned.
+			expect(result).toBe('output_1.py');
 		});
 
-		it('falls back to timestamp-based name when no patterns match', () => {
+		it('falls back to a deterministic name when no patterns match', () => {
 			const code = `some random code\nwith no patterns`;
 			const result = extractFilename(code, 'python', 0);
-			expect(result).toMatch(
-				/^output_1_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.py$/,
-			);
+			expect(result).toBe('output_1.py');
 		});
 
 		it('uses correct extensions from EXT_MAP for known languages', () => {
@@ -181,7 +179,7 @@ print("first")
 print("second")
 \`\`\`
 `;
-			const existingFile = path.join(ws, 'output_1_1970-01-01T00-00-00.py');
+			const existingFile = path.join(ws, 'output_1.py');
 			fs.writeFileSync(existingFile, 'existing content');
 
 			await extract_code_blocks.execute({ content }, { directory: ws } as any);
@@ -189,7 +187,7 @@ print("second")
 			const files = fs.readdirSync(ws);
 			expect(files).toHaveLength(3); // existing + 2 new files
 			const newFiles = files.filter((f) => f !== path.basename(existingFile));
-			expect(newFiles.some((f) => f.includes('_1_'))).toBe(true);
+			expect(newFiles.sort()).toEqual(['output_1_1.py', 'output_2.py']);
 
 			fs.rmSync(ws, { recursive: true, force: true });
 		});
@@ -291,7 +289,18 @@ print("second")
 			// Deterministic generated filename via a bare `# filename:` comment,
 			// so the pre-planted symlink name matches the write target exactly.
 			const linkName = 'planted.py';
-			fs.symlinkSync(outsideTarget, path.join(ws, linkName));
+			try {
+				fs.symlinkSync(outsideTarget, path.join(ws, linkName));
+			} catch (error) {
+				// Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege for
+				// file symlinks. Leave this security case active everywhere it is supported.
+				if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+					fs.rmSync(ws, { recursive: true, force: true });
+					fs.rmSync(outside, { recursive: true, force: true });
+					return;
+				}
+				throw error;
+			}
 			const content = '```python\n# filename: planted.py\nprint("pwn")\n```';
 
 			const result = await extract_code_blocks.execute({ content }, {

@@ -331,97 +331,26 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 		});
 	});
 
-	describe('attack vector 7: non-string targetPath (should NOT throw)', () => {
-		it('null targetPath → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+	describe('attack vectors 7-8: malformed targets fail closed', () => {
+		it.each([
+			{ value: null },
+			{ value: undefined },
+			{ value: 123 },
+			{ value: { path: '.swarm/plan.md' } },
+			{ value: ['.swarm', 'plan.md'] },
+			{ value: true },
+			{ value: '' },
+			{ value: '   ' },
+		])('rejects unverifiable filePath %#', async ({ value: filePath }) => {
+			const hooks = createGuardrailsHooks(defaultConfig());
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: null });
-
-			// Should not throw - just run the function
-			await hooks.toolBefore(input, output);
-		});
-
-		it('undefined targetPath → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({});
-
-			await hooks.toolBefore(input, output);
-		});
-
-		it('number targetPath (123) → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: 123 });
-
-			await hooks.toolBefore(input, output);
-		});
-
-		it('object targetPath → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: { path: '.swarm/plan.md' } });
-
-			await hooks.toolBefore(input, output);
-		});
-
-		it('array targetPath → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: ['.swarm', 'plan.md'] });
-
-			await hooks.toolBefore(input, output);
-		});
-
-		it('boolean targetPath (true) → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: true });
-
-			await hooks.toolBefore(input, output);
-		});
-	});
-
-	describe('attack vector 8: empty string targetPath (should NOT throw)', () => {
-		it('empty string targetPath → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: '' });
-
-			await hooks.toolBefore(input, output);
-		});
-
-		it('whitespace-only targetPath → should NOT throw (length > 0 passes)', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: '   ' });
-
-			// Whitespace passes the length check but won't match plan.md
-			await hooks.toolBefore(input, output);
+			const args = filePath === undefined ? {} : { filePath };
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput(args),
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 		});
 	});
 

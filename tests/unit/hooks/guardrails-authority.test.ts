@@ -2468,23 +2468,6 @@ describe('patch-style write authority enforcement', () => {
 			).rejects.toThrow(/WRITE BLOCKED/i);
 		});
 
-		it('F4: apply_patch with empty payload → no throw (nothing to check)', async () => {
-			const sessionId = 'patch-f4-delegated';
-			ensureAgentSession(sessionId, 'coder');
-			swarmState.activeAgent.set(sessionId, 'coder');
-			const session = getAgentSession(sessionId)!;
-			session.delegationActive = true;
-			beginInvocation(sessionId, 'coder');
-
-			const hooks = createGuardrailsHooks(tempDir, hooksConfig);
-
-			// apply_patch with empty content - no paths to extract
-			await hooks.toolBefore(
-				{ tool: 'apply_patch', sessionID: sessionId, callID: 'call-f4' },
-				{ args: { input: '' } },
-			);
-		});
-
 		it('F5: apply_patch with /dev/null only → no throw (filtered out)', async () => {
 			const sessionId = 'patch-f5-delegated';
 			ensureAgentSession(sessionId, 'coder');

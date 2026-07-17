@@ -59,7 +59,7 @@ describe('outbound delegation check', () => {
 		).rejects.toThrow(/unknown subagent/);
 	});
 
-	test('denies coder delegation without declared scope', async () => {
+	test('defers coder scope enforcement to the shared identity-aware gate', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
 			config: config(),
@@ -70,7 +70,7 @@ describe('outbound delegation check', () => {
 				{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
 				{ args: { subagent_type: 'coder' } },
 			),
-		).rejects.toThrow(/declared scope/);
+		).resolves.toBeUndefined();
 	});
 
 	test('allows coder delegation when scope declared via session', async () => {
@@ -134,7 +134,7 @@ describe('outbound delegation — arbitrary user-defined swarm IDs', () => {
 		});
 	}
 
-	test('arbitrary swarm coder without declared scope is denied', async () => {
+	test('prefixed coder scope enforcement also defers to the shared gate', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
 			config: config(),
@@ -145,7 +145,7 @@ describe('outbound delegation — arbitrary user-defined swarm IDs', () => {
 				{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
 				{ args: { subagent_type: 'banana_coder' } },
 			),
-		).rejects.toThrow(/declared scope/);
+		).resolves.toBeUndefined();
 	});
 
 	test('arbitrary swarm coder with declared scope passes', async () => {

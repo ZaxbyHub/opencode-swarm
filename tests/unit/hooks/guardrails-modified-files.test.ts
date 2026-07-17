@@ -84,36 +84,6 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			expect(files.filter((f) => f === 'src/foo.ts').length).toBe(1);
 		});
 
-		it('multiple different write tools → all paths tracked', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.delegationActive = true;
-
-			// Write tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: 'src/foo.ts' }),
-			);
-			// Edit tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'edit', 'call-2'),
-				makeOutput({ filePath: 'src/bar.ts' }),
-			);
-			// Patch tool
-			await hooks.toolBefore(
-				makeInput('test-session', 'patch', 'call-3'),
-				makeOutput({ filePath: 'src/baz.ts' }),
-			);
-
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/foo.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/bar.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/baz.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(3);
-		});
-
 		it('non-write tool (bash) → modifiedFilesThisCoderTask unchanged', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
@@ -186,38 +156,6 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			expect(session?.modifiedFilesThisCoderTask).toContain(
 				'src/using-target.ts',
 			);
-		});
-
-		it('all write tool variants tracked: create_file, insert, apply_patch', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.delegationActive = true;
-
-			// create_file
-			await hooks.toolBefore(
-				makeInput('test-session', 'create_file', 'call-1'),
-				makeOutput({ filePath: 'src/new-file.ts' }),
-			);
-			// insert
-			await hooks.toolBefore(
-				makeInput('test-session', 'insert', 'call-2'),
-				makeOutput({ path: 'src/insert-into.ts' }),
-			);
-			// apply_patch
-			await hooks.toolBefore(
-				makeInput('test-session', 'apply_patch', 'call-3'),
-				makeOutput({ file: 'src/patch.ts' }),
-			);
-
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/new-file.ts');
-			expect(session?.modifiedFilesThisCoderTask).toContain(
-				'src/insert-into.ts',
-			);
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/patch.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(3);
 		});
 	});
 
@@ -479,7 +417,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	});
 
 	describe('edge cases', () => {
-		it('empty string path → does NOT track', async () => {
+		it('empty string path fails closed and does not track', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -487,15 +425,17 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.delegationActive = true;
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: '' }),
-			);
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: '' }),
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});
 
-		it('undefined path → does NOT track', async () => {
+		it('undefined path fails closed and does not track', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -503,10 +443,12 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.delegationActive = true;
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ content: 'some content' }), // No path field
-			);
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ content: 'some content' }), // No path field
+				),
+			).rejects.toThrow('WRITE TARGET UNVERIFIABLE');
 
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});

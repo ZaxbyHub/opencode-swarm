@@ -308,18 +308,8 @@ export function createFullAutoDelegationHook(
 			// the args.files / args.scope payload. The check is keyed on the
 			// CANONICAL role, so `bananaSwarm_coder` is treated identically to
 			// the unprefixed `coder` for the scope requirement.
-			if (canonicalRole === 'coder') {
-				const session = swarmState.agentSessions.get(sessionID);
-				const declared = session?.declaredCoderScope;
-				const argScope =
-					Array.isArray((args as Record<string, unknown>).files) ||
-					Array.isArray((args as Record<string, unknown>).scope);
-				if ((!declared || declared.length === 0) && !argScope) {
-					throw new Error(
-						`FULL_AUTO_DELEGATION_DENY: coder delegation '${subagentRaw}' requires declared scope. Call declare_scope first or include 'files' in the Task arguments.`,
-					);
-				}
-			}
+			// The shared delegation gate performs the identity-aware coder scope
+			// preflight for standard and prefixed Full-Auto agents alike.
 
 			// Outbound check 3: protected paths in delegation prompt.
 			if (promptText && typeof promptText === 'string') {
