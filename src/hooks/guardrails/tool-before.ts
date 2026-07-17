@@ -1287,14 +1287,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const currentSession = swarmState.agentSessions.get(sessionID);
 		if (!currentSession?.delegationActive && isArchitect(sessionID)) {
 			const coderDelegArgs = args as Record<string, unknown> | undefined;
-			const rawSubagentType = coderDelegArgs?.subagent_type;
 			const coderDeleg = isAgentDelegation(tool, coderDelegArgs);
-			if (
-				coderDeleg.isDelegation &&
-				coderDeleg.targetAgent === 'coder' &&
-				typeof rawSubagentType === 'string' &&
-				(rawSubagentType === 'coder' || rawSubagentType.endsWith('_coder'))
-			) {
+			if (coderDeleg.isDelegation && coderDeleg.targetAgent === 'coder') {
 				const coderSession = swarmState.agentSessions.get(sessionID);
 				if (coderSession) {
 					coderSession.modifiedFilesThisCoderTask = [];

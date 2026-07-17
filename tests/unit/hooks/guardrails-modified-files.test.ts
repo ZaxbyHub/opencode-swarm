@@ -160,7 +160,16 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	});
 
 	describe('architect coder dispatch reset', () => {
-		it('architect dispatches Task with subagent_type=coder → resets modifiedFilesThisCoderTask to []', async () => {
+		it.each([
+			'coder',
+			'mega_coder',
+			'id_coder',
+			'lowtier_coder',
+			'modelrelay_coder',
+			'user-chosen-42_coder',
+			'user-chosen-42-coder',
+			'user chosen 42 coder',
+		])('architect dispatches the canonical coder role as %s → resets modifiedFilesThisCoderTask to []', async (subagentType) => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			// Start as architect
@@ -171,17 +180,30 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			// Pre-populate modifiedFilesThisCoderTask (simulating prior coder activity)
 			session!.modifiedFilesThisCoderTask = ['src/old1.ts', 'src/old2.ts'];
 
-			// Architect dispatches a Task with subagent_type='coder'
+			// Issue #1875 follow-up: swarm IDs are opaque user input. This matrix
+			// must fail if reset behavior is coupled to any known swarm name or one
+			// raw-name separator instead of the canonical-role resolver.
 			await hooks.toolBefore(
 				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'coder', task: 'Implement feature X' }),
+				makeOutput({
+					subagent_type: subagentType,
+					task: 'Implement feature X',
+				}),
 			);
 
 			// Should be reset to empty array
 			expect(session?.modifiedFilesThisCoderTask?.length ?? 0).toBe(0);
 		});
 
-		it('Task with subagent_type=reviewer → does NOT reset', async () => {
+		it.each([
+			'reviewer',
+			'modelrelay_reviewer',
+			'user-chosen-42-explorer',
+			'test_engineer',
+			'coder_helper',
+			'codec',
+			undefined,
+		])('non-coder delegation identity %s → does NOT reset', async (subagentType) => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -189,53 +211,17 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			const session = getAgentSession('test-session');
 			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
 
-			// Architect dispatches reviewer (not coder)
 			await hooks.toolBefore(
 				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'reviewer', task: 'Review code' }),
+				makeOutput({
+					...(subagentType === undefined
+						? {}
+						: { subagent_type: subagentType }),
+					task: 'Non-coder task',
+				}),
 			);
 
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
-		});
-
-		it('Task with subagent_type=test_engineer → does NOT reset', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
-
-			// Architect dispatches test_engineer (not coder)
-			await hooks.toolBefore(
-				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ subagent_type: 'test_engineer', task: 'Run tests' }),
-			);
-
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
-		});
-
-		it('Task with no subagent_type → does NOT reset', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const session = getAgentSession('test-session');
-			session!.modifiedFilesThisCoderTask = ['src/old.ts'];
-
-			// Task without subagent_type
-			await hooks.toolBefore(
-				makeInput('test-session', 'Task', 'call-1'),
-				makeOutput({ task: 'Some task' }),
-			);
-
-			// Should NOT be reset
-			expect(session?.modifiedFilesThisCoderTask).toContain('src/old.ts');
-			expect(session?.modifiedFilesThisCoderTask?.length).toBe(1);
+			expect(session?.modifiedFilesThisCoderTask).toEqual(['src/old.ts']);
 		});
 	});
 

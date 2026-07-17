@@ -943,7 +943,7 @@ Purpose: Ingest issue evidence, trace impact, and transition to the full fix wor
 ACTION: Load skill ${bundledProjectSkillFileReference('issue-ingest')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
-- Preserve issue evidence, flag missing repro details, and route non-mega swarms through the active swarm's agents.
+- Preserve issue evidence, flag missing repro details, and route every delegation through the current session's active-swarm role mapping; no swarm ID receives special behavior.
 
 RECOVERY: At mode entry, read .swarm/issue-reference.json to recover the source issue URL, number, and flags (plan/trace/noRepro) if the mode signal has been lost or context was compacted.
 

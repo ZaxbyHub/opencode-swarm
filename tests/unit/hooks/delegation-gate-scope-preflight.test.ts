@@ -152,20 +152,28 @@ describe('coder scope preflight', () => {
 		).toEqual(['src/a.ts', 'src/b.ts']);
 	});
 
-	test('applies the same preflight to prefixed coder names', async () => {
+	test.each([
+		'mega_coder',
+		'id_coder',
+		'lowtier_coder',
+		'modelrelay_coder',
+		'user-chosen-42_coder',
+		'user-chosen-42-coder',
+		'user chosen 42 coder',
+	])('applies the same preflight to the canonical coder role for arbitrary swarm name %s', async (agent) => {
 		await writePlan([]);
-		await expect(dispatch('TASK: 1.1', 'mega_coder')).rejects.toThrow(
+		await expect(dispatch('TASK: 1.1', agent)).rejects.toThrow(
 			'SCOPE_NOT_DECLARED',
 		);
 	});
 
-	test('blocks Phase-1 mega_coder dispatch before any plan or scope state exists', async () => {
+	test('blocks Phase-1 coder dispatch under an unseen user-defined swarm name before any plan or scope state exists', async () => {
 		expect(fs.existsSync(path.join(directory, '.swarm', 'plan.json'))).toBe(
 			false,
 		);
-		await expect(dispatch('TASK: 1.1', 'mega_coder')).rejects.toThrow(
-			'SCOPE_NOT_DECLARED',
-		);
+		await expect(
+			dispatch('TASK: 1.1', 'never-seen-before_coder'),
+		).rejects.toThrow('SCOPE_NOT_DECLARED');
 
 		const absentPlanIdentity = planWith(['src/must-not-be-authorized.ts']);
 		expect(getPendingCoderScope(directory, '1.1')).toBeNull();
@@ -198,7 +206,9 @@ describe('coder scope preflight', () => {
 		await expect(
 			hook.toolBefore(
 				{ tool: 'Task', sessionID: 'parent', callID: 'disabled-call' },
-				{ args: { subagent_type: 'mega_coder', prompt: 'TASK: 1.1' } },
+				{
+					args: { subagent_type: 'modelrelay_coder', prompt: 'TASK: 1.1' },
+				},
 			),
 		).rejects.toThrow('SCOPE_NOT_DECLARED');
 	});
@@ -210,7 +220,7 @@ describe('coder scope preflight', () => {
 			directory,
 		);
 		const input = { tool: 'Task', sessionID: 'parent', callID: 'disabled-ok' };
-		const args = { subagent_type: 'mega_coder', prompt: 'TASK: 1.1' };
+		const args = { subagent_type: 'lowtier_coder', prompt: 'TASK: 1.1' };
 		await hook.toolBefore(input, { args });
 		expect(
 			getAuthorizedScopeBinding({
