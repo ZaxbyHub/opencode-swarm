@@ -167,4 +167,84 @@ describe('advisoryWarn', () => {
 
 		expect(getDeferredWarnings()).toEqual(['first', 'second', 'third']);
 	});
+
+	// --- Issue #1886: the `data` argument must reach /swarm diagnose, not only
+	// the debug log. Structural guardrail for the whole defect class: any
+	// two-arg advisoryWarn caller (config-validation, fs errors, …) whose
+	// actionable detail lives in `data` must surface that detail in the buffer.
+	// These fail on the pre-fix advisoryWarn (which buffered only `message`).
+	describe('folds the optional data arg into the buffered warning (#1886)', () => {
+		test('appends string detail to the buffered entry', () => {
+			advisoryWarn(
+				'validation failed:',
+				'agents.architect.fallback_models: too big',
+			);
+			const [entry] = getDeferredWarnings();
+			expect(entry).toBe(
+				'validation failed: agents.architect.fallback_models: too big',
+			);
+		});
+
+		test("surfaces an Error's message", () => {
+			advisoryWarn('Failed to load config:', new Error('ENOENT: missing file'));
+			expect(getDeferredWarnings()[0]).toContain('ENOENT: missing file');
+		});
+
+		test('renders a plain object as compact JSON', () => {
+			advisoryWarn('detail:', { field: 'x', code: 'too_big' });
+			expect(getDeferredWarnings()[0]).toContain(
+				'{"field":"x","code":"too_big"}',
+			);
+		});
+
+		test('joins a string array with "; "', () => {
+			advisoryWarn('issues:', ['a: bad', 'b: worse']);
+			expect(getDeferredWarnings()[0]).toBe('issues: a: bad; b: worse');
+		});
+
+		test('buffers exactly the message when data is absent or nullish', () => {
+			advisoryWarn('no data');
+			advisoryWarn('null data', null);
+			advisoryWarn('undefined data', undefined);
+			expect(getDeferredWarnings()).toEqual([
+				'no data',
+				'null data',
+				'undefined data',
+			]);
+		});
+
+		test('collapses multi-line detail to a single line (markdown-bullet safe)', () => {
+			advisoryWarn('multiline:', 'line one\n  line two\n\tline three');
+			const entry = getDeferredWarnings()[0];
+			expect(entry).not.toContain('\n');
+			expect(entry).toBe('multiline: line one line two line three');
+		});
+
+		test('bounds very long detail with an ellipsis', () => {
+			advisoryWarn('big:', 'D'.repeat(5000));
+			const entry = getDeferredWarnings()[0];
+			// message + space + <=600 chars of detail; far below the 5000 raw.
+			expect(entry.length).toBeLessThan(700);
+			expect(entry.endsWith('…')).toBe(true);
+		});
+
+		test('does not throw on circular / BigInt data (String() fallback)', () => {
+			const circular: Record<string, unknown> = {};
+			circular.self = circular;
+			expect(() => advisoryWarn('circular:', circular)).not.toThrow();
+			expect(() => advisoryWarn('bigint:', { n: 10n })).not.toThrow();
+			// Both still buffered (one entry each), never lost.
+			expect(getDeferredWarnings().length).toBe(2);
+		});
+
+		test('still forwards raw structured data to the debug logger unchanged', () => {
+			process.env.OPENCODE_SWARM_DEBUG = '1';
+			const payload = { slug: 'x' };
+			advisoryWarn('advisory:', payload);
+			expect(consoleLogSpy).toHaveBeenCalledWith(
+				expect.stringContaining('advisory:'),
+				payload,
+			);
+		});
+	});
 });

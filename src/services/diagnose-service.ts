@@ -1106,7 +1106,7 @@ export async function getDiagnoseData(
 		checks.push({
 			name: 'Deferred Warnings',
 			status: '⚠️',
-			detail: `${getDeferredWarnings().length} warning(s) deferred from init (run with verbose logs for details)`,
+			detail: `${getDeferredWarnings().length} warning(s) deferred from init — see the Deferred Warnings section below (or set OPENCODE_SWARM_DEBUG=1 for full detail)`,
 		});
 	}
 

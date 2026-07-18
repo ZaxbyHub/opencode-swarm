@@ -33,15 +33,65 @@ export function addDeferredWarning(warning: string): void {
 }
 
 /**
+ * Upper bound (chars) on the rendered `data` detail appended to a buffered
+ * advisory. The buffer itself is already capped at MAX_DEFERRED_WARNINGS
+ * entries; this bounds per-entry size so a large validation dump cannot bloat
+ * `/swarm diagnose`. Overflow is truncated with an ellipsis.
+ */
+const MAX_ADVISORY_DETAIL_CHARS = 600;
+
+/**
+ * Render the optional `data` argument of `advisoryWarn` into a compact,
+ * single-line, bounded string that is safe to append to the operator-visible
+ * deferred-warning buffer. Returns '' when there is nothing meaningful to show.
+ *
+ * Intentionally generic (no Zod/domain coupling): strings pass through, Errors
+ * surface their `.message`, string arrays join, and anything else is
+ * JSON-stringified with a `String()` fallback for circular refs, BigInt, and
+ * the `undefined`-return cases (functions/symbols). Callers that want a clean,
+ * human-readable summary (e.g. flattened Zod issues) should pass a pre-formatted
+ * string — see `formatZodIssues` in `config/loader.ts` (issue #1886).
+ */
+function renderAdvisoryDetail(data: unknown): string {
+	if (data === undefined || data === null) return '';
+	let raw: string;
+	if (typeof data === 'string') {
+		raw = data;
+	} else if (data instanceof Error) {
+		raw = data.message;
+	} else if (Array.isArray(data) && data.every((d) => typeof d === 'string')) {
+		raw = (data as string[]).join('; ');
+	} else {
+		try {
+			// JSON.stringify RETURNS undefined (does not throw) for functions and
+			// symbols; the ?? covers that, the catch covers circular refs/BigInt.
+			raw = JSON.stringify(data) ?? String(data);
+		} catch {
+			raw = String(data);
+		}
+	}
+	// Collapse to a single line so /swarm diagnose renders one markdown bullet
+	// per warning (formatDiagnoseMarkdown emits `- ${warning}`).
+	const collapsed = raw.replace(/\s+/g, ' ').trim();
+	if (collapsed === '') return '';
+	return collapsed.length > MAX_ADVISORY_DETAIL_CHARS
+		? `${collapsed.slice(0, MAX_ADVISORY_DETAIL_CHARS - 1)}…`
+		: collapsed;
+}
+
+/**
  * Operational advisory: a non-fatal, operator-actionable condition reached on
  * a path that can run while the host TUI owns the terminal (plugin init,
- * /swarm command handlers, tool execution, chat/tool hooks). Routes the message
- * to BOTH delivery channels:
+ * /swarm command handlers, tool execution, chat/tool hooks). Routes to BOTH
+ * delivery channels:
  *
  * 1. `addDeferredWarning` — buffers it for `/swarm diagnose`, so the operator
- *    can discover the condition without it polluting the live display.
- * 2. `log` — the debug-gated logger, so it also shows under
- *    `OPENCODE_SWARM_DEBUG=1` for live debugging.
+ *    can discover the condition without it polluting the live display. The
+ *    optional `data` is folded into the buffered entry (rendered compact +
+ *    single-line) so actionable detail is visible in `/swarm diagnose`, not
+ *    only under debug (issue #1886: config-validation detail was silently lost).
+ * 2. `log` — the debug-gated logger, so the message AND the structured `data`
+ *    also show under `OPENCODE_SWARM_DEBUG=1` for live debugging.
  *
  * This NEVER writes raw stderr/stdout. It is the safe replacement for the raw
  * `console.warn` calls that corrupt the bubbletea TUI (issue #1249 class, and
@@ -57,7 +107,8 @@ export function addDeferredWarning(warning: string): void {
  * streams."
  */
 export function advisoryWarn(message: string, data?: unknown): void {
-	addDeferredWarning(message);
+	const detail = renderAdvisoryDetail(data);
+	addDeferredWarning(detail ? `${message} ${detail}` : message);
 	log(message, data);
 }
 
