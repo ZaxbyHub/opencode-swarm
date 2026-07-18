@@ -19,7 +19,7 @@ Use the project skill at `.claude/skills/issue-tracer/SKILL.md` as your operatin
 1. Read the issue and repository evidence before making claims.
 2. Reproduce the issue or document why it cannot be reproduced.
 3. Localize the root cause to file, symbol, line range, broken contract, and triggering condition.
-4. Write artifacts under `.claude/issue-traces/<issue-id-or-slug>/`.
+4. Write artifacts under `.agents/issue-traces/<issue-slug>/` (create the directory and its `.git/info/exclude` entry with the skill's `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>`, run from the repo root). Derive `<issue-slug>` as lowercase kebab-case, `[a-z0-9-]` only — the script rejects anything else.
 5. Produce 3-5 fix candidates when realistic and rank them.
 6. Run a critic pass before presenting a plan.
 7. Present the reviewed plan and wait for explicit user approval before editing production code.
@@ -27,7 +27,7 @@ Use the project skill at `.claude/skills/issue-tracer/SKILL.md` as your operatin
 
 ## Important Limitation
 
-Claude Code subagents cannot spawn nested subagents. This is a hard platform restriction. When running as this subagent, always use the fallback adversarial critic pass from `references/critic-gate.md`. Label the review "Fallback self-critic: independent critic unavailable." Do not attempt to invoke Agent or Task.
+Claude Code subagents cannot spawn nested subagents. This is a hard platform restriction. When running as this subagent, always use the fallback adversarial critic pass from `.opencode/skills/issue-tracer/references/critic-gate.md`. Label the review "Fallback self-critic: independent critic unavailable." Do not attempt to invoke Agent or Task.
 
 ## Final Output Before Approval
 

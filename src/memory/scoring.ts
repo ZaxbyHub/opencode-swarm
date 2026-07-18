@@ -215,6 +215,12 @@ function scopeSpecificityBoost(scope: MemoryScopeRef): number {
 			return 0.9;
 		case 'repository':
 			return 0.8;
+		// #1850: a cohort scope is broader than repository (shared across
+		// sibling worktrees) but more specific than a single project. Score it
+		// just below repository so cohort-shared memories rank comparably to
+		// repository memories in the absence of a repository-tier match.
+		case 'cohort':
+			return 0.75;
 		case 'project':
 			return 0.65;
 		case 'workspace':

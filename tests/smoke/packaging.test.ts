@@ -42,10 +42,9 @@ describe('packaging smoke tests', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// The mechanical PR-workflow controller adds durable evidence, provenance,
-		// and publication enforcement. The observed bundle is about 5.30 MB; the
-		// 5.4 MiB cap retains roughly 350 KB of headroom while a further 10% increase
-		// still exceeds the limit. The exact merged size is rechecked after every build.
+		// The current memory-sharing and PR-workflow controllers add durable
+		// provenance, validation, and publication enforcement. The exact merged
+		// size is rechecked after every build; 5.4 MiB is a bounded budget.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
 	appendFile,
 	mkdir,
@@ -30,6 +30,10 @@ import type {
 	MemoryRewardEvent,
 	MemoryRewardEventFilter,
 } from './provider';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from './redaction';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import {
@@ -70,20 +74,35 @@ export class LocalJsonlMemoryProvider
 {
 	readonly name = 'local-jsonl';
 	private readonly rootDirectory: string;
+	/**
+	 * #1850: when set, the provider serves a cohort-shared store. Cohort roots
+	 * bypass `validateSwarmPath` (constructed by the resolver from a sanitized
+	 * linkId). `null` for local-root providers (today's behavior).
+	 */
+	private readonly cohortRoot: string | null;
 	private readonly config: MemoryConfig;
 	private initialized = false;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
 
-	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
+	constructor(
+		rootDirectory: string,
+		config: Partial<MemoryConfig> = {},
+		vettedCohortRoot?: string | null,
+	) {
 		this.rootDirectory = rootDirectory;
+		this.cohortRoot = vettedCohortRoot ?? null;
 		this.config = { ...DEFAULT_MEMORY_CONFIG, ...config };
 	}
 
+	/**
+	 * #1850 (critic GAP-5): explicit cohort-root path branch.
+	 * - cohort root → `<cohortRoot>/<filename>` (NO validateSwarmPath).
+	 * - local root → existing behavior: strip `.swarm/`, validateSwarmPath.
+	 */
 	private pathFor(
 		file: 'memories' | 'proposals' | 'audit' | 'reward-events',
 	): string {
-		const storageDir = this.config.storageDir.replace(/^\.swarm[/\\]?/, '');
 		const filename =
 			file === 'memories'
 				? 'memories.jsonl'
@@ -92,6 +111,10 @@ export class LocalJsonlMemoryProvider
 					: file === 'audit'
 						? 'audit.jsonl'
 						: 'reward-events.jsonl';
+		if (this.cohortRoot) {
+			return path.join(this.cohortRoot, filename);
+		}
+		const storageDir = this.config.storageDir.replace(/^\.swarm[/\\]?/, '');
 		return validateSwarmPath(
 			this.rootDirectory,
 			path.join(storageDir, filename),
@@ -100,6 +123,12 @@ export class LocalJsonlMemoryProvider
 
 	async initialize(): Promise<void> {
 		if (this.initialized) return;
+		// #1850 (KC-001 fix): enforce the cohort config fingerprint for JSONL
+		// providers too, so a cohort member with a mismatched config fails
+		// closed (acceptance #10). Mirrors the SQLite provider's check.
+		if (this.cohortRoot) {
+			this.assertCohortConfigFingerprint();
+		}
 		const memoryPath = this.pathFor('memories');
 		const proposalPath = this.pathFor('proposals');
 		const memoryLoad = validateLoadedMemories(
@@ -151,6 +180,7 @@ export class LocalJsonlMemoryProvider
 		this.memories.set(next.id, next);
 		await appendJsonl(this.pathFor('memories'), next);
 		await this.audit('upsert', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
@@ -176,6 +206,7 @@ export class LocalJsonlMemoryProvider
 			await appendJsonl(this.pathFor('memories'), tombstone);
 		}
 		await this.audit('delete', id, reason);
+		this.bumpCohortGeneration();
 	}
 
 	async recall(request: RecallRequest): Promise<RecallResultItem[]> {
@@ -247,6 +278,7 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		const record: MemoryRewardEvent = { ...event, id: randomUUID() };
 		await appendJsonl(this.pathFor('reward-events'), record);
+		this.bumpCohortGeneration();
 	}
 
 	async listRewardEvents(
@@ -300,6 +332,7 @@ export class LocalJsonlMemoryProvider
 		this.proposals.set(next.id, next);
 		await appendJsonl(this.pathFor('proposals'), next);
 		await this.audit('proposal', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
@@ -427,6 +460,7 @@ export class LocalJsonlMemoryProvider
 			change.reason,
 			buildCuratorDecisionEvent(change, proposal),
 		);
+		this.bumpCohortGeneration();
 		return change;
 	}
 
@@ -437,6 +471,7 @@ export class LocalJsonlMemoryProvider
 			Array.from(this.memories.values()),
 		);
 		await this.audit('compact', 'memories');
+		this.bumpCohortGeneration();
 	}
 
 	async compactMaintenance(
@@ -478,6 +513,7 @@ export class LocalJsonlMemoryProvider
 			'removed deleted, superseded, and expired scratch memories',
 			result,
 		);
+		this.bumpCohortGeneration();
 		return result;
 	}
 
@@ -496,6 +532,59 @@ export class LocalJsonlMemoryProvider
 			timestamp: new Date().toISOString(),
 		};
 		await appendJsonl(this.pathFor('audit'), event);
+	}
+
+	/**
+	 * #1850 (critic CONCERN-1): bump the cohort generation marker so sibling
+	 * worktrees observe this write on their next revalidation. Called at the
+	 * provider layer so ALL write paths invalidate peers. Local writes are
+	 * no-ops. Best-effort: a bump failure must never block the write.
+	 */
+	private bumpCohortGeneration(): void {
+		if (!this.cohortRoot) return;
+		try {
+			const markerPath = path.join(this.cohortRoot, 'memory.gen');
+			writeFileSync(markerPath, String(Date.now()), 'utf-8');
+		} catch {
+			/* best-effort — peer revalidation has TTL + pointer-stat backstops */
+		}
+	}
+
+	/**
+	 * #1850 (KC-001 fix): mirror the SQLite provider's fingerprint check. Reads
+	 * `memory-cohort-config.json` and throws on mismatch. Absent/malformed file
+	 * is permissive (fail-open never strands memory).
+	 */
+	private assertCohortConfigFingerprint(): void {
+		if (!this.cohortRoot) return;
+		const configPath = path.join(this.cohortRoot, 'memory-cohort-config.json');
+		if (!existsSync(configPath)) return;
+		try {
+			const stored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<
+				string,
+				unknown
+			>;
+			const storedFingerprint = stored.fingerprint;
+			if (typeof storedFingerprint !== 'string') return;
+			const expectedFingerprint = computeMemoryCohortFingerprint(
+				buildMemoryCohortFingerprintInput(this.config),
+			);
+			if (storedFingerprint !== expectedFingerprint) {
+				throw new Error(
+					`memory cohort config fingerprint mismatch: cohort expects ${storedFingerprint}, this worktree computes ${expectedFingerprint}. ` +
+						'Provider/embedding/redaction config differs across cohort members. ' +
+						'Run `/swarm memory unlink` to recover local state, or align configs across linked worktrees.',
+				);
+			}
+		} catch (err) {
+			if (
+				err instanceof Error &&
+				err.message.includes('fingerprint mismatch')
+			) {
+				throw err;
+			}
+			/* malformed config file — fail-open */
+		}
 	}
 
 	private activeMemory(memoryId: string): MemoryRecord {

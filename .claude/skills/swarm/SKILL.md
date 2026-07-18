@@ -89,6 +89,9 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm memory import` — import legacy JSONL memory into SQLite
 - `/swarm memory migrate` — run the one-time legacy JSONL to SQLite migration
 - `/swarm memory consolidation-log` — summarize recent memory consolidation passes
+- `/swarm memory link` — share memory across linked worktrees (requires `memory.link.enabled`)
+- `/swarm memory link status` — show whether memory is cohort-linked (distinct from knowledge link)
+- `/swarm memory unlink` — stop sharing memory; copies cohort family back to local
 - `/swarm curate` — run knowledge curation and hive promotion review
 - `/swarm consolidate` — run quota-bounded skill-improver consolidation
 - `/swarm promote` — manually promote a lesson to hive knowledge

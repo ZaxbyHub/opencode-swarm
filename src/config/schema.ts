@@ -1262,6 +1262,17 @@ export const MemoryConfigSchema = z.object({
 			busyTimeoutMs: z.number().int().min(0).max(60000).default(5000),
 		})
 		.default({ path: '.swarm/memory/memory.db', busyTimeoutMs: 5000 }),
+	/**
+	 * #1850 Linked Knowledge 5/5: opt-in cohort memory sharing. Default off —
+	 * memory remains worktree-local unless explicitly enabled. When enabled
+	 * and a memory-link pointer exists, repository-scoped memory redirects to
+	 * a shared cohort root derived from the #1846 cohort identity.
+	 */
+	link: z
+		.object({
+			enabled: z.boolean().default(false),
+		})
+		.default({ enabled: false }),
 	recall: z
 		.object({
 			defaultMaxItems: z.number().int().min(1).max(20).default(8),

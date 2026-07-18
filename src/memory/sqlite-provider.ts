@@ -1,6 +1,12 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { loadDatabaseCtor } from '../db/sqlite-loader.js';
@@ -54,6 +60,10 @@ import type {
 	MemoryRewardEventFilter,
 	MemoryTransaction,
 } from './provider';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from './redaction';
 import {
 	normalizeMemoryText,
 	stableScopeKey,
@@ -364,6 +374,14 @@ export class SQLiteMemoryProvider
 {
 	readonly name = 'sqlite';
 	private readonly rootDirectory: string;
+	/**
+	 * #1850: when set, the provider serves a cohort-shared store rather than
+	 * the worktree-local `.swarm/memory`. Cohort roots live under the platform
+	 * data dir (`<dataDir>/links/<linkId>/memory`) and bypass
+	 * `validateSwarmPath` by construction (the resolver sanitizes the linkId).
+	 * `null` for local-root providers (today's behavior, still validated).
+	 */
+	private readonly cohortRoot: string | null;
 	private readonly config: MemoryConfig;
 	private initialized = false;
 	private initPromise: Promise<void> | null = null;
@@ -379,8 +397,21 @@ export class SQLiteMemoryProvider
 	private recallCountSinceLastCompaction = 0;
 	private isCompacting = false;
 
-	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
+	constructor(
+		rootDirectory: string,
+		config: Partial<MemoryConfig> = {},
+		/**
+		 * #1850: optional cohort root. When provided, the provider opens the DB
+		 * at `<cohortRoot>/memory.db` and bypasses `validateSwarmPath` (the
+		 * cohort root is resolver-constructed from a sanitized linkId, not a
+		 * user-supplied path). When omitted, the provider uses the worktree
+		 * `.swarm` path with full `validateSwarmPath` enforcement (today's
+		 * behavior).
+		 */
+		vettedCohortRoot?: string | null,
+	) {
 		this.rootDirectory = rootDirectory;
+		this.cohortRoot = vettedCohortRoot ?? null;
 		this.config = {
 			...DEFAULT_MEMORY_CONFIG,
 			...config,
@@ -411,7 +442,18 @@ export class SQLiteMemoryProvider
 		};
 	}
 
+	/**
+	 * #1850 (critic GAP-5): explicit cohort-root path branch.
+	 * - cohort root → `<cohortRoot>/memory.db` (NO validateSwarmPath — the
+	 *   cohort root is a platform-data-dir path constructed by the resolver
+	 *   from a sanitized linkId, never from user input).
+	 * - local root → existing behavior: strip `.swarm/` prefix, pass through
+	 *   `validateSwarmPath` to enforce `.swarm` containment.
+	 */
 	private databasePath(): string {
+		if (this.cohortRoot) {
+			return path.join(this.cohortRoot, 'memory.db');
+		}
 		const relativePath = this.config.sqlite.path.replace(/^\.swarm[/\\]?/, '');
 		return validateSwarmPath(this.rootDirectory, relativePath);
 	}
@@ -429,6 +471,13 @@ export class SQLiteMemoryProvider
 
 	private async doInitialize(): Promise<void> {
 		const dbPath = this.databasePath();
+		// #1850 (reviewer important fix): enforce the cohort config fingerprint
+		// BEFORE opening the DB, so a cohort member with a mismatched provider,
+		// embedding model, or redaction policy fails closed (acceptance #10).
+		// The fingerprint was written at link time by `handleMemoryLinkCommand`.
+		if (this.cohortRoot) {
+			this.assertCohortConfigFingerprint();
+		}
 		mkdirSync(path.dirname(dbPath), { recursive: true });
 		const Db = loadDatabaseCtor();
 		this.db = new Db(dbPath);
@@ -1223,6 +1272,60 @@ export class SQLiteMemoryProvider
 	}
 
 	/**
+	 * #1850 (critic CONCERN-3): checkpoint the WAL into the main DB, then
+	 * close the handle. Used by the memory family migration engine before it
+	 * copies the DB file, so the copy reflects all committed writes and is not
+	 * mid-checkpoint. After this call, the provider is closed and must be
+	 * re-opened (the migration engine re-creates it via the pool).
+	 *
+	 * Returns the absolute paths to copy: `memory.db` plus any non-empty
+	 * `-wal`/`-shm` sidecars (after a TRUNCATE checkpoint the WAL is typically
+	 * empty; if it is not, copying it alongside the DB is still correct because
+	 * SQLite recovers from WAL on next open).
+	 */
+	checkpointCloseSnapshot(): {
+		dbPath: string;
+		walPath: string | null;
+		shmPath: string | null;
+	} {
+		const dbPath = this.databasePath();
+		let walPath: string | null = null;
+		let shmPath: string | null = null;
+		try {
+			if (this.db) {
+				try {
+					this.db.run('PRAGMA wal_checkpoint(TRUNCATE);');
+				} catch {
+					/* non-fatal — close will still produce a consistent DB */
+				}
+				this.db.close();
+				this.db = null;
+				this.ftsAvailable = false;
+				this.initialized = false;
+				this.initPromise = null;
+			}
+			// Stat the sidecars; include only non-empty ones.
+			try {
+				const wal = `${dbPath}-wal`;
+				const st = statSync(wal);
+				if (st.size > 0) walPath = wal;
+			} catch {
+				/* no WAL sidecar */
+			}
+			try {
+				const shm = `${dbPath}-shm`;
+				const st = statSync(shm);
+				if (st.size > 0) shmPath = shm;
+			} catch {
+				/* no SHM sidecar */
+			}
+		} catch {
+			/* best-effort */
+		}
+		return { dbPath, walPath, shmPath };
+	}
+
+	/**
 	 * Re-embed all durable memory records with the current embedding provider
 	 * model, update the stored global model_version, and clear the embedding
 	 * cache. This is the recovery path for EmbeddingVersionMismatchError.
@@ -1838,6 +1941,92 @@ export class SQLiteMemoryProvider
 			],
 		);
 		this.writeMemoryFts(record);
+		// #1850 (critic CONCERN-1): bump the cohort generation marker so sibling
+		// worktrees observe this write on their next revalidation. Bumped at the
+		// provider layer so ALL write paths (propose, curator, finalize-reward,
+		// direct upsert) invalidate peers. Local writes are no-ops. Best-effort:
+		// a bump failure must never block the write.
+		this.bumpCohortGeneration();
+	}
+
+	/**
+	 * #1850: write a monotonic generation marker so siblings re-open their
+	 * in-memory mirror. Fire-and-forget; failures are non-fatal (peers simply
+	 * revalidate on the next pointer-stat change or TTL expiry).
+	 */
+	private bumpCohortGeneration(): void {
+		if (!this.cohortRoot) return;
+		try {
+			const markerPath = path.join(this.cohortRoot, 'memory.gen');
+			writeFileSync(markerPath, String(Date.now()), 'utf-8');
+		} catch {
+			/* best-effort — peer revalidation has TTL + pointer-stat backstops */
+		}
+	}
+
+	/**
+	 * #1850 (reviewer important fix): read `memory-cohort-config.json` and fail
+	 * closed if the stored provider/embedding/redaction fingerprint disagrees
+	 * with this worktree's config (acceptance #10). Absent file = first link
+	 * (permissive — the linker writes it immediately after migration). A
+	 * malformed file is also permissive (fail-open never strands memory, but
+	 * a mismatch is a hard error).
+	 */
+	private assertCohortConfigFingerprint(): void {
+		if (!this.cohortRoot) return;
+		const configPath = path.join(this.cohortRoot, 'memory-cohort-config.json');
+		if (!existsSync(configPath)) {
+			// #1850 (M-010): absent config AFTER a cohort root is opened is
+			// suspicious — the linker writes it before flipping the pointer.
+			// Fail-open (do not strand memory) but surface a visible warning so
+			// the operator knows config-coherence is not enforced for this open.
+			warn(
+				'[memory-cohort] cohort config fingerprint file is absent; config-coherence check skipped. Run `/swarm memory link` to re-establish the fingerprint.',
+				{ cohortRoot: this.cohortRoot },
+			);
+			return;
+		}
+		try {
+			const stored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<
+				string,
+				unknown
+			>;
+			const storedFingerprint = stored.fingerprint;
+			if (typeof storedFingerprint !== 'string') {
+				warn(
+					'[memory-cohort] cohort config fingerprint file is malformed; config-coherence check skipped.',
+					{ cohortRoot: this.cohortRoot },
+				);
+				return;
+			}
+			// #1850 (final-critic dedup): use the shared fingerprint helper so the
+			// SQLite provider, status service, and linker all agree on the algorithm.
+			const expectedFingerprint = computeMemoryCohortFingerprint(
+				buildMemoryCohortFingerprintInput(this.config),
+			);
+			if (storedFingerprint !== expectedFingerprint) {
+				throw new Error(
+					`memory cohort config fingerprint mismatch: cohort expects ${storedFingerprint}, this worktree computes ${expectedFingerprint}. ` +
+						'Provider/embedding/redaction config differs across cohort members. ' +
+						'Run `/swarm memory unlink` to recover local state, or align configs across linked worktrees.',
+				);
+			}
+		} catch (err) {
+			if (
+				err instanceof Error &&
+				err.message.includes('fingerprint mismatch')
+			) {
+				throw err; // re-throw the mismatch — this is the fail-closed path
+			}
+			// malformed config file — fail-open with a warning (do not strand memory)
+			warn(
+				'[memory-cohort] failed to read cohort config fingerprint; config-coherence check skipped.',
+				{
+					cohortRoot: this.cohortRoot,
+					reason: err instanceof Error ? err.message : String(err),
+				},
+			);
+		}
 	}
 
 	private writeMemoryFts(record: MemoryRecord): void {

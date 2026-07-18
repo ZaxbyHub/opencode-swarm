@@ -43,6 +43,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'fork-pr-operations',
 	'parallel-work-check',
 	'ci-fix-monitor',
+	'issue-tracer',
 ] as const;
 export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
 /**

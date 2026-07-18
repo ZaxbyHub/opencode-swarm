@@ -2,6 +2,8 @@ import * as fsSync from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
+import { loadPluginConfig } from '../config/loader';
+import { MemoryConfigSchema } from '../config/schema';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -17,6 +19,11 @@ import {
 import { readLinkPointer, resolveLinkDir } from '../hooks/knowledge-link';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { readMemoryLinkPointer } from '../memory/memory-link';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from '../memory/redaction';
 import { loadPlan } from '../plan/manager';
 import {
 	getActiveFullAutoSessionID,
@@ -117,6 +124,22 @@ export interface StatusData {
 		degraded?: boolean;
 		sharedRoot?: string;
 		generation?: number;
+	};
+	/**
+	 * #1850: memory cohort link status. Distinct from `cohort` (knowledge link)
+	 * so status can distinguish knowledge-linked from memory-linked (acceptance
+	 * #2). Carries provider/config/privacy health fields.
+	 */
+	memoryCohort?: {
+		linked: boolean;
+		linkId?: string;
+		cohortId?: string;
+		identitySource?: 'remote' | 'git-common-dir' | 'path';
+		degraded?: boolean;
+		sharedRoot?: string;
+		generation?: number;
+		provider?: string;
+		configFingerprintMatch?: boolean;
 	};
 }
 
@@ -286,6 +309,60 @@ export async function getStatusData(
 		}
 	} catch {
 		status.cohort = { linked: false };
+	}
+
+	// #1850: surface the memory link status SEPARATELY from the knowledge link
+	// (acceptance #2). Best-effort: a missing or corrupt memory pointer reports
+	// the unlinked shape. Provider/config/privacy health is populated when
+	// available so operators can detect cohort divergence.
+	try {
+		const memoryPointer = readMemoryLinkPointer(directory);
+		// #1850 (reviewer nit): populate provider + configFingerprintMatch so
+		// status surfaces cohort divergence (acceptance #2). Best-effort.
+		let provider: string | undefined;
+		let configFingerprintMatch: boolean | undefined;
+		try {
+			const memoryConfig = MemoryConfigSchema.parse(
+				(loadPluginConfig(directory) as { memory?: unknown }).memory ?? {},
+			);
+			provider = memoryConfig.provider;
+			if (memoryPointer) {
+				const cohortConfigPath = path.join(
+					resolveLinkDir(memoryPointer.linkId),
+					'memory',
+					'memory-cohort-config.json',
+				);
+				if (fsSync.existsSync(cohortConfigPath)) {
+					const stored = JSON.parse(
+						fsSync.readFileSync(cohortConfigPath, 'utf-8'),
+					) as { fingerprint?: string };
+					// #1850 (final-critic dedup): shared fingerprint helper.
+					const expected = computeMemoryCohortFingerprint(
+						buildMemoryCohortFingerprintInput(memoryConfig),
+					);
+					configFingerprintMatch = stored.fingerprint === expected;
+				}
+			}
+		} catch {
+			/* best-effort config read */
+		}
+		if (memoryPointer) {
+			status.memoryCohort = {
+				linked: true,
+				linkId: memoryPointer.linkId,
+				cohortId: memoryPointer.cohortId,
+				identitySource: memoryPointer.identitySource,
+				degraded: memoryPointer.degraded,
+				sharedRoot: resolveLinkDir(memoryPointer.linkId),
+				generation: memoryPointer.generation,
+				provider,
+				configFingerprintMatch,
+			};
+		} else {
+			status.memoryCohort = { linked: false, provider };
+		}
+	} catch {
+		status.memoryCohort = { linked: false };
 	}
 
 	// Check Full-Auto status (issue #1781 E2: this was previously nested
@@ -530,6 +607,44 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push(
 			'',
 			'**Knowledge Cohort**: local (not linked — run `/swarm link` to share across worktrees)',
+		);
+	}
+
+	// #1850: memory cohort status — rendered separately so users can tell
+	// knowledge-link and memory-link apart (acceptance #2). No record text is
+	// emitted here (diagnostics-no-leakage discipline, acceptance #13).
+	if (status.memoryCohort?.linked) {
+		lines.push('', '**Memory Cohort**:');
+		lines.push(
+			`  - 🔗 Memory shared across linked worktrees "${status.memoryCohort.linkId}"`,
+		);
+		if (status.memoryCohort.cohortId)
+			lines.push(`    cohort: ${status.memoryCohort.cohortId}`);
+		if (status.memoryCohort.identitySource)
+			lines.push(`    identity: ${status.memoryCohort.identitySource}`);
+		if (status.memoryCohort.degraded)
+			lines.push(
+				'    ⚠ degraded (machine-local, not portable across machines)',
+			);
+		if (status.memoryCohort.sharedRoot)
+			lines.push(`    shared at: ${status.memoryCohort.sharedRoot}/memory`);
+		if (status.memoryCohort.generation !== undefined)
+			lines.push(`    generation: ${status.memoryCohort.generation}`);
+		// #1850 (final-critic #2 fix): render provider + config fingerprint
+		// health so operators can detect cohort divergence (acceptance #2).
+		if (status.memoryCohort.provider)
+			lines.push(`    provider: ${status.memoryCohort.provider}`);
+		if (status.memoryCohort.configFingerprintMatch === false) {
+			lines.push(
+				'    ⚠ config fingerprint mismatch — provider/embedding/redaction config differs across cohort members',
+			);
+		} else if (status.memoryCohort.configFingerprintMatch === true) {
+			lines.push('    config: ✅ fingerprint matches cohort');
+		}
+	} else {
+		lines.push(
+			'',
+			'**Memory Cohort**: local (not linked — run `/swarm memory link` to share memory across worktrees; requires `memory.link.enabled: true`)',
 		);
 	}
 

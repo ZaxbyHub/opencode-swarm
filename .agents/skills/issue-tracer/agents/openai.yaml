@@ -1,4 +1,4 @@
 interface:
   display_name: "Issue Tracer"
-  short_description: "Evidence-first bug tracing and fixes"
-  default_prompt: "Use $issue-tracer to investigate this bug report, find the root cause, and prepare a verified fix."
+  short_description: "Evidence-first bug tracing and full resolution"
+  default_prompt: "Use $issue-tracer to investigate this issue, find the root cause, and drive it to a fully verified fix."

@@ -53,6 +53,7 @@ const requiredProjectSkillSlugs = [
 	'fork-pr-operations',
 	'parallel-work-check',
 	'ci-fix-monitor',
+	'issue-tracer',
 ];
 
 const expectedProjectSkillFiles = [

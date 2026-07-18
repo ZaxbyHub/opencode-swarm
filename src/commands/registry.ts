@@ -73,6 +73,10 @@ import {
 	handleMemoryStatusCommand,
 	handleMemoryValueLogCommand,
 } from './memory.js';
+import {
+	handleMemoryLinkCommand,
+	handleMemoryUnlinkCommand,
+} from './memory-link.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePostMortemCommand } from './post-mortem.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
@@ -1456,6 +1460,34 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--limit <n>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	// #1850: cohort memory sharing commands (distinct from knowledge link).
+	'memory link': {
+		handler: (ctx) => handleMemoryLinkCommand(ctx.directory, ctx.args),
+		description:
+			'Share this worktree memory across linked sibling worktrees via the cohort identity (requires memory.link.enabled). Independently opt-in from /swarm link.',
+		subcommandOf: 'memory',
+		args: '[name]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'memory link status': {
+		handler: (ctx) => handleMemoryLinkCommand(ctx.directory, ['status']),
+		description: 'Show whether this worktree shares memory via a cohort link',
+		subcommandOf: 'memory',
+		args: '',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	'memory unlink': {
+		handler: (ctx) => handleMemoryUnlinkCommand(ctx.directory, ctx.args),
+		description:
+			'Stop sharing memory; copies the cohort memory family back to local .swarm/memory/. The cohort store is never deleted.',
+		subcommandOf: 'memory',
+		args: '[--no-copy]',
+		category: 'utility',
 		toolPolicy: 'agent',
 	},
 	// Aliases for the TUI shortcuts 'swarm-memory-status' / 'swarm-memory-export'

@@ -39,6 +39,17 @@ export interface MemoryConfig {
 	/** Reflection / consolidation pass (issue #1464, Phase 3). */
 	consolidation: ConsolidationConfig;
 	hardDelete: boolean;
+	/**
+	 * #1850 Linked Knowledge 5/5: opt-in cohort memory sharing. Default off —
+	 * memory stays worktree-local (today's behavior) unless explicitly enabled.
+	 * When enabled AND a memory-link pointer is present, repository-scoped
+	 * memory is shared across sibling worktrees through the #1846 cohort
+	 * identity. Knowledge link and memory link are independent toggles: linking
+	 * knowledge does not imply linking memory.
+	 */
+	link: {
+		enabled: boolean;
+	};
 	embeddings: {
 		enabled: boolean;
 		model: string;
@@ -278,6 +289,8 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 		...DEFAULT_CONSOLIDATION_CONFIG,
 		decayHalfLifeDays: { ...DEFAULT_DECAY_HALF_LIFE_DAYS },
 	},
+	// #1850: cohort memory sharing default-off.
+	link: { enabled: false },
 	embeddings: { ...DEFAULT_EMBEDDINGS_CONFIG },
 	retrieval: { ...DEFAULT_RETRIEVAL_CONFIG },
 	qLearning: { ...DEFAULT_QLEARNING_CONFIG },
@@ -340,12 +353,16 @@ export function resolveMemoryConfig(
 			},
 		},
 		consolidation: {
-			...DEFAULT_MEMORY_CONFIG.consolidation,
+			...DEFAULT_CONSOLIDATION_CONFIG,
 			...(input?.consolidation ?? {}),
 			decayHalfLifeDays: {
-				...DEFAULT_MEMORY_CONFIG.consolidation.decayHalfLifeDays,
+				...DEFAULT_CONSOLIDATION_CONFIG.decayHalfLifeDays,
 				...(input?.consolidation?.decayHalfLifeDays ?? {}),
 			},
+		},
+		// #1850: cohort link config — default-off but allow caller override.
+		link: {
+			enabled: input?.link?.enabled ?? DEFAULT_MEMORY_CONFIG.link.enabled,
 		},
 		embeddings: {
 			...DEFAULT_MEMORY_CONFIG.embeddings,

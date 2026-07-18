@@ -57,6 +57,9 @@ const NON_COMMAND_SKILLS = new Set([
 	// adapters, not architect MODE commands.
 	'parallel-work-check',
 	'ci-fix-monitor',
+	// Invoked directly by name/description trigger (Read/Skill), not via a
+	// /swarm <cmd> architect MODE signal — same shape as ci-fix-monitor.
+	'issue-tracer',
 ]);
 
 /**

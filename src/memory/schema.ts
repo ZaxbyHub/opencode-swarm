@@ -21,6 +21,8 @@ export const MemoryScopeTypeSchema = z.enum([
 	'repository',
 	'run',
 	'agent',
+	// #1850: cohort-scoped shared memory.
+	'cohort',
 ]);
 
 export const MemoryScopeRefSchema = z
@@ -33,6 +35,9 @@ export const MemoryScopeRefSchema = z
 		repoRoot: z.string().optional(),
 		runId: z.string().optional(),
 		agentId: z.string().optional(),
+		// #1850: required to key cohort scopes so different cohorts do not
+		// collapse to one stable scope key (critic GAP-1/GAP-2).
+		cohortId: z.string().optional(),
 	})
 	.strict();
 
@@ -91,6 +96,14 @@ export const MemoryRecordSchema = z
 		supersededBy: z.string().optional(),
 		contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 		metadata: z.record(z.string(), z.unknown()),
+		// #1850 cohort-sharing provenance (all optional for back-compat).
+		cohortId: z.string().optional(),
+		producerSessionId: z.string().optional(),
+		producerAgentRole: z.string().optional(),
+		redactionPolicyVersion: z.number().int().min(0).optional(),
+		schemaVersion: z.number().int().min(0).optional(),
+		providerVersion: z.string().optional(),
+		sourceRevision: z.string().optional(),
 	})
 	.strict();
 
@@ -218,18 +231,23 @@ export function normalizeMemoryText(text: string): string {
 
 export function stableScopeKey(scope: MemoryScopeRef): string {
 	const ordered: Record<string, string> = { type: scope.type };
+	// #1850 (critic GAP-1): cohort scopes MUST key on cohortId, otherwise every
+	// cohort collapses to `{"type":"cohort"}` and recall returns records from
+	// unrelated cohorts. The branch is a single-key extraction like `repository`.
 	const keys =
 		scope.type === 'repository'
 			? (['repoId'] as const)
-			: ([
-					'userId',
-					'workspaceId',
-					'projectId',
-					'repoId',
-					'repoRoot',
-					'runId',
-					'agentId',
-				] as const);
+			: scope.type === 'cohort'
+				? (['cohortId'] as const)
+				: ([
+						'userId',
+						'workspaceId',
+						'projectId',
+						'repoId',
+						'repoRoot',
+						'runId',
+						'agentId',
+					] as const);
 	for (const key of keys) {
 		const value = scope[key];
 		if (value) ordered[key] = value;
