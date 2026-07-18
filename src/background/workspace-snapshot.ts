@@ -8,6 +8,8 @@ const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
 const GIT_SNAPSHOT_MAX_BUFFER = 512 * 1024;
 const REVISION_MAX_FILES = 5_000;
 const REVISION_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const REVISION_READ_CHUNK_BYTES = 64 * 1024;
+const REVISION_YIELD_EVERY_CHUNKS = 16;
 
 type SpawnSync = typeof child_process.spawnSync;
 
@@ -36,6 +38,99 @@ function runGit(
 	});
 	if (result.error || result.status !== 0) return null;
 	return typeof result.stdout === 'string' ? result.stdout.trimEnd() : null;
+}
+
+/**
+ * Async equivalent of the bounded snapshot helper. Revision binding runs on
+ * tool/hook gates, so it must never monopolize the host event loop while Git
+ * is resolving the checked-out state.
+ */
+async function runGitAsync(
+	directory: string,
+	args: string[],
+	timeoutMs = GIT_SNAPSHOT_TIMEOUT_MS,
+): Promise<string | null> {
+	return await new Promise((resolve) => {
+		let settled = false;
+		let stdout = '';
+		let stderrBytes = 0;
+		let timeout: NodeJS.Timeout | undefined;
+		let child: child_process.ChildProcess | undefined;
+		const finish = (value: string | null) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			// A timeout, buffer failure, or host-side stream error must not leave
+			// a Git child behind. Killing an already-closed child is best-effort.
+			try {
+				child?.kill();
+			} catch {
+				// The child has already exited or cannot be signalled.
+			}
+			resolve(value);
+		};
+		try {
+			child = child_process.spawn('git', ['-C', directory, ...args], {
+				cwd: directory,
+				stdio: ['ignore', 'pipe', 'pipe'],
+				windowsHide: true,
+			});
+		} catch {
+			finish(null);
+			return;
+		}
+		timeout = setTimeout(() => finish(null), timeoutMs);
+		child.stdout?.setEncoding('utf-8');
+		child.stdout?.on('data', (chunk: string) => {
+			stdout += chunk;
+			if (Buffer.byteLength(stdout, 'utf-8') > GIT_SNAPSHOT_MAX_BUFFER) {
+				finish(null);
+			}
+		});
+		child.stderr?.on('data', (chunk: Buffer) => {
+			stderrBytes += chunk.length;
+			if (stderrBytes > GIT_SNAPSHOT_MAX_BUFFER) {
+				finish(null);
+			}
+		});
+		child.once('error', () => finish(null));
+		child.once('close', (code) => finish(code === 0 ? stdout.trimEnd() : null));
+	});
+}
+
+/**
+ * Read one bounded repository file from an immutable commit without consulting
+ * the mutable checkout. Callers compare this text with the checkout copy before
+ * treating a PR-provided contract as authority.
+ */
+export function readGitTextAtRevision(
+	directory: string,
+	revision: string,
+	relativePath: string,
+): string | null {
+	if (
+		!isSafeGitRevisionToken(revision) ||
+		!/^\.?(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*$/.test(
+			relativePath,
+		) ||
+		relativePath.split('/').includes('..')
+	) {
+		return null;
+	}
+	const result = _internals.spawnSync(
+		'git',
+		['-C', directory, 'show', `${revision}:${relativePath}`],
+		{
+			cwd: directory,
+			encoding: 'utf-8',
+			timeout: GIT_SNAPSHOT_TIMEOUT_MS,
+			maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		},
+	);
+	if (result.error || result.status !== 0 || typeof result.stdout !== 'string')
+		return null;
+	return result.stdout;
 }
 
 /** Resolve the exact checked-out commit through the bounded Git snapshot path. */
@@ -358,6 +453,112 @@ export function resolvePrWorkflowRevisionDigest(
 	return hash.digest('hex');
 }
 
+/**
+ * Asynchronously bind a mutable working tree to its actual content. File
+ * reads are chunked with bounded cooperative yields so a large, permitted
+ * revision cannot stall the synchronous plugin gate path.
+ */
+export async function resolvePrWorkflowRevisionDigestAsync(
+	directory: string,
+	baseHeadSha: string,
+): Promise<string | null> {
+	const projectRoot = path.resolve(directory);
+	const [baseHead, diffNames, porcelain] = await Promise.all([
+		runGitAsync(projectRoot, [
+			'rev-parse',
+			'--verify',
+			`${baseHeadSha}^{commit}`,
+		]),
+		runGitAsync(projectRoot, [
+			'diff',
+			'--no-ext-diff',
+			'--name-only',
+			'-z',
+			baseHeadSha,
+		]),
+		runGitAsync(projectRoot, [
+			'status',
+			'--porcelain=v1',
+			'-z',
+			'--untracked-files=all',
+		]),
+	]);
+	if (!baseHead || diffNames === null || porcelain === null) return null;
+	const porcelainPaths = parsePorcelainPaths(porcelain);
+	if (!porcelainPaths) return null;
+	const changedPaths = [
+		...new Set([...parseNulPaths(diffNames), ...porcelainPaths]),
+	].sort((left, right) => left.localeCompare(right));
+	if (changedPaths.length > REVISION_MAX_FILES) return null;
+
+	const hash = createHash('sha256');
+	hash.update(`base\0${baseHead}\0`);
+	let totalBytes = 0;
+	let chunksSinceYield = 0;
+	for (const relativePath of changedPaths) {
+		const resolvedPath = path.resolve(projectRoot, relativePath);
+		const relativeToRoot = path.relative(projectRoot, resolvedPath);
+		if (
+			!relativeToRoot ||
+			relativeToRoot.startsWith('..') ||
+			path.isAbsolute(relativeToRoot)
+		)
+			return null;
+		hash.update(`path\0${relativePath}\0`);
+		let stats: fs.Stats;
+		try {
+			stats = await fs.promises.lstat(resolvedPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				hash.update('deleted\0');
+				continue;
+			}
+			return null;
+		}
+		if (stats.isSymbolicLink()) {
+			try {
+				hash.update(`symlink\0${await fs.promises.readlink(resolvedPath)}\0`);
+				continue;
+			} catch {
+				return null;
+			}
+		}
+		if (!stats.isFile()) {
+			hash.update(`node\0${stats.mode}\0`);
+			continue;
+		}
+		totalBytes += stats.size;
+		if (totalBytes > REVISION_MAX_TOTAL_BYTES) return null;
+		hash.update(`file\0${stats.mode}\0`);
+		let handle: fs.promises.FileHandle | undefined;
+		try {
+			handle = await fs.promises.open(resolvedPath, 'r');
+			const buffer = Buffer.allocUnsafe(REVISION_READ_CHUNK_BYTES);
+			for (let position = 0; position < stats.size; ) {
+				const length = Math.min(
+					REVISION_READ_CHUNK_BYTES,
+					stats.size - position,
+				);
+				const { bytesRead } = await handle.read(buffer, 0, length, position);
+				if (bytesRead <= 0) return null;
+				hash.update(buffer.subarray(0, bytesRead));
+				position += bytesRead;
+				chunksSinceYield++;
+				if (chunksSinceYield >= REVISION_YIELD_EVERY_CHUNKS) {
+					chunksSinceYield = 0;
+					await _internals.yieldControl();
+				}
+			}
+			hash.update('\0');
+		} catch {
+			return null;
+		} finally {
+			await handle?.close().catch(() => undefined);
+		}
+	}
+	return hash.digest('hex');
+}
+
 function parseNulPaths(output: string): string[] {
 	return output.split('\0').filter((entry) => entry.length > 0);
 }
@@ -382,6 +583,74 @@ export function parsePorcelainPaths(output: string): string[] | null {
 	return [...new Set(paths)];
 }
 
+interface PorcelainV2Snapshot {
+	gitHead: string | null;
+	changedFiles: string[];
+}
+
+/**
+ * Parse the one-command `git status --porcelain=v2 --branch -z` snapshot used
+ * by background evidence capture. A malformed or unknown record fails closed.
+ */
+function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
+	const records = output.split('\0');
+	const headers: string[] = [];
+	while (records[0]?.startsWith('# ')) {
+		headers.push(records.shift()!);
+	}
+	const oidMatch = headers.join('\n').match(/^# branch\.oid (.+)$/m);
+	if (!oidMatch) return null;
+	const gitHead = /^[0-9a-f]{6,64}$/i.test(oidMatch[1])
+		? oidMatch[1]
+		: oidMatch[1] === '(initial)'
+			? null
+			: null;
+	const paths: string[] = [];
+	for (let index = 0; index < records.length; index++) {
+		const record = records[index];
+		if (!record) continue;
+		if (record.startsWith('? ')) {
+			paths.push(record.slice(2));
+			continue;
+		}
+		if (record.startsWith('1 ')) {
+			const changedPath = porcelainV2PathAfterFields(record, 8);
+			if (!changedPath) return null;
+			paths.push(changedPath);
+			continue;
+		}
+		if (record.startsWith('2 ')) {
+			const changedPath = porcelainV2PathAfterFields(record, 9);
+			const originalPath = records[++index];
+			if (!changedPath || !originalPath) return null;
+			paths.push(changedPath, originalPath);
+			continue;
+		}
+		if (record.startsWith('u ')) {
+			const changedPath = porcelainV2PathAfterFields(record, 10);
+			if (!changedPath) return null;
+			paths.push(changedPath);
+			continue;
+		}
+		return null;
+	}
+	return { gitHead, changedFiles: [...new Set(paths)] };
+}
+
+function porcelainV2PathAfterFields(
+	record: string,
+	fields: number,
+): string | null {
+	let offset = 0;
+	for (let index = 0; index < fields; index++) {
+		const delimiter = record.indexOf(' ', offset);
+		if (delimiter < 0) return null;
+		offset = delimiter + 1;
+	}
+	const pathValue = record.slice(offset);
+	return pathValue || null;
+}
+
 export function captureWorkspaceSnapshot(
 	directory: string,
 	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
@@ -391,29 +660,41 @@ export function captureWorkspaceSnapshot(
 		typeof optionsOrScope === 'object' && optionsOrScope !== null
 			? (optionsOrScope.scope ?? null)
 			: optionsOrScope;
-	const prHeadSha = (() => {
+	const configuredPrHeadSha = (() => {
 		if (typeof optionsOrScope !== 'object' || optionsOrScope === null) {
 			return prHeadShaArg;
 		}
-		if (optionsOrScope.resolveCurrentPrHeadSha) {
-			return runGit(directory, ['rev-parse', '@{upstream}']);
-		}
 		return optionsOrScope.prHeadSha ?? null;
 	})();
-	const gitHead = resolveCurrentGitHead(directory);
+	const resolveCurrentPrHeadSha =
+		typeof optionsOrScope === 'object' &&
+		optionsOrScope !== null &&
+		optionsOrScope.resolveCurrentPrHeadSha === true;
+	const upstreamBefore = resolveCurrentPrHeadSha
+		? runGit(directory, ['rev-parse', '@{upstream}'])
+		: null;
 	const porcelain = runGit(directory, [
 		'status',
-		'--porcelain=v1',
+		'--porcelain=v2',
+		'--branch',
 		'-z',
 		'--untracked-files=all',
 	]);
-	const changedFiles =
-		porcelain === null ? null : parsePorcelainPaths(porcelain);
+	const snapshot =
+		porcelain === null ? null : parsePorcelainV2Snapshot(porcelain);
+	const upstreamAfter = resolveCurrentPrHeadSha
+		? runGit(directory, ['rev-parse', '@{upstream}'])
+		: null;
+	const prHeadSha = resolveCurrentPrHeadSha
+		? upstreamBefore && upstreamBefore === upstreamAfter
+			? upstreamBefore
+			: null
+		: configuredPrHeadSha;
 	return {
 		directory: path.resolve(directory),
-		gitHead,
+		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles,
+		changedFiles: snapshot?.changedFiles ?? null,
 		prHeadSha,
 		scope,
 	};
@@ -498,6 +779,12 @@ export function digest(text: string): string {
 	return createHash('sha256').update(text).digest('hex');
 }
 
-export const _internals: { spawnSync: SpawnSync } = {
+export const _internals: {
+	spawnSync: SpawnSync;
+	yieldControl: () => Promise<void>;
+	parsePorcelainV2Snapshot: typeof parsePorcelainV2Snapshot;
+} = {
 	spawnSync: child_process.spawnSync,
+	yieldControl: () => new Promise<void>((resolve) => setImmediate(resolve)),
+	parsePorcelainV2Snapshot,
 };

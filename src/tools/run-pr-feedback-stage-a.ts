@@ -2,7 +2,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
+	readGitTextAtRevision,
 	resolveCurrentGitHead,
+	resolveExactMergeBase,
 	resolveGitControlStateDigest,
 	resolvePrWorkflowRevisionDigest,
 } from '../background/workspace-snapshot.js';
@@ -30,6 +32,11 @@ interface StageAObligation {
 	workingDirectory: string;
 	source: string;
 	validatorContract?: { path: string; id: string };
+}
+
+interface ContractBaseProvenance {
+	baseRef: string;
+	baseSha: string;
 }
 const ALWAYS_REQUIRED_CATEGORIES: readonly StageACategory[] = [
 	'diff-check',
@@ -135,6 +142,8 @@ const StageACheckSchema = z
 const RunPrFeedbackStageAArgsSchema = z
 	.object({
 		pr_head_sha: z.string().trim().min(1).max(80),
+		base_ref: z.string().trim().min(1).max(256).optional(),
+		base_sha: z.string().trim().min(6).max(80).optional(),
 		checks: z.array(StageACheckSchema).min(2).max(258),
 	})
 	.strict();
@@ -887,16 +896,65 @@ function readRepositoryValidationContract(
 	}
 }
 
+function resolveContractBaseProvenance(
+	directory: string,
+	prHeadSha: string,
+	baseRef: string | undefined,
+	baseSha: string | undefined,
+): ContractBaseProvenance | undefined {
+	if (!baseRef && !baseSha) return undefined;
+	if (!baseRef || !baseSha) {
+		throw new Error(
+			'BLOCKED: Stage A contract authorization requires both base_ref and base_sha',
+		);
+	}
+	const resolvedBase = _internals.resolveExactMergeBase(
+		directory,
+		baseRef,
+		prHeadSha,
+	);
+	if (
+		!resolvedBase ||
+		resolvedBase.toLowerCase() !== baseSha.toLowerCase() ||
+		resolvedBase.toLowerCase() === prHeadSha.toLowerCase()
+	) {
+		throw new Error(
+			'Stage A contract authorization requires base_sha to be the immutable merge base of base_ref and pr_head_sha',
+		);
+	}
+	return { baseRef, baseSha: resolvedBase.toLowerCase() };
+}
+
+function readTrustedRepositoryValidationContract(
+	directory: string,
+	contractPath: string,
+	provenance: ContractBaseProvenance | undefined,
+): z.infer<typeof RepositoryValidationContractSchema> | undefined {
+	if (!provenance) return undefined;
+	const current = readRepositoryValidationContract(directory, contractPath);
+	const currentText = readBoundedText(path.resolve(directory, contractPath));
+	const baseText = _internals.readGitTextAtRevision(
+		directory,
+		provenance.baseSha,
+		contractPath.replaceAll('\\', '/').replace(/^\.\//, ''),
+	);
+	if (!current || !currentText || baseText === null || currentText !== baseText)
+		return undefined;
+	return current;
+}
+
 type StageACheckInput = z.infer<typeof StageACheckSchema>;
 
 function isExactRepositoryContractValidator(
 	directory: string,
 	check: StageACheckInput,
+	provenance: ContractBaseProvenance | undefined,
 ): boolean {
 	if (!check.validator_contract) return false;
-	const contract = readRepositoryValidationContract(
+	const contract = readTrustedRepositoryValidationContract(
 		directory,
 		check.validator_contract.path,
+		provenance,
 	);
 	const validator = contract?.validators.find(
 		(candidate) => candidate.id === check.validator_contract?.id,
@@ -922,6 +980,7 @@ function isExactObligationContractAuthorization(
 	directory: string,
 	obligation: StageAObligation,
 	check: StageACheckInput,
+	provenance: ContractBaseProvenance | undefined,
 ): boolean {
 	const identity = obligation.validatorContract;
 	if (
@@ -931,7 +990,11 @@ function isExactObligationContractAuthorization(
 	) {
 		return false;
 	}
-	const contract = readRepositoryValidationContract(directory, identity.path);
+	const contract = readTrustedRepositoryValidationContract(
+		directory,
+		identity.path,
+		provenance,
+	);
 	const validator = contract?.validators.find(({ id }) => id === identity.id);
 	const workspace = resolveContainedDirectory(
 		directory,
@@ -1231,6 +1294,7 @@ function commandMatchesObligationSource(
 /** Discover concrete workspace/category/source obligations from bounded local signals. */
 function discoverApplicableStageAObligations(
 	directory: string,
+	contractBase?: ContractBaseProvenance,
 ): StageAObligation[] {
 	const root = path.resolve(directory);
 	const canonicalRoot = (() => {
@@ -1491,12 +1555,19 @@ function discoverApplicableStageAObligations(
 		const contractRelative = path
 			.relative(canonicalRoot, contractPath)
 			.replaceAll('\\', '/');
-		const contract = readRepositoryValidationContract(
+		const untrustedContract = readRepositoryValidationContract(
 			canonicalRoot,
 			contractRelative,
 		);
-		if (fs.existsSync(contractPath) && !contract) {
+		const contract = readTrustedRepositoryValidationContract(
+			canonicalRoot,
+			contractRelative,
+			contractBase,
+		);
+		if (fs.existsSync(contractPath) && !untrustedContract) {
 			discoveryOverflow = `Stage A found an invalid, oversized, unreadable, or escaping validation contract at ${contractRelative}`;
+		} else if (untrustedContract && !contract) {
+			discoveryOverflow = `Stage A validation contract at ${contractRelative} must be unchanged from the immutable merge base named by base_ref and base_sha`;
 		}
 		const contractValidatorsCoveredByScripts = new Set<string>();
 		const packageText = readPresentRepositoryText(
@@ -1517,6 +1588,7 @@ function discoverApplicableStageAObligations(
 							? parseSimpleRepositoryScript(commandText)
 							: undefined;
 					for (const category of OPTIONAL_STAGE_A_CATEGORIES) {
+						if (!categoryMatchesScriptName(category, script)) continue;
 						const authorizingValidator = contract?.validators.find(
 							(validator) => {
 								const validatorWorkspace = resolveContainedDirectory(
@@ -1526,18 +1598,23 @@ function discoverApplicableStageAObligations(
 								return (
 									validator.category === category &&
 									validatorWorkspace?.absolute === candidateRoot &&
-									declaredCommand?.length === validator.command.length &&
-									declaredCommand.every(
-										(part, index) => part === validator.command[index],
-									)
+									(!declaredCommand ||
+										(declaredCommand.length === validator.command.length &&
+											declaredCommand.every(
+												(part, index) => part === validator.command[index],
+											)))
 								);
 							},
 						);
+						if (!declaredCommand) {
+							if (!authorizingValidator) {
+								discoveryOverflow = `Stage A opaque package script ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} requires a trusted base-identical contract validator for ${category}`;
+							}
+							continue;
+						}
 						if (
-							declaredCommand &&
-							categoryMatchesScriptName(category, script) &&
-							(isPlausibleStageACommand(category, declaredCommand) ||
-								Boolean(authorizingValidator))
+							isPlausibleStageACommand(category, declaredCommand) ||
+							Boolean(authorizingValidator)
 						) {
 							addObligation(
 								category,
@@ -1597,9 +1674,10 @@ function discoverApplicableStageAObligations(
 
 function discoverApplicableStageACategories(
 	directory: string,
+	contractBase?: ContractBaseProvenance,
 ): OptionalStageACategory[] {
 	const applicable = new Set(
-		discoverApplicableStageAObligations(directory).map(
+		discoverApplicableStageAObligations(directory, contractBase).map(
 			({ category }) => category,
 		),
 	);
@@ -1636,10 +1714,23 @@ export async function executeRunPrFeedbackStageA(
 			);
 		}
 	}
+	let contractBase: ContractBaseProvenance | undefined;
+	try {
+		contractBase = resolveContractBaseProvenance(
+			directory,
+			parsed.data.pr_head_sha,
+			parsed.data.base_ref,
+			parsed.data.base_sha,
+		);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
 	let applicableObligations: StageAObligation[];
 	try {
-		applicableObligations =
-			_internals.discoverApplicableStageAObligations(directory);
+		applicableObligations = _internals.discoverApplicableStageAObligations(
+			directory,
+			contractBase,
+		);
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
 	}
@@ -1712,6 +1803,7 @@ export async function executeRunPrFeedbackStageA(
 		const directContractValidated = isExactRepositoryContractValidator(
 			directory,
 			check,
+			contractBase,
 		);
 		const selectedObligation = selectedObligations.get(check);
 		const obligationContractValidated = selectedObligation
@@ -1719,6 +1811,7 @@ export async function executeRunPrFeedbackStageA(
 					directory,
 					selectedObligation,
 					check,
+					contractBase,
 				)
 			: false;
 		const contractValidated =
@@ -2070,6 +2163,8 @@ export async function executeRunPrFeedbackStageA(
 
 export const _internals = {
 	runExternalTool,
+	readGitTextAtRevision,
+	resolveExactMergeBase,
 	resolveCurrentGitHead,
 	resolveGitControlStateDigest,
 	resolvePrWorkflowRevisionDigest,

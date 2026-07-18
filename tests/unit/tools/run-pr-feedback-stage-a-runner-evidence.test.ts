@@ -22,9 +22,13 @@ import {
 
 const SESSION = 'stage-a-runner-evidence-session';
 const HEAD = 'abc123';
+const BASE = 'def456';
 const REVISION = 'revision-1';
 let directory = '';
+let baseContracts = new Map<string, string>();
 const originalRunner = _internals.runExternalTool;
+const originalReadGitTextAtRevision = _internals.readGitTextAtRevision;
+const originalResolveExactMergeBase = _internals.resolveExactMergeBase;
 const originalDigest = _internals.resolvePrWorkflowRevisionDigest;
 const originalStageHead = _internals.resolveCurrentGitHead;
 const originalControlDigest = _internals.resolveGitControlStateDigest;
@@ -66,6 +70,10 @@ beforeEach(async () => {
 	_internals.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_internals.resolveCurrentGitHead = () => HEAD;
 	_internals.resolveGitControlStateDigest = () => 'git-control-1';
+	baseContracts = new Map();
+	_internals.resolveExactMergeBase = () => BASE;
+	_internals.readGitTextAtRevision = (_directory, sha, contractPath) =>
+		sha === BASE ? (baseContracts.get(contractPath) ?? null) : null;
 	_internals.runExternalTool = mock(async () => ({
 		status: 'completed' as const,
 		exitCode: 0,
@@ -135,6 +143,8 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	_internals.runExternalTool = originalRunner;
+	_internals.readGitTextAtRevision = originalReadGitTextAtRevision;
+	_internals.resolveExactMergeBase = originalResolveExactMergeBase;
 	_internals.resolvePrWorkflowRevisionDigest = originalDigest;
 	_internals.resolveCurrentGitHead = originalStageHead;
 	_internals.resolveGitControlStateDigest = originalControlDigest;
@@ -229,23 +239,28 @@ describe('run_pr_feedback_stage_a runner evidence', () => {
 	});
 
 	test('accepts an exact safe validator from a bounded repository contract', async () => {
+		const contractText = JSON.stringify({
+			version: 1,
+			validators: [
+				{
+					id: 'custom-build',
+					category: 'build',
+					working_directory: '.',
+					command: ['acme-validator', 'verify-build'],
+				},
+			],
+		});
+		baseContracts.set('.pr-validation.json', contractText);
 		await fs.writeFile(
 			path.join(directory, '.pr-validation.json'),
-			JSON.stringify({
-				version: 1,
-				validators: [
-					{
-						id: 'custom-build',
-						category: 'build',
-						working_directory: '.',
-						command: ['acme-validator', 'verify-build'],
-					},
-				],
-			}),
+			contractText,
 			'utf8',
 		);
 		const obligation = _internals
-			.discoverApplicableStageAObligations(directory)
+			.discoverApplicableStageAObligations(directory, {
+				baseRef: 'origin/main',
+				baseSha: BASE,
+			})
 			.find(({ source }) => source === '.pr-validation.json#custom-build')!;
 		const checks = validChecks.map((check) =>
 			check.category === 'build'
@@ -271,7 +286,12 @@ describe('run_pr_feedback_stage_a runner evidence', () => {
 		);
 		const unbound = JSON.parse(
 			await executeRunPrFeedbackStageA(
-				{ pr_head_sha: HEAD, checks: unboundChecks },
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks: unboundChecks,
+				},
 				directory,
 				{ sessionID: SESSION },
 			),
@@ -289,7 +309,12 @@ describe('run_pr_feedback_stage_a runner evidence', () => {
 		}));
 		const empty = JSON.parse(
 			await executeRunPrFeedbackStageA(
-				{ pr_head_sha: HEAD, checks },
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks,
+				},
 				directory,
 				{ sessionID: SESSION },
 			),
@@ -306,7 +331,12 @@ describe('run_pr_feedback_stage_a runner evidence', () => {
 		}));
 		const result = JSON.parse(
 			await executeRunPrFeedbackStageA(
-				{ pr_head_sha: HEAD, checks },
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks,
+				},
 				directory,
 				{ sessionID: SESSION },
 			),

@@ -2,8 +2,8 @@
 
 ## Summary
 
-- Strengthened `/swarm pr-review` guidance so the architect launches all six fixed base lanes and all 11 mandatory repository-agnostic micro-lanes, keeps working while async lanes dispatch/collect, and does not synthesize while lane coverage is open.
-- Clarified that blocking `dispatch_lanes` and direct Task calls cannot replace structured PR-review lanes because they lose required workflow/head provenance.
+- Strengthened `/swarm pr-review` guidance so the architect launches all six fixed base lanes, evaluates triggered micro-lanes, keeps working while async lanes dispatch/collect, and does not synthesize while lane coverage is open.
+- Clarified fallback order across PR review and related async review modes: retry/re-collect async lanes, use blocking `dispatch_lanes`, then use Task-tool dispatch only as a verified-equivalent final fallback when lane tools do not work.
 - Replaced partial/INCOMPLETE review allowances with a hard BLOCKED stop: if required lane coverage cannot be closed or equivalence cannot be proven, the architect surfaces the lane failure to the user instead of producing a degraded review.
 
 ## Testing

@@ -700,8 +700,10 @@ reproduction command must name at least one exact test, package, path, or
 regression selector in `targets`. Invoke recognized validators and test runners
 directly. Standard contained `./gradlew` and `./mvnw` wrappers are supported. A
 repository with a custom validator can declare its exact array-form command in a
-bounded repository-owned `.pr-validation.json` version-1 contract and reference
-the exact contract path/id. When that contract authorizes an otherwise opaque
+   bounded `.pr-validation.json` version-1 contract that is byte-identical to
+   the immutable `base_ref`/`base_sha` merge-base copy and reference the exact
+   contract path/id. A contract added or changed by the PR never authorizes a
+   command. When that trusted contract replaces an otherwise opaque named
 package script, the controller preserves the contract identity on the discovered
 obligation and receipt, requires non-empty execution evidence, and permits only
 an exact inspected npm, pnpm, yarn, or Bun script selection. Unsupported

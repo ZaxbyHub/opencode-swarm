@@ -16,6 +16,8 @@ let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveRevisionDigest =
+	_test_exports.resolvePrWorkflowRevisionDigest;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -24,12 +26,14 @@ beforeEach(() => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => 'abc123';
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	_test_exports.resolvePrWorkflowRevisionDigest = () => 'revision-1';
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -88,6 +92,22 @@ describe('PR feedback shell mutation gate', () => {
 			await expect(
 				enforcePrWorkflowToolBefore(directory, 'feedback-shell', toolName, {}),
 			).rejects.toThrow('PR_FEEDBACK');
+		}
+	});
+
+	test('does not honor environment-variable bypasses before verification', async () => {
+		const original = process.env.SWARM_DISABLE_GATES;
+		process.env.SWARM_DISABLE_GATES = '1';
+		try {
+			await activatePrWorkflow(directory, 'feedback-env-bypass', 'PR_FEEDBACK');
+			await expect(
+				enforcePrWorkflowToolBefore(directory, 'feedback-env-bypass', 'shell', {
+					command: 'git push origin HEAD',
+				}),
+			).rejects.toThrow('PR_FEEDBACK');
+		} finally {
+			if (original === undefined) delete process.env.SWARM_DISABLE_GATES;
+			else process.env.SWARM_DISABLE_GATES = original;
 		}
 	});
 

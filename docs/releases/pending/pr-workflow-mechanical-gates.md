@@ -25,13 +25,15 @@
   reproduction/regression and exact `git diff --check` commands plus every
   concrete workspace/category/source build, typecheck, and lint obligation
   mechanically discovered from repository manifests, configs, scripts, or a
-  bounded `.pr-validation.json` validator contract, then binds the
+  bounded `.pr-validation.json` validator contract that is byte-identical to
+  the immutable `base_ref`/`base_sha` merge-base copy, then binds the
   receipts to a content digest and an exact per-item reproduction-target and
   expected-behavior map for the immutable feedback inventory.
   Receipts must be obligation-distinct, category-compatible,
   non-publishing, and non-noop; reproduction requires an explicit selected
   target and non-empty runner output. Contained standard Gradle/Maven wrappers
-  and exact repository-contract validators are supported. Contract-authorized
+  and exact repository-contract validators are supported only from that trusted
+  base copy. Contract-authorized
   package scripts preserve their exact contract path/id on the obligation and
   receipt, require non-empty output, and may run only through an exact inspected
   npm, pnpm, yarn, or Bun script selection. Unsupported workspace-glob semantics

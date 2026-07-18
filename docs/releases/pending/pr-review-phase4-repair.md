@@ -2,9 +2,9 @@
 
 ## What changed
 
-- Made deep PR review Phase 4 auditable and non-skippable with exact mandatory
-  micro-lane accounting, durable evidence, provenance-based acceptance for all
-  11 repository-agnostic lanes, and a reviewer join barrier.
+- Made deep PR review Phase 4 auditable and non-skippable with exact trigger-map
+  accounting, durable trigger evidence, provenance-based micro-lane acceptance,
+  and a reviewer join barrier.
 - Reconciled candidate producer/parser contracts with asserted row families,
   marker compatibility, and durable CLEAN attestations for verified negative
   micro-lane results.

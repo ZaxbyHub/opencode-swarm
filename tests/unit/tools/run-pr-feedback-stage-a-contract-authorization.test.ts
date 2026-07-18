@@ -22,9 +22,13 @@ import {
 
 const SESSION = 'stage-a-contract-authorization';
 const HEAD = 'abc123';
+const BASE = 'def456';
 const REVISION = 'revision-1';
 let directory = '';
+let baseContracts = new Map<string, string>();
 const originalRunner = _internals.runExternalTool;
+const originalReadGitTextAtRevision = _internals.readGitTextAtRevision;
+const originalResolveExactMergeBase = _internals.resolveExactMergeBase;
 const originalDigest = _internals.resolvePrWorkflowRevisionDigest;
 const originalStageHead = _internals.resolveCurrentGitHead;
 const originalControlDigest = _internals.resolveGitControlStateDigest;
@@ -46,6 +50,10 @@ beforeEach(async () => {
 	_internals.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_internals.resolveCurrentGitHead = () => HEAD;
 	_internals.resolveGitControlStateDigest = () => 'git-control-1';
+	baseContracts = new Map();
+	_internals.resolveExactMergeBase = () => BASE;
+	_internals.readGitTextAtRevision = (_directory, sha, contractPath) =>
+		sha === BASE ? (baseContracts.get(contractPath) ?? null) : null;
 	_internals.runExternalTool = mock(async () => ({
 		status: 'completed' as const,
 		exitCode: 0,
@@ -116,6 +124,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	_internals.runExternalTool = originalRunner;
+	_internals.readGitTextAtRevision = originalReadGitTextAtRevision;
+	_internals.resolveExactMergeBase = originalResolveExactMergeBase;
 	_internals.resolvePrWorkflowRevisionDigest = originalDigest;
 	_internals.resolveCurrentGitHead = originalStageHead;
 	_internals.resolveGitControlStateDigest = originalControlDigest;
@@ -131,28 +141,30 @@ describe('Stage A coalesced validator contract authorization', () => {
 			path: '.pr-validation.json',
 			id: 'custom-build',
 		};
+		const contractText = JSON.stringify({
+			version: 1,
+			validators: [
+				{
+					id: validatorContract.id,
+					category: 'build',
+					working_directory: '.',
+					command: ['acme-validator', 'verify-build'],
+				},
+			],
+		});
+		baseContracts.set(validatorContract.path, contractText);
 		await Promise.all([
 			fs.writeFile(
 				path.join(directory, 'package.json'),
 				JSON.stringify({ scripts: { build: 'acme-validator verify-build' } }),
 			),
-			fs.writeFile(
-				path.join(directory, validatorContract.path),
-				JSON.stringify({
-					version: 1,
-					validators: [
-						{
-							id: validatorContract.id,
-							category: 'build',
-							working_directory: '.',
-							command: ['acme-validator', 'verify-build'],
-						},
-					],
-				}),
-			),
+			fs.writeFile(path.join(directory, validatorContract.path), contractText),
 		]);
 		const build = _internals
-			.discoverApplicableStageAObligations(directory)
+			.discoverApplicableStageAObligations(directory, {
+				baseRef: 'origin/main',
+				baseSha: BASE,
+			})
 			.find(({ category }) => category === 'build')!;
 		expect(build).toMatchObject({
 			source: 'package.json#build',
@@ -186,6 +198,8 @@ describe('Stage A coalesced validator contract authorization', () => {
 				await executeRunPrFeedbackStageA(
 					{
 						pr_head_sha: HEAD,
+						base_ref: 'origin/main',
+						base_sha: BASE,
 						checks: baseChecks.map((check) =>
 							check.category === 'build'
 								? { ...check, validator_contract: reference }
@@ -214,7 +228,12 @@ describe('Stage A coalesced validator contract authorization', () => {
 		}));
 		const empty = JSON.parse(
 			await executeRunPrFeedbackStageA(
-				{ pr_head_sha: HEAD, checks: authorizedChecks },
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks: authorizedChecks,
+				},
 				directory,
 				{ sessionID: SESSION },
 			),
@@ -231,7 +250,12 @@ describe('Stage A coalesced validator contract authorization', () => {
 		}));
 		const accepted = JSON.parse(
 			await executeRunPrFeedbackStageA(
-				{ pr_head_sha: HEAD, checks: authorizedChecks },
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks: authorizedChecks,
+				},
 				directory,
 				{ sessionID: SESSION },
 			),
@@ -279,5 +303,109 @@ describe('Stage A coalesced validator contract authorization', () => {
 			);
 			expect(result.success).toBe(true);
 		}
+	});
+
+	test('rejects a contract added or changed by the PR tree before any validator can run', async () => {
+		const baseContract = JSON.stringify({
+			version: 1,
+			validators: [
+				{
+					id: 'trusted-build',
+					category: 'build',
+					working_directory: '.',
+					command: ['trusted-validator', 'build'],
+				},
+			],
+		});
+		baseContracts.set('.pr-validation.json', baseContract);
+		await fs.writeFile(
+			path.join(directory, '.pr-validation.json'),
+			JSON.stringify({
+				version: 1,
+				validators: [
+					{
+						id: 'pr-added-validator',
+						category: 'build',
+						working_directory: '.',
+						command: ['untrusted-validator', 'build'],
+					},
+				],
+			}),
+		);
+
+		const result = JSON.parse(
+			await executeRunPrFeedbackStageA(
+				{
+					pr_head_sha: HEAD,
+					base_ref: 'origin/main',
+					base_sha: BASE,
+					checks: [
+						{
+							category: 'diff-check',
+							command: ['git', 'diff', '--check'],
+						},
+						{
+							category: 'reproduction',
+							command: ['bun', 'test', 'tests/targeted-regression.test.ts'],
+							targets: ['tests/targeted-regression.test.ts'],
+							feedback_targets: [
+								{
+									feedback_item_id: 'FB-001',
+									target: 'tests/targeted-regression.test.ts',
+									expected_behavior:
+										'targeted regression proves the blocked contract does not execute',
+								},
+							],
+						},
+					],
+				},
+				directory,
+				{ sessionID: SESSION },
+			),
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.message).toContain(
+			'must be unchanged from the immutable merge base',
+		);
+		expect(_internals.runExternalTool).not.toHaveBeenCalled();
+	});
+
+	test('fails closed for an opaque named script unless a base-identical contract replaces it', async () => {
+		await fs.writeFile(
+			path.join(directory, 'package.json'),
+			JSON.stringify({ scripts: { build: 'custom-build && echo done' } }),
+		);
+		expect(() =>
+			_internals.discoverApplicableStageAObligations(directory),
+		).toThrow('opaque package script');
+
+		const contractText = JSON.stringify({
+			version: 1,
+			validators: [
+				{
+					id: 'trusted-build',
+					category: 'build',
+					working_directory: '.',
+					command: ['trusted-validator', 'build'],
+				},
+			],
+		});
+		baseContracts.set('.pr-validation.json', contractText);
+		await fs.writeFile(
+			path.join(directory, '.pr-validation.json'),
+			contractText,
+		);
+
+		const obligations = _internals.discoverApplicableStageAObligations(
+			directory,
+			{ baseRef: 'origin/main', baseSha: BASE },
+		);
+		expect(obligations).toContainEqual({
+			id: 'build:.:.pr-validation.json#trusted-build',
+			category: 'build',
+			workingDirectory: '.',
+			source: '.pr-validation.json#trusted-build',
+		});
 	});
 });

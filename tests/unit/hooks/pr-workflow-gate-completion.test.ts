@@ -339,6 +339,16 @@ describe('PR workflow terminal completion', () => {
 				}),
 			).rejects.toThrow('standalone git commit');
 		}
+		for (const command of [
+			'git commit -m "fix $(node scripts/mutate.js)"',
+			'git commit -m "fix `node scripts/mutate.js`"',
+		]) {
+			await expect(
+				enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
+					command,
+				}),
+			).rejects.toThrow('standalone shell commands');
+		}
 		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
 		for (const commitCount of [0, 2, null]) {
 			_test_exports.resolveCommitCountSince = () => commitCount;
@@ -456,6 +466,30 @@ describe('PR workflow terminal completion', () => {
 		_test_exports.resolveRemoteRefsContainingHead = () => [
 			'refs/remotes/origin/pr-head',
 		];
+		const statePath = path.join(
+			directory,
+			'.swarm',
+			_test_exports.workflowGateStateRelativePath(SESSION_ID),
+		);
+		_test_exports.beforeTerminalClear = async () => {
+			// Model a second same-session writer that commits after completion has
+			// validated its state snapshot but immediately before the terminal CAS.
+			const raw = JSON.parse(await fs.readFile(statePath, 'utf-8')) as {
+				revision: number;
+				updatedAt: string;
+			};
+			raw.revision += 1;
+			raw.updatedAt = new Date().toISOString();
+			await fs.writeFile(statePath, JSON.stringify(raw), 'utf-8');
+			_test_exports.resetTrackedStateCache();
+		};
+		await expect(
+			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+		).rejects.toThrow('state changed during terminal completion');
+		await expect(
+			readPrWorkflowGateState(directory, SESSION_ID),
+		).resolves.not.toBeNull();
+		_test_exports.beforeTerminalClear = undefined;
 		await expect(
 			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
 		).resolves.toBe('completed');

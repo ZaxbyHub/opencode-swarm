@@ -17,6 +17,7 @@ import {
 	resolveIsExactSingleChildCommit,
 	resolveIsWorkingTreeClean,
 	resolvePrWorkflowRevisionDigest,
+	resolvePrWorkflowRevisionDigestAsync,
 	resolveRemoteRefsContainingHead,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
@@ -154,6 +155,8 @@ interface PrReviewValidationBatchRecord {
 
 export interface PrWorkflowGateState {
 	schemaVersion: 1;
+	/** Monotonic durable revision used to reject stale same-session transitions. */
+	revision: number;
 	sessionID: string;
 	mode: PrWorkflowMode;
 	activatedAt: string;
@@ -175,15 +178,25 @@ export interface PrWorkflowGateState {
 	prFeedbackReadyToPublish?: PrFeedbackReadyToPublishRecord;
 }
 
+interface SessionStateMutationLock {
+	ownerToken: string;
+	pid: number;
+	createdAtMs: number;
+}
+
 const GATE_SCHEMA_VERSION = 1 as const;
 const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 const WINDOWS_RENAME_MAX_RETRIES = 3;
 const RENAME_RETRY_DELAY_MS = 10;
+const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
+const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
+const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
 const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
 const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
+const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
 
 const PrReviewBaseDispatchRecordSchema = z
 	.object({
@@ -336,6 +349,7 @@ const PrReviewValidationBatchRecordSchema = z
 const PrWorkflowGateStateSchema = z
 	.object({
 		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
+		revision: z.number().int().nonnegative().default(0),
 		sessionID: z.string().min(1),
 		mode: z.enum(['PR_REVIEW', 'PR_FEEDBACK']),
 		activatedAt: z.string().min(1),
@@ -395,6 +409,7 @@ export async function activatePrWorkflow(
 	const timestamp = isoNow();
 	const nextState: PrWorkflowGateState = {
 		schemaVersion: GATE_SCHEMA_VERSION,
+		revision: 0,
 		sessionID: normalizedSessionID,
 		mode,
 		activatedAt: timestamp,
@@ -410,58 +425,54 @@ export async function readPrWorkflowGateState(
 	sessionID: string,
 ): Promise<PrWorkflowGateState | null> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
-	const cacheKey = stateCacheKey(directory, normalizedSessionID);
-	const cached = trackedStatesByProjectSession.get(cacheKey);
-	if (cached) return cached;
-
-	const filePath = workflowGateStatePath(directory, normalizedSessionID);
-	let raw: string;
-	try {
-		raw = await fsp.readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-			return null;
-		}
-		throw error;
-	}
-
-	let parsedJson: unknown;
-	try {
-		parsedJson = JSON.parse(raw);
-	} catch {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is not valid JSON`,
+	// State is shared by plugin processes. The bounded cache is an eviction aid
+	// for locally persisted snapshots, never an authority over the durable file.
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizedSessionID,
+	);
+	if (state) {
+		rememberState(directory, state);
+	} else {
+		trackedStatesByProjectSession.delete(
+			stateCacheKey(directory, normalizedSessionID),
 		);
 	}
-
-	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
-	if (!parsed.success) {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid`,
-		);
-	}
-
-	rememberState(directory, parsed.data);
-	return parsed.data;
+	return state;
 }
 
 export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
+	expectedRevision?: number,
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
-	trackedStatesByProjectSession.delete(
-		stateCacheKey(directory, normalizedSessionID),
-	);
-	try {
-		await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
-			force: true,
-		});
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-			throw error;
+	await withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const current = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (
+			expectedRevision !== undefined &&
+			(!current || current.revision !== expectedRevision)
+		) {
+			throw new Error(
+				'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
+			);
 		}
-	}
+		try {
+			await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
+				force: true,
+			});
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+				throw error;
+			}
+		}
+		trackedStatesByProjectSession.delete(
+			stateCacheKey(directory, normalizedSessionID),
+		);
+	});
 }
 
 /** Bind an active PR workflow to one immutable PR head. */
@@ -966,6 +977,7 @@ export async function assertPrFeedbackVerificationSettled(
 	sessionID: string,
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
 	const inventory = state.prFeedbackInventory;
 	const batches = state.prFeedbackVerifications ?? [];
 	if (!inventory || batches.length === 0) {
@@ -986,6 +998,8 @@ export async function assertPrFeedbackVerificationSettled(
 			'swarm-pr-feedback:verification',
 			batch.validatedAt,
 			false,
+			new Set(),
+			currentDigest,
 		);
 		for (const lane of batch.ownership) {
 			if (!successfulLaneIds.has(lane.laneId)) continue;
@@ -1036,7 +1050,7 @@ export async function recordPrFeedbackStageA(
 	} = {},
 ): Promise<PrWorkflowGateState> {
 	const state = await assertPrFeedbackVerificationSettled(directory, sessionID);
-	const currentDigest = currentPrFeedbackRevisionDigest(directory, state);
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
 	if (revisionDigest !== currentDigest) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK Stage A receipt is stale because the working-tree revision changed during validation',
@@ -1239,18 +1253,6 @@ export async function recordPrFeedbackGateBatch(
 			`BLOCKED: PR_FEEDBACK ${phase} must own every inventory item exactly once and in declared order`,
 		);
 	}
-	const stageA = state.prFeedbackStageA;
-	const currentDigest = currentPrFeedbackRevisionDigest(directory, state);
-	if (
-		!stageA ||
-		stageA.revisionDigest !== currentDigest ||
-		!sameStringArray(stageA.feedbackItemIds ?? [], inventory) ||
-		options.revisionDigest !== currentDigest
-	) {
-		throw new Error(
-			`BLOCKED: PR_FEEDBACK ${phase} requires fresh Stage A checks on the current revision`,
-		);
-	}
 	const phaseIndex = PR_FEEDBACK_PHASE_ORDER.indexOf(phase);
 	const prerequisite = PR_FEEDBACK_PHASE_ORDER[phaseIndex - 1];
 	if (prerequisite) {
@@ -1258,6 +1260,23 @@ export async function recordPrFeedbackGateBatch(
 			directory,
 			sessionID,
 			prerequisite,
+		);
+	}
+	// The prerequisite check may await independent evidence. Refresh the durable
+	// state and digest afterwards so the newly-recorded batch cannot bind an
+	// earlier content snapshot.
+	const stageA = state.prFeedbackStageA;
+	const refreshedInventory = state.prFeedbackInventory;
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
+	if (
+		!stageA ||
+		!refreshedInventory ||
+		stageA.revisionDigest !== currentDigest ||
+		!sameStringArray(stageA.feedbackItemIds ?? [], refreshedInventory) ||
+		options.revisionDigest !== currentDigest
+	) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK ${phase} requires fresh Stage A checks on the current revision`,
 		);
 	}
 	const batchId = normalizeBatchId(options.batchId);
@@ -1294,7 +1313,7 @@ export async function assertPrFeedbackGatePhaseSettled(
 	phase: PrFeedbackGatePhase,
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
-	const currentDigest = currentPrFeedbackRevisionDigest(directory, state);
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
 	if (state.prFeedbackStageA?.revisionDigest !== currentDigest) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK ${phase} cannot use stale Stage A evidence`,
@@ -1331,6 +1350,9 @@ export async function assertPrFeedbackGatePhaseSettled(
 		],
 		`swarm-pr-feedback:${phase}`,
 		batch.validatedAt,
+		true,
+		new Set(),
+		currentDigest,
 	);
 	if (!successful.has(phase)) {
 		throw new Error(
@@ -1419,7 +1441,7 @@ async function assertPrFeedbackPublicationArmed(
 			'BLOCKED: PR_FEEDBACK publication is not armed; call complete_pr_workflow once after every ordered gate passes',
 		);
 	}
-	const currentDigest = currentPrFeedbackRevisionDigest(directory, state);
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
 	if (armed.revisionDigest !== currentDigest) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK changed after publication was armed; rerun Stage A and every independent gate',
@@ -1723,7 +1745,7 @@ export async function completePrWorkflow(
 			directory,
 			sessionID,
 		);
-		const currentDigest = currentPrFeedbackRevisionDigest(
+		const currentDigest = await currentPrFeedbackRevisionDigest(
 			directory,
 			readyState,
 		);
@@ -1809,13 +1831,20 @@ export async function completePrWorkflow(
 			);
 		}
 	}
-	await clearPrWorkflowGateState(directory, sessionID);
+	await _test_exports.beforeTerminalClear?.();
+	await clearPrWorkflowGateState(directory, sessionID, state.revision);
 	return 'completed';
 }
 
 export const _test_exports = {
 	workflowGateStateRelativePath,
-	resetTrackedStateCache: () => trackedStatesByProjectSession.clear(),
+	workflowGateStateLockRelativePath,
+	resetTrackedStateCache: () => {
+		trackedStatesByProjectSession.clear();
+		pendingStateMutationsByProjectSession.clear();
+		_test_exports.beforeTerminalClear = undefined;
+	},
+	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	resolveCurrentGitHead,
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamRemoteRef,
@@ -1826,6 +1855,8 @@ export const _test_exports = {
 	resolvePrWorkflowRevisionDigest,
 	resolveRemoteRefsContainingHead,
 	parseCriticVerdict,
+	isProcessAlive,
+	nowMs: () => Date.now(),
 };
 
 async function requireAnyActiveState(
@@ -2292,16 +2323,16 @@ function normalizePrHeadSha(prHeadSha: string): string {
 	return normalized;
 }
 
-function currentPrFeedbackRevisionDigest(
+async function currentPrFeedbackRevisionDigest(
 	directory: string,
 	state: PrWorkflowGateState,
-): string {
+): Promise<string> {
 	if (!state.prHeadSha) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK revision binding requires pr_head_sha',
 		);
 	}
-	const digest = _test_exports.resolvePrWorkflowRevisionDigest(
+	const digest = await resolvePrWorkflowRevisionDigestForGate(
 		directory,
 		state.prHeadSha,
 	);
@@ -2311,6 +2342,28 @@ function currentPrFeedbackRevisionDigest(
 		);
 	}
 	return digest;
+}
+
+/**
+ * Production gate calls use the non-blocking, chunked digest implementation.
+ * Keep the synchronous seam for existing focused tests and explicit test
+ * injection; it is never selected while the production implementation is in
+ * place.
+ */
+async function resolvePrWorkflowRevisionDigestForGate(
+	directory: string,
+	baseHeadSha: string,
+): Promise<string | null> {
+	if (
+		_test_exports.resolvePrWorkflowRevisionDigest !==
+		resolvePrWorkflowRevisionDigest
+	) {
+		return _test_exports.resolvePrWorkflowRevisionDigest(
+			directory,
+			baseHeadSha,
+		);
+	}
+	return resolvePrWorkflowRevisionDigestAsync(directory, baseHeadSha);
 }
 
 function normalizeBatchId(batchId: string): string {
@@ -2640,6 +2693,7 @@ function successfulObligationsFromExactBatch(
 	validatedAt: string,
 	checkWorkflowLane = true,
 	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
+	expectedRevisionDigest?: string,
 ): Set<string> {
 	const records = findByBatchId(directory, batchId, {
 		parentSessionId: state.sessionID,
@@ -2699,6 +2753,7 @@ function successfulObligationsFromExactBatch(
 				expectedMode,
 				expectedWorkflowLane,
 				expectedLane?.reviewItemIds,
+				expectedRevisionDigest,
 			)
 		) {
 			successful.add(expectedWorkflowLane);
@@ -2714,6 +2769,7 @@ function workflowArtifactHasContractMarker(
 	expectedMode: string,
 	expectedWorkflowLane: string,
 	reviewItemIds?: readonly string[],
+	expectedRevisionDigest?: string,
 ): boolean {
 	const ref = record.result?.outputRef?.trim();
 	if (!ref) return false;
@@ -2722,9 +2778,14 @@ function workflowArtifactHasContractMarker(
 	const artifact = loaded.artifact;
 	const recordPrHeadSha = record.workspace?.prHeadSha;
 	const recordGitHead = record.workspace?.gitHead;
-	const expectedRevisionDigest = recordPrHeadSha
-		? _test_exports.resolvePrWorkflowRevisionDigest(directory, recordPrHeadSha)
-		: null;
+	const resolvedRevisionDigest =
+		expectedRevisionDigest ??
+		(recordPrHeadSha
+			? _test_exports.resolvePrWorkflowRevisionDigest(
+					directory,
+					recordPrHeadSha,
+				)
+			: null);
 	const expectedReviewScope =
 		state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
 			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
@@ -2744,8 +2805,8 @@ function workflowArtifactHasContractMarker(
 		artifact.prHeadSha !== recordPrHeadSha ||
 		!recordGitHead ||
 		artifact.gitHead !== recordGitHead ||
-		!expectedRevisionDigest ||
-		artifact.revisionDigest !== expectedRevisionDigest ||
+		!resolvedRevisionDigest ||
+		artifact.revisionDigest !== resolvedRevisionDigest ||
 		(expectedReviewScope !== undefined &&
 			(record.workspace?.scope !== expectedReviewScope ||
 				artifact.scope !== expectedReviewScope)) ||
@@ -3020,10 +3081,214 @@ async function persistState(
 	state: PrWorkflowGateState,
 ): Promise<void> {
 	const validated = PrWorkflowGateStateSchema.parse(state);
-	const filePath = workflowGateStatePath(directory, validated.sessionID);
-	await fsp.mkdir(path.dirname(filePath), { recursive: true });
-	await writeAtomicJson(filePath, validated);
-	rememberState(directory, validated);
+	await withSessionStateMutation(directory, validated.sessionID, async () => {
+		const current = await readPrWorkflowGateStateFromDisk(
+			directory,
+			validated.sessionID,
+		);
+		if (
+			current
+				? current.revision !== validated.revision
+				: validated.revision !== 0
+		) {
+			throw new Error(
+				'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+			);
+		}
+		const nextRevision = validated.revision + 1;
+		const nextState = { ...validated, revision: nextRevision };
+		const filePath = workflowGateStatePath(directory, validated.sessionID);
+		await fsp.mkdir(path.dirname(filePath), { recursive: true });
+		await writeAtomicJson(filePath, nextState);
+		Object.assign(state, nextState);
+		rememberState(directory, nextState);
+	});
+}
+
+/** Serialize in-process mutations; the durable revision rejects stale callers. */
+async function withSessionStateMutation<T>(
+	directory: string,
+	sessionID: string,
+	action: () => Promise<T>,
+): Promise<T> {
+	const key = stateCacheKey(directory, sessionID);
+	const previous =
+		pendingStateMutationsByProjectSession.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const current = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const queued = previous.then(() => current);
+	pendingStateMutationsByProjectSession.set(key, queued);
+	await previous;
+	try {
+		const lock = await acquireSessionStateMutationLock(directory, sessionID);
+		try {
+			return await action();
+		} finally {
+			await releaseSessionStateMutationLock(lock);
+		}
+	} finally {
+		release();
+		if (pendingStateMutationsByProjectSession.get(key) === queued) {
+			pendingStateMutationsByProjectSession.delete(key);
+		}
+	}
+}
+
+async function acquireSessionStateMutationLock(
+	directory: string,
+	sessionID: string,
+): Promise<{ path: string; ownerToken: string }> {
+	const lockPath = workflowGateStateLockPath(directory, sessionID);
+	await fsp.mkdir(path.dirname(lockPath), { recursive: true });
+	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
+		try {
+			const handle = await fsp.open(lockPath, 'wx');
+			const lock: SessionStateMutationLock = {
+				ownerToken: randomUUID(),
+				pid: process.pid,
+				createdAtMs: _test_exports.nowMs(),
+			};
+			try {
+				await handle.writeFile(JSON.stringify(lock), 'utf-8');
+				await handle.close();
+			} catch (error) {
+				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
+				throw error;
+			}
+			return { path: lockPath, ownerToken: lock.ownerToken };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+			if (await reclaimAbandonedSessionStateMutationLock(lockPath)) continue;
+			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
+				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
+			}
+		}
+	}
+	throw new Error(
+		'BLOCKED: PR workflow gate state is being mutated by another process; retry after that session transition finishes',
+	);
+}
+
+async function releaseSessionStateMutationLock(lock: {
+	path: string;
+	ownerToken: string;
+}): Promise<void> {
+	try {
+		await removeSessionStateMutationLockIfOwned(lock.path, lock.ownerToken);
+	} catch {
+		// Best-effort cleanup; a crash-recovered lock is reclaimed by the next mutation.
+	}
+}
+
+async function reclaimAbandonedSessionStateMutationLock(
+	lockPath: string,
+): Promise<boolean> {
+	const lock = await readSessionStateMutationLock(lockPath);
+	if (lock) {
+		if (_test_exports.isProcessAlive(lock.pid)) return false;
+		return removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
+	}
+	try {
+		const stat = await fsp.stat(lockPath);
+		if (
+			_test_exports.nowMs() - stat.mtimeMs <
+			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
+		) {
+			return false;
+		}
+		await fsp.rm(lockPath, { force: true });
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+		throw error;
+	}
+}
+
+async function readSessionStateMutationLock(
+	lockPath: string,
+): Promise<SessionStateMutationLock | null> {
+	let raw: string;
+	try {
+		raw = await fsp.readFile(lockPath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			typeof parsed === 'object' &&
+			parsed !== null &&
+			typeof (parsed as SessionStateMutationLock).ownerToken === 'string' &&
+			(parsed as SessionStateMutationLock).ownerToken.length > 0 &&
+			typeof (parsed as SessionStateMutationLock).pid === 'number' &&
+			Number.isInteger((parsed as SessionStateMutationLock).pid) &&
+			(parsed as SessionStateMutationLock).pid > 0 &&
+			typeof (parsed as SessionStateMutationLock).createdAtMs === 'number' &&
+			Number.isFinite((parsed as SessionStateMutationLock).createdAtMs)
+		) {
+			return parsed as SessionStateMutationLock;
+		}
+	} catch {
+		// A crash between exclusive create and metadata write is recovered below.
+	}
+	return null;
+}
+
+async function removeSessionStateMutationLockIfOwned(
+	lockPath: string,
+	ownerToken: string,
+): Promise<boolean> {
+	const lock = await readSessionStateMutationLock(lockPath);
+	if (!lock || lock.ownerToken !== ownerToken) return false;
+	try {
+		await fsp.rm(lockPath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+		throw error;
+	}
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// Permission errors prove the process exists. Unknown errors fail closed.
+		return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+	}
+}
+
+async function readPrWorkflowGateStateFromDisk(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState | null> {
+	const filePath = workflowGateStatePath(directory, sessionID);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(filePath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(raw);
+	} catch {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${sessionID}" is not valid JSON`,
+		);
+	}
+	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
+	if (!parsed.success) {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${sessionID}" is invalid`,
+		);
+	}
+	return parsed.data;
 }
 
 function rememberState(directory: string, state: PrWorkflowGateState): void {
@@ -3046,6 +3311,20 @@ function stateCacheKey(directory: string, sessionID: string): string {
 
 function workflowGateStatePath(directory: string, sessionID: string): string {
 	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
+}
+
+function workflowGateStateLockPath(
+	directory: string,
+	sessionID: string,
+): string {
+	return validateSwarmPath(
+		directory,
+		workflowGateStateLockRelativePath(sessionID),
+	);
+}
+
+function workflowGateStateLockRelativePath(sessionID: string): string {
+	return path.join(WORKFLOW_GATE_DIR, `${safeSessionFileStem(sessionID)}.lock`);
 }
 
 function workflowGateStateRelativePath(sessionID: string): string {
