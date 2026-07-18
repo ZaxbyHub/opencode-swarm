@@ -25,6 +25,14 @@ Delegate plan to the active swarm's critic agent for review BEFORE any implement
 
 You MUST NOT proceed to MODE: EXECUTE without printing this checklist with filled values.
 
+**Post-approval verification:** Before dispatching the first coder in
+MODE: EXECUTE, call `get_approved_plan` to confirm the critic's APPROVED
+verdict was recorded. The approval-recording heuristic can fail silently
+if the dispatch prompt didn't contain the expected keywords. Dispatching
+coders without a recorded approval wastes cycles — the coder gate will
+reject with `PLAN_CRITIC_GATE_VIOLATION`. One read-only call prevents
+this entire failure class.
+
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
 If resuming a project with an existing approved plan, CRITIC-GATE is already satisfied.
