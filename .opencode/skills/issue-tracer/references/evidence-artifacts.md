@@ -1,10 +1,6 @@
 # Evidence Artifacts
 
-Use these templates when a trace directory is warranted. Default path:
-
-```text
-.Codex/issue-traces/<issue-id-or-slug>/
-```
+Use these templates to keep the investigation auditable and resumable. In compact mode each template may be a clearly-headed in-thread block with the identical required content — the storage changes, the required content does not.
 
 ## `01-issue-summary.md`
 
@@ -26,7 +22,6 @@ Use these templates when a trace directory is warranted. Default path:
 ## Reproduction Steps
 1. [Step]
 2. [Step]
-3. [Step]
 
 ## Environment
 - Runtime:
@@ -83,16 +78,16 @@ Use these templates when a trace directory is warranted. Default path:
 - Verdict:
 
 ## Files Read
-- `path/file.ext:lines` - [why read] - [what was learned]
+- `path/file.ext:lines` — [why read] — [what was learned]
 
 ## Searches Run
-- `rg "pattern"` - [result]
+- `<search pattern>` — [result]
 
 ## Tests/Commands Run
-- `command` - PASS/FAIL/BLOCKED - [meaning]
+- `command` — PASS/FAIL/BLOCKED — [meaning]
 
 ## Ruled-Out Paths
-- [Path] - [why ruled out]
+- [Path] — [why ruled out]
 ```
 
 ## `04-root-cause.md`
@@ -121,7 +116,7 @@ Use these templates when a trace directory is warranted. Default path:
 4. [Ruled-out alternatives]
 
 ## Confidence
-[0-100% with reason. Stop below 90%.]
+[0–100% with reason. Below 90%, return to localization with a NAMED missing-evidence target instead of guessing. If two hypotheses remain equally supported after a second pass, escalate to the user.]
 ```
 
 ## `05-fix-plan.md`
@@ -144,7 +139,7 @@ Use these templates when a trace directory is warranted. Default path:
 [Exact behavioral change and why it is necessary and sufficient.]
 
 ## Files Expected to Change
-- `path/file.ext` - [exact reason]
+- `path/file.ext` — [exact reason]
 
 ## Impact Analysis
 - Callers/importers:
@@ -154,10 +149,14 @@ Use these templates when a trace directory is warranted. Default path:
 - Persistence/migrations:
 - Security/privacy:
 - Concurrency/idempotency:
-- opencode-swarm invariants touched:
+
+## Anticipated Defect-Class Sweep (Phase 4.2)
+- Pattern statement (draft):
+- Search predicates (draft):
+- Guardrail rung intended:
 
 ## Edge Cases
-- [edge] - covered by [test/check]
+- [edge] — covered by [test/check]
 
 ## Test Plan
 1. [Failing regression test]
@@ -182,20 +181,18 @@ Use these templates when a trace directory is warranted. Default path:
 
 ## `06-critic-review.md`
 
-Use `references/critic-gate.md`.
+Use `references/critic-gate.md` (Plan Critic section). The artifact records the reviewed SHA/diff hash and a verdict.
 
 ## `07-approved-plan.md`
 
 ```markdown
-# Reviewed Plan
+# Reviewed Plan Awaiting Approval
 
 [Copy final 05-fix-plan.md here.]
 
 ## User Approval
 - [ ] User explicitly approved implementation on [date/time/session note]
 ```
-
-In approved-implementation mode, record why approval was already implied by the user's request instead of blocking.
 
 ## `08-test-results.md`
 
@@ -218,37 +215,53 @@ In approved-implementation mode, record why approval was already implied by the 
 - Format:
 - Security/static checks:
 
+## Deferred-Work Scan
+- Command: `.opencode/skills/issue-tracer/scripts/scan-deferred.sh`
+- Result: [clean, or each hit + disposition]
+
 ## Verification Reasoning
 [Why the fix is correct beyond merely making tests pass.]
 
 ## Test Drift Review
 [Any stale tests found and how they were handled.]
+```
 
-## Invariant Audit Evidence
-[For opencode-swarm touched invariants, list concrete command/source evidence.]
+## `08a-recurrence-sweep.md`
+
+```markdown
+# Recurrence Sweep and Guardrail
+
+(If the change corrects no incorrect behavior/data/docs — pure style/naming — record "no defect class" with a one-line justification and stop here.)
+
+## Defect Class
+[One-sentence pattern statement: the shape of the mistake — API misused, guard omitted, contract assumed, encoding confused — not the site of it.]
+
+## Predicates and Results
+- Predicate 1: `<rg/AST/type query>`
+
+```text
+[Full result set. An empty result is evidence only if the predicate is shown.]
+```
+
+## Dispositions
+| Hit (file:line) | Disposition | Justification |
+|---|---|---|
+| path:line | FIX / FALSE_POSITIVE / OUT_OF_CLASS / DEFERRED_WITH_USER_APPROVAL | [why; for DEFERRED: tracked issue link + quoted user acknowledgment] |
+
+## Guardrail
+- Rung chosen: [lint/static rule > type constraint > runtime/trust-boundary assertion > CI check > documented invariant + regression family]
+- Infeasibility reasons (required if landing on either of the two weakest rungs): [why each stronger rung is infeasible for this class — "faster" is not a reason]
+- Demonstration: [revert-check / mutation / synthetic instance] — captured output showing it FAILS on the original defect and PASSES on the fixed code.
 ```
 
 ## `08b-implementation-review.md`
 
-Use `references/critic-gate.md` (Implementation Review section).
+Use `references/critic-gate.md` (Implementation Review section). The artifact records the reviewed SHA/diff hash, a verdict, and the `## Deferred / Scoped-Out / Unwired` finding.
 
 ## `09-final-critic.md`
 
-Use `references/critic-gate.md` (Final Critic section).
+Use `references/critic-gate.md` (Final Critic section). The artifact records the reviewed SHA/diff hash (confirmed equal to shipped HEAD), a verdict, and the `## Deferred / Scoped-Out / Unwired` finding.
 
 ## `10-pr-body.md`
 
-Use `assets/pr-template.md`.
-
-## `state.md`
-
-```markdown
-# Trace State
-
-- Phase:
-- Completed gates:
-- Active hypothesis:
-- Selected fix:
-- Unresolved risks:
-- Next action:
-```
+Use `assets/pr-template.md`, including the `## Acceptance Criteria → Evidence` map and the `## Waivers (or none)` section.

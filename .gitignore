@@ -68,6 +68,9 @@ events.jsonl
 .claude/session/tasks/
 .codex/issue-traces/
 .Codex/issue-traces/
+# Unified issue-tracer trace root (v2) — runtime evidence under the tracked .agents/ tree, never commit
+.agents/issue-traces/
+.zcode/issue-traces/
 
 
 # ZCode session artifacts (investigation traces, swarm-mode state)

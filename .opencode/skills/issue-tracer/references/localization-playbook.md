@@ -31,22 +31,13 @@ Use when the stack trace is missing, generic, misleading, or incomplete.
    - command flags
    - config names
    - domain nouns and verbs
-2. Search broadly, then narrow:
-   - `rg "<exact error>"`
-   - `rg "<route-or-command>"`
-   - `rg "<domain term>|<config key>|<flag>"`
-   - `git grep "<tracked symbol>"`
-3. Build a candidate file table:
-   - file
-   - relevant symbol
-   - why it could cause the symptom
-   - confidence
-   - next evidence needed
-4. Inspect dependency direction:
-   - who calls this code
-   - what this code calls
-   - where state/config enters
-   - where errors are transformed
+2. Search broadly, then narrow, using your repository search tool:
+   - the exact error string
+   - the route or command name
+   - domain terms, config keys, flags
+   - tracked-symbol confirmation
+3. Build a candidate file table: file, relevant symbol, why it could cause the symptom, confidence, next evidence needed.
+4. Inspect dependency direction: who calls this code, what this code calls, where state/config enters, where errors are transformed.
 5. Use git archaeology sparingly but deliberately:
    - `git log --oneline -- <path>`
    - `git show <commit> -- <path>`
@@ -56,7 +47,7 @@ Use when the stack trace is missing, generic, misleading, or incomplete.
 
 Use when multiple plausible locations remain.
 
-1. Generate 2-5 competing hypotheses.
+1. Generate 2–5 competing hypotheses.
 2. For each hypothesis, define the evidence that would confirm it and the evidence that would falsify it.
 3. Test hypotheses in likelihood order.
 4. Keep no more than three active hypotheses.
@@ -90,12 +81,7 @@ When the failure propagates across components:
 
 1. Start at the failing entry point.
 2. Follow calls one layer at a time.
-3. At each layer, ask:
-   - what data enters
-   - what contract is assumed
-   - what state changes
-   - what errors are swallowed/transformed
-   - what output leaves
+3. At each layer, ask: what data enters, what contract is assumed, what state changes, what errors are swallowed/transformed, what output leaves.
 4. Backtrack when evidence weakens.
 5. Record pruned branches in `03-localization-log.md`.
 
@@ -104,7 +90,6 @@ When the failure propagates across components:
 Stop localization and escalate if:
 
 - the root cause requires unavailable production-only data
-- two hypotheses remain equally supported
+- two hypotheses remain equally supported after a second pass
 - the issue requires a product decision rather than a code correction
 - the suspected fix crosses subsystem boundaries beyond the approved scope
-

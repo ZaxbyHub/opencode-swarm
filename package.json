@@ -80,6 +80,7 @@
 		".opencode/skills/fork-pr-operations",
 		".opencode/skills/parallel-work-check",
 		".opencode/skills/ci-fix-monitor",
+		".opencode/skills/issue-tracer",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"
