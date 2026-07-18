@@ -151,7 +151,12 @@ export async function handleDoctorCommand(
 		const { runConfigDoctorWithFixes } = await import(
 			'../services/config-doctor'
 		);
-		const fixResult = await runConfigDoctorWithFixes(directory, config, true);
+		// The interactive `--fix` command is an explicit, confirmed user action, so
+		// it opts into lossy fixes (e.g. trimming an over-length fallback_models
+		// array). The passive startup autofix path never does (issue #1886).
+		const fixResult = await runConfigDoctorWithFixes(directory, config, true, {
+			applyLossy: true,
+		});
 		output = formatDoctorMarkdown(fixResult.result);
 	} else {
 		const lastRun = readDoctorArtifact(directory);

@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { ALL_AGENT_NAMES } from '../config/constants';
 import type { PluginConfig } from '../config/schema';
 import {
+	FALLBACK_MODELS_MAX,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
 	GateConfigSchema,
 	PluginConfigSchema,
@@ -272,6 +273,149 @@ function collectRawStrictSectionFindings(directory: string): ConfigFinding[] {
 	return findings;
 }
 
+/**
+ * Walk a raw (pre-parse) config object by a Zod issue path, returning the value
+ * at that location or `undefined` if the path does not resolve.
+ */
+function getRawValueAtPath(
+	raw: unknown,
+	issuePath: ReadonlyArray<PropertyKey>,
+): unknown {
+	let node: unknown = raw;
+	for (const seg of issuePath) {
+		if (node === null || typeof node !== 'object') return undefined;
+		node = (node as Record<PropertyKey, unknown>)[seg];
+	}
+	return node;
+}
+
+/**
+ * Surface value-constraint config failures (issue #1886 follow-up).
+ *
+ * `collectRawStrictSectionFindings` only reports UNRECOGNIZED keys, and
+ * `runConfigDoctor` otherwise inspects the already-parsed config — which, for a
+ * config rejected on a value constraint, is the fail-secure DEFAULTS. So a
+ * `too_big`/`too_small`/`invalid_type`/… failure (e.g. an agent's
+ * `fallback_models` array exceeding the schema max) produced NO finding, leaving
+ * the user to guess why their config was discarded.
+ *
+ * This re-reads the raw user + project configs, runs the full schema, and:
+ *   - reports every value-constraint issue so the doctor names WHY the config is
+ *     rejected, and
+ *   - for an over-length `fallback_models` array, attaches an opt-in, lossy
+ *     auto-fix that trims it to the schema max. The trim is applied ONLY via the
+ *     explicit `/swarm config doctor --fix` command (see `applySafeAutoFixes`
+ *     `applyLossy`), never at startup.
+ *
+ * `unrecognized_keys` (owned by `collectRawStrictSectionFindings`) and `gates.*`
+ * (owned by `collectRawGatesConfigFindings`) issues are skipped to avoid
+ * duplicate findings.
+ */
+function collectRawValueConstraintFindings(directory: string): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+
+	// The file `applySafeAutoFixes` will actually write (project wins when it
+	// exists). Only a finding in THIS file is marked auto-fixable, so `--fix`
+	// never claims to trim an array it would not touch.
+	const applyTargetPath = fs.existsSync(projectConfigPath)
+		? projectConfigPath
+		: userConfigPath;
+
+	// One dedupe set across both files so a key present in user AND project
+	// configs is reported once. Iterate the apply-target file FIRST so that, on a
+	// same-path collision, the dedupe keeps the FIXABLE (apply-target) variant
+	// instead of a report-only one that points at the merge-losing file — which
+	// would make `--fix` silently no-op on a repairable config.
+	const seen = new Set<string>();
+	const filesInApplyOrder =
+		applyTargetPath === projectConfigPath
+			? [projectConfigPath, userConfigPath]
+			: [userConfigPath, projectConfigPath];
+
+	for (const configPath of filesInApplyOrder) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+			if (!isPlainObject(raw)) continue;
+
+			const parsed = PluginConfigSchema.safeParse(raw);
+			if (parsed.success) continue;
+
+			for (const issue of parsed.error.issues) {
+				// Owned by sibling collectors — skip to avoid duplicate findings.
+				if (issue.code === 'unrecognized_keys') continue;
+				if (issue.path[0] === 'gates') continue;
+
+				const dotted = issue.path.map(String).join('.');
+				const dedupeKey = `${dotted}|${issue.code}`;
+				if (seen.has(dedupeKey)) continue;
+				seen.add(dedupeKey);
+
+				const current = getRawValueAtPath(raw, issue.path);
+
+				// Opt-in lossy auto-fix: an over-length fallback_models array can be
+				// mechanically trimmed to the schema max — the one value constraint we
+				// can repair without guessing user intent.
+				if (
+					issue.code === 'too_big' &&
+					dotted.endsWith('fallback_models') &&
+					Array.isArray(current) &&
+					current.length > FALLBACK_MODELS_MAX
+				) {
+					const trimmed = current.slice(0, FALLBACK_MODELS_MAX);
+					const dropped = current.slice(FALLBACK_MODELS_MAX).map(String);
+					const inApplyTarget = configPath === applyTargetPath;
+					const drop = `${dropped.length} entr${dropped.length === 1 ? 'y' : 'ies'}`;
+					findings.push({
+						id: 'fallback-models-too-many',
+						title: 'Too many fallback models',
+						description:
+							`"${dotted}" in ${configPath} lists ${current.length} models; the maximum is ${FALLBACK_MODELS_MAX}. ` +
+							`A config that fails validation is discarded in favor of safe defaults. ` +
+							(inApplyTarget
+								? `Run /swarm config doctor --fix to trim to the first ${FALLBACK_MODELS_MAX} (drops ${drop}: ${dropped.join(', ')}), or edit the file yourself.`
+								: `Remove ${drop} from that file (would drop: ${dropped.join(', ')}).`),
+						severity: 'error',
+						path: dotted,
+						currentValue: current,
+						autoFixable: inApplyTarget,
+						proposedFix: {
+							type: 'update',
+							path: dotted,
+							value: trimmed,
+							description: `Trim "${dotted}" to the first ${FALLBACK_MODELS_MAX} models`,
+							risk: 'low',
+							lossy: true,
+						},
+					});
+					continue;
+				}
+
+				// General detection: report every other value-constraint failure so
+				// the doctor names exactly what is invalid.
+				findings.push({
+					id: 'invalid-config-value',
+					title: 'Invalid config value',
+					description:
+						`"${dotted || '(root)'}" in ${configPath} is invalid: ${issue.message}. ` +
+						`A config that fails validation is discarded in favor of safe defaults until this is fixed.`,
+					severity: 'error',
+					path: dotted,
+					currentValue: current,
+					autoFixable: false,
+				});
+			}
+		} catch {
+			// Best-effort, non-blocking (see collectRawGatesConfigFindings).
+		}
+	}
+
+	return findings;
+}
+
 function emitWorktreeIsolationLayeringAdvisory(
 	config: PluginConfig,
 	findings: ConfigFinding[],
@@ -333,6 +477,14 @@ export interface ConfigFix {
 	description: string;
 	/** Risk level - only 'low' is auto-fixable */
 	risk: 'low' | 'medium' | 'high';
+	/**
+	 * When true, the fix loses user-authored data (e.g. trimming an over-length
+	 * array). Lossy fixes are applied ONLY when the caller explicitly opts in via
+	 * `applySafeAutoFixes(..., { applyLossy: true })` — the interactive
+	 * `/swarm config doctor --fix` command does; the passive startup autofix path
+	 * never does. This keeps a lossy repair from being applied silently (#1886).
+	 */
+	lossy?: boolean;
 }
 
 /** Result of running the config doctor */
@@ -1505,6 +1657,7 @@ export function runConfigDoctor(
 	walkConfigAndValidate(config, '', findings);
 	findings.push(...collectRawGatesConfigFindings(directory));
 	findings.push(...collectRawStrictSectionFindings(directory));
+	findings.push(...collectRawValueConstraintFindings(directory));
 	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity
@@ -1574,10 +1727,16 @@ function isPathSafe(fixPath: string): boolean {
 export function applySafeAutoFixes(
 	directory: string,
 	result: ConfigDoctorResult,
+	options: { applyLossy?: boolean } = {},
 ): {
 	appliedFixes: ConfigFix[];
 	updatedConfigPath: string | null;
 } {
+	// Lossy fixes (e.g. trimming an over-length array, which drops user-authored
+	// entries) are applied ONLY when the caller explicitly opts in — the
+	// interactive `/swarm config doctor --fix` command does; the passive startup
+	// autofix path never does (issue #1886 follow-up).
+	const applyLossy = options.applyLossy === true;
 	const appliedFixes: ConfigFix[] = [];
 	let updatedConfigPath: string | null = null;
 
@@ -1608,9 +1767,13 @@ export function applySafeAutoFixes(
 		return { appliedFixes, updatedConfigPath: null };
 	}
 
-	// Filter for safe fixes only
+	// Filter for safe fixes only. Lossy fixes are held back unless the caller
+	// opted in (see `applyLossy` above).
 	const safeFixes = result.findings.filter(
-		(f) => f.autoFixable && f.proposedFix?.risk === 'low',
+		(f) =>
+			f.autoFixable &&
+			f.proposedFix?.risk === 'low' &&
+			(applyLossy || !f.proposedFix?.lossy),
 	);
 
 	// Apply each safe fix
@@ -1827,6 +1990,7 @@ export function writeDoctorArtifact(
 						path: f.proposedFix.path,
 						description: f.proposedFix.description,
 						risk: f.proposedFix.risk,
+						lossy: f.proposedFix.lossy === true,
 					}
 				: null,
 		})),
@@ -1865,6 +2029,7 @@ export async function runConfigDoctorWithFixes(
 	directory: string,
 	config: PluginConfig,
 	autoFix: boolean = false,
+	options: { applyLossy?: boolean } = {},
 ): Promise<{
 	result: ConfigDoctorResult;
 	backupPath: string | null;
@@ -1901,6 +2066,7 @@ export async function runConfigDoctorWithFixes(
 	const { appliedFixes, updatedConfigPath } = applySafeAutoFixes(
 		directory,
 		result,
+		options,
 	);
 
 	// Re-run doctor after fixes to get post-fix result

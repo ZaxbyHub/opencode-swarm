@@ -166,6 +166,13 @@ export const AgentThinkingConfigSchema = z.object({
 });
 export type AgentThinkingConfig = z.infer<typeof AgentThinkingConfigSchema>;
 
+/**
+ * Maximum number of `fallback_models` an agent override may declare. Shared so
+ * the config doctor's opt-in trim (src/services/config-doctor.ts) can never
+ * drift from the schema constraint enforced here (issue #1886 follow-up).
+ */
+export const FALLBACK_MODELS_MAX = 3;
+
 // Agent override configuration
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
@@ -184,7 +191,7 @@ export const AgentOverrideConfigSchema = z.object({
 	variant: z.string().min(1).optional(),
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
-	fallback_models: z.array(z.string()).max(3).optional(),
+	fallback_models: z.array(z.string()).max(FALLBACK_MODELS_MAX).optional(),
 	// Provider-native extended-reasoning / extended-thinking blocks. These
 	// were previously silently stripped by Zod's default strip behavior;
 	// they are now first-class fields. See AgentReasoningConfigSchema /
