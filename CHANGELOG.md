@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.123.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.122.1...v7.123.0) (2026-07-18)
+
+
+### Features
+
+* **skills:** canonicalize issue-tracer with full-resolution contract and per-agent adapters ([0fc66ac](https://github.com/ZaxbyHub/opencode-swarm/commit/0fc66aca1db48ccb466f21e641f94b7b5bf0f1f6))
+
 ## [7.122.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.122.0...v7.122.1) (2026-07-17)
 
 
