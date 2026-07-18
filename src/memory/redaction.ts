@@ -69,6 +69,71 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 ];
 
+/**
+ * #1850: Coarse redaction-policy fingerprint. Two cohort members with the same
+ * count of secret-pattern families and the same `rejectDurableSecrets` setting
+ * are considered policy-compatible; a mismatch fails closed at link time and on
+ * cohort-root open. This is honest about what it measures (the regex pattern
+ * count + the durable-rejection toggle) — it is NOT a content hash of stored
+ * records. Bump the salt constant when the redaction contract changes
+ * meaningfully (e.g. adding PII detection per #1466).
+ */
+export const REDACTION_POLICY_SALT = 1;
+export function computeRedactionPolicyVersion(
+	rejectDurableSecrets: boolean,
+): number {
+	return (
+		REDACTION_POLICY_SALT * 1_000_000 +
+		SECRET_PATTERNS.length * 2 +
+		(rejectDurableSecrets ? 1 : 0)
+	);
+}
+
+/**
+ * #1850 (final-critic dedup): the single cohort-config fingerprint algorithm.
+ * Consumed by the linker (writer), the SQLite provider (fail-closed check),
+ * and the status service (health surface). Centralizing it here prevents the
+ * triple-duplication the final critic flagged — any future edit to the input
+ * shape or hash params changes all three sites consistently.
+ *
+ * Input shape mirrors what `handleMemoryLinkCommand` writes to
+ * `memory-cohort-config.json`. Two cohort members with the same fingerprint
+ * are considered config-compatible.
+ */
+import { createHash } from 'node:crypto';
+
+export interface MemoryCohortFingerprintInput {
+	provider: string;
+	redaction_policy_version: number;
+	embedding_model: string;
+	embedding_dimension: number;
+	embedding_version: string;
+}
+
+export function computeMemoryCohortFingerprint(
+	input: MemoryCohortFingerprintInput,
+): string {
+	const canonical = JSON.stringify(input, Object.keys(input).sort());
+	return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
+}
+
+/** Convenience: build the fingerprint input from a memory config subset. */
+export function buildMemoryCohortFingerprintInput(config: {
+	provider: string;
+	redaction: { rejectDurableSecrets: boolean };
+	embeddings: { model: string; dimension: number; version?: string };
+}): MemoryCohortFingerprintInput {
+	return {
+		provider: config.provider,
+		redaction_policy_version: computeRedactionPolicyVersion(
+			config.redaction.rejectDurableSecrets,
+		),
+		embedding_model: config.embeddings.model,
+		embedding_dimension: config.embeddings.dimension,
+		embedding_version: config.embeddings.version ?? 'default',
+	};
+}
+
 export function findSecrets(text: string): SecretFinding[] {
 	const findings: SecretFinding[] = [];
 	for (const { type, pattern } of SECRET_PATTERNS) {

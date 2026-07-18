@@ -72,6 +72,10 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'guardrail-log',
 		'lanes',
 		'ci-simulate',
+		// #1850: cohort memory sharing commands
+		'memory link',
+		'memory link status',
+		'memory unlink',
 	]);
 
 	const EXPECTED_HUMAN_ONLY = new Set<string>([
@@ -344,6 +348,8 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 			'memory status',
 			'memory export',
 			'lanes',
+			// #1850: memory link status has toolNoArgs: true
+			'memory link status',
 		]);
 		const derived = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {

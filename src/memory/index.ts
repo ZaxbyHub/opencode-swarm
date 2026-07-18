@@ -18,6 +18,7 @@ export type {
 } from './gateway';
 export {
 	createConfiguredMemoryProvider,
+	createConfiguredMemoryProviderForRoot,
 	createMemoryGateway,
 	MemoryGateway,
 } from './gateway';
@@ -52,6 +53,17 @@ export {
 	type MemorySupersededChain,
 	shouldCompactMemory,
 } from './maintenance';
+// #1850 Linked Knowledge 5/5: cohort memory sharing.
+export {
+	invalidateMemoryStoreDirCache,
+	isMemoryLinked,
+	MEMORY_LINK_POINTER_FILENAME,
+	type MemoryLinkPointer,
+	readMemoryLinkPointer,
+	removeMemoryLinkPointer,
+	resolveMemoryStoreDir,
+	writeMemoryLinkPointer,
+} from './memory-link';
 export { buildRecallPromptBlock } from './prompt-block';
 export type {
 	MemoryCompactOptions,
@@ -66,7 +78,13 @@ export {
 	type MemoryRecallPlan,
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
-export { findSecrets, redactSecrets } from './redaction';
+export {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+	computeRedactionPolicyVersion,
+	findSecrets,
+	redactSecrets,
+} from './redaction';
 export {
 	MEMORY_RECALL_PROFILES,
 	type MemoryRecallProfile,
@@ -86,6 +104,14 @@ export {
 	validateMemoryRecordRules,
 } from './schema';
 export { SQLiteMemoryProvider } from './sqlite-provider';
+export {
+	isCohortRoot,
+	isLocalRoot,
+	resolveVettedMemoryRoot,
+	rootStoragePath,
+	type VettedMemoryRoot,
+	wrapLocalRoot,
+} from './storage-root';
 export type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,

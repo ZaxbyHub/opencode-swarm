@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import {
 	computeMemoryContentHash,
 	createConfiguredMemoryProvider,
+	createConfiguredMemoryProviderForRoot,
 	createMemoryId,
 	DEFAULT_MEMORY_CONFIG,
 	type MemoryProvider,
@@ -68,6 +69,8 @@ afterEach(async () => {
 	}
 	// Restore DI seams in case a test overrode them.
 	_internals.createConfiguredMemoryProvider = createConfiguredMemoryProvider;
+	_internals.createConfiguredMemoryProviderForRoot =
+		createConfiguredMemoryProviderForRoot;
 	_internals.applyCouncilReward = applyCouncilReward;
 	// Release sqlite pool handles BEFORE removing temp dirs (Windows EBUSY guard).
 	clearPool();
@@ -280,9 +283,15 @@ describe('runFinalizeRewardSweep — control paths', () => {
 	});
 
 	test('non-blocking: a provider-factory that throws does NOT propagate out of the sweep', async () => {
-		_internals.createConfiguredMemoryProvider = (() => {
+		// #1850: the sweep now resolves a vetted root and calls the ForRoot
+		// factory. Mock both factories so the throw path is exercised regardless
+		// of which entry the implementation uses.
+		const throwingFactory = (() => {
 			throw new Error('factory boom');
 		}) as typeof createConfiguredMemoryProvider;
+		_internals.createConfiguredMemoryProvider = throwingFactory;
+		_internals.createConfiguredMemoryProviderForRoot =
+			throwingFactory as unknown as typeof createConfiguredMemoryProviderForRoot;
 
 		const result = await runFinalizeRewardSweep({
 			directory: '/nonexistent',

@@ -4,7 +4,13 @@ export type MemoryScopeType =
 	| 'project'
 	| 'repository'
 	| 'run'
-	| 'agent';
+	| 'agent'
+	// Linked Knowledge 5/5 (#1850): cohort-scoped memory shared across linked
+	// sibling worktrees through the #1846 cohort identity. A cohort scope is
+	// visible to every worktree that resolves the same canonical cohort id, so
+	// it is the scope used for shared repository memory. Per-session/per-run
+	// state continues to use the `run`/`agent` scopes (which stay worktree-local).
+	| 'cohort';
 
 export interface MemoryScopeRef {
 	type: MemoryScopeType;
@@ -15,6 +21,10 @@ export interface MemoryScopeRef {
 	repoRoot?: string;
 	runId?: string;
 	agentId?: string;
+	/** Canonical cohort id from `resolveCohortId` (#1850). Set when
+	 * `type === 'cohort'`. Required for cohort-scoped records so the scope key
+	 * and recall filters distinguish different cohorts. */
+	cohortId?: string;
 }
 
 export type MemoryKind =
@@ -66,6 +76,26 @@ export interface MemoryRecord {
 	supersededBy?: string;
 	contentHash: string;
 	metadata: Record<string, unknown>;
+	// Linked Knowledge 5/5 (#1850): cohort-sharing provenance. All optional so
+	// pre-#1850 records continue to load without migration. Populated by the
+	// gateway on cohort-linked writes; validated by `validateMemoryRecordRules`
+	// for cohort-scoped records. Provenance preserves privacy/redaction policy
+	// across cohort members (acceptance #13).
+	/** Canonical cohort id the record belongs to. Matches `scope.cohortId`
+	 * when `scope.type === 'cohort'`. */
+	cohortId?: string;
+	/** Session id of the producer (when policy permits retention). */
+	producerSessionId?: string;
+	/** Agent role of the producer. */
+	producerAgentRole?: string;
+	/** Redaction policy version at write time (from REDACTION_POLICY_VERSION). */
+	redactionPolicyVersion?: number;
+	/** Memory schema version at write time. */
+	schemaVersion?: number;
+	/** Provider name at write time (`'sqlite'` | `'local-jsonl'`). */
+	providerVersion?: string;
+	/** Source git revision of the producer, when available. */
+	sourceRevision?: string;
 }
 
 export interface MemoryProposal {

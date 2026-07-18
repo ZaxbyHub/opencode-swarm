@@ -25,6 +25,7 @@ import {
 } from '../memory/consolidation-log.js';
 import { createMemoryGateway } from '../memory/gateway.js';
 import { appendMemoryRunLog } from '../memory/run-log.js';
+import { resolveVettedMemoryRoot } from '../memory/storage-root.js';
 
 export interface MemoryConsolidationRequest {
 	directory: string;
@@ -98,8 +99,17 @@ export async function runMemoryConsolidation(
 					now: () => new Date(),
 					logEvent: (event) =>
 						appendMemoryRunLog(req.directory, req.sessionId, event),
-					readLog: () => readConsolidationLog(req.directory),
-					appendLog: (record) => appendConsolidationLog(req.directory, record),
+					// #1850 GAP-3: route the consolidation log through the vetted
+					// root so it lands in the cohort store when linked.
+					readLog: () =>
+						readConsolidationLog(
+							resolveVettedMemoryRoot(req.directory, req.config),
+						),
+					appendLog: (record) =>
+						appendConsolidationLog(
+							resolveVettedMemoryRoot(req.directory, req.config),
+							record,
+						),
 					signal: controller.signal,
 				},
 			);

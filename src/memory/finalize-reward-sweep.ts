@@ -83,8 +83,12 @@
 
 import type { MemoryConfig } from '../config/schema';
 import { log as debugLog } from '../utils/logger';
-import { createConfiguredMemoryProvider } from './gateway';
+import {
+	createConfiguredMemoryProvider,
+	createConfiguredMemoryProviderForRoot,
+} from './gateway';
 import { applyCouncilReward } from './reward-capture';
+import { resolveVettedMemoryRoot } from './storage-root';
 
 /**
  * Negative terminal reward for memories recalled into non-completed
@@ -161,8 +165,12 @@ export async function runFinalizeRewardSweep(
 		}
 
 		const timestamp = args.timestamp ?? new Date().toISOString();
-		const provider = _internals.createConfiguredMemoryProvider(
-			directory,
+		// #1850 (critic GAP-4): resolve the vetted root so rewards captured by
+		// the finalize sweep land in the cohort store when linked. Without this,
+		// the sweep silently stays local (rewards invisible to siblings).
+		const vettedRoot = resolveVettedMemoryRoot(directory, memoryConfig);
+		const provider = _internals.createConfiguredMemoryProviderForRoot(
+			vettedRoot,
 			memoryConfig,
 		);
 		try {
@@ -245,5 +253,6 @@ export async function runFinalizeRewardSweep(
  */
 export const _internals = {
 	createConfiguredMemoryProvider,
+	createConfiguredMemoryProviderForRoot,
 	applyCouncilReward,
 };
