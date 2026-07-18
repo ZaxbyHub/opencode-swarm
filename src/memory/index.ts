@@ -1,24 +1,5 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
-// #1850 Linked Knowledge 5/5: cohort memory sharing.
-export {
-	type MemoryLinkPointer,
-	MEMORY_LINK_POINTER_FILENAME,
-	readMemoryLinkPointer,
-	removeMemoryLinkPointer,
-	writeMemoryLinkPointer,
-	resolveMemoryStoreDir,
-	invalidateMemoryStoreDirCache,
-	isMemoryLinked,
-} from './memory-link';
-export {
-	type VettedMemoryRoot,
-	resolveVettedMemoryRoot,
-	wrapLocalRoot,
-	isCohortRoot,
-	isLocalRoot,
-	rootStoragePath,
-} from './storage-root';
 export { MemoryDisabledError, MemoryValidationError } from './errors';
 export {
 	evaluateMemoryRecallFixtures,
@@ -72,6 +53,17 @@ export {
 	type MemorySupersededChain,
 	shouldCompactMemory,
 } from './maintenance';
+// #1850 Linked Knowledge 5/5: cohort memory sharing.
+export {
+	invalidateMemoryStoreDirCache,
+	isMemoryLinked,
+	MEMORY_LINK_POINTER_FILENAME,
+	type MemoryLinkPointer,
+	readMemoryLinkPointer,
+	removeMemoryLinkPointer,
+	resolveMemoryStoreDir,
+	writeMemoryLinkPointer,
+} from './memory-link';
 export { buildRecallPromptBlock } from './prompt-block';
 export type {
 	MemoryCompactOptions,
@@ -87,11 +79,11 @@ export {
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
 export {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+	computeRedactionPolicyVersion,
 	findSecrets,
 	redactSecrets,
-	computeRedactionPolicyVersion,
-	computeMemoryCohortFingerprint,
-	buildMemoryCohortFingerprintInput,
 } from './redaction';
 export {
 	MEMORY_RECALL_PROFILES,
@@ -112,6 +104,14 @@ export {
 	validateMemoryRecordRules,
 } from './schema';
 export { SQLiteMemoryProvider } from './sqlite-provider';
+export {
+	isCohortRoot,
+	isLocalRoot,
+	resolveVettedMemoryRoot,
+	rootStoragePath,
+	type VettedMemoryRoot,
+	wrapLocalRoot,
+} from './storage-root';
 export type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,

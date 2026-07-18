@@ -3,12 +3,13 @@
  * Verifies status/diagnostics surfaces do NOT emit memory record text or
  * unrelated-repo identifiers when cohort-linked.
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { computeKnowledgeDebug } from '../../../src/services/knowledge-diagnostics';
 import { writeMemoryLinkPointer } from '../../../src/memory/memory-link';
+import { computeKnowledgeDebug } from '../../../src/services/knowledge-diagnostics';
 
 function makeTmp(prefix: string): string {
 	return realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
@@ -16,8 +17,12 @@ function makeTmp(prefix: string): string {
 
 describe('#1850 diagnostics no-leakage (acceptance #13 — category #13)', () => {
 	const dirs: string[] = [];
+	let prevXdg: string | undefined;
+	let prevHome: string | undefined;
 
 	beforeEach(() => {
+		prevXdg = process.env.XDG_DATA_HOME;
+		prevHome = process.env.HOME;
 		const dataDir = makeTmp('diag-data-');
 		dirs.push(dataDir);
 		process.env.XDG_DATA_HOME = dataDir;
@@ -25,6 +30,8 @@ describe('#1850 diagnostics no-leakage (acceptance #13 — category #13)', () =>
 	});
 
 	afterEach(() => {
+		process.env.XDG_DATA_HOME = prevXdg;
+		process.env.HOME = prevHome;
 		for (const d of dirs.splice(0)) {
 			try {
 				rmSync(d, { recursive: true, force: true });

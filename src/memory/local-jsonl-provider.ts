@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import {
 	appendFile,
 	mkdir,
@@ -30,6 +30,10 @@ import type {
 	MemoryRewardEvent,
 	MemoryRewardEventFilter,
 } from './provider';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from './redaction';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import {
@@ -119,6 +123,12 @@ export class LocalJsonlMemoryProvider
 
 	async initialize(): Promise<void> {
 		if (this.initialized) return;
+		// #1850 (KC-001 fix): enforce the cohort config fingerprint for JSONL
+		// providers too, so a cohort member with a mismatched config fails
+		// closed (acceptance #10). Mirrors the SQLite provider's check.
+		if (this.cohortRoot) {
+			this.assertCohortConfigFingerprint();
+		}
 		const memoryPath = this.pathFor('memories');
 		const proposalPath = this.pathFor('proposals');
 		const memoryLoad = validateLoadedMemories(
@@ -537,6 +547,43 @@ export class LocalJsonlMemoryProvider
 			writeFileSync(markerPath, String(Date.now()), 'utf-8');
 		} catch {
 			/* best-effort — peer revalidation has TTL + pointer-stat backstops */
+		}
+	}
+
+	/**
+	 * #1850 (KC-001 fix): mirror the SQLite provider's fingerprint check. Reads
+	 * `memory-cohort-config.json` and throws on mismatch. Absent/malformed file
+	 * is permissive (fail-open never strands memory).
+	 */
+	private assertCohortConfigFingerprint(): void {
+		if (!this.cohortRoot) return;
+		const configPath = path.join(this.cohortRoot, 'memory-cohort-config.json');
+		if (!existsSync(configPath)) return;
+		try {
+			const stored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<
+				string,
+				unknown
+			>;
+			const storedFingerprint = stored.fingerprint;
+			if (typeof storedFingerprint !== 'string') return;
+			const expectedFingerprint = computeMemoryCohortFingerprint(
+				buildMemoryCohortFingerprintInput(this.config),
+			);
+			if (storedFingerprint !== expectedFingerprint) {
+				throw new Error(
+					`memory cohort config fingerprint mismatch: cohort expects ${storedFingerprint}, this worktree computes ${expectedFingerprint}. ` +
+						'Provider/embedding/redaction config differs across cohort members. ' +
+						'Run `/swarm memory unlink` to recover local state, or align configs across linked worktrees.',
+				);
+			}
+		} catch (err) {
+			if (
+				err instanceof Error &&
+				err.message.includes('fingerprint mismatch')
+			) {
+				throw err;
+			}
+			/* malformed config file — fail-open */
 		}
 	}
 

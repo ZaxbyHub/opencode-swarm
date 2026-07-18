@@ -27,7 +27,7 @@
  */
 
 import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, rename } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
@@ -35,12 +35,16 @@ import {
 	MIGRATION_LOCK_RETRIES,
 	MIGRATION_LOCK_STALE_MS,
 } from '../knowledge/family-migration-shared.js';
-import {
-	MEMORY_FAMILY,
-	type MemoryFamilyMember,
-} from './memory-family-manifest.js';
+import { warn } from '../utils/logger.js';
+import { MEMORY_FAMILY } from './memory-family-manifest.js';
 import type { VettedMemoryRoot } from './storage-root.js';
 import { isCohortRoot, rootStoragePath } from './storage-root.js';
+
+/**
+ * #1850 (H-008): max number of source-DB backups retained in
+ * `<cohortRoot>/backups/`. Oldest are pruned after each migration.
+ */
+const MAX_BACKUPS = 5;
 
 export interface MemoryFamilyMigrationCounts {
 	readonly perMember: ReadonlyArray<{
@@ -190,14 +194,17 @@ async function mergeStagedSqlite(
 	// unlink cycle (or two worktrees linking concurrently) merges rather than
 	// overwrites or fails. We open the destination DB directly (NOT via the
 	// pool — the pool was drained by the command handler before migration).
-	const beforeCount = await countRowsSafe(destDbPath);
 	try {
 		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
 		const Db = loadDatabaseCtor();
 		const db = new Db(destDbPath);
 		try {
-			// ATTACH the staged DB read-only.
-			db.run(`ATTACH DATABASE '${stagedPath}' AS staged;`);
+			// ATTACH the staged DB read-only. #1850 (M-001 fix): escape single
+			// quotes in the path by doubling them (SQL-standard string escape)
+			// so paths containing `'` don't break the ATTACH. We avoid
+			// pathToFileURL because node:sqlite on Windows rejects file:// URLs.
+			const safePath = stagedPath.replace(/'/g, "''");
+			db.run(`ATTACH DATABASE '${safePath}' AS staged;`);
 			// Merge each id-keyed table. INSERT OR IGNORE skips rows whose id
 			// already exists in the destination (idempotent on retry).
 			const tables = [
@@ -208,6 +215,8 @@ async function mergeStagedSqlite(
 				'memory_reward_events',
 			];
 			let merged = 0;
+			let skippedDueToError = 0;
+			const failedTables: string[] = [];
 			for (const table of tables) {
 				try {
 					// Check the staged table exists (a freshly-created staged DB
@@ -222,12 +231,23 @@ async function mergeStagedSqlite(
 						`INSERT OR IGNORE INTO ${table} SELECT * FROM staged.${table};`,
 					);
 					merged += result.changes ?? 0;
-				} catch {
-					/* per-table best-effort — schema may differ */
+				} catch (err) {
+					// #1850 (M-002 fix): track tables that failed schema-mismatch or
+					// other errors, so the migration report surfaces them instead of
+					// silently claiming skipped:0.
+					skippedDueToError++;
+					failedTables.push(
+						`${table} (${err instanceof Error ? err.message : String(err)})`,
+					);
 				}
 			}
 			db.run('DETACH DATABASE staged;');
-			return { merged, skipped: 0 };
+			if (failedTables.length > 0) {
+				warn(
+					`[memory-family-migration] ${failedTables.length} table(s) skipped during SQLite ATTACH merge: ${failedTables.join(', ')}`,
+				);
+			}
+			return { merged, skipped: skippedDueToError };
 		} finally {
 			db.close();
 			// #1850 (final-critic cleanup): remove the staged DB file (+ sidecars)
@@ -358,12 +378,13 @@ export async function migrateMemoryFamily(
 				}
 				await atomicWriteFile(destPath, serialized);
 				perMember.push({ filename: member.filename, merged: added, skipped });
-				continue;
 			}
 		}
 
 		// 8. Source backup (step 9 of the issue sequence) — retained for recovery.
 		// Written under the cohort dir's backups/ subdir with a timestamp.
+		// #1850 (H-008 fix): cap at MAX_BACKUPS to prevent unbounded accumulation;
+		// oldest backups are pruned after each write.
 		if (isCohortRoot(sourceRoot)) {
 			const backupDir = path.join(destStoragePath, 'backups');
 			await mkdir(backupDir, { recursive: true });
@@ -377,6 +398,21 @@ export async function migrateMemoryFamily(
 					);
 				} catch {
 					/* best-effort backup */
+				}
+				// Prune oldest backups beyond the cap.
+				try {
+					const { readdirSync, unlinkSync: rmFileSync } = await import(
+						'node:fs'
+					);
+					const backups = readdirSync(backupDir)
+						.filter((f) => f.startsWith('memory.db.pre-merge-'))
+						.sort();
+					while (backups.length > MAX_BACKUPS) {
+						const oldest = backups.shift();
+						if (oldest) rmFileSync(path.join(backupDir, oldest));
+					}
+				} catch {
+					/* best-effort prune */
 				}
 			}
 		}

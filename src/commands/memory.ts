@@ -16,6 +16,7 @@ import {
 	resolveMemoryConfig,
 	resolveMemoryStorageDir,
 	resolveSqliteDatabasePath,
+	resolveVettedMemoryRoot,
 	SQLiteMemoryProvider,
 	writeJsonlExport,
 } from '../memory';
@@ -71,7 +72,15 @@ export async function handleMemoryConsolidationLogCommand(
 	});
 	if ('error' in parsed) return parsed.error;
 	const limit = Math.min(parsed.limit, 50);
-	const records = await readConsolidationLog(directory);
+	// #1850 (M-011 fix): read the consolidation log via the vetted root so it
+	// surfaces cohort-shared passes when linked, not the stale local path.
+	const loadedMemory = loadPluginConfig(directory).memory;
+	const records = await readConsolidationLog(
+		resolveVettedMemoryRoot(
+			directory,
+			resolveMemoryConfig(loadedMemory ?? DEFAULT_MEMORY_CONFIG),
+		),
+	);
 	const recent = records.slice(-limit).reverse();
 	const lines = [
 		'## Swarm Memory Consolidation Log',

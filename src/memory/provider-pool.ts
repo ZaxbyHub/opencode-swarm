@@ -2,9 +2,9 @@ import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 
 import type { MemoryConfig } from './config';
-import type { VettedMemoryRoot } from './storage-root';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
 import { SQLiteMemoryProvider } from './sqlite-provider';
+import type { VettedMemoryRoot } from './storage-root';
 
 /**
  * Maximum number of cached providers in the process-level pool.

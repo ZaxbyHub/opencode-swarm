@@ -4,6 +4,8 @@
  * fail-closed enforcement path in the SQLite provider (final-critic blocking
  * gap: the mismatch throw was previously untested).
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdtempSync,
@@ -13,13 +15,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { DEFAULT_MEMORY_CONFIG } from '../../../src/memory/config';
 import {
-	computeMemoryCohortFingerprint,
 	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
 	computeRedactionPolicyVersion,
 } from '../../../src/memory/redaction';
-import { DEFAULT_MEMORY_CONFIG } from '../../../src/memory/config';
 import { SQLiteMemoryProvider } from '../../../src/memory/sqlite-provider';
 
 function makeTmp(prefix: string): string {
@@ -73,8 +74,12 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 
 describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-closed)', () => {
 	const dirs: string[] = [];
+	let prevXdg: string | undefined;
+	let prevHome: string | undefined;
 
 	beforeEach(() => {
+		prevXdg = process.env.XDG_DATA_HOME;
+		prevHome = process.env.HOME;
 		const dataDir = makeTmp('fp-data-');
 		dirs.push(dataDir);
 		process.env.XDG_DATA_HOME = dataDir;
@@ -82,6 +87,8 @@ describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-clo
 	});
 
 	afterEach(() => {
+		process.env.XDG_DATA_HOME = prevXdg;
+		process.env.HOME = prevHome;
 		for (const d of dirs.splice(0)) {
 			try {
 				rmSync(d, { recursive: true, force: true });

@@ -2,16 +2,17 @@
  * #1850: memory link pointer read/write/remove + cache invalidation.
  * Acceptance #1 (independent opt-in), #2 (distinguishable from knowledge link).
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+	invalidateMemoryStoreDirCache,
 	isMemoryLinked,
 	readMemoryLinkPointer,
 	removeMemoryLinkPointer,
 	resolveMemoryStoreDir,
-	invalidateMemoryStoreDirCache,
 	writeMemoryLinkPointer,
 } from '../../../src/memory/memory-link';
 

@@ -49,10 +49,6 @@ import {
 	writeMigrationReport,
 } from './jsonl-migration';
 import { shouldCompactMemory } from './maintenance';
-import {
-	computeMemoryCohortFingerprint,
-	buildMemoryCohortFingerprintInput,
-} from './redaction';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -64,6 +60,10 @@ import type {
 	MemoryRewardEventFilter,
 	MemoryTransaction,
 } from './provider';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from './redaction';
 import {
 	normalizeMemoryText,
 	stableScopeKey,
@@ -1975,14 +1975,30 @@ export class SQLiteMemoryProvider
 	private assertCohortConfigFingerprint(): void {
 		if (!this.cohortRoot) return;
 		const configPath = path.join(this.cohortRoot, 'memory-cohort-config.json');
-		if (!existsSync(configPath)) return; // first open — permissive
+		if (!existsSync(configPath)) {
+			// #1850 (M-010): absent config AFTER a cohort root is opened is
+			// suspicious — the linker writes it before flipping the pointer.
+			// Fail-open (do not strand memory) but surface a visible warning so
+			// the operator knows config-coherence is not enforced for this open.
+			warn(
+				'[memory-cohort] cohort config fingerprint file is absent; config-coherence check skipped. Run `/swarm memory link` to re-establish the fingerprint.',
+				{ cohortRoot: this.cohortRoot },
+			);
+			return;
+		}
 		try {
 			const stored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<
 				string,
 				unknown
 			>;
 			const storedFingerprint = stored.fingerprint;
-			if (typeof storedFingerprint !== 'string') return; // malformed — permissive
+			if (typeof storedFingerprint !== 'string') {
+				warn(
+					'[memory-cohort] cohort config fingerprint file is malformed; config-coherence check skipped.',
+					{ cohortRoot: this.cohortRoot },
+				);
+				return;
+			}
 			// #1850 (final-critic dedup): use the shared fingerprint helper so the
 			// SQLite provider, status service, and linker all agree on the algorithm.
 			const expectedFingerprint = computeMemoryCohortFingerprint(
@@ -2002,7 +2018,14 @@ export class SQLiteMemoryProvider
 			) {
 				throw err; // re-throw the mismatch — this is the fail-closed path
 			}
-			// malformed config file — fail-open (do not strand memory)
+			// malformed config file — fail-open with a warning (do not strand memory)
+			warn(
+				'[memory-cohort] failed to read cohort config fingerprint; config-coherence check skipped.',
+				{
+					cohortRoot: this.cohortRoot,
+					reason: err instanceof Error ? err.message : String(err),
+				},
+			);
 		}
 	}
 

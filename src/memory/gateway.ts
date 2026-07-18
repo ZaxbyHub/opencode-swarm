@@ -15,16 +15,8 @@ import type {
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
 } from './provider';
-import {
-	getOrCreateProvider,
-	getOrCreateProviderForRoot,
-} from './provider-pool';
+import { getOrCreateProviderForRoot } from './provider-pool';
 import { computeRedactionPolicyVersion, redactSecrets } from './redaction';
-import {
-	type VettedMemoryRoot,
-	isCohortRoot,
-	resolveVettedMemoryRoot,
-} from './storage-root';
 import {
 	computeMemoryContentHash,
 	createBundleId,
@@ -35,6 +27,11 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
+import {
+	isCohortRoot,
+	resolveVettedMemoryRoot,
+	type VettedMemoryRoot,
+} from './storage-root';
 import type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
@@ -432,10 +429,14 @@ export class MemoryGateway {
 	}): MemoryRecord {
 		const now = this.now().toISOString();
 		const text = normalizeMemoryText(input.text);
-		const scope = this.resolveRecordScope(input.scope);
 		const kind = input.kind;
 		const stability =
 			input.stability ?? (kind === 'scratch' ? 'ephemeral' : 'durable');
+		// #1850 (H-002 fix): pass stability to resolveRecordScope so
+		// ephemeral/session records default to a worktree-local scope (run/agent)
+		// instead of the cohort scope. Only durable records default to cohort
+		// when linked; scratch and session-scoped records stay worktree-local.
+		const scope = this.resolveRecordScope(input.scope, stability);
 		const expiresAt =
 			kind === 'scratch'
 				? new Date(this.now().getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
@@ -530,16 +531,23 @@ export class MemoryGateway {
 		});
 	}
 
-	private resolveRecordScope(scope?: MemoryScopeRef): MemoryScopeRef {
+	private resolveRecordScope(
+		scope?: MemoryScopeRef,
+		stability?: MemoryRecord['stability'],
+	): MemoryScopeRef {
 		const allowedScopes = this.deriveAllowedScopes();
 		if (!scope) {
-			// #1850: when cohort sharing is active, default durable records to
-			// the cohort scope so they are shared across sibling worktrees
-			// (acceptance #8). Curator-supplied NewMemoryRecord omits scope by
-			// default. Fall back to the repository scope (today's behavior)
-			// when not cohort-linked.
+			// #1850 (H-002 fix): when cohort sharing is active, default DURABLE
+			// records to the cohort scope so they are shared across sibling
+			// worktrees (acceptance #8). Ephemeral and session-stability
+			// records stay worktree-local — they must NOT leak across the
+			// cohort boundary. When not cohort-linked, fall back to the
+			// repository scope (today's behavior).
+			const wantsCohort = stability !== 'ephemeral' && stability !== 'session';
 			const cohortScope = allowedScopes.find((s) => s.type === 'cohort');
-			const defaultScope = cohortScope ?? allowedScopes[1] ?? allowedScopes[0];
+			const defaultScope = wantsCohort
+				? (cohortScope ?? allowedScopes[1] ?? allowedScopes[0])
+				: (allowedScopes[1] ?? allowedScopes[0]);
 			if (!defaultScope) {
 				throw new MemoryValidationError(
 					'memory scope is not available for this context',
@@ -702,6 +710,11 @@ function scopeKey(scope: MemoryScopeRef): string {
 		repoRoot: scope.repoRoot ? path.resolve(scope.repoRoot) : undefined,
 		runId: scope.runId,
 		agentId: scope.agentId,
+		// #1850 (H-001 fix): cohortId MUST be part of the scope-validation key,
+		// otherwise validateRequestedScopes would accept a cross-cohort scope
+		// (both stringify to {"type":"cohort"} and pass the gate). This must
+		// stay in sync with the cohortId branch in stableScopeKey (schema.ts).
+		cohortId: scope.cohortId,
 	});
 }
 

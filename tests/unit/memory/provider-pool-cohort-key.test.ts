@@ -3,15 +3,16 @@
  * Verifies cohort roots get distinct pool keys from local roots, and that
  * evictAndCloseForRoot is scoped (does not clear unrelated entries).
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { DEFAULT_MEMORY_CONFIG } from '../../../src/memory/config';
 import {
+	clearPool,
 	evictAndCloseForRoot,
 	getOrCreateProviderForRoot,
-	clearPool,
 } from '../../../src/memory/provider-pool';
 import { wrapLocalRoot } from '../../../src/memory/storage-root';
 

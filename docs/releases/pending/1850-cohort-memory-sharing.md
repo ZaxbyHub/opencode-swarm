@@ -24,9 +24,12 @@ remain independently opt-in — linking knowledge does NOT link memory.
 - **Cohort-aware provider pool**: pooled by `cohort:<canonicalPath>` for cohort
   roots, with generation-based invalidation on link/unlink.
 - **Memory family migration engine**: migrates the complete memory family
-  (`memory.db`, JSONL members, consolidation log) atomically under
-  `proper-lockfile`. SQLite non-empty destinations merge via ATTACH +
-  INSERT OR IGNORE (id-keyed, idempotent on retry).
+  (`memory.db`, JSONL members, consolidation log) under `proper-lockfile` with
+  stage→validate→commit per member. The pointer is flipped last so a failed
+  migration leaves the worktree in its prior state and retry is idempotent
+  (id-keyed dedup). SQLite non-empty destinations merge via ATTACH +
+  INSERT OR IGNORE (id-keyed, idempotent on retry). NOTE: migration is NOT
+  atomic across the multi-member family — see Known limitations.
 - **Cohort config fingerprint**: `memory-cohort-config.json` written at link
   time with provider/embedding/redaction config. SQLite providers fail closed
   on mismatch (acceptance #10).
@@ -38,8 +41,23 @@ remain independently opt-in — linking knowledge does NOT link memory.
   match, degraded state.
 
 ### Acceptance criteria
-All 13 from the issue are satisfied. See the PR description's Invariant audit
+All 13 from the issue are addressed. See the PR description's Invariant audit
 and the trace artifacts at `.zcode/issue-traces/1850/`.
+
+### Known limitations
+- **Mixed-provider cohort**: a cohort mixing SQLite and JSONL providers is not
+  fully fail-closed at link time. The cohort-config fingerprint covers provider
+  mismatch, but JSONL-only paths (append, compact) are not cross-process
+  transactional the way SQLite WAL is. Recommendation: use a single provider
+  across all cohort members.
+- **Migration atomicity**: the memory family migration is idempotent and
+  recoverable (pointer flipped last, INSERT OR IGNORE dedup on retry), but it
+  is NOT atomic across the multi-member family — a mid-migration failure after
+  member N commits leaves members 1..N in the destination. Retry is safe.
+- **Cross-process write visibility**: relies on SQLite WAL mode + 2s TTL +
+  pointer-stat revalidation. A `memory.gen` marker is written on cohort writes
+  but is not yet consumed by a tighter revalidation loop (reserved for future
+  enhancement).
 
 ### Dependencies
 Completes the Linked Knowledge series: #1846 (cohort identity), #1847 (hive

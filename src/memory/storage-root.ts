@@ -27,13 +27,13 @@
  */
 
 import * as path from 'node:path';
+import { log, warn } from '../utils/logger.js';
 import type { MemoryConfig } from './config.js';
 import {
 	type MemoryLinkPointer,
 	readMemoryLinkPointer,
 	resolveMemoryStoreDir,
 } from './memory-link.js';
-import { log } from '../utils/logger.js';
 
 /**
  * The vetted root. `directory` is always the worktree's project root (so
@@ -86,6 +86,16 @@ export function resolveVettedMemoryRoot(
 ): VettedMemoryRoot {
 	const linkEnabled = config?.link?.enabled === true;
 	if (!linkEnabled) {
+		// #1850 (C-001-config fix): if a cohort pointer exists but link is
+		// disabled in config, warn the operator — cohort memory is unreachable
+		// and new writes land in the local store, diverging from the cohort.
+		const existingPointer = readMemoryLinkPointer(directory);
+		if (existingPointer) {
+			warn(
+				`[memory-link] memory.link.enabled is false but a cohort pointer exists (linkId=${existingPointer.linkId}). Cohort memory is unreachable — run \`/swarm memory link\` or remove the pointer with \`/swarm memory unlink\`.`,
+				{ directory, linkId: existingPointer.linkId },
+			);
+		}
 		return wrapLocalRoot(directory);
 	}
 	const pointer = readMemoryLinkPointer(directory);
@@ -145,7 +155,13 @@ export function isLocalRoot(
 
 /** Return the resolved storage path for a given root (no validation). */
 export function rootStoragePath(root: VettedMemoryRoot): string {
-	return root.kind === 'cohort' ? root.cohortRoot : root.root;
+	// #1850 (reviewer fix): local roots must resolve to `.swarm/memory` (where
+	// the SQLite provider stores memory.db and the JSONL provider stores its
+	// files), NOT bare `.swarm`. Cohort roots already include the `memory`
+	// segment by construction (storage-root.ts resolveVettedMemoryRoot).
+	return root.kind === 'cohort'
+		? root.cohortRoot
+		: path.join(root.root, 'memory');
 }
 
 export const _internals = {

@@ -2,6 +2,8 @@
  * #1850: memory family manifest + migration engine (acceptance #7).
  * Tests the manifest inventory, JSONL append-union, and SQLite staging.
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdtempSync,
@@ -11,7 +13,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { MEMORY_FAMILY } from '../../../src/memory/memory-family-manifest';
 import { _internals } from '../../../src/memory/memory-family-migration';
 

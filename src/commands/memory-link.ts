@@ -33,6 +33,7 @@ import {
 	type CohortIdentity,
 	resolveCohortId,
 } from '../knowledge/cohort-identity.js';
+import { migrateMemoryFamily } from '../memory/memory-family-migration.js';
 import {
 	type MemoryLinkPointer,
 	readMemoryLinkPointer,
@@ -41,11 +42,10 @@ import {
 	sanitizeLinkId,
 	writeMemoryLinkPointer,
 } from '../memory/memory-link.js';
-import { migrateMemoryFamily } from '../memory/memory-family-migration.js';
 import { evictAndCloseForRoot } from '../memory/provider-pool.js';
 import {
-	computeMemoryCohortFingerprint,
 	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
 } from '../memory/redaction.js';
 import {
 	type VettedMemoryRoot,
@@ -292,8 +292,11 @@ export async function handleMemoryUnlinkCommand(
 		}`;
 	}
 
+	const copyNote = noCopy
+		? 'No local copy was made (--no-copy).'
+		: 'A local copy of the cohort memory family has been restored.';
 	return [
-		'🔓 Unlinked memory. A local copy of the cohort memory family has been restored.',
+		`🔓 Unlinked memory. ${copyNote}`,
 		`  The shared cohort store at ${cohortRoot.cohortRoot} is NOT deleted`,
 		'  (other worktrees may still be linked to it).',
 	].join('\n');

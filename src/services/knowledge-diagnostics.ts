@@ -8,7 +8,7 @@
  * status breakdown, event volume, and cache freshness so those issues surface.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
@@ -22,7 +22,6 @@ import {
 	resolveKnowledgeStoreDir,
 	resolveLinkDir,
 } from '../hooks/knowledge-link.js';
-import { readMemoryLinkPointer } from '../memory/memory-link.js';
 import {
 	readKnowledge,
 	readRejectedLessons,
@@ -35,6 +34,11 @@ import type {
 } from '../hooks/knowledge-types.js';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator.js';
 import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
+import { readMemoryLinkPointer } from '../memory/memory-link.js';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from '../memory/redaction.js';
 import { readSynonymMap } from './synonym-map.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 
@@ -191,6 +195,12 @@ export interface KnowledgeDebugMeta {
 		generation: number | null;
 		/** Provider name from config ('sqlite' | 'local-jsonl'). */
 		provider: string | null;
+		/**
+		 * #1850 (KC-002): config fingerprint agreement — true when this
+		 * worktree's config matches the cohort's stored fingerprint, false on
+		 * mismatch, null when not checked (unlinked or file absent).
+		 */
+		config_fingerprint_match: boolean | null;
 	};
 }
 
@@ -458,16 +468,57 @@ function computeMemoryCohortDiagnostics(directory: string): {
 	shared_root: string | null;
 	generation: number | null;
 	provider: string | null;
+	config_fingerprint_match: boolean | null;
 } {
 	try {
 		const pointer = readMemoryLinkPointer(directory);
 		let provider: string | null = null;
+		let configFingerprintMatch: boolean | null = null;
 		try {
 			const { loadPluginConfig } = require('../config/loader.js') as {
-				loadPluginConfig: (dir: string) => { memory?: { provider?: string } };
+				loadPluginConfig: (dir: string) => {
+					memory?: {
+						provider?: string;
+						redaction?: { rejectDurableSecrets?: boolean };
+						embeddings?: {
+							model?: string;
+							dimension?: number;
+							version?: string;
+						};
+					};
+				};
 			};
 			const cfg = loadPluginConfig(directory);
 			provider = cfg.memory?.provider ?? null;
+			// #1850 (KC-002): compute config fingerprint match when linked.
+			if (pointer && cfg.memory) {
+				const cohortConfigPath = join(
+					resolveLinkDir(pointer.linkId),
+					'memory',
+					'memory-cohort-config.json',
+				);
+				if (existsSync(cohortConfigPath)) {
+					const stored = JSON.parse(
+						readFileSync(cohortConfigPath, 'utf-8'),
+					) as { fingerprint?: string };
+					const expected = computeMemoryCohortFingerprint(
+						buildMemoryCohortFingerprintInput({
+							provider: cfg.memory.provider ?? 'sqlite',
+							redaction: {
+								rejectDurableSecrets:
+									cfg.memory.redaction?.rejectDurableSecrets ?? true,
+							},
+							embeddings: {
+								model:
+									cfg.memory.embeddings?.model ?? 'Xenova/all-MiniLM-L6-v2',
+								dimension: cfg.memory.embeddings?.dimension ?? 384,
+								version: cfg.memory.embeddings?.version,
+							},
+						}),
+					);
+					configFingerprintMatch = stored.fingerprint === expected;
+				}
+			}
 		} catch {
 			/* best-effort */
 		}
@@ -482,6 +533,7 @@ function computeMemoryCohortDiagnostics(directory: string): {
 				shared_root: pointer.linkId ? resolveLinkDir(pointer.linkId) : null,
 				generation: pointer.generation ?? null,
 				provider,
+				config_fingerprint_match: configFingerprintMatch,
 			};
 		}
 		return {
@@ -494,6 +546,7 @@ function computeMemoryCohortDiagnostics(directory: string): {
 			shared_root: null,
 			generation: null,
 			provider,
+			config_fingerprint_match: null,
 		};
 	} catch {
 		return {
@@ -506,6 +559,7 @@ function computeMemoryCohortDiagnostics(directory: string): {
 			shared_root: null,
 			generation: null,
 			provider: null,
+			config_fingerprint_match: null,
 		};
 	}
 }

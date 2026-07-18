@@ -4,10 +4,11 @@
  * Verifies that resolveVettedMemoryRoot returns local by default, cohort when
  * linked, and that the cohort path bypasses validateSwarmPath by construction.
  */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	DEFAULT_MEMORY_CONFIG,
 	resolveVettedMemoryRoot,
@@ -24,8 +25,12 @@ function makeTmp(prefix: string): string {
 
 describe('#1850 storage-root resolution', () => {
 	const dirs: string[] = [];
+	let prevXdg: string | undefined;
+	let prevHome: string | undefined;
 
 	beforeEach(() => {
+		prevXdg = process.env.XDG_DATA_HOME;
+		prevHome = process.env.HOME;
 		// Redirect the platform data dir so cohort paths land in temp.
 		const dataDir = makeTmp('storage-root-data-');
 		dirs.push(dataDir);
@@ -34,6 +39,8 @@ describe('#1850 storage-root resolution', () => {
 	});
 
 	afterEach(() => {
+		process.env.XDG_DATA_HOME = prevXdg;
+		process.env.HOME = prevHome;
 		invalidateMemoryStoreDirCache();
 		for (const d of dirs.splice(0)) {
 			try {

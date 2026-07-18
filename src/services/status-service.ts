@@ -2,6 +2,8 @@ import * as fsSync from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
+import { loadPluginConfig } from '../config/loader';
+import { MemoryConfigSchema } from '../config/schema';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -15,15 +17,13 @@ import {
 	readRecentEscalations,
 } from '../hooks/knowledge-escalator';
 import { readLinkPointer, resolveLinkDir } from '../hooks/knowledge-link';
-import { readMemoryLinkPointer } from '../memory/memory-link';
-import { MemoryConfigSchema } from '../config/schema';
-import { loadPluginConfig } from '../config/loader';
-import {
-	computeMemoryCohortFingerprint,
-	buildMemoryCohortFingerprintInput,
-} from '../memory/redaction';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { readMemoryLinkPointer } from '../memory/memory-link';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+} from '../memory/redaction';
 import { loadPlan } from '../plan/manager';
 import {
 	getActiveFullAutoSessionID,
