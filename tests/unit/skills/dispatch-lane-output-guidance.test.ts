@@ -66,7 +66,7 @@ describe('dispatch lane full-output retrieval guidance', () => {
 	}
 });
 
-describe('swarm-pr-feedback batch collection (Issue #1746)', () => {
+describe('swarm-pr-feedback host-neutral batch collection', () => {
 	for (const filePath of [
 		'.opencode/skills/swarm-pr-feedback/SKILL.md',
 		'.claude/skills/swarm-pr-feedback/SKILL.md',
@@ -77,7 +77,7 @@ describe('swarm-pr-feedback batch collection (Issue #1746)', () => {
 			// Batch collection step: gh pr checks → gh run view --log-failed → full ledger
 			expect(source).toContain('gh pr checks');
 			expect(source).toContain('--log-failed');
-			expect(source).toContain('Issue #1746');
+			expect(source).toMatch(/host-(?:neutral|equivalent)/i);
 			expect(source).toMatch(/batch|one batch|all failures in one/i);
 		});
 	}

@@ -27,7 +27,7 @@
   free-text feedback.
 - **PR review/feedback are more autonomous.** The architect now has hard
   constraints to follow the skill exactly, check out the PR branch locally before
-  exploring/fixing, run the triggered micro-lanes, and honor appended
+  exploring/fixing, run all mandatory repository-agnostic micro-lanes, and honor appended
   instructions — so these no longer need to be repeated by hand each run.
 - **Drift prevention.** A new enforcement test ties every `[MODE: X]`-emitting
   command to its architect section and skill file and flags orphaned skills, and

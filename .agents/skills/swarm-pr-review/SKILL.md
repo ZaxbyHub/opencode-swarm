@@ -11,11 +11,8 @@ description: >
 ---
 
 # Swarm PR Review
-
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
-
 ## Codex Execution Notes
-
 - `PR_REVIEW` is read-only with respect to the PR branch. You may fetch refs,
   inspect metadata, and check out the PR head after verifying a clean working
   tree, but do not fix code, resolve conflicts, commit, push, rebase, or reset
@@ -24,27 +21,38 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   review summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
   issues, and commit messages.
+- If the repository defines a PR publication contract in local docs, templates,
+  skills, or CI, ingest it as an obligation source. Do not assume this repo's
+  title/body sections when the target repo does not define them.
 - Treat every ingested signal as a claim until reviewer validation proves or
   disproves it with file:line evidence or explicit counter-evidence.
 - Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
   comments, review threads, checks, conflicts, and head SHA.
 - Use the runtime's parallel-execution capability for the deterministic lane
-  flow: dispatch the review lanes in parallel, poll settled lanes incrementally
-  to process results while continuing independent work, and wait on the
-  remainder only when no independent work remains. All lanes must be settled
-  before synthesis or phase transitions. If the runtime has no
-  parallel-execution capability, run the lanes sequentially.
-- If lanes cannot close required coverage after retry/re-collection, a
-  verified-equivalent subagent dispatch is the final fallback, but only as a
-  verified equivalent: same agent type, same prompt, same scope, same
-  isolation. If equivalence cannot be proven, stop and surface the lane
-  failure as BLOCKED; do not produce a degraded review or partial verdict.
+  flow as one structured exact-six initial batch: dispatch the review lanes in
+  parallel, poll settled lanes incrementally to process results while continuing
+  independent work, and wait on the remainder only when no independent work
+  remains. All lanes must be settled before synthesis or phase transitions. If
+  the runtime cannot preserve one structured exact-six batch plus workflow-lane
+  and exact-head provenance, stop and report `BLOCKED`; sequential, blocking,
+  or direct-agent fallback is not equivalent.
+- If structured lane retries cannot close required coverage, stop and surface
+  the lane failure as BLOCKED. A different dispatch path is not equivalent
+  when it loses the canonical workflow-lane or exact-head provenance; do not
+  produce a degraded review or partial verdict.
 - When lane results include an `output_ref`, retrieve the full text, then
   extract structured candidates for reviewer dispatch; degraded or incomplete
   outputs are coverage gaps.
-- If actionable findings remain, write the handoff artifact described by the
-  canonical skill and ask the user whether to continue with `swarm-pr-feedback`.
-
-Do not improvise a fix path from review mode. If the user approves follow-up
-work, switch to `swarm-pr-feedback` and carry validated findings forward with
-their original IDs and provenance.
+- Clean lanes still require a fully populated row with evidence, such as
+  `[CLEAN] | workflow_lane | coverage_scope | evidence` for a base lane or
+  `[CLEAN] | micro_lane | coverage_scope | evidence` for a micro-lane.
+- All 11 repository-agnostic micro-lanes in the canonical skill are mandatory;
+  diff/path heuristics may focus prompts but cannot produce a `NO-MATCH` waiver.
+- A newer reviewer batch invalidates all older critic evidence. Re-run the
+  critic from the latest complete reviewer inventory before completion.
+- Call `complete_pr_workflow` before the user-facing final response. While the
+  durable gate remains active, architect response text is mechanically replaced
+  and an idle parent session is resumed rather than allowed to stop early.
+- If actionable findings remain, write the canonical handoff artifact and ask
+  whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
+  Carry validated findings forward with their original IDs and provenance.

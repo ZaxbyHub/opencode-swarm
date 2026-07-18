@@ -281,11 +281,13 @@ describe('buildDetailedHelp() — via handleHelpCommand for single-token command
 		expect(result).toContain('<pr-url|owner/repo#N|N>');
 		expect(result).toContain('launches all 6 fixed base explorer lanes');
 		expect(result).toContain('architect keeps doing non-dependent work');
-		expect(result).toContain('runs every triggered micro-lane');
 		expect(result).toContain(
-			'Task-tool dispatch is the final verified-equivalent fallback',
+			'runs all 11 mandatory repository-agnostic micro-lanes',
 		);
-		expect(result).toContain('review is BLOCKED rather than degraded');
+		expect(result).toContain(
+			'blocking or direct-Task dispatch is not provenance-equivalent',
+		);
+		expect(result).toContain('review BLOCKED rather than degraded');
 	});
 
 	test('shows detailed help for pr-feedback optional PR ref and pasted-feedback mode', async () => {

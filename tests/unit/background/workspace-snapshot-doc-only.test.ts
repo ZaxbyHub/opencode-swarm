@@ -7,6 +7,8 @@ import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
 	parsePorcelainPaths,
+	resolveCurrentGitHead,
+	resolvePrWorkflowRevisionDigest,
 } from '../../../src/background/workspace-snapshot';
 
 function git(directory: string, args: string[]): void {
@@ -71,6 +73,21 @@ describe('task workspace change observation', () => {
 		fs.writeFileSync(path.join(directory, 'README.md'), '# docs\n');
 
 		expect(changedFilesSinceSnapshot(directory, baseline)).toBeNull();
+	});
+
+	test('revision digest changes for same-path content edits', () => {
+		const head = resolveCurrentGitHead(directory);
+		expect(head).not.toBeNull();
+		fs.writeFileSync(path.join(directory, 'base.txt'), 'first edit\n');
+		const first = resolvePrWorkflowRevisionDigest(directory, head!);
+		fs.writeFileSync(path.join(directory, 'base.txt'), 'second edit\n');
+		const second = resolvePrWorkflowRevisionDigest(directory, head!);
+		expect(first).not.toBeNull();
+		expect(second).not.toBeNull();
+		expect(second).not.toBe(first);
+		git(directory, ['add', 'base.txt']);
+		git(directory, ['commit', '-m', 'test: preserve reviewed content']);
+		expect(resolvePrWorkflowRevisionDigest(directory, head!)).toBe(second);
 	});
 
 	test('does not treat unchanged pre-existing Markdown dirt as task output', () => {

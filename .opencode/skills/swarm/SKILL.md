@@ -5,7 +5,8 @@ description: Cross-agent swarm-mode behavior model — a higher-rigor workflow u
 ---
 
 ## Goal
-Turn the host agent into a swarm-like orchestrator while preserving host-agent speed advantages.
+Turn the host agent into a swarm-like orchestrator that prioritizes complete,
+evidence-backed results over elapsed time, token count, or dispatch count.
 
 ## What this mode changes
 When enabled, the agent should:
@@ -16,22 +17,25 @@ When enabled, the agent should:
 - keep quality as the only metric that matters
 - treat time pressure as nonexistent
 - preserve normal host-agent strengths: parallel subagents, scoped exploration, and fast synthesis
-- protect speed by spending the deepest validation effort only where it materially reduces ship risk
+- spend the deepest validation effort where it materially reduces ship risk,
+  without using time, token, or dispatch cost to waive a required gate
 
-## Quality and speed policy
+## Quality policy
 Code quality and pre-ship defect detection are paramount.
-Speed still matters.
-The point of swarm mode is not to recreate slow serial swarm behavior inside the host agent.
-The point is to keep the host agent fast by parallelizing everything that can safely be parallelized while preserving a strict validation architecture.
+Elapsed time, token count, dispatch count, and perceived repository simplicity
+are never reasons to weaken a required workflow step. Parallelism is used to
+reduce wall-clock latency without reducing coverage or independence.
 
 That means:
 - parallelize breadth aggressively
 - validate in depth selectively based on risk
-- avoid running the heaviest critic loop on every low-value issue
+- run every reviewer or critic loop required by the active workflow; optional
+  extra scrutiny may still be risk-targeted
 - spend the most time on correctness, security, edge cases, regressions, and claimed-vs-actual mismatches
 - keep low-risk nits cheap
 
-If a workflow step does not materially improve quality, correctness, or trust, keep it lightweight or skip it.
+Only explicitly optional workflow steps may be skipped. A required step remains
+required even when the architect predicts that it will find nothing.
 If a workflow step prevents real bugs from shipping, keep it even if it costs time.
 
 ## Default triage model

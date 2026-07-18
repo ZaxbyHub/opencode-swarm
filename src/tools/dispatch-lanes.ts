@@ -11,11 +11,28 @@ import {
 	findByBatchId,
 	recordPendingDelegation,
 } from '../background/pending-delegations.js';
+import {
+	resolveExactMergeBase,
+	resolvePrWorkflowRevisionDigest,
+} from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
+import {
+	activatePrWorkflow,
+	assertCurrentCheckoutHead,
+	assertPrReviewBaseCoverageSettled,
+	bindPrReviewBase,
+	declarePrFeedbackInventory,
+	enforcePrFeedbackVerificationOwnership,
+	enforcePrReviewBaseDimensions,
+	enforcePrWorkflowDispatchLanesAsync,
+	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
+	recordPrFeedbackGateBatch,
+	recordPrReviewValidationBatch,
+} from '../hooks/pr-workflow-gate.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
@@ -41,6 +58,51 @@ const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
+const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
+	'intent-architecture':
+		'obligations, claimed versus actual behavior, design fit, callers, consumers, sibling patterns, and documentation',
+	'correctness-state':
+		'control flow, boundary conditions, error paths, invariants, state transitions, persistence, and rollback behavior',
+	'tests-falsifiability':
+		'assertion strength, negative paths, fixtures and mocks, isolation, CI behavior, and falsification probes',
+	'security-trust':
+		'authentication, authorization, untrusted inputs, secrets, injection sinks, privilege, and write authority',
+	'reliability-performance':
+		'timeouts, retries, concurrency, cleanup, resource bounds, failure recovery, and performance regressions',
+	'compatibility-delivery':
+		'public contracts, schemas, migrations, platform portability, dependencies, packaging, deployment, and release behavior',
+	'auth-identity-secrets':
+		'identity, session, permission, authentication, authorization, secret, and cryptographic boundaries',
+	'untrusted-input-boundaries':
+		'parsing, serialization, query, template, filesystem, and network sources through every reachable sink',
+	'subprocess-platform':
+		'array-form execution, cwd, stdin, timeout, output bounds, kill paths, quoting, and OS/runtime portability',
+	'concurrency-state':
+		'locks, queues, caches, transactions, retries, races, session isolation, eviction, and state-machine transitions',
+	'dependencies-build-release':
+		'manifests, lockfiles, installers, build scripts, CI, artifacts, provenance, packaging, deployment, and release hygiene',
+	'api-schema-migrations':
+		'public APIs, wire/config/storage schemas, compatibility, defaults, migrations, flags, and rollback paths',
+	'test-infrastructure':
+		'test validity, isolation, mock leakage, fixtures, harnesses, coverage claims, and CI matrices',
+	'ui-accessibility-i18n':
+		'user interaction, rendering, keyboard and screen-reader access, focus, localization, and error states',
+	'privacy-observability':
+		'logs, telemetry, analytics, traces, diagnostics, retention, redaction, and sensitive-data exposure',
+	'generated-provenance':
+		'generated, vendored, binary, model-produced, codegen, and checked-in artifact source and reproducibility',
+	'unclassified-risk':
+		'every changed artifact or behavior not fully covered by another lane, with conservative escalation of ambiguity',
+	'stage-b-reviewer':
+		'every feedback item against the exact diff, fix correctness, adjacent regressions, repository contracts, and evidence quality',
+	'stage-b-test':
+		'every feedback item with independent targeted negative-path and regression probes on the Stage-A-bound revision',
+	'closeout-reviewer':
+		'the complete feedback inventory, final diff, tests, docs, release artifacts, scope, and unresolved risk',
+	'closeout-critic':
+		'challenge the closeout evidence, omissions, false confidence, severity, scope, and publication readiness',
+};
+
 const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
 
 IMPORTANT — OUTPUT FORMAT REQUIREMENT:
@@ -53,15 +115,20 @@ Standard explorer format (use unless the prompt specifies micro-lane work):
 Micro-lane format (use when the prompt references invariant checking or micro_lane):
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
 
-If a standard explorer finds zero issues, emit only the header row. If a
-micro-lane finds zero issues, emit its header followed by exactly:
-[CLEAN] | micro_lane | coverage_scope | evidence
-Fill every CLEAN field; bare header-only micro output is UNATTESTED.
+Candidate IDs must be globally unique across the run; prefix them with the
+exact workflow_lane value from this dispatch.
+
+If either a standard explorer or micro-lane finds zero issues, emit its header
+followed by exactly:
+[CLEAN] | workflow_lane | coverage_scope | evidence
+Fill every CLEAN field with the exact workflow_lane; bare header-only output is
+UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
 
 const READ_ONLY_LANE_ROLES: ReadonlySet<string> = new Set([
 	'explorer',
 	'reviewer',
+	'test_engineer',
 	'critic',
 	'critic_oversight',
 	'critic_sounding_board',
@@ -98,6 +165,9 @@ const READ_ONLY_TOOL_DENYLIST = [
 		'knowledge_remove',
 		'summarize_work',
 		'doc_scan',
+		'lint',
+		'shell',
+		'bash',
 	]),
 ] as const;
 
@@ -120,7 +190,35 @@ const LaneSchema = z.object({
 		.min(1)
 		.max(MAX_PROMPT_CHARS)
 		.describe('Full lane prompt to send to the requested agent'),
+	workflow_lane: z
+		.string()
+		.min(1)
+		.max(120)
+		.optional()
+		.describe(
+			'Required mechanical policy identifier in PR workflows; distinct from the retry-safe lane id',
+		),
+	feedback_item_ids: z
+		.array(z.string().trim().min(1).max(120))
+		.min(1)
+		.optional()
+		.describe('PR-feedback ledger item IDs owned exclusively by this lane'),
+	review_item_ids: z
+		.array(z.string().trim().min(1).max(160))
+		.min(1)
+		.optional()
+		.describe(
+			'Candidate/finding IDs owned by a PR-review reviewer or critic lane; every ID requires a parseable verdict row',
+		),
 });
+
+const PrReviewTriggerEvaluationRowSchema = z
+	.object({
+		trigger_id: z.string().trim().min(1).max(120),
+		result: z.literal('MATCHED'),
+		evidence: z.string().trim().min(1).max(4000),
+	})
+	.strict();
 
 const DispatchLanesArgsSchema = z.object({
 	lanes: z
@@ -186,7 +284,29 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.optional()
 		.describe('Advisory workflow mode, such as deep-dive or swarm-pr-review'),
 	pr_head_sha: z.string().min(1).max(80).optional(),
+	base_sha: z
+		.string()
+		.regex(/^[0-9a-f]{6,64}$/i)
+		.optional(),
+	base_ref: z
+		.string()
+		.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
+		.optional(),
 	scope: z.string().min(1).max(500).optional(),
+	trigger_evaluation: z
+		.array(PrReviewTriggerEvaluationRowSchema)
+		.min(1)
+		.optional()
+		.describe(
+			'Exact all-MATCHED repository-agnostic mandatory micro-lane ledger required for swarm-pr-review:micro',
+		),
+	feedback_inventory: z
+		.array(z.string().trim().min(1).max(120))
+		.min(1)
+		.optional()
+		.describe(
+			'Complete immutable feedback item inventory required for swarm-pr-feedback:verification',
+		),
 });
 
 const CollectLaneResultsArgsSchema = z.object({
@@ -215,6 +335,56 @@ const CollectLaneResultsArgsSchema = z.object({
 });
 
 export type DispatchLaneSpec = z.infer<typeof LaneSchema>;
+
+function validatePrReviewMicroDispatch(args: DispatchLanesAsyncArgs): void {
+	const evaluation = args.trigger_evaluation;
+	if (!evaluation) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW micro dispatch requires the complete trigger_evaluation ledger',
+		);
+	}
+	const expected = new Set<string>(PR_REVIEW_REQUIRED_MICRO_LANE_IDS);
+	const seen = new Set<string>();
+	for (const row of evaluation) {
+		if (seen.has(row.trigger_id)) {
+			throw new Error(
+				`BLOCKED: duplicate PR_REVIEW trigger row: ${row.trigger_id}`,
+			);
+		}
+		seen.add(row.trigger_id);
+	}
+	const missing = [...expected].filter((id) => !seen.has(id));
+	const unknown = [...seen].filter((id) => !expected.has(id));
+	if (missing.length > 0 || unknown.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW trigger ledger must be exact; missing: ${missing.join(', ') || '(none)'}; unknown: ${unknown.join(', ') || '(none)'}`,
+		);
+	}
+	const required = new Set(evaluation.map((row) => row.trigger_id));
+	const laneTriggers = args.lanes.map((lane) => lane.workflow_lane ?? '');
+	const duplicates = laneTriggers.filter(
+		(value, index) => laneTriggers.indexOf(value) !== index,
+	);
+	const unmatched = laneTriggers.filter(
+		(triggerId) => !required.has(triggerId),
+	);
+	if (
+		laneTriggers.some((triggerId) => triggerId.length === 0) ||
+		duplicates.length > 0 ||
+		unmatched.length > 0
+	) {
+		const missingLabels = laneTriggers.some(
+			(triggerId) => triggerId.length === 0,
+		)
+			? ['(missing workflow_lane)']
+			: [];
+		throw new Error(
+			`BLOCKED: PR_REVIEW micro lanes must have unique workflow_lane IDs from the mandatory repository-agnostic lane set; invalid: ${[
+				...new Set([...missingLabels, ...duplicates, ...unmatched]),
+			].join(', ')}`,
+		);
+	}
+}
 export type DispatchLanesArgs = z.infer<typeof DispatchLanesArgsSchema>;
 export type DispatchLanesAsyncArgs = z.infer<
 	typeof DispatchLanesAsyncArgsSchema
@@ -352,6 +522,8 @@ export const _internals: {
 	getSessionOps: () => SessionOps | null;
 	getGeneratedAgentNames: () => readonly string[];
 	createParallelDispatcher: typeof createParallelDispatcher;
+	resolvePrWorkflowRevisionDigest: typeof resolvePrWorkflowRevisionDigest;
+	resolveExactMergeBase: typeof resolveExactMergeBase;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 } = {
@@ -360,6 +532,8 @@ export const _internals: {
 		null,
 	getGeneratedAgentNames: () => swarmState.generatedAgentNames,
 	createParallelDispatcher,
+	resolvePrWorkflowRevisionDigest,
+	resolveExactMergeBase,
 	now: () => Date.now(),
 	sleep,
 };
@@ -367,6 +541,8 @@ export const _internals: {
 export const _test_exports = {
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
+	applyPrWorkflowPromptContract,
+	buildReadOnlyTools,
 	buildLaneSessionCreateArgs,
 	extractAssistantTranscript,
 	formatError,
@@ -414,6 +590,24 @@ export async function executeDispatchLanes(
 			message: 'Lane IDs must be unique within one dispatch_lanes batch',
 			errors: duplicateLaneIds.map((id) => `Duplicate lane id: ${id}`),
 		});
+	}
+
+	if (context.sessionID?.trim()) {
+		try {
+			await enforcePrWorkflowDispatchLanesAsync(
+				directory,
+				context.sessionID,
+				'dispatch_lanes',
+			);
+		} catch (error) {
+			return failureResult({
+				failure_class: 'invalid_args',
+				message:
+					error instanceof Error
+						? error.message
+						: 'PR workflow gate rejected dispatch',
+			});
+		}
 	}
 
 	const session = _internals.getSessionOps();
@@ -488,6 +682,7 @@ export async function executeDispatchLanesAsync(
 		});
 	}
 
+	const requestedBatchId = parsed.data.batch_id ?? makeBatchId();
 	const session = _internals.getSessionOps();
 	if (!session || typeof session.promptAsync !== 'function') {
 		return asyncFailureResult({
@@ -507,8 +702,8 @@ export async function executeDispatchLanesAsync(
 			errors: common.errors,
 		});
 	}
-	const lanes = applyExplorerFormatSuffix(common.lanes);
-	const batchId = parsed.data.batch_id ?? makeBatchId();
+	let lanes = common.lanes;
+	const batchId = requestedBatchId;
 	if (findByBatchId(directory, batchId).length > 0) {
 		return asyncFailureResult({
 			failure_class: 'invalid_args',
@@ -516,6 +711,305 @@ export async function executeDispatchLanesAsync(
 			errors: [`batch_id must be unique: ${batchId}`],
 		});
 	}
+	let verifiedPrHead: string | undefined;
+	let workflowRevisionDigest: string | undefined;
+	let verifiedReviewBaseSha: string | undefined;
+	if (
+		context.sessionID?.trim() &&
+		parsed.data.pr_head_sha &&
+		(parsed.data.mode?.startsWith('swarm-pr-review:') ||
+			parsed.data.mode?.startsWith('swarm-pr-feedback:'))
+	) {
+		try {
+			verifiedPrHead = assertCurrentCheckoutHead(
+				directory,
+				parsed.data.pr_head_sha,
+			);
+			workflowRevisionDigest =
+				_internals.resolvePrWorkflowRevisionDigest(
+					directory,
+					parsed.data.pr_head_sha,
+				) ?? undefined;
+			if (!workflowRevisionDigest) {
+				throw new Error(
+					'BLOCKED: PR workflow could not compute a bounded current-revision digest',
+				);
+			}
+			if (parsed.data.mode?.startsWith('swarm-pr-review:')) {
+				if (!parsed.data.base_sha || !parsed.data.base_ref) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW dispatch requires exact base_sha and base_ref',
+					);
+				}
+				const resolvedBase = _internals.resolveExactMergeBase(
+					directory,
+					parsed.data.base_ref,
+					parsed.data.pr_head_sha,
+				);
+				if (
+					!resolvedBase ||
+					resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW base_sha is not the exact merge base of base_ref and pr_head_sha',
+					);
+				}
+				verifiedReviewBaseSha = resolvedBase;
+			}
+		} catch (error) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message:
+					error instanceof Error
+						? error.message
+						: 'PR workflow checkout head verification failed',
+			});
+		}
+	}
+	if (context.sessionID?.trim()) {
+		try {
+			let gateState = await enforcePrWorkflowDispatchLanesAsync(
+				directory,
+				context.sessionID,
+				'dispatch_lanes_async',
+			);
+			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
+				gateState = await activatePrWorkflow(
+					directory,
+					context.sessionID,
+					'PR_REVIEW',
+				);
+			} else if (
+				!gateState &&
+				parsed.data.mode === 'swarm-pr-feedback:verification'
+			) {
+				gateState = await activatePrWorkflow(
+					directory,
+					context.sessionID,
+					'PR_FEEDBACK',
+				);
+			}
+			if (gateState?.mode === 'PR_REVIEW') {
+				const headSha = parsed.data.pr_head_sha;
+				if (!headSha) {
+					throw new Error(
+						'BLOCKED: active PR_REVIEW dispatch requires pr_head_sha',
+					);
+				}
+				if (!verifiedReviewBaseSha || !parsed.data.base_ref) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW exact merge-base scope was not verified',
+					);
+				}
+				gateState = await bindPrReviewBase(directory, context.sessionID, {
+					prHeadSha: headSha,
+					baseRef: parsed.data.base_ref,
+					baseSha: verifiedReviewBaseSha,
+				});
+				const laneSpecs = parsed.data.lanes.map((lane) => ({
+					laneId: lane.id,
+					workflowLane: lane.workflow_lane,
+					reviewItemIds: lane.review_item_ids,
+				}));
+				if (parsed.data.mode === 'swarm-pr-review:base') {
+					const isInitialBase =
+						(gateState.prReviewBaseDispatches?.length ?? 0) === 0;
+					if (
+						isInitialBase &&
+						(parsed.data.lanes.length !== 6 || parsed.data.max_concurrent !== 6)
+					) {
+						throw new Error(
+							'BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6',
+						);
+					}
+					for (const lane of parsed.data.lanes) {
+						if (
+							resolveGeneratedAgentRole(
+								lane.agent,
+								swarmState.generatedAgentNames,
+							) !== 'explorer'
+						) {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
+							);
+						}
+					}
+					await enforcePrReviewBaseDimensions(
+						directory,
+						context.sessionID,
+						laneSpecs,
+						{ batchId, prHeadSha: headSha },
+					);
+				} else if (parsed.data.mode === 'swarm-pr-review:micro') {
+					await assertPrReviewBaseCoverageSettled(directory, context.sessionID);
+					if (gateState.prHeadSha && gateState.prHeadSha !== headSha) {
+						throw new Error(
+							`BLOCKED: PR_REVIEW head mismatch; expected "${gateState.prHeadSha}", received "${headSha}"`,
+						);
+					}
+					for (const lane of parsed.data.lanes) {
+						if (
+							resolveGeneratedAgentRole(
+								lane.agent,
+								swarmState.generatedAgentNames,
+							) !== 'explorer'
+						) {
+							throw new Error(
+								`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
+							);
+						}
+					}
+					validatePrReviewMicroDispatch(parsed.data);
+				} else if (
+					parsed.data.mode === 'swarm-pr-review:council' ||
+					parsed.data.mode === 'swarm-pr-review:reviewer' ||
+					parsed.data.mode === 'swarm-pr-review:critic'
+				) {
+					const phase = parsed.data.mode.endsWith(':council')
+						? 'council'
+						: parsed.data.mode.endsWith(':reviewer')
+							? 'reviewer'
+							: 'critic';
+					for (const lane of parsed.data.lanes) {
+						const role = resolveGeneratedAgentRole(
+							lane.agent,
+							swarmState.generatedAgentNames,
+						);
+						if (
+							(phase === 'council' && !role.startsWith('council_')) ||
+							(phase === 'reviewer' && role !== 'reviewer') ||
+							(phase === 'critic' && !role.startsWith('critic'))
+						) {
+							throw new Error(
+								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"`,
+							);
+						}
+					}
+					await recordPrReviewValidationBatch(
+						directory,
+						context.sessionID,
+						phase,
+						laneSpecs,
+						{ batchId, prHeadSha: headSha },
+					);
+				} else {
+					throw new Error(
+						'BLOCKED: active PR_REVIEW requires a structured base, micro, council, reviewer, or critic mode',
+					);
+				}
+			} else if (gateState?.mode === 'PR_FEEDBACK') {
+				const headSha = parsed.data.pr_head_sha;
+				if (!headSha) {
+					throw new Error('BLOCKED: PR_FEEDBACK dispatch requires pr_head_sha');
+				}
+				if (parsed.data.mode === 'swarm-pr-feedback:verification') {
+					await declarePrFeedbackInventory(
+						directory,
+						context.sessionID,
+						parsed.data.feedback_inventory ?? [],
+						{ prHeadSha: headSha },
+					);
+					await enforcePrFeedbackVerificationOwnership(
+						directory,
+						context.sessionID,
+						parsed.data.lanes.map((lane) => ({
+							laneId: lane.id,
+							ownedItemIds: lane.feedback_item_ids ?? [],
+						})),
+						{ batchId, prHeadSha: headSha },
+					);
+				} else if (
+					parsed.data.mode === 'swarm-pr-feedback:stage-b-reviewer' ||
+					parsed.data.mode === 'swarm-pr-feedback:stage-b-test' ||
+					parsed.data.mode === 'swarm-pr-feedback:closeout-reviewer' ||
+					parsed.data.mode === 'swarm-pr-feedback:closeout-critic'
+				) {
+					if (
+						parsed.data.lanes.length !== 1 ||
+						parsed.data.max_concurrent !== 1
+					) {
+						throw new Error(
+							'BLOCKED: each ordered PR_FEEDBACK gate requires exactly one lane and max_concurrent: 1',
+						);
+					}
+					const phase = parsed.data.mode.slice('swarm-pr-feedback:'.length) as
+						| 'stage-b-reviewer'
+						| 'stage-b-test'
+						| 'closeout-reviewer'
+						| 'closeout-critic';
+					const lane = parsed.data.lanes[0];
+					const role = resolveGeneratedAgentRole(
+						lane.agent,
+						swarmState.generatedAgentNames,
+					);
+					const expectedRole =
+						phase === 'stage-b-test'
+							? 'test_engineer'
+							: phase === 'closeout-critic'
+								? 'critic'
+								: 'reviewer';
+					if (
+						lane.workflow_lane !== phase ||
+						(expectedRole === 'critic'
+							? !role.startsWith('critic')
+							: role !== expectedRole)
+					) {
+						throw new Error(
+							`BLOCKED: PR_FEEDBACK ${phase} requires workflow_lane "${phase}" and role "${expectedRole}"`,
+						);
+					}
+					await recordPrFeedbackGateBatch(
+						directory,
+						context.sessionID,
+						phase,
+						{
+							laneId: lane.id,
+							ownedItemIds: lane.feedback_item_ids ?? [],
+						},
+						{
+							batchId,
+							prHeadSha: headSha,
+							revisionDigest: workflowRevisionDigest ?? '',
+						},
+					);
+				} else {
+					throw new Error(
+						'BLOCKED: active PR_FEEDBACK requires structured verification, Stage B reviewer/test, and closeout reviewer/critic modes',
+					);
+				}
+			}
+		} catch (error) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message:
+					error instanceof Error
+						? error.message
+						: 'PR workflow gate rejected dispatch',
+			});
+		}
+	}
+	const contracted = applyPrWorkflowPromptContract(lanes, {
+		mode: parsed.data.mode,
+		prHeadSha: verifiedPrHead,
+		revisionDigest: workflowRevisionDigest,
+		scope: verifiedReviewBaseSha
+			? `complete PR diff ${verifiedReviewBaseSha}...${verifiedPrHead}`
+			: 'the complete immutable feedback inventory on the exact checked-out revision',
+		callerFocus: parsed.data.scope,
+	});
+	if (!contracted.ok) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid mandatory PR workflow prompt contract',
+			errors: contracted.errors,
+		});
+	}
+	lanes = applyExplorerFormatSuffix(contracted.lanes);
+	const canonicalWorkflowScope = verifiedReviewBaseSha
+		? `complete PR diff ${verifiedReviewBaseSha}...${verifiedPrHead}`
+		: parsed.data.mode?.startsWith('swarm-pr-feedback:')
+			? 'the complete immutable feedback inventory on the exact checked-out revision'
+			: parsed.data.scope;
 	const maxConcurrent = Math.min(
 		parsed.data.max_concurrent ?? lanes.length,
 		lanes.length,
@@ -546,7 +1040,9 @@ export async function executeDispatchLanesAsync(
 						batchId,
 						mode: parsed.data.mode,
 						prHeadSha: parsed.data.pr_head_sha,
-						scope: parsed.data.scope,
+						gitHead: verifiedPrHead,
+						dirtyHash: workflowRevisionDigest,
+						scope: canonicalWorkflowScope,
 					}),
 				),
 			),
@@ -657,6 +1153,8 @@ async function launchAsyncLane(args: {
 	batchId: string;
 	mode?: string;
 	prHeadSha?: string;
+	gitHead?: string;
+	dirtyHash?: string;
 	scope?: string;
 }): Promise<DispatchLaneResult> {
 	const validation = validateLaneAgent(args.lane.agent, args.context);
@@ -734,11 +1232,12 @@ async function launchAsyncLane(args: {
 			batchId: args.batchId,
 			laneId: args.lane.id,
 			mode: args.mode ?? 'advisory',
+			workflowLane: args.lane.workflow_lane,
 			promptHash: promptHash(args.lane, args.directory, args.batchId),
 			workspace: {
 				directory: args.directory,
-				gitHead: null,
-				dirtyHash: null,
+				gitHead: args.gitHead ?? null,
+				dirtyHash: args.dirtyHash ?? null,
 				prHeadSha: args.prHeadSha ?? null,
 				scope: args.scope ?? null,
 			},
@@ -835,6 +1334,16 @@ async function collectOnce(
 			sessionId: record.subagentSessionId,
 			parentSessionId: record.parentSessionId,
 			mode: record.mode,
+			workflowLane: record.workflowLane,
+			prHeadSha: record.workspace?.prHeadSha ?? undefined,
+			gitHead: record.workspace?.gitHead ?? undefined,
+			revisionDigest: record.workspace?.prHeadSha
+				? (_internals.resolvePrWorkflowRevisionDigest(
+						directory,
+						record.workspace.prHeadSha,
+					) ?? undefined)
+				: undefined,
+			scope: record.workspace?.scope ?? undefined,
 			source: 'collect_lane_results',
 			text: transcript.text,
 			messageCount: transcript.messageCount,
@@ -1381,6 +1890,11 @@ function prepareLaneOutput(args: {
 	sessionId?: string;
 	parentSessionId?: string;
 	mode?: string;
+	workflowLane?: string;
+	prHeadSha?: string;
+	gitHead?: string;
+	revisionDigest?: string;
+	scope?: string;
 	source: 'dispatch_lanes' | 'collect_lane_results';
 	text: string;
 	messageCount?: number;
@@ -1405,6 +1919,11 @@ function prepareLaneOutput(args: {
 		sessionId: args.sessionId,
 		parentSessionId: args.parentSessionId,
 		mode: args.mode,
+		workflowLane: args.workflowLane,
+		prHeadSha: args.prHeadSha,
+		gitHead: args.gitHead,
+		revisionDigest: args.revisionDigest,
+		scope: args.scope,
 		source: args.source,
 		text: args.text,
 		messageCount: args.messageCount,
@@ -1541,7 +2060,10 @@ function applyExplorerFormatSuffix(
 		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
 		if (role !== 'explorer') return lane;
 		if (lane.prompt.includes('[CANDIDATE]')) return lane;
-		const prompt = `${lane.prompt}${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
+		const exactLane = lane.workflow_lane ?? lane.id;
+		const prompt = `${lane.prompt}
+
+CONTROLLER-BOUND OUTPUT IDENTITY: every output row MUST use the exact lane value "${exactLane}". Placeholder text such as "workflow_lane" is invalid.${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			logger.log(
 				`[dispatch-lanes] applyExplorerFormatSuffix: lane "${lane.id}" prompt too long ` +
@@ -1552,6 +2074,69 @@ function applyExplorerFormatSuffix(
 		}
 		return { ...lane, prompt };
 	});
+}
+
+function applyPrWorkflowPromptContract(
+	lanes: DispatchLaneSpec[],
+	options: {
+		mode?: string;
+		prHeadSha?: string;
+		revisionDigest?: string;
+		scope?: string;
+		callerFocus?: string;
+	},
+): ApplyCommonPromptResult {
+	const mode = options.mode;
+	if (
+		!mode?.startsWith('swarm-pr-review:') &&
+		!mode?.startsWith('swarm-pr-feedback:')
+	) {
+		return { ok: true, lanes: [...lanes] };
+	}
+	if (!options.prHeadSha || !options.revisionDigest) {
+		return {
+			ok: false,
+			errors: [
+				'PR workflow prompts require controller-verified head and revision bindings',
+			],
+		};
+	}
+	const errors: string[] = [];
+	const contracted = lanes.map((lane) => {
+		const workflowLane = lane.workflow_lane ?? '';
+		const assignedIds = lane.review_item_ids ?? lane.feedback_item_ids ?? [];
+		const checklist =
+			PR_WORKFLOW_LANE_CHECKLISTS[workflowLane] ??
+			(mode.endsWith(':reviewer')
+				? 're-read every assigned candidate at its exact location; prove classification, reachability, mitigation, severity, and falsification path'
+				: mode.endsWith(':critic')
+					? 'challenge every assigned verdict for evidence, reachability, mitigation, severity, coherence, and required report changes'
+					: 'inspect the bound scope using the complete repository-defined contract for this lane');
+		const contract = `
+
+[CONTROLLER-BOUND PR WORKFLOW CONTRACT]
+mode: ${mode}
+workflow_lane: ${workflowLane}
+pr_head_sha: ${options.prHeadSha}
+revision_digest: ${options.revisionDigest}
+declared_scope: ${options.scope ?? 'the exact checked-out PR revision and repository-defined diff context'}
+caller_focus_non_authoritative: ${options.callerFocus ?? '(none)'}
+assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discovery lane)'}
+mandatory_lane_checklist: ${checklist}
+
+This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
+[END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
+		const prompt = `${lane.prompt}${contract}`;
+		if (prompt.length > MAX_PROMPT_CHARS) {
+			errors.push(
+				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`,
+			);
+		}
+		return { ...lane, prompt };
+	});
+	return errors.length > 0
+		? { ok: false, errors }
+		: { ok: true, lanes: contracted };
 }
 
 function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
@@ -1710,7 +2295,11 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 			batch_id: DispatchLanesAsyncArgsSchema.shape.batch_id,
 			mode: DispatchLanesAsyncArgsSchema.shape.mode,
 			pr_head_sha: DispatchLanesAsyncArgsSchema.shape.pr_head_sha,
+			base_sha: DispatchLanesAsyncArgsSchema.shape.base_sha,
+			base_ref: DispatchLanesAsyncArgsSchema.shape.base_ref,
 			scope: DispatchLanesAsyncArgsSchema.shape.scope,
+			trigger_evaluation: DispatchLanesAsyncArgsSchema.shape.trigger_evaluation,
+			feedback_inventory: DispatchLanesAsyncArgsSchema.shape.feedback_inventory,
 		},
 		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
 			const result = await executeDispatchLanesAsync(args, directory, {

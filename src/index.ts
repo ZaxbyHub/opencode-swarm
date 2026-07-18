@@ -111,6 +111,9 @@ import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
+import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
+import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
+import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
@@ -853,6 +856,14 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 		advisoryInjector,
 	);
+	const prWorkflowResponseGate = createPrWorkflowResponseGate({
+		directory: ctx.directory,
+		client: ctx.client,
+	});
+	const prWorkflowSessionResolver = createPrWorkflowSessionResolver({
+		directory: ctx.directory,
+		client: ctx.client,
+	});
 
 	const delegationLedgerHook = createDelegationLedgerHook(
 		{ enabled: watchdogConfig.delegation_ledger },
@@ -1414,6 +1425,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						);
 					}
 				}
+				prWorkflowSessionResolver.observeEvent(input);
+				await prWorkflowResponseGate.event(input);
 				// PR wake delivery: session.idle flushes that session's queued PR
 				// events. No-op unless prompt-mode delivery is registered.
 				if (prEventDelivery) {
@@ -2044,6 +2057,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
 
+		// Correctness boundary: while a durable PR workflow gate exists, no
+		// architect text can masquerade as a terminal verdict or closure response.
+		// Raw-await this hook so gate-state read failures block text completion.
+		'experimental.text.complete': prWorkflowResponseGate.textComplete,
+
 		// Inject system prompt enhancements + phase monitor (when phase_preflight or knowledge enabled)
 		'experimental.chat.system.transform': composeHandlers(
 			...([
@@ -2187,18 +2205,31 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    has not produced an explicit pass/decision.
 			await delegationGateHooks.toolBefore(input, output);
 
-			// 4. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
+			// 4. PR workflow obligation gate (FAIL-CLOSED).
+			//    Prevents review/feedback mutation or validation transitions until
+			//    their durable lane and trigger obligations are satisfied.
+			const prWorkflowControllerSessionID =
+				await prWorkflowSessionResolver.resolve(input.sessionID);
+			await enforcePrWorkflowToolBefore(
+				ctx.directory,
+				prWorkflowControllerSessionID,
+				normalizeToolName(input.tool) ?? input.tool,
+				input.args as Record<string, unknown> | undefined,
+				swarmState.generatedAgentNames,
+			);
+
+			// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
 			//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
 			//    delegations (unknown canonical role, missing coder scope).
 			await fullAutoDelegationHook.toolBefore(input, output);
 
-			// 5. Full-Auto v2 permission policy (FAIL-CLOSED).
+			// 6. Full-Auto v2 permission policy (FAIL-CLOSED).
 			//    Throws FULL_AUTO_DENY / FULL_AUTO_BLOCKED / FULL_AUTO_PAUSED /
 			//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
 			//    critic when escalate_critic is needed.
 			await fullAutoPermissionHook.toolBefore(input, output);
 
-			// 6. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
+			// 7. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
 			//    Reads in-memory currentCriticalShownIds populated at injection
 			//    time and the in-process ack dedup set. Throws
 			//    KNOWLEDGE_ENFORCE_GATE_DENY for high-risk architect actions

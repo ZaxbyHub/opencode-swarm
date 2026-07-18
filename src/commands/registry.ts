@@ -4,6 +4,10 @@ import {
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import {
+	activatePrWorkflow,
+	type PrWorkflowMode,
+} from '../hooks/pr-workflow-gate.js';
 import { warn } from '../utils/logger.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
@@ -266,6 +270,7 @@ export type CommandResult = Promise<string>;
 async function handleModeCommandWithBundledSkills(
 	ctx: CommandContext,
 	handler: (directory: string, args: string[]) => string | CommandResult,
+	mechanicalMode?: PrWorkflowMode,
 ): CommandResult {
 	if (ctx.packageRoot) {
 		// Backstop for projects that predate init-time materialization (the
@@ -286,7 +291,13 @@ async function handleModeCommandWithBundledSkills(
 			true,
 		);
 	}
-	return Promise.resolve(handler(ctx.directory, ctx.args));
+	const result = await Promise.resolve(handler(ctx.directory, ctx.args));
+	if (/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)) {
+		if (mechanicalMode) {
+			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode);
+		}
+	}
+	return result;
 }
 
 export type CommandCategory =
@@ -925,18 +936,26 @@ export const COMMAND_REGISTRY = {
 	},
 	'pr-review': {
 		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handlePrReviewCommand),
+			handleModeCommandWithBundledSkills(
+				ctx,
+				handlePrReviewCommand,
+				'PR_REVIEW',
+			),
 		description:
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
-			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, launches all 6 fixed base explorer lanes through dispatch_lanes_async while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, runs every triggered micro-lane, validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. If lane tools cannot close coverage, Task-tool dispatch is the final verified-equivalent fallback; if equivalence cannot be proven, the review is BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, launches all 6 fixed base explorer lanes through dispatch_lanes_async while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, runs all 11 mandatory repository-agnostic micro-lanes without applicability waivers, validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
 	'pr-feedback': {
 		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handlePrFeedbackCommand),
+			handleModeCommandWithBundledSkills(
+				ctx,
+				handlePrFeedbackCommand,
+				'PR_FEEDBACK',
+			),
 		description:
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',

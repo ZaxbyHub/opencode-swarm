@@ -1,10 +1,13 @@
 import * as child_process from 'node:child_process';
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
 const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
 const GIT_SNAPSHOT_MAX_BUFFER = 512 * 1024;
+const REVISION_MAX_FILES = 5_000;
+const REVISION_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 
 type SpawnSync = typeof child_process.spawnSync;
 
@@ -19,16 +22,340 @@ interface CaptureWorkspaceSnapshotOptions {
 	resolveCurrentPrHeadSha?: boolean;
 }
 
-function runGit(directory: string, args: string[]): string | null {
+function runGit(
+	directory: string,
+	args: string[],
+	timeoutMs = GIT_SNAPSHOT_TIMEOUT_MS,
+): string | null {
 	const result = _internals.spawnSync('git', ['-C', directory, ...args], {
 		cwd: directory,
 		encoding: 'utf-8',
-		timeout: GIT_SNAPSHOT_TIMEOUT_MS,
+		timeout: timeoutMs,
 		maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
 		stdio: ['ignore', 'pipe', 'pipe'],
 	});
 	if (result.error || result.status !== 0) return null;
 	return typeof result.stdout === 'string' ? result.stdout.trimEnd() : null;
+}
+
+/** Resolve the exact checked-out commit through the bounded Git snapshot path. */
+export function resolveCurrentGitHead(directory: string): string | null {
+	return runGit(directory, ['rev-parse', '--verify', 'HEAD^{commit}']);
+}
+
+/** Resolve one exact PR merge base without shell interpolation or unbounded I/O. */
+export function resolveExactMergeBase(
+	directory: string,
+	baseRef: string,
+	prHeadSha: string,
+): string | null {
+	if (!isSafeGitRevisionToken(baseRef) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const mergeBase = runGit(directory, ['merge-base', '--', baseRef, prHeadSha]);
+	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+function isSafeGitRevisionToken(value: string): boolean {
+	return (
+		/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/.test(value) &&
+		!value.includes('..') &&
+		!value.includes('//') &&
+		!value.includes('@{')
+	);
+}
+
+/** Resolve the current branch's exact remote-tracking publication target. */
+export function resolveCurrentUpstreamRemoteRef(
+	directory: string,
+): string | null {
+	const upstream = runGit(directory, [
+		'rev-parse',
+		'--symbolic-full-name',
+		'@{upstream}',
+	]);
+	if (!upstream?.startsWith('refs/remotes/') || upstream.endsWith('/HEAD')) {
+		return null;
+	}
+	return upstream;
+}
+
+export interface PrUpstreamPushTarget {
+	remoteName: string;
+	remoteBranchRef: string;
+	remoteTrackingRef: string;
+}
+
+/** Resolve a branch's upstream without guessing where a remote name ends. */
+export function resolveCurrentUpstreamPushTarget(
+	directory: string,
+): PrUpstreamPushTarget | null {
+	const localBranchRef = runGit(directory, ['symbolic-ref', '--quiet', 'HEAD']);
+	if (!localBranchRef?.startsWith('refs/heads/')) return null;
+	const encoded = runGit(directory, [
+		'for-each-ref',
+		'--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)',
+		localBranchRef,
+	]);
+	if (!encoded) return null;
+	const [remoteName, remoteBranchRef, remoteTrackingRef, ...extras] =
+		encoded.split('\0');
+	if (
+		extras.length > 0 ||
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef?.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef) ||
+		!remoteTrackingRef?.startsWith('refs/remotes/') ||
+		remoteTrackingRef.endsWith('/HEAD')
+	) {
+		return null;
+	}
+	return { remoteName, remoteBranchRef, remoteTrackingRef };
+}
+
+/** Query the actual remote ref; local tracking refs are not publication proof. */
+export function resolveExactRemoteBranchHead(
+	directory: string,
+	remoteName: string,
+	remoteBranchRef: string,
+): string | null {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef)
+	) {
+		return null;
+	}
+	const output = runGit(
+		directory,
+		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
+		20_000,
+	);
+	if (!output) return null;
+	const rows = output.split(/\r?\n/).filter(Boolean);
+	if (rows.length !== 1) return null;
+	const [objectName, refName, ...extras] = rows[0].split(/\s+/);
+	if (
+		extras.length > 0 ||
+		refName !== remoteBranchRef ||
+		!objectName ||
+		!(/^[0-9a-f]{40}$/i.test(objectName) || /^[0-9a-f]{64}$/i.test(objectName))
+	) {
+		return null;
+	}
+	return objectName;
+}
+
+/** Bind Stage-A execution to Git refs, config, HEAD, and index metadata. */
+export function resolveGitControlStateDigest(directory: string): string | null {
+	const head = runGit(directory, ['rev-parse', '--verify', 'HEAD^{commit}']);
+	const symbolicHead = runGit(directory, ['symbolic-ref', '--quiet', 'HEAD']);
+	const upstream = resolveCurrentUpstreamPushTarget(directory);
+	const refs = runGit(directory, [
+		'for-each-ref',
+		'--format=%(refname)%00%(objectname)',
+		'refs/heads',
+		'refs/remotes',
+		'refs/tags',
+	]);
+	const config = runGit(directory, [
+		'config',
+		'--null',
+		'--show-origin',
+		'--show-scope',
+		'--list',
+	]);
+	const index = runGit(directory, ['ls-files', '--stage', '-z']);
+	if (
+		head === null ||
+		symbolicHead === null ||
+		!upstream ||
+		refs === null ||
+		config === null ||
+		index === null
+	) {
+		return null;
+	}
+	return digest(
+		`head\0${head}\0symbolic\0${symbolicHead}\0upstream\0${upstream.remoteName}\0${upstream.remoteBranchRef}\0${upstream.remoteTrackingRef}\0refs\0${refs}\0config\0${config}\0index\0${index}`,
+	);
+}
+
+/** Require all independently reviewed content to be captured by the commit. */
+export function resolveIsWorkingTreeClean(directory: string): boolean | null {
+	const status = runGit(directory, [
+		'status',
+		'--porcelain=v1',
+		'--untracked-files=all',
+	]);
+	return status === null ? null : status.length === 0;
+}
+
+/** Count commits on the ancestry path from the immutable intake head to HEAD. */
+export function resolveCommitCountSince(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): number | null {
+	const output = runGit(directory, [
+		'rev-list',
+		'--count',
+		'--ancestry-path',
+		`${baseHeadSha}..${currentHeadSha}`,
+	]);
+	if (!output || !/^\d+$/.test(output)) return null;
+	const count = Number(output);
+	return Number.isSafeInteger(count) ? count : null;
+}
+
+/** Prove the publication commit is a non-merge direct child of intake HEAD. */
+export function resolveIsExactSingleChildCommit(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): boolean | null {
+	const base = runGit(directory, [
+		'rev-parse',
+		'--verify',
+		`${baseHeadSha}^{commit}`,
+	]);
+	const current = runGit(directory, [
+		'rev-parse',
+		'--verify',
+		`${currentHeadSha}^{commit}`,
+	]);
+	if (!base || !current) return null;
+	const commitAndParents = runGit(directory, [
+		'rev-list',
+		'--parents',
+		'-n',
+		'1',
+		current,
+	]);
+	if (commitAndParents === null) return null;
+	const fields = commitAndParents.trim().split(/\s+/);
+	return (
+		fields.length === 2 &&
+		fields[0]?.toLowerCase() === current.toLowerCase() &&
+		fields[1]?.toLowerCase() === base.toLowerCase()
+	);
+}
+
+/**
+ * Return remote-tracking refs whose tip equals the exact checked-out commit.
+ * Publication closeout uses this bounded local observation after a successful
+ * push; an empty list is not proof that the approved revision was published.
+ */
+export function resolveRemoteRefsContainingHead(
+	directory: string,
+	headSha: string,
+): string[] | null {
+	const output = runGit(directory, [
+		'for-each-ref',
+		'--format=%(refname)%09%(objectname)',
+		'refs/remotes',
+	]);
+	if (output === null) return null;
+	return output
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.filter(
+			([ref, objectName]) =>
+				ref?.startsWith('refs/remotes/') &&
+				!ref.endsWith('/HEAD') &&
+				objectName?.toLowerCase() === headSha.toLowerCase(),
+		)
+		.map(([ref]) => ref);
+}
+
+/**
+ * Bind a mutable working tree to its actual content, not merely porcelain status.
+ * This lets PR-feedback approvals fail closed when a same-path edit occurs after a
+ * gate. Paths come from Git, are containment-checked, and are hashed without
+ * following symlinks outside the project.
+ */
+export function resolvePrWorkflowRevisionDigest(
+	directory: string,
+	baseHeadSha: string,
+): string | null {
+	const projectRoot = path.resolve(directory);
+	const baseHead = runGit(projectRoot, [
+		'rev-parse',
+		'--verify',
+		`${baseHeadSha}^{commit}`,
+	]);
+	const diffNames = runGit(projectRoot, [
+		'diff',
+		'--no-ext-diff',
+		'--name-only',
+		'-z',
+		baseHeadSha,
+	]);
+	const porcelain = runGit(projectRoot, [
+		'status',
+		'--porcelain=v1',
+		'-z',
+		'--untracked-files=all',
+	]);
+	if (!baseHead || diffNames === null || porcelain === null) return null;
+	const porcelainPaths = parsePorcelainPaths(porcelain);
+	if (!porcelainPaths) return null;
+	const changedPaths = [
+		...new Set([...parseNulPaths(diffNames), ...porcelainPaths]),
+	].sort((left, right) => left.localeCompare(right));
+	if (changedPaths.length > REVISION_MAX_FILES) return null;
+
+	const hash = createHash('sha256');
+	hash.update(`base\0${baseHead}\0`);
+	let totalBytes = 0;
+	for (const relativePath of changedPaths) {
+		const resolvedPath = path.resolve(projectRoot, relativePath);
+		const relativeToRoot = path.relative(projectRoot, resolvedPath);
+		if (
+			!relativeToRoot ||
+			relativeToRoot.startsWith('..') ||
+			path.isAbsolute(relativeToRoot)
+		)
+			return null;
+		hash.update(`path\0${relativePath}\0`);
+		let stats: fs.Stats;
+		try {
+			stats = fs.lstatSync(resolvedPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				hash.update('deleted\0');
+				continue;
+			}
+			return null;
+		}
+		if (stats.isSymbolicLink()) {
+			try {
+				hash.update(`symlink\0${fs.readlinkSync(resolvedPath)}\0`);
+				continue;
+			} catch {
+				return null;
+			}
+		}
+		if (!stats.isFile()) {
+			hash.update(`node\0${stats.mode}\0`);
+			continue;
+		}
+		totalBytes += stats.size;
+		if (totalBytes > REVISION_MAX_TOTAL_BYTES) return null;
+		try {
+			hash.update(`file\0${stats.mode}\0`);
+			hash.update(fs.readFileSync(resolvedPath));
+			hash.update('\0');
+		} catch {
+			return null;
+		}
+	}
+	return hash.digest('hex');
 }
 
 function parseNulPaths(output: string): string[] {
@@ -73,7 +400,7 @@ export function captureWorkspaceSnapshot(
 		}
 		return optionsOrScope.prHeadSha ?? null;
 	})();
-	const gitHead = runGit(directory, ['rev-parse', 'HEAD']);
+	const gitHead = resolveCurrentGitHead(directory);
 	const porcelain = runGit(directory, [
 		'status',
 		'--porcelain=v1',

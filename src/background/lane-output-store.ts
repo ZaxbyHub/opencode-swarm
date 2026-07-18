@@ -27,6 +27,11 @@ const LaneOutputArtifactSchema = z
 		sessionId: z.string().min(1).optional(),
 		parentSessionId: z.string().min(1).optional(),
 		mode: z.string().min(1).optional(),
+		workflowLane: z.string().min(1).optional(),
+		prHeadSha: z.string().min(1).optional(),
+		gitHead: z.string().min(1).optional(),
+		revisionDigest: z.string().min(1).optional(),
+		scope: z.string().min(1).optional(),
 		source: z.enum(['dispatch_lanes', 'collect_lane_results']),
 		text: z.string(),
 		chars: z.number().int().nonnegative(),
@@ -52,6 +57,11 @@ export interface StoreLaneOutputInput {
 	sessionId?: string;
 	parentSessionId?: string;
 	mode?: string;
+	workflowLane?: string;
+	prHeadSha?: string;
+	gitHead?: string;
+	revisionDigest?: string;
+	scope?: string;
 	source: LaneOutputSource;
 	text: string;
 	messageCount?: number;
@@ -100,13 +110,27 @@ export function storeLaneOutput(
 			const existing = LaneOutputArtifactSchema.safeParse(
 				JSON.parse(readFileSync(absPath, 'utf-8')),
 			);
-			if (existing.success && existing.data.digest === digest) {
+			if (
+				existing.success &&
+				hasValidArtifactIntegrity(existing.data, ref) &&
+				artifactIdentityMatchesInput(existing.data, input)
+			) {
 				return {
 					ref,
 					digest,
 					chars: existing.data.chars,
 					bytes: existing.data.bytes,
 					degraded: false,
+				};
+			}
+			if (existing.success && hasValidArtifactIntegrity(existing.data, ref)) {
+				return {
+					digest,
+					chars: input.text.length,
+					bytes,
+					degraded: true,
+					error:
+						'lane output ref collision has incompatible agent/session provenance',
 				};
 			}
 		}
@@ -123,6 +147,11 @@ export function storeLaneOutput(
 				? { parentSessionId: input.parentSessionId }
 				: {}),
 			...(input.mode ? { mode: input.mode } : {}),
+			...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
+			...(input.prHeadSha ? { prHeadSha: input.prHeadSha } : {}),
+			...(input.gitHead ? { gitHead: input.gitHead } : {}),
+			...(input.revisionDigest ? { revisionDigest: input.revisionDigest } : {}),
+			...(input.scope ? { scope: input.scope } : {}),
 			source: input.source,
 			text: input.text,
 			chars: input.text.length,
@@ -174,7 +203,9 @@ export function readLaneOutput(
 	} catch {
 		return null;
 	}
-	if (!parsed.success || parsed.data.ref !== ref) return null;
+	if (!parsed.success || !hasValidArtifactIntegrity(parsed.data, ref)) {
+		return null;
+	}
 	return { artifact: parsed.data };
 }
 
@@ -271,6 +302,41 @@ function laneOutputRelativePath(ref: string): string {
 		batchDigest,
 		laneDigest,
 		`${outputDigest}.json`,
+	);
+}
+
+function hasValidArtifactIntegrity(
+	artifact: LaneOutputArtifact,
+	expectedRef: string,
+): boolean {
+	const digest = digestText(artifact.text);
+	if (artifact.digest !== digest) return false;
+	if (artifact.chars !== artifact.text.length) return false;
+	if (artifact.bytes !== Buffer.byteLength(artifact.text, 'utf-8')) {
+		return false;
+	}
+	const batchDigest = digestText(artifact.batchId);
+	const laneDigest = digestText(artifact.laneId);
+	const expectedArtifactRef = `${LANE_OUTPUT_REF_PREFIX}:${batchDigest}:${laneDigest}:${digest}`;
+	return artifact.ref === expectedRef && artifact.ref === expectedArtifactRef;
+}
+
+function artifactIdentityMatchesInput(
+	artifact: LaneOutputArtifact,
+	input: StoreLaneOutputInput,
+): boolean {
+	return (
+		artifact.agent === input.agent &&
+		artifact.role === input.role &&
+		artifact.sessionId === input.sessionId &&
+		artifact.parentSessionId === input.parentSessionId &&
+		artifact.mode === input.mode &&
+		artifact.workflowLane === input.workflowLane &&
+		artifact.prHeadSha === input.prHeadSha &&
+		artifact.gitHead === input.gitHead &&
+		artifact.revisionDigest === input.revisionDigest &&
+		artifact.scope === input.scope &&
+		artifact.source === input.source
 	);
 }
 

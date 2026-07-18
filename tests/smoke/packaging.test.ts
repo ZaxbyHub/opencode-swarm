@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 4.9 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 5.4 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,15 +38,14 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 4.9MB)', () => {
+	test('dist/index.js file size is reasonable (< 5.4MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// Main had grown to 4,824,030 bytes before #1820. After integrating current
-		// main plus the evaluation substrate, the measured bundle is 4,960,550
-		// bytes. The 4.9 MiB cap preserves about 177 KB of cross-platform headroom,
-		// while a further 10% increase still exceeds the limit. The exact merged
-		// size is rechecked by this smoke test after every build.
+		// The mechanical PR-workflow controller adds durable evidence, provenance,
+		// and publication enforcement. The observed bundle is about 5.30 MB; the
+		// 5.4 MiB cap retains roughly 350 KB of headroom while a further 10% increase
+		// still exceeds the limit. The exact merged size is rechecked after every build.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

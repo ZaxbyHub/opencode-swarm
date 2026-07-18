@@ -6,9 +6,9 @@ description: >
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
   PR follow-up work that must close all known issues without dropping findings.
-  Supports multi-round bot reviews — when the repo uses an auto-review bot that
-  posts a new review after every push (in opencode-swarm, `hermes-pr-review`) —
-  via the iterative pattern documented in the body. Stage A
+  Supports multi-round bot reviews when the repo uses an auto-review bot that
+  posts a new review after every push, via the iterative pattern documented in
+  the body. Stage A
   (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the
   reviewer + critic closeout gate are MANDATORY for any change made as part of
   this process.
@@ -17,6 +17,7 @@ description: >
 # Swarm PR Feedback
 
 Use this skill to close known PR feedback. This is not a fresh broad PR review.
+Repository-specific bot names and examples below are illustrative; substitute the repo's actual bot and branch-state surfaces when they differ.
 `swarm-pr-review` discovers new findings; `swarm-pr-feedback` ingests existing
 feedback surfaces, verifies each claim, clusters related problems, fixes confirmed
 issues, validates the branch, and reports closure status for every item.
@@ -25,7 +26,8 @@ issues, validates the branch, and reports closure status for every item.
 (reviewer + test_engineer) gates and the reviewer + critic closeout gate are
 MANDATORY for any change made as part of this process. No fix lands, no closure
 ledger row is marked FIXED, and no PR is published until all three gates pass on
-the current diff. See "Mandatory Gates" below for the full protocol.
+the current diff. There is no speed, efficiency, or time exception. See
+"Mandatory Gates" below for the full protocol.
 
 When the work starts from a prior `swarm-pr-review` run, ingest the review's
 handoff artifact (for example
@@ -43,10 +45,10 @@ fixes.
 
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
-When the repo uses an auto-review bot — in opencode-swarm, `hermes-pr-review`
-(Qwen3.6 + Gemma-4 dual-model) — it posts a new review comment after **every
-push** to the PR branch, not just the final state. Expect N rounds of review for
-N pushes, and budget for it.
+When the repo uses an auto-review bot that posts a new review comment after
+**every push** to the PR branch, identify that bot from the repository contract
+and apply this pattern (for example `hermes-pr-review` in this repo). Expect N
+rounds of review for N pushes, and budget for it.
 
 **Round N+1 deltas vs Round N:**
 - Fresh `FB-###` ledger IDs for new findings (do not reuse IDs from earlier rounds)
@@ -63,12 +65,15 @@ N pushes, and budget for it.
 2. **Carry forward unresolved items.** Findings you marked `PARTIAL` or `NEEDS_USER_DECISION`
    in round N will still be open in round N+1. The closure ledger should show their
    evolution (e.g., "PARTIAL round 1 → CONFIRMED round 2 after evidence collected").
-3. **Apply the 3-strikes-then-defense-in-depth rule.** When the same finding is
-   raised 3+ times across rounds, prefer to add the suggested code change with a
-   defense-in-depth rationale comment rather than continue to debate. One extra
-   condition is cheap; per-round debate is expensive. Document the parent-vs-inner
-   relationship inline so future readers see the rationale.
-   **When not to apply 3-strikes:** If the suggested fix would add incorrect or
+3. **Apply the 3-strikes evidence-escalation rule.** When the same finding is
+   raised 3+ times across rounds, re-run source verification with a fresh
+   reviewer context and surface the disagreement explicitly. Add a
+   defense-in-depth change only when that fresh verification proves the change
+   is correct, preserves the real invariant, and adds meaningful protection.
+   Repetition, time, token cost, and reviewer persistence are never substitutes
+   for evidence. Document any parent-vs-inner relationship inline so future
+   readers see the rationale.
+   **Do not add the repeated suggestion:** If it would add incorrect or
    misleading code about existing guards — e.g., an outer guard that already exists at an
    inner scope and whose addition would imply the inner guard is absent, a type
    narrowing that masks a real error class, or a check whose presence asserts a
@@ -117,11 +122,15 @@ current branch before editing:
 
 ### Automated Security Finding Verification
 
-Automated security bots (e.g., hermes-pr-review, CodeRabbit, Gemini) frequently
-produce findings rated CRITICAL or HIGH that are false positives. In a recent
-PR review cycle, 7/7 bot security findings were false positives upon source
-verification. Before acting on any bot security finding, perform these
-source-level checks:
+This is a repository-agnostic verification checklist. Technology names and
+paths in the examples below are illustrative only: apply an example only when
+the reviewed repository actually uses that API, validator, runtime, or file
+layout, and otherwise translate the same origin-to-sink question to the
+repository's language and framework. No example creates a dependency on the
+opencode-swarm tree.
+
+Automated security bots can produce CRITICAL or HIGH false positives. Before
+acting on any bot security finding, perform these source-level checks:
 
 1. **`child_process.exec` vs `RegExp.exec`**: SAST rules pattern-match on
    `.exec(` and cannot distinguish `child_process.exec(userInput)` (real
@@ -187,11 +196,12 @@ tree:
 
 - If `head_ref` is a remote branch that is not checked out locally, fetch it
   (`git fetch origin <head_ref>`).
-- **Check for parallel work first.** Before checkout, run
-  `file:.swarm/bundled-skills/parallel-work-check/SKILL.md` to
-  detect concurrent pushes from other agents (e.g., `hermes-pr-review` bot
-  following up, maintainer pushing fixes, parallel swarm work). If remote has new
-  commits: read `git log local..remote`, evaluate whether the parallel work
+- **Check for parallel work first.** Before checkout, use the repository or
+  runtime's parallel-work check. When the bundled
+  `parallel-work-check` skill exists, it is one conditional implementation to
+  detect concurrent pushes from other agents (for example the repo's
+  auto-review bot following up, a maintainer pushing fixes, or parallel swarm
+  work). If remote has new commits: read `git log local..remote`, evaluate whether the parallel work
   supersedes your planned fixes, and prefer the parallel work if it's more
   comprehensive (more tests, better edge coverage, clearer error handling).
   Abort your rebase, take the remote state, then add minor improvements on top.
@@ -200,12 +210,18 @@ tree:
 - **Check out the head branch locally.** Feedback verification reads the working-tree
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the
-  `base_ref..head_ref` range for diff-scoped inspection.
- - Pass the `base_ref..head_ref` commit range in every read-only verification or
+  exact `merge_base...head_ref` range for diff-scoped inspection.
+ - Pass the exact `merge_base...head_ref` commit range in every read-only verification or
    explorer/advisory-lane delegation so lane agents can inspect specific revisions
    with `git show` when needed.
 - If no PR reference was provided (a pasted-feedback session on the current branch),
    confirm the current branch is the intended PR branch before editing.
+- If the fetched PR head is detached or has no local tracking branch, establish
+  it only during this pre-bind transition with the constrained existing-remote
+  form `git switch -c <local-branch> --track <remote>/<remote-branch>` (or set
+  the upstream of an existing local branch with
+  `git branch --set-upstream-to=<remote>/<remote-branch> <local-branch>`).
+  Branch creation/tracking is blocked after the immutable head is bound.
 
 When a verification lane result includes `output_ref`, treat `output` as a
 preview and call `retrieve_lane_output` before using it to classify, resolve,
@@ -218,9 +234,7 @@ ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
 Before staging any files for the PR commit, check the working tree state:
 
 **The problem:** `git add -A` stages every uncommitted change in the working tree,
-including pre-existing changes from other branches or prior work. This was hit twice
-in one session during PR #1472 review, producing a 59-file commit instead of the
-intended 2-file targeted fix.
+including pre-existing changes from other branches or prior work.
 
 **The check:** Run `git status --porcelain` first. If output is non-empty, identify
 which files are PR-related vs pre-existing uncommitted changes.
@@ -235,13 +249,13 @@ git add src/foo.ts tests/foo.test.ts
 Never use `git add -A` when the working tree has pre-existing changes from other
 branches or prior work sessions.
 
-*Reference: Caught during PR #1472 Round 1 closure.*
-
 ## Batch Collection (mandatory before any fix)
 
-Read `file:.swarm/bundled-skills/ci-failure-batching/SKILL.md` for the full batch collection and fix protocol before proceeding.
+When the runtime provides a CI-failure-batching workflow, load it before
+proceeding. The bundled `ci-failure-batching` skill is one conditional
+implementation; otherwise apply the host-neutral complete-ledger protocol
+below.
 
-Issue #1746: 8+ push cycles where 3–4 would have sufficed with batching.
 The anti-pattern: iterating check-by-check, proposing a fix for one failure,
 pushing, waiting for CI, then discovering the next failure. Each cycle costs
 one push + one CI run.
@@ -264,6 +278,12 @@ modification is proposed. Verifying the ledger is complete is a prerequisite
 for the Fix Planning step.
 
 ## Pre-flight: Scope Discipline
+
+The following `save_plan` / `declare_scope` mechanics apply only when those
+plugin tools are available. In other repositories or runtimes, use the native
+scope controller; if none exists, put exact allowed files and non-goals in the
+delegation and verify the resulting diff mechanically. Never bypass an
+available scope controller merely to reduce ceremony.
 
 `declare_scope({ taskId, files })` enforces that the delegated coder agent may only modify the declared files. The enforcement requires an active `.swarm/plan.json` — calling `declare_scope` in a feedback-closure run (which does not go through `save_plan`) rejects with "No plan found."
 
@@ -292,12 +312,17 @@ If a source is unavailable, retry with alternative access paths. If unavailable 
 ### Async advisory verification lanes
 
 After the complete feedback ledger exists and before editing, use
-`dispatch_lanes_async` when available for independent read-only verification lanes:
+`dispatch_lanes_async` with `mode: "swarm-pr-feedback:verification"`, the
+complete immutable `feedback_inventory` ID list, the exact current
+`pr_head_sha`, and each lane's exact
+`feedback_item_ids` ownership list for independent read-only verification lanes:
 comment classification, CI/log root-cause inspection, test impact mapping,
 release/docs claim checks, and stale-branch/conflict analysis. Partition the
 ledger so each `FB-###` item is owned by exactly one verification lane and the
 union of lanes covers the entire ledger — no feedback item may be left
-unassigned to a lane; state each lane's owned `FB-###` range in its prompt. Scale
+unassigned to a lane; state each lane's owned IDs both structurally and in its
+prompt. The runtime rejects missing, duplicate, overlapping, or unknown item
+ownership and blocks mutation until the verification batch settles. Scale
 the lane count to the ledger size: a 1–3 item round may use a single combined
 lane, while a large multi-round intake may warrant one lane per category above.
 Cap each `dispatch_lanes_async` batch at 8 lanes (`MAX_LANES`); if the ledger
@@ -307,6 +332,15 @@ trivial round. Record each returned `batch_id`, then continue only ledger-safe
 architect work: normalize feedback IDs, gather deterministic PR metadata, prepare
 reproduction commands, and plan likely fix groups. Do not edit, close items, or
 mark feedback resolved from running lanes.
+
+Every verification lane must end with one parseable row for each owned item:
+
+```text
+[FEEDBACK-VERIFIED] | FB-### | CONFIRMED/PARTIAL/DISPROVED/PRE_EXISTING/NEEDS_MORE_EVIDENCE/NEEDS_USER_DECISION | evidence
+```
+
+Non-empty prose without this marker contract is not a settled verification
+artifact and cannot unlock mutation.
 
 Before the Verification step can mark any item `CONFIRMED`, `PARTIAL`,
 `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`,
@@ -319,10 +353,12 @@ exhausted, to confirm every lane is settled.
 Missing, stale, cancelled, or failed lanes are coverage gaps that must be closed
 before marking any item CONFIRMED/PARTIAL/DISPROVED/PRE_EXISTING. Apply the
 COVERAGE GATE:
-retry failed lanes (max 2), deploy a verified equivalent alternative (same agent
-type, same prompt, same scope, same isolation, with Task-tool dispatch as the
-final fallback when lane tools do not work), or stop and surface the lane failure
-to the user as BLOCKED.
+retry failed lanes (max 2) as another
+`swarm-pr-feedback:verification` async batch with the same immutable inventory,
+exact `pr_head_sha`, agent type, prompt, scope, and isolation, or stop and
+surface the lane failure to the user as BLOCKED. Blocking and direct-Task
+fallbacks are rejected because they cannot satisfy the durable ownership and
+head-provenance gate.
 Do not proceed with "blocking verification and record that async advisory lanes
 were unavailable" — record-and-continue is not coverage closure.
 
@@ -350,6 +386,12 @@ entire pipeline. Before triaging, check:
    confirmed by CI alone.
 
 ### PR body claim verification
+
+The `.swarm/evidence/` paths below apply only when the reviewed repository uses
+this plugin's council evidence contract. For any other repository, locate the
+authoritative CI attestation, code-host review record, or repository-declared
+evidence store; the universal rule is that an approval claim needs a real,
+retrievable provenance artifact.
 
 PR body text like "PHASE 2 council APPROVED (5/5, round 2)" or "Final council
 APPROVED" must be backed by an evidence file under `.swarm/evidence/` — phase
@@ -464,7 +506,11 @@ Verification checklist:
 - Check related tests and whether a failing/proposed test would prove the item.
 - Check whether multiple feedback items share one root cause.
 
-### DI seam migration validation
+### DI seam migration validation (when the repository uses this pattern)
+
+`_internals` and `mock.module()` below are JavaScript/TypeScript examples only.
+For another stack, apply the same live-binding question using that language and
+test runner's dependency-injection/mocking semantics.
 
 When a test file mutates a DI seam object (e.g., `_internals.foo = mock`),
 verify that the production source reads from the seam at call time. A common
@@ -523,7 +569,11 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
   and let the merge queue perform final current-base validation. Still resolve real
    merge conflicts and SHA-dependent review threads before queuing.
 
-### Operational Gotchas
+### Conditional runtime/host gotchas
+
+Apply each item below only when the named plugin tool, plan model, shell, or
+code-host client is actually present. They are portability examples, not
+requirements imposed on unrelated repositories.
 
  - **Plan identity change:** When switching from a review plan to a feedback-closure
    plan, `save_plan` rejects with `PLAN_IDENTITY_MISMATCH`. Pass
@@ -554,6 +604,64 @@ pre-checks; Stage B = `reviewer` + `test_engineer` per-task gates (consistent
 with `execute`, `plan`, `specify`, `brainstorm`, `docs/swarm-briefing.md`, and
 `docs/council/README.md`).
 
+**Mechanical controller contract.** Prose acknowledgements, direct `Task` calls,
+blocking dispatch, reused conversations, and free-form `APPROVE`/`PASS` text do
+not satisfy these gates. The durable controller requires this exact sequence on
+one content digest:
+
+Controller authority follows the parent/child session ancestry. Coder and
+nested child tool calls inherit the parent feedback gate; delegation never
+grants early commit, push, remote-write, checkout, or protected-evidence
+authority.
+
+1. `run_pr_feedback_stage_a` with array-form commands for every concrete
+   workspace/category/source build, typecheck, and lint/format obligation
+   mechanically discovered from the repository's manifests, configs, scripts,
+   or bounded `.pr-validation.json` contract, plus exact
+   `["git", "diff", "--check"]`. A category with no repository-local signal is
+   not invented merely to reach a fixed command count.
+   Add one required proof command: use the exact failing CI/test reproduction
+   when the immutable inventory includes a defect or CI/test failure; otherwise
+   add a repo-appropriate targeted regression/test command that exercises the
+   changed behavior. The tool executes the commands; naming a category without
+   executing it is not evidence. The controller binds that reproduction receipt
+   to the complete immutable feedback inventory, so no feedback item can reach
+   Stage B with an unrelated or unowned Stage A receipt.
+2. One `dispatch_lanes_async` lane with
+   `mode: "swarm-pr-feedback:stage-b-reviewer"`,
+   `workflow_lane: "stage-b-reviewer"`, every immutable
+   `feedback_item_ids`, and `max_concurrent: 1`.
+3. After that lane settles positively, one fresh `test_engineer` lane with
+   `mode: "swarm-pr-feedback:stage-b-test"`, matching `workflow_lane`, the
+   complete inventory, and `max_concurrent: 1`.
+4. After Stage B settles, one separate fresh reviewer lane with
+   `mode: "swarm-pr-feedback:closeout-reviewer"`, then one separate fresh
+   critic lane with `mode: "swarm-pr-feedback:closeout-critic"`. Each owns the
+   complete inventory and uses `max_concurrent: 1`.
+
+Every gate lane emits exactly one fully populated row per feedback ID:
+
+```text
+[STAGE-B-REVIEW] | FB-001 | APPROVE|NEEDS_REVISION|BLOCKED | evidence
+[STAGE-B-TEST] | FB-001 | PASS|FAIL|BLOCKED | evidence
+[CLOSEOUT-REVIEW] | FB-001 | APPROVE|NEEDS_REVISION|BLOCKED | evidence
+[CLOSEOUT-CRITIC] | FB-001 | APPROVE|NEEDS_REVISION|BLOCKED | evidence
+```
+
+Only exact positive verdict fields pass. A sentence containing “not APPROVE,” a
+header without item rows, duplicate rows, missing IDs, degraded/truncated
+artifacts, wrong roles, stale content digests, parallel or out-of-order phases,
+and reused pre-edit approvals all fail closed. Any content change after Stage A
+invalidates Stage A and every later gate; restart at step 1. Publication tools
+and `git commit`/`git push` remain blocked until all four ordered lane phases
+settle on the Stage-A digest. After they settle, only one standalone `git commit`
+command may create the reviewed commit; push and remote publication remain
+blocked until that exact commit is armed. The first completion requires a clean
+index/worktree and a non-merge direct child commit whose sole parent is the
+immutable intake head, so zero commits, multiple commits, merge commits,
+amend/non-descendant histories,
+`--allow-empty`, and partially committed reviewed content fail closed. There is no speed, efficiency, token, or time exception.
+
 If a gate failure is suspected pre-existing, prove it on the base branch or
 label it `UNVERIFIED`. Do not call the branch green while required checks are
 non-green.
@@ -564,13 +672,54 @@ Run for every changed surface. No "where relevant" — every PR-feedback change
 runs these; if a surface is genuinely untouched, state that explicitly rather
 than skipping silently.
 
-- `bun run build` (or the repository's build command) — must succeed.
-- typecheck — must pass.
-- lint/format (e.g. `biome ci .`) — must pass.
+- the repository's actual build validation for the changed surface — must
+  succeed when that surface participates in a build,
+- the repository's actual typecheck/static-analysis validation for the changed
+  surface — must pass when such a check exists,
+- the repository's actual lint/format validation for the changed surface — must
+  pass when such a check exists,
 - `git diff --check` — no whitespace or merge-marker errors.
-- exact failing CI/test command reproduced locally when a ledger item is rooted
-  in a CI/test failure — the reproduction must fail on the pre-fix tree and pass
-  after the fix.
+- one proof command is mandatory on every run:
+  - use the exact failing CI/test command when a ledger item is rooted in a
+    defect or CI/test failure; the reproduction must fail on the pre-fix tree
+    and pass after the fix.
+  - otherwise run a repo-appropriate targeted regression/test command that
+    exercises the changed behavior and passes on the post-fix tree.
+
+Execute these through `run_pr_feedback_stage_a` when available. Its bounded
+array-form commands are not arbitrary shell escape hatches: diff-check and a
+targeted reproduction are unconditional, every mechanically discovered
+workspace/category/source obligation is also required, and each command must
+match its declared build/typecheck/lint/diff-check/reproduction intent. Multiple
+commands in one category are mandatory when polyglot or monorepo discovery
+produces multiple obligations; use the exact `working_directory` and
+`obligation_id` for each. Every obligation ID gets exactly one independently
+executed receipt; identical commands remain separate only when distinct
+repository sources mechanically require them. The
+reproduction command must name at least one exact test, package, path, or
+regression selector in `targets`. Invoke recognized validators and test runners
+directly. Standard contained `./gradlew` and `./mvnw` wrappers are supported. A
+repository with a custom validator can declare its exact array-form command in a
+bounded repository-owned `.pr-validation.json` version-1 contract and reference
+the exact contract path/id. When that contract authorizes an otherwise opaque
+package script, the controller preserves the contract identity on the discovered
+obligation and receipt, requires non-empty execution evidence, and permits only
+an exact inspected npm, pnpm, yarn, or Bun script selection. Unsupported
+workspace-glob semantics fail closed rather than silently omitting a workspace.
+Arbitrary opaque scripts and unverified package-script names remain non-proof
+because a name such as `test` or `build` can hide a no-op. A
+reproduction must also return non-empty machine-observable runner output.
+The reproduction check also supplies one `feedback_targets` row per immutable
+feedback ID, in inventory order: exact `feedback_item_id`, one executed `target`,
+and concrete `expected_behavior`. Missing, duplicate, invented, or target-less
+mappings block Stage B; the controller persists that exact per-item mapping
+rather than stamping an unrelated test onto the whole inventory.
+No-op/help/list/dry-run,
+fix/update, package publication/deployment, Git mutation, remote client,
+shell/eval/wrapper, and credentialed publication surfaces fail closed. The
+controller snapshots the content revision plus HEAD, index, refs, upstream, and
+Git config before and after every command (including failures/timeouts); any
+mutation invalidates Stage A and prevents later commands from becoming proof.
 
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 
@@ -582,15 +731,18 @@ risks the test_engineer pinning a not-yet-approved fix shape.
 - **reviewer** — independent (fresh context, not the implementer, not a continued
   conversation). Validates each fix on the current diff against the feedback
   item it closes. Verdict per item: APPROVE / NEEDS_REVISION / BLOCKED.
-- **test_engineer** — writes and runs the falsification probe or regression test
-  that proves each fix actually resolves its item (tests for changed behavior or
-  newly covered gaps). Verdict per item: PASS / FAIL / BLOCKED.
+- **test_engineer** — independently designs and runs the falsification probe or
+  regression test that proves each fix resolves its item (tests for changed
+  behavior or newly covered gaps). The structured gate lane is read-only: if a
+  missing test must be authored, return `FAIL` with the exact requested probe so
+  implementation can add it before the sequence restarts. Verdict per item:
+  PASS / FAIL / BLOCKED.
 
-Address every NEEDS_REVISION / BLOCKED / FAIL, then re-run the affected agent on
-the current diff. When the test_engineer authors or modifies test files during
-Stage B, re-run the Stage A structural pre-checks (build / typecheck / lint)
-over those test files before the Stage B verdict is considered final — Stage A
-must be green over the full Stage-B-inclusive diff.
+Address every NEEDS_REVISION / BLOCKED / FAIL, then restart at Stage A on the
+current diff. When implementation authors or modifies test files requested by
+the test_engineer, the content-digest controller invalidates all earlier
+receipts automatically. Stage A must be green over the full Stage-B-inclusive
+diff before a new Stage B reviewer and test engineer run.
 
 ### Closeout gate — reviewer + critic (mandatory after Stage B)
 
@@ -613,10 +765,9 @@ reviewer's or critic's approval invalidates that approval** — re-run the
 affected gate on the current diff before publishing.
 
 Record both closeout verdicts (reviewer + critic, with HEAD/diff) in the
-runtime's session task-gates artifact (e.g. `.claude/session/tasks/<slug>/gates.md`
-under Claude Code, or the OpenCode/Codex equivalent) per the
-`durable-session-state` skill (`.swarm/` is the plugin's runtime state — never
-write task artifacts there).
+runtime's session task-gates artifact using the repository/runtime-specific
+durable-session guidance when one exists. `.swarm/` is the plugin's runtime
+state — never write task artifacts there.
 
 ### Post-publish verification (mandatory after the PR is pushed)
 
@@ -632,8 +783,35 @@ pre-checks and must not be folded into Stage A.
 
 ## Publishing And Communication
 
-Commits and pushes follow `file:.swarm/bundled-skills/commit-pr/SKILL.md` (the
-repository's commit/PR workflow) — do not push ad-hoc.
+After every ordered local gate passes on one unchanged content digest, create
+the reviewed commit with one standalone `git commit` command. Then call
+`complete_pr_workflow` once with `mode: "PR_FEEDBACK"` and the immutable intake
+`pr_head_sha`. A `ready-to-publish` result arms publication but deliberately
+keeps the durable gate active and binds that post-commit HEAD to the current
+branch's exact upstream remote-tracking ref. Configure the repository's intended
+PR-branch upstream before committing and arming. Push is blocked before this
+transition. Arming fails unless the index/worktree are clean and the bound HEAD
+is a non-merge direct child whose sole parent is the immutable intake head. Any content
+mutation or amend after it is blocked; restart at Stage A if the approved
+content must change.
+
+After arming, publish with exactly one non-force, single-ref command of the
+form `git push <bound-remote> <bound-commit>:refs/heads/<bound-branch>`. The
+source must be the literal commit ID bound by the first completion call, not
+`HEAD`; the destination must be the branch behind the bound upstream
+remote-tracking ref. Force flags, mirror/all/tags/delete operations, extra
+refspecs, URLs, wrappers, `git -C`, `gh` writes, aliases, and other publication
+surfaces fail closed. Read-only inspection remains available. Immediately
+after the exact push and read-only remote verification, call
+`complete_pr_workflow` again to prove the bound remote-tracking ref points at
+the bound commit. Completion also performs a bounded query of the actual remote
+branch; a locally forged or fetched tracking ref is never publication proof.
+The gate clears only after both observations agree, before any PR
+comment/body/thread write.
+
+Commits and pushes follow the repository's commit/PR workflow (for example
+`file:.swarm/bundled-skills/commit-pr/SKILL.md` when that bundled workflow is
+available) — do not push ad-hoc.
 
 After fixes, update the PR body or comment with a closure ledger:
 
@@ -652,6 +830,16 @@ resolve only threads whose ledger item is fixed or disproved on the pushed PR
 head, and record the exact evidence used.
 
 ## Final Output
+
+Before emitting the user-facing final response, call `complete_pr_workflow` a
+second time with the same mode and immutable verification `pr_head_sha`. The
+tool clears the durable session gate only when the content digest still equals
+the independently approved digest, the exact approved commit remains current,
+its bound upstream remote-tracking ref points to that exact commit, every
+feedback ID has exact-provenance evidence, and no PR-workflow lanes remain
+open. While the gate remains active, the runtime replaces architect
+final-response text with a mechanical blocked notice and re-wakes an idle
+parent session.
 
 Report:
 

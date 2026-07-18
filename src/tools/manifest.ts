@@ -31,6 +31,7 @@ import { build_check } from './build-check';
 import { check_gate_status } from './check-gate-status';
 import { checkpoint } from './checkpoint';
 import { co_change_analyzer } from './co-change-analyzer';
+import { complete_pr_workflow } from './complete-pr-workflow';
 import { completion_verify } from './completion-verify';
 import { complexity_hotspots } from './complexity-hotspots';
 import { context_status } from './context-status';
@@ -93,6 +94,7 @@ import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
 import { retrieve_lane_output } from './retrieve-lane-output';
 import { retrieve_summary } from './retrieve-summary';
+import { run_pr_feedback_stage_a } from './run-pr-feedback-stage-a';
 import { sast_scan } from './sast-scan';
 import { save_plan } from './save-plan';
 import { sbom_generate } from './sbom-generate';
@@ -165,6 +167,8 @@ export const TOOL_MANIFEST = defineHandlers({
 	evidence_check: () => evidence_check,
 	check_gate_status: () => check_gate_status,
 	completion_verify: () => completion_verify,
+	complete_pr_workflow: () => complete_pr_workflow,
+	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,
 	submit_phase_council_verdicts: () => submit_phase_council_verdicts,
 	declare_council_criteria: () => declare_council_criteria,

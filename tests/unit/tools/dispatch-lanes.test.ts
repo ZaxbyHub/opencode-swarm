@@ -1150,7 +1150,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			'one unprefixed data row per finding',
 		);
 		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
-			'[CLEAN] | micro_lane | coverage_scope | evidence',
+			'[CLEAN] | workflow_lane | coverage_scope | evidence',
 		);
 		expect(promptAsyncCalls[1][0].body.parts[0].text).toBe('inspect tests');
 		expect(ops.prompt).not.toHaveBeenCalled();

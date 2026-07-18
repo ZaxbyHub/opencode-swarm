@@ -75,6 +75,8 @@ export interface BackgroundDelegationRecord {
 	laneId?: string;
 	/** Advisory workflow/mode that launched the lane. */
 	mode?: string;
+	/** Mechanical PR workflow obligation identifier, distinct from retry-safe laneId. */
+	workflowLane?: string;
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -192,6 +194,7 @@ const RecordSchema = z
 		batchId: z.string().optional(),
 		laneId: z.string().optional(),
 		mode: z.string().optional(),
+		workflowLane: z.string().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -288,6 +291,7 @@ export interface RecordPendingInput {
 	batchId?: string;
 	laneId?: string;
 	mode?: string;
+	workflowLane?: string;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
@@ -325,6 +329,7 @@ export async function recordPendingDelegation(
 		...(input.batchId ? { batchId: input.batchId } : {}),
 		...(input.laneId ? { laneId: input.laneId } : {}),
 		...(input.mode ? { mode: input.mode } : {}),
+		...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
 		...(input.taskChangeContext

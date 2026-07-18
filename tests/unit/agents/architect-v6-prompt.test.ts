@@ -260,16 +260,24 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		const section = p.slice(idx, next);
 
 		expect(section).toContain('RUN ALL BASE LANES');
-		expect(section).toContain('fixed six base check-type lanes');
+		expect(section).toContain(
+			'exactly six repository-agnostic base check-type lanes',
+		);
+		expect(section).toContain(
+			'there is no speed, efficiency, or time exception',
+		);
 		expect(section).toContain('USE ASYNC DISPATCH WITHOUT IDLING');
 		expect(section).toContain('dispatch_lanes_async');
 		expect(section).toContain('collect_lane_results');
 		expect(section).toContain('without `wait`');
 		expect(section).toContain('wait: true');
-		expect(section).toContain('RUN THE TRIGGERED MICRO-LANES');
-		expect(section).toContain('after the base explorer lanes settle');
-		expect(section).toContain('Do not skip micro-lanes');
-		expect(section).not.toContain('after the base explorer lanes start');
+		expect(section).toContain('RUN ALL MICRO-LANES');
+		expect(section).toContain('all 11 micro-lanes');
+		expect(section).toContain('swarm-pr-review:micro');
+		expect(section).toContain('heuristics cannot waive a row');
+		expect(section).toContain(
+			'Missing any micro-lane is a BLOCKED coverage gap',
+		);
 		expect(section).toContain(
 			'surface the lane failure to the user as BLOCKED',
 		);

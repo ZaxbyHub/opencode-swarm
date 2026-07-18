@@ -182,10 +182,46 @@ describe('static-analysis: src/index.ts tool.execute.before registration', () =>
 		);
 	});
 
+	test('PR workflow obligation enforcement is fail-closed and raw-awaited', () => {
+		expect(toolBeforeBlock).toMatch(
+			/await\s+prWorkflowSessionResolver\.resolve\(input\.sessionID\)/,
+		);
+		expect(toolBeforeBlock).toMatch(/await\s+enforcePrWorkflowToolBefore\(/);
+		expect(toolBeforeBlock).toContain('prWorkflowControllerSessionID');
+		expect(toolBeforeBlock).not.toMatch(
+			/safeHook\(\s*enforcePrWorkflowToolBefore/,
+		);
+	});
+
 	test('advisory toolBefore (activity tracker) IS safe-wrapped (intentional)', () => {
 		// Documents the intentional asymmetry: activityHooks.toolBefore is
 		// observer-only and may safely swallow errors.
 		expect(toolBeforeBlock).toMatch(/safeHook\(\s*activityHooks\.toolBefore/);
+	});
+});
+
+describe('static-analysis: src/index.ts PR workflow response gate registration', () => {
+	const indexPath = path.resolve(
+		__dirname,
+		'..',
+		'..',
+		'..',
+		'src',
+		'index.ts',
+	);
+	const source = fs.readFileSync(indexPath, 'utf-8');
+
+	test('experimental.text.complete uses the raw fail-closed response gate', () => {
+		expect(source).toContain(
+			"'experimental.text.complete': prWorkflowResponseGate.textComplete",
+		);
+		expect(source).not.toMatch(
+			/safeHook\(\s*prWorkflowResponseGate\.textComplete/,
+		);
+	});
+
+	test('session events reach the automatic workflow-resume gate', () => {
+		expect(source).toMatch(/await\s+prWorkflowResponseGate\.event\(input\)/);
 	});
 });
 

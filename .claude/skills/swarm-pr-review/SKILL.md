@@ -11,12 +11,9 @@ description: >
 ---
 
 # Swarm PR Review
-
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the
 canonical workflow.
-
 ## Claude Code Execution Notes
-
 - `PR_REVIEW` is read-only with respect to the PR branch. You may fetch refs,
   inspect metadata, and check out the PR head after verifying a clean working
   tree, but do not fix code, resolve conflicts, commit, push, rebase, or reset
@@ -25,6 +22,9 @@ canonical workflow.
   review summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
   issues, and commit messages.
+- If the repository defines a PR publication contract in local docs, templates,
+  skills, or CI, ingest it as an obligation source. Do not assume this repo's
+  title/body sections when the target repo does not define them.
 - Treat every ingested signal as a claim until reviewer validation proves or
   disproves it with file:line evidence or explicit counter-evidence.
 - Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
@@ -32,21 +32,26 @@ canonical workflow.
 - Use the canonical deterministic lane flow: `dispatch_lanes_async` plus
   incremental `collect_lane_results` polling (without `wait`) to process
   settled lanes while continuing independent work; fall back to `wait: true`
-  only when no independent work remains, and to blocking `dispatch_lanes`
-  only when async collection is unavailable. All lanes must be settled
-  before synthesis or phase transitions.
-- If lane tools cannot close required coverage after retry/re-collection,
-  Task-tool dispatch is the final fallback, but only as a verified equivalent:
-  same agent type, same prompt, same scope, same isolation. If equivalence cannot
-  be proven, stop and surface the lane failure as BLOCKED; do not produce a
-  degraded review or partial verdict.
+  only when no independent work remains. All lanes must be settled before
+  synthesis or phase transitions.
+- If structured lane retries cannot close required coverage, stop and surface
+  the lane failure as BLOCKED. Blocking and direct-Task dispatch are not
+  equivalent because they cannot preserve the canonical skill's durable
+  workflow-lane and exact-head provenance; do not produce a degraded review or
+  partial verdict.
 - When lane results include `output_ref`, call `retrieve_lane_output` for
   full text, then `parse_lane_candidates` to extract structured candidates
   for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
-- If actionable findings remain, write the handoff artifact described by the
-  canonical skill and ask the user whether to continue with
-  `swarm-pr-feedback`.
-
-Do not improvise a fix path from review mode. If the user approves follow-up
-work, switch to `swarm-pr-feedback` and carry validated findings forward with
-their original IDs and provenance.
+- Clean lanes still require a fully populated row with evidence, such as
+  `[CLEAN] | workflow_lane | coverage_scope | evidence` for a base lane or
+  `[CLEAN] | micro_lane | coverage_scope | evidence` for a micro-lane.
+- All 11 repository-agnostic micro-lanes in the canonical skill are mandatory;
+  diff/path heuristics may focus prompts but cannot produce a `NO-MATCH` waiver.
+- A newer reviewer batch invalidates all older critic evidence. Re-run the
+  critic from the latest complete reviewer inventory before completion.
+- Call `complete_pr_workflow` before the user-facing final response. While the
+  durable gate remains active, architect response text is mechanically replaced
+  and an idle parent session is resumed rather than allowed to stop early.
+- If actionable findings remain, write the canonical handoff artifact and ask
+  whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
+  Carry validated findings forward with their original IDs and provenance.
