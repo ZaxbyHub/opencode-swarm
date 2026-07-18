@@ -539,6 +539,10 @@ describe('Command registration parity', () => {
 			'sync-plan',
 			'export',
 			'auto-proceed',
+			// #1850: cohort memory sharing commands (agent/utility + diagnostics)
+			'memory link',
+			'memory link status',
+			'memory unlink',
 		]);
 
 		// Authoritative pre-existing baseline (10 human-only entries)
@@ -580,6 +584,8 @@ describe('Command registration parity', () => {
 			'memory',
 			'memory status',
 			'memory export',
+			// #1850: memory link status has toolNoArgs: true
+			'memory link status',
 		]);
 
 		// After the fix, only these additions are permitted to differ.
