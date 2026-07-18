@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.125.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.124.0...v7.125.0) (2026-07-18)
+
+
+### Features
+
+* **pr-workflow:** enforce mechanical review gates ([725283f](https://github.com/ZaxbyHub/opencode-swarm/commit/725283fd3cbf2f2ad94ebd27e431db2d3b49ef60))
+
 ## [7.124.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.123.0...v7.124.0) (2026-07-18)
 
 
