@@ -152,6 +152,10 @@ export {
 	detectFlakyTests,
 	isTestQuarantined,
 } from '../test-impact/flaky-detector.js';
+export {
+	complete_pr_workflow,
+	executeCompletePrWorkflow,
+} from './complete-pr-workflow';
 export { epic_plan_waves } from './epic-plan-waves';
 export { epic_record_divergence } from './epic-record-divergence';
 export { epic_decide_phase } from './epic-run-phase';
@@ -164,6 +168,10 @@ export { lean_turbo_runner_status } from './lean-turbo-runner-status';
 export { lean_turbo_status } from './lean-turbo-status';
 export { lint_spec } from './lint-spec';
 export { mutation_test } from './mutation-test';
+export {
+	executeRunPrFeedbackStageA,
+	run_pr_feedback_stage_a,
+} from './run-pr-feedback-stage-a';
 export { symbols } from './symbols';
 export {
 	type SyntaxCheckFileResult,

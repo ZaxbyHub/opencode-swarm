@@ -155,6 +155,16 @@ export const TOOL_METADATA = {
 		description: 'verify completed tasks have required evidence',
 		agents: ['architect', 'critic_oversight'],
 	},
+	complete_pr_workflow: {
+		description:
+			'validate terminal PR workflow evidence and clear its durable session gate',
+		agents: ['architect'],
+	},
+	run_pr_feedback_stage_a: {
+		description:
+			'execute and persist mandatory PR-feedback Stage A checks on a content-bound revision',
+		agents: ['architect'],
+	},
 	submit_council_verdicts: {
 		description:
 			'submit pre-collected council member verdicts for synthesis (architect MUST dispatch critic/reviewer/sme/test_engineer/explorer as Agent tasks first; this tool synthesizes only, it does not contact members)',
@@ -196,7 +206,7 @@ export const TOOL_METADATA = {
 	},
 	write_pr_review_trigger_eval: {
 		description:
-			'persist the complete PR-review trigger evaluation with exact-set validation and dispatch provenance',
+			'persist the complete PR-review trigger evaluation with exact-set validation, dispatch provenance, and live merge-base verification',
 		agents: ['architect'],
 	},
 	test_runner: {

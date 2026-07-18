@@ -36,8 +36,12 @@ lightweight: read-only tools, skips CLAUDE.md) and by prompt scope.
 
 - Launch parallel agents only for **disjoint scopes**. Before launching, write
   one line per agent stating its scope; if two overlap, merge them.
-- 2–4 explorers per wave is the useful range for most tasks. More agents than
-  distinct scopes adds token cost and synthesis burden without adding recall.
+- 2–4 explorers per wave is a heuristic only when the active workflow does
+  not define a fixed fan-out. A workflow-specific count is a hard contract and
+  overrides this heuristic: PR review, for example, requires all six base lanes,
+  and no time, cost, repository-size, or simplicity rationale may reduce it.
+  Outside fixed-fan-out workflows, more agents than distinct scopes adds token
+  cost and synthesis burden without adding recall.
 - Launch independent agents **in a single message** so they run concurrently.
 - Do not re-run a search an agent is already doing; wait for its report.
 - Scale waves, not width: if the first wave surfaces new territory, launch a

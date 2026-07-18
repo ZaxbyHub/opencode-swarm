@@ -32,6 +32,11 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'## Handoff To PR Feedback',
 			'## Operating Stance',
 		);
+		const phase0aSection = sectionBetween(
+			source,
+			'## Phase 0A: Existing PR Signal Ingestion',
+			'## Phase 0B: Mergeability and Branch-State Intake',
+		);
 		const mergeabilitySection = sectionBetween(
 			source,
 			'## Phase 0B: Mergeability and Branch-State Intake',
@@ -40,11 +45,11 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		const phase3Section = sectionBetween(
 			source,
 			'## Phase 3: Parallel Base Explorer Lanes',
-			'## Phase 4: Triggered Swarm Plugin Micro-Lanes',
+			'## Phase 4: Mandatory Repository-Agnostic Micro-Lanes',
 		);
 		const phase4Section = sectionBetween(
 			source,
-			'## Phase 4: Triggered Swarm Plugin Micro-Lanes',
+			'## Phase 4: Mandatory Repository-Agnostic Micro-Lanes',
 			'## Phase 5: Swarm-Native Verifier Routing',
 		);
 		const phase6Section = sectionBetween(
@@ -58,17 +63,19 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('lane_results');
 		expect(phase3Section).toContain('output_ref');
 		expect(phase3Section).toContain('retrieve_lane_output');
-		expect(phase3Section).toContain(
-			'Task is not an early-poll or empty-partial-output fallback',
-		);
-		expect(phase3Section).toContain(
-			'the Task tool as the last-resort equivalent dispatch mechanism',
-		);
+		expect(phase3Section).toContain('exact six-lane gate');
+		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
+		expect(phase3Section).toContain('same exact `pr_head_sha`');
+		expect(phase3Section).toContain('direct Task dispatch are not equivalent');
 		expect(phase3Section).toContain('STOP and surface the lane failure');
 		expect(phase3Section).toContain('Do not present partial findings');
 		expect(phase3Section).toContain(
 			'A low-quality partial review is worse than no review',
 		);
+		expect(phase3Section).toContain(
+			'[CLEAN] | workflow_lane | coverage_scope | evidence',
+		);
+		expect(phase3Section).toContain('Header-only `[CLEAN]` markers');
 		expect(phase3Section).toContain('UNVERIFIED');
 		expect(phase3Section).toContain('dispatch_lanes');
 		expect(phase3Section).not.toContain('report to the user as INCOMPLETE');
@@ -79,24 +86,43 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		);
 		expect(phase3Section).toContain('do not dispatch reviewers yet');
 		expect(phase4Section).toContain('[TRIGGER-EVAL]');
-		expect(phase4Section).toContain('one row per trigger-map row');
+		expect(phase4Section).toContain('one row per map row');
 		expect(phase4Section).toContain('write_pr_review_trigger_eval');
 		expect(phase4Section).toContain('source_batch_id');
 		expect(phase4Section).toContain('source_lane_id');
 		expect(phase4Section).toContain('expected_family: "micro_lane"');
 		expect(phase4Section).toContain('`expected_micro_lane`');
+		expect(phase4Section).toContain(
+			'Repository-agnostic mandatory micro-lane map',
+		);
+		expect(phase4Section).toContain('`NO-MATCH` is invalid');
+		expect(phase4Section).toContain('eleven mandatory micro-lanes');
+		expect(phase4Section).toContain('Scope');
+		expect(phase4Section).toContain('universal');
+		expect(phase4Section).not.toContain('swarm-extension');
+		expect(phase4Section).toContain('unclassified-risk');
 		expect(phase4Section).toContain('zero malformed rows');
 		expect(phase4Section).toContain('matches the trigger row');
 		expect(phase4Section).toContain('[CLEAN]');
 		expect(phase4Section).toContain('UNATTESTED');
-		expect(phase4Section).toContain(
-			'Task output has no `L1` artifact provenance',
-		);
-		expect(phase4Section).toContain('generic trigger rows');
+		expect(phase4Section).toContain('the active controller rejects blocking');
+		expect(phase4Section).toContain('Task-derived');
+		expect(phase4Section).toContain('Repository identity');
+		expect(phase4Section).toContain('never justifies skipping a row');
 		expect(phase6Section).toContain('join barrier');
 		expect(phase6Section).toContain('malformed `[REVIEWED]`');
+		expect(phase0aSection).toContain(
+			'discover whether the repository defines a PR',
+		);
+		expect(phase0aSection).toContain('publication contract');
+		expect(phase0aSection).toContain(
+			'do not invent opencode-swarm-specific title/body',
+		);
+		expect(phase0aSection).not.toContain(
+			"commit-pr skill's publication contract",
+		);
 		expect(source).toContain(
-			'[VALIDATION] trigger map evaluated: ___ rows (X MATCHED → X micro-lanes dispatched) OR BLOCKED — <unevaluated rows>',
+			'[VALIDATION] mandatory micro-lanes dispatched and settled: ___ / 11 OR BLOCKED — <missing rows>',
 		);
 		expect(source).toContain(
 			'review comments, review summaries, requested changes',
@@ -104,6 +130,23 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).toContain('CI/check failures');
 		expect(source).toContain('mergeability/conflicts');
 		expect(source).toContain('GraphQL review-thread inspection');
+		expect(source).toContain(
+			'Council mode supplements the default mechanical workflow',
+		);
+		expect(source).toContain(
+			'blocking, sequential, or direct-Task fallback is not equivalent',
+		);
+		expect(source).toContain('mode: "swarm-pr-review:council"');
+		expect(source).toContain('runtime enforces this join barrier');
+		expect(source).toContain(
+			'Council prose without one of those markers does not settle the lane',
+		);
+		expect(source).not.toContain(
+			'Council mode is mutually exclusive with the default layered workflow',
+		);
+		expect(source).not.toContain(
+			'Fall back to blocking `dispatch_lanes` when async launch is unavailable',
+		);
 		expect(handoffSection).toContain(
 			'.swarm/pr-review/<run_id>/feedback-handoff.md',
 		);
@@ -133,7 +176,9 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			);
 			expect(source).toContain('canonical workflow');
 			expect(source).toContain('read-only');
-			expect(source).toContain('same agent type, same prompt, same scope');
+			expect(source).toContain('workflow-lane');
+			expect(source).toContain('exact-head provenance');
+			expect(source).toContain('PR publication contract');
 			expect(source).toContain('BLOCKED');
 			expect(source).toContain('degraded review');
 			expect(source).toContain('output_ref');
@@ -146,15 +191,15 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		});
 	}
 
-	// GPT-17 (issue #1804): the Codex (.agents) adapter must use runtime-agnostic
-	// capability phrasing rather than OpenCode-specific lane-tool names. The
-	// .claude adapter is owned by PR-2 and retains its existing tool-name wording
-	// until that PR lands; it is intentionally NOT asserted here for capability
-	// phrasing.
+	// The Codex adapter uses runtime-agnostic capability phrasing while preserving
+	// the canonical no-fallback provenance contract.
 	test('.agents/skills/swarm-pr-review/SKILL.md uses capability phrasing, not runtime-specific tool names', () => {
 		const source = readSkill('.agents/skills/swarm-pr-review/SKILL.md');
 		expect(source).toContain("runtime's parallel-execution capability");
-		expect(source).toContain('verified-equivalent subagent dispatch');
+		expect(source).toContain('different dispatch path is not equivalent');
+		expect(source).toContain('one structured exact-six batch');
+		expect(source).toContain('PR publication contract');
+		expect(source).not.toContain('run the lanes sequentially');
 		// Adapter must not leak runtime-specific tool names.
 		expect(source).not.toContain('dispatch_lanes_async');
 		expect(source).not.toContain('collect_lane_results');
@@ -164,13 +209,13 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).not.toContain('Task-tool dispatch');
 	});
 
-	// The .claude adapter is owned by PR-2; assert its CURRENT shape is preserved
-	// so this PR does not silently drift it. PR-2 will update these assertions.
-	test('.claude/skills/swarm-pr-review/SKILL.md preserves its current tool-name wording (PR-2 owns changes)', () => {
+	test('.claude/skills/swarm-pr-review/SKILL.md preserves structured async wording without a Task fallback', () => {
 		const source = readSkill('.claude/skills/swarm-pr-review/SKILL.md');
 		expect(source).toContain('dispatch_lanes_async');
 		expect(source).toContain('collect_lane_results');
-		expect(source).toContain('Task-tool dispatch is the final fallback');
+		expect(source).toContain('direct-Task dispatch are not');
+		expect(source).toContain('PR publication contract');
+		expect(source).not.toContain('Task-tool dispatch is the final fallback');
 		expect(source).toContain('retrieve_lane_output');
 	});
 });

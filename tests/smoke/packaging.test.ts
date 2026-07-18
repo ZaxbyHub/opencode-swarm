@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 5.0 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 5.4 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,17 +38,13 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5.0MB)', () => {
+	test('dist/index.js file size is reasonable (< 5.4MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// Main had grown to 4,824,030 bytes before #1820. After integrating current
-		// main plus the evaluation substrate, the measured bundle was 4,960,550
-		// bytes. The #1850 cohort memory sharing feature (vetted root, cohort-aware
-		// provider pool, migration engine, memory-link command, status/diagnostics)
-		// pushed it to 5,150,646 bytes — bumping the cap to 5.0 MiB preserves ~97 KB
-		// of cross-platform headroom. The exact merged size is rechecked by this
-		// smoke test after every build.
+		// The current memory-sharing and PR-workflow controllers add durable
+		// provenance, validation, and publication enforcement. The exact merged
+		// size is rechecked after every build; 5.4 MiB is a bounded budget.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

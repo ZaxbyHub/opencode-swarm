@@ -87,12 +87,15 @@ describe('process-improvement skill guidance', () => {
 		const feedback = readSkill('.opencode/skills/swarm-pr-feedback/SKILL.md');
 		const implement = readSkill('.opencode/skills/swarm-implement/SKILL.md');
 
-		for (const source of [codebase, feedback, implement]) {
+		for (const source of [codebase, implement]) {
 			const lower = source.toLowerCase();
 			expect(source).toContain('git status --porcelain');
 			expect(lower).toContain('check out');
 			expect(source).toContain('base_ref..head_ref');
 		}
+		expect(feedback).toContain('git status --porcelain');
+		expect(feedback.toLowerCase()).toContain('check out');
+		expect(feedback).toContain('merge_base...head_ref');
 
 		// FB-001: isolated assertion — swarm-implement must have its own Phase 0b section
 		const implementSource = readSkill(

@@ -2,82 +2,110 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { readLaneOutput } from '../background/lane-output-store.js';
+import { findByBatchId } from '../background/pending-delegations.js';
+import {
+	resolveExactMergeBase,
+	resolvePrWorkflowRevisionDigest,
+} from '../background/workspace-snapshot.js';
+import {
+	assertPrReviewBaseCoverageSettled,
+	markPrReviewTriggerEvaluationComplete,
+	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
+	prReviewDiscoveryArtifactCoversLane,
+	readPrWorkflowGateState,
+} from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { createSwarmTool } from './create-tool';
+
+export const _internals = {
+	resolvePrWorkflowRevisionDigest,
+	resolveMergeBase: resolveExactMergeBase,
+};
 
 /** Canonical trigger IDs and display values shared with the PR-review protocol. */
 export const PR_REVIEW_TRIGGER_DEFINITIONS = [
 	{
-		id: 'architect-prompts',
-		trigger_row: 'agents, prompts, templates, prompt interpolation, role text',
-		micro_lane: 'Architect prompt integrity',
+		id: 'auth-identity-secrets',
+		scope: 'universal',
+		trigger_row:
+			'authentication, authorization, identity, sessions, permissions, secrets, cryptography',
+		micro_lane: 'Identity and secret boundaries',
 	},
 	{
-		id: 'council-orchestration',
-		trigger_row: 'council, verdict, quorum, veto, synthesis',
-		micro_lane: 'Council orchestration',
+		id: 'untrusted-input-boundaries',
+		scope: 'universal',
+		trigger_row:
+			'parsing, serialization, queries, templates/rendering, file or network input/output',
+		micro_lane: 'Untrusted input and sink analysis',
 	},
 	{
-		id: 'guardrail-bypass',
-		trigger_row: 'guardrail, gate, delegation, rate limit, approval checks',
-		micro_lane: 'Guardrail bypass paths',
+		id: 'subprocess-platform',
+		scope: 'universal',
+		trigger_row:
+			'subprocesses, shell commands, filesystem operations, OS/runtime-specific code',
+		micro_lane: 'Subprocess and platform safety',
 	},
 	{
-		id: 'evidence-schema',
-		trigger_row: 'schema, evidence, JSONL, migrations, serializers',
-		micro_lane: 'Evidence schema drift',
+		id: 'concurrency-state',
+		scope: 'universal',
+		trigger_row:
+			'queues, caches, retries, transactions, locks, state machines, async coordination',
+		micro_lane: 'Concurrency and state transitions',
 	},
 	{
-		id: 'knowledge-contract',
-		trigger_row: 'knowledge, curator, hive, quarantine, memory',
-		micro_lane: 'Knowledge base contract',
+		id: 'dependencies-build-release',
+		scope: 'universal',
+		trigger_row:
+			'dependency manifests, lockfiles, installers, build scripts, CI, packaging, deployment',
+		micro_lane: 'Dependency and delivery integrity',
 	},
 	{
-		id: 'phase-transitions',
-		trigger_row: 'phase, state, plan, .swarm/state, completion markers',
-		micro_lane: 'Phase transition validation',
-	},
-	{
-		id: 'model-role-mapping',
-		trigger_row: 'model, role, prefix, tool, agent config',
-		micro_lane: 'Model-to-role mapping',
-	},
-	{
-		id: 'config-ratchet',
-		trigger_row: 'config, defaults, ratchet, locks, policy flags',
-		micro_lane: 'Config ratchet semantics',
-	},
-	{
-		id: 'url-fetch',
-		trigger_row: 'url, fetch, http, GitHub PR/issue parsing, package fetch',
-		micro_lane: 'URL sanitization and external fetch',
-	},
-	{
-		id: 'git-safety',
-		trigger_row: 'git, branch, checkout, reset, worktree, .git',
-		micro_lane: 'Git safety',
-	},
-	{
-		id: 'shell-write',
-		trigger_row: 'shell, exec, command parser, file writes, delete/move/copy',
-		micro_lane: 'Shell/write authority and path containment',
+		id: 'api-schema-migrations',
+		scope: 'universal',
+		trigger_row:
+			'public API, wire/schema/config/storage formats, migrations, feature flags',
+		micro_lane: 'Compatibility and migration safety',
 	},
 	{
 		id: 'test-infrastructure',
-		trigger_row: 'test, bun, mocks, fixtures, CI matrix',
-		micro_lane: 'Test infrastructure',
+		scope: 'universal',
+		trigger_row: 'tests, mocks, fixtures, harnesses, coverage, CI matrices',
+		micro_lane: 'Test validity and isolation',
 	},
 	{
-		id: 'metrics-privacy',
-		trigger_row: 'metrics, telemetry, logs, serialized traces',
-		micro_lane: 'Metrics and evidence privacy',
+		id: 'ui-accessibility-i18n',
+		scope: 'universal',
+		trigger_row:
+			'user interfaces, interaction flows, rendering, accessibility, localization',
+		micro_lane: 'UI and human-interface quality',
+	},
+	{
+		id: 'privacy-observability',
+		scope: 'universal',
+		trigger_row: 'telemetry, logs, analytics, traces, retention, diagnostics',
+		micro_lane: 'Privacy and observability safety',
+	},
+	{
+		id: 'generated-provenance',
+		scope: 'universal',
+		trigger_row:
+			'generated, vendored, binary, model-produced, codegen or checked-in build artifacts',
+		micro_lane: 'Generated artifact provenance',
+	},
+	{
+		id: 'unclassified-risk',
+		scope: 'universal',
+		trigger_row:
+			'any changed artifact or behavior not confidently classified by the rows above',
+		micro_lane: 'Unclassified high-risk fallback',
 	},
 ] as const;
 
 const TriggerEvalRowSchema = z
 	.object({
 		trigger_id: z.string().min(1),
-		result: z.enum(['MATCHED', 'NO-MATCH']),
+		result: z.literal('MATCHED'),
 		evidence: z.string().trim().min(1).max(4000),
 		source_batch_id: z.string().trim().min(1).optional(),
 		source_lane_id: z.string().trim().min(1).optional(),
@@ -92,6 +120,20 @@ const WritePrReviewTriggerEvalArgsSchema = z
 				/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
 				'run_id must be a safe relative identifier',
 			),
+		pr_head_sha: z
+			.string()
+			.trim()
+			.regex(/^[0-9a-f]{6,64}$/i),
+		base_sha: z
+			.string()
+			.trim()
+			.regex(/^[0-9a-f]{6,64}$/i)
+			.optional(),
+		base_ref: z
+			.string()
+			.trim()
+			.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
+			.optional(),
 		rows: z.array(TriggerEvalRowSchema).min(1),
 	})
 	.strict();
@@ -108,6 +150,7 @@ function failure(message: string): string {
 export async function executeWritePrReviewTriggerEval(
 	args: unknown,
 	directory: string,
+	context: { sessionID?: string } = {},
 ): Promise<string> {
 	const parsed = WritePrReviewTriggerEvalArgsSchema.safeParse(args);
 	if (!parsed.success) {
@@ -118,9 +161,7 @@ export async function executeWritePrReviewTriggerEval(
 		);
 	}
 
-	const expectedIds = new Set<string>(
-		PR_REVIEW_TRIGGER_DEFINITIONS.map((definition) => definition.id),
-	);
+	const expectedIds = new Set<string>(PR_REVIEW_REQUIRED_MICRO_LANE_IDS);
 	const seenIds = new Set<string>();
 	const duplicateIds = new Set<string>();
 	for (const row of parsed.data.rows) {
@@ -155,11 +196,128 @@ export async function executeWritePrReviewTriggerEval(
 				);
 			}
 			provenance.add(tuple);
-		} else if (row.source_batch_id || row.source_lane_id) {
+		}
+	}
+
+	const sessionID = context.sessionID?.trim();
+	if (!sessionID) {
+		return failure(
+			'PR_REVIEW trigger evaluation requires the current session to have an active, bound PR_REVIEW gate',
+		);
+	}
+	let gateState: Awaited<ReturnType<typeof readPrWorkflowGateState>>;
+	try {
+		gateState = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
+	if (gateState?.mode !== 'PR_REVIEW' || !gateState.prHeadSha) {
+		return failure(
+			'PR_REVIEW trigger evaluation requires the current session to have an active, bound PR_REVIEW gate',
+		);
+	}
+	if (gateState.prHeadSha !== parsed.data.pr_head_sha) {
+		return failure(
+			`PR_REVIEW trigger evaluation head mismatch: expected ${gateState.prHeadSha}, received ${parsed.data.pr_head_sha}`,
+		);
+	}
+	try {
+		await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
+	const currentRevisionDigest = _internals.resolvePrWorkflowRevisionDigest(
+		directory,
+		parsed.data.pr_head_sha,
+	);
+	if (!currentRevisionDigest) {
+		return failure(
+			'Active PR_REVIEW trigger evaluation could not bind the current exact revision digest',
+		);
+	}
+	for (const row of parsed.data.rows) {
+		if (row.result !== 'MATCHED') continue;
+		const records = findByBatchId(directory, row.source_batch_id!, {
+			parentSessionId: sessionID,
+		});
+		const record = records.find(
+			(candidate) => candidate.laneId === row.source_lane_id,
+		);
+		const outputRef = record?.result?.outputRef?.trim();
+		const outputArtifact = outputRef
+			? readLaneOutput(directory, outputRef)
+			: null;
+		if (
+			!record ||
+			record.mode !== 'swarm-pr-review:micro' ||
+			record.workflowLane !== row.trigger_id ||
+			record.status !== 'completed' ||
+			record.result?.outputDegraded === true ||
+			record.result?.transcriptIncomplete === true ||
+			record.result?.truncated === true ||
+			(record.result?.chars ?? 0) <= 0 ||
+			!record.result?.digest?.trim() ||
+			!record.result?.outputRef?.trim() ||
+			!outputArtifact ||
+			outputArtifact.artifact.batchId !== row.source_batch_id ||
+			outputArtifact.artifact.laneId !== row.source_lane_id ||
+			outputArtifact.artifact.mode !== 'swarm-pr-review:micro' ||
+			outputArtifact.artifact.sessionId !== record.subagentSessionId ||
+			outputArtifact.artifact.parentSessionId !== record.parentSessionId ||
+			outputArtifact.artifact.agent !== record.swarmPrefixedAgent ||
+			outputArtifact.artifact.role !== record.normalizedAgent ||
+			outputArtifact.artifact.source !== 'collect_lane_results' ||
+			outputArtifact.artifact.workflowLane !== record.workflowLane ||
+			outputArtifact.artifact.workflowLane !== row.trigger_id ||
+			outputArtifact.artifact.prHeadSha !== record.workspace?.prHeadSha ||
+			outputArtifact.artifact.gitHead !== record.workspace?.gitHead ||
+			outputArtifact.artifact.revisionDigest !== currentRevisionDigest ||
+			outputArtifact.artifact.digest !== record.result?.digest ||
+			outputArtifact.artifact.chars !== record.result?.chars ||
+			!prReviewDiscoveryArtifactCoversLane(
+				outputArtifact.artifact.text,
+				row.trigger_id,
+			) ||
+			record.workspace?.prHeadSha !== parsed.data.pr_head_sha ||
+			record.workspace?.gitHead !== parsed.data.pr_head_sha
+		) {
 			return failure(
-				`NO-MATCH rows must not include dispatch provenance: ${row.trigger_id}`,
+				`MATCHED trigger ${row.trigger_id} does not reference a completed non-degraded micro-lane artifact`,
 			);
 		}
+	}
+	if (!parsed.data.base_sha) {
+		return failure(
+			'Active PR_REVIEW trigger evaluation requires the exact merge-base base_sha',
+		);
+	}
+	if (!parsed.data.base_ref) {
+		return failure(
+			'Active PR_REVIEW trigger evaluation requires the exact live base_ref used to verify base_sha',
+		);
+	}
+	const resolvedMergeBase = _internals.resolveMergeBase(
+		directory,
+		parsed.data.base_ref,
+		parsed.data.pr_head_sha,
+	);
+	if (!resolvedMergeBase) {
+		return failure(
+			'Active PR_REVIEW trigger evaluation could not resolve the exact merge base from base_ref and pr_head_sha',
+		);
+	}
+	if (resolvedMergeBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
+		return failure(
+			`PR_REVIEW merge-base mismatch: expected ${resolvedMergeBase}, received ${parsed.data.base_sha}`,
+		);
+	}
+	if (
+		gateState.prReviewBaseRef !== parsed.data.base_ref ||
+		gateState.prReviewBaseSha !== parsed.data.base_sha.toLowerCase()
+	) {
+		return failure(
+			`PR_REVIEW trigger evaluation scope mismatch: workflow is bound to ${gateState.prReviewBaseRef ?? '(unbound)'} at ${gateState.prReviewBaseSha ?? '(unbound)'}, received ${parsed.data.base_ref} at ${parsed.data.base_sha}`,
+		);
 	}
 
 	const rowsById = new Map(
@@ -171,28 +329,26 @@ export async function executeWritePrReviewTriggerEval(
 			throw new Error(`Missing validated trigger row: ${definition.id}`);
 		return {
 			trigger_id: definition.id,
+			scope: definition.scope,
 			trigger_row: definition.trigger_row,
 			micro_lane: definition.micro_lane,
 			result: row.result,
 			evidence: row.evidence,
-			...(row.result === 'MATCHED'
-				? {
-						source_batch_id: row.source_batch_id,
-						source_lane_id: row.source_lane_id,
-					}
-				: {}),
+			source_batch_id: row.source_batch_id,
+			source_lane_id: row.source_lane_id,
 		};
 	});
-	const matchedCount = artifactRows.filter(
-		(row) => row.result === 'MATCHED',
-	).length;
+	const matchedCount = artifactRows.length;
 	const artifact = {
 		schema_version: 1,
 		run_id: parsed.data.run_id,
+		pr_head_sha: parsed.data.pr_head_sha,
+		base_ref: parsed.data.base_ref,
+		base_sha: parsed.data.base_sha,
 		evaluated_at: new Date().toISOString(),
 		trigger_count: artifactRows.length,
 		matched_count: matchedCount,
-		no_match_count: artifactRows.length - matchedCount,
+		no_match_count: 0,
 		dispatched_micro_lane_count: matchedCount,
 		rows: artifactRows,
 	};
@@ -228,6 +384,11 @@ export async function executeWritePrReviewTriggerEval(
 	} finally {
 		await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
 	}
+	await markPrReviewTriggerEvaluationComplete(
+		directory,
+		sessionID,
+		relativePath.split(path.sep).join('/'),
+	);
 
 	return JSON.stringify(
 		{
@@ -235,7 +396,7 @@ export async function executeWritePrReviewTriggerEval(
 			path: relativePath.split(path.sep).join('/'),
 			trigger_count: artifactRows.length,
 			matched_count: matchedCount,
-			no_match_count: artifactRows.length - matchedCount,
+			no_match_count: 0,
 			dispatched_micro_lane_count: matchedCount,
 		},
 		null,
@@ -246,9 +407,12 @@ export async function executeWritePrReviewTriggerEval(
 export const write_pr_review_trigger_eval: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Persist a complete, exact-set PR-review trigger ledger under .swarm/pr-review/<run_id>/trigger-eval.json.',
+			'Persist the complete, exact-set PR-review micro-lane ledger after every repository-agnostic lane has completed.',
 		args: {
 			run_id: WritePrReviewTriggerEvalArgsSchema.shape.run_id,
+			pr_head_sha: WritePrReviewTriggerEvalArgsSchema.shape.pr_head_sha,
+			base_sha: WritePrReviewTriggerEvalArgsSchema.shape.base_sha,
+			base_ref: WritePrReviewTriggerEvalArgsSchema.shape.base_ref,
 			rows: WritePrReviewTriggerEvalArgsSchema.shape.rows,
 		},
 		execute: executeWritePrReviewTriggerEval,
