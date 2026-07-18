@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.124.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.123.0...v7.124.0) (2026-07-18)
+
+
+### Features
+
+* **knowledge:** share opt-in repository memory across linked swarms ([#1850](https://github.com/ZaxbyHub/opencode-swarm/issues/1850)) ([e28f9d2](https://github.com/ZaxbyHub/opencode-swarm/commit/e28f9d27e6a4f2052ff1f0ae7ef4b1b474b5f582))
+
+
+### Bug Fixes
+
+* **commands:** update command-parity baselines for [#1850](https://github.com/ZaxbyHub/opencode-swarm/issues/1850) memory link/unlink ([39dfe73](https://github.com/ZaxbyHub/opencode-swarm/commit/39dfe7394ff556ce6ae3aee518efd30e93e25648))
+* **knowledge:** address PR review findings for [#1850](https://github.com/ZaxbyHub/opencode-swarm/issues/1850) memory sharing ([6964f9f](https://github.com/ZaxbyHub/opencode-swarm/commit/6964f9fbe212ece44adf70e842732a4752f706c3))
+* **smoke:** bump bundle size budget to 5.0MB for [#1850](https://github.com/ZaxbyHub/opencode-swarm/issues/1850) cohort memory sharing ([00e3280](https://github.com/ZaxbyHub/opencode-swarm/commit/00e328057d680430aa5804917c66fea9fcf6b309))
+
 ## [7.123.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.122.1...v7.123.0) (2026-07-18)
 
 
