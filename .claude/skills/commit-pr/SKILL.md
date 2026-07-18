@@ -116,6 +116,21 @@ The fragment should cover:
 - breaking changes, if any
 - known caveats
 
+#### Ground-truth verification (mandatory)
+
+Before finalizing a release note fragment, verify every concrete reference
+against the actual codebase:
+
+- **File paths**: `grep -r "path/to/file"` — confirm each referenced file
+  exists at the stated path.
+- **Script names**: check `package.json` scripts or `scripts/` directory.
+- **Attribute/variable names**: grep for the exact identifier in `src/`.
+- **Environment variables**: grep for the exact name in `src/` and config.
+
+Remove or correct any reference that does not resolve. AI-generated
+fragments frequently hallucinate paths and names — this step is not
+optional.
+
 Bot authors (e.g. `[bot]`, Copilot) and docs/workflow/meta-only changes (no `src/`, `tests/`, `scripts/`, `package.json`, etc.) are exempt from this requirement by CI; all other PRs that touch code must include a fragment.
 
 Do not manually edit:

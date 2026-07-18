@@ -91,3 +91,40 @@ If below 95%, state what remains and continue working.
 
 #### User-controlled gates
 When the user has explicitly declined or deferred an action that is theirs to take — such as choosing "Leave it for you" on a merge offer, or explicitly saying they will merge manually — that action is outside the agent's scope. The 95% confidence gate applies to technical work the agent controls. Publication by merge is a user-controlled gate: once the user has deliberately declined it, the agent's work is complete and the stop condition is satisfied. Do not loop on pending user-controlled actions.
+
+### Reviewer rejection loops
+
+When a single file has gone through 2+ reviewer rejection cycles without
+resolution, escalate to `critic_sounding_board` before the next re-dispatch.
+The sounding board can identify whether the reviewer's bar is unreasonable,
+the implementation is fundamentally wrong, or the rejection is structural
+(e.g., skill-load failure masquerading as a content rejection). Do not
+enter a third rejection cycle without sounding-board consultation.
+
+### Skill-load failures in reviewer delegation
+
+If a reviewer returns a REJECT that explicitly cites `SKILL_LOAD_FAILED`,
+treat the verdict as **INCONCLUSIVE** — not a content rejection. Re-dispatch the
+reviewer with `SKILLS: none` (omitting the problematic file reference)
+so the reviewer evaluates the actual code, not the skill-loading
+infrastructure. This only applies when the rejection explicitly cites
+a skill-loading failure — never use `SKILLS: none` to suppress a
+legitimate content-based rejection.
+
+### Inline code fallback for restricted review contexts
+
+When a reviewer cannot read files directly (read-restricted advisory
+lanes, sandbox limitations), include the most relevant code snippets
+inline in the delegation prompt with `path:line` anchors so citations
+are independently verifiable. This is a **fallback only** — prefer
+file-read access when available, and never inline entire files (large
+inline prompts can produce malformed tool-call JSON). Keep inline
+snippets to the specific functions or blocks under review.
+
+### One-shot docs review delegation
+
+When a reviewer rejects a documentation file, do not send piecemeal
+fix-one-issue delegations. Read the entire file yourself, list ALL
+issues in a single comprehensive delegation, and have the coder fix
+everything in one pass. Apply this per-file — do not batch fixes
+across unrelated files (scope containment still applies).

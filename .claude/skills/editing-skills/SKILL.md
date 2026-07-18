@@ -62,6 +62,12 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   — shims delegate — but **renaming, moving, or removing** one of these
   skills silently orphans its `.agents` shim with zero drift-check coverage.
   Update or remove the shim in the same change.
+- **Pre-flight for new skills** (blocking): Before authoring any SKILL.md
+  content for a skill that should reach npm users, the slug MUST be registered
+  in all three places: `src/config/skill-mirrors.ts` (classification),
+  `src/config/bundled-skills.ts` (`BUNDLED_PROJECT_SKILLS`), and
+  `package.json#files`. Creating content first and registering later is a
+  common source of drift-check failures and missing shipments.
 
 ## Step 2 — Know what ships where
 
