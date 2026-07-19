@@ -13,7 +13,18 @@
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { swarmState } from '../../state';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { stripKnownSwarmPrefix } from '../../config/schema';
+import { getAgentSession, swarmState } from '../../state';
+import { telemetry } from '../../telemetry';
+import {
+	dispatchWithModelFallback,
+	type ModelOverride,
+} from '../../utils/model-dispatch-fallback';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../../utils/provider-error-classification';
 import {
 	type LaneEvidence,
 	listLaneEvidence,
@@ -370,6 +381,7 @@ async function defaultDispatchReviewerAgent(
 	agentName: string,
 	timeoutMs: number,
 	parentSessionId?: string,
+	model?: ModelOverride,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -444,6 +456,8 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 							path: { id: sessionId },
 							body: {
 								agent: agentName,
+								// #1896: per-call model override on a fallback attempt.
+								...(model ? { model } : {}),
 								tools: { write: false, edit: false, patch: false },
 								parts: [{ type: 'text', text: promptText }],
 							},
@@ -502,6 +516,7 @@ export const _internals: {
 		agentName: string,
 		timeoutMs: number,
 		parentSessionId?: string,
+		model?: ModelOverride,
 	) => Promise<string>;
 	resolveDefaultReviewerAgent: typeof resolveDefaultReviewerAgent;
 	listLaneEvidence: typeof listLaneEvidence;
@@ -564,18 +579,63 @@ export async function dispatchPhaseReviewer(
 		mergedConfig.requireDiffSummary,
 	);
 
-	// Dispatch the reviewer agent and await its response
+	// Dispatch the reviewer agent and await its response.
+	// #1896: on a transient/quota dispatch error, fail over to a configured
+	// reviewer fallback_model instead of immediately writing a REJECTED verdict
+	// (a quota blip previously cascaded into a false phase rejection). Only after
+	// the primary + all fallbacks are exhausted does the fail-closed path run.
+	const reviewerBase = stripKnownSwarmPrefix(agentName);
+	const reviewerSwarmId =
+		reviewerBase !== agentName
+			? agentName.slice(0, agentName.length - reviewerBase.length - 1)
+			: undefined;
+	const reviewerSwarmAgents = getSwarmAgents(reviewerSwarmId);
 	let responseText: string;
 	try {
-		responseText = await _internals.dispatchReviewerAgent(
-			directory,
-			pkg,
-			agentName,
-			mergedConfig.timeoutMs,
-			sessionID,
-		);
+		const dispatched = await dispatchWithModelFallback<string>({
+			dispatch: (model) =>
+				_internals.dispatchReviewerAgent(
+					directory,
+					pkg,
+					agentName,
+					mergedConfig.timeoutMs,
+					sessionID,
+					model,
+				),
+			resolveFallback: (index) =>
+				resolveFallbackModel(reviewerBase, index, reviewerSwarmAgents),
+			// Advance to the next model immediately on a transient/quota error — an
+			// instant same-model retry cannot clear an exhausted quota.
+			maxTransientRetriesPerModel: 0,
+			classify: (err) =>
+				isTransientProviderError(
+					err instanceof Error ? err.message : String(err),
+				)
+					? 'transient'
+					: 'permanent',
+			onFallback: ({ toModel, fallbackIndex }) => {
+				telemetry.modelFallback(
+					sessionID,
+					agentName,
+					reviewerSwarmAgents?.[reviewerBase]?.model ?? 'default',
+					toModel,
+					'transient_model_error',
+				);
+				const session = getAgentSession(sessionID);
+				if (session) {
+					session.pendingAdvisoryMessages ??= [];
+					session.pendingAdvisoryMessages.push(
+						`MODEL FALLBACK: reviewer failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
+					);
+				}
+			},
+		});
+		responseText = dispatched.result;
 	} catch (error) {
-		// Fail-closed: dispatch failure → write REJECTED verdict
+		// Fail-closed: dispatch failure (after fallbacks exhausted) → REJECTED verdict
+		const isQuota = isQuotaError(
+			error instanceof Error ? error.message : String(error),
+		);
 		const evidencePath = await _internals.writeReviewerEvidence(
 			directory,
 			phase,
@@ -584,7 +644,7 @@ export async function dispatchPhaseReviewer(
 		);
 		return {
 			verdict: 'REJECTED',
-			reason: `Reviewer dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+			reason: `Reviewer dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${error instanceof Error ? error.message : String(error)}`,
 			evidencePath,
 		};
 	}

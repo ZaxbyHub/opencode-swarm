@@ -880,7 +880,7 @@ export function describeCoverageMiss(params: {
 	let corruptionHint: string | undefined;
 	if (/�/.test(raw)) {
 		corruptionHint =
-			"the text contains U+FFFD (the Unicode replacement char), a sign spec.md was decoded with the wrong encoding — re-save spec.md as UTF-8";
+			'the text contains U+FFFD (the Unicode replacement char), a sign spec.md was decoded with the wrong encoding — re-save spec.md as UTF-8';
 	} else if (/\?{2,}/.test(raw)) {
 		corruptionHint =
 			"the text contains a '??' run — a non-UTF-8 save can turn characters like § into ?? on disk; open .swarm/spec.md and re-type the affected character, then re-save as UTF-8";
@@ -915,7 +915,11 @@ export function checkAcceptanceCoversFrRefs(params: {
 	acceptanceText: string;
 	frRefs: string[];
 	specText: string;
-}): { covered: boolean; missingId?: string; diagnostic?: CoverageMissDiagnostic } {
+}): {
+	covered: boolean;
+	missingId?: string;
+	diagnostic?: CoverageMissDiagnostic;
+} {
 	const normalizedAcceptance = normalizeAcceptanceText(params.acceptanceText);
 	for (const id of params.frRefs) {
 		const body = extractSpecRequirementBodyById(params.specText, id);

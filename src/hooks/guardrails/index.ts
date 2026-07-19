@@ -26,6 +26,11 @@ import { advanceTaskState, getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import * as logger from '../../utils/logger';
+import {
+	extractStatusCode,
+	TRANSIENT_MODEL_ERROR_PATTERN,
+	TRANSIENT_STATUS_CODES,
+} from '../../utils/provider-error-classification';
 import { computeSpecDiff } from '../../utils/spec-hash';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
@@ -113,22 +118,6 @@ export function enforceSpecDriftGate(
 
 		throw new Error(message);
 	}
-}
-
-/**
- * v6.33: Known HTTP status codes that indicate transient provider errors.
- */
-const TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-
-/**
- * Extracts an HTTP status code from an error message string.
- */
-function extractStatusCode(errorMsg: string): number | null {
-	const match = errorMsg.match(/\b(408|429|500|502|503|504|529)\b/);
-	if (match) {
-		return parseInt(match[1], 10);
-	}
-	return null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -241,12 +230,6 @@ function extractErrorSignal(errorContent: unknown): string {
 
 	return parts.join(' ');
 }
-
-/**
- * v6.33: Regex pattern for transient model errors that should trigger fallback.
- */
-const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
 
 /**
  * v7.12: Regex pattern for degraded model errors.

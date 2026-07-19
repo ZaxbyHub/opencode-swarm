@@ -19,6 +19,11 @@ import { loadPlan } from '../../plan/manager';
 import { getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log } from '../../utils';
+import {
+	extractStatusCode,
+	TRANSIENT_MODEL_ERROR_PATTERN,
+	TRANSIENT_STATUS_CODES,
+} from '../../utils/provider-error-classification';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { extractModelInfo } from '../model-limits';
 import { hashArgs } from './file-authority';
@@ -46,16 +51,6 @@ type ChatMessageLike = {
 	parts?: Array<{ type?: string; text?: unknown }>;
 };
 
-/** v6.33: Known HTTP status codes that indicate transient provider errors. */
-const TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-
-/**
- * v6.33: Regex pattern for transient model errors that should trigger fallback.
- * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
- */
-const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
-
 const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
 
 function getMessageText(message: ChatMessageLike | undefined): string {
@@ -75,14 +70,6 @@ export function getMostRecentAssistantText(
 		}
 	}
 	return '';
-}
-
-function extractStatusCode(errorMsg: string): number | null {
-	const match = errorMsg.match(/\b(408|429|500|502|503|504|529)\b/);
-	if (match) {
-		return parseInt(match[1], 10);
-	}
-	return null;
 }
 
 export function isTransientProviderFailureText(text: string): boolean {
