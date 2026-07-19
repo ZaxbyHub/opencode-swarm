@@ -20,6 +20,7 @@ import {
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
 import {
+	_internals,
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
 } from '../../../src/hooks/knowledge-application-gate';
@@ -435,10 +436,6 @@ describe('knowledgeApplicationTransformScan', () => {
 });
 
 describe('gate escape hatches (#1690)', () => {
-	const { _internals } = await import(
-		'../../../src/hooks/knowledge-application-gate'
-	);
-
 	beforeEach(() => {
 		_internals.resetGateDenialCounts();
 	});
