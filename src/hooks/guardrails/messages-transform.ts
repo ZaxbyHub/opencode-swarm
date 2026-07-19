@@ -7,6 +7,7 @@
  * inject warnings, detect loops, and enforce QA gate compliance.
  */
 
+import { getSwarmAgents } from '../../agents/index';
 import {
 	isLowCapabilityModel,
 	ORCHESTRATOR_NAME,
@@ -163,6 +164,57 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			: session
 				? stripKnownSwarmPrefix(session.agentName) === ORCHESTRATOR_NAME
 				: false;
+
+		// #1896: model-divergence detection, scoped to the ARCHITECT/primary session
+		// (its model is the UI-driven one; swarm fallback only mutates SUBAGENT
+		// models, so this scoping avoids a false positive on a swarm-initiated
+		// switch). Two one-shot advisories: (a) a model that silently changed across
+		// an interrupt/resume, and (b) a configured architect model that the UI has
+		// overridden (expected, since the primary's configured model is intentionally
+		// not applied — surfaced so the mismatch does not silently confuse the run).
+		if (isArchitectSession && session) {
+			const { modelID, providerID } = extractModelInfo(messages);
+			if (modelID) {
+				const observedFull = providerID ? `${providerID}/${modelID}` : modelID;
+				const previousObserved = session.lastObservedModel;
+
+				// (a) Silent switch across a resume — compare like-with-like across the
+				// interrupt, gated on no swarm fallback being in play (fallback resets
+				// model_fallback_index to 0 on rehydrate, and never targets the primary).
+				if (
+					session.sessionRehydratedAt > 0 &&
+					session.model_fallback_index === 0 &&
+					previousObserved &&
+					previousObserved !== observedFull &&
+					!session.resumeModelAdvisoryDone
+				) {
+					session.pendingAdvisoryMessages ??= [];
+					session.pendingAdvisoryMessages.push(
+						`MODEL CHANGED ACROSS RESUME: this run previously observed model "${previousObserved}"; the active model is now "${observedFull}". If this switch was unintended, re-select the intended model (or use /swarm handoff) before continuing.`,
+					);
+					session.resumeModelAdvisoryDone = true;
+				}
+
+				// (b) Config-vs-UI clarification (fires once per session).
+				if (!session.configModelAdvisoryDone) {
+					const configuredArchitect = getSwarmAgents()?.architect?.model;
+					if (
+						configuredArchitect &&
+						configuredArchitect !== observedFull &&
+						configuredArchitect !== modelID
+					) {
+						session.pendingAdvisoryMessages ??= [];
+						session.pendingAdvisoryMessages.push(
+							`MODEL CONFIG NOTE: your config pins the architect to "${configuredArchitect}", but the UI has "${observedFull}" active. The UI selection wins for the primary/architect role (its configured model is intentionally not applied), so this difference is expected — switch the UI model if you meant to run "${configuredArchitect}".`,
+						);
+						session.configModelAdvisoryDone = true;
+					}
+				}
+
+				session.lastObservedModel = observedFull;
+				session.lastObservedProviderID = providerID;
+			}
+		}
 
 		// Find system message(s) for model-only guidance injection
 		const systemMessages = messages.filter(

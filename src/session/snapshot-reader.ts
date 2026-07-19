@@ -210,6 +210,15 @@ export function deserializeAgentSession(
 		// re-resolve on cache-miss via a bounded fallback.
 		cachedCohortId:
 			typeof s.cachedCohortId === 'string' ? s.cachedCohortId : undefined,
+		// (#1896) last observed model — intentionally NOT in TRANSIENT_SESSION_FIELDS,
+		// so it survives rehydration and a silent cross-interrupt model switch is
+		// detectable on the first post-resume turn.
+		lastObservedModel:
+			typeof s.lastObservedModel === 'string' ? s.lastObservedModel : undefined,
+		lastObservedProviderID:
+			typeof s.lastObservedProviderID === 'string'
+				? s.lastObservedProviderID
+				: undefined,
 	};
 }
 
