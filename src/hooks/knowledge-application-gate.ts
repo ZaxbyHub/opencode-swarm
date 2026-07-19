@@ -15,8 +15,14 @@
  *      assemble the set of critical directives that have been shown but
  *      not acknowledged. In `mode: 'enforce'` it THROWS to block the
  *      action (per the FAIL-CLOSED contract — `output.error` is NOT a
- *      write API at toolBefore time). In `mode: 'warn'` it appends to
- *      `events.jsonl` and lets the action proceed.
+ *      write API at toolBefore time) — UNLESS one of two bounded escape
+ *      hatches has fired first (a per-directive denial-count limit, or a
+ *      staleness TTL since the directive was shown; see
+ *      `incrementGateDenialCount`/`buildGateDenialDirectiveKey` in
+ *      `../state.js`), in which case the pending directives are
+ *      auto-acknowledged and an audit event is durably written before the
+ *      action is allowed to proceed. In `mode: 'warn'` it appends to
+ *      `events.jsonl` and always lets the action proceed.
  *
  * Tools considered high-risk:
  *   - save_plan
@@ -30,7 +36,14 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
-import { addKnowledgeAckDedup, swarmState } from '../state.js';
+import {
+	addKnowledgeAckDedup,
+	buildGateDenialDirectiveKey,
+	clearCriticalShownIds,
+	clearGateDenialCount,
+	incrementGateDenialCount,
+	swarmState,
+} from '../state.js';
 import { warn } from '../utils/logger.js';
 import {
 	buildAckDedupKey,
@@ -51,6 +64,9 @@ export const HIGH_RISK_TOOLS = new Set([
 	'skill_regenerate',
 	'skill_retire',
 ]);
+
+const DEFAULT_MAX_GATE_DENIALS = 5;
+const DEFAULT_GATE_STALENESS_MS = 600_000; // 10 minutes
 
 export interface GateInput {
 	tool: unknown;
@@ -113,7 +129,10 @@ export async function knowledgeApplicationGateBefore(
 	}
 
 	const cached = swarmState.currentCriticalShownIds.get(sessionID);
-	if (!cached || cached.ids.length === 0) return;
+	if (!cached || cached.ids.length === 0) {
+		clearGateDenialCount(sessionID);
+		return;
+	}
 
 	// Has an architect terminal ack landed in this session for any critical id?
 	const ackedIds = new Set<string>();
@@ -130,12 +149,85 @@ export async function knowledgeApplicationGateBefore(
 	}
 
 	const unacked = cached.ids.filter((id) => !ackedIds.has(id));
-	if (unacked.length === 0) return;
+	if (unacked.length === 0) {
+		clearGateDenialCount(sessionID);
+		return;
+	}
 
 	// Synthesise the gate result format expected by gateKnowledgeApplication
 	// (the helper itself takes recentArchitectText, but here we pre-decided
 	// who is acked via the dedup set; do not re-parse text).
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
+		const maxDenials = config.max_gate_denials ?? DEFAULT_MAX_GATE_DENIALS;
+		const stalenessMs = config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
+
+		// Escape hatch 1: staleness — if the directive has been pending longer
+		// than the configured TTL, auto-clear and allow the action.
+		const age = Date.now() - cached.generatedAt;
+		if (age > stalenessMs) {
+			for (const id of unacked) {
+				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+			}
+			clearCriticalShownIds(sessionID);
+			clearGateDenialCount(sessionID);
+			// Awaited (not fire-and-forget): the bypass state above is already
+			// committed, so the audit write is the only remaining evidence of
+			// this security-relevant auto-clear. Awaiting it before returning
+			// keeps the "never silent" guarantee true even under a write
+			// failure window, not just in the common case.
+			await writeWarnEvent(directory, {
+				timestamp: new Date().toISOString(),
+				event: 'knowledge_application_gate_staleness_clear',
+				tool: toolName,
+				agent: agentRaw,
+				sessionID,
+				cleared_ids: unacked,
+				age_ms: age,
+				staleness_threshold_ms: stalenessMs,
+			}).catch((err: unknown) => {
+				warn(
+					`[knowledge-application-gate] staleness-clear audit write failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+			});
+			return;
+		}
+
+		// Escape hatch 2: denial count — if this session has been denied more
+		// than the configured max, auto-clear and allow the action. The
+		// counter is keyed to the current directive-id-set identity, so a
+		// session whose critical directives were swapped out from under it
+		// (an ordinary phase/task-transition occurrence via
+		// setCriticalShownIds) starts a fresh count instead of inheriting a
+		// stale one accrued against an unrelated, earlier directive.
+		const directiveKey = buildGateDenialDirectiveKey(cached.ids);
+		const denials = incrementGateDenialCount(sessionID, directiveKey);
+		if (denials > maxDenials) {
+			for (const id of unacked) {
+				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+			}
+			clearCriticalShownIds(sessionID);
+			clearGateDenialCount(sessionID);
+			await writeWarnEvent(directory, {
+				timestamp: new Date().toISOString(),
+				event: 'knowledge_application_gate_denial_limit_clear',
+				tool: toolName,
+				agent: agentRaw,
+				sessionID,
+				cleared_ids: unacked,
+				denial_count: denials,
+				max_gate_denials: maxDenials,
+			}).catch((err: unknown) => {
+				warn(
+					`[knowledge-application-gate] denial-limit-clear audit write failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+			});
+			return;
+		}
+
 		const ids = unacked.join(', ');
 		throw new Error(
 			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,

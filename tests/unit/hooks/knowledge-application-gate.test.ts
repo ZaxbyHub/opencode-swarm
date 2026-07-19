@@ -7,6 +7,11 @@
  *    swarmState.knowledgeAckDedup. Tests prime/clear them between cases.
  *  - In `enforce` mode the gate throws KNOWLEDGE_ENFORCE_GATE_DENY.
  *  - In `warn` mode the gate appends to .swarm/events.jsonl and returns.
+ *
+ * Deadlock escape-hatch behavior (denial-count limit + staleness TTL) is
+ * covered in knowledge-application-gate-escape-hatch.test.ts and
+ * knowledge-application-gate-escape-hatch-regression.test.ts (split out to
+ * stay under the repo's 500-line test file limit — AGENTS.md invariant 7).
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
@@ -20,12 +25,14 @@ import {
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
 import {
+	_internals,
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
 } from '../../../src/hooks/knowledge-application-gate';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { swarmState } from '../../../src/state';
 import { knowledge_receipt } from '../../../src/tools/knowledge-receipt';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 let tmp: string;
 beforeEach(() => {
@@ -33,6 +40,7 @@ beforeEach(() => {
 	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-gate-'));
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
+	swarmState.gateDenialCounts.clear();
 });
 afterEach(() => {
 	rmSync(tmp, { recursive: true, force: true });
@@ -46,7 +54,9 @@ describe('knowledgeApplicationGateBefore', () => {
 	it('does nothing when disabled', async () => {
 		swarmState.currentCriticalShownIds.set('s1', {
 			ids: [ID_A],
-			generatedAt: Date.now(),
+			// generatedAt is fixture data here, never asserted against — frozen
+			// deterministically per repo test-stability convention (issue #1782).
+			generatedAt: withFrozenClock(() => Date.now()),
 		});
 		await knowledgeApplicationGateBefore(
 			tmp,

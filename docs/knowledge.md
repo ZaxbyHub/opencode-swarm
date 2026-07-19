@@ -471,14 +471,33 @@ generatedSkillPath, sessionId}`.
   "min_confidence": 0.85,
   "critical_requires_ack": true,
   "require_skill_refs": true,
-  "high_risk_tools": ["save_plan", "update_task_status", "phase_complete", "task", "Task"]
+  "high_risk_tools": ["save_plan", "update_task_status", "phase_complete", "task", "Task"],
+  "max_gate_denials": 5,       // enforce-mode escape hatch: auto-clear after this many denials
+  "gate_staleness_ms": 600000  // enforce-mode escape hatch: auto-clear after this many ms unacked (10 min)
 }
 ```
 
-In `enforce` mode the gate (`gateKnowledgeApplication` in
-`src/hooks/knowledge-application.ts`) blocks high-risk actions when a critical
-directive was shown but received no terminal acknowledgment
-(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`).
+In `enforce` mode the gate (`knowledgeApplicationGateBefore` in
+`src/hooks/knowledge-application-gate.ts`) blocks high-risk actions when a
+critical directive was shown but received no terminal acknowledgment
+(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`) — bounded by
+two escape hatches so the gate cannot deadlock a session forever:
+
+- **`max_gate_denials`** (default `5`) — after this many consecutive denials
+  against the same unacknowledged critical-directive set, the gate
+  auto-acknowledges the pending directives, clears them for that session, and
+  lets the action through.
+- **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
+  directive shown longer ago than this is treated as stale and auto-cleared
+  the same way, regardless of denial count.
+
+Both auto-clears write an audit event to `.swarm/events.jsonl`
+(`knowledge_application_gate_denial_limit_clear` or
+`knowledge_application_gate_staleness_clear`) before the action proceeds — the
+bypass is never silent. These are safety nets against a broken acknowledgment
+pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
+enforcement still applies for the first `max_gate_denials` attempts or the
+full `gate_staleness_ms` window.
 
 **`high_risk_tools`** — optionally override the set of tools that trigger the
 acknowledgment gate. When absent, defaults to `["save_plan",
