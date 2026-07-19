@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.125.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.1...v7.125.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* **knowledge-gate:** prevent permanent deadlock on KNOWLEDGE_ENFORCE_GATE_DENY ([63781a5](https://github.com/ZaxbyHub/opencode-swarm/commit/63781a5b01528a94317ba21e20952a748a348cc7))
+
 ## [7.125.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.0...v7.125.1) (2026-07-19)
 
 
