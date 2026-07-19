@@ -1,4 +1,4 @@
-import { loadPluginConfig } from '../config/loader';
+import { loadPluginConfigWithMeta } from '../config/loader';
 import {
 	type ConfigDoctorResult,
 	detectStraySwarmDirs,
@@ -139,7 +139,8 @@ export async function handleDoctorCommand(
 	// agent-initiated commands.
 	const enableAutoFix = args.includes('--fix') || args.includes('-f');
 
-	const config = loadPluginConfig(directory);
+	const meta = loadPluginConfigWithMeta(directory);
+	const config = meta.config;
 	const result = runConfigDoctor(config, directory);
 
 	// If auto-fix is requested and there are auto-fixable issues, apply fixes
@@ -167,6 +168,22 @@ export async function handleDoctorCommand(
 				markdown;
 		}
 		output = markdown;
+	}
+
+	// Surface recovery metadata (FR-004) — when the loader had to drop keys or
+	// fall back to defaults, the user must be able to discover that here.
+	if (meta.recovery !== 'none') {
+		const lines: string[] = ['\n---\n\n## Config Recovery (FR-004)\n\n'];
+		lines.push(`- **Recovery applied**: \`${meta.recovery}\``);
+		if (meta.removedKeys.length > 0) {
+			lines.push(`- **Removed keys (${meta.removedKeys.length})**:`);
+			for (const k of meta.removedKeys) lines.push(`  - \`${k}\``);
+		}
+		if (meta.warnings.length > 0) {
+			lines.push(`- **Recovery warnings (${meta.warnings.length})**:`);
+			for (const w of meta.warnings) lines.push(`  - ${w}`);
+		}
+		output += `${lines.join('\n')}\n`;
 	}
 
 	// Check for stray .swarm directories

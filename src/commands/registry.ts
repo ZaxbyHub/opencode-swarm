@@ -102,6 +102,7 @@ import { handleSpecifyCommand } from './specify.js';
 import { handleStatusCommand } from './status.js';
 import { handleSyncPlanCommand } from './sync-plan.js';
 import { handleTurboCommand } from './turbo.js';
+import { TURBO_BYPASS_DISCLOSURE } from './turbo-constants.js';
 import { handleUnlinkCommand } from './unlink.js';
 import { handleWriteRetroCommand } from './write-retro.js';
 
@@ -1257,7 +1258,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Toggles Turbo Mode for the current session. Supports three strategies:\n' +
 			'\n' +
-			'**Standard turbo** — skips non-critical QA gates for faster iteration.\n' +
+			`**Standard turbo** — ${TURBO_BYPASS_DISCLOSURE}\n` +
 			'**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection.\n' +
 			'**Epic** — additive overlay above Lean Turbo. Auto-decides per-plan parallel-vs-serial via the coupling coefficient `p` and three gates (p-threshold, hot-module, greenfield). When `/swarm turbo epic on` is selected, Lean Turbo is also enabled — Epic dispatches Lean Turbo when it promotes.\n' +
 			'\n' +
