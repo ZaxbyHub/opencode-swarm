@@ -40,7 +40,7 @@ describe('Swarm subcommand registration', () => {
 
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands and main's CI-monitor command.
-		expect(commandKeys.length).toBe(78);
+		expect(commandKeys.length).toBe(79);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -118,6 +118,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-council',
 			'swarm-pr-review',
 			'swarm-pr-feedback',
+			'swarm-abort-pr-workflow',
 			'swarm-pr-subscribe',
 			'swarm-pr-unsubscribe',
 			'swarm-pr-status',
