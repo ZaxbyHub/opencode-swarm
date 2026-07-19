@@ -599,7 +599,15 @@ describe('handleCloseCommand', () => {
 			await handleCloseCommand(testDir, []);
 
 			expect(mockArchiveEvidence).toHaveBeenCalledTimes(1);
-			expect(mockArchiveEvidence).toHaveBeenCalledWith(testDir, 30, 10);
+			// Issue #1184: finalize now uses the report overload (4th arg) so
+			// the documents-cache prune runs when cache caps are configured.
+			// When no cache caps are set, cacheMaxBytes/cacheMaxRecords are
+			// undefined (append-only default preserved).
+			expect(mockArchiveEvidence).toHaveBeenCalledWith(testDir, 30, 10, {
+				report: true,
+				cacheMaxBytes: undefined,
+				cacheMaxRecords: undefined,
+			});
 		});
 	});
 
