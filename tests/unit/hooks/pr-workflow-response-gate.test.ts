@@ -282,4 +282,51 @@ describe('PR workflow response-gate wake budget', () => {
 		expect(budget?.suspended).toBe(true);
 		expect(budget?.consecutiveUnproductive).toBe(2);
 	});
+
+	test('does not falsely suspend when revision advances mid-wake (PRR-005)', async () => {
+		// Regression: madeProgress was computed from a snapshot read BEFORE the
+		// promptAsync await. If a concurrent controller tool bumped state.revision
+		// during the await and the counter was at MAX-1, the stale madeProgress
+		// (false) would wrongly increment to MAX and suspend a healthy session.
+		// Fix: re-read state.revision AFTER the await and treat the wake as
+		// productive if the revision advanced.
+		await writeStateWithRevision('race-session', 0);
+		// Drive the counter to MAX-1 (4 with max=5) by holding revision at 0.
+		// Sequence: wake1 (probe, counter stays 0), wake2 (unproductive, counter→1),
+		// wake3 (→2), wake4 (→3), wake5 (→4 = MAX-1).
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 5,
+			wakeCooldownMs: 0,
+		});
+		const idle = (sid: string) => ({
+			event: { type: 'session.idle', properties: { sessionID: sid } },
+		});
+		for (let i = 0; i < 5; i++) {
+			await gate.event(idle('race-session'));
+		}
+		let budget = gate._inspectWakeBudget('race-session');
+		expect(budget?.consecutiveUnproductive).toBe(4);
+		expect(budget?.suspended).toBe(false);
+
+		// Now bump revision to 10 AFTER the pre-await snapshot read but BEFORE
+		// the finally block re-reads. Simulate a concurrent controller mutation.
+		// The promptAsync mock itself bumps the on-disk revision mid-wake.
+		promptAsync.mockImplementation(async () => {
+			await writeStateWithRevision('race-session', 10);
+			return {};
+		});
+		// wake6: pre-await snapshot sees revision 0 (stale madeProgress=false),
+		// but during the await the revision bumps to 10. The fix's post-await
+		// re-read must detect this and treat the wake as productive.
+		await gate.event(idle('race-session'));
+
+		budget = gate._inspectWakeBudget('race-session');
+		// The bug would set suspended=true here. The fix keeps the session alive.
+		expect(budget?.suspended).toBe(false);
+		expect(budget?.consecutiveUnproductive).toBe(0);
+		expect(budget?.lastSeenRevision).toBe(10);
+	});
 });

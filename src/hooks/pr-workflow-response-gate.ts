@@ -261,15 +261,42 @@ export function createPrWorkflowResponseGate(options: {
 			// failures. An attempted wake that did not produce progress must
 			// count toward the consecutive-unproductive budget; otherwise a
 			// failing host resume API would recreate the unbounded loop.
+			//
+			// Re-read the durable state AFTER the promptAsync await to detect
+			// mid-wake progress. `madeProgress` was computed from a snapshot
+			// read before the await (response-gate.ts:164); if a concurrent
+			// controller tool bumped `state.revision` during the await, the
+			// pre-await `madeProgress` would be stale `false`, the counter
+			// would wrongly increment, and a healthy session could be
+			// falsely suspended at MAX-1. The fresh read here corrects that
+			// race: if the revision advanced during the wake, the wake IS
+			// productive and the counter resets.
+			const postWakeState = await readPrWorkflowGateState(
+				options.directory,
+				sessionID,
+			);
 			budget.lastWakeAt = now;
-			budget.lastSeenRevision = state.revision;
-			if (!madeProgress) {
-				budget.consecutiveUnproductive += 1;
-				if (budget.consecutiveUnproductive >= maxConsecutive) {
-					budget.suspended = true;
-				}
+			if (postWakeState === null) {
+				// Gate cleared during the wake (complete/abort). Drop the
+				// budget so a future activation starts fresh; never suspend
+				// a session whose gate just cleared. (No `return` here —
+				// biome: returning inside finally would mask try/catch flow.)
+				resetBudget(sessionID);
 			} else {
-				budget.consecutiveUnproductive = 0;
+				const currentRevision = postWakeState.revision;
+				const effectiveMadeProgress =
+					madeProgress ||
+					(budget.lastSeenRevision !== undefined &&
+						currentRevision > budget.lastSeenRevision);
+				budget.lastSeenRevision = currentRevision;
+				if (!effectiveMadeProgress) {
+					budget.consecutiveUnproductive += 1;
+					if (budget.consecutiveUnproductive >= maxConsecutive) {
+						budget.suspended = true;
+					}
+				} else {
+					budget.consecutiveUnproductive = 0;
+				}
 			}
 		}
 	};
