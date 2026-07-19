@@ -86,6 +86,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([
+		'abort-pr-workflow',
 		'acknowledge-spec-drift',
 		'reset',
 		'reset-session',
@@ -160,14 +161,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'restricted' bucket contains exactly the expected 6 commands", () => {
+	test("'restricted' bucket contains exactly the expected 7 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'restricted') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(6);
+		expect(actual.size).toBe(7);
 		for (const name of EXPECTED_RESTRICTED) {
 			expect(actual.has(name)).toBe(true);
 		}
