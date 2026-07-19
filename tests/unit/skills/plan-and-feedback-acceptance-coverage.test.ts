@@ -32,7 +32,7 @@ describe('.opencode/skills/plan/SKILL.md ACCEPTANCE coverage (issue: architect-a
 		// The fallback template is a literal TASK:/OUTPUT:/INPUT:/CONSTRAINT:
 		// block — a delegation-construction site gated by ACCEPTANCE_FIELD_REQUIRED.
 		const idx = planContent.indexOf(
-			'delegate plan writing to the active swarm\'s coder agent',
+			"delegate plan writing to the active swarm's coder agent",
 		);
 		expect(idx).toBeGreaterThan(-1);
 		// Slice to the next non-template block (TASK GRANULARITY RULES).
@@ -48,9 +48,7 @@ describe('.opencode/skills/swarm-pr-feedback/SKILL.md ACCEPTANCE coverage (issue
 	it('direct-Task coder carve-out carries an ACCEPTANCE reminder', () => {
 		// The carve-out sanctions Task(subagent_type="<coder>", ...) without
 		// declare_scope. The dispatch is still gated by ACCEPTANCE_FIELD_REQUIRED.
-		const idx = feedbackContent.indexOf(
-			'Carve-out for direct Task delegation',
-		);
+		const idx = feedbackContent.indexOf('Carve-out for direct Task delegation');
 		expect(idx).toBeGreaterThan(-1);
 		const next = feedbackContent.indexOf('**Anti-pattern:**', idx);
 		expect(next).toBeGreaterThan(idx);
