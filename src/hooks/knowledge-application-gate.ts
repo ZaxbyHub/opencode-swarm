@@ -15,8 +15,14 @@
  *      assemble the set of critical directives that have been shown but
  *      not acknowledged. In `mode: 'enforce'` it THROWS to block the
  *      action (per the FAIL-CLOSED contract — `output.error` is NOT a
- *      write API at toolBefore time). In `mode: 'warn'` it appends to
- *      `events.jsonl` and lets the action proceed.
+ *      write API at toolBefore time) — UNLESS one of two bounded escape
+ *      hatches has fired first (a per-directive denial-count limit, or a
+ *      staleness TTL since the directive was shown; see
+ *      `incrementGateDenialCount`/`buildGateDenialDirectiveKey` in
+ *      `../state.js`), in which case the pending directives are
+ *      auto-acknowledged and an audit event is durably written before the
+ *      action is allowed to proceed. In `mode: 'warn'` it appends to
+ *      `events.jsonl` and always lets the action proceed.
  *
  * Tools considered high-risk:
  *   - save_plan
@@ -30,7 +36,14 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
-import { addKnowledgeAckDedup, swarmState } from '../state.js';
+import {
+	addKnowledgeAckDedup,
+	buildGateDenialDirectiveKey,
+	clearCriticalShownIds,
+	clearGateDenialCount,
+	incrementGateDenialCount,
+	swarmState,
+} from '../state.js';
 import { warn } from '../utils/logger.js';
 import {
 	buildAckDedupKey,
@@ -52,36 +65,8 @@ export const HIGH_RISK_TOOLS = new Set([
 	'skill_retire',
 ]);
 
-// ============================================================================
-// Gate denial counter — prevents permanent deadlock when ack pipeline fails
-// ============================================================================
-
-const MAX_DENIAL_TRACKER_ENTRIES = 500;
 const DEFAULT_MAX_GATE_DENIALS = 5;
 const DEFAULT_GATE_STALENESS_MS = 600_000; // 10 minutes
-
-const _gateDenialCounts = new Map<string, number>();
-
-function incrementDenialCount(sessionID: string): number {
-	const current = (_gateDenialCounts.get(sessionID) ?? 0) + 1;
-	if (_gateDenialCounts.has(sessionID)) _gateDenialCounts.delete(sessionID);
-	_gateDenialCounts.set(sessionID, current);
-	if (_gateDenialCounts.size > MAX_DENIAL_TRACKER_ENTRIES) {
-		const oldest = _gateDenialCounts.keys().next().value;
-		if (oldest !== undefined && oldest !== sessionID) {
-			_gateDenialCounts.delete(oldest);
-		}
-	}
-	return current;
-}
-
-function clearDenialCount(sessionID: string): void {
-	_gateDenialCounts.delete(sessionID);
-}
-
-export function resetGateDenialCounts(): void {
-	_gateDenialCounts.clear();
-}
 
 export interface GateInput {
 	tool: unknown;
@@ -145,7 +130,7 @@ export async function knowledgeApplicationGateBefore(
 
 	const cached = swarmState.currentCriticalShownIds.get(sessionID);
 	if (!cached || cached.ids.length === 0) {
-		clearDenialCount(sessionID);
+		clearGateDenialCount(sessionID);
 		return;
 	}
 
@@ -165,7 +150,7 @@ export async function knowledgeApplicationGateBefore(
 
 	const unacked = cached.ids.filter((id) => !ackedIds.has(id));
 	if (unacked.length === 0) {
-		clearDenialCount(sessionID);
+		clearGateDenialCount(sessionID);
 		return;
 	}
 
@@ -183,9 +168,14 @@ export async function knowledgeApplicationGateBefore(
 			for (const id of unacked) {
 				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
 			}
-			swarmState.currentCriticalShownIds.delete(sessionID);
-			clearDenialCount(sessionID);
-			void writeWarnEvent(directory, {
+			clearCriticalShownIds(sessionID);
+			clearGateDenialCount(sessionID);
+			// Awaited (not fire-and-forget): the bypass state above is already
+			// committed, so the audit write is the only remaining evidence of
+			// this security-relevant auto-clear. Awaiting it before returning
+			// keeps the "never silent" guarantee true even under a write
+			// failure window, not just in the common case.
+			await writeWarnEvent(directory, {
 				timestamp: new Date().toISOString(),
 				event: 'knowledge_application_gate_staleness_clear',
 				tool: toolName,
@@ -194,22 +184,32 @@ export async function knowledgeApplicationGateBefore(
 				cleared_ids: unacked,
 				age_ms: age,
 				staleness_threshold_ms: stalenessMs,
-			}).catch(() => {
-				/* never block tool path */
+			}).catch((err: unknown) => {
+				warn(
+					`[knowledge-application-gate] staleness-clear audit write failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
 			});
 			return;
 		}
 
 		// Escape hatch 2: denial count — if this session has been denied more
-		// than the configured max, auto-clear and allow the action.
-		const denials = incrementDenialCount(sessionID);
+		// than the configured max, auto-clear and allow the action. The
+		// counter is keyed to the current directive-id-set identity, so a
+		// session whose critical directives were swapped out from under it
+		// (an ordinary phase/task-transition occurrence via
+		// setCriticalShownIds) starts a fresh count instead of inheriting a
+		// stale one accrued against an unrelated, earlier directive.
+		const directiveKey = buildGateDenialDirectiveKey(cached.ids);
+		const denials = incrementGateDenialCount(sessionID, directiveKey);
 		if (denials > maxDenials) {
 			for (const id of unacked) {
 				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
 			}
-			swarmState.currentCriticalShownIds.delete(sessionID);
-			clearDenialCount(sessionID);
-			void writeWarnEvent(directory, {
+			clearCriticalShownIds(sessionID);
+			clearGateDenialCount(sessionID);
+			await writeWarnEvent(directory, {
 				timestamp: new Date().toISOString(),
 				event: 'knowledge_application_gate_denial_limit_clear',
 				tool: toolName,
@@ -218,8 +218,12 @@ export async function knowledgeApplicationGateBefore(
 				cleared_ids: unacked,
 				denial_count: denials,
 				max_gate_denials: maxDenials,
-			}).catch(() => {
-				/* never block tool path */
+			}).catch((err: unknown) => {
+				warn(
+					`[knowledge-application-gate] denial-limit-clear audit write failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
 			});
 			return;
 		}
@@ -310,6 +314,4 @@ export const _internals = {
 	knowledgeApplicationTransformScan,
 	HIGH_RISK_TOOLS,
 	writeWarnEvent,
-	resetGateDenialCounts,
-	_gateDenialCounts,
 };

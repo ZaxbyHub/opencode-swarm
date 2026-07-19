@@ -545,6 +545,17 @@ export const swarmState = {
 	 *  see addKnowledgeAckDedup. */
 	knowledgeAckDedup: new Set<string>(),
 
+	/** v2: per-session denial counter for the knowledge-application enforcement
+	 *  gate's deadlock escape hatch (`knowledgeApplicationGateBefore`). Keyed by
+	 *  sessionID; each entry also records the `directiveKey` (a sorted, joined
+	 *  fingerprint of the critical-directive-id set the count was accumulated
+	 *  against) so a session that has its critical directives swapped out from
+	 *  under it — an ordinary occurrence on phase/task transitions via
+	 *  `setCriticalShownIds` — does not carry a stale denial count into an
+	 *  unrelated new directive's budget. FIFO-capped — see
+	 *  incrementGateDenialCount/clearGateDenialCount. */
+	gateDenialCounts: new Map<string, { count: number; directiveKey: string }>(),
+
 	/**
 	 * All generated agent names registered with OpenCode at plugin init.
 	 * Used by Full-Auto v2 delegation guard to apply strict registry-aware
@@ -598,6 +609,7 @@ export function resetSwarmState(): void {
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
+	swarmState.gateDenialCounts.clear();
 	swarmState.generatedAgentNames = [];
 	_rehydrationCache = null;
 	// Full Auto Mode (Phase 4)
@@ -2159,6 +2171,7 @@ export function ensureSessionEnvironment(
 // preserves insertion order so `Map.keys().next()` is the FIFO oldest.
 export const MAX_TRACKED_CRITICAL_SHOWN = 500;
 export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
+export const MAX_TRACKED_GATE_DENIALS = 500;
 
 /** Set the critical shown ids for a session, FIFO-evicting the oldest entry
  * if the cap is exceeded. Re-setting an existing key keeps insertion order
@@ -2188,6 +2201,47 @@ export function setCriticalShownIds(
  *  whether an entry was removed. */
 export function clearCriticalShownIds(sessionID: string): boolean {
 	return swarmState.currentCriticalShownIds.delete(sessionID);
+}
+
+/** Build the directive-identity fingerprint used to key the gate denial
+ *  counter — a sorted, joined snapshot of a critical-directive-id set. Two
+ *  calls with the same id set (regardless of order) produce the same key,
+ *  so re-injecting the identical directive on a later turn does not reset
+ *  the counter, but swapping to a genuinely different directive set does. */
+export function buildGateDenialDirectiveKey(ids: string[]): string {
+	return [...ids].sort().join(',');
+}
+
+/** Increment (or start) the per-session gate denial counter for the given
+ *  directive identity, FIFO-evicting the oldest session entry if the cap is
+ *  exceeded. When the stored entry's `directiveKey` does not match
+ *  `directiveKey`, the counter restarts at 1 instead of continuing to
+ *  accumulate — this is what prevents a stale denial count from an earlier,
+ *  unrelated critical directive from carrying into a fresh one's
+ *  `max_gate_denials` budget. Returns the resulting count. */
+export function incrementGateDenialCount(
+	sessionID: string,
+	directiveKey: string,
+): number {
+	const map = swarmState.gateDenialCounts;
+	const existing = map.get(sessionID);
+	const count =
+		existing && existing.directiveKey === directiveKey ? existing.count + 1 : 1;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, { count, directiveKey });
+	if (map.size > MAX_TRACKED_GATE_DENIALS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+	return count;
+}
+
+/** Clear the gate denial counter for a session. Centralised so call sites do
+ *  not bypass the FIFO-cap pathway with a direct `.delete()`. */
+export function clearGateDenialCount(sessionID: string): void {
+	swarmState.gateDenialCounts.delete(sessionID);
 }
 
 /** Add a knowledge ack dedup key, FIFO-evicting the oldest if the cap is
