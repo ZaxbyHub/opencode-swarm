@@ -85,6 +85,63 @@ KNOWLEDGE_VIOLATED: ${id} reason=scope breach`;
 	it('returns empty for non-matching text', () => {
 		expect(parseAcknowledgments('plain prose, no markers')).toEqual([]);
 	});
+
+	it('matches when ID is followed by trailing explanation text', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_APPLIED: ${id} - I have incorporated this directive.`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(1);
+		expect(acks[0].id).toBe(id);
+		expect(acks[0].result).toBe('applied');
+	});
+
+	it('matches when ID is followed by a period', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_APPLIED: ${id}. Moving on to the next step.`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(1);
+		expect(acks[0].id).toBe(id);
+		expect(acks[0].result).toBe('applied');
+	});
+
+	it('matches when ID is followed by parenthetical', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_APPLIED: ${id}(used in plan)`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(1);
+		expect(acks[0].id).toBe(id);
+		expect(acks[0].result).toBe('applied');
+	});
+
+	it('matches inline multi-marker on same line separated by spaces', () => {
+		const id1 = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const id2 = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
+		const text = `KNOWLEDGE_APPLIED: ${id1} KNOWLEDGE_IGNORED: ${id2} reason=not relevant`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(2);
+		expect(acks[0].id).toBe(id1);
+		expect(acks[0].result).toBe('applied');
+		expect(acks[1].id).toBe(id2);
+		expect(acks[1].result).toBe('ignored');
+		expect(acks[1].reason).toBe('not relevant');
+	});
+
+	it('handles N_A marker', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_N_A: ${id} reason=directive not applicable to this context`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(1);
+		expect(acks[0].result).toBe('n_a');
+		expect(acks[0].reason).toBe('directive not applicable to this context');
+	});
+
+	it('matches ID at end of string without newline', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_APPLIED: ${id}`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toHaveLength(1);
+		expect(acks[0].id).toBe(id);
+	});
 });
 
 describe('recordKnowledgeShown vs recordAcknowledgment', () => {

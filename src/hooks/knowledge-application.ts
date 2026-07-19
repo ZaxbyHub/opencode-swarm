@@ -58,7 +58,7 @@ export interface ParsedAcknowledgment {
 }
 
 const ACK_PATTERN =
-	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+KNOWLEDGE_)/g;
+	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?(?=[^0-9a-fA-F-]|$)/g;
 
 export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 	if (!text || typeof text !== 'string') return [];
@@ -411,6 +411,8 @@ export interface KnowledgeApplicationConfig {
 	critical_requires_ack: boolean;
 	require_skill_refs: boolean;
 	high_risk_tools?: string[];
+	max_gate_denials?: number;
+	gate_staleness_ms?: number;
 }
 
 export const DEFAULT_KNOWLEDGE_APPLICATION_CONFIG: KnowledgeApplicationConfig =
@@ -427,6 +429,8 @@ export const DEFAULT_KNOWLEDGE_APPLICATION_CONFIG: KnowledgeApplicationConfig =
 			'task',
 			'Task',
 		],
+		max_gate_denials: 5,
+		gate_staleness_ms: 600_000,
 	};
 
 export interface GateResult {

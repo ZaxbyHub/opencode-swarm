@@ -1660,6 +1660,10 @@ export const KnowledgeApplicationConfigSchema = z.object({
 			'task',
 			'Task',
 		]),
+	/** Max consecutive gate denials per session before auto-clearing unacked directives. Default: 5 */
+	max_gate_denials: z.number().int().min(1).max(100).default(5),
+	/** Staleness TTL (ms) for critical shown IDs — directives older than this auto-clear. Default: 600000 (10 min) */
+	gate_staleness_ms: z.number().int().min(10000).max(3600000).default(600_000),
 });
 
 export type KnowledgeApplicationConfig = z.infer<

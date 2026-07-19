@@ -52,6 +52,37 @@ export const HIGH_RISK_TOOLS = new Set([
 	'skill_retire',
 ]);
 
+// ============================================================================
+// Gate denial counter — prevents permanent deadlock when ack pipeline fails
+// ============================================================================
+
+const MAX_DENIAL_TRACKER_ENTRIES = 500;
+const DEFAULT_MAX_GATE_DENIALS = 5;
+const DEFAULT_GATE_STALENESS_MS = 600_000; // 10 minutes
+
+const _gateDenialCounts = new Map<string, number>();
+
+function incrementDenialCount(sessionID: string): number {
+	const current = (_gateDenialCounts.get(sessionID) ?? 0) + 1;
+	if (_gateDenialCounts.has(sessionID)) _gateDenialCounts.delete(sessionID);
+	_gateDenialCounts.set(sessionID, current);
+	if (_gateDenialCounts.size > MAX_DENIAL_TRACKER_ENTRIES) {
+		const oldest = _gateDenialCounts.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			_gateDenialCounts.delete(oldest);
+		}
+	}
+	return current;
+}
+
+function clearDenialCount(sessionID: string): void {
+	_gateDenialCounts.delete(sessionID);
+}
+
+export function resetGateDenialCounts(): void {
+	_gateDenialCounts.clear();
+}
+
 export interface GateInput {
 	tool: unknown;
 	agent?: unknown;
@@ -113,7 +144,10 @@ export async function knowledgeApplicationGateBefore(
 	}
 
 	const cached = swarmState.currentCriticalShownIds.get(sessionID);
-	if (!cached || cached.ids.length === 0) return;
+	if (!cached || cached.ids.length === 0) {
+		clearDenialCount(sessionID);
+		return;
+	}
 
 	// Has an architect terminal ack landed in this session for any critical id?
 	const ackedIds = new Set<string>();
@@ -130,12 +164,67 @@ export async function knowledgeApplicationGateBefore(
 	}
 
 	const unacked = cached.ids.filter((id) => !ackedIds.has(id));
-	if (unacked.length === 0) return;
+	if (unacked.length === 0) {
+		clearDenialCount(sessionID);
+		return;
+	}
 
 	// Synthesise the gate result format expected by gateKnowledgeApplication
 	// (the helper itself takes recentArchitectText, but here we pre-decided
 	// who is acked via the dedup set; do not re-parse text).
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
+		const maxDenials = config.max_gate_denials ?? DEFAULT_MAX_GATE_DENIALS;
+		const stalenessMs =
+			config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
+
+		// Escape hatch 1: staleness — if the directive has been pending longer
+		// than the configured TTL, auto-clear and allow the action.
+		const age = Date.now() - cached.generatedAt;
+		if (age > stalenessMs) {
+			for (const id of unacked) {
+				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+			}
+			swarmState.currentCriticalShownIds.delete(sessionID);
+			clearDenialCount(sessionID);
+			void writeWarnEvent(directory, {
+				timestamp: new Date().toISOString(),
+				event: 'knowledge_application_gate_staleness_clear',
+				tool: toolName,
+				agent: agentRaw,
+				sessionID,
+				cleared_ids: unacked,
+				age_ms: age,
+				staleness_threshold_ms: stalenessMs,
+			}).catch(() => {
+				/* never block tool path */
+			});
+			return;
+		}
+
+		// Escape hatch 2: denial count — if this session has been denied more
+		// than the configured max, auto-clear and allow the action.
+		const denials = incrementDenialCount(sessionID);
+		if (denials > maxDenials) {
+			for (const id of unacked) {
+				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+			}
+			swarmState.currentCriticalShownIds.delete(sessionID);
+			clearDenialCount(sessionID);
+			void writeWarnEvent(directory, {
+				timestamp: new Date().toISOString(),
+				event: 'knowledge_application_gate_denial_limit_clear',
+				tool: toolName,
+				agent: agentRaw,
+				sessionID,
+				cleared_ids: unacked,
+				denial_count: denials,
+				max_gate_denials: maxDenials,
+			}).catch(() => {
+				/* never block tool path */
+			});
+			return;
+		}
+
 		const ids = unacked.join(', ');
 		throw new Error(
 			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,
@@ -222,4 +311,6 @@ export const _internals = {
 	knowledgeApplicationTransformScan,
 	HIGH_RISK_TOOLS,
 	writeWarnEvent,
+	resetGateDenialCounts,
+	_gateDenialCounts,
 };
