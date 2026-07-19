@@ -25,7 +25,10 @@ beforeEach(() => {
 	// Isolate from the real user config (~/.config/opencode/opencode-swarm.json)
 	// so the test's project config is the only evidence config source.
 	originalXdg = process.env.XDG_CONFIG_HOME;
-	process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), 'archive-docs-cache-xdg-');
+	process.env.XDG_CONFIG_HOME = path.join(
+		os.tmpdir(),
+		'archive-docs-cache-xdg-',
+	);
 	mkdirSync(process.env.XDG_CONFIG_HOME, { recursive: true });
 
 	tempDir = require('node:fs').realpathSync(
@@ -34,7 +37,9 @@ beforeEach(() => {
 		),
 	);
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
-	mkdirSync(path.join(tempDir, '.swarm', 'evidence-cache'), { recursive: true });
+	mkdirSync(path.join(tempDir, '.swarm', 'evidence-cache'), {
+		recursive: true,
+	});
 	mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 });
 
@@ -68,7 +73,12 @@ function writeCacheRow(id: string, daysAgo: number): void {
 		text: 'x'.repeat(200),
 		capturedAt: ts,
 	});
-	const cacheFile = path.join(tempDir, '.swarm', 'evidence-cache', 'documents.jsonl');
+	const cacheFile = path.join(
+		tempDir,
+		'.swarm',
+		'evidence-cache',
+		'documents.jsonl',
+	);
 	// Append (the production write path is append-only).
 	writeFileSync(cacheFile, row + '\n', { flag: 'a' });
 }
@@ -102,9 +112,16 @@ describe('handleArchiveCommand — documents cache section (issue #1184)', () =>
 		expect(result).toContain('**Inventory**: 12 record(s)');
 		expect(result).toContain('**Would prune**: 2 record(s)');
 		// Nothing was actually written (dry run).
-		const cacheFile = path.join(tempDir, '.swarm', 'evidence-cache', 'documents.jsonl');
+		const cacheFile = path.join(
+			tempDir,
+			'.swarm',
+			'evidence-cache',
+			'documents.jsonl',
+		);
 		const content = require('node:fs').readFileSync(cacheFile, 'utf8');
-		expect(content.split('\n').filter((l: string) => l.length > 0)).toHaveLength(12);
+		expect(
+			content.split('\n').filter((l: string) => l.length > 0),
+		).toHaveLength(12);
 	});
 
 	test('caps configured, execution → cache pruned, report shows Pruned count', async () => {
@@ -128,7 +145,12 @@ describe('handleArchiveCommand — documents cache section (issue #1184)', () =>
 		expect(result).toContain('No evidence bundles were archived.');
 
 		// The newest 10 rows survive; the oldest 2 are gone.
-		const cacheFile = path.join(tempDir, '.swarm', 'evidence-cache', 'documents.jsonl');
+		const cacheFile = path.join(
+			tempDir,
+			'.swarm',
+			'evidence-cache',
+			'documents.jsonl',
+		);
 		const content = require('node:fs').readFileSync(cacheFile, 'utf8');
 		expect(content).toContain('evd_11'); // newest
 		expect(content).not.toContain('evd_00'); // oldest, pruned

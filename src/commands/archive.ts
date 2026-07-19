@@ -43,7 +43,10 @@ function formatDocumentsCacheSection(
 		(typeof maxRecords === 'number' && maxRecords > 0);
 	if (!capsConfigured) return '';
 
-	const lines: string[] = ['', '### Documents cache (`.swarm/evidence-cache/documents.jsonl`)'];
+	const lines: string[] = [
+		'',
+		'### Documents cache (`.swarm/evidence-cache/documents.jsonl`)',
+	];
 	if (cache.aborted) {
 		lines.push(
 			`**Aborted**: file exceeds the 100 MiB read cap; left untouched. Set a tighter cap or prune manually.`,
@@ -58,11 +61,17 @@ function formatDocumentsCacheSection(
 		capParts.push(`max ${maxRecords} records`);
 	}
 	lines.push(`**Retention caps**: ${capParts.join(', ')}`);
-	lines.push(`**Inventory**: ${cache.inventory} record(s), ${formatBytes(cache.bytesBefore)}`);
+	lines.push(
+		`**Inventory**: ${cache.inventory} record(s), ${formatBytes(cache.bytesBefore)}`,
+	);
 	if (cache.dryRun) {
-		lines.push(`**Would prune**: ${cache.selected} record(s) → ${formatBytes(cache.bytesAfter)}`);
+		lines.push(
+			`**Would prune**: ${cache.selected} record(s) → ${formatBytes(cache.bytesAfter)}`,
+		);
 	} else {
-		lines.push(`**Pruned**: ${cache.archived} record(s) → ${formatBytes(cache.bytesAfter)}`);
+		lines.push(
+			`**Pruned**: ${cache.archived} record(s) → ${formatBytes(cache.bytesAfter)}`,
+		);
 	}
 	if (cache.corrupt > 0) {
 		lines.push(

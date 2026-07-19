@@ -6,8 +6,8 @@ import * as path from 'node:path';
 import {
 	_internals,
 	atomicRenameWithRetry,
-	pruneEvidenceDocuments,
 	type DocumentsRetentionResult,
+	pruneEvidenceDocuments,
 } from '../../../src/evidence/documents-retention';
 
 /**
@@ -21,7 +21,9 @@ import {
  */
 
 function makeTmpDir(): string {
-	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-docs-ret-')));
+	const dir = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-docs-ret-')),
+	);
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence-cache'), { recursive: true });
 	return dir;
 }
@@ -107,6 +109,26 @@ describe('pruneEvidenceDocuments', () => {
 			bytesAfter: 0,
 			aborted: false,
 		});
+	});
+
+	test('stat error other than ENOENT → rethrows (PRR-002)', async () => {
+		// EACCES (or any non-ENOENT errno) must surface to the caller rather
+		// than being masked as a benign "missing file" no-op.
+		const realStat = _internals.stat;
+		_internals.stat = async () => {
+			const err = new Error(
+				'EACCES: permission denied',
+			) as NodeJS.ErrnoException;
+			err.code = 'EACCES';
+			throw err;
+		};
+		try {
+			await expect(
+				pruneEvidenceDocuments({ directory: tempDir, maxRecords: 10 }),
+			).rejects.toThrow('EACCES');
+		} finally {
+			_internals.stat = realStat;
+		}
 	});
 
 	test('no caps configured → no-op, preserves append-only behavior', async () => {
@@ -214,6 +236,37 @@ describe('pruneEvidenceDocuments', () => {
 		expect(survivors.map((r) => r.id).sort()).toEqual(['evd_c', 'evd_d']);
 	});
 
+	test('both caps tight: byte cap applies AFTER count cap, no over-prune (critic regression)', async () => {
+		// 5 rows, each ~320 bytes (JSON + LF). maxRecords=3 keeps the
+		// newest 3 (drops 2 oldest). maxBytes=550 then drops oldest survivors
+		// until ≤ 550 B: 3×320=960 → drop 1 (640) → drop 2 (320 ≤ 550),
+		// leaving 1 survivor. This proves the byte-cap total starts from the
+		// post-count-cap survivors, not all rows (final-critic regression:
+		// the pre-fix bug computed total over all 5 rows and over-pruned to 0).
+		await writeRows(tempDir, [
+			makeRow('evd_0', 40, 'x'.repeat(200)),
+			makeRow('evd_1', 30, 'x'.repeat(200)),
+			makeRow('evd_2', 20, 'x'.repeat(200)),
+			makeRow('evd_3', 10, 'x'.repeat(200)),
+			makeRow('evd_4', 1, 'x'.repeat(200)),
+		]);
+
+		const result = await pruneEvidenceDocuments({
+			directory: tempDir,
+			maxRecords: 3,
+			maxBytes: 550,
+		});
+
+		// Count cap drops 2 (evd_0, evd_1); byte cap drops 2 more (evd_2,
+		// evd_3) from the 3 survivors → 1 survivor (evd_4). Total archived = 4.
+		expect(result.archived).toBe(4);
+		expect(result.bytesAfter).toBeLessThanOrEqual(550);
+		const survivors = await readRows(tempDir);
+		expect(survivors.map((r) => r.id)).toEqual(['evd_4']);
+		// Critical: the file must NOT be empty (the pre-fix bug rewrote it to 0).
+		expect(survivors.length).toBeGreaterThan(0);
+	});
+
 	test('corrupt row dropped + counted, not preserved in rewrite', async () => {
 		// Mix valid and corrupt lines.
 		const valid1 = rowToJson(makeRow('evd_1', 30));
@@ -296,10 +349,7 @@ describe('pruneEvidenceDocuments', () => {
 	});
 
 	test('Windows rename retry: EPERM twice then success (integration via _internals)', async () => {
-		await writeRows(tempDir, [
-			makeRow('evd_old', 30),
-			makeRow('evd_new', 1),
-		]);
+		await writeRows(tempDir, [makeRow('evd_old', 30), makeRow('evd_new', 1)]);
 
 		// Override the DI seam so the production code's retry path runs
 		// against a rename that throws EPERM twice then succeeds. This
@@ -310,7 +360,9 @@ describe('pruneEvidenceDocuments', () => {
 		const flakyRename = async (src: string, dst: string) => {
 			attempts++;
 			if (attempts < 3) {
-				const err = new Error('EPERM: operation not permitted') as NodeJS.ErrnoException;
+				const err = new Error(
+					'EPERM: operation not permitted',
+				) as NodeJS.ErrnoException;
 				err.code = 'EPERM';
 				throw err;
 			}
@@ -332,10 +384,7 @@ describe('pruneEvidenceDocuments', () => {
 	});
 
 	test('atomic-rewrite failure: tmp cleaned up, original untouched', async () => {
-		await writeRows(tempDir, [
-			makeRow('evd_old', 30),
-			makeRow('evd_new', 1),
-		]);
+		await writeRows(tempDir, [makeRow('evd_old', 30), makeRow('evd_new', 1)]);
 		const beforeContent = await fsp.readFile(cachePath(tempDir), 'utf8');
 
 		// rename always fails (non-retryable error).
@@ -359,10 +408,7 @@ describe('pruneEvidenceDocuments', () => {
 	});
 
 	test('writeSync failure: tmp cleaned up, original untouched (reviewer finding)', async () => {
-		await writeRows(tempDir, [
-			makeRow('evd_old', 30),
-			makeRow('evd_new', 1),
-		]);
+		await writeRows(tempDir, [makeRow('evd_old', 30), makeRow('evd_new', 1)]);
 		const beforeContent = await fsp.readFile(cachePath(tempDir), 'utf8');
 
 		// writeSync fails after openSync succeeds — temp file must still be
@@ -407,11 +453,7 @@ describe('pruneEvidenceDocuments', () => {
 
 	test('JSON array / non-object rows counted as corrupt', async () => {
 		// JSON.parse succeeds but the result is not an object.
-		await fsp.writeFile(
-			cachePath(tempDir),
-			'[1,2,3]\n"string"\n42\n',
-			'utf8',
-		);
+		await fsp.writeFile(cachePath(tempDir), '[1,2,3]\n"string"\n42\n', 'utf8');
 		const result = await pruneEvidenceDocuments({
 			directory: tempDir,
 			maxRecords: 10,
@@ -423,4 +465,3 @@ describe('pruneEvidenceDocuments', () => {
 		expect(content).toBe('');
 	});
 });
-

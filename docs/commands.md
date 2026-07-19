@@ -579,7 +579,7 @@ Generate an evidence summary showing completion ratio across all tasks, blockers
 
 ### `/swarm archive [--dry-run]`
 
-Archive old evidence bundles. Two-tier retention: age-based (`max_age_days`, default 90) then count-based (`max_bundles`, default 1000). Use `--dry-run` to preview.
+Archive old evidence bundles. Two-tier retention: age-based (`max_age_days`, default 90) then count-based (`max_bundles`, default 1000). When `evidence.cache_max_bytes` or `evidence.cache_max_records` is configured, the command also prunes the `web_search` / `web_fetch` documents cache (`.swarm/evidence-cache/documents.jsonl`); the report then includes a "Documents cache" section. Use `--dry-run` to preview.
 
 ### `/swarm benchmark [--cumulative] [--ci-gate] [--max-cost-usd <n>] [--gate-audit-run <id>]`
 

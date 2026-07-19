@@ -27,13 +27,13 @@ import {
 	archiveEvaluationArtifacts,
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
+import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { warn } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 import {
 	type DocumentsRetentionResult,
 	pruneEvidenceDocuments,
 } from './documents-retention.js';
-import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
-import { warn } from '../utils';
-import { bunWrite } from '../utils/bun-compat';
 import { withEvidenceLock } from './lock.js';
 
 /**
@@ -778,7 +778,8 @@ export async function archiveEvidence(
 	};
 	if (
 		(typeof options?.cacheMaxBytes === 'number' && options.cacheMaxBytes > 0) ||
-		(typeof options?.cacheMaxRecords === 'number' && options.cacheMaxRecords > 0)
+		(typeof options?.cacheMaxRecords === 'number' &&
+			options.cacheMaxRecords > 0)
 	) {
 		try {
 			documentsCache = await _internals.pruneEvidenceDocuments({

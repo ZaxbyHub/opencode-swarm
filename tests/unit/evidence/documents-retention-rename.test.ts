@@ -42,9 +42,7 @@ describe('atomicRenameWithRetry', () => {
 		// placeholders to honor AGENTS.md invariant #7 (no hardcoded /tmp).
 		const src = path.join(os.tmpdir(), 'swarm-rename-src');
 		const dst = path.join(os.tmpdir(), 'swarm-rename-dst');
-		await expect(
-			atomicRenameWithRetry(src, dst, failRename),
-		).rejects.toThrow();
+		await expect(atomicRenameWithRetry(src, dst, failRename)).rejects.toThrow();
 		expect(calls).toBe(1); // no retry on non-Windows-contention codes
 	});
 
@@ -84,9 +82,9 @@ describe('atomicRenameWithRetry', () => {
 		};
 		const src = path.join(os.tmpdir(), 'swarm-rename-src');
 		const dst = path.join(os.tmpdir(), 'swarm-rename-dst');
-		await expect(
-			atomicRenameWithRetry(src, dst, alwaysFail),
-		).rejects.toThrow('EBUSY');
+		await expect(atomicRenameWithRetry(src, dst, alwaysFail)).rejects.toThrow(
+			'EBUSY',
+		);
 		expect(calls).toBe(5); // exactly RENAME_MAX_ATTEMPTS
 	});
 });

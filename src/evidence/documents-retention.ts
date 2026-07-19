@@ -36,10 +36,19 @@
  *   - Windows-safe rename: `EPERM`/`EBUSY`/`ENOTEMPTY`/`EACCES` are retried
  *     with bounded backoff (5× / 10ms). On final failure the temp file is
  *     removed and the original is left untouched (fail-safe).
+ *
+ * Memory tradeoff (L6-002): valid rows are parsed into a `ParsedRow[]` and
+ * retained in memory (raw string + parsed object per row) before selection.
+ * The 100 MiB read cap bounds input bytes, but the in-process heap footprint
+ * is higher (V8 string + object overhead). This is an accepted tradeoff: the
+ * prune runs once per explicit `/swarm archive` / `/swarm finalize` (never on
+ * a hot path), the input is bounded, and a streaming rewrite would be a
+ * materially larger refactor. If the cache ever needs to scale beyond the
+ * current cap, switch `readCacheRows` + `selectSurvivors` to a streaming
+ * selection (single pass, write survivors directly to the temp file).
  */
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
-import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
@@ -182,9 +191,7 @@ function emptyResult(dryRun: boolean): DocumentsRetentionResult {
  * Returns `{ rows, corrupt, aborted, bytesBefore }`. On `aborted: true` the
  * caller must not perform any rewrite.
  */
-async function readCacheRows(
-	filePath: string,
-): Promise<{
+async function readCacheRows(filePath: string): Promise<{
 	rows: ParsedRow[];
 	corrupt: number;
 	aborted: boolean;
@@ -207,36 +214,45 @@ async function readCacheRows(
 	let bytesRead = 0;
 	let aborted = false;
 
-	outer: for await (const line of rl) {
-		// readline strips the trailing newline; account for it (LF or CRLF).
-		// We cannot know which without inspecting the raw stream, so use LF
-		// (1 byte) as the conservative lower bound — the cap is a safety
-		// guard, not an exact budget.
-		const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
-		bytesRead += lineBytes;
-		if (bytesRead > MAX_READ_BYTES) {
-			aborted = true;
-			break outer;
-		}
-		if (line.length === 0) continue;
-		let record: Record<string, unknown> | null = null;
-		try {
-			const parsed = JSON.parse(line);
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				record = parsed as Record<string, unknown>;
-			} else {
+	// Cleanup runs in finally so a stream 'error' event (e.g. EIO mid-read)
+	// cannot skip rl.close()/stream.destroy() and leak the file handle (PRR-003).
+	try {
+		for await (const line of rl) {
+			// readline strips the trailing newline; account for it (LF or CRLF).
+			// We cannot know which without inspecting the raw stream, so use LF
+			// (1 byte) as the conservative lower bound — the cap is a safety
+			// guard, not an exact budget. Note: the rewrite (see rewriteAtomic)
+			// always joins survivors with '\n', so a CRLF source is normalized
+			// to LF on rewrite; bytesAfter reflects the post-normalization size
+			// (PRR-013).
+			const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+			bytesRead += lineBytes;
+			if (bytesRead > MAX_READ_BYTES) {
+				aborted = true;
+				break;
+			}
+			if (line.length === 0) continue;
+			let record: Record<string, unknown> | null = null;
+			try {
+				const parsed = JSON.parse(line);
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					record = parsed as Record<string, unknown>;
+				} else {
+					corrupt++;
+					continue;
+				}
+			} catch {
 				corrupt++;
 				continue;
 			}
-		} catch {
-			corrupt++;
-			continue;
+			rows.push({ raw: line, bytes: lineBytes, record });
 		}
-		rows.push({ raw: line, bytes: lineBytes, record });
+	} finally {
+		// Ensure the stream is fully released on every path (normal exit,
+		// break, or thrown stream error).
+		rl.close();
+		stream.destroy();
 	}
-	// Ensure the stream is fully released before returning.
-	rl.close();
-	stream.destroy();
 
 	return { rows, corrupt, aborted, bytesBefore };
 }
@@ -247,8 +263,14 @@ async function readCacheRows(
  * index (which would be non-deterministic across reads on some platforms).
  */
 function oldestFirst(a: ParsedRow, b: ParsedRow): number {
-	const at = typeof a.record?.capturedAt === 'string' ? (a.record.capturedAt as string) : '';
-	const bt = typeof b.record?.capturedAt === 'string' ? (b.record.capturedAt as string) : '';
+	const at =
+		typeof a.record?.capturedAt === 'string'
+			? (a.record.capturedAt as string)
+			: '';
+	const bt =
+		typeof b.record?.capturedAt === 'string'
+			? (b.record.capturedAt as string)
+			: '';
 	if (at === bt) return a.raw.localeCompare(b.raw);
 	return at.localeCompare(bt);
 }
@@ -261,21 +283,32 @@ function selectSurvivors(
 ): { survivors: ParsedRow[]; selected: number } {
 	// Work on a oldest-first copy so "drop oldest" is index-based and stable.
 	const ordered = [...rows].sort(oldestFirst);
-	let survivors = ordered;
 
-	if (typeof maxRecords === 'number' && survivors.length > maxRecords) {
-		survivors = survivors.slice(survivors.length - maxRecords);
+	// Count cap: keep the newest `maxRecords` rows (drop oldest via slice).
+	let keepFrom = 0;
+	if (typeof maxRecords === 'number' && ordered.length > maxRecords) {
+		keepFrom = ordered.length - maxRecords;
 	}
 
+	// Byte cap: advance `keepFrom` forward (dropping oldest) until the
+	// surviving tail is at or under the byte cap. Using an index instead of
+	// repeated Array.shift() keeps this O(n) rather than O(n²) (L6-001).
+	// `total` must start from the post-count-cap survivors (ordered[keepFrom:])
+	// — NOT all rows — so rows already dropped by the count cap are not
+	// double-subtracted (final-critic regression: without this, tight combined
+	// caps over-prune to an empty file).
 	if (typeof maxBytes === 'number' && maxBytes > 0) {
-		let total = survivors.reduce((sum, row) => sum + row.bytes, 0);
-		while (total > maxBytes && survivors.length > 0) {
-			const dropped = survivors.shift();
-			if (!dropped) break;
-			total -= dropped.bytes;
+		let total = 0;
+		for (let i = keepFrom; i < ordered.length; i++) {
+			total += ordered[i].bytes;
+		}
+		while (keepFrom < ordered.length && total > maxBytes) {
+			total -= ordered[keepFrom].bytes;
+			keepFrom++;
 		}
 	}
 
+	const survivors = ordered.slice(keepFrom);
 	const selected = rows.length - survivors.length;
 	return { survivors, selected };
 }
@@ -295,9 +328,10 @@ async function rewriteAtomic(
 	survivors: ParsedRow[],
 ): Promise<number> {
 	const tmpPath = `${filePath}.tmp.${Date.now()}.${process.pid}`;
-	const payload = survivors.length > 0
-		? `${survivors.map((row) => row.raw).join('\n')}\n`
-		: '';
+	const payload =
+		survivors.length > 0
+			? `${survivors.map((row) => row.raw).join('\n')}\n`
+			: '';
 	// `succeeded` flips to true only after the rename lands. The outer
 	// finally uses it to decide whether to clean up the temp file: on every
 	// error path (open/write/fsync/rename) the temp is removed; on success
@@ -349,12 +383,17 @@ export async function pruneEvidenceDocuments(
 
 	const filePath = validateSwarmPath(args.directory, EVIDENCE_CACHE_FILE);
 
-	// Missing file: idempotent no-op.
+	// Missing file: idempotent no-op. Only ENOENT is treated as "missing";
+	// other stat errors (EACCES, EIO, ELOOP, ...) are rethrown so the caller
+	// (archive command, fail-open) can log the real cause instead of masking
+	// it as a benign missing-file no-op (PRR-002).
 	let stat: fs.Stats;
 	try {
 		stat = await _internals.stat(filePath);
-	} catch {
-		return emptyResult(dryRun);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code === 'ENOENT') return emptyResult(dryRun);
+		throw err;
 	}
 
 	// No caps configured: preserve append-only behavior, report size only.
@@ -371,7 +410,12 @@ export async function pruneEvidenceDocuments(
 		};
 	}
 
-	let readResult: { rows: ParsedRow[]; corrupt: number; aborted: boolean; bytesBefore: number };
+	let readResult: {
+		rows: ParsedRow[];
+		corrupt: number;
+		aborted: boolean;
+		bytesBefore: number;
+	};
 	try {
 		readResult = await readCacheRows(filePath);
 	} catch (err) {

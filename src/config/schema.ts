@@ -329,7 +329,11 @@ export const EvidenceConfigSchema = z.object({
 	 * `/swarm archive` and `/swarm finalize` prune oldest rows until the
 	 * surviving file is at or below this size. Range: 512 B – 50 MiB.
 	 */
-	cache_max_bytes: z.number().min(512).max(50 * 1024 * 1024).optional(),
+	cache_max_bytes: z
+		.number()
+		.min(512)
+		.max(50 * 1024 * 1024)
+		.optional(),
 	/**
 	 * Optional record-count cap for the same documents cache. When omitted, no
 	 * count-based pruning. When set, oldest rows (by `capturedAt`) are pruned

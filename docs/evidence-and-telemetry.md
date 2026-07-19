@@ -57,7 +57,7 @@ Full field definitions live in `src/config/evidence-schema.ts`.
 
 ### Retention
 
-Config keys (`src/config/schema.ts:179`):
+Config keys (`src/config/schema.ts` → `EvidenceConfigSchema`):
 
 | Key | Archive default | Finalize default | Range | Purpose |
 |-----|:---:|:---:|:---:|---------|
