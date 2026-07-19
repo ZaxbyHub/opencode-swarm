@@ -25,6 +25,7 @@ import {
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 let tmp: string;
 beforeEach(() => {
@@ -55,8 +56,13 @@ async function seedEntry(id: string): Promise<void> {
 			failed_after_count: 0,
 		},
 		schema_version: 2,
-		created_at: new Date().toISOString(),
-		updated_at: new Date().toISOString(),
+		...withFrozenClock(
+			() => ({
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+			}),
+			{ isoNow: '2026-01-01T00:00:00.000Z' },
+		),
 		project_name: 'test',
 		directive_priority: 'critical',
 	};

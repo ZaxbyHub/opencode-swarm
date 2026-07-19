@@ -27,6 +27,7 @@ import {
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { swarmState } from '../../../src/state';
 import { knowledge_receipt } from '../../../src/tools/knowledge-receipt';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 let tmp: string;
 beforeEach(() => {
@@ -42,6 +43,8 @@ afterEach(() => {
 
 const ID_A = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 const ID_B = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
+/** Fixed reference instant for staleness escape-hatch tests (withFrozenClockAsync). */
+const FIXED_NOW = 1_700_000_000_000;
 
 describe('knowledgeApplicationGateBefore', () => {
 	it('does nothing when disabled', async () => {
@@ -510,134 +513,168 @@ describe('gate escape hatches (KNOWLEDGE_ENFORCE_GATE_DENY deadlock)', () => {
 	});
 
 	it('auto-clears stale directives older than gate_staleness_ms', async () => {
-		const staleTime = Date.now() - 700_000; // 700s ago > 600s default
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: staleTime,
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const staleTime = FIXED_NOW - 700_000; // 700s ago > 600s default
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A],
+					generatedAt: staleTime,
+				});
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+				};
 
-		// Should NOT throw — directive is stale
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
+				// Should NOT throw — directive is stale
+				await knowledgeApplicationGateBefore(
+					tmp,
+					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+					cfg,
+				);
+			},
+			{ fixedNow: FIXED_NOW },
 		);
 	});
 
 	it('respects custom gate_staleness_ms from config', async () => {
-		const staleTime = Date.now() - 15_000; // 15s ago
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: staleTime,
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-			gate_staleness_ms: 10_000, // 10s staleness
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const staleTime = FIXED_NOW - 15_000; // 15s ago
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A],
+					generatedAt: staleTime,
+				});
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+					gate_staleness_ms: 10_000, // 10s staleness
+				};
 
-		// Should NOT throw — 15s > 10s
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
+				// Should NOT throw — 15s > 10s
+				await knowledgeApplicationGateBefore(
+					tmp,
+					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+					cfg,
+				);
+			},
+			{ fixedNow: FIXED_NOW },
 		);
 	});
 
 	it('still throws when within staleness threshold', async () => {
-		const recentTime = Date.now() - 1_000; // 1s ago
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: recentTime,
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const recentTime = FIXED_NOW - 1_000; // 1s ago
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A],
+					generatedAt: recentTime,
+				});
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+				};
 
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-				cfg,
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
+				await expect(
+					knowledgeApplicationGateBefore(
+						tmp,
+						{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+						cfg,
+					),
+				).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
+			},
+			{ fixedNow: FIXED_NOW },
+		);
 	});
 
 	it('populates knowledgeAckDedup after escape hatch fires', async () => {
-		const staleTime = Date.now() - 700_000;
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A, ID_B],
-			generatedAt: staleTime,
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const staleTime = FIXED_NOW - 700_000;
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A, ID_B],
+					generatedAt: staleTime,
+				});
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+				};
 
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
+				await knowledgeApplicationGateBefore(
+					tmp,
+					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+					cfg,
+				);
+
+				// Both IDs should now be in the dedup set as 'applied'
+				expect(
+					swarmState.knowledgeAckDedup.has(
+						buildAckDedupKey('s1', ID_A, 'applied'),
+					),
+				).toBe(true);
+				expect(
+					swarmState.knowledgeAckDedup.has(
+						buildAckDedupKey('s1', ID_B, 'applied'),
+					),
+				).toBe(true);
+			},
+			{ fixedNow: FIXED_NOW },
 		);
-
-		// Both IDs should now be in the dedup set as 'applied'
-		expect(
-			swarmState.knowledgeAckDedup.has(buildAckDedupKey('s1', ID_A, 'applied')),
-		).toBe(true);
-		expect(
-			swarmState.knowledgeAckDedup.has(buildAckDedupKey('s1', ID_B, 'applied')),
-		).toBe(true);
 	});
 
 	it('clears currentCriticalShownIds for session after escape hatch', async () => {
-		const staleTime = Date.now() - 700_000;
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: staleTime,
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const staleTime = FIXED_NOW - 700_000;
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A],
+					generatedAt: staleTime,
+				});
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+				};
 
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
+				await knowledgeApplicationGateBefore(
+					tmp,
+					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+					cfg,
+				);
+
+				expect(swarmState.currentCriticalShownIds.has('s1')).toBe(false);
+			},
+			{ fixedNow: FIXED_NOW },
 		);
-
-		expect(swarmState.currentCriticalShownIds.has('s1')).toBe(false);
 	});
 
 	it('writes warning event to events.jsonl on staleness clear', async () => {
-		const staleTime = Date.now() - 700_000;
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: staleTime,
-		});
-		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-		};
+		await withFrozenClockAsync(
+			async () => {
+				const staleTime = FIXED_NOW - 700_000;
+				swarmState.currentCriticalShownIds.set('s1', {
+					ids: [ID_A],
+					generatedAt: staleTime,
+				});
+				await mkdir(path.join(tmp, '.swarm'), { recursive: true });
+				const cfg = {
+					...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+					mode: 'enforce' as const,
+				};
 
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
+				await knowledgeApplicationGateBefore(
+					tmp,
+					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+					cfg,
+				);
+
+				await new Promise((r) => setTimeout(r, 30));
+				const eventsPath = path.join(tmp, '.swarm', 'events.jsonl');
+				expect(existsSync(eventsPath)).toBe(true);
+				const body = readFileSync(eventsPath, 'utf-8');
+				expect(body).toContain('knowledge_application_gate_staleness_clear');
+				expect(body).toContain(ID_A);
+			},
+			{ fixedNow: FIXED_NOW },
 		);
-
-		await new Promise((r) => setTimeout(r, 30));
-		const eventsPath = path.join(tmp, '.swarm', 'events.jsonl');
-		expect(existsSync(eventsPath)).toBe(true);
-		const body = readFileSync(eventsPath, 'utf-8');
-		expect(body).toContain('knowledge_application_gate_staleness_clear');
-		expect(body).toContain(ID_A);
 	});
 
 	it('writes warning event to events.jsonl on denial limit clear', async () => {
