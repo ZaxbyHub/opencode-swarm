@@ -153,6 +153,10 @@ export {
 	isTestQuarantined,
 } from '../test-impact/flaky-detector.js';
 export {
+	abort_pr_workflow,
+	executeAbortPrWorkflow,
+} from './abort-pr-workflow';
+export {
 	complete_pr_workflow,
 	executeCompletePrWorkflow,
 } from './complete-pr-workflow';

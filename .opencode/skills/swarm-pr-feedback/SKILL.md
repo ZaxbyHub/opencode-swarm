@@ -738,3 +738,18 @@ Report:
 - whether review-thread resolution was skipped or explicitly performed.
 
 End with a complete ledger mapping every original item to its outcome.
+
+## Aborting an unrecoverable feedback workflow (pre-armed only)
+
+If the verification bind is genuinely unreachable (the PR head cannot be
+fetched or checked out, or a compound `git fetch … && git checkout …` keeps
+being rejected — run them as TWO separate standalone commands first), call
+`abort_pr_workflow` with `mode: "PR_FEEDBACK"` and a one-line `reason`
+instead of looping. The tool refuses while PR workflow lanes are in flight
+(collect their results with `collect_lane_results` first) AND refuses once
+the workflow is armed for publication (`prFeedbackReadyToPublish`) — after
+arming you MUST complete via `complete_pr_workflow` (or push the bound
+commit first), because aborting an armed gate would drop the immutable-
+commit binding and leave a half-published commit. The user can also run
+`/swarm abort-pr-workflow` once the wake budget suspends. Abort is a
+recovery tool, not a gate-skip shortcut.

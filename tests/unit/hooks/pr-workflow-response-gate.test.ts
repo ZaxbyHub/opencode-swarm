@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import {
 	activatePrWorkflow,
 	clearPrWorkflowGateState,
+	type PrWorkflowGateState,
 	_test_exports as workflowInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from '../../../src/hooks/pr-workflow-response-gate.js';
@@ -23,6 +24,26 @@ afterEach(async () => {
 	workflowInternals.resetTrackedStateCache();
 	await fs.rm(directory, { recursive: true, force: true });
 });
+
+/** Write a raw gate-state record with a specific revision so tests can
+ * simulate the durable gate advancing (or NOT advancing) across idle cycles. */
+async function writeStateWithRevision(
+	sessionID: string,
+	revision: number,
+): Promise<void> {
+	const relative = workflowInternals.workflowGateStateRelativePath(sessionID);
+	const absolute = path.join(directory, '.swarm', relative);
+	await fs.mkdir(path.dirname(absolute), { recursive: true });
+	const state: PrWorkflowGateState = {
+		schemaVersion: 1,
+		revision,
+		sessionID,
+		mode: 'PR_REVIEW',
+		activatedAt: '2026-07-19T00:00:00.000Z',
+		updatedAt: '2026-07-19T00:00:00.000Z',
+	};
+	await fs.writeFile(absolute, JSON.stringify(state, null, 2), 'utf-8');
+}
 
 describe('PR workflow response-level gate', () => {
 	test('replaces architect text until complete_pr_workflow clears durable state', async () => {
@@ -95,5 +116,170 @@ describe('PR workflow response-level gate', () => {
 			},
 		});
 		expect(output.text).toContain('FINAL RESPONSE BLOCKED');
+	});
+});
+
+describe('PR workflow response-gate wake budget', () => {
+	test('block text names abort_pr_workflow and /swarm abort-pr-workflow', async () => {
+		await activatePrWorkflow(directory, 'discoverable-session', 'PR_REVIEW');
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: mock(async () => ({})) } },
+		});
+		const output = { text: 'original' };
+		await gate.textComplete({ sessionID: 'discoverable-session' }, output);
+		expect(output.text).toContain('abort_pr_workflow');
+		expect(output.text).toContain('/swarm abort-pr-workflow');
+	});
+
+	test('suspends auto-resume after the configured consecutive unproductive wakes', async () => {
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 2,
+			wakeCooldownMs: 0,
+		});
+		// Hold revision constant → every wake is "unproductive".
+		await writeStateWithRevision('stuck-session', 0);
+
+		const idleEvent = {
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'stuck-session' },
+			},
+		};
+		// Wake 1 (first probe — counts as progress), wake 2 (unproductive, counter→1),
+		// wake 3 (unproductive, counter→2 → suspend).
+		await gate.event(idleEvent);
+		await gate.event(idleEvent);
+		await gate.event(idleEvent);
+		// The 2 unproductive wakes (after the probe) hit the budget; a 4th idle
+		// must NOT re-wake.
+		await gate.event(idleEvent);
+		expect(promptAsync).toHaveBeenCalledTimes(3);
+
+		// textComplete still rewrites text so the user-visible surface is
+		// preserved and now carries the suspend notice.
+		const output = { text: 'x' };
+		await gate.textComplete({ sessionID: 'stuck-session' }, output);
+		expect(output.text).toContain('Auto-resume is suspended');
+		expect(output.text).toContain('/swarm abort-pr-workflow');
+	});
+
+	test('resets the consecutive counter when state.revision advances (progress)', async () => {
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 2,
+			wakeCooldownMs: 0,
+		});
+		await writeStateWithRevision('healthy-session', 0);
+
+		const idle = (sid: string) => ({
+			event: { type: 'session.idle', properties: { sessionID: sid } },
+		});
+
+		// Wake 1 (probe, revision 0), wake 2 (unproductive, revision still 0).
+		await gate.event(idle('healthy-session'));
+		await gate.event(idle('healthy-session'));
+		// Now the controller makes progress — revision bumps to 5.
+		await writeStateWithRevision('healthy-session', 5);
+		// Wake 3 sees revision 5 > lastSeenRevision 0 → progress → counter resets.
+		await gate.event(idle('healthy-session'));
+		// Wake 4 (revision unchanged at 5 → unproductive again, counter→1).
+		await gate.event(idle('healthy-session'));
+		// Wake 5 (unproductive, counter→2 → suspend).
+		await gate.event(idle('healthy-session'));
+		// Wake 6 must be skipped.
+		await gate.event(idle('healthy-session'));
+		expect(promptAsync).toHaveBeenCalledTimes(5);
+	});
+
+	test('evicts the wake budget when the gate clears (state → null)', async () => {
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 1,
+			wakeCooldownMs: 0,
+		});
+		await writeStateWithRevision('cleared-session', 0);
+
+		// Wake once, then hit the budget on the next.
+		await gate.event({
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'cleared-session' },
+			},
+		});
+		await gate.event({
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'cleared-session' },
+			},
+		});
+		// Now suspended.
+		const budgetBeforeClear = gate._inspectWakeBudget('cleared-session');
+		expect(budgetBeforeClear?.suspended).toBe(true);
+
+		// Clear the gate (e.g. via abort or complete).
+		await clearPrWorkflowGateState(directory, 'cleared-session');
+		await gate.event({
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'cleared-session' },
+			},
+		});
+		// Budget must be evicted — a future activation of the same sessionID
+		// starts fresh, not stuck in the old suspended state.
+		expect(gate._inspectWakeBudget('cleared-session')).toBeUndefined();
+
+		// And textComplete stops rewriting once the gate is gone.
+		const output = { text: 'final real text' };
+		await gate.textComplete({ sessionID: 'cleared-session' }, output);
+		expect(output.text).toBe('final real text');
+	});
+
+	test('counts a failed resume prompt toward the budget (no unbounded loop)', async () => {
+		// Regression: if the host resume API keeps returning {error: ...} (rate
+		// limit, context length, model error), the budget MUST still advance so
+		// the session suspends. Otherwise the failing host recreates the exact
+		// unbounded auto-resume loop this module exists to prevent.
+		const promptAsync = mock(async () => ({
+			error: 'upstream rate limited',
+		}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 2,
+			wakeCooldownMs: 0,
+		});
+		await writeStateWithRevision('failing-host-session', 0);
+
+		const idle = {
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'failing-host-session' },
+			},
+		};
+		// Each wake throws because promptAsync returns {error}; the throw must
+		// NOT skip budget bookkeeping. After the configured budget of
+		// unproductive wakes, further idles stop calling promptAsync.
+		// Wake 1 (probe), wake 2 (unproductive, counter→1), wake 3
+		// (unproductive, counter→2 → suspend). Wake 4 must be skipped.
+		for (let i = 0; i < 3; i++) {
+			await gate.event(idle).catch(() => {
+				/* expected throw from the failing resume prompt */
+			});
+		}
+		await gate.event(idle).catch(() => {
+			/* the suspended path returns early, no throw */
+		});
+		expect(promptAsync).toHaveBeenCalledTimes(3);
+		const budget = gate._inspectWakeBudget('failing-host-session');
+		expect(budget?.suspended).toBe(true);
+		expect(budget?.consecutiveUnproductive).toBe(2);
 	});
 });

@@ -160,6 +160,11 @@ export const TOOL_METADATA = {
 			'validate terminal PR workflow evidence and clear its durable session gate',
 		agents: ['architect'],
 	},
+	abort_pr_workflow: {
+		description:
+			'abort an unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gate and clear its durable session state',
+		agents: ['architect'],
+	},
 	run_pr_feedback_stage_a: {
 		description:
 			'execute and persist mandatory PR-feedback Stage A checks on a content-bound revision',

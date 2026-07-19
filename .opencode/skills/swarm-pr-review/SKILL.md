@@ -1402,3 +1402,37 @@ trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime replaces architect final-response
 text with a mechanical blocked notice and re-wakes an idle parent session. Only
 emit the final report after the completion tool confirms that the gate cleared.
+
+## Aborting an unrecoverable review
+
+The mechanical gate can leave the session stuck if the PR head cannot be
+fetched or checked out — for example when a compound `git fetch … && git
+checkout …` is repeatedly rejected as read-only shell syntax (the runtime
+requires each git intake command to be a single standalone command), when
+the PR ref is missing, or when the working tree is on the wrong branch and
+the merge-base bind can never verify. In that state the response gate
+suspends further auto-resumes after a small number of consecutive
+unproductive wakes, and the only exits are:
+
+1. **Diagnose and retry as two separate standalone commands.** First run
+   `git fetch origin refs/pull/<N>/head:pr-<N>-head` (single command), then
+   `git checkout pr-<N>-head` (single command). Then recompute the exact
+   merge base with `git merge-base -- <base_ref> <pr_head_sha>` (single
+   command) and retry the `swarm-pr-review:base` dispatch with the exact
+   `pr_head_sha`, `base_sha`, and `base_ref`.
+2. **Call `abort_pr_workflow`** with `mode: "PR_REVIEW"` and a one-line
+   `reason` describing the blocker. The tool clears the durable gate state
+   and stops the auto-resume loop. It refuses while PR workflow lanes are
+   still in flight (collect their results with `collect_lane_results`
+   first) and refuses once a PR_FEEDBACK workflow is armed for publication
+   — in PR_REVIEW those refusals do not apply because there is no armed
+   publication state. An audit event is appended to `.swarm/events.jsonl`.
+3. **Ask the user to run `/swarm abort-pr-workflow`** (a human-only
+   restricted command; the agent cannot invoke it via `swarm_command`).
+   This is the recovery path when the wake budget has suspended and the
+   architect cannot make further tool progress.
+
+Abort is a recovery tool, not a coverage shortcut. Use it only when the
+bind/checkout path is genuinely unreachable; never use it to skip a
+coverage obligation that is merely expensive or inconvenient.
+

@@ -52,6 +52,17 @@ canonical workflow.
 - Call `complete_pr_workflow` before the user-facing final response. While the
   durable gate remains active, architect response text is mechanically replaced
   and an idle parent session is resumed rather than allowed to stop early.
+- If the bind/checkout path is genuinely unreachable (compound `git fetch … &&
+  git checkout …` repeatedly rejected as read-only shell syntax — run them as
+  TWO separate standalone commands first; or the PR ref is missing; or the
+  working tree cannot reach the PR head), call `abort_pr_workflow` with
+  `mode: "PR_REVIEW"` and a one-line `reason` instead of looping. The runtime
+  suspends auto-resume after a small number of consecutive unproductive wakes;
+  once suspended, the user must run `/swarm abort-pr-workflow` (a human-only
+  restricted command) or you must call `abort_pr_workflow` to clear the gate.
+  Abort refuses while PR workflow lanes are in flight (collect their results
+  first). Never abort as a coverage shortcut — only when the bind/checkout
+  path is genuinely unreachable.
 - If actionable findings remain, write the canonical handoff artifact and ask
   whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
   Carry validated findings forward with their original IDs and provenance.

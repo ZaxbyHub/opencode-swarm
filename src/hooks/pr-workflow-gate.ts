@@ -475,6 +475,101 @@ export async function clearPrWorkflowGateState(
 	});
 }
 
+/**
+ * Abort an active PR workflow gate without reaching terminal completion.
+ *
+ * This is the escape hatch for the deadlock where `/swarm pr-review` activates
+ * a PR_REVIEW gate without binding a PR head and the architect cannot reach
+ * `completePrWorkflow` (compound `git fetch && git checkout` rejected by the
+ * read-only shell classifier, missing PR ref, model confusion, etc.). Without
+ * this path the durable gate is permanent for the session and the response
+ * gate's auto-resume loop runs unbounded.
+ *
+ * Fail-closed semantics, checked in order:
+ *   1. Authorization: operates on the raw caller `sessionID` only. A lane or
+ *      child session whose ID has no gate record throws "no active gate" —
+ *      lanes must not abort the controller's gate.
+ *   2. Mode match when `expectedMode` is supplied.
+ *   3. Refuses while `prFeedbackReadyToPublish` is set — clearing an armed
+ *      gate would drop the immutable-commit binding and leave a half-published
+ *      commit. The tool gate refuses armed abort too (defense in depth).
+ *   4. Refuses while open `swarm-pr-*` delegations exist, matching
+ *      `completePrWorkflow` — aborting mid-flight would orphan running lanes.
+ *
+ * Records a non-fatal audit event into the existing `.swarm/events.jsonl`
+ * (no new ledger file), then delegates to `clearPrWorkflowGateState`.
+ */
+export async function abortPrWorkflow(
+	directory: string,
+	sessionID: string,
+	options: { expectedMode?: PrWorkflowMode; reason?: string } = {},
+): Promise<{
+	mode: PrWorkflowMode;
+	prHeadSha?: string;
+	openLanes: number;
+}> {
+	const state = await requireAnyActiveState(directory, sessionID);
+	if (options.expectedMode && state.mode !== options.expectedMode) {
+		throw wrongModeError(state, options.expectedMode);
+	}
+	if (state.prFeedbackReadyToPublish) {
+		throw new Error(
+			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.`,
+		);
+	}
+	const openLanes = readDelegations(directory).filter(
+		(record) =>
+			record.parentSessionId === state.sessionID &&
+			record.mode?.startsWith('swarm-pr-') &&
+			(record.status === 'pending' || record.status === 'running'),
+	);
+	if (openLanes.length > 0) {
+		const laneIds = openLanes
+			.map((record) => record.laneId ?? record.subagentSessionId ?? 'unknown')
+			.filter(Boolean)
+			.slice(0, 10)
+			.join(', ');
+		throw new Error(
+			`BLOCKED: ${state.mode} abort refused while ${openLanes.length} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
+		);
+	}
+	const sanitizedReason =
+		typeof options.reason === 'string'
+			? options.reason.trim().slice(0, 500)
+			: undefined;
+	const abortEvent = {
+		type: 'pr_workflow_aborted',
+		timestamp: isoNow(),
+		sessionID: state.sessionID,
+		mode: state.mode,
+		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+		openLanes: openLanes.length,
+		...(sanitizedReason ? { reason: sanitizedReason } : {}),
+	};
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await fsp.appendFile(
+			eventsPath,
+			`${JSON.stringify(abortEvent)}\n`,
+			'utf-8',
+		);
+	} catch {
+		// Non-fatal: the audit trail is best-effort. The gate must clear
+		// regardless so the deadlock does not persist because of a write error.
+	}
+	// Pass the revision snapshot as a CAS guard, matching completePrWorkflow's
+	// concurrency discipline: if the gate state changed between our reads and
+	// this clear, the clear is rejected and the caller revalidates. Self-heals
+	// on retry and prevents a late concurrent mutation from being silently
+	// dropped by our clear.
+	await clearPrWorkflowGateState(directory, sessionID, state.revision);
+	return {
+		mode: state.mode,
+		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+		openLanes: openLanes.length,
+	};
+}
+
 /** Bind an active PR workflow to one immutable PR head. */
 export async function bindPrWorkflowHead(
 	directory: string,
@@ -1636,6 +1731,14 @@ export async function enforcePrWorkflowToolBefore(
 		);
 	}
 	if (state.prFeedbackReadyToPublish) {
+		// NOTE: abort_pr_workflow is deliberately NOT allowed in the armed
+		// state. Clearing an armed gate would drop the immutable-commit /
+		// upstream binding and leave a half-published commit; once state is
+		// null, enforcePrWorkflowToolBefore returns early and arbitrary
+		// pushes would become allowed. abortPrWorkflow also refuses armed
+		// state at the hook level (defense in depth). The armed workflow
+		// must be completed (or explicitly un-armed by a human) before any
+		// abort path opens.
 		if (normalizedTool === 'complete_pr_workflow') return;
 		if (isNamedReadOnlyTool) return;
 		if (
@@ -1683,6 +1786,13 @@ export async function enforcePrWorkflowToolBefore(
 		!isCoderTask
 	)
 		return;
+	// abort_pr_workflow is a pure escape hatch, not a publication-adjacent
+	// operation. It must be reachable from a bound-but-unverified PR_FEEDBACK
+	// state — that is exactly the deadlock scenario it exists to resolve
+	// (architect cannot complete the ordered gates). The hook itself enforces
+	// the armed-state refusal, so letting it past the verification gate here
+	// does not weaken publication safety.
+	if (normalizedTool === 'abort_pr_workflow') return;
 	await assertPrFeedbackVerificationSettled(directory, sessionID);
 }
 
@@ -2007,6 +2117,7 @@ function containsProtectedWorkflowPath(value: string): boolean {
 }
 
 const PR_WORKFLOW_CONTROLLER_TOOLS = new Set([
+	'abort_pr_workflow',
 	'collect_lane_results',
 	'complete_pr_workflow',
 	'dispatch_lanes_async',
