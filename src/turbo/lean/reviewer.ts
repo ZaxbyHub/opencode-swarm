@@ -607,12 +607,15 @@ export async function dispatchPhaseReviewer(
 			// Advance to the next model immediately on a transient/quota error — an
 			// instant same-model retry cannot clear an exhausted quota.
 			maxTransientRetriesPerModel: 0,
-			classify: (err) =>
-				isTransientProviderError(
-					err instanceof Error ? err.message : String(err),
-				)
-					? 'transient'
-					: 'permanent',
+			classify: (err) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				// A reviewer dispatch TIMEOUT is not a provider transient — keep
+				// the existing fail-closed-then-REJECTED behavior instead of
+				// failing over (a slow call on one model does not predict quota
+				// exhaustion on the next). Mirrors the runner lane-timeout carve-out.
+				if (/Reviewer dispatch timed out/i.test(msg)) return 'permanent';
+				return isTransientProviderError(msg) ? 'transient' : 'permanent';
+			},
 			onFallback: ({ toModel, fallbackIndex }) => {
 				telemetry.modelFallback(
 					sessionID,

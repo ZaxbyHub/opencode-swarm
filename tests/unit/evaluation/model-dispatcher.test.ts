@@ -213,3 +213,143 @@ describe('evaluation model dispatcher', () => {
 		);
 	});
 });
+
+/**
+ * #1896: the evaluation dispatcher retries a transient/quota error on the SAME
+ * model (never substitutes a fallback — `request.modelId` is the benchmark
+ * subject, so substitution would corrupt attribution). Each failed attempt's
+ * session is cleaned up via `boundedDelete` before the retry so no ephemeral
+ * session leaks. After `maxSameModelRetries` (2) the enriched error string
+ * records the retry count. A permanent error short-circuits with no retry.
+ */
+describe('evaluation model dispatcher — same-model quota retry (#1896)', () => {
+	// fakeClient variant whose `prompt` records every call's body.model and can
+	// be programmed to throw a quota error N times before succeeding.
+	function fakeClientWithRetryPrompt(opts: {
+		failTimes: number;
+		errorMessage: string;
+		succeedText?: string;
+	}) {
+		let promptCalls = 0;
+		let deleteCalls = 0;
+		const modelsRequested: Array<unknown> = [];
+		const client = {
+			app: {
+				agents: async () => ({ data: [{ name: 'reviewer' }] }),
+			},
+			session: {
+				create: async () => ({ data: { id: `session-${++promptCalls}` } }),
+				prompt: async (req: { body: { model?: unknown } }) => {
+					modelsRequested.push(req.body?.model);
+					// Throw the configured error for the first `failTimes` calls.
+					// Use promptCalls as the monotonic counter (incremented in create).
+					const attempt = promptCalls;
+					if (attempt <= opts.failTimes) {
+						throw new Error(opts.errorMessage);
+					}
+					return {
+						data: {
+							info: assistantInfo,
+							parts: [
+								{
+									type: 'text',
+									text: opts.succeedText ?? '{"v":1,"caught":true}',
+								},
+							],
+						},
+					};
+				},
+				delete: async () => {
+					deleteCalls++;
+					return {};
+				},
+			},
+		} as never;
+		return {
+			client,
+			modelsRequested: () => modelsRequested,
+			deleteCalls: () => deleteCalls,
+		};
+	}
+
+	test('retries a quota error on the SAME model and eventually succeeds (no substitution)', async () => {
+		// Fail twice on quota, succeed on the 3rd attempt (initial + 2 retries).
+		const fake = fakeClientWithRetryPrompt({
+			failTimes: 2,
+			errorMessage: '429 insufficient_quota: usage limit exceeded',
+		});
+		const dispatch = createEvaluationModelDispatcher(fake.client);
+		const result = await dispatch(
+			request({ modelId: 'bench-provider/bench-model', timeoutMs: 5_000 }),
+		);
+
+		// Recovered → completed.
+		expect(result.status).toBe('completed');
+		// Every prompt attempt used the SAME requested model — NO fallback
+		// substitution (the benchmark-attribution invariant).
+		expect(fake.modelsRequested()).toHaveLength(3);
+		for (const model of fake.modelsRequested()) {
+			expect(model).toEqual({
+				providerID: 'bench-provider',
+				modelID: 'bench-model',
+			});
+		}
+		// The result is attributed to the requested subject model (actual-model
+		// from assistantInfo is reported, but the request was never substituted).
+		expect(result.modelId).toBe('actual-provider/actual-model');
+	});
+
+	test('cleans up each failed attempt session before retrying (no leak)', async () => {
+		// Fail once on quota, succeed on the 2nd attempt.
+		const fake = fakeClientWithRetryPrompt({
+			failTimes: 1,
+			errorMessage: '429 insufficient_quota: usage limit exceeded',
+		});
+		const dispatch = createEvaluationModelDispatcher(fake.client);
+		const result = await dispatch(request({ timeoutMs: 5_000 }));
+
+		expect(result.status).toBe('completed');
+		// 2 prompt attempts → 1 failed session cleaned up mid-retry + 1 final
+		// session cleaned up in the finally clause = at least 2 deletes. (The
+		// mid-retry boundedDelete fires for attempt 1's session; the finally
+		// fires for attempt 2's session.)
+		expect(fake.deleteCalls()).toBeGreaterThanOrEqual(2);
+	});
+
+	test('enriches the error string with the retry count when quota exhausts all retries', async () => {
+		// Fail on every attempt (initial + 2 retries = 3 quota failures).
+		const fake = fakeClientWithRetryPrompt({
+			failTimes: 5,
+			errorMessage: '429 insufficient_quota: usage limit exceeded',
+		});
+		const dispatch = createEvaluationModelDispatcher(fake.client);
+		const result = await dispatch(request({ timeoutMs: 5_000 }));
+
+		// All 3 attempts (1 initial + 2 retries) burned on the same model.
+		expect(result.status).toBe('error');
+		expect(fake.modelsRequested()).toHaveLength(3);
+		// The enriched error records that the same model was retried 2 times and
+		// was NOT substituted (benchmark-attribution preservation).
+		expect(typeof result.error).toBe('string');
+		expect(result.error as string).toContain(
+			'retried the same model 2 time(s) — not substituted',
+		);
+		expect(result.error as string).toContain('quota/usage limit');
+	});
+
+	test('does NOT retry a permanent (non-transient, non-quota) error', async () => {
+		// 401 unauthorized is permanent — no retry, immediate error return.
+		const fake = fakeClientWithRetryPrompt({
+			failTimes: 5,
+			errorMessage: '401 unauthorized: invalid api key',
+		});
+		const dispatch = createEvaluationModelDispatcher(fake.client);
+		const result = await dispatch(request({ timeoutMs: 5_000 }));
+
+		expect(result.status).toBe('error');
+		// Only ONE prompt attempt — no retry on a permanent error.
+		expect(fake.modelsRequested()).toHaveLength(1);
+		// No quota-suffix enrichment on a non-quota error.
+		expect(result.error).toBe('401 unauthorized: invalid api key');
+	});
+});

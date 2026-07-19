@@ -108,4 +108,35 @@ describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 		// Only the primary was attempted — no fallover on a permanent error.
 		expect(calls).toEqual([undefined]);
 	});
+
+	test('a reviewer dispatch timeout is permanent (no failover) — pins the defense-in-depth carve-out', async () => {
+		// The classify step explicitly treats "Reviewer dispatch timed out" as
+		// permanent (mirroring the lane runner). Even though today's transient
+		// classifier does not match the spaced "timed out" token anyway, this
+		// pins the carve-out so a future timeout-message rewording that DOES
+		// match cannot silently start burning the fallback chain.
+		const calls: Array<string | undefined> = [];
+		_internals.dispatchReviewerAgent = async (
+			_dir,
+			_pkg,
+			_agent,
+			_timeout,
+			_parent,
+			model,
+		) => {
+			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+			throw new Error('Reviewer dispatch timed out after 60000ms');
+		};
+
+		const result = await dispatchPhaseReviewer(
+			'/tmp/does-not-matter',
+			1,
+			'sess-timeout',
+			{ reviewerAgent: 'reviewer', timeoutMs: 0 },
+		);
+
+		expect(result.verdict).toBe('REJECTED');
+		// Only the primary attempted — timeout is permanent, no failover.
+		expect(calls).toEqual([undefined]);
+	});
 });
