@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.125.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.3...v7.125.4) (2026-07-19)
+
+
+### Bug Fixes
+
+* **delegation:** encoding-robust ACCEPTANCE checks, model quota failover, scope-activation + interpreter-eval shell-write fixes ([2616988](https://github.com/ZaxbyHub/opencode-swarm/commit/2616988a72f64be055f24e21c1d3b75367129e5e))
+* **guardrails:** stop hard-blocking `python -m <module>` shell commands ([#1902](https://github.com/ZaxbyHub/opencode-swarm/issues/1902)) ([713e1b1](https://github.com/ZaxbyHub/opencode-swarm/commit/713e1b1e0abf4b40576b489562d8e072ad0c775a))
+* **scope:** activate coder scope bindings from the real Task event shape ([e5d7865](https://github.com/ZaxbyHub/opencode-swarm/commit/e5d78652786406d1680823931be73e14d20a36a4))
+* **session:** detect model divergence + silent cross-interrupt switch for the architect ([#1896](https://github.com/ZaxbyHub/opencode-swarm/issues/1896)) ([eacb1a2](https://github.com/ZaxbyHub/opencode-swarm/commit/eacb1a2cc267a6b3a78562b92564c2e0ef372ae0))
+
 ## [7.125.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.2...v7.125.3) (2026-07-19)
 
 
