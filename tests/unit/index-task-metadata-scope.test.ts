@@ -167,6 +167,46 @@ describe('production Task metadata scope activation', () => {
 		).resolves.toBeUndefined();
 	});
 
+	// Newer opencode ALSO emits metadata.parentSessionId on task parts. The
+	// handler must activate on that shape too while IGNORING the metadata parent
+	// (parent identity comes from the runtime-assigned part.sessionID). Kept as a
+	// SEPARATE test so the previous one stays a pure v1.1.x fixture — the shape
+	// whose absence of parentSessionId caused the original bug.
+	test('activates on the newer runtime shape (metadata also carries parentSessionId)', async () => {
+		const currentPlan = plan();
+		const { plugin } = await bootAndDispatch(currentPlan);
+
+		await plugin.event?.({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						id: 'part-id',
+						sessionID: PARENT_SESSION,
+						callID: TASK_CALL_ID,
+						type: 'tool',
+						tool: 'task',
+						state: {
+							metadata: {
+								parentSessionId: PARENT_SESSION,
+								sessionId: CHILD_SESSION,
+								model: 'some/model',
+							},
+						},
+					},
+				},
+			},
+		});
+		expect(
+			getAuthorizedScopeBinding({
+				directory,
+				plan: currentPlan,
+				taskId: '1.1',
+				activeSessionId: CHILD_SESSION,
+			}),
+		).not.toBeNull();
+	});
+
 	test('a text part with task-like metadata never activates (spoof guard)', async () => {
 		const currentPlan = plan();
 		const { plugin } = await bootAndDispatch(currentPlan);
