@@ -83,7 +83,7 @@ If this changeset edited any SKILL.md file's wording, also run `file:.swarm/bund
 
 ## Step 1 - Commit and PR titles
 
-Use `<type>(<scope>): <description>` exactly.
+Use conventional commit format `<type>(<scope>): <description>` exactly.
 
 - description is lowercase and does not end with a period
 - allowed types: `feat`, `fix`, `perf`, `revert`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`
@@ -139,18 +139,7 @@ Do not manually edit:
 - `CHANGELOG.md`
 - `.release-please-manifest.json` — exception: reconciliation when the manifest desyncs from actual releases (see below)
 
-### Release-please manifest desync
-
-`.release-please-manifest.json` is the version source of truth for release-please. If it desyncs from the actual published release (e.g., `7.26.0` in manifest but `v7.27.1` on GitHub), release-please will propose a version that goes backwards.
-
-**Common cause:** An older release PR (e.g., `chore(main): release 7.26.0`) merges after a newer one (`chore(main): release 7.27.1`). Both PRs modify the manifest, so the later one to merge wins — regardless of which version is higher.
-
-**Detection:** If a release-please PR proposes a version that seems too low, check:
-1. `gh release list --limit 5` — what's the latest published release?
-2. `git show origin/main:.release-please-manifest.json` — what does the manifest say?
-3. If different, the manifest is desynced.
-
-**Fix:** Open a PR that updates `.release-please-manifest.json` to match the actual latest release (e.g., `"7.27.1"`). Close the incorrect release PR with explanation. After the manifest fix merges, release-please will auto-create a correct release PR.
+For the full release-please manifest desync diagnosis and fix protocol, read `references/pr-incident-playbook.md`.
 
 ## Step 3 - Mandatory validation suite
 
@@ -158,8 +147,7 @@ Run the full validation stack before pushing. The exact commands may be narrowed
 
 ### Pre-flight
 
-`dist/` is generated output and is **not** committed (#1047). Confirm the build still
-succeeds and the bundle loads — do not stage `dist/`:
+`dist/` is not committed (#1047) — do not stage it. Confirm the build succeeds:
 
 ```bash
 bun run build
@@ -286,62 +274,17 @@ This requires `actions: write` permission on the base repository. See the `fork-
 
 Before `git push`, run both checks:
 
-#### Push protection scan
+1. **Push protection scan** — scan for literal secret patterns that trigger GitHub push protection:
+   ```bash
+   git log origin/main..HEAD -p | grep -E 'sk_live|ghp_|xox[abprs]-|AKIA|eyJ|AIza' || true
+   ```
+2. **Canonical remote resolution** — push to the canonical-org remote, not a personal fork:
+   ```bash
+   git remote -v   # identify the org-owned remote
+   git push -u <canonical-remote> <branch>
+   ```
 
-GitHub push protection blocks commits containing literal secret patterns. This bit the
-first commit of PR #1472 — a test file with a literal `sk_live_*` Stripe fixture
-pattern was pushed before the string-concatenation workaround was applied.
-
-**The primary check (pre-push, after commit exists):**
-
-```bash
-git log origin/main..HEAD -p | grep -E 'sk_live|ghp_|xox[abprs]-|AKIA|eyJ|AIza' || true
-```
-
-**The optional pre-commit add-on (staged changes only):**
-
-```bash
-git diff --cached | grep -E 'sk_live|ghp_|xox[abprs]-|AKIA|eyJ|AIza' || true
-```
-
-Forbidden patterns: Stripe (`sk_live_*`), GitHub (`ghp_*`), Slack (`xox[abprs]-*`),
-AWS (`AKIA*`), JWT (`eyJ*`), Google API (`AIza*`).
-
-**The fix:** Construct test fixtures via string concatenation rather than literal
-patterns. For example:
-
-```typescript
-// Wrong — triggers push protection:
-const stripeKey = 'sk_live_' + '1234567890abcdefghijklmn'
-
-// Right — split the literal so it never appears verbatim in source:
-const stripeKey = 'sk_' + 'live_' + '1234567890abcdefghijklmn'
-```
-
-> **Note:** This scan is a best-effort heuristic. It will not catch deliberately obfuscated patterns (e.g., base64 or hex encoding, runtime string assembly). For genuinely sensitive keys, use environment variables or a secret store — never commit credentials to source.
-
-#### Canonical remote resolution
-
-When a repo has multiple remotes (e.g. `zaxbysauce/opencode-swarm` and
-`ZaxbyHub/opencode-swarm`), pushing to the wrong remote causes `gh pr create` to
-fail with "No commits between <canonical>:main and <mirror>:<branch>". This happened
-on PR #1472.
-
-**The check:** `git remote -v` before push. Identify the canonical-org remote.
-
-**The rule:** Push to the canonical-org remote explicitly:
-
-```bash
-git push -u <canonical-remote> <branch>
-```
-
-Create the PR against the canonical repo:
-
-```bash
-gh pr create --repo <canonical-org>/<repo>
-```
-
-**Heuristic for identifying the canonical remote:** the canonical remote is the one whose URL points to the owning organization (e.g. `github.com/<org>/<repo>.git`), not a personal fork or mirror. When the owning org differs from the local fork's owner, the org-owned remote is canonical. Example: `github.com/ZaxbyHub/opencode-swarm.git` is canonical; `github.com/zaxbysauce/opencode-swarm.git` is a personal fork.
+For full details, patterns, workarounds, and anecdotes, read `references/pr-incident-playbook.md`.
 
 ## Step 6 - PR creation
 
@@ -430,7 +373,7 @@ The issue comment must include:
 3. how to use it
 4. migration steps or "No migration required"
 
-PowerShell-safe pattern:
+Uses the same UTF-8-no-BOM file-write pattern as Step 6 above.
 
 ````powershell
 $comment = @"
@@ -458,23 +401,7 @@ If the PR merged before this was done, post the missing issue comment immediatel
 
 ## Commit messages
 
-`git commit -m "..."` with parens, brackets, backticks, or dollar-signs in the message fails on PowerShell because the shell parses them as expressions. Write the commit message to a UTF-8 (no BOM) file first and use `git commit -F <file>`.
-
-PowerShell-safe pattern:
-
-```powershell
-$msg = @"
-<type>(<scope>): <description>
-
-<optional body — note this is for the git commit message, NOT the PR body>
-"@
-$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
-$commitMsgPath = Join-Path ([System.IO.Path]::GetTempPath()) "commit-msg.txt"
-[System.IO.File]::WriteAllText($commitMsgPath, $msg, $utf8NoBom)
-git commit -F $commitMsgPath
-```
-
-Apply this pattern for any commit message containing special characters, multi-paragraph bodies, or code blocks. The plain `git commit -m "..."` form remains fine for short single-line messages with no special characters.
+PowerShell parens/brackets/backticks/dollar-signs in `git commit -m "..."` fail. Use the same UTF-8-no-BOM file-write pattern (see Step 6), then `git commit -F <file>`.
 
 ## Step 7 - Existing PR follow-up and closeout
 
@@ -517,33 +444,7 @@ conflict is resolved.
 
 ### GitHub auto-merge race condition
 
-With a merge queue enabled, prefer queuing over manual freshness rebases, which
-avoids this race entirely. It can still occur if you rebase manually: when `main`
-advances while your PR is open, GitHub's PR sync machinery may **automatically push a
-merge commit to your branch** in the window between when you fetch and when you push.
-This is distinct from a conflict — it is GitHub creating a merge commit on your behalf
-without rebuilding generated outputs (lockfiles, etc.).
-
-Symptoms:
-- `git push` is rejected with "fetch first" even though you just fetched
-- `git log HEAD..origin/<branch>` shows a commit authored by GitHub/the repo owner with message `Merge branch 'main' into <branch>`
-- generated outputs (e.g. lockfiles) on that auto-merge commit are stale because it was not rebuilt
-
-Recovery:
-```bash
-git fetch origin <branch>
-git log HEAD..origin/<branch>   # confirm it's only the GitHub auto-merge
-# Your local commit is correct. Force-push it:
-git push origin <branch> --force-with-lease
-```
-
-After force-pushing, verify the PR head SHA updated and cancel any CI run
-targeting the superseded auto-merge SHA to unblock concurrency:
-
-```powershell
-gh run list --branch <branch> --limit 5 --json databaseId,headSha,status,workflowName
-gh run cancel <stale-run-id>
-```
+With a merge queue enabled, prefer queuing over manual freshness rebases. If you encounter "fetch first" errors after a fresh fetch, GitHub may have auto-pushed a merge commit. Recovery: force-push your local commit with `--force-with-lease`. See `references/pr-incident-playbook.md` for full diagnosis and recovery steps.
 
 ### Check closeout
 

@@ -649,7 +649,7 @@ rather than preview-text extraction:
 4. Stage reviewer-sized chunks, but do not dispatch reviewers yet. Phase 4 must
    complete trigger accounting and settle every launched micro-lane first.
 
-If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE from Phase 3 with a structured async retry using the applicable workflow mode and the same exact `pr_head_sha`. If the gap cannot be closed, stop and surface the lane failure to the user as BLOCKED. Do not use blocking or direct-Task fallbacks, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview.
+If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE (Phase 3). Do not use blocking or direct-Task fallbacks, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
 candidate ledger using the Review Finding Persistence contract. This is the
@@ -782,12 +782,7 @@ errors, zero malformed rows, and a complete, non-degraded source:
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
-Header-only or malformed zero output is `UNATTESTED` and must follow the
-canonical COVERAGE GATE retry path. Only the structured async PR-workflow path
-preserves the required `L1`, exact-head, batch, and workflow-lane provenance;
-the active controller rejects blocking and direct-Task substitutes. Task-derived
-findings or CLEAN prose cannot satisfy Phase 4; if bounded structured retries
-cannot produce an artifact, the phase is BLOCKED.
+Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). The structured async PR-workflow path is required to preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes. Task-derived findings or CLEAN prose cannot satisfy Phase 4.
 
 Each micro-lane receives:
 
@@ -1041,7 +1036,7 @@ BLOCKED. Terminal critic rows are cross-field checked: `DISPROVED` requires
 `NONE`, `UPHELD` requires CRITICAL/HIGH/MEDIUM, and `DOWNGRADED` cannot remain
 CRITICAL.
 
-**COVERAGE GATE alignment:** Critic lane failures follow the same COVERAGE GATE as explorer lanes: retry (max 2 attempts) with materially different parameters using `dispatch_lanes_async`, `mode: "swarm-pr-review:critic"`, and the same exact `pr_head_sha`. Blocking and direct-Task fallbacks are not provenance-equivalent and are rejected. If no structured retry closes coverage, stop and surface the critic-lane failure to the user as BLOCKED — do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
+**COVERAGE GATE alignment:** Critic lane failures apply the COVERAGE GATE (Phase 3) using `dispatch_lanes_async` with `mode: "swarm-pr-review:critic"` and the same exact `pr_head_sha`. Do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
 
 Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.
 
@@ -1170,240 +1165,7 @@ Update the verdict only after re-verifying all previously blocking findings.
 
 ---
 
-## Dry-Run: Parser-Based Candidate Extraction
-
-This section demonstrates the new parser-based extraction path end-to-end
-using synthetic data. It is concrete enough to implement the same pattern in
-another skill.
-
-### Scenario
-
-A PR review has dispatched six base explorer lanes via `dispatch_lanes_async`.
-The batch completed and `collect_lane_results` returned:
-
-```json
-{
-  "batch_id": "batch-a1b2c3",
-  "lane_results": [
-    {
-      "lane_id": "pr_review_lane1_correctness",
-      "status": "completed",
-      "output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "output_degraded": false
-    },
-    {
-      "lane_id": "pr_review_lane2_security",
-      "status": "completed",
-      "output_ref": "L1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-      "output_degraded": false
-    }
-  ]
-}
-```
-
-### Step 1 — Call the parser
-
-The orchestrator calls `parse_lane_candidates` for each `output_ref`:
-
-```json
-{
-  "tool": "parse_lane_candidates",
-  "arguments": {
-    "output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "producer": "swarm-pr-review",
-    "expected_family": "base_explorer"
-  }
-}
-```
-
-### Step 2 — Structured response
-
-The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_code` are absent:
-
-```json
-{
-  "candidates": [
-    {
-      "record_type": "candidate",
-      "row_format_family": "base_explorer",
-      "row_format_version": 1,
-      "record_version": { "major": 1, "minor": 1 },
-      "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "source_batch_id": "B-2025-06-22-001",
-      "source_lane_id": "explorer-1",
-      "source_agent": "paid_explorer",
-      "source_digest": "sha256:abc123def456...",
-      "extracted_from_partial_source": false,
-      "sessionId": "ses_01HXYZ...",
-      "parentSessionId": "ses_01HABC...",
-      "producer": "swarm-pr-review",
-      "candidate_id": "C-001",
-      "lane": "Lane 1: Correctness and edge cases",
-      "micro_lane": null,
-      "severity": "HIGH",
-      "category": "null-safety",
-      "file_line": "src/utils/cache.ts:142",
-      "claim": "Uncached getter may return undefined on cold start",
-      "evidence_summary": "The `getCached` function returns `cache[key]` without a fallback when the cache is empty.",
-      "impact_context": "Downstream callers in `src/handlers/*.ts` expect a defined value and call `.toString()` directly.",
-      "invariant_violated": null,
-      "confidence": "HIGH"
-    },
-    {
-      "record_type": "candidate",
-      "row_format_family": "base_explorer",
-      "row_format_version": 1,
-      "record_version": { "major": 1, "minor": 1 },
-      "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "source_batch_id": "B-2025-06-22-001",
-      "source_lane_id": "explorer-1",
-      "source_agent": "paid_explorer",
-      "source_digest": "sha256:abc123def456...",
-      "extracted_from_partial_source": false,
-      "sessionId": "ses_01HXYZ...",
-      "parentSessionId": "ses_01HABC...",
-      "producer": "swarm-pr-review",
-      "candidate_id": "C-002",
-      "lane": "Lane 1: Correctness and edge cases",
-      "micro_lane": null,
-      "severity": "MEDIUM",
-      "category": "async-ordering",
-      "file_line": "src/services/queue.ts:88",
-      "claim": "Race between `drain` and `processNext` may drop items",
-      "evidence_summary": "`drain` sets `active = false` before awaiting `processNext`, which also checks `active`.",
-      "impact_context": "Items submitted during the drain window are silently dropped.",
-      "invariant_violated": null,
-      "confidence": "MEDIUM"
-    }
-  ],
-  "invocation_envelope": {
-    "record_type": "invocation",
-    "source_output_ref": "L1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "source_batch_id": "B-2025-06-22-001",
-    "source_lane_id": "explorer-1",
-    "source_agent": "paid_explorer",
-    "source_digest": "sha256:abc123def456...",
-    "row_format_version": 1,
-    "record_version": { "major": 1, "minor": 1 },
-    "sessionId": "ses_01HXYZ...",
-    "parentSessionId": "ses_01HABC...",
-    "producer": "swarm-pr-review",
-    "produced_at": "2025-06-22T14:30:00.000Z",
-     "format_families_detected": ["base_explorer"],
-     "candidate_count": 2,
-     "parse_errors": 0,
-     "malformed_rows": 0,
-     "clean_attestation_count": 0
-  },
-  "diagnostics": {
-    "candidate_count": 2,
-    "parse_errors": 0,
-    "parse_error_details": [],
-    "malformed_rows": 0,
-    "duplicate_id_count": 0,
-    "duplicate_id_warnings": [],
-    "degraded_source_count": 0,
-    "incomplete_source_count": 0,
-     "format_families_detected": ["base_explorer"],
-     "clean_attestation_count": 0
-   }
-}
-```
-> **Note**: callers pass `expected_family` for each dispatch batch. A recognizable
-> conflicting header fails closed with `expected-family-mismatch`; when the flag
-> is absent, the recognized header controls the mapping and positional detection
-> is only a legacy unknown-header fallback. Marker-prefixed data rows remain
-> accepted for compatibility. Valid canonical rows produce `parse_errors: 0`.
-
-On refusal (e.g. `output_ref` does not exist), `error` and `error_code` are present; `candidates` is `[]`; `invocation_envelope` and `diagnostics` are populated with empty fields for traceability:
-
-```json
-{
-  "error": "Artifact reference not found in store",
-  "error_code": "ref-not-found",
-  "candidates": [],
-  "invocation_envelope": {
-    "record_type": "invocation",
-    "source_output_ref": "L1:1111111111111111111111111111111111111111111111111111111111111111:2222222222222222222222222222222222222222222222222222222222222222:3333333333333333333333333333333333333333333333333333333333333333",
-    "source_batch_id": "",
-    "source_lane_id": "",
-    "source_agent": "",
-    "source_digest": "",
-    "row_format_version": 1,
-    "record_version": { "major": 1, "minor": 1 },
-    "produced_at": "2025-06-22T14:30:00.000Z",
-    "format_families_detected": [],
-    "candidate_count": 0,
-    "parse_errors": 0,
-    "malformed_rows": 0,
-    "clean_attestation_count": 0
-  },
-  "diagnostics": {
-    "candidate_count": 0,
-    "parse_errors": 0,
-    "parse_error_details": [],
-    "malformed_rows": 0,
-    "duplicate_id_count": 0,
-    "duplicate_id_warnings": [],
-    "degraded_source_count": 0,
-    "incomplete_source_count": 0,
-    "format_families_detected": [],
-    "clean_attestation_count": 0
-   }
-}
-```
-
-### Step 3 — Filter and group
-
-The orchestrator filters the returned `candidates[]` array by `producer: "swarm-pr-review"` and the exact allowed `source_batch_id` / `source_lane_id` tuples, then groups
-the candidates. In this synthetic example, the two candidates above are grouped
-by file area:
-
-- **Chunk A — `src/utils/`** (1 candidate): C-001
-- **Chunk B — `src/services/`** (1 candidate): C-002
-
-If there were more candidates, the orchestrator would also group by category
-(e.g., `null-safety`, `async-ordering`) and cap each chunk at 50 candidates.
-
-### Step 4 — Dispatch reviewer lanes
-
-The orchestrator dispatches one reviewer lane per chunk:
-
-```text
-You are the independent reviewer. Validate only the candidates assigned below.
-Do not search for new issues except where needed to validate reachability or
-mitigation. Do not trust explorer severity.
-
-Context pack summary:
-- scope: ...
-- obligations: ...
-- impact cone: ...
-- deterministic signals: ...
-- relevant Swarm artifacts / knowledge: ...
-- base_ref: <commit SHA of base branch>
-- head_ref: <commit SHA of PR head branch>
-
-Candidates (Chunk A — src/utils/):
-- C-001 | HIGH | null-safety | src/utils/cache.ts:142 | Uncached getter may return undefined on cold start
-
-For each candidate, return:
-[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
-
-You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
-
-IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you MUST read the equivalent code on the base branch (git show <base_ref>:<file>) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
-```
-
-### Key invariants
-
-- The parser reads the **full artifact**, not a preview. Truncation in the
-  `dispatch_lanes` preview does not affect candidate extraction.
-- The orchestrator never classifies candidates — it only filters, groups, and
-  routes them.
-- Each reviewer receives a bounded chunk. A chunk with more than 50 candidates
-  is split before dispatch.
-- The `invocation_envelope` in the parser response provides audit provenance
-  for every extracted candidate.
+For the full parser-based candidate extraction dry-run example, read `references/parser-dry-run.md`.
 
 ---
 
@@ -1522,7 +1284,7 @@ If any reviewer lane lacks a parseable `[REVIEWED]` row after bounded
 re-dispatch, the reviewer dimension is BLOCKED. Do not infer or silently
 downgrade a verdict.
 
-**COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage (lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry), the Pre-Synthesis Gate FAILS. Do not proceed to final output. Surface the unclosed gaps to the user as BLOCKED with exact failing dimensions and retry/equivalence evidence. Do not include partial findings from successful dimensions, do not issue a review verdict, and do not silently accept reduced coverage.
+**COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage (lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry), the Pre-Synthesis Gate FAILS — apply the COVERAGE GATE (Phase 3). Do not proceed to final output. Surface unclosed gaps with exact failing dimensions and retry/equivalence evidence.
 
 ---
 
@@ -1630,109 +1392,7 @@ Use this exact continuation prompt format:
 
 ---
 
-# Reviewer Prompt Template
-
-Use this template when dispatching reviewer subagents:
-
-```text
-You are the independent reviewer. Validate only the candidates assigned below.
-Do not search for new issues except where needed to validate reachability or mitigation.
-Do not trust explorer severity.
-
-Context pack summary:
-- scope: ...
-- obligations: ...
-- impact cone: ...
-- deterministic signals: ...
-- relevant Swarm artifacts / knowledge: ...
-- base_ref: <commit SHA of base branch>
-- head_ref: <commit SHA of PR head branch>
-
-Candidates:
-- ...
-
-For each candidate, return:
-[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
-
-You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
-
-IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you MUST read the equivalent code on the base branch (git show <base_ref>:<file>) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
-```
-
----
-
-# Critic Prompt Template
-
-Use this template when dispatching critic subagents:
-
-```text
-You are the adversarial critic. Challenge only reviewer-confirmed findings assigned below.
-Your goal is to reduce false positives, severity inflation, and non-actionable reports.
-
-For each finding, challenge:
-- whether evidence proves the claim,
-- whether the path is reachable,
-- whether mitigations apply,
-- whether severity is inflated,
-- whether it is PR-introduced,
-- whether suggested fixes are safe/actionable,
-- whether related files were missed,
-- whether multiple findings should be grouped.
-
-Return:
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
-
-REQUIRED FINAL LINE — your final line MUST be exactly the row above (no variations, no labeled fields, no placeholders):
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
-
-A response without this exact row is treated as a planning preamble and re-dispatched. Do not output only a planning or investigation message.
-```
-
----
-
-# Explorer Prompt Template
-
-Use this template when dispatching base explorer or micro-lane agents:
-
-```text
-You are an explorer. Optimize for recall, not final judgment.
-Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
-
-Lane:
-Scope:
-base_ref:
-head_ref:
-Obligations:
-Changed files/hunks:
-Impact cone:
-Relevant deterministic signals:
-Relevant Swarm artifacts / knowledge:
-Checklist:
-
-You must inspect or mark unavailable:
-1. changed hunk,
-2. caller/consumer,
-3. callee/dependency,
-4. sibling implementation or prior pattern,
-5. nearest test or missing-test location,
-6. deterministic signals,
-7. Swarm artifacts/knowledge,
-8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
-
-Return:
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
-Emit the marker-bearing header once, then unprefixed data rows.
-For a clean micro-lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
-For a clean base lane, emit `[CLEAN] | workflow_lane | coverage_scope | evidence`.
-```
-
-The orchestrator extracts candidates from the full lane artifact via
-`parse_lane_candidates` as the primary mechanism. The `[CANDIDATE]` row
-format above is a fallback convention for environments where the parser is
-unavailable. Explorers should still emit structured records regardless of
-whether the parser is present.
-
-Do not let speed degrade validation quality.
+For reviewer, critic, and explorer prompt templates, read `references/prompt-templates.md`.
 
 After metrics and durable review artifacts are complete, but before emitting the
 user-facing final report, call `complete_pr_workflow` with mode `PR_REVIEW` and

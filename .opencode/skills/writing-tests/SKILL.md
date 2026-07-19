@@ -619,44 +619,6 @@ authority checks:
 
 For the full splitting protocol (describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, cascading-split detection), read `file:.swarm/bundled-skills/test-file-split/SKILL.md`.
 
-### Checking file length
-
-```bash
-# Check a single file
-wc -l tests/unit/scripts/my-test.test.ts
-
-# Find all test files exceeding 400 lines (early warning threshold)
-find tests/ -name "*.test.ts" -exec wc -l {} \; | sort -rn | awk '$1 > 400'
-```
-
-### Splitting pattern
-
-When a test file approaches or exceeds 500 lines, split it by extracting cohesive `describe()` blocks into a new file with a descriptive suffix:
-
-1. **Identify natural boundaries.** Group `describe()` blocks by functional area (e.g., SHA resolution, validation, merge logic).
-2. **Create the new file** with a descriptive suffix: `<module>-<area>.test.ts` (e.g., `release-notes-fragments-sha.test.ts`, `release-notes-fragments-validation.test.ts`).
-3. **Move shared imports and helpers.** Either:
-   - Duplicate shared imports in both files (simple, for small overlap), OR
-   - Extract shared test helpers to a utility module (e.g., `tests/helpers/<module>-shared.ts`) and import from both files (preferred for complex shared setup).
-4. **Extract testable pure functions.** If the source module has inline validation logic (e.g., `isValidPrNumber`), extract it as an exported pure function so both test files can target it independently.
-5. **Verify both files are under 500 lines.**
-6. **Run both files independently AND co-run** to verify no mock isolation breakage:
-   ```bash
-   bun --smol test tests/unit/scripts/release-notes-fragments.test.ts --timeout 60000
-   bun --smol test tests/unit/scripts/release-notes-fragments-sha.test.ts --timeout 60000
-   bun --smol test tests/unit/scripts/release-notes-fragments*.test.ts --timeout 60000
-   ```
-
-### When to split vs refactor
-
-- **Split** when there are natural `describe()` boundaries (e.g., one file per functional area).
-- **Refactor** when the file is a single monolithic test with no clear boundaries — consolidate test logic instead.
-- **Warning:** If a previously split file exceeds 500 lines again, the test suite is structurally too large. Reorganize by module rather than continuing to split.
-
-### Reference
-
-See PR #1762 for a real-world example: `release-notes-fragments.test.ts` was split into `release-notes-fragments.test.ts` (379 lines) + `release-notes-fragments-sha.test.ts` (261 lines).
-
 ## Cross-Entry Invariants (config maps)
 
 When you modify any entry of a "map of agents/tools/roles" in `src/config/constants.ts` (`AGENT_TOOL_MAP`, `DEFAULT_MODELS`, `QA_AGENTS`, `PIPELINE_AGENTS`, etc.) or tool-name registration in `src/tools/tool-names.ts`, there are tests that assert **parity across sibling entries**, not just shape of one entry.
@@ -847,50 +809,7 @@ try {
 
 ## Running Tests
 
-### bash (Linux / macOS)
-
-```bash
-# Single file
-bun test src/hooks/scope-guard.test.ts
-
-# Batch directory (safe for dirs without mock conflicts)
-bun --smol test tests/unit/hooks --timeout 30000
-
-# Per-file loop (required for tools/services/agents — prevents mock poisoning)
-for f in tests/unit/tools/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-
-# CI-equivalent run for batch steps (step 2: cli; step 3: commands + config)
-bun --smol test tests/unit/cli --timeout 120000
-bun --smol test tests/unit/commands tests/unit/config --timeout 120000
-```
-
-### PowerShell (Windows)
-
-```powershell
-# Single file
-bun test src/hooks/scope-guard.test.ts
-
-# Batch directory (safe for dirs without mock conflicts)
-bun --smol test tests/unit/hooks --timeout 30000
-
-# Per-file loop (required for tools/services/agents — prevents mock poisoning)
-Get-ChildItem tests/unit/tools/*.test.ts | ForEach-Object { bun --smol test $_.FullName --timeout 30000 }
-
-# CI-equivalent run for batch steps (step 2: cli; step 3: commands + config)
-bun --smol test tests/unit/cli --timeout 120000
-bun --smol test tests/unit/commands tests/unit/config --timeout 120000
-
-# Capture output to file (avoids truncation when output is large)
-bun --smol test tests/unit/agents --timeout 60000 | Out-File "$env:TEMP\test_out.txt"; Get-Content "$env:TEMP\test_out.txt" | Select-Object -Last 50
-```
-
-**Note:** `for f in ...; do` bash syntax is invalid in PowerShell. Use `Get-ChildItem | ForEach-Object` instead. `Select-String -Last N` is also invalid — use `Select-Object -Last N`.
-
-**Warning:** Running `bun --smol test tests/unit/tools` as a single batch will cause mock poisoning failures. Always use the per-file loop for the per-file-isolation steps (1a, 1b, 4-6: tools, services, agents, etc.).
-
-The `--smol` flag reduces Bun's memory footprint. Use it when running large directories (50+ files).
-
-The `--timeout 120000` flag sets per-test timeout to 120 seconds. Individual tests should complete in under 5 seconds. If a test needs more than 10 seconds, it's doing too much — split it or mock the slow dependency.
+For the full test execution commands (bash and PowerShell per-file isolation loops, CI integration), read `file:.swarm/bundled-skills/running-tests/SKILL.md`. The key principle: always run one test file per process (`bun --smol test <file> --timeout 30000`) to prevent `mock.module` cross-contamination.
 
 ## Before Submitting
 
@@ -905,44 +824,6 @@ The `--timeout 120000` flag sets per-test timeout to 120 seconds. Individual tes
 
 Pre-existing and flaky failures are tracked in the per-platform quarantine ledgers (`scripts/ci/quarantined-tests.txt`, `quarantined-tests-macos.txt`, `quarantined-tests-windows.txt`), not in this skill. To confirm a failure is pre-existing, reproduce it in a clean worktree on `origin/main` (see the worktree verify protocol in `running-tests`).
 
-## Known Cross-module mock.module Locations
+## Mock and Seam Inventories
 
-The following directories contain test files that use cross-module `mock.module` (permitted under two-tier convention):
-
-- `tests/unit/commands/` — mocks tools, hooks, services, state
-- `tests/unit/hooks/` — mocks knowledge-store, knowledge-validator, knowledge-reader, telemetry, utils
-- `tests/unit/tools/` — mocks Node built-ins (fs, child_process), sast-baseline, build/discovery
-- `tests/unit/services/` — mocks path-security
-- `tests/unit/config/` — mocks node:fs/promises
-- `tests/unit/background/` — mocks utils, event-bus, evidence-summary-service
-- `tests/unit/council/` — mocks node:fs
-- `tests/unit/plan/` — mocks spec-hash
-- `tests/unit/mutation/` — mocks node:child_process
-- `tests/unit/git/` — mocks node:child_process
-- `tests/integration/` — mocks co-change-analyzer, knowledge-store
-- `src/__tests__/` — mocks plan/manager, preflight-service, telemetry
-- `src/hooks/` — mocks logger, event-bus
-- `src/tools/__tests__/` — mocks test-impact/analyzer, build/discovery, path-security
-- `src/mutation/__tests__/` — mocks state
-- `src/agents/` — mocks node:fs/promises
-- `src/background/` — mocks vulnerability trigger
-
-## Dead-code _internals Seams
-
-The following source modules export `_internals` but have no test consumers (as of this writing). They are harmless but may be removed in future cleanup:
-
-- `src/tools/secretscan.ts`
-- `src/tools/knowledge-recall.ts`
-- `src/tools/lint.ts`
-- `src/tools/sast-scan.ts`
-- `src/tools/sast-baseline.ts`
-- `src/mutation/gate.ts`
-- `src/mutation/equivalence.ts`
-- `src/mutation/engine.ts`
-- `src/db/qa-gate-profile.ts`
-- `src/config/schema.ts`
-- `src/config/index.ts`
-- `src/commands/registry.ts`
-- `src/background/manager.ts`
-- `src/background/event-bus.ts`
-- `src/agents/critic.ts`
+For the current cross-module `mock.module` location inventory and dead-code `_internals` seam inventory, read `references/mock-and-seam-inventory.md`.

@@ -486,7 +486,10 @@ describe('Failure case — artifact_status: ref-not-found', () => {
 
 	test('documented refusal JSON includes both CLEAN counters', () => {
 		const skill = fs.readFileSync(
-			path.join(process.cwd(), '.opencode/skills/swarm-pr-review/SKILL.md'),
+			path.join(
+				process.cwd(),
+				'.opencode/skills/swarm-pr-review/references/parser-dry-run.md',
+			),
 			'utf-8',
 		);
 		const refusalStart = skill.indexOf(
