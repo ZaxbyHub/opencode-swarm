@@ -22,6 +22,11 @@ const skillContent = readFileSync(SKILL_PATH, 'utf-8');
 
 describe('.opencode/skills/phase-wrap/SKILL.md ACCEPTANCE coverage (issue: architect-acceptance-criteria)', () => {
 	it('mentions ACCEPTANCE at least 2 times (phase council + final council reviewer dispatches)', () => {
+		// Sanity floor only — catches a total wipe of ACCEPTANCE from the skill.
+		// Does NOT pin each of the 2 sites individually: each reminder line
+		// contributes ~3 ACCEPTANCE substrings, so a single remaining site
+		// satisfies this floor. The per-site `it` blocks below (step 5.65 and
+		// step 5.7) are the load-bearing guards.
 		const matches = skillContent.match(/ACCEPTANCE/g) || [];
 		expect(matches.length).toBeGreaterThanOrEqual(2);
 	});

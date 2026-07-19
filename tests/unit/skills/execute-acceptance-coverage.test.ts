@@ -21,10 +21,13 @@ const skillContent = readFileSync(SKILL_PATH, 'utf-8');
 
 describe('.opencode/skills/execute/SKILL.md ACCEPTANCE coverage (issue: architect-acceptance-criteria)', () => {
 	it('mentions ACCEPTANCE at least 5 times across the delegation-construction sites', () => {
-		// Floor catches the regression where the skill was silent (0 mentions).
-		// Five sites: retry template, 5b coder, 5j reviewer, 5j-COUNCIL, 5k
-		// security-reviewer (5k dispatches the canonical reviewer too, and the
-		// gate at delegation-gate.ts:2014 does not exempt security-only reviews).
+		// Sanity floor only — catches a total wipe of ACCEPTANCE from the skill.
+		// Does NOT pin each of the 5 sites individually: each reminder line
+		// contributes 3-4 ACCEPTANCE substrings (ACCEPTANCE: + ACCEPTANCE FIELD
+		// RESOLUTION + ACCEPTANCE_FIELD_REQUIRED), so this floor is satisfied by
+		// ~2 of the 5 sites being present. The per-site `it` blocks below pin
+		// each location (retry template, 5b, 5j-COUNCIL, 5j, 5k) and are the
+		// load-bearing guards.
 		const matches = skillContent.match(/ACCEPTANCE/g) || [];
 		expect(matches.length).toBeGreaterThanOrEqual(5);
 	});

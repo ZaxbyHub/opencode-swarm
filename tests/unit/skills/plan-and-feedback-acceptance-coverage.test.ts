@@ -50,7 +50,10 @@ describe('.opencode/skills/swarm-pr-feedback/SKILL.md ACCEPTANCE coverage (issue
 		// declare_scope. The dispatch is still gated by ACCEPTANCE_FIELD_REQUIRED.
 		const idx = feedbackContent.indexOf('Carve-out for direct Task delegation');
 		expect(idx).toBeGreaterThan(-1);
-		const next = feedbackContent.indexOf('**Anti-pattern:**', idx);
+		// Slice to the next `##` markdown header rather than a cosmetic bold
+		// marker (e.g. `**Anti-pattern:**`) so the test is robust to harmless
+		// rebolding of unrelated section labels.
+		const next = feedbackContent.indexOf('\n## ', idx);
 		expect(next).toBeGreaterThan(idx);
 		const block = feedbackContent.slice(idx, next);
 		expect(block).toContain(
