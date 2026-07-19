@@ -333,6 +333,41 @@ describe('config-doctor artifact + schema sync (#1886)', () => {
 		}
 	});
 
+	it('excludes currentValue from the serialized artifact (PR #1890 review, security-2)', () => {
+		// writeDoctorArtifact whitelists which ConfigFinding fields it serializes
+		// for the GUI. currentValue can hold raw config content (e.g. the
+		// over-length fallback_models array); confirm it never reaches the
+		// on-disk artifact, not just that `lossy` happens to be present.
+		const dir = writeProject({
+			agents: {
+				architect: { model: 'k', fallback_models: overLongFallback() },
+			},
+		});
+		try {
+			const result = runConfigDoctor(loadPluginConfig(dir), dir);
+			const fbFinding = result.findings.find(
+				(f) => f.id === 'fallback-models-too-many',
+			);
+			// Sanity: the in-memory finding DOES carry currentValue (so this test
+			// actually exercises the artifact-serialization whitelist, not an
+			// already-absent value).
+			expect(fbFinding?.currentValue).toBeDefined();
+
+			const artifactPath = writeDoctorArtifact(dir, result);
+			const rawArtifact = fs.readFileSync(artifactPath, 'utf-8');
+			expect(rawArtifact).not.toContain('currentValue');
+
+			const artifact = JSON.parse(rawArtifact);
+			const fb = artifact.findings.find(
+				(f: { id: string }) => f.id === 'fallback-models-too-many',
+			);
+			expect(fb.currentValue).toBeUndefined();
+			expect(Object.keys(fb)).not.toContain('currentValue');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it('FALLBACK_MODELS_MAX matches the schema constraint', () => {
 		const okList = Array.from(
 			{ length: FALLBACK_MODELS_MAX },
