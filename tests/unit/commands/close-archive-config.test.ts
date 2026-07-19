@@ -249,4 +249,55 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 
 		expect(capturedDir).toBe(testDir);
 	});
+
+	it('forwards evidence.cache_max_bytes / cache_max_records to archiveEvidence (issue #1184)', async () => {
+		writePlan();
+		let capturedArgs: unknown[] = [];
+		closeInternals.loadPluginConfigWithMeta = () =>
+			makeConfig({
+				evidence: {
+					max_age_days: 30,
+					max_bundles: 10,
+					cache_max_bytes: 5_000_000,
+					cache_max_records: 5000,
+				},
+			});
+		closeInternals.archiveEvidence = mock(async (...args: unknown[]) => {
+			capturedArgs = args;
+			return [];
+		});
+
+		await handleCloseCommand(testDir, []);
+
+		// archiveEvidence(directory, maxAgeDays, maxBundles, options) — the
+		// 4th arg must be the report-options object carrying the cache caps.
+		expect(capturedArgs).toHaveLength(4);
+		expect(capturedArgs[0]).toBe(testDir);
+		expect(capturedArgs[1]).toBe(30);
+		expect(capturedArgs[2]).toBe(10);
+		const opts = capturedArgs[3] as Record<string, unknown>;
+		expect(opts.report).toBe(true);
+		expect(opts.cacheMaxBytes).toBe(5_000_000);
+		expect(opts.cacheMaxRecords).toBe(5000);
+	});
+
+	it('omits cache caps from archiveEvidence options when config does not set them', async () => {
+		writePlan();
+		let capturedArgs: unknown[] = [];
+		closeInternals.loadPluginConfigWithMeta = () =>
+			makeConfig({
+				evidence: { max_age_days: 30, max_bundles: 10 },
+			});
+		closeInternals.archiveEvidence = mock(async (...args: unknown[]) => {
+			capturedArgs = args;
+			return [];
+		});
+
+		await handleCloseCommand(testDir, []);
+
+		expect(capturedArgs).toHaveLength(4);
+		const opts = capturedArgs[3] as Record<string, unknown>;
+		expect(opts.cacheMaxBytes).toBeUndefined();
+		expect(opts.cacheMaxRecords).toBeUndefined();
+	});
 });

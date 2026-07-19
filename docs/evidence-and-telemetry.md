@@ -57,7 +57,7 @@ Full field definitions live in `src/config/evidence-schema.ts`.
 
 ### Retention
 
-Config keys (`src/config/schema.ts:179`):
+Config keys (`src/config/schema.ts` → `EvidenceConfigSchema`):
 
 | Key | Archive default | Finalize default | Range | Purpose |
 |-----|:---:|:---:|:---:|---------|
@@ -65,8 +65,63 @@ Config keys (`src/config/schema.ts:179`):
 | `max_age_days` | `90` | **30** | 1–365 | Age threshold for archiving |
 | `max_bundles` | `1000` | **10** | 10–10000 | Count cap |
 | `auto_archive` | `false` | `false` | — | Future gate (config-only) |
+| `cache_max_bytes` | _unset_ | _unset_ | 512 B–50 MiB | Optional documents-cache byte cap (issue #1184) |
+| `cache_max_records` | _unset_ | _unset_ | 10–100 000 | Optional documents-cache record cap (issue #1184) |
 
 `/swarm archive` applies two-tier retention: age first, then count. The same execution report includes ordinary evidence, generic evaluation runs, and gate-audit detail, and lists only successful deletions. `/swarm finalize` applies tighter retention (30 days / 10 bundles) to keep only recent evidence. Configure via `evidence.max_age_days` and `evidence.max_bundles` in your project config. Use `--dry-run` to preview.
+
+#### Documents cache retention (issue #1184)
+
+The web_search / web_fetch evidence cache at `.swarm/evidence-cache/documents.jsonl`
+is **append-only by default**. Records are written by `writeEvidenceDocuments`
+(`src/evidence/documents.ts`) on every search/fetch capture and are never removed
+unless you opt in to one or both of the cache retention caps:
+
+| Key | Default | Range | Effect |
+|-----|:---:|:---:|---|
+| `evidence.cache_max_bytes` | _unset_ (append-only) | 512 B–50 MiB | Prune oldest rows until the surviving file is at or below this size |
+| `evidence.cache_max_records` | _unset_ (append-only) | 10–100 000 | Prune oldest rows (by `capturedAt`) until the surviving record count is at or below this number |
+
+When either cap is set, `/swarm archive` and `/swarm finalize` also sweep the
+documents cache (in addition to evidence bundles) and the command report includes
+a **Documents cache** section showing inventory, pruned count, and byte size
+before/after. The prune is:
+
+- **Bounded:** the cache is streamed line-by-line with a hard 100 MiB read cap;
+  on breach the prune aborts and leaves the file byte-identical.
+- **Atomic:** surviving rows are written to a temp file, fsynced, then renamed
+  over the target with Windows-safe retry (`EPERM`/`EBUSY`/`ENOTEMPTY`/`EACCES`,
+  5× / 10 ms backoff). On any rewrite failure the temp file is removed and the
+  original is left untouched (fail-safe: no-change over partial-change).
+- **Corrupt-row tolerant:** lines that fail `JSON.parse` are dropped from the
+  rewrite and reported in the `corrupt` count. They are not relocated to a
+  sidecar — the bounded-growth contract requires that corrupt rows stop counting
+  toward caps.
+- **Project-root contained:** all paths route through `validateSwarmPath`; no
+  scan outside `.swarm/`.
+
+> **Append-vs-rewrite race (known, accepted):** the cache is NOT locked during
+> a prune. A concurrent `web_search`/`web_fetch` whose `appendFile` write is in
+> flight when the prune renames the temp file over the target will, on POSIX,
+> complete against the now-unlinked old inode — the appended row is silently
+> lost from the cache. On Windows the rename may contend (handled by retry) or
+> the appender may write into the replacement file. This data-loss window is
+> accepted because (a) evidence refs are content-addressed
+> (`evd_<sha256[:16]>`), so a lost row's ref re-materializes on the next capture
+> of the same content, and (b) the prune runs only via explicit `/swarm archive`
+> / `/swarm finalize`, not on every write. Locking the write path would tax
+> every `web_search` call and is deliberately avoided.
+
+**Example** — cap the cache at 5 MiB and 5000 records:
+
+```json
+{
+  "evidence": {
+    "cache_max_bytes": 5242880,
+    "cache_max_records": 5000
+  }
+}
+```
 
 ---
 

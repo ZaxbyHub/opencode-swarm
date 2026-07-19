@@ -599,6 +599,8 @@ Configure evidence bundle retention:
 | `max_age_days` | number | `90` | Archive evidence older than N days |
 | `max_bundles` | number | `1000` | Maximum evidence bundles before auto-archive |
 | `auto_archive` | boolean | `false` | Enable automatic archiving of old evidence |
+| `cache_max_bytes` | number | _unset_ | Optional byte cap (512 B–50 MiB) for the `web_search`/`web_fetch` documents cache (issue #1184). Unset = append-only. |
+| `cache_max_records` | number | _unset_ | Optional record-count cap (10–100 000) for the same cache. Unset = append-only. |
 
 ---
 

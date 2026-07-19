@@ -322,6 +322,25 @@ export const EvidenceConfigSchema = z.object({
 	max_age_days: z.number().min(1).max(365).default(90),
 	max_bundles: z.number().min(10).max(10000).default(1000),
 	auto_archive: z.boolean().default(false),
+	/**
+	 * Optional byte cap for the documents cache at
+	 * `.swarm/evidence-cache/documents.jsonl` (web_search / web_fetch captures).
+	 * When omitted, the cache is append-only by design (issue #1184). When set,
+	 * `/swarm archive` and `/swarm finalize` prune oldest rows until the
+	 * surviving file is at or below this size. Range: 512 B – 50 MiB.
+	 */
+	cache_max_bytes: z
+		.number()
+		.min(512)
+		.max(50 * 1024 * 1024)
+		.optional(),
+	/**
+	 * Optional record-count cap for the same documents cache. When omitted, no
+	 * count-based pruning. When set, oldest rows (by `capturedAt`) are pruned
+	 * until the surviving record count is at or below this number.
+	 * Range: 10 – 100 000.
+	 */
+	cache_max_records: z.number().min(10).max(100_000).optional(),
 });
 
 export type EvidenceConfig = z.infer<typeof EvidenceConfigSchema>;

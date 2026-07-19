@@ -1390,6 +1390,8 @@ Configurable via `evidence` config:
 - `max_age_days`: Archive evidence older than N days (default: 90)
 - `max_bundles`: Maximum evidence bundles before auto-archive (default: 1000)
 - `auto_archive`: Enable automatic archiving (default: false)
+- `cache_max_bytes`: Optional byte cap for the documents cache (issue #1184; 512 B–50 MiB; default unset = append-only)
+- `cache_max_records`: Optional record-count cap for the same cache (10–100 000; default unset)
 
 ---
 

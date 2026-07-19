@@ -244,7 +244,11 @@ Raw `api_finding` and `evidence` proposals are accepted as proposal records so
 they can be reviewed, rejected, or rephrased, but they are not directly
 promotable into durable memory. Keep raw API docs, search results, crawled
 pages, and bulky evidence in `.swarm/evidence-cache/documents.jsonl`; promote
-only the concise durable fact they support.
+only the concise durable fact they support. The cache is append-only by
+default; set `evidence.cache_max_bytes` and/or `evidence.cache_max_records`
+to opt in to bounded retention (see
+[docs/evidence-and-telemetry.md](evidence-and-telemetry.md#documents-cache-retention-issue-1184),
+issue #1184).
 
 Durable project, repository, and security memories require source evidence such as a file path, commit SHA, URL, test output reference, evidence ref, or manual reference.
 
