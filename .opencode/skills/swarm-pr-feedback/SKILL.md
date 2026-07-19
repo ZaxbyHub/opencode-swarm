@@ -101,75 +101,9 @@ rounds of review for N pushes, and budget for it.
 each round's work is bounded by new findings + carried-forward items only.
 This matches how the bot actually behaves and avoids wasted cycles.
 
-### Bot Review Verification Traps
+### Bot and Security Claim Verification
 
-When a bot or pasted review cites a code fact, verify the fact against the
-current branch before editing:
-
-- **Import/export claims:** Check the exact import path used by the changed file.
-  A symbol may be missing from an internal submodule but correctly exported by the
-  public barrel the tests or runtime actually import.
-- **Line numbers:** Treat bot line references as approximate after any follow-up
-  push or local edit. Re-locate the symbol or block with `rg` before patching.
-- **Ordering claims:** If the concern is about rule precedence, add or run a
-  direct precedence test that would fail under the wrong ordering; comments alone
-  are not enough.
-- **Disproved findings:** Do not change unrelated code to satisfy a false claim.
-  Keep the finding in the closure ledger with the source or test evidence that
-  disproves it.
-- **Cache/state claims:** Test both relevant state orders when the behavior
-  depends on cache priming, singleton state, or prior calls.
-
-### Automated Security Finding Verification
-
-This is a repository-agnostic verification checklist. Technology names and
-paths in the examples below are illustrative only: apply an example only when
-the reviewed repository actually uses that API, validator, runtime, or file
-layout, and otherwise translate the same origin-to-sink question to the
-repository's language and framework. No example creates a dependency on the
-opencode-swarm tree.
-
-Automated security bots can produce CRITICAL or HIGH false positives. Before
-acting on any bot security finding, perform these source-level checks:
-
-1. **`child_process.exec` vs `RegExp.exec`**: SAST rules pattern-match on
-   `.exec(` and cannot distinguish `child_process.exec(userInput)` (real
-   injection risk) from `/^pattern$/.exec(str)` (safe regex test). Read the
-   actual line to determine which `.exec` is called.
-
-2. **Schema validation already present**: Bots may flag "missing type
-   validation" without checking the Zod schema. Search for the field name in
-   `src/config/schema.ts` — `z.number().int()`, `z.string().min()`, etc. are
-   runtime validators that run before the code path the bot reviewed.
-
-3. **`Object.assign` mutation claims**: Bots may claim `Object.assign` mutates
-   the source object. Check whether the call is `Object.assign(target, source)`
-   (mutates target) vs `Object.assign({}, source)` or a manual copy loop into a
-   new `{}` (creates a new object, source is safe). Read the actual assignment.
-
-4. **Path containment for system-generated paths**: Bots may flag "path
-   traversal" on file paths. Check whether the path is user-controlled (real
-   risk) or system-generated from `provisionWorktree`, `mkdtempSync`, or
-   similar (no user input reaches the path). Trace the variable's origin.
-
-5. **Value validation vs key validation**: Bots may suggest validating env var
-   *values* for shell injection characters. Check whether the value is passed
-   through a sandbox executor that escapes arguments (e.g., `wrapCommand`
-   which returns a shell-quoted / `psStringEscape`-escaped string for the
-   `bunSpawn` array-form argv to consume). Value validation would break
-   legitimate env vars (PATH with `;`, URLs with `$`); escaping is the
-   sandbox's job — see `engineering-conventions` § "Sandbox env overrides"
-   for the full escape contract.
-
-6. **Deduplication for independent resources**: Bots may suggest deduplicating
-   cache redirects or env var entries. Check whether the entries map to
-   independent keys (different env var names) — independent keys cannot
-   "collide" and deduplication is nonsensical.
-
-**Rule:** For any bot finding rated CRITICAL or HIGH, read the actual source
-line AND its surrounding context (parent function, schema definition, type
-annotations) before accepting the finding. If the finding is disproved, record
-it in the closure ledger with the specific source evidence that disproves it.
+Before trusting automated review findings (SAST bots, security scanners, AI reviewers), apply the verification protocol in `references/bot-claim-verification.md`. Key principle: every bot claim is unverified until you reproduce the exact finding against the current HEAD with the exact tool and rule it names.
 
 ## Operating Stance
 
@@ -256,22 +190,12 @@ proceeding. The bundled `ci-failure-batching` skill is one conditional
 implementation; otherwise apply the host-neutral complete-ledger protocol
 below.
 
-The anti-pattern: iterating check-by-check, proposing a fix for one failure,
-pushing, waiting for CI, then discovering the next failure. Each cycle costs
-one push + one CI run.
+For the detailed 6-step batch collection protocol, read `file:.swarm/bundled-skills/ci-failure-batching/SKILL.md`. The steps below are a summary:
 
-**The fix:** Collect all failures and their logs in one batch operation before
-proposing any fix.
-
-1. `gh pr checks <n> --json name,bucket,state,link` — get every check,
-   its bucket/state, and the URL to its run details.
-2. Filter to failing checks (`bucket == "fail"` | `bucket == "cancel"`).
-3. For each failing check, extract the run ID from `link` and run
-   `gh run view <run-id> --log-failed` to fetch the full log output.
-4. Build a complete failure ledger: all checks + all failure logs collected.
-5. Triage the full ledger to identify root causes.
-6. Propose fixes for all failures in **one batch** — do not iterate
-   check-by-check through push cycles.
+1. `gh pr checks <number> --json name,bucket,state,link` to collect all check results
+2. Filter to `bucket == "fail"` or `bucket == "cancel"`
+3. `gh run view <id> --log-failed` for each failing run
+4. Group failures by root cause before fixing
 
 **Rule:** The complete failure ledger must be collected before any
 modification is proposed. Verifying the ledger is complete is a prerequisite
@@ -506,29 +430,9 @@ Verification checklist:
 - Check related tests and whether a failing/proposed test would prove the item.
 - Check whether multiple feedback items share one root cause.
 
-### DI seam migration validation (when the repository uses this pattern)
+### DI seam migration validation
 
-`_internals` and `mock.module()` below are JavaScript/TypeScript examples only.
-For another stack, apply the same live-binding question using that language and
-test runner's dependency-injection/mocking semantics.
-
-When a test file mutates a DI seam object (e.g., `_internals.foo = mock`),
-verify that the production source reads from the seam at call time. A common
-anti-pattern: the test mutates the seam object, but the production code
-imports the named function (`import { foo } from './module'`) which is bound
-at module load. The seam mutation has no effect on the named reference,
-so the test fails even though the seam object's `foo === mock`.
-
-Verification: open the source file and grep for call sites. If you see
-`import { foo } from '...'` followed by `foo(...)` in the production code,
-and the test does `_internals.foo = mock`, the test will fail. The fix is
-to change the production code to call `_internals.foo(...)` (or equivalent
-active-seam pattern) so the seam mutation is read at call time.
-
-If only a few call sites exist, fix them in the source. If many call sites
-exist, consider whether the migration should use `mock.module()` instead,
-which replaces the entire module object (including the named export
-reference).
+When the repository uses `_internals` seam / `mock.module()` patterns, apply the validation protocol in `references/operational-gotchas.md`.
 
 ## Fix Planning
 
@@ -571,27 +475,7 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
 
 ### Conditional runtime/host gotchas
 
-Apply each item below only when the named plugin tool, plan model, shell, or
-code-host client is actually present. They are portability examples, not
-requirements imposed on unrelated repositories.
-
- - **Plan identity change:** When switching from a review plan to a feedback-closure
-   plan, `save_plan` rejects with `PLAN_IDENTITY_MISMATCH`. Pass
-   `confirm_identity_change: true` to acknowledge the intentional overwrite.
- - **Stale gate evidence:** After a plan identity change, `check_gate_status` returns
-   timestamps from the *prior* plan. Reset task statuses and re-run Stage A gates
-   before trusting gate results. Do not accept cached gate verdicts from before the
-   identity change.
- - **PowerShell PR comment posting:** Complex markdown bodies containing backticks,
-   dollar signs, or nested quotes fail in PowerShell here-strings. Write the body
-   to a temp file and use `gh pr comment <number> --body-file <tempfile>` instead
-   of inline `--body "..."`.
- - **Same-file batching:** Multiple findings targeting the same file for the same
-   review cycle CAN be fixed in one coder task when the fixes are trivially
-   independent (e.g., a one-line guard and a typo fix). When findings require
-   different fixes on different code paths, use separate coder tasks even if
-   targeting the same file. The "ONE task per coder" rule is about distinct
-   objectives, not about N edits to one file.
+For portability gotchas (plan identity, stale gate evidence, PowerShell comment posting, same-file batching), read `references/operational-gotchas.md`.
 
 ## Mandatory Gates
 
