@@ -153,6 +153,19 @@ describe('model-divergence advisories (#1896)', () => {
 		expect(systemText(msgs)).toContain('MODEL CONFIG NOTE');
 	});
 
+	it('does NOT fire the config note while a fallback is active (avoids reading a mutated model)', async () => {
+		getAgentConfigs({
+			agents: { architect: { model: 'kimi-k3' } },
+		} as unknown as PluginConfig);
+		const hooks = createGuardrailsHooks(config());
+		const s = architectSession('sess-cfg-fb');
+		s.model_fallback_index = 1; // fallback in play — config/observed both unreliable
+
+		const msgs = [assistantMsg('sess-cfg-fb', 'nemotron-3', 'nvidia')];
+		await hooks.messagesTransform({}, { messages: msgs });
+		expect(systemText(msgs)).not.toContain('MODEL CONFIG NOTE');
+	});
+
 	it('does NOT fire divergence advisories on a subagent (non-architect) session', async () => {
 		const hooks = createGuardrailsHooks(config());
 		const s = ensureAgentSession('sess-coder', 'coder');

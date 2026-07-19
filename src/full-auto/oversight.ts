@@ -547,9 +547,18 @@ export async function dispatchFullAutoOversight(
 			dispatchError = undefined;
 			const nextModel = resolveOversightFallback(modelFallbackIndex + 1);
 			if (nextModel) {
+				// Advance the index FIRST so a malformed entry is skipped rather
+				// than re-resolved every retry (which would strand any valid
+				// fallback listed after it); only adopt the model on a clean parse.
+				modelFallbackIndex++;
+				let parsed: ModelOverride | undefined;
 				try {
-					modelOverride = parseModelString(nextModel);
-					modelFallbackIndex++;
+					parsed = parseModelString(nextModel);
+				} catch {
+					parsed = undefined; // malformed provider/model entry — skip it
+				}
+				if (parsed) {
+					modelOverride = parsed;
 					modelUsedLabel = nextModel;
 					const reason = isQuotaError(
 						lastError instanceof Error ? lastError.message : String(lastError),
@@ -566,8 +575,6 @@ export async function dispatchFullAutoOversight(
 						nextModel,
 						reason,
 					);
-				} catch {
-					// Malformed fallback config entry — keep the current model.
 				}
 			}
 		} else {

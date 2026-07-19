@@ -195,8 +195,15 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					session.resumeModelAdvisoryDone = true;
 				}
 
-				// (b) Config-vs-UI clarification (fires once per session).
-				if (!session.configModelAdvisoryDone) {
+				// (b) Config-vs-UI clarification (fires once per session). Gated on
+				// no fallback in play: the guardrails toolAfter path can mutate the
+				// architect's swarmAgents model to a fallback value, and the observed
+				// model would also be that fallback — both unreliable for a
+				// "config vs UI" comparison while a fallback is active.
+				if (
+					!session.configModelAdvisoryDone &&
+					session.model_fallback_index === 0
+				) {
 					const configuredArchitect = getSwarmAgents()?.architect?.model;
 					if (
 						configuredArchitect &&

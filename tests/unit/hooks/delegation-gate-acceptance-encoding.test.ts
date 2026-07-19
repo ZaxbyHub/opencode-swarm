@@ -14,10 +14,11 @@
  *     bounded diff with a corruption hint that names the encoding fault;
  *   - a genuinely-different ACCEPTANCE still MISSES (no bypass was opened).
  *
- * Every non-ASCII input is written as a \u escape so this test source stays
- * pure-ASCII on disk and cannot itself be mojibake'd or ambiguous (the
- * decomposed vs precomposed accent MUST be byte-distinct for its test to mean
- * anything).
+ * The non-ASCII fixtures below use literal characters (a UTF-8 source file). The
+ * one case that MUST be byte-distinct to be meaningful — decomposed vs
+ * precomposed accent — is guarded by an explicit `.not.toBe(...)` sanity assert
+ * in the NFC test, which fails loudly if the two literals ever collapse to the
+ * same bytes on disk (e.g. an editor NFC-normalizing the file).
  */
 
 import { describe, expect, it } from 'bun:test';
