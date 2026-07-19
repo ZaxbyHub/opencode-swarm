@@ -435,7 +435,7 @@ describe('knowledgeApplicationTransformScan', () => {
 	});
 });
 
-describe('gate escape hatches (#1690)', () => {
+describe('gate escape hatches (KNOWLEDGE_ENFORCE_GATE_DENY deadlock)', () => {
 	beforeEach(() => {
 		_internals.resetGateDenialCounts();
 	});
@@ -449,7 +449,10 @@ describe('gate escape hatches (#1690)', () => {
 			ids: [ID_A],
 			generatedAt: Date.now(),
 		});
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		// First 5 calls should throw
 		for (let i = 0; i < 5; i++) {
@@ -512,7 +515,10 @@ describe('gate escape hatches (#1690)', () => {
 			ids: [ID_A],
 			generatedAt: staleTime,
 		});
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		// Should NOT throw — directive is stale
 		await knowledgeApplicationGateBefore(
@@ -548,7 +554,10 @@ describe('gate escape hatches (#1690)', () => {
 			ids: [ID_A],
 			generatedAt: recentTime,
 		});
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		await expect(
 			knowledgeApplicationGateBefore(
@@ -565,7 +574,10 @@ describe('gate escape hatches (#1690)', () => {
 			ids: [ID_A, ID_B],
 			generatedAt: staleTime,
 		});
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		await knowledgeApplicationGateBefore(
 			tmp,
@@ -588,7 +600,10 @@ describe('gate escape hatches (#1690)', () => {
 			ids: [ID_A],
 			generatedAt: staleTime,
 		});
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		await knowledgeApplicationGateBefore(
 			tmp,
@@ -606,7 +621,10 @@ describe('gate escape hatches (#1690)', () => {
 			generatedAt: staleTime,
 		});
 		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-		const cfg = { ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' as const };
+		const cfg = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce' as const,
+		};
 
 		await knowledgeApplicationGateBefore(
 			tmp,

@@ -174,8 +174,7 @@ export async function knowledgeApplicationGateBefore(
 	// who is acked via the dedup set; do not re-parse text).
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
 		const maxDenials = config.max_gate_denials ?? DEFAULT_MAX_GATE_DENIALS;
-		const stalenessMs =
-			config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
+		const stalenessMs = config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
 
 		// Escape hatch 1: staleness — if the directive has been pending longer
 		// than the configured TTL, auto-clear and allow the action.
