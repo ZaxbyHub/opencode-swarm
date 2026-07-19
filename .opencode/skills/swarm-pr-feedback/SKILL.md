@@ -214,6 +214,7 @@ available scope controller merely to reduce ceremony.
 **When to use `declare_scope` (preferred):** any feedback round that touches 2+ files, OR any feedback round where the file scope is not 100% obvious from the prompt. Before delegating, save a minimal plan via `save_plan` with a single phase containing the feedback-closure tasks, then call `declare_scope` per task with the exact file list.
 
 **Carve-out for direct Task delegation:** 1-file, single-function changes where the file path appears verbatim in the coder's prompt may use direct `Task(subagent_type="<coder>", ...)` delegation without `declare_scope`, where `<coder>` is the active swarm's coder agent (e.g. `coder`, or `paid_coder` when the swarm id is `paid`). This is a narrow exception; the orchestrator is responsible for verifying the scope is unambiguous.
+→ REQUIRED: even under this carve-out, the direct Task dispatch MUST contain a literal `ACCEPTANCE:` line — resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt (one-line task-derived DONE restatement for the feedback fix, since feedback-closure runs typically have no fr_refs). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
 
 **Anti-pattern:** do not use `Task` delegation for multi-file feedback fixes just to skip `save_plan` — the loss of scope discipline is not worth the saved ceremony.
 

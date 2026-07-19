@@ -270,4 +270,54 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 		);
 		expect(reviewerExample).toContain('ACCEPTANCE_SATISFACTION');
 	});
+
+	// architect-acceptance-criteria: concrete (non-placeholder) examples +
+	// plan-task/delegation disambiguation. The #1687 examples used abstract
+	// placeholder brackets which licensed omission; these guard against a
+	// return to that shape.
+	it('39. coder delegation example ACCEPTANCE line is concrete (not the old placeholder)', () => {
+		const coderExampleIndex = prompt.indexOf(
+			'TASK: Add input validation to login',
+		);
+		expect(coderExampleIndex).toBeGreaterThan(-1);
+		const coderExampleEnd = prompt.indexOf(
+			'{{AGENT_PREFIX}}reviewer',
+			coderExampleIndex,
+		);
+		const coderExample = prompt.slice(coderExampleIndex, coderExampleEnd);
+		expect(coderExample).toContain('ACCEPTANCE: FR-');
+		// Forbid the old placeholder shape verbatim (regression guard).
+		expect(coderExample).not.toContain(
+			'ACCEPTANCE: [copied verbatim from spec.md',
+		);
+	});
+
+	it('40. reviewer delegation example ACCEPTANCE line is concrete (not the old placeholder)', () => {
+		const reviewerExampleIndex = prompt.indexOf(
+			'TASK: Review login validation',
+		);
+		expect(reviewerExampleIndex).toBeGreaterThan(-1);
+		const reviewerExampleEnd = prompt.indexOf(
+			'{{AGENT_PREFIX}}test_engineer',
+			reviewerExampleIndex,
+		);
+		const reviewerExample = prompt.slice(
+			reviewerExampleIndex,
+			reviewerExampleEnd,
+		);
+		expect(reviewerExample).toContain('ACCEPTANCE: FR-');
+		expect(reviewerExample).not.toContain(
+			'ACCEPTANCE: [copied verbatim from spec.md',
+		);
+	});
+
+	it('41. ACCEPTANCE FIELD RESOLUTION disambiguates plan-task acceptance from delegation ACCEPTANCE', () => {
+		// The plan-task `acceptance` field is a different concept from the
+		// per-delegation ACCEPTANCE: line. Without disambiguation the architect
+		// can conflate "I wrote acceptance on the plan task" with "the
+		// delegation prompt has its own ACCEPTANCE: line."
+		expect(prompt).toContain(
+			'plan-task `acceptance` field is a different thing',
+		);
+	});
 });

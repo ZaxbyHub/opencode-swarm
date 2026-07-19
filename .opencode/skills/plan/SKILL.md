@@ -283,6 +283,7 @@ TASK: Write the implementation plan to .swarm/plan.md
 OUTPUT: .swarm/plan.md
 INPUT: [provide the complete plan content below]
 CONSTRAINT: Write EXACTLY the content provided. Do not modify, summarize, or interpret.
+ACCEPTANCE: [REQUIRED on every coder Task dispatch — resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt. Plan-writing has no fr_refs, so use a one-line task-derived DONE restatement, e.g. "DONE = .swarm/plan.md contains the verbatim plan content provided, unmodified." A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.]
 
 TASK GRANULARITY RULES:
 - SMALL task: 1 file, 1 logical concern. Delegate as-is.

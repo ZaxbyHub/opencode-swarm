@@ -57,6 +57,7 @@ If `council.general.enabled` is true in the resolved opencode-swarm config AND a
     - **Important:** If research is ongoing, apply a fixed 5-minute protocol budget to `research_needed`. If research does not complete before the budget expires, automatically reclassify the item to `user_decision` with a note that research was incomplete, then surface it to the user. This prevents the clarification funnel from stalling while waiting for external research.
 - Cross-reference design sections by name where relevant context helps (but keep HOW out of the spec).
 - Delegate to `the active swarm's reviewer agent` for an independent review of the draft spec. Reviewer must flag: requirements that encode HOW, untestable requirements, missing edge cases, silent assumptions.
+    → REQUIRED: The reviewer Task dispatch MUST contain a literal `ACCEPTANCE:` line. This is a pre-plan spec review (no fr_refs yet), so resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt using a one-line task-derived DONE restatement, e.g. "DONE = reviewer flags HOW-encoded requirements, untestable requirements, missing edge cases, and silent assumptions in the draft spec." A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
 - Apply reviewer feedback. If reviewer rejects, iterate once and re-review. After two rounds, surface remaining disagreements to the user.
 - Before writing `.swarm/spec.md`, apply the FR-002 non-shadowing check: if a non-native spec already exists, do not shadow it (see MODE: SPECIFY step 1b).
 - Write the final spec to `.swarm/spec.md`.

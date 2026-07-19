@@ -38,6 +38,7 @@ TASK: Fix [gate name] failure
 FILE: [affected file(s)]
 INPUT: [exact error output from the gate]
 CONSTRAINT: Fix ONLY the reported issue, do not modify other code
+ACCEPTANCE: [resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt — REQUIRED on every coder/reviewer dispatch; a missing line is blocked by ACCEPTANCE_FIELD_REQUIRED. Copy the SAME ACCEPTANCE text used on the original coder dispatch for this task.]
 ✓ After coder returns, re-run the failed gate from the step that failed
 ✓ Print "Coder attempt [N/configured QA retry limit] on task [X.Y]"
 
@@ -56,6 +57,7 @@ All other gates: failure → return to coder. No self-fixes. No workarounds.
     → Subsequent `pre_check_batch` calls with `phase: <N>` will automatically diff against this baseline — only NEW findings (not in baseline) drive the fail verdict.
     -> PREFLIGHT CHECKLIST: Before first coder delegation, answer "SAST baseline captured before first coder delegation? yes/no/disabled/error". If the answer is no, do not delegate to coder; run 5b-BASE first. If disabled or error, record the exact tool result.
 5b. the active swarm's coder agent - Implement (if designer scaffold produced, include it as INPUT).
+    → REQUIRED: The coder Task dispatch MUST contain a literal `ACCEPTANCE:` line — resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt (verbatim FR/SC text when fr_refs is non-empty, otherwise a one-line task-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before the coder runs. Do NOT confuse the plan-task `acceptance` field with this per-dispatch header — both are required.
     → If this dispatch fails with `PLAN_CRITIC_GATE_VIOLATION`: the plan has no current critic-approved snapshot (commonly a plan approved before this mechanical gate existed). Do NOT retry the coder dispatch as-is — re-run MODE: CRITIC-GATE to get a fresh critic `APPROVED` verdict, then retry this step.
 5b-bis. **CODER OUTPUT VERIFICATION**: After the coder reports completion, do NOT accept the self-report alone. Run `diff` (step 5c) and inspect at least one of the modified files yourself to confirm the change exists. The coder may report DONE without having produced any diff. A 30-second read of the changed file(s) catches this failure mode. This is NOT a separate explorer dispatch — the existing `diff` tool at step 5c is the verification mechanism; the key discipline is checking that `diff` returns actual changes before proceeding, rather than forwarding the coder's self-report to the next gate.
 5c. Run `diff` tool. If `hasContractChanges` → the active swarm's explorer agent integration analysis. If COMPATIBILITY SIGNALS=INCOMPATIBLE or MIGRATION_SURFACE=yes → coder retry. If COMPATIBILITY SIGNALS=COMPATIBLE and MIGRATION_SURFACE=no → proceed.
@@ -105,6 +107,7 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     After Stage A (pre_check_batch) passes:
     1. Ensure `declare_council_criteria` was called for this task (prerequisite).
     2. Dispatch all 5 council members (critic, reviewer, sme, test_engineer, explorer) in PARALLEL with task-scoped context.
+       → REQUIRED: Any council member whose agent role is `coder` or `reviewer` MUST receive a Task prompt containing a literal `ACCEPTANCE:` line — resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt (same text as the coder delegation for this task). In the standard 5-member council only the reviewer member is gated (ACCEPTANCE_FIELD_REQUIRED); the wording covers coder too in case a future council profile includes one.
     3. Collect all 5 verdict objects. Do NOT fabricate or substitute verdicts.
     4. Call `submit_council_verdicts` with the collected verdicts.
     5. Act on the verdict: APPROVE → task passes. CONCERNS with `success: false` + `reason: 'blocking_concerns_unresolved'` → HIGH/CRITICAL findings are blocking, no evidence written, return to coder with requiredFixes and re-council after fixes. CONCERNS with `success: true` → only MEDIUM/LOW advisory findings, task passes. REJECT → return to coder with requiredFixes.
@@ -114,8 +117,10 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     For set-dispatch reviewer/test_engineer verdict rows that must be attributed to plan tasks, read `file:.swarm/bundled-skills/gate-attribution/SKILL.md`. Before re-dispatching a coder for a task that already has a lane (any prior dispatch status), read `file:.swarm/bundled-skills/worktree-retry-cleanup/SKILL.md`.
 
     5j. the active swarm's reviewer agent - General review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate.
+    → REQUIRED: The reviewer Task dispatch MUST contain a literal `ACCEPTANCE:` line — same text as the coder delegation for this task. Resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt. A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
     → REQUIRED: Print "reviewer: [APPROVED | REJECTED — reason]"
     5k. Security gate: if change matches TIER 3 criteria OR content contains SECURITY_KEYWORDS OR secretscan has ANY findings OR sast_scan has ANY findings at or above threshold → MUST delegate the active swarm's reviewer agent security-only review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate to user.
+    → REQUIRED: The security-reviewer Task dispatch MUST contain a literal `ACCEPTANCE:` line — same text as the coder delegation for this task (the security review is still a reviewer dispatch; the gate does not exempt security-only reviews). Resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt. A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
     → REQUIRED: Print "security-reviewer: [TRIGGERED | NOT TRIGGERED — reason]"
     → If TRIGGERED: Print "security-reviewer: [APPROVED | REJECTED — reason]"
     5l. the active swarm's test_engineer agent - Verification tests. FAIL → coder retry from 5g.
