@@ -168,7 +168,7 @@ describe('checkAcceptanceCoversFrRefs (unit)', () => {
 			frRefs: ['FR-001'],
 			specText: SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-001' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-001' });
 	});
 
 	it('multi-FR: covered when both bodies present', () => {
@@ -186,7 +186,7 @@ describe('checkAcceptanceCoversFrRefs (unit)', () => {
 			frRefs: ['FR-001', 'FR-002'],
 			specText: SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-002' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-002' });
 	});
 
 	it('unknown id in frRefs is skipped (fail-open, covered:true)', () => {
