@@ -1,0 +1,61 @@
+# Documents cache retention policy (issue #1184)
+
+The `web_search` / `web_fetch` evidence cache at
+`.swarm/evidence-cache/documents.jsonl` now has an explicit, configurable
+retention policy. Previously the cache was purely append-only with no TTL,
+size cap, prune, or cleanup command — long-running projects accumulated
+unbounded disk usage with no automatic or documented cleanup path.
+
+## What changed
+
+- **New optional config keys** under `evidence.*`:
+  - `cache_max_bytes` (range 512 B–50 MiB) — prune oldest cache rows until
+    the surviving file is at or below this size.
+  - `cache_max_records` (range 10–100 000) — prune oldest rows (by
+    `capturedAt`) until the surviving record count is at or below this number.
+  - When **both are unset** (the default), the cache remains append-only —
+    zero behavior change for existing users.
+- **`/swarm archive` and `/swarm finalize`** now also sweep the documents
+  cache when at least one cap is configured, and the command report includes
+  a **Documents cache** section showing inventory, pruned count, and byte
+  size before/after. Both commands support `--dry-run` to preview the prune.
+- **Bounded and safe by construction:**
+  - Streamed line-by-line read with a hard 100 MiB cap; on breach the prune
+    aborts and leaves the file byte-identical.
+  - Atomic rewrite via temp file + fsync + Windows-safe rename retry
+    (`EPERM`/`EBUSY`/`ENOTEMPTY`/`EACCES`, 5× / 10 ms backoff). On any
+    failure (open, write, fsync, or rename) the temp file is removed and the
+    original is left untouched (fail-safe: no-change over partial-change).
+  - Corrupt rows (failed `JSON.parse`) are dropped from the rewrite and
+    reported in the `corrupt` count — they stop counting toward caps.
+  - Project-root contained: all paths route through `validateSwarmPath`.
+- **No plugin-init work:** the prune runs only via `/swarm archive` and
+  `/swarm finalize`, never at plugin load.
+
+## Known append-vs-rewrite race (accepted)
+
+The cache is NOT locked during a prune. A concurrent `web_search`/`web_fetch`
+whose `appendFile` write is in flight when the prune renames the temp file
+over the target will, on POSIX, complete against the now-unlinked old inode —
+the appended row is silently lost from the cache. This data-loss window is
+accepted because evidence refs are content-addressed
+(`evd_<sha256[:16]>`), so a lost row's ref re-materializes on the next
+capture of the same content, and because the prune runs only via explicit
+`/swarm archive` / `/swarm finalize`. Locking the write path would tax every
+`web_search` call and is deliberately avoided.
+
+## Why no age-based pruning
+
+Evidence refs are content-addressed (`evd_<sha256[:16]>`). Age-based pruning
+would silently invalidate cited refs that agents may still hold in
+conversation. Byte/count caps bound disk usage without time-based ref
+invalidation.
+
+## Migration
+
+No migration required. Existing caches are untouched until a user opts in by
+setting one of the new config keys. See
+[docs/evidence-and-telemetry.md](../evidence-and-telemetry.md#documents-cache-retention-issue-1184)
+for the full contract.
+
+Closes #1184.

@@ -664,8 +664,22 @@ Controls evidence bundle archival for `/swarm finalize` and `/swarm archive`. Th
 | `max_age_days` | number | **30** | 90 | 1–365 | Age threshold for archiving |
 | `max_bundles` | number | **10** | 1000 | 10–10000 | Count cap |
 | `auto_archive` | boolean | `false` | `false` | — | Future gate (config-only) |
+| `cache_max_bytes` | number | _unset_ | _unset_ | 512 B–50 MiB | Optional byte cap for the web_search/web_fetch documents cache (issue #1184). When unset, the cache is append-only. |
+| `cache_max_records` | number | _unset_ | _unset_ | 10–100 000 | Optional record-count cap for the same documents cache. |
 
 > **Note:** `/swarm finalize` applies tighter retention (30 days / 10 bundles) by default to keep only recent evidence for the current project. `/swarm archive` targets long-term retention (90 days / 1000 bundles). Both are configurable via `evidence.max_age_days` and `evidence.max_bundles` in your project config.
+
+### Documents cache retention (issue #1184)
+
+The web_search / web_fetch evidence cache (`.swarm/evidence-cache/documents.jsonl`)
+is **append-only by default**. Set `evidence.cache_max_bytes` and/or
+`evidence.cache_max_records` to opt in to bounded retention — both `/swarm archive`
+and `/swarm finalize` will then prune oldest cache rows (by `capturedAt`) until
+the surviving file is within the configured cap(s). When neither cap is set, the
+cache grows without bound exactly as before. See
+[docs/evidence-and-telemetry.md](evidence-and-telemetry.md#documents-cache-retention-issue-1184)
+for the full bounded-prune contract (atomic rewrite, corrupt-row handling,
+read cap, append-vs-rewrite race tradeoff).
 
 **Example** — Tighten finalize retention:
 

@@ -1221,14 +1221,18 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 
 /**
  * Runs the evidence-retention sub-logic of STAGE 2 (ARCHIVE).
- * Reads max_age_days / max_bundles from config.evidence (FR-016) and
- * calls archiveEvidence. Fail-open: pushes a warning on error but never throws.
+ * Reads max_age_days / max_bundles / cache_max_bytes / cache_max_records from
+ * config.evidence (FR-016, issue #1184) and calls archiveEvidence. The report
+ * overload is used so the documents-cache prune runs when cache caps are set.
+ * Fail-open: pushes a warning on error but never throws.
  */
 export async function runArchiveEvidenceRetention(
 	ctx: ArchiveStageContext,
 ): Promise<void> {
 	let maxAgeDays = 30;
 	let maxBundles = 10;
+	let cacheMaxBytes: number | undefined;
+	let cacheMaxRecords: number | undefined;
 	try {
 		const { config: evidenceLoadedConfig } =
 			_internals.loadPluginConfigWithMeta(ctx.directory);
@@ -1242,12 +1246,27 @@ export async function runArchiveEvidenceRetention(
 		if (typeof evidenceCfg.max_bundles === 'number') {
 			maxBundles = evidenceCfg.max_bundles;
 		}
+		// Issue #1184: documents-cache retention caps. Only forwarded when set
+		// so the cache remains append-only by default.
+		if (typeof evidenceCfg.cache_max_bytes === 'number') {
+			cacheMaxBytes = evidenceCfg.cache_max_bytes;
+		}
+		if (typeof evidenceCfg.cache_max_records === 'number') {
+			cacheMaxRecords = evidenceCfg.cache_max_records;
+		}
 	} catch {
 		// Fallback to defaults on config read failure
 	}
 
 	try {
-		await _internals.archiveEvidence(ctx.directory, maxAgeDays, maxBundles);
+		// Use the report overload so the documents-cache sweep (issue #1184)
+		// runs when cache caps are configured. The report itself is not surfaced
+		// to the finalize summary; only warnings on failure.
+		await _internals.archiveEvidence(ctx.directory, maxAgeDays, maxBundles, {
+			report: true,
+			cacheMaxBytes,
+			cacheMaxRecords,
+		});
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Evidence retention archive failed: ${msg}`);

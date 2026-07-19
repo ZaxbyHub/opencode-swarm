@@ -27,6 +27,10 @@ import {
 	archiveEvaluationArtifacts,
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
+import {
+	type DocumentsRetentionResult,
+	pruneEvidenceDocuments,
+} from './documents-retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
@@ -653,12 +657,27 @@ export type EvidenceArchiveReport = {
 	archivedEvidence: string[];
 	failedEvidence: string[];
 	evaluation: EvaluationRetentionResult;
+	/**
+	 * Documents-cache retention result (issue #1184). Always present in the
+	 * report shape — a zeroed result ({ inventory: 0, selected: 0, ... })
+	 * indicates the cache was not pruned (no caps configured, file missing,
+	 * or prune disabled).
+	 */
+	documentsCache: DocumentsRetentionResult;
 };
 
 export type EvidenceArchiveReportOptions = {
 	report: true;
 	dryRun?: boolean;
 	now?: Date;
+	/**
+	 * Optional documents-cache retention caps (issue #1184). When either is a
+	 * positive number, `archiveEvidence` also prunes
+	 * `.swarm/evidence-cache/documents.jsonl` after the bundle/evaluation
+	 * sweep. When both are unset, the cache is left untouched (append-only).
+	 */
+	cacheMaxBytes?: number;
+	cacheMaxRecords?: number;
 };
 
 export function archiveEvidence(
@@ -744,6 +763,36 @@ export async function archiveEvidence(
 		now: options?.now,
 	});
 
+	// Documents-cache retention (issue #1184). Only runs when at least one cap
+	// is configured. Fail-open: a cache I/O error must never break the bundle
+	// archive. The zeroed result preserves the report shape for consumers.
+	let documentsCache: DocumentsRetentionResult = {
+		inventory: 0,
+		selected: 0,
+		archived: 0,
+		corrupt: 0,
+		bytesBefore: 0,
+		bytesAfter: 0,
+		dryRun: options?.dryRun === true,
+		aborted: false,
+	};
+	if (
+		(typeof options?.cacheMaxBytes === 'number' && options.cacheMaxBytes > 0) ||
+		(typeof options?.cacheMaxRecords === 'number' && options.cacheMaxRecords > 0)
+	) {
+		try {
+			documentsCache = await _internals.pruneEvidenceDocuments({
+				directory,
+				maxBytes: options?.cacheMaxBytes,
+				maxRecords: options?.cacheMaxRecords,
+				dryRun: options?.dryRun,
+			});
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			warn(`archiveEvidence: documents-cache prune failed (fail-open): ${msg}`);
+		}
+	}
+
 	if (options?.report) {
 		return {
 			inventoryEvidence: [...taskIds].sort(),
@@ -753,6 +802,7 @@ export async function archiveEvidence(
 			archivedEvidence: archived.sort(),
 			failedEvidence: failed.sort(),
 			evaluation,
+			documentsCache,
 		};
 	}
 	return archived.sort();
@@ -777,6 +827,7 @@ export const _internals: {
 	validateEvidence: typeof validateEvidence;
 	saveEvidence: typeof saveEvidence;
 	deleteEvidence: typeof deleteEvidence;
+	pruneEvidenceDocuments: typeof pruneEvidenceDocuments;
 	now: () => Date;
 } = {
 	wrapFlatRetrospective,
@@ -786,5 +837,6 @@ export const _internals: {
 	validateEvidence,
 	saveEvidence,
 	deleteEvidence,
+	pruneEvidenceDocuments,
 	now: () => new Date(),
 } as const;
