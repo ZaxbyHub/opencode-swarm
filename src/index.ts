@@ -1362,12 +1362,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 								status?: string | { type?: string };
 								part?: {
 									id?: string;
+									sessionID?: string;
 									callID?: string;
 									type?: string;
 									tool?: string;
 									state?: {
 										metadata?: {
-											parentSessionId?: string;
 											sessionId?: string;
 										};
 									};
@@ -1383,18 +1383,39 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						typeof part?.tool === 'string'
 							? normalizeToolName(part.tool)?.toLowerCase()
 							: undefined;
+					// Scope-activation event sourcing: the PARENT is the SDK-typed
+					// `part.sessionID` — the Task ToolPart lives in the parent
+					// (architect) session's message stream, and `sessionID` is required
+					// on every Part variant (same sourcing as the background
+					// completion-observer). The CHILD is `state.metadata.sessionId`,
+					// the key opencode's task tool emits at v1.1.x (upstream dev also
+					// adds metadata.parentSessionId, but 1.1.x-era runtimes never emit
+					// it — gating on it left bindings stuck at pending_child and every
+					// default-mode coder write failing SCOPE_NOT_DECLARED). Metadata is
+					// tool-controlled, so it is never trusted for the parent identity;
+					// empty/whitespace ids fail closed (no activation, no fallback).
+					const eventParentSessionID =
+						typeof part?.sessionID === 'string' && part.sessionID.trim() !== ''
+							? part.sessionID
+							: undefined;
+					const eventChildSessionID =
+						typeof metadata?.sessionId === 'string' &&
+						metadata.sessionId.trim() !== ''
+							? metadata.sessionId
+							: undefined;
 					if (
 						part?.type === 'tool' &&
 						partTool === 'task' &&
 						typeof part.callID === 'string' &&
 						part.callID.trim() !== '' &&
-						typeof metadata?.parentSessionId === 'string' &&
-						typeof metadata?.sessionId === 'string'
+						eventParentSessionID !== undefined &&
+						eventChildSessionID !== undefined &&
+						eventParentSessionID !== eventChildSessionID
 					) {
 						await delegationGateHooks.taskMetadata({
 							callID: part.callID,
-							parentSessionID: metadata.parentSessionId,
-							childSessionID: metadata.sessionId,
+							parentSessionID: eventParentSessionID,
+							childSessionID: eventChildSessionID,
 						});
 					}
 				}

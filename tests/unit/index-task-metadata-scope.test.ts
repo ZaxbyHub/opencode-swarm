@@ -67,8 +67,11 @@ describe('production Task metadata scope activation', () => {
 		fs.rmSync(directory, { recursive: true, force: true });
 	});
 
-	test('uses the Task ToolPart callID, not its distinct part id', async () => {
-		const currentPlan = plan();
+	/**
+	 * Boot the plugin, register the architect session, and dispatch the coder
+	 * Task so a pending_child scope binding is published for TASK_CALL_ID.
+	 */
+	async function bootAndDispatch(currentPlan: Plan) {
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		fs.writeFileSync(
 			path.join(directory, '.swarm', 'plan.json'),
@@ -105,34 +108,18 @@ describe('production Task metadata scope activation', () => {
 				},
 			} as never,
 		);
+		return { plugin, toolBefore, chatMessage };
+	}
 
-		await plugin.event?.({
-			event: {
-				type: 'message.part.updated',
-				properties: {
-					part: {
-						id: TASK_CALL_ID,
-						callID: TASK_CALL_ID,
-						type: 'text',
-						tool: 'Task',
-						state: {
-							metadata: {
-								parentSessionId: PARENT_SESSION,
-								sessionId: 'spoofed-child',
-							},
-						},
-					},
-				},
-			},
-		});
-		expect(
-			getAuthorizedScopeBinding({
-				directory,
-				plan: currentPlan,
-				taskId: '1.1',
-				activeSessionId: 'spoofed-child',
-			}),
-		).toBeNull();
+	// Issue #1896 follow-up (SCOPE_NOT_DECLARED): this event mirrors what the
+	// opencode task tool actually emits at v1.1.x — the ToolPart lives in the
+	// PARENT session's stream (part.sessionID = parent) and metadata carries ONLY
+	// { sessionId, model }. metadata.parentSessionId is NOT emitted on 1.1.x-era
+	// runtimes; the old handler required it and therefore never activated.
+	test('activates from the real runtime event shape (part.sessionID parent, metadata.sessionId child)', async () => {
+		const currentPlan = plan();
+		const { plugin, toolBefore, chatMessage } =
+			await bootAndDispatch(currentPlan);
 
 		await plugin.event?.({
 			event: {
@@ -140,13 +127,14 @@ describe('production Task metadata scope activation', () => {
 				properties: {
 					part: {
 						id: 'part-id-is-not-the-call-id',
+						sessionID: PARENT_SESSION,
 						callID: TASK_CALL_ID,
 						type: 'tool',
-						tool: 'Task',
+						tool: 'task',
 						state: {
 							metadata: {
-								parentSessionId: PARENT_SESSION,
 								sessionId: CHILD_SESSION,
+								model: 'some/model',
 							},
 						},
 					},
@@ -177,5 +165,109 @@ describe('production Task metadata scope activation', () => {
 				{ args: { path: 'src/index.ts', content: 'in scope' } } as never,
 			),
 		).resolves.toBeUndefined();
+	});
+
+	test('a text part with task-like metadata never activates (spoof guard)', async () => {
+		const currentPlan = plan();
+		const { plugin } = await bootAndDispatch(currentPlan);
+
+		await plugin.event?.({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						id: TASK_CALL_ID,
+						sessionID: PARENT_SESSION,
+						callID: TASK_CALL_ID,
+						type: 'text',
+						tool: 'task',
+						state: {
+							metadata: { sessionId: 'spoofed-child' },
+						},
+					},
+				},
+			},
+		});
+		expect(
+			getAuthorizedScopeBinding({
+				directory,
+				plan: currentPlan,
+				taskId: '1.1',
+				activeSessionId: 'spoofed-child',
+			}),
+		).toBeNull();
+	});
+
+	// The load-bearing security property: the parent identity comes from the
+	// runtime-assigned part.sessionID, and tool-controlled metadata can never
+	// override it — even when metadata names the real publishing parent.
+	test('metadata.parentSessionId can never override the runtime-assigned parent', async () => {
+		const currentPlan = plan();
+		const { plugin } = await bootAndDispatch(currentPlan);
+
+		await plugin.event?.({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						id: 'part-id',
+						// Part lives in a NON-publishing session…
+						sessionID: 'attacker-session',
+						callID: TASK_CALL_ID,
+						type: 'tool',
+						tool: 'task',
+						state: {
+							metadata: {
+								// …while tool-controlled metadata names the real publisher.
+								parentSessionId: PARENT_SESSION,
+								sessionId: CHILD_SESSION,
+							},
+						},
+					},
+				},
+			},
+		});
+		expect(
+			getAuthorizedScopeBinding({
+				directory,
+				plan: currentPlan,
+				taskId: '1.1',
+				activeSessionId: CHILD_SESSION,
+			}),
+		).toBeNull();
+	});
+
+	test('an empty part.sessionID fails closed (no metadata fallback)', async () => {
+		const currentPlan = plan();
+		const { plugin } = await bootAndDispatch(currentPlan);
+
+		await plugin.event?.({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						id: 'part-id',
+						sessionID: '  ',
+						callID: TASK_CALL_ID,
+						type: 'tool',
+						tool: 'task',
+						state: {
+							metadata: {
+								parentSessionId: PARENT_SESSION,
+								sessionId: CHILD_SESSION,
+							},
+						},
+					},
+				},
+			},
+		});
+		expect(
+			getAuthorizedScopeBinding({
+				directory,
+				plan: currentPlan,
+				taskId: '1.1',
+				activeSessionId: CHILD_SESSION,
+			}),
+		).toBeNull();
 	});
 });
