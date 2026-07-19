@@ -16,7 +16,11 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 
 const SRC_ROOT = path.join(import.meta.dir, '..', '..', '..', 'src');
-const SHARED_MODULE = path.join(SRC_ROOT, 'utils', 'provider-error-classification.ts');
+const SHARED_MODULE = path.join(
+	SRC_ROOT,
+	'utils',
+	'provider-error-classification.ts',
+);
 
 // The distinctive shape of the old duplicated regex: a rate-limit / HTTP-code
 // alternation. Matching this in a source literal means a local copy was reborn.
