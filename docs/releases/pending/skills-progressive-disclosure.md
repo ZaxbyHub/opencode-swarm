@@ -5,8 +5,8 @@
 - Extracted deep/duplicated material from four oversized SKILL.md files into `references/` subdirectories, following the exemplar pattern established by `codebase-review-swarm/`:
   - **swarm-pr-review** (~1744 → ~1400 lines): parser dry-run example → `references/parser-dry-run.md`; reviewer/critic/explorer prompt templates → `references/prompt-templates.md`; COVERAGE GATE restatements collapsed to Phase 3 references
   - **writing-tests** (~948 → ~825 lines): mock.module location + dead-code _internals seam inventories → `references/mock-and-seam-inventory.md`; FR-006 splitting protocol collapsed to limit + skill pointer; Running Tests trimmed to pointer
-  - **commit-pr** (~632 → ~465 lines): push-protection scan, canonical remote resolution, auto-merge race, release-please desync → `references/pr-incident-playbook.md`; PowerShell heredoc blocks collapsed; dist/ rule deduplicated
-  - **swarm-pr-feedback** (~856 → ~525 lines): bot review traps + security finding verification → `references/bot-claim-verification.md`; DI seam validation + runtime/host gotchas → `references/operational-gotchas.md`; batch collection deduped against ci-failure-batching skill
+  - **commit-pr** (~632 → ~533 lines): push-protection scan, canonical remote resolution, auto-merge race, release-please desync → `references/pr-incident-playbook.md`; PowerShell heredoc blocks collapsed; dist/ rule deduplicated
+  - **swarm-pr-feedback** (~856 → ~740 lines): bot review traps + security finding verification → `references/bot-claim-verification.md`; DI seam validation + runtime/host gotchas → `references/operational-gotchas.md`; batch collection deduped against ci-failure-batching skill
 - Each trimmed SKILL.md retains explicit "read `references/`" pointers so agents following the bundled copy can locate the deep material
 - Updated `swarm-pr-review-dry-run.test.ts` to read from the new `references/parser-dry-run.md` path
 
