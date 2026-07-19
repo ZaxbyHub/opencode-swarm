@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.125.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.0...v7.125.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **evidence:** add retention policy for web_search cache ([c2c52e4](https://github.com/ZaxbyHub/opencode-swarm/commit/c2c52e4afca7caa8525a115b6048a3a23b528e8e))
+* **evidence:** add retention policy for web_search cache (closes [#1184](https://github.com/ZaxbyHub/opencode-swarm/issues/1184)) ([f0952cb](https://github.com/ZaxbyHub/opencode-swarm/commit/f0952cb1f0ee7f4f78d9d9f04858b8efa55ec93b))
+* **evidence:** address PR review findings on cache retention ([b89f40b](https://github.com/ZaxbyHub/opencode-swarm/commit/b89f40b73f195905c3d0631445ec94bafac264da))
+
 ## [7.125.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.124.0...v7.125.0) (2026-07-18)
 
 
