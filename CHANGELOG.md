@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.125.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.2...v7.125.3) (2026-07-19)
+
+
+### Bug Fixes
+
+* **config:** surface specific validation detail in /swarm diagnose ([1cb13a4](https://github.com/ZaxbyHub/opencode-swarm/commit/1cb13a496799c0efc34ab718e49abfffc4cbc9bc))
+
 ## [7.125.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.1...v7.125.2) (2026-07-19)
 
 
