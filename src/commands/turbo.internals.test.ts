@@ -90,8 +90,11 @@ describe('turbo _internals DI seam', () => {
 
 		// Assert: mock was called
 		expect(mockFn).toHaveBeenCalledWith(tmpDir);
-		// Result should be 'Turbo Mode enabled' since strategy is 'standard'
-		expect(result).toBe('Turbo Mode enabled');
+		// Result should include "Turbo Mode enabled" plus the FR-002 bypass
+		// disclosure (issue #1690, task 2.1). The disclosure is the user-facing
+		// contract that says which gates ARE bypassed.
+		expect(result).toContain('Turbo Mode enabled');
+		expect(result).toContain('Bypassed: Stage B');
 	});
 
 	test('swapping _internals.loadPluginConfigWithMeta with a mock works — lean turbo on path (line 196)', async () => {
