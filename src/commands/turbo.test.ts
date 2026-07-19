@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { _internals, handleTurboCommand } from '../commands/turbo';
 import { getAgentSession, swarmState } from '../state';
+import { TURBO_BYPASS_DISCLOSURE } from '../commands/turbo-constants';
 
 describe('handleTurboCommand', () => {
 	let testSessionId: string;
@@ -106,7 +107,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -117,7 +118,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 	});
@@ -156,7 +157,7 @@ describe('handleTurboCommand', () => {
 
 			const result = await handleTurboCommand('/project', [], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -174,7 +175,7 @@ describe('handleTurboCommand', () => {
 
 			const result = await handleTurboCommand('/project', [''], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 	});
@@ -189,7 +190,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -202,7 +203,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
