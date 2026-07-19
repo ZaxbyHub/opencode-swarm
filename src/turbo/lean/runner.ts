@@ -16,14 +16,30 @@
  * - If dispatch fails, locks for that lane are released and lane is marked 'failed'
  */
 import type { OpencodeClient } from '@opencode-ai/sdk';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { LeanTurboConfig } from '../../config/schema';
+import { stripKnownSwarmPrefix } from '../../config/schema';
 import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { derivePlanId } from '../../plan/utils';
-import { ensureAgentSession, hasActiveFullAuto, swarmState } from '../../state';
+import {
+	ensureAgentSession,
+	getAgentSession,
+	hasActiveFullAuto,
+	swarmState,
+} from '../../state';
+import { telemetry } from '../../telemetry';
 import { log } from '../../utils/logger';
+import {
+	dispatchWithModelFallback,
+	type ModelOverride,
+} from '../../utils/model-dispatch-fallback';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../../utils/provider-error-classification';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import {
@@ -634,6 +650,7 @@ export class LeanTurboRunner {
 		lane: LeanTurboLane,
 		agentName: string,
 		worktreeDirectory?: string,
+		model?: ModelOverride,
 	): Promise<LaneDispatchResult> {
 		const session =
 			this._sessionOps ??
@@ -650,6 +667,7 @@ export class LeanTurboRunner {
 			agentName,
 			worktreeDirectory,
 			promptController,
+			model,
 		);
 
 		// Apply timeout if configured via _internals
@@ -714,6 +732,7 @@ export class LeanTurboRunner {
 		agentName: string,
 		worktreeDirectory?: string,
 		abortController?: AbortController,
+		model?: ModelOverride,
 	): Promise<LaneDispatchResult> {
 		let sessionId: string | undefined;
 		try {
@@ -749,6 +768,8 @@ export class LeanTurboRunner {
 				path: { id: sessionId },
 				body: {
 					agent: agentName,
+					// #1896: per-call model override on a fallback attempt.
+					...(model ? { model } : {}),
 					tools: { write: true, edit: true, patch: true },
 					parts: [{ type: 'text' as const, text: promptText }],
 				},
@@ -1161,12 +1182,71 @@ export class LeanTurboRunner {
 			}
 		}
 
-		// Dispatch to selected agent
-		const dispatchResult = await this.dispatchLane(
-			lane,
-			agent,
-			worktreeDirectory,
-		);
+		// Dispatch to selected agent.
+		// #1896: on a transient/quota PROVIDER error, fail over to a configured
+		// coder fallback_model instead of failing the lane outright. Lane-level
+		// timeouts are NOT provider-transient and keep their existing fail-the-lane
+		// behavior (classified permanent below).
+		const coderBase = stripKnownSwarmPrefix(agent);
+		const coderSwarmId =
+			coderBase !== agent
+				? agent.slice(0, agent.length - coderBase.length - 1)
+				: undefined;
+		const coderSwarmAgents = getSwarmAgents(coderSwarmId);
+		let dispatchResult: LaneDispatchResult;
+		try {
+			const fb = await dispatchWithModelFallback<LaneDispatchResult>({
+				dispatch: async (model) => {
+					const r = await this.dispatchLane(
+						lane,
+						agent,
+						worktreeDirectory,
+						model,
+					);
+					if (!r.ok) throw new Error(r.error ?? 'lane dispatch failed');
+					return r;
+				},
+				resolveFallback: (index) =>
+					resolveFallbackModel(coderBase, index, coderSwarmAgents),
+				// Advance immediately on a transient/quota error — an instant
+				// same-model retry cannot clear an exhausted quota.
+				maxTransientRetriesPerModel: 0,
+				classify: (err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					// A lane-level dispatch timeout is not a provider transient — keep
+					// the existing fail-the-lane behavior instead of failing over.
+					if (/Lane dispatch timed out/i.test(msg)) return 'permanent';
+					return isTransientProviderError(msg) ? 'transient' : 'permanent';
+				},
+				onFallback: ({ toModel, fallbackIndex }) => {
+					telemetry.modelFallback(
+						this._sessionID ?? '',
+						agent,
+						coderSwarmAgents?.[coderBase]?.model ?? 'default',
+						toModel,
+						'transient_model_error',
+					);
+					const session = this._sessionID
+						? getAgentSession(this._sessionID)
+						: undefined;
+					if (session) {
+						session.pendingAdvisoryMessages ??= [];
+						session.pendingAdvisoryMessages.push(
+							`MODEL FALLBACK: coder lane ${lane.laneId} failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
+						);
+					}
+				},
+			});
+			dispatchResult = fb.result;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			dispatchResult = {
+				ok: false,
+				error: isQuotaError(msg)
+					? `${msg} (model quota/usage limit exhausted across all configured fallbacks)`
+					: msg,
+			};
+		}
 
 		if (!dispatchResult.ok) {
 			// Dispatch failed — release locks immediately

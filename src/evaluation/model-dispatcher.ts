@@ -1,5 +1,9 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
 import { log } from '../utils/logger.js';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../utils/provider-error-classification';
 
 export type EvaluationModelDispatchRequest = {
 	directory: string;
@@ -214,26 +218,55 @@ export function createEvaluationModelDispatcher(
 				};
 			};
 
-			return await Promise.race([
-				operation(),
-				new Promise<never>((_, reject) => {
-					controller.signal.addEventListener(
-						'abort',
-						() => reject(new Error('evaluation dispatch aborted')),
-						{ once: true },
-					);
-				}),
-			]);
-		} catch (error) {
-			const cancelled = request.abortSignal?.aborted === true;
-			return {
-				status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
-				modelId: request.modelId,
-				agentName: resolvedAgentName,
-				text: '',
-				durationMs: Date.now() - startedAt,
-				error: error instanceof Error ? error.message : String(error),
-			};
+			// #1896 (evaluation deviation): `request.modelId` is the benchmark
+			// SUBJECT — the result is recorded against it — so we must NOT substitute
+			// a fallback model here (that would attribute a verdict to the wrong
+			// model and corrupt the evaluation). We DO absorb a transient/quota blip
+			// with a bounded SAME-model retry so a momentary quota hiccup does not
+			// fail the benchmark outright. Each failed attempt's session is cleaned up
+			// before retrying so no ephemeral session leaks.
+			const maxSameModelRetries = 2;
+			for (let attempt = 0; ; attempt++) {
+				try {
+					// eslint-disable-next-line no-await-in-loop
+					return await Promise.race([
+						operation(),
+						new Promise<never>((_, reject) => {
+							controller.signal.addEventListener(
+								'abort',
+								() => reject(new Error('evaluation dispatch aborted')),
+								{ once: true },
+							);
+						}),
+					]);
+				} catch (error) {
+					const cancelled = request.abortSignal?.aborted === true;
+					const msg = error instanceof Error ? error.message : String(error);
+					const retryable =
+						!cancelled &&
+						!timedOut &&
+						attempt < maxSameModelRetries &&
+						isTransientProviderError(msg);
+					if (!retryable) {
+						return {
+							status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
+							modelId: request.modelId,
+							agentName: resolvedAgentName,
+							text: '',
+							durationMs: Date.now() - startedAt,
+							error: isQuotaError(msg)
+								? `${msg} (model quota/usage limit; retried the same model ${attempt} time(s) — not substituted, to preserve benchmark attribution)`
+								: msg,
+						};
+					}
+					// Clean up the failed attempt's session before the same-model retry.
+					if (sessionId) {
+						// eslint-disable-next-line no-await-in-loop
+						await _internals.boundedDelete(client, sessionId);
+						sessionId = undefined;
+					}
+				}
+			}
 		} finally {
 			clearTimeout(timeoutHandle);
 			request.abortSignal?.removeEventListener('abort', abortListener);

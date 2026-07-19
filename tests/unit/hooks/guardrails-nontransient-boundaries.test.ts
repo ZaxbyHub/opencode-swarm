@@ -5,6 +5,7 @@ import {
 	_test_exports,
 	forgetToolExecution,
 	markToolExecutionSandboxWrapped,
+	nonTransientHardStopMessage,
 	recordNonTransientFailure,
 	rememberToolExecution,
 } from '../../../src/hooks/guardrails/nontransient-circuit';
@@ -206,5 +207,64 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 		expect(
 			getAgentSession(sessionID)?.pendingToolExecutions?.has('lifecycle'),
 		).toBe(false);
+	});
+});
+
+// Issue #1896 (sub-issue 4): the hard-stop message must surface the stored
+// signal + category-specific remediation so the operator can tell a dead sandbox
+// (infra) from a sub-agent refusing to act, instead of a bare category string.
+describe('nonTransientHardStopMessage — diagnostic surfacing (#1896)', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	it('surfaces the wrapper signal + sandbox remediation for sandbox_wrapper_failure', () => {
+		const sessionID = 'msg-sandbox';
+		setupSession(sessionID);
+		const signal =
+			'[sandbox] BLOCKED: Failed to wrap command with bubblewrap: probe failed. Command will not be executed unsandboxed.';
+		const circuit = recordNonTransientFailure(
+			sessionID,
+			'sandbox_wrapper_failure',
+			signal,
+		);
+		expect(circuit).not.toBeNull();
+		const msg = nonTransientHardStopMessage(circuit!);
+		expect(msg).toContain('NON-TRANSIENT CIRCUIT BREAKER');
+		// The actual wrapper error + mechanism are now visible (was dropped before).
+		expect(msg).toContain('Last signal:');
+		expect(msg).toContain('bubblewrap');
+		// Distinguishes sandbox-dead (infra) from an agent refusing.
+		expect(msg).toContain('SANDBOX PROVISIONING');
+		expect(msg).toContain('/swarm diagnose');
+		// Explains why a plain session reset / cache clear did not help.
+		expect(msg).toMatch(/in-memory|fresh agent invocation/i);
+	});
+
+	it('gives command-not-found remediation with the signal', () => {
+		const sessionID = 'msg-cnf';
+		setupSession(sessionID);
+		const circuit = recordNonTransientFailure(
+			sessionID,
+			'command_not_found',
+			'bash: line 1: frobnicate: not found',
+		);
+		const msg = nonTransientHardStopMessage(circuit!);
+		expect(msg).toContain('Last signal:');
+		expect(msg).toContain('frobnicate');
+		expect(msg).toContain('PATH');
+	});
+
+	it('falls back to "(no signal captured)" when lastSignal is absent', () => {
+		const msg = nonTransientHardStopMessage({
+			ownerAgent: 'coder',
+			ownerInvocationId: 1,
+			category: 'general_permanent',
+			sameCategoryCount: 3,
+			hardStop: true,
+			lastSignal: null,
+		});
+		expect(msg).toContain('NON-TRANSIENT CIRCUIT BREAKER');
+		expect(msg).toContain('(no signal captured)');
 	});
 });

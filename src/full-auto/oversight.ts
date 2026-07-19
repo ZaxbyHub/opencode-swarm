@@ -24,11 +24,22 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
+import { stripKnownSwarmPrefix } from '../config/schema';
 import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
+import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
+import {
+	type ModelOverride,
+	parseModelString,
+} from '../utils/model-dispatch-fallback';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../utils/provider-error-classification';
 import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
@@ -178,10 +189,11 @@ function decisionFromVerdict(
 }
 
 function isTransientDispatchError(error: unknown): boolean {
+	// #1896: single-sourced classifier — now also recognizes quota/usage-limit
+	// exhaustion (a distinct, retry + fallback-eligible class) on top of the
+	// transient provider/network set.
 	const text = error instanceof Error ? error.message : String(error);
-	return /(?:\b408\b|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|\b529\b|timeout|timed out|temporarily unavailable|server error|unexpected server error|rate limit|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)/i.test(
-		text,
-	);
+	return isTransientProviderError(text);
 }
 
 /**
@@ -392,9 +404,41 @@ export async function dispatchFullAutoOversight(
 	const maxConsecutiveFailures =
 		input.fullAutoConfig?.max_consecutive_dispatch_failures ?? 3;
 
+	// #1896: model-failover setup. On a transient/quota dispatch failure the critic
+	// fails over to a configured fallback model (critic_oversight's fallback_models,
+	// else critic's) via a per-call `model` override. `input.criticModel` is
+	// decorative in dispatch — the real model comes from the registered
+	// critic_oversight agent — so the override is the only way to switch mid-loop.
+	// The fallback index is tracked locally: the ephemeral child session has no
+	// per-role fallback state (that belongs to the parent architect session).
+	const oversightFullName = input.oversightAgentName;
+	const oversightBaseRole = stripKnownSwarmPrefix(oversightFullName);
+	const oversightSwarmId =
+		oversightBaseRole !== oversightFullName
+			? oversightFullName.slice(
+					0,
+					oversightFullName.length - oversightBaseRole.length - 1,
+				)
+			: undefined;
+	const oversightSwarmAgents = getSwarmAgents(oversightSwarmId);
+	const oversightFallbackRole = oversightSwarmAgents?.[oversightBaseRole]
+		?.fallback_models?.length
+		? oversightBaseRole
+		: 'critic';
+	const resolveOversightFallback = (index: number): string | null =>
+		resolveFallbackModel(oversightFallbackRole, index, oversightSwarmAgents);
+	let modelFallbackIndex = 0;
+	let modelOverride: ModelOverride | undefined;
+	let modelUsedLabel = input.criticModel;
+
 	// Helper: returns { ok, response, error }
-	// Retries transient errors (missing data / server errors) with exponential backoff.
-	async function attemptDispatch(attempt: number): Promise<{
+	// Retries transient errors (missing data / server errors) with exponential
+	// backoff. #1896: `modelOverride` lets a transient/quota retry fail over to a
+	// configured fallback model via the per-call `model` override.
+	async function attemptDispatch(
+		attempt: number,
+		modelOverride: ModelOverride | undefined,
+	): Promise<{
 		ok: boolean;
 		response: string;
 		error: unknown;
@@ -446,6 +490,9 @@ export async function dispatchFullAutoOversight(
 					path: { id: ephemeralSessionId },
 					body: {
 						agent: input.oversightAgentName,
+						// #1896: per-call model override on a fallback attempt; omitted
+						// (undefined) means the registered critic_oversight agent model.
+						...(modelOverride ? { model: modelOverride } : {}),
 						tools: { write: false, edit: false, patch: false },
 						parts: [{ type: 'text', text: buildOversightPrompt(input) }],
 					},
@@ -482,7 +529,7 @@ export async function dispatchFullAutoOversight(
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		// eslint-disable-next-line no-await-in-loop
-		const result = await attemptDispatch(attempt);
+		const result = await attemptDispatch(attempt, modelOverride);
 		if (result.ok) {
 			criticResponse = result.response;
 			dispatchError = undefined;
@@ -494,8 +541,42 @@ export async function dispatchFullAutoOversight(
 			`[full-auto/oversight] dispatch attempt ${attempt + 1}/${maxRetries + 1} failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
 		);
 		if (dispatchFailureWasTransient && attempt < maxRetries) {
-			// Transient — will retry.
+			// Transient — will retry. #1896: advance to the next configured fallback
+			// model (if any) before the retry, so a quota/rate-limit hit fails over
+			// instead of just re-hitting the same exhausted model.
 			dispatchError = undefined;
+			const nextModel = resolveOversightFallback(modelFallbackIndex + 1);
+			if (nextModel) {
+				// Advance the index FIRST so a malformed entry is skipped rather
+				// than re-resolved every retry (which would strand any valid
+				// fallback listed after it); only adopt the model on a clean parse.
+				modelFallbackIndex++;
+				let parsed: ModelOverride | undefined;
+				try {
+					parsed = parseModelString(nextModel);
+				} catch {
+					parsed = undefined; // malformed provider/model entry — skip it
+				}
+				if (parsed) {
+					modelOverride = parsed;
+					modelUsedLabel = nextModel;
+					const reason = isQuotaError(
+						lastError instanceof Error ? lastError.message : String(lastError),
+					)
+						? 'quota'
+						: 'transient_model_error';
+					logger.warn(
+						`[full-auto/oversight] failing over critic to fallback model "${nextModel}" (fallback ${modelFallbackIndex}, reason=${reason})`,
+					);
+					telemetry.modelFallback(
+						input.sessionID,
+						input.oversightAgentName,
+						input.criticModel,
+						nextModel,
+						reason,
+					);
+				}
+			}
 		} else {
 			// Exhausted retries.
 			dispatchError = lastError;
@@ -504,6 +585,12 @@ export async function dispatchFullAutoOversight(
 	}
 
 	cleanup();
+
+	// #1896: reflect the ACTUAL model used — a fallback may have replaced the
+	// configured criticModel — so the event audit trail is not stale.
+	if (modelFallbackIndex > 0) {
+		baseEvent.critic_model = modelUsedLabel;
+	}
 
 	if (dispatchError) {
 		const infraReason = dispatchFailureWasTransient

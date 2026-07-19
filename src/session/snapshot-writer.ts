@@ -91,6 +91,15 @@ export interface SerializedAgentSession {
 	 * so older snapshots deserialize cleanly; the reader defaults to undefined.
 	 */
 	cachedCohortId?: string;
+	/**
+	 * Last observed `provider/model` for this (architect) session (#1896). Omitted
+	 * when undefined for additive-only schema. MUST survive rehydration (it is NOT
+	 * a transient-reset field) so a silent cross-interrupt model switch is
+	 * detectable on resume.
+	 */
+	lastObservedModel?: string;
+	/** Provider id paired with lastObservedModel (#1896). Omitted when undefined. */
+	lastObservedProviderID?: string;
 }
 
 /**
@@ -248,6 +257,12 @@ export function serializeAgentSession(
 		}),
 		...(s.cachedCohortId !== undefined && {
 			cachedCohortId: s.cachedCohortId,
+		}),
+		...(s.lastObservedModel !== undefined && {
+			lastObservedModel: s.lastObservedModel,
+		}),
+		...(s.lastObservedProviderID !== undefined && {
+			lastObservedProviderID: s.lastObservedProviderID,
 		}),
 	};
 }

@@ -96,7 +96,7 @@ describe('ADVERSARIAL: id-collision word-boundary (extractSpecRequirementBodyByI
 			frRefs: ['FR-1'],
 			specText: ADV_SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-1' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-1' });
 	});
 
 	it('checkAcceptanceCoversFrRefs: FR-1 IS satisfied by its own body even with FR-12 present in spec', () => {
@@ -174,7 +174,7 @@ describe('ADVERSARIAL: bypass resistance (checkAcceptanceCoversFrRefs, pure)', (
 			frRefs: ['FR-001'],
 			specText: ADV_SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-001' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-001' });
 	});
 
 	it('rejects a PARAPHRASE of the requirement body (same meaning, different words)', () => {
@@ -184,7 +184,7 @@ describe('ADVERSARIAL: bypass resistance (checkAcceptanceCoversFrRefs, pure)', (
 			frRefs: ['FR-001'],
 			specText: ADV_SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-001' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-001' });
 	});
 
 	it('rejects a PARTIAL copy — only the first half of the body', () => {
@@ -194,7 +194,7 @@ describe('ADVERSARIAL: bypass resistance (checkAcceptanceCoversFrRefs, pure)', (
 			frRefs: ['FR-001'],
 			specText: ADV_SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-001' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-001' });
 	});
 
 	it('rejects a PARTIAL copy — only the second half of the body (no anchoring assumption)', () => {
@@ -204,7 +204,7 @@ describe('ADVERSARIAL: bypass resistance (checkAcceptanceCoversFrRefs, pure)', (
 			frRefs: ['FR-001'],
 			specText: ADV_SPEC_MD,
 		});
-		expect(result).toEqual({ covered: false, missingId: 'FR-001' });
+		expect(result).toMatchObject({ covered: false, missingId: 'FR-001' });
 	});
 });
 

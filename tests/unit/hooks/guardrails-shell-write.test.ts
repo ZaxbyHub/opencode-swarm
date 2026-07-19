@@ -606,9 +606,11 @@ describe('guardrails shell write scope enforcement', () => {
 			).rejects.toThrow(/WRITE BLOCKED: Agent "architect".*config zone/);
 		});
 
-		it('blocks architect interpreter eval writes with unresolvable targets even without declared scope', async () => {
+		it('blocks architect interpreter-eval inline code even without declared scope (eval bypass guard)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			architectSession('s53-architect-eval');
+			// Inline `python -c` code can target a config zone; it stays fail-closed
+			// so it cannot be used to bypass the scope/config-zone protections.
 			await expect(
 				hooks.toolBefore(
 					makeBashInput('s53-architect-eval'),
@@ -616,7 +618,7 @@ describe('guardrails shell write scope enforcement', () => {
 						`python3 -c "open('.swarm/evidence/5.4.json','w').write('x')"`,
 					),
 				),
-			).rejects.toThrow(/BLOCKED|unresolvable path/);
+			).rejects.toThrow(/BLOCKED: python3 \[eval\] evaluates inline code/);
 		});
 	});
 
@@ -715,25 +717,23 @@ describe('guardrails shell write scope enforcement', () => {
 	// Fail-closed on undetectable paths
 	// -------------------------------------------------------------------------
 
-	describe('fail-closed on undetectable paths', () => {
-		it('blocks python -c eval (path is null — cannot verify scope)', async () => {
+	describe('fail-closed on undetectable paths (interpreter eval)', () => {
+		it('blocks python -c eval (inline code — target cannot be scope-verified)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s60');
 			setDeclaredScope('s60', ['src/']);
 
 			// python -c with inline code has null path because the file being
-			// written is not statically determinable
+			// written is not statically determinable → stays fail-closed.
 			await expect(
 				hooks.toolBefore(
 					makeBashInput('s60'),
 					makeOutput(`python -c "import os; os.write(1, b'data')"`),
 				),
-			).rejects.toThrow(
-				/bash write detected outside declared scope|unresolvable path/,
-			);
+			).rejects.toThrow(/BLOCKED: python \[eval\] evaluates inline code/);
 		});
 
-		it('blocks node -e eval (path is null)', async () => {
+		it('blocks node -e eval (inline code)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s61');
 			setDeclaredScope('s61', ['src/']);
@@ -745,12 +745,10 @@ describe('guardrails shell write scope enforcement', () => {
 						`node -e "require('fs').writeFileSync('out.txt', 'data')"`,
 					),
 				),
-			).rejects.toThrow(
-				/bash write detected outside declared scope|unresolvable path/,
-			);
+			).rejects.toThrow(/BLOCKED: node \[eval\] evaluates inline code/);
 		});
 
-		it('blocks bun -e eval (path is null)', async () => {
+		it('blocks bun -e eval (inline code)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s62');
 			setDeclaredScope('s62', ['src/']);
@@ -760,9 +758,54 @@ describe('guardrails shell write scope enforcement', () => {
 					makeBashInput('s62'),
 					makeOutput(`bun -e "Deno.writeTextFile('out.txt', 'data')"`),
 				),
-			).rejects.toThrow(
-				/bash write detected outside declared scope|unresolvable path/,
-			);
+			).rejects.toThrow(/BLOCKED: bun \[eval\] evaluates inline code/);
+		});
+	});
+
+	// -------------------------------------------------------------------------
+	// issue #1902: `python -m <module>` runs an installed program, not inline
+	// code — it must NOT be hard-blocked as an unverifiable write. Only genuine
+	// inline eval (-c/-e/-r) and truly dynamic redirect targets stay fail-closed.
+	// -------------------------------------------------------------------------
+
+	describe('interpreter module runs are allowed (#1902 regression)', () => {
+		it('allows `python -m pytest ... 2>&1` for a scoped coder (no eval flag)', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			coderSession('s63-mrun');
+			setDeclaredScope('s63-mrun', ['src/']);
+
+			await expect(
+				hooks.toolBefore(
+					makeBashInput('s63-mrun'),
+					makeOutput('python -m pytest tests/ 2>&1'),
+				),
+			).resolves.toBeUndefined();
+		});
+
+		it('allows `python3 -m ruff check` for a scoped coder', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			coderSession('s64-mrun');
+			setDeclaredScope('s64-mrun', ['src/']);
+
+			await expect(
+				hooks.toolBefore(
+					makeBashInput('s64-mrun'),
+					makeOutput('python3 -m ruff check'),
+				),
+			).resolves.toBeUndefined();
+		});
+
+		it('still blocks a truly dynamic redirect target ($VAR) with a clear message', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			coderSession('s65-dyn');
+			setDeclaredScope('s65-dyn', ['src/']);
+
+			await expect(
+				hooks.toolBefore(
+					makeBashInput('s65-dyn'),
+					makeOutput('echo data > $OUTFILE'),
+				),
+			).rejects.toThrow(/BLOCKED: bash\/shell write to a dynamic path target/);
 		});
 	});
 

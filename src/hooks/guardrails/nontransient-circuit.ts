@@ -296,15 +296,50 @@ export function clearNonTransientCircuit(sessionID: string): void {
 	circuit.lastSignal = null;
 }
 
+/**
+ * Issue #1896 (sub-issue 4): category-specific remediation. The bare "reset the
+ * session" instruction did not tell the operator WHICH failure they hit — most
+ * importantly it could not distinguish a dead sandbox (infra) from a sub-agent
+ * refusing to act. The `lastSignal` surfaced by `nonTransientHardStopMessage`
+ * carries the actual wrapper error; this adds the "what to do next" per category.
+ */
+function nonTransientRemediation(
+	category: NonTransientErrorCategory | 'fatal',
+): string {
+	switch (category) {
+		case 'sandbox_wrapper_failure':
+			return (
+				'This is a SANDBOX PROVISIONING failure — the command wrapper itself failed to sandbox the command (see "Last signal" for the wrapper error and mechanism). It is NOT the sub-agent refusing to act. ' +
+				'Run /swarm diagnose to check the sandbox mechanism and its availability. ' +
+				'A UI "session reset" alone may NOT clear this: the circuit is keyed to the current agent invocation, so only a fresh agent invocation (re-delegation) or a full plugin restart resets it — clearing the .opencode cache does not, because the circuit is in-memory. ' +
+				'When the sandbox mechanism is genuinely unavailable the shell runs UNSANDBOXED instead of hard-stopping, so a repeatable hard-stop here means the wrapper is actively failing — repair the sandbox environment before re-dispatching.'
+			);
+		case 'command_not_found':
+			return 'A command/executable was not found (see "Last signal"). Ensure the binary is installed and on PATH, then start a fresh invocation.';
+		case 'shell_parse_error':
+			return 'The shell could not parse the command (see "Last signal"). Fix the command syntax (quoting/escaping), then start a fresh invocation.';
+		default:
+			return 'Start a verified new invocation or reset the session before continuing.';
+	}
+}
+
 export function nonTransientHardStopMessage(
 	circuit: NonTransientCircuitState,
 ): string {
+	const category = circuit.category ?? 'fatal';
+	// lastSignal is recorded (bounded to MAX_SIGNAL_LENGTH) before hardStop can be
+	// true, so it is populated at every call site; the fallback is belt-and-suspenders.
+	const signal = circuit.lastSignal ?? '(no signal captured)';
 	return (
 		'NON-TRANSIENT CIRCUIT BREAKER: ' +
 		circuit.sameCategoryCount +
 		' consecutive ' +
-		(circuit.category ?? 'fatal') +
-		' failures. STOP tool calls and report the blocker. Start a verified new invocation or reset the session before continuing.'
+		category +
+		' failure(s). STOP tool calls and report the blocker.\n' +
+		'Last signal: ' +
+		signal +
+		'\n' +
+		nonTransientRemediation(category)
 	);
 }
 
