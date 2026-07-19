@@ -1275,6 +1275,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							const autoFixableCount = doctorResult.result.findings.filter(
 								(f) => f.autoFixable,
 							).length;
+							const appliedCount = doctorResult.appliedFixes.length;
 
 							if (!enableAutofix && autoFixableCount > 0) {
 								const msg = `[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`;
@@ -1284,16 +1285,29 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 								} else {
 									addDeferredWarning(msg);
 								}
-							} else if (
-								enableAutofix &&
-								doctorResult.appliedFixes.length > 0
-							) {
-								const msg = `[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`;
-								if (!config.quiet) {
-									// biome-ignore lint/suspicious/noConsole: Config Doctor applied fixes confirmation — user must see what was auto-fixed
-									console.warn(msg);
-								} else {
-									addDeferredWarning(msg);
+							} else if (enableAutofix) {
+								// Report what was applied, and — crucially — nudge for any
+								// auto-fixable finding NOT applied because it is lossy.
+								// Over-length fallback_models is never trimmed silently at
+								// startup; the user must opt in via --fix (issue #1886).
+								const parts: string[] = [];
+								if (appliedCount > 0) {
+									parts.push(`applied ${appliedCount} fix(es) automatically`);
+								}
+								const unapplied = Math.max(0, autoFixableCount - appliedCount);
+								if (unapplied > 0) {
+									parts.push(
+										`${unapplied} auto-fixable issue(s) need explicit review — run /swarm config doctor --fix`,
+									);
+								}
+								if (parts.length > 0) {
+									const msg = `[opencode-swarm] Config Doctor: ${parts.join('; ')}.`;
+									if (!config.quiet) {
+										// biome-ignore lint/suspicious/noConsole: Config Doctor autofix summary — user must see what was fixed / still needs --fix
+										console.warn(msg);
+									} else {
+										addDeferredWarning(msg);
+									}
 								}
 							}
 						} catch {

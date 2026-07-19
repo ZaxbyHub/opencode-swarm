@@ -166,7 +166,7 @@ function sanitizeExternalSkillsConfig(
 	}
 	advisoryWarn(
 		'[opencode-swarm] external_skills config validation failed:',
-		esResult.error.format(),
+		formatZodIssues(esResult.error),
 	);
 	advisoryWarn(
 		'[opencode-swarm] External skills curation disabled due to invalid config. Fix the external_skills section to enable it.',
@@ -234,7 +234,7 @@ function sanitizeGatesConfig(
 		if (!sectionResult.success) {
 			advisoryWarn(
 				`[opencode-swarm] gates.${key} config validation failed; that gate section will use defaults and other config sections remain active:`,
-				sectionResult.error.format(),
+				formatZodIssues(sectionResult.error),
 			);
 			delete cleanedGates[key];
 		}
@@ -250,7 +250,7 @@ function sanitizeGatesConfig(
 
 	advisoryWarn(
 		'[opencode-swarm] gates config validation failed after section cleanup; quality gates will use defaults and other config sections remain active:',
-		gatesResult.error.format(),
+		formatZodIssues(gatesResult.error),
 	);
 	const cleaned = { ...raw };
 	delete cleaned.gates;
@@ -261,6 +261,30 @@ function sanitizeSectionConfigs(
 	raw: Record<string, unknown>,
 ): Record<string, unknown> {
 	return sanitizeGatesConfig(sanitizeExternalSkillsConfig(raw));
+}
+
+/**
+ * Flatten a ZodError into a compact, single-line, human-readable summary that
+ * names each failing config path and why it failed, e.g.
+ *   "agents.architect.fallback_models: Too big: expected array to have <=3 items"
+ *
+ * Surfaced to operators via `advisoryWarn` → `/swarm diagnose` so a config
+ * validation failure tells the user exactly what to fix, instead of the bare
+ * `"... validation failed:"` line they used to see (issue #1886). Replaces
+ * `error.format()` (a nested object that `advisoryWarn` dropped from the
+ * operator-visible buffer). It emits issue paths and messages only — never a
+ * raw dump of the user's config values.
+ */
+export function formatZodIssues(error: z.ZodError): string {
+	if (error.issues.length === 0) return '';
+	return error.issues
+		.map((issue) => {
+			// Guard the JOINED path, not the raw array: an empty `path` array is
+			// truthy in JS, so a top-level issue must fall through to message-only.
+			const dotted = issue.path.map(String).join('.');
+			return dotted ? `${dotted}: ${issue.message}` : issue.message;
+		})
+		.join('; ');
 }
 
 /**
@@ -396,7 +420,7 @@ function parseConfigWithFallback(
 	} else {
 		advisoryWarn(
 			'[opencode-swarm] Merged config validation failed:',
-			result.error.format(),
+			formatZodIssues(result.error),
 		);
 	}
 	advisoryWarn(
