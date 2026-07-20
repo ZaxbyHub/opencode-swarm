@@ -6,8 +6,10 @@
  * `recovery`, `removedKeys`, `warnings`, and `config` for every fixture
  * in the battery.
  *
- * Purpose: if a future contributor edits one path of `buildConfigWithMeta`
- * and forgets the other, this test fires immediately. It is the regression
+ * Purpose: Guards against future re-divergence in the I/O layer (sync vs async
+ * file reads) and ensures the shared `buildConfigWithMeta` core produces identical
+ * outputs for both entry points. If separate sync/async logic is ever reintroduced
+ * or the I/O wiring drifts, this test fires immediately. It is the regression
  * guard for issue #1900 FR-4 and the architectural invariant in FR-1.
  *
  * Fixtures:

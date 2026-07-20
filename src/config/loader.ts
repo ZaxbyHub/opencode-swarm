@@ -408,6 +408,7 @@ function buildConfigWithMeta(
 	//    `locked: false` must NOT override a user-level `locked: true`.
 	//    OR across both raw configs before merging so deep-merge cannot
 	//    silently flip it back to false.
+	//    rawFullAutoLocked(raw): returns true when raw?.full_auto?.locked === true.
 	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
 		const fa =
 			mergedRaw.full_auto &&

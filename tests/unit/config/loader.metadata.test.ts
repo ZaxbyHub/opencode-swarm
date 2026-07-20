@@ -263,7 +263,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 	describe('guardrails defaults fallback', () => {
 		it('sync: irrecoverable config (invalid JSON in both) → recovery=guardrails_defaults', () => {
 			// Both user and project configs are invalid JSON
-			writeUserConfig('not json at all — intentionally invalid');
+			writeUserConfig('not json at all -- intentionally invalid');
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-guardrails-'));
 			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
