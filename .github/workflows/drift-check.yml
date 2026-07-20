@@ -53,6 +53,11 @@ jobs:
         id: drift
         env:
           DRIFT_CHECK_ENFORCE: ${{ vars.DRIFT_CHECK_ENFORCE }}
+          # Issue #1899: opt CI into the dependency-freshness advisory (locked
+          # @opencode-ai/* vs npm-latest). Fail-open `notice` only — never blocks
+          # even under DRIFT_CHECK_ENFORCE. Left off locally so `bun run
+          # drift:check` stays offline/deterministic.
+          SWARM_DEP_FRESHNESS_CHECK: "1"
         run: bun run scripts/drift-check.ts --report drift-report.md
       - name: Post drift report comment
         # Only comment on pull requests, and even if the drift step failed under

@@ -19,6 +19,10 @@
  *   4. command          — COMMAND_REGISTRY structural integrity.
  *   5. agent            — ALL_AGENT_NAMES vs AGENT_TOOL_MAP and the opt-in maps.
  *   6. docs-claim       — numeric documentation claims vs importable source.
+ *   7. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
+ *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
+ *                         fail-open: emits advisory `notice` findings only, never
+ *                         blocks, so a stale lockfile can't silently age again.
  *
  * Output:
  *   - GitHub Actions annotations (`::warning file=...::message`) on stdout.
@@ -1054,6 +1058,221 @@ export function detectSkillReferenceDrift(root: string = REPO_ROOT): DriftFindin
 }
 
 // ---------------------------------------------------------------------------
+// 7) Dependency-freshness drift (issue #1899)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runtime deps whose locked resolution must not silently age far behind npm
+ * latest. #1899: `@opencode-ai/{sdk,plugin}` froze at 1.1.53 in bun.lock while
+ * users ran 1.18.x — a ~17-minor-series skew invisible to CI because the loose
+ * SDK types still compiled. No static/type/lint rule can know npm's *latest
+ * published* version, so this is inherently a CI-time (network) check.
+ */
+export const DEP_FRESHNESS_PACKAGES = [
+	'@opencode-ai/sdk',
+	'@opencode-ai/plugin',
+] as const;
+
+const DEP_FRESHNESS_DEFAULT_THRESHOLD = 5;
+const DEP_FRESHNESS_FETCH_TIMEOUT_MS = 10_000;
+
+export interface DepFreshnessDeps {
+	/** locked/installed version for a package (from node_modules), or null. */
+	readInstalledVersion: (pkg: string) => string | null;
+	/** npm dist-tag latest for a package, or null when unresolved. */
+	fetchLatestVersion: (pkg: string) => Promise<string | null>;
+}
+
+/** Truthy-env gate mirroring isEnforce(). */
+function isDepFreshnessEnabled(): boolean {
+	const v = (process.env.SWARM_DEP_FRESHNESS_CHECK ?? '').trim().toLowerCase();
+	return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+function depFreshnessThreshold(): number {
+	const raw = (process.env.SWARM_DEP_FRESHNESS_THRESHOLD ?? '').trim();
+	if (raw === '') return DEP_FRESHNESS_DEFAULT_THRESHOLD;
+	const n = Number.parseInt(raw, 10);
+	// Non-numeric input must NOT silently disable the check (every `> NaN` is
+	// false); fall back to the default threshold instead.
+	return Number.isFinite(n) && n >= 0 ? n : DEP_FRESHNESS_DEFAULT_THRESHOLD;
+}
+
+/** Parse `major.minor` from a semver string; null when unparseable. */
+export function parseMajorMinor(
+	version: string,
+): { major: number; minor: number } | null {
+	// Strip a leading `v`, then drop build (+) and prerelease (-) metadata.
+	const core = version.trim().replace(/^v/, '').split('+')[0].split('-')[0];
+	const m = /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(core);
+	if (!m) return null;
+	return { major: Number.parseInt(m[1], 10), minor: Number.parseInt(m[2], 10) };
+}
+
+/**
+ * How many "minor series" `latest` is ahead of `locked`.
+ *  - Same major: `latest.minor - locked.minor` (0 or negative → not behind).
+ *  - `latest.major > locked.major`: Infinity (a major bump is always "far behind").
+ *  - `latest.major < locked.major` (locked ahead of latest, unusual): 0.
+ * Returns null when either version is unparseable.
+ */
+export function minorSeriesBehind(
+	locked: string,
+	latest: string,
+): number | null {
+	const a = parseMajorMinor(locked);
+	const b = parseMajorMinor(latest);
+	if (!a || !b) return null;
+	if (b.major > a.major) return Number.POSITIVE_INFINITY;
+	if (b.major < a.major) return 0;
+	return b.minor - a.minor;
+}
+
+function defaultReadInstalledVersion(
+	root: string,
+): (pkg: string) => string | null {
+	const { fileExists, readFile } = makeFs(root);
+	return (pkg) => {
+		const rel = `node_modules/${pkg}/package.json`;
+		if (!fileExists(rel)) return null;
+		try {
+			const parsed = JSON.parse(readFile(rel)) as { version?: unknown };
+			return typeof parsed.version === 'string' ? parsed.version : null;
+		} catch {
+			return null;
+		}
+	};
+}
+
+async function defaultFetchLatestVersion(pkg: string): Promise<string | null> {
+	const controller = new AbortController();
+	const timer = setTimeout(
+		() => controller.abort(),
+		DEP_FRESHNESS_FETCH_TIMEOUT_MS,
+	);
+	try {
+		// Abbreviated packument (Accept header) carries `dist-tags` without the
+		// full version history. Scoped name is URL-encoded (`@scope%2Fname`).
+		const res = await fetch(
+			`https://registry.npmjs.org/${encodeURIComponent(pkg)}`,
+			{
+				headers: { accept: 'application/vnd.npm.install-v1+json' },
+				signal: controller.signal,
+			},
+		);
+		if (!res.ok) return null;
+		const body = (await res.json()) as { 'dist-tags'?: { latest?: unknown } };
+		const latest = body['dist-tags']?.latest;
+		return typeof latest === 'string' ? latest : null;
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Detect runtime deps whose locked resolution has aged past the threshold behind
+ * npm latest (issue #1899). Env-gated OFF by default so local
+ * `bun run drift:check` stays offline/deterministic and CI opts in via
+ * `SWARM_DEP_FRESHNESS_CHECK=1`. Every finding is a non-blocking `notice`:
+ * dependency freshness is an external-world fact a blocked PR cannot fix, so it
+ * must never fail a merge even under DRIFT_CHECK_ENFORCE (it stays visible via
+ * annotations, the report, and the sticky PR comment). Fail-open on any error.
+ */
+export async function detectDependencyFreshnessDrift(
+	root: string = REPO_ROOT,
+	deps: Partial<DepFreshnessDeps> = {},
+): Promise<DriftFinding[]> {
+	if (!isDepFreshnessEnabled()) return [];
+	const category = 'dep-freshness';
+	const readInstalledVersion =
+		deps.readInstalledVersion ?? defaultReadInstalledVersion(root);
+	const fetchLatestVersion = deps.fetchLatestVersion ?? defaultFetchLatestVersion;
+	const threshold = depFreshnessThreshold();
+
+	// Fetch both packages' latest concurrently to bound CI latency to one
+	// timeout window; each fetch fails to `null`/error in isolation.
+	const resolved = await Promise.all(
+		DEP_FRESHNESS_PACKAGES.map(async (pkg) => {
+			try {
+				return { pkg, latest: await fetchLatestVersion(pkg), error: null };
+			} catch (err) {
+				return { pkg, latest: null, error: err };
+			}
+		}),
+	);
+
+	const findings: DriftFinding[] = [];
+	for (const { pkg, latest, error } of resolved) {
+		// Defense-in-depth fail-open: any throw during per-package disposition
+		// (including an injected/custom `readInstalledVersion`) must degrade to a
+		// non-blocking notice, never escape the detector into runAllDetectors/main.
+		try {
+			if (error) {
+				findings.push({
+					category,
+					severity: 'notice',
+					file: 'bun.lock',
+					message: `dependency-freshness check errored for "${pkg}": ${error instanceof Error ? error.message : String(error)} (skipped)`,
+				});
+				continue;
+			}
+			const locked = readInstalledVersion(pkg);
+			if (!locked) {
+				findings.push({
+					category,
+					severity: 'notice',
+					file: 'bun.lock',
+					message: `could not resolve installed version for "${pkg}" (skipped freshness check)`,
+				});
+				continue;
+			}
+			if (!latest) {
+				findings.push({
+					category,
+					severity: 'notice',
+					file: 'bun.lock',
+					message: `could not resolve npm-latest version for "${pkg}" (network/registry unavailable; skipped)`,
+				});
+				continue;
+			}
+			const behind = minorSeriesBehind(locked, latest);
+			if (behind === null) {
+				findings.push({
+					category,
+					severity: 'notice',
+					file: 'bun.lock',
+					message: `could not compare versions for "${pkg}" (locked="${locked}", latest="${latest}")`,
+				});
+				continue;
+			}
+			if (behind > threshold) {
+				const gap =
+					behind === Number.POSITIVE_INFINITY
+						? 'a major version'
+						: `${behind} minor series`;
+				findings.push({
+					category,
+					severity: 'notice',
+					file: 'package.json',
+					message: `"${pkg}" locked at ${locked} is ${gap} behind npm latest ${latest} (threshold ${threshold}). Refresh with \`bun update ${pkg}\` and re-audit runtime-shape assumptions (issue #1899).`,
+				});
+			}
+		} catch (err) {
+			findings.push({
+				category,
+				severity: 'notice',
+				file: 'bun.lock',
+				message: `dependency-freshness disposition errored for "${pkg}": ${err instanceof Error ? err.message : String(err)} (skipped)`,
+			});
+		}
+	}
+
+	return findings;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -1089,6 +1308,12 @@ export async function runAllDetectors(): Promise<DriftFinding[]> {
 	const findings = runSyncDetectors();
 	const skillFindings = await detectSkillAssertionDrift();
 	findings.push(...skillFindings);
+	// Dependency-freshness (issue #1899): env-gated OFF by default, so this is a
+	// no-op for local `bun run drift:check` and leaves the sync-detector tests
+	// untouched. CI opts in via SWARM_DEP_FRESHNESS_CHECK=1. Fail-open, advisory
+	// `notice` only — never blocks a merge.
+	const depFindings = await detectDependencyFreshnessDrift();
+	findings.push(...depFindings);
 	return findings;
 }
 
@@ -1133,7 +1358,7 @@ export function buildReport(findings: DriftFinding[]): string {
 	const lines: string[] = ['# Drift check report', ''];
 	if (findings.length === 0) {
 		lines.push(
-			'✅ No drift detected across skills, tools, commands, agents, and docs claims.',
+			'✅ No drift detected across skills, tools, commands, agents, docs claims, and dependency freshness.',
 		);
 		lines.push('');
 		return lines.join('\n');
