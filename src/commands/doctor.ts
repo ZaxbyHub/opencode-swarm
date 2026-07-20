@@ -1,4 +1,4 @@
-import { loadPluginConfig } from '../config/loader';
+import { loadPluginConfigWithMeta } from '../config/loader';
 import {
 	type ConfigDoctorResult,
 	detectStraySwarmDirs,
@@ -72,6 +72,45 @@ export function formatToolDoctorMarkdown(result: ConfigDoctorResult): string {
 }
 
 /**
+ * Strip C0 control characters (including `\r`, `\n`, and ESC `\x1b`) and DEL,
+ * collapsing each run to a single space. `removedKeys`/`warnings` are rendered
+ * to a terminal in many call paths, not just as markdown — an unstripped ESC
+ * lets an attacker-controlled config key smuggle ANSI escape sequences (e.g.
+ * `\x1b[2J\x1b[31mFAKE\x1b[0m`) to clear the screen or spoof output, on top of
+ * the markdown-structure risks newlines pose.
+ */
+function stripControlChars(s: string): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+	return s.replace(/[\x00-\x1f\x7f]+/g, ' ');
+}
+
+/**
+ * Neutralize a string before it is interpolated INSIDE a backtick code span
+ * (`` `${...}` ``) in rendered command output. `removedKeys` carries raw
+ * config key names sourced from the project/user config file
+ * (`stripUnrecognizedKeys` in `../config/loader`) — an attacker-controlled
+ * `.opencode/opencode-swarm.json` could embed a backtick (breaking out of the
+ * code span) on top of the control-character risks `stripControlChars`
+ * handles. CommonMark renders every other character literally inside a code
+ * span, and backslash escapes are NOT interpreted there — escaping e.g. `*`
+ * would show a literal backslash to the user.
+ */
+function sanitizeForMarkdownCodeSpan(s: string): string {
+	return stripControlChars(s).replace(/`/g, "'");
+}
+
+/**
+ * Neutralize a string before it is interpolated as plain (non-code-span)
+ * markdown text, as `warnings` is. Unlike `sanitizeForMarkdownCodeSpan`,
+ * backslash-escaping IS interpreted outside a code span, so it is the
+ * correct way to neutralize emphasis/link/table metacharacters here without
+ * altering the visible text.
+ */
+function sanitizeForMarkdownText(s: string): string {
+	return stripControlChars(s).replace(/([\\`*_[\]|])/g, '\\$1');
+}
+
+/**
  * Format config doctor result as markdown for command output.
  */
 function formatDoctorMarkdown(result: ConfigDoctorResult): string {
@@ -139,7 +178,8 @@ export async function handleDoctorCommand(
 	// agent-initiated commands.
 	const enableAutoFix = args.includes('--fix') || args.includes('-f');
 
-	const config = loadPluginConfig(directory);
+	const meta = loadPluginConfigWithMeta(directory);
+	const config = meta.config;
 	const result = runConfigDoctor(config, directory);
 
 	// If auto-fix is requested and there are auto-fixable issues, apply fixes
@@ -167,6 +207,24 @@ export async function handleDoctorCommand(
 				markdown;
 		}
 		output = markdown;
+	}
+
+	// Surface recovery metadata (FR-004) — when the loader had to drop keys or
+	// fall back to defaults, the user must be able to discover that here.
+	if (meta.recovery !== 'none') {
+		const lines: string[] = ['\n---\n\n## Config Recovery (FR-004)\n\n'];
+		lines.push(`- **Recovery applied**: \`${meta.recovery}\``);
+		if (meta.removedKeys.length > 0) {
+			lines.push(`- **Removed keys (${meta.removedKeys.length})**:`);
+			for (const k of meta.removedKeys)
+				lines.push(`  - \`${sanitizeForMarkdownCodeSpan(k)}\``);
+		}
+		if (meta.warnings.length > 0) {
+			lines.push(`- **Recovery warnings (${meta.warnings.length})**:`);
+			for (const w of meta.warnings)
+				lines.push(`  - ${sanitizeForMarkdownText(w)}`);
+		}
+		output += `${lines.join('\n')}\n`;
 	}
 
 	// Check for stray .swarm directories

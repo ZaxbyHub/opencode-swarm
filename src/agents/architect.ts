@@ -1407,14 +1407,16 @@ function buildYourToolsList(
 }
 
 /**
- * Build the user-facing QA gate selection dialogue, used by MODE: SPECIFY
- * (step 5b), MODE: BRAINSTORM (Phase 6), and MODE: PLAN (post-`save_plan`
- * inline path). The dialogue is dialogue-only — persistence happens during
- * MODE: PLAN after `save_plan` creates `plan.json`.
+ * TEST-ONLY ORACLE: This function is no longer wired into the architect prompt
+ * (the {{QA_GATE_DIALOGUE_*}} placeholder substitution was removed in #1690,
+ * task 3.1). It is retained here because three test files import it directly:
+ *   - src/__tests__/qa-gate-hardening.test.ts:17
+ *   - tests/unit/agents/architect-hallucination-gate.test.ts:3
+ *   - tests/unit/skills/plan-protocol.test.ts:8
  *
- * The lead-in sentence varies per mode, but the body (ten gates with
- * defaults, one-shot accept-or-customize prompt) is shared so SPECIFY,
- * BRAINSTORM, and PLAN inline paths stay in lockstep.
+ * Future work (task 3.2) will create `references/qa-gate-gates-body.md` and
+ * migrate those tests to assert against the canonical body. Once migrated,
+ * this helper may be deleted.
  */
 export function buildQaGateSelectionDialogue(
 	modeLabel: 'BRAINSTORM' | 'SPECIFY' | 'PLAN',
@@ -1744,24 +1746,6 @@ export function createArchitectAgent(
 			),
 		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());
-
-	// Substitute the QA gate selection dialogue blocks shared across
-	// MODE: SPECIFY (step 5b), MODE: BRAINSTORM (Phase 6), and MODE: PLAN
-	// (post-save_plan inline path). Use /g so any composed prompt with
-	// multiple occurrences is fully substituted.
-	prompt = prompt
-		?.replace(
-			/\{\{QA_GATE_DIALOGUE_SPECIFY\}\}/g,
-			buildQaGateSelectionDialogue('SPECIFY'),
-		)
-		?.replace(
-			/\{\{QA_GATE_DIALOGUE_BRAINSTORM\}\}/g,
-			buildQaGateSelectionDialogue('BRAINSTORM'),
-		)
-		?.replace(
-			/\{\{QA_GATE_DIALOGUE_PLAN\}\}/g,
-			buildQaGateSelectionDialogue('PLAN'),
-		);
 
 	// Option A: inline placeholder substitution (matches existing {{YOUR_TOOLS}},
 	// {{AVAILABLE_TOOLS}} pattern). When council is disabled/missing, collapse

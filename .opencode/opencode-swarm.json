@@ -1,4 +1,7 @@
 {
   "agents": {},
-  "hooks": {}
+  "hooks": {},
+  "phase_complete": {
+    "policy": "warn"
+  }
 }

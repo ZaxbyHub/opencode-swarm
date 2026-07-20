@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { _internals, handleTurboCommand } from '../commands/turbo';
+import { TURBO_BYPASS_DISCLOSURE } from '../commands/turbo-constants';
 import { getAgentSession, swarmState } from '../state';
 
 describe('handleTurboCommand', () => {
@@ -106,7 +107,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -117,7 +118,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 	});
@@ -156,7 +157,7 @@ describe('handleTurboCommand', () => {
 
 			const result = await handleTurboCommand('/project', [], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -174,7 +175,7 @@ describe('handleTurboCommand', () => {
 
 			const result = await handleTurboCommand('/project', [''], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 	});
@@ -189,7 +190,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -202,7 +203,7 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
 			expect(getSession().turboMode).toBe(true);
 		});
 
@@ -244,5 +245,34 @@ describe('handleTurboCommand', () => {
 			await handleTurboCommand('/project', ['on'], testSessionId);
 			expect(getSession().turboMode).toBe(true);
 		});
+	});
+});
+
+describe('TURBO_BYPASS_DISCLOSURE content', () => {
+	// The enable-message assertions above only check that the constant is
+	// appended, not what it says — if a future edit silently dropped a gate
+	// name from turbo-constants.ts, those tests would still pass. Assert the
+	// disclosure actually names the gates it claims to enumerate.
+	it('names the bypassed gates', () => {
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Stage B');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('reviewer');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('test_engineer');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('phase_complete Gates 1-5');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('completion-verify');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('drift-verifier');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('hallucination-guard');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('mutation-gate');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('phase-council');
+	});
+
+	it('names the gates still enforced', () => {
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Stage A');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Tier 3 Stage B');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Gate 5b');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('architecture-supervisor');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Gate 6');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('final-council');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('Gate 7');
+		expect(TURBO_BYPASS_DISCLOSURE).toContain('full-auto');
 	});
 });

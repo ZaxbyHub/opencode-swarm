@@ -9,6 +9,7 @@ import {
 	saveLeanTurboRunState,
 } from '../turbo/lean/state';
 import * as logger from '../utils/logger';
+import { TURBO_BYPASS_DISCLOSURE } from './turbo-constants.js';
 
 /**
  * Test-only dependency-injection seam. Production code calls
@@ -117,7 +118,7 @@ export async function handleTurboCommand(
 			session.turboStrategy = 'standard';
 			session.leanTurboActive = false;
 			session.leanTurboCurrentPhase = undefined;
-			return 'Turbo Mode enabled';
+			return `Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`;
 		}
 	}
 
@@ -148,7 +149,7 @@ export async function handleTurboCommand(
 		session.turboStrategy = 'standard';
 		session.leanTurboActive = false;
 		session.leanTurboCurrentPhase = undefined;
-		return 'Turbo Mode enabled';
+		return `Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`;
 	}
 
 	// --- turbo standard on ---
@@ -161,7 +162,7 @@ export async function handleTurboCommand(
 		session.turboStrategy = 'standard';
 		session.leanTurboActive = false;
 		session.leanTurboCurrentPhase = undefined;
-		return 'Turbo Mode enabled (standard)';
+		return `Turbo Mode enabled (standard). ${TURBO_BYPASS_DISCLOSURE}`;
 	}
 
 	// --- turbo lean on ---
@@ -253,7 +254,7 @@ export async function handleTurboCommand(
 		session.turboStrategy = 'standard';
 		session.leanTurboActive = false;
 		session.leanTurboCurrentPhase = undefined;
-		return 'Turbo Mode enabled';
+		return `Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`;
 	}
 }
 
@@ -313,7 +314,8 @@ function enableLeanTurbo(
 	session.leanTurboCurrentPhase = undefined;
 
 	return [
-		'Lean Turbo enabled',
+		`Lean Turbo enabled. ${TURBO_BYPASS_DISCLOSURE} ` +
+			`Per-lane: reviewer gates and file-lock conflict detection.`,
 		`(maxParallelCoders=${maxParallelCoders}, conflict_policy=${conflictPolicy},`,
 		`Full-Auto: ${fullAutoActive ? 'active' : 'inactive'})`,
 	].join(' ');
