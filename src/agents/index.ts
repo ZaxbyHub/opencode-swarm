@@ -77,6 +77,15 @@ const _swarmAgentsMap = new Map<
 	>
 >();
 
+// Tracks gated-agent advisory messages emitted in the current createAgents
+// call. Top-level config.agents is merged into every swarm (see ~L933), so
+// without dedupe the advisory would fire once per swarm. Cleared in
+// createAgents. Plugin init calls createAgents twice (src/index.ts:647 via
+// getAgentConfigs and :653 directly), so a misconfigured gated agent produces
+// exactly 2 identical deferred warnings per init — cosmetic, accepted.
+// Issue #1914 Defect 3 / critic item 5.
+const _emittedGatedAgentAdvisories = new Set<string>();
+
 /**
  * Strip the user-defined swarm prefix from an agent name to get the base
  * canonical role.
@@ -427,6 +436,19 @@ function createSwarmAgents(
 	// Helper to load custom prompts
 	const getPrompts = (name: string) => loadAgentPrompt(name);
 
+	// Emit a gated-agent advisory (deduped across swarms within a single
+	// createAgents call). Issue #1914 Defect 3. Mirrors the quiet-ternary
+	// pattern used by the council moderator deprecation advisory (~L795).
+	const emitGatedAgentAdvisory = (msg: string): void => {
+		if (_emittedGatedAgentAdvisories.has(msg)) return;
+		_emittedGatedAgentAdvisories.add(msg);
+		if (quiet) {
+			addDeferredWarning(msg);
+		} else {
+			advisoryWarn(msg);
+		}
+	};
+
 	// Helper to create prefixed agent name
 	const prefixName = (name: string) => `${prefix}${name}`;
 
@@ -662,6 +684,31 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	// domain_expert → SME model. Web search is owned by the architect (a single
 	// pre-search pass), and synthesis is the architect's responsibility — the
 	// dedicated council_moderator agent has been removed.
+
+	// Advisory: agents.council_* configured (and not disabled) but
+	// council.general.enabled is off → silent no-op. Issue #1914 Defect 3 sweep.
+	// Condition uses per-agent "configured AND not disabled" disjunction so a
+	// single council agent configured with {disabled: true} (others absent)
+	// does NOT trip the advisory.
+	const anyCouncilAgentConfiguredActive =
+		(swarmAgents?.council_generalist !== undefined &&
+			!isAgentDisabled('council_generalist', swarmAgents, swarmPrefix)) ||
+		(swarmAgents?.council_skeptic !== undefined &&
+			!isAgentDisabled('council_skeptic', swarmAgents, swarmPrefix)) ||
+		(swarmAgents?.council_domain_expert !== undefined &&
+			!isAgentDisabled('council_domain_expert', swarmAgents, swarmPrefix));
+	if (
+		pluginConfig?.council?.general?.enabled !== true &&
+		anyCouncilAgentConfiguredActive
+	) {
+		emitGatedAgentAdvisory(
+			'[opencode-swarm] agents.council_{generalist,skeptic,domain_expert} are configured but ' +
+				'council.general.enabled is not true — the council agents will NOT be registered. ' +
+				'Set "council": { "general": { "enabled": true } } in opencode-swarm.json to enable them, ' +
+				'or remove the agents.council_* blocks to silence this warning.',
+		);
+	}
+
 	if (pluginConfig?.council?.general?.enabled === true) {
 		// Council agents intentionally omit the third `appendPrompt` argument that
 		// createReviewerAgent / createCriticAgent / createSMEAgent accept.
@@ -750,6 +797,20 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		}
 	}
 
+	// Advisory: agents.docs_design configured (and not disabled) but
+	// design_docs.enabled is off → silent no-op. Issue #1914 Defect 3.
+	if (
+		swarmAgents?.docs_design !== undefined &&
+		!isAgentDisabled('docs_design', swarmAgents, swarmPrefix) &&
+		pluginConfig?.design_docs?.enabled !== true
+	) {
+		emitGatedAgentAdvisory(
+			'[opencode-swarm] agents.docs_design is configured but design_docs.enabled is not true — ' +
+				'the docs_design agent will NOT be registered. Set "design_docs": { "enabled": true } ' +
+				'in opencode-swarm.json to enable it, or remove the agents.docs_design block to silence this warning.',
+		);
+	}
+
 	// 8b. Create Docs (Design-Doc Author) variant — opt-in, only when
 	// design_docs.enabled === true (issue #1080). Shares the docs agent base via
 	// the 'design_docs' role, mirroring how critic role variants are registered.
@@ -768,6 +829,20 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		docsDesign.name = prefixName('docs_design');
 		agents.push(applyOverrides(docsDesign, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// Advisory: agents.designer configured (and not disabled) but
+	// ui_review.enabled is off → silent no-op. Issue #1914 Defect 3.
+	if (
+		swarmAgents?.designer !== undefined &&
+		!isAgentDisabled('designer', swarmAgents, swarmPrefix) &&
+		pluginConfig?.ui_review?.enabled !== true
+	) {
+		emitGatedAgentAdvisory(
+			'[opencode-swarm] agents.designer is configured but ui_review.enabled is not true — ' +
+				'the designer agent will NOT be registered. Set "ui_review": { "enabled": true } ' +
+				'in opencode-swarm.json to enable it, or remove the agents.designer block to silence this warning.',
+		);
 	}
 
 	// 9. Create Designer agent (opt-in — only when ui_review.enabled === true)
@@ -833,6 +908,10 @@ export function createAgents(
 	projectContext: ProjectContext = emptyProjectContext(),
 ): AgentDefinition[] {
 	const allAgents: AgentDefinition[] = [];
+
+	// Clear the gated-agent advisory dedupe set at entry. Tests call createAgents
+	// repeatedly and need isolation; plugin init calls it twice (see note above).
+	_emittedGatedAgentAdvisories.clear();
 
 	// Check if we have swarms configured
 	const swarms = config?.swarms;
