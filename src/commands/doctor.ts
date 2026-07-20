@@ -72,6 +72,32 @@ export function formatToolDoctorMarkdown(result: ConfigDoctorResult): string {
 }
 
 /**
+ * Neutralize a string before it is interpolated INSIDE a backtick code span
+ * (`` `${...}` ``) in rendered command output. `removedKeys` carries raw
+ * config key names sourced from the project/user config file
+ * (`stripUnrecognizedKeys` in `../config/loader`) — an attacker-controlled
+ * `.opencode/opencode-swarm.json` could embed a backtick (breaking out of the
+ * code span) or a newline (injecting extra markdown lines) into a key name.
+ * Only those two need handling: CommonMark renders every other character
+ * literally inside a code span, and backslash escapes are NOT interpreted
+ * there — escaping e.g. `*` would show a literal backslash to the user.
+ */
+function sanitizeForMarkdownCodeSpan(s: string): string {
+	return s.replace(/[\r\n]+/g, ' ').replace(/`/g, "'");
+}
+
+/**
+ * Neutralize a string before it is interpolated as plain (non-code-span)
+ * markdown text, as `warnings` is. Unlike `sanitizeForMarkdownCodeSpan`,
+ * backslash-escaping IS interpreted outside a code span, so it is the
+ * correct way to neutralize emphasis/link/table metacharacters here without
+ * altering the visible text.
+ */
+function sanitizeForMarkdownText(s: string): string {
+	return s.replace(/[\r\n]+/g, ' ').replace(/([\\`*_[\]|])/g, '\\$1');
+}
+
+/**
  * Format config doctor result as markdown for command output.
  */
 function formatDoctorMarkdown(result: ConfigDoctorResult): string {
@@ -177,11 +203,13 @@ export async function handleDoctorCommand(
 		lines.push(`- **Recovery applied**: \`${meta.recovery}\``);
 		if (meta.removedKeys.length > 0) {
 			lines.push(`- **Removed keys (${meta.removedKeys.length})**:`);
-			for (const k of meta.removedKeys) lines.push(`  - \`${k}\``);
+			for (const k of meta.removedKeys)
+				lines.push(`  - \`${sanitizeForMarkdownCodeSpan(k)}\``);
 		}
 		if (meta.warnings.length > 0) {
 			lines.push(`- **Recovery warnings (${meta.warnings.length})**:`);
-			for (const w of meta.warnings) lines.push(`  - ${w}`);
+			for (const w of meta.warnings)
+				lines.push(`  - ${sanitizeForMarkdownText(w)}`);
 		}
 		output += `${lines.join('\n')}\n`;
 	}

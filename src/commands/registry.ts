@@ -1259,7 +1259,7 @@ export const COMMAND_REGISTRY = {
 			'Toggles Turbo Mode for the current session. Supports three strategies:\n' +
 			'\n' +
 			`**Standard turbo** — ${TURBO_BYPASS_DISCLOSURE}\n` +
-			'**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection.\n' +
+			`**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection. ${TURBO_BYPASS_DISCLOSURE}\n` +
 			'**Epic** — additive overlay above Lean Turbo. Auto-decides per-plan parallel-vs-serial via the coupling coefficient `p` and three gates (p-threshold, hot-module, greenfield). When `/swarm turbo epic on` is selected, Lean Turbo is also enabled — Epic dispatches Lean Turbo when it promotes.\n' +
 			'\n' +
 			'Subcommands:\n' +

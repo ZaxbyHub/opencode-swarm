@@ -6,10 +6,15 @@ import type { RecoveryInfo } from './loader';
  * happened, so callers can append the result directly to their user-facing
  * message without conditional checks.
  *
- * Used by FR-004 (issue #1690) surgical command-return contract:
- * `/swarm turbo on`, `/swarm full-auto on`, `/swarm close`, etc. must
- * surface affected section names when the loader had to fall back from
- * the user's config.
+ * Designed for the FR-004 (issue #1690) surgical command-return contract:
+ * `/swarm turbo on`, `/swarm full-auto on`, `/swarm close`, etc. should
+ * surface affected section names when the loader had to fall back from the
+ * user's config. NOT YET WIRED INTO ANY CALL SITE — `turbo.ts`, `full-auto.ts`,
+ * and `close.ts` currently destructure only `{ config }` from
+ * `loadPluginConfigWithMeta`/`Async` and discard `recovery`/`removedKeys`/
+ * `warnings`. `doctor.ts` is the only current consumer of that metadata and
+ * renders it inline rather than through this helper. Tracked as a follow-up;
+ * do not assume this function runs anywhere until a caller is added.
  */
 export function formatRecoveryContext(
 	meta:
