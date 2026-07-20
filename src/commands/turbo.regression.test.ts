@@ -23,6 +23,7 @@ import {
 import { getAgentSession, hasActiveTurboMode, swarmState } from '../state';
 import { checkReviewerGate } from '../tools/update-task-status';
 import { _internals, handleTurboCommand } from './turbo';
+import { TURBO_BYPASS_DISCLOSURE } from './turbo-constants';
 
 describe('Task 4: Turbo Mode Regression Tests', () => {
 	let testSessionId: string;
@@ -117,7 +118,7 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 
 			const result = await handleTurboCommand('/test', [], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe(`Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`);
 			expect(session?.turboMode).toBe(true);
 		});
 
@@ -137,7 +138,7 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 
 			const result = await handleTurboCommand('/test', ['on'], testSessionId);
 
-			expect(result).toBe('Turbo Mode enabled');
+			expect(result).toBe(`Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`);
 			expect(session?.turboMode).toBe(true);
 		});
 
