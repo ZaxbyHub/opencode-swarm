@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.125.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.5...v7.125.6) (2026-07-20)
+
+
+### Bug Fixes
+
+* **architect:** make runtime reliably emit ACCEPTANCE on every coder/reviewer dispatch ([b9da7e5](https://github.com/ZaxbyHub/opencode-swarm/commit/b9da7e52b31c62f4850d7a24fd31ea78859efcc2))
+
 ## [7.125.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.4...v7.125.5) (2026-07-20)
 
 
