@@ -22,6 +22,7 @@ import {
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import { resolveGeneratedAgentRole } from '../config/schema.js';
+import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { validateSwarmPath } from './utils.js';
 
 export const PR_REVIEW_BASE_DIMENSION_IDS = [
@@ -141,6 +142,18 @@ interface PrFeedbackReadyToPublishRecord {
 export type PrWorkflowCompletionStatus = 'completed' | 'ready-to-publish';
 
 export type PrReviewValidationPhase = 'council' | 'reviewer' | 'critic';
+export type PrReviewArtifactBoundary =
+	| 'post_explorer'
+	| 'post_reviewer'
+	| 'post_critic';
+
+interface PrFeedbackScopeDeclarationRecord {
+	taskId: string;
+	files: string[];
+	revisionDigest: string;
+	declaredAt: string;
+	consumedByCallId?: string;
+}
 
 interface PrReviewValidationBatchRecord {
 	batchId: string;
@@ -169,6 +182,11 @@ export interface PrWorkflowGateState {
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
 	prReviewTriggerEvalPath?: string;
 	prReviewValidationBatches?: PrReviewValidationBatchRecord[];
+	prReviewArtifactRunId?: string;
+	prReviewFindingsPath?: string;
+	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
+	prReviewHandoffPath?: string;
+	prReviewHandoffRequired?: boolean;
 	prFeedbackInventory?: string[];
 	prFeedbackVerifications?: PrFeedbackVerificationRecord[];
 	/** @deprecated Compatibility projection of the most recent verification dispatch. */
@@ -176,6 +194,7 @@ export interface PrWorkflowGateState {
 	prFeedbackStageA?: PrFeedbackStageARecord;
 	prFeedbackGateBatches?: PrFeedbackGateBatchRecord[];
 	prFeedbackReadyToPublish?: PrFeedbackReadyToPublishRecord;
+	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
 }
 
 interface SessionStateMutationLock {
@@ -346,6 +365,16 @@ const PrReviewValidationBatchRecordSchema = z
 	})
 	.strict();
 
+const PrFeedbackScopeDeclarationRecordSchema = z
+	.object({
+		taskId: z.string().regex(/^\d+\.\d+(?:\.\d+)*$/),
+		files: z.array(z.string().min(1)).min(1).max(10_000),
+		revisionDigest: z.string().min(1),
+		declaredAt: z.string().min(1),
+		consumedByCallId: z.string().min(1).optional(),
+	})
+	.strict();
+
 const PrWorkflowGateStateSchema = z
 	.object({
 		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
@@ -367,6 +396,14 @@ const PrWorkflowGateStateSchema = z
 			.array(PrReviewValidationBatchRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
+		prReviewArtifactRunId: z.string().min(1).optional(),
+		prReviewFindingsPath: z.string().min(1).optional(),
+		prReviewArtifactBoundaries: z
+			.array(z.enum(['post_explorer', 'post_reviewer', 'post_critic']))
+			.max(3)
+			.optional(),
+		prReviewHandoffPath: z.string().min(1).optional(),
+		prReviewHandoffRequired: z.boolean().optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
 		prFeedbackVerifications: z
 			.array(PrFeedbackVerificationRecordSchema)
@@ -379,6 +416,10 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prFeedbackReadyToPublish: PrFeedbackReadyToPublishRecordSchema.optional(),
+		prFeedbackScopes: z
+			.array(PrFeedbackScopeDeclarationRecordSchema)
+			.max(MAX_WORKFLOW_BATCHES)
+			.optional(),
 	})
 	.strict();
 
@@ -1588,6 +1629,215 @@ export async function markPrReviewTriggerEvaluationComplete(
 	return nextState;
 }
 
+export async function assertPrReviewArtifactBoundary(
+	directory: string,
+	sessionID: string,
+	runId: string,
+	boundary: PrReviewArtifactBoundary,
+	findingIds: string[],
+): Promise<PrWorkflowGateState> {
+	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	if (!state.prReviewTriggerEvalPath) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact',
+		);
+	}
+	if (boundary === 'post_reviewer') {
+		state = await assertPrReviewValidationSettled(
+			directory,
+			sessionID,
+			'reviewer',
+		);
+	} else if (boundary === 'post_critic') {
+		await assertPrReviewValidationSettled(directory, sessionID, 'reviewer');
+		if (derivePrReviewCriticInventory(directory, state).length > 0) {
+			state = await assertPrReviewValidationSettled(
+				directory,
+				sessionID,
+				'critic',
+			);
+		}
+	}
+	if (state.prReviewArtifactRunId && state.prReviewArtifactRunId !== runId) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW artifacts are already bound to run "${state.prReviewArtifactRunId}"`,
+		);
+	}
+	const expectedFindingIds = derivePrReviewCandidateInventory(directory, state);
+	const normalizedFindingIds = [...new Set(findingIds)].sort();
+	if (
+		normalizedFindingIds.length !== findingIds.length ||
+		JSON.stringify(normalizedFindingIds) !==
+			JSON.stringify([...expectedFindingIds].sort())
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${boundary} findings must exactly cover the discovered candidate inventory`,
+		);
+	}
+	return state;
+}
+
+export async function markPrReviewArtifactBoundary(
+	directory: string,
+	sessionID: string,
+	runId: string,
+	boundary: PrReviewArtifactBoundary,
+	artifactPath: string,
+	findingIds: string[],
+	handoffRequired: boolean,
+): Promise<PrWorkflowGateState> {
+	const state = await assertPrReviewArtifactBoundary(
+		directory,
+		sessionID,
+		runId,
+		boundary,
+		findingIds,
+	);
+	const boundaries = new Set(state.prReviewArtifactBoundaries ?? []);
+	boundaries.add(boundary);
+	const nextState: PrWorkflowGateState = {
+		...state,
+		updatedAt: isoNow(),
+		prReviewArtifactRunId: runId,
+		prReviewFindingsPath: artifactPath,
+		prReviewArtifactBoundaries: [...boundaries],
+		prReviewHandoffRequired: handoffRequired,
+	};
+	await persistState(directory, nextState);
+	return nextState;
+}
+
+export async function markPrReviewHandoffComplete(
+	directory: string,
+	sessionID: string,
+	runId: string,
+	artifactPath: string,
+): Promise<PrWorkflowGateState> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	if (
+		state.prReviewArtifactRunId !== runId ||
+		!(state.prReviewArtifactBoundaries ?? []).includes('post_critic')
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW handoff requires the final findings boundary for the same run',
+		);
+	}
+	const nextState: PrWorkflowGateState = {
+		...state,
+		updatedAt: isoNow(),
+		prReviewHandoffPath: artifactPath,
+	};
+	await persistState(directory, nextState);
+	return nextState;
+}
+
+export async function declarePrFeedbackScope(
+	directory: string,
+	sessionID: string,
+	taskId: string,
+	files: string[],
+): Promise<PrWorkflowGateState> {
+	const state = await assertPrFeedbackVerificationSettled(directory, sessionID);
+	const revisionDigest = await currentPrFeedbackRevisionDigest(
+		directory,
+		state,
+	);
+	const previous = state.prFeedbackScopes ?? [];
+	const existing = previous.find((entry) => entry.taskId === taskId);
+	if (existing?.consumedByCallId) {
+		throw new Error(
+			`SCOPE_NOT_DECLARED: PR-feedback scope ${taskId} was already consumed; use a fresh task_id for any retry`,
+		);
+	}
+	const record: PrFeedbackScopeDeclarationRecord = {
+		taskId,
+		files,
+		revisionDigest,
+		declaredAt: isoNow(),
+	};
+	const nextState: PrWorkflowGateState = {
+		...state,
+		updatedAt: isoNow(),
+		prFeedbackScopes: [
+			...previous.filter((entry) => entry.taskId !== taskId),
+			record,
+		],
+	};
+	await persistState(directory, nextState);
+	return nextState;
+}
+
+export async function resolvePrFeedbackScopeDeclaration(
+	directory: string,
+	sessionID: string,
+	taskId: string,
+): Promise<PrFeedbackScopeDeclarationRecord | null> {
+	const state = await readPrWorkflowGateState(directory, sessionID);
+	if (state?.mode !== 'PR_FEEDBACK') return null;
+	const declaration = (state.prFeedbackScopes ?? []).find(
+		(entry) => entry.taskId === taskId,
+	);
+	if (!declaration) return null;
+	await assertPrFeedbackVerificationSettled(directory, sessionID);
+	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
+	return currentDigest === declaration.revisionDigest ? declaration : null;
+}
+
+export async function consumePrFeedbackScopeDeclaration(
+	directory: string,
+	sessionID: string,
+	taskId: string,
+	callID: string,
+): Promise<PrFeedbackScopeDeclarationRecord | null> {
+	const declaration = await resolvePrFeedbackScopeDeclaration(
+		directory,
+		sessionID,
+		taskId,
+	);
+	if (!declaration) return null;
+	if (declaration.consumedByCallId && declaration.consumedByCallId !== callID) {
+		throw new Error(
+			`SCOPE_NOT_DECLARED: PR-feedback scope ${taskId} was already consumed by another Task call`,
+		);
+	}
+	if (declaration.consumedByCallId === callID) return declaration;
+	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+	const nextState: PrWorkflowGateState = {
+		...state,
+		updatedAt: isoNow(),
+		prFeedbackScopes: (state.prFeedbackScopes ?? []).map((entry) =>
+			entry.taskId === taskId ? { ...entry, consumedByCallId: callID } : entry,
+		),
+	};
+	await persistState(directory, nextState);
+	return { ...declaration, consumedByCallId: callID };
+}
+
+export async function validatePrFeedbackScopeBinding(
+	directory: string,
+	binding: {
+		taskId: string;
+		files: string[];
+		dispatchCallId?: string;
+		workflowSessionId?: string;
+		workflowRevisionDigest?: string;
+	},
+): Promise<boolean> {
+	if (!binding.workflowSessionId || !binding.workflowRevisionDigest)
+		return false;
+	const declaration = await resolvePrFeedbackScopeDeclaration(
+		directory,
+		binding.workflowSessionId,
+		binding.taskId,
+	);
+	return Boolean(
+		declaration &&
+			declaration.consumedByCallId === binding.dispatchCallId &&
+			declaration.revisionDigest === binding.workflowRevisionDigest &&
+			JSON.stringify(declaration.files) === JSON.stringify(binding.files),
+	);
+}
+
 export async function enforcePrWorkflowToolBefore(
 	directory: string,
 	sessionID: string,
@@ -1616,8 +1866,10 @@ export async function enforcePrWorkflowToolBefore(
 	const referencesProtectedWorkflowEvidence = containsProtectedWorkflowPath(
 		command || serializedArgs,
 	);
-	const isInternalWorkflowTool =
-		PR_WORKFLOW_CONTROLLER_TOOLS.has(normalizedTool);
+	const isInternalWorkflowTool = isPrWorkflowControllerTool(
+		state.mode,
+		normalizedTool,
+	);
 	const isShellTool = normalizedTool === 'bash' || normalizedTool === 'shell';
 	const isReadOnlyShell =
 		isShellTool &&
@@ -1625,10 +1877,19 @@ export async function enforcePrWorkflowToolBefore(
 		isAllowedPrWorkflowReadOnlyShell(command, {
 			allowCheckout: !state.prHeadSha,
 			allowFetch: !state.prHeadSha,
+			allowTrackingFetch: Boolean(state.prHeadSha),
 		});
+	const trustedCapability = getPrWorkflowToolCapability(
+		normalizedTool,
+		state.mode,
+	);
+	const isTrustedWorkflowTool =
+		trustedCapability !== null &&
+		isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {});
 	const isNamedReadOnlyTool =
-		isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
-		readOnlyToolArgumentsAreSafe(args ?? {});
+		isTrustedWorkflowTool ||
+		(isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
+			readOnlyToolArgumentsAreSafe(args ?? {}));
 	if (
 		referencesProtectedWorkflowEvidence &&
 		!isInternalWorkflowTool &&
@@ -1747,6 +2008,7 @@ export async function enforcePrWorkflowToolBefore(
 			isAllowedPrWorkflowReadOnlyShell(command, {
 				allowCheckout: false,
 				allowFetch: false,
+				allowTrackingFetch: false,
 			})
 		)
 			return;
@@ -1783,7 +2045,8 @@ export async function enforcePrWorkflowToolBefore(
 		!isDirectWrite &&
 		!isShellCommandRequiringVerification &&
 		!isRemoteMutationTool &&
-		!isCoderTask
+		!isCoderTask &&
+		normalizedTool !== 'prepare_pr_feedback_scope'
 	)
 		return;
 	// abort_pr_workflow is a pure escape hatch, not a publication-adjacent
@@ -1849,6 +2112,25 @@ export async function completePrWorkflow(
 				);
 			}
 			await assertPrReviewValidationSettled(directory, sessionID, 'critic');
+		}
+		const requiredArtifactBoundaries: PrReviewArtifactBoundary[] = [
+			'post_explorer',
+			'post_reviewer',
+			'post_critic',
+		];
+		const persistedBoundaries = new Set(state.prReviewArtifactBoundaries ?? []);
+		const missingArtifactBoundaries = requiredArtifactBoundaries.filter(
+			(boundary) => !persistedBoundaries.has(boundary),
+		);
+		if (!state.prReviewFindingsPath || missingArtifactBoundaries.length > 0) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW completion requires durable findings checkpoints; missing: ${missingArtifactBoundaries.join(', ') || 'findings path'}`,
+			);
+		}
+		if (state.prReviewHandoffRequired && !state.prReviewHandoffPath) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
+			);
 		}
 	} else {
 		const readyState = await assertPrFeedbackReadyToPublish(
@@ -2116,16 +2398,35 @@ function containsProtectedWorkflowPath(value: string): boolean {
 	);
 }
 
-const PR_WORKFLOW_CONTROLLER_TOOLS = new Set([
+const PR_WORKFLOW_SHARED_CONTROLLER_TOOLS = new Set([
 	'abort_pr_workflow',
 	'collect_lane_results',
 	'complete_pr_workflow',
 	'dispatch_lanes_async',
 	'get_async_result',
 	'get_async_status',
-	'run_pr_feedback_stage_a',
+]);
+
+const PR_REVIEW_CONTROLLER_TOOLS = new Set([
+	'parse_lane_candidates',
+	'write_pr_review_artifact',
 	'write_pr_review_trigger_eval',
 ]);
+
+const PR_FEEDBACK_CONTROLLER_TOOLS = new Set([
+	'prepare_pr_feedback_scope',
+	'run_pr_feedback_stage_a',
+]);
+
+function isPrWorkflowControllerTool(
+	mode: PrWorkflowMode,
+	toolName: string,
+): boolean {
+	if (PR_WORKFLOW_SHARED_CONTROLLER_TOOLS.has(toolName)) return true;
+	return mode === 'PR_REVIEW'
+		? PR_REVIEW_CONTROLLER_TOOLS.has(toolName)
+		: PR_FEEDBACK_CONTROLLER_TOOLS.has(toolName);
+}
 
 const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
 	'ast_grep_search',
@@ -2136,11 +2437,21 @@ const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
 	'open',
 	'read',
 	'search',
+	'skill',
 	'tree',
 	'view',
 	'webfetch',
 	'websearch',
 ]);
+
+function isTrustedPrWorkflowToolInvocationSafe(
+	toolName: string,
+	args: Record<string, unknown>,
+): boolean {
+	if (toolName === 'lint') return args.mode === 'check';
+	if (toolName === 'sast_scan') return args.capture_baseline !== true;
+	return true;
+}
 
 /**
  * Positive classifier for non-shell tools usable during PR_REVIEW.
@@ -2243,7 +2554,11 @@ function readOnlyToolArgumentsAreSafe(
 
 function isAllowedPrWorkflowReadOnlyShell(
 	command: string,
-	options: { allowCheckout: boolean; allowFetch: boolean },
+	options: {
+		allowCheckout: boolean;
+		allowFetch: boolean;
+		allowTrackingFetch: boolean;
+	},
 ): boolean {
 	const normalized = command.trim().replace(/\s+/g, ' ');
 	if (!normalized) return false;
@@ -2322,7 +2637,11 @@ function isSafeExactBoundPush(
 
 function isAllowedPrWorkflowGitIntake(
 	gitArgs: string,
-	options: { allowCheckout: boolean; allowFetch: boolean },
+	options: {
+		allowCheckout: boolean;
+		allowFetch: boolean;
+		allowTrackingFetch: boolean;
+	},
 ): boolean {
 	if (
 		/(?:--ext-diff|--textconv|--open-files-in-pager|--output(?:=|\s)|--upload-pack(?:=|\s)|--exec(?:=|\s))/i.test(
@@ -2339,6 +2658,8 @@ function isAllowedPrWorkflowGitIntake(
 		return true;
 
 	if (options.allowFetch && /^fetch(?:\s|$)/i.test(gitArgs)) return true;
+	if (options.allowTrackingFetch && isAllowedBoundRemoteTrackingFetch(gitArgs))
+		return true;
 
 	if (/^remote(?:\s+-v)?$/i.test(gitArgs)) return true;
 
@@ -2357,6 +2678,19 @@ function isAllowedPrWorkflowGitIntake(
 	// authorize a key/value write.
 	return /^config\s+(?:(?:--show-origin|--show-scope|--global|--local|--system|--worktree)\s+)*(?:--list|--get(?:-all)?\s+\S+)$/i.test(
 		gitArgs,
+	);
+}
+
+function isAllowedBoundRemoteTrackingFetch(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length !== 3 || tokens[0].toLowerCase() !== 'fetch') return false;
+	const [, remote, remoteBranch] = tokens;
+	return (
+		isSafeGitRefToken(remote) &&
+		!remote.includes('/') &&
+		isSafeGitRefToken(remoteBranch) &&
+		!remoteBranch.startsWith('-') &&
+		!remoteBranch.includes(':')
 	);
 }
 

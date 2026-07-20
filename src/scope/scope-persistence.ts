@@ -74,6 +74,7 @@ const SCOPES_DIR = '.swarm/scopes';
 const MAX_FILES_PER_SCOPE = 10_000;
 const MAX_PLAN_BYTES = 10 * 1024 * 1024; // 10 MiB — plan.json size cap
 const MAX_SCOPE_BYTES = 2 * 1024 * 1024; // 2 MiB — scope file size cap
+const MAX_BINDING_FILES_TO_SCAN = 10_000;
 
 // Windows reserved device names. Defence-in-depth — declare-scope already
 // constrains taskId to N.M[.P], but this module is also imported by readers
@@ -581,6 +582,142 @@ export function resolveAuthorizedScopeBindingForSession(input: {
 		if (matches.length > 1) return null;
 	}
 	return matches[0] ?? null;
+}
+
+function readPrFeedbackBindingFile(
+	directory: string,
+	filePath: string,
+	activeSessionId: string,
+	taskId?: string,
+): ScopeBinding | null {
+	try {
+		const leaf = fs.lstatSync(filePath);
+		if (!leaf.isFile() || leaf.isSymbolicLink()) return null;
+		if (
+			normalizePathForComparison(fs.realpathSync(filePath)) !==
+			normalizePathForComparison(filePath)
+		)
+			return null;
+	} catch {
+		return null;
+	}
+	const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+	let fd: number;
+	try {
+		fd = fs.openSync(filePath, fs.constants.O_RDONLY | nofollow);
+	} catch {
+		return null;
+	}
+	let raw = '';
+	try {
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile() || stat.size > MAX_SCOPE_BYTES) return null;
+		const buffer = Buffer.alloc(stat.size);
+		fs.readSync(fd, buffer, 0, stat.size, 0);
+		raw = buffer.toString('utf8');
+	} catch {
+		return null;
+	} finally {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			/* already closed */
+		}
+	}
+
+	let parsed: Partial<ScopeBinding>;
+	try {
+		parsed = JSON.parse(raw) as Partial<ScopeBinding>;
+	} catch {
+		return null;
+	}
+	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+	const files = Array.isArray(parsed.files)
+		? normalizeScopeFiles(
+				parsed.files.filter((file): file is string => typeof file === 'string'),
+			)
+		: null;
+	const now = Date.now();
+	if (
+		parsed.version !== 2 ||
+		parsed.source !== 'pr_feedback' ||
+		!workspaceIdentity ||
+		parsed.workspaceIdentity !== workspaceIdentity ||
+		!isSafeTaskId(parsed.taskId ?? '') ||
+		(taskId !== undefined && parsed.taskId !== taskId) ||
+		parsed.ownerSessionId !== activeSessionId ||
+		parsed.activation !== 'active' ||
+		typeof parsed.dispatchCallId !== 'string' ||
+		!parsed.dispatchCallId ||
+		parsed.ownerMessageId !== parsed.dispatchCallId ||
+		typeof parsed.parentOwnerSessionId !== 'string' ||
+		!parsed.parentOwnerSessionId ||
+		parsed.ownerSessionId === parsed.parentOwnerSessionId ||
+		parsed.parentCallId !== parsed.dispatchCallId ||
+		parsed.workflowSessionId !== parsed.parentOwnerSessionId ||
+		typeof parsed.workflowRevisionDigest !== 'string' ||
+		!parsed.workflowRevisionDigest ||
+		parsed.planId !== `pr-feedback:${parsed.workflowSessionId}` ||
+		parsed.planStructureHash !== parsed.workflowRevisionDigest ||
+		typeof parsed.declaredAt !== 'number' ||
+		parsed.declaredAt > now ||
+		typeof parsed.expiresAt !== 'number' ||
+		parsed.expiresAt <= now ||
+		!files
+	)
+		return null;
+	const expectedPath = getBindingFilePath(
+		directory,
+		parsed.taskId!,
+		activeSessionId,
+	);
+	if (
+		normalizePathForComparison(expectedPath) !==
+		normalizePathForComparison(filePath)
+	)
+		return null;
+	return { ...(parsed as ScopeBinding), files };
+}
+
+/** Recover one exact planless PR_FEEDBACK child binding after plugin restart. */
+export function resolveAuthorizedPrFeedbackScopeBindingFromDisk(input: {
+	directory: string;
+	activeSessionId: string;
+	taskId?: string;
+}): ScopeBinding | null {
+	if (!input.activeSessionId.trim()) return null;
+	const scopesDir = getScopesDir(input.directory);
+	if (!isScopesDirSafe(input.directory, scopesDir)) return null;
+	let candidates: string[];
+	if (input.taskId) {
+		if (!isSafeTaskId(input.taskId)) return null;
+		candidates = [
+			getBindingFilePath(input.directory, input.taskId, input.activeSessionId),
+		];
+	} else {
+		try {
+			const names = fs.readdirSync(scopesDir);
+			if (names.length > MAX_BINDING_FILES_TO_SCAN) return null;
+			candidates = names
+				.filter((name) => name.startsWith('binding-') && name.endsWith('.json'))
+				.map((name) => path.join(scopesDir, name));
+		} catch {
+			return null;
+		}
+	}
+	const matches = candidates
+		.map((candidate) =>
+			readPrFeedbackBindingFile(
+				input.directory,
+				candidate,
+				input.activeSessionId,
+				input.taskId,
+			),
+		)
+		.filter((binding): binding is ScopeBinding => binding !== null);
+	if (matches.length !== 1) return null;
+	registerScopeBinding(matches[0]);
+	return matches[0];
 }
 
 /**

@@ -203,20 +203,25 @@ for the Fix Planning step.
 
 ## Pre-flight: Scope Discipline
 
-The following `save_plan` / `declare_scope` mechanics apply only when those
-plugin tools are available. In other repositories or runtimes, use the native
-scope controller; if none exists, put exact allowed files and non-goals in the
-delegation and verify the resulting diff mechanically. Never bypass an
-available scope controller merely to reduce ceremony.
+When the plugin's mechanical controller is available, every coder Task must be
+preceded by `prepare_pr_feedback_scope({ task_id, files })`. The controller is
+available only after the immutable feedback-verification lanes have settled and
+binds the exact file set to the current feedback revision, parent session, and
+next matching Task call. The coder prompt must use the same numeric `task_id`,
+contain matching `FILE:` directives, and include a literal `ACCEPTANCE:` line.
+Once a Task consumes that scope, its `task_id` is immutable for the current
+feedback revision. Any retry must prepare and dispatch a fresh nested numeric
+task identity (for example `1.1.1`), never re-declare the consumed ID.
 
-`declare_scope({ taskId, files })` enforces that the delegated coder agent may only modify the declared files. The enforcement requires an active `.swarm/plan.json` — calling `declare_scope` in a feedback-closure run (which does not go through `save_plan`) rejects with "No plan found."
+Do not create a synthetic `save_plan` merely to authorize feedback work, and do
+not use `declare_scope`; those tools belong to the normal implementation-plan
+lifecycle. There is no one-file or single-function carve-out from the dedicated
+PR-feedback scope controller.
 
-**When to use `declare_scope` (preferred):** any feedback round that touches 2+ files, OR any feedback round where the file scope is not 100% obvious from the prompt. Before delegating, save a minimal plan via `save_plan` with a single phase containing the feedback-closure tasks, then call `declare_scope` per task with the exact file list.
-
-**Carve-out for direct Task delegation:** 1-file, single-function changes where the file path appears verbatim in the coder's prompt may use direct `Task(subagent_type="<coder>", ...)` delegation without `declare_scope`, where `<coder>` is the active swarm's coder agent (e.g. `coder`, or `paid_coder` when the swarm id is `paid`). This is a narrow exception; the orchestrator is responsible for verifying the scope is unambiguous.
-→ REQUIRED: even under this carve-out, the direct Task dispatch MUST contain a literal `ACCEPTANCE:` line — resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt (one-line task-derived DONE restatement for the feedback fix, since feedback-closure runs typically have no fr_refs). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
-
-**Anti-pattern:** do not use `Task` delegation for multi-file feedback fixes just to skip `save_plan` — the loss of scope discipline is not worth the saved ceremony.
+In runtimes without this controller, use the native scope mechanism. If none
+exists, put exact allowed files and non-goals in the delegation and verify the
+resulting diff mechanically. Never bypass an available scope controller merely
+to reduce ceremony.
 
 ## Intake Surfaces
 
