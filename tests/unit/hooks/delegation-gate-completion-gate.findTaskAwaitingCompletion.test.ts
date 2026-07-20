@@ -345,11 +345,19 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			expect(threw).toBe(true);
 		});
 
-		it('explicit invalid task_id should fail closed without text fallback (bypass fix)', async () => {
+		it('explicit non-plan-shaped task_id falls through to text extraction (issue #1914)', async () => {
+			// Reverts the PR #961 bypass-guard for the non-plan-shaped case: a
+			// non-plan-shaped explicit task_id (e.g. a runtime session id `ses_…`,
+			// or any non-N.M value) is treated as "not our field" and the resolver
+			// falls through to TASK: line / prompt-text extraction. Plan-task-shaped
+			// values still win (see next test); plan-task-shaped-but-unknown ids
+			// are rejected by the membership gate in prepareCoderScope.
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'coder_delegated');
 
+			// `task_id: 'not-valid'` is non-plan-shaped → falls through → resolves
+			// `1.2` from the TASK: line → dispatch succeeds (no SCOPE_NOT_DECLARED).
 			await expect(
 				callToolBefore(hook, 'Task', 'test-session', {
 					subagent_type: 'mega_coder',
@@ -357,7 +365,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 					prompt:
 						'TASK: 1.2\nFILE: src/foo.ts\nACCEPTANCE: task complete and covered by tests',
 				}),
-			).rejects.toThrow('SCOPE_NOT_DECLARED');
+			).resolves.toBeUndefined();
 		});
 
 		it('prompt with same task ID in multiple text fields — deduplication works (bypass fix)', async () => {
@@ -446,6 +454,38 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			expect(errorMessage).toContain('1.1');
 			expect(errorMessage).toContain('update_task_status');
 			expect(errorMessage).toContain('completed');
+		});
+	});
+
+	describe('non-plan-shaped task_id regression (issue #1914)', () => {
+		it('bogus non-plan-shaped task_id + prompt mentioning a DIFFERENT awaiting task still throws TASK_COMPLETION_GATE_VIOLATION', async () => {
+			// Issue #1914 plan-critic item 2: with the fall-through fix, a bogus
+			// non-plan-shaped task_id resolves to whatever the prompt text mentions.
+			// findTaskAwaitingCompletion returns an awaiting task only when it
+			// DIFFERS from requestedTaskId (delegation-gate.ts:1458), so a bogus
+			// id that resolves (via text) to an unrelated task cannot suppress
+			// the violation — the unrelated awaiting task is still returned and
+			// the gate throws.
+			const hook = createDelegationGateHook(makeConfig(), tempDir);
+			const session = ensureAgentSession('test-session');
+			session.taskWorkflowStates.set('1.1', 'tests_run');
+
+			let threw = false;
+			let errorMessage = '';
+			try {
+				await callToolBefore(hook, 'Task', 'test-session', {
+					subagent_type: 'mega_coder',
+					task_id: 'ses_bogus-runtime-injection',
+					prompt: 'TASK: 1.2 — unrelated task\nFILE: src/foo.ts',
+				});
+			} catch (err) {
+				threw = true;
+				errorMessage = (err as Error).message;
+			}
+
+			expect(threw).toBe(true);
+			expect(errorMessage).toContain('TASK_COMPLETION_GATE_VIOLATION');
+			expect(errorMessage).toContain('1.1');
 		});
 	});
 });

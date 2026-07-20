@@ -214,16 +214,35 @@ async function prepareCoderScope(
 	input: { sessionID: string; callID: string },
 	args: Record<string, unknown>,
 ): Promise<PreparedCoderScope> {
+	const planPath = path.join(directory, '.swarm', 'plan.json');
+	// loadPlanJsonOnly swallows read/parse errors and returns null for missing,
+	// corrupt, or schema-invalid plan.json — it never throws (see plan/manager.ts).
+	// One message covers all three cases; the validation warning was already
+	// logged by loadPlanJsonOnly itself.
 	const plan = await loadPlanJsonOnly(directory);
-	const planTaskIds = plan
-		? new Set(
-				plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
-			)
-		: new Set<string>();
-	const taskId = resolveDelegatedPlanTaskId(args, planTaskIds);
-	if (!plan || !taskId) {
+	if (!plan) {
 		throw new Error(
-			'SCOPE_NOT_DECLARED: coder delegation requires one unambiguous plan task ID and a non-empty scope from declare_scope, plan files_touched, or complete FILE: directives.',
+			`SCOPE_NOT_DECLARED: no valid plan found at ${planPath} (file missing or invalid). Declare a plan via save_plan or run /swarm plan first.`,
+		);
+	}
+	const planTaskIds = new Set(
+		plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
+	);
+	const taskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+	if (!taskId) {
+		// Cause-specific diagnostic so the architect can self-correct in one turn
+		// instead of guessing (issue #1914 Defect 2).
+		throw new Error(
+			`SCOPE_NOT_DECLARED: ${describeCoderScopeFailure(args, planTaskIds)}`,
+		);
+	}
+	// Membership gate (issue #1914 critic item 1): reject plan-task-shaped-but-
+	// unknown ids explicitly. Without this, `task_id: "9.9"` + FILE: directives
+	// would produce a valid binding for a non-existent task — createScopeBinding
+	// only validates isStrictTaskId, not plan membership.
+	if (!planTaskIds.has(taskId)) {
+		throw new Error(
+			`SCOPE_NOT_DECLARED: task_id "${taskId}" does not match any known plan task id. Known: ${[...planTaskIds].sort().join(', ') || '(none)'}. Update the dispatch or revise the plan.`,
 		);
 	}
 	const directives = extractTaskFileDirectives(args);
@@ -1222,14 +1241,28 @@ function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
 	knownPlanTaskIds?: ReadonlySet<string>,
 ): string | null {
-	// Prefer explicit task_id/taskId fields — never fall through to text extraction
-	// when the caller provides a direct task identifier.
+	// Prefer plan-task-shaped explicit task_id/taskId fields. The arg name is
+	// generic and is overloaded by newer OpenCode runtimes (and by our own
+	// worktree-isolation pre-create at delegation-gate/worktree-isolation.ts:836)
+	// to carry a child SESSION id (e.g. `ses_…`), not a plan-task id. A
+	// non-plan-shaped value means "this field is not ours" — fall through to
+	// TASK: line / prompt-text extraction instead of fail-closing on what is
+	// really a runtime-injected session reuse handle. (Issue #1914 Defect 1.)
+	//
+	// This reverts the PR #961 bypass-guard for the non-plan-shaped case only.
+	// Plan-task-shaped values still win over prompt text (preserves PR #961's
+	// "explicit id takes precedence" intent). Plan-task-shaped-but-unknown ids
+	// are rejected by the membership gate in prepareCoderScope (typo protection,
+	// acceptance criterion 2).
+	//
+	// The guard is general (not `ses_`-prefix-specific) so future runtime
+	// session-id shapes don't silently re-break dispatches.
 	const rawTaskId = args.task_id ?? args.taskId;
 	if (typeof rawTaskId === 'string') {
 		const trimmed = rawTaskId.trim();
 		if (trimmed.length <= 20 && isStrictTaskId(trimmed)) return trimmed;
-		// Explicit field was present but invalid — fail closed, don't fish in text fields
-		return null;
+		// Non-plan-shaped explicit value (e.g. `ses_…`) — fall through to text
+		// extraction below. Do NOT return null here.
 	}
 
 	// Text field extraction: collect ALL distinct task IDs to detect ambiguity.
@@ -1278,6 +1311,59 @@ function resolveDelegatedPlanTaskId(
 	// Fail closed on ambiguity — multiple distinct IDs means we can't determine intent.
 	if (seen.size === 1) return seen.values().next().value as string;
 	return null;
+}
+
+/**
+ * Builds a cause-specific diagnostic for `prepareCoderScope`'s SCOPE_NOT_DECLARED
+ * throw when `resolveDelegatedPlanTaskId` returns null. Re-runs extraction with
+ * diagnostics enabled so the architect can self-correct in one turn instead of
+ * guessing. Issue #1914 Defect 2.
+ *
+ * Only invoked on the null-resolution failure path — does not affect happy-path
+ * latency, and does NOT handle plan-task-shaped-but-unknown ids (those are
+ * rejected by the membership gate in prepareCoderScope with their own message).
+ */
+function describeCoderScopeFailure(
+	args: Record<string, unknown>,
+	planTaskIds: ReadonlySet<string>,
+): string {
+	const known = [...planTaskIds].sort().join(', ') || '(none)';
+	const rawTaskId = args.task_id ?? args.taskId;
+	const explicitFieldShape =
+		typeof rawTaskId === 'string' && rawTaskId.trim().length > 0
+			? `"${rawTaskId.trim().slice(0, 40)}" (non-plan-shaped; treated as runtime session id and ignored — falling through to text extraction)`
+			: 'absent';
+	const candidateTextFields = [
+		args.prompt,
+		args.description,
+		args.task,
+		args.input,
+	];
+	const taskLineCandidates = new Set<string>();
+	let taskLineDetected = false;
+	for (const field of candidateTextFields) {
+		if (typeof field !== 'string') continue;
+		const taskLine = extractTaskLine(field);
+		if (!taskLine) continue;
+		taskLineDetected = true;
+		for (const m of taskLine.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
+			if (planTaskIds.has(m[1])) taskLineCandidates.add(m[1]);
+		}
+	}
+	const textCandidates = new Set<string>();
+	for (const field of candidateTextFields) {
+		if (typeof field !== 'string') continue;
+		for (const m of field.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
+			if (planTaskIds.has(m[1])) textCandidates.add(m[1]);
+		}
+	}
+	if (taskLineCandidates.size > 1) {
+		return `multiple candidate task ids found in TASK: line: [${[...taskLineCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${known}.`;
+	}
+	if (textCandidates.size > 1) {
+		return `multiple candidate task ids found in prompt text: [${[...textCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${known}.`;
+	}
+	return `no plan task id could be resolved. Include a TASK: <N.M> line or plan-task-shaped task_id arg. Explicit task_id field: ${explicitFieldShape}. TASK: line detected: ${taskLineDetected ? 'yes' : 'no'}. Known plan task ids: ${known}.`;
 }
 
 function extractTaskFileDirectives(args: Record<string, unknown>): {
@@ -1659,8 +1745,8 @@ async function resolveEvidenceTaskId(
 
 /**
  * _internals export for testing — do not use in production code.
- * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId, and
- * buildParallelExecutionGuidance for unit testing.
+ * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId,
+ * describeCoderScopeFailure, and buildParallelExecutionGuidance for unit testing.
  *
  * Worktree operation entries (provisionWorktree, removeWorktree, etc.) proxy
  * to delegation-gate/worktree-isolation._internals via getters/setters so
@@ -1669,6 +1755,7 @@ async function resolveEvidenceTaskId(
 export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
+	describeCoderScopeFailure,
 	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
