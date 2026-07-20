@@ -214,6 +214,11 @@ export const TOOL_METADATA = {
 			'abort an unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gate and clear its durable session state',
 		agents: ['architect'],
 	},
+	prepare_pr_workflow_checkout: {
+		description:
+			'preserve explicit dirty tracked files before an unbound PR workflow checkout with an auditable recovery receipt',
+		agents: ['architect'],
+	},
 	run_pr_feedback_stage_a: {
 		description:
 			'execute and persist mandatory PR-feedback Stage A checks on a content-bound revision',

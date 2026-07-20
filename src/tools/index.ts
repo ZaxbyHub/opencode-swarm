@@ -177,6 +177,10 @@ export { lean_turbo_status } from './lean-turbo-status';
 export { lint_spec } from './lint-spec';
 export { mutation_test } from './mutation-test';
 export {
+	executePreparePrWorkflowCheckout,
+	prepare_pr_workflow_checkout,
+} from './prepare-pr-workflow-checkout';
+export {
 	executeRunPrFeedbackStageA,
 	run_pr_feedback_stage_a,
 } from './run-pr-feedback-stage-a';

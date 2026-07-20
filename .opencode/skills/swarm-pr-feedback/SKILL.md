@@ -139,8 +139,11 @@ tree:
   supersedes your planned fixes, and prefer the parallel work if it's more
   comprehensive (more tests, better edge coverage, clearer error handling).
   Abort your rebase, take the remote state, then add minor improvements on top.
-- Verify the working tree is clean first (`git status --porcelain`). If uncommitted
-  changes exist, stash them or abort to prevent data loss.
+- Verify the working tree is clean first (`git status --porcelain`). If tracked
+  changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
+  tracked path. It creates an auditable, path-scoped stash and returns its
+  recovery command. Do not issue `git stash` through shell. The controller never
+  stashes untracked files; move or remove those manually, or abort the checkout.
 - **Check out the head branch locally.** Feedback verification reads the working-tree
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the

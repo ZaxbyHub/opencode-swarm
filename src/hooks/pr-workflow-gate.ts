@@ -494,6 +494,39 @@ export async function readPrWorkflowGateState(
 	return state;
 }
 
+/**
+ * Serialize a pre-bind checkout-preservation controller with every terminal
+ * PR-workflow transition for the raw parent session. The caller's action may
+ * perform the fixed Git preservation command while holding this lock; abort,
+ * bind, and a same-session reactivation cannot clear or replace the gate until
+ * it settles. The state passed to the action is schema-validated durable state,
+ * never a caller-supplied projection.
+ */
+export async function withPrWorkflowCheckoutPreparationLock<T>(
+	directory: string,
+	sessionID: string,
+	action: (state: PrWorkflowGateState) => Promise<T>,
+): Promise<T> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (!state) {
+			throw new Error(
+				`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}"`,
+			);
+		}
+		if (state.prHeadSha) {
+			throw new Error(
+				`BLOCKED: ${state.mode} checkout preparation is allowed only before the PR head is bound`,
+			);
+		}
+		return action(state);
+	});
+}
+
 export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
@@ -2418,6 +2451,7 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHead,
 	parseCriticVerdict,
 	isProcessAlive,
+	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
 
@@ -2575,6 +2609,7 @@ const PR_WORKFLOW_SHARED_CONTROLLER_TOOLS = new Set([
 	'dispatch_lanes_async',
 	'get_async_result',
 	'get_async_status',
+	'prepare_pr_workflow_checkout',
 ]);
 
 const PR_REVIEW_CONTROLLER_TOOLS = new Set([
@@ -4009,14 +4044,20 @@ function workflowGateStateLockPath(
 }
 
 function workflowGateStateLockRelativePath(sessionID: string): string {
-	return path.join(WORKFLOW_GATE_DIR, `${safeSessionFileStem(sessionID)}.lock`);
+	return path.join(
+		WORKFLOW_GATE_DIR,
+		`${prWorkflowSessionFileStem(sessionID)}.lock`,
+	);
 }
 
 function workflowGateStateRelativePath(sessionID: string): string {
-	return path.join(WORKFLOW_GATE_DIR, `${safeSessionFileStem(sessionID)}.json`);
+	return path.join(
+		WORKFLOW_GATE_DIR,
+		`${prWorkflowSessionFileStem(sessionID)}.json`,
+	);
 }
 
-function safeSessionFileStem(sessionID: string): string {
+export function prWorkflowSessionFileStem(sessionID: string): string {
 	const normalized = normalizeSessionID(sessionID);
 	const slug =
 		normalized.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'session';
@@ -4045,7 +4086,7 @@ async function writeAtomicJson(
 		await fsp.writeFile(tempPath, JSON.stringify(value, null, 2), 'utf-8');
 		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
 			try {
-				await fsp.rename(tempPath, filePath);
+				await _test_exports.rename(tempPath, filePath);
 				lastError = undefined;
 				break;
 			} catch (error) {
@@ -4069,6 +4110,18 @@ async function writeAtomicJson(
 			// best-effort temp cleanup
 		}
 	}
+}
+
+/**
+ * Write a PR-workflow artifact with the gate's Windows-safe atomic persistence
+ * contract. Checkout-preparation receipts must survive the same transient
+ * rename contention as canonical gate state.
+ */
+export async function writePrWorkflowAtomicJson(
+	filePath: string,
+	value: unknown,
+): Promise<void> {
+	await writeAtomicJson(filePath, value);
 }
 
 function isoNow(): string {
