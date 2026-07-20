@@ -291,7 +291,7 @@ async function propagateReward(
 	// id, across ALL sessions. `lastAccessedAt` on the record is defined-but-
 	// never-written in this codebase (untrustworthy); recall usage is the real
 	// signal. A candidate absent from this map was never retrieved → excluded.
-	const recencyById = await buildRetrievalRecency(provider);
+	const recencyById = await buildRetrievalRecency(provider, nowMs);
 	if (!recencyById) return; // provider lacks listRecallUsage → skip
 
 	// Deterministic source order so cap/drop decisions are stable in tests.
@@ -406,17 +406,22 @@ export function truncateObjectForJson<T extends Record<string, unknown>>(
 
 /**
  * Build `memoryId → most-recent recall-usage timestamp (ms)` for memories
- * recalled within the last 30 days. Returns null when the provider cannot report
- * recall usage (then B.5 skips propagation entirely, since it has no trustworthy
- * recency signal).
+ * recalled within the last 30 days of `nowMs`. Returns null when the provider
+ * cannot report recall usage (then B.5 skips propagation entirely, since it
+ * has no trustworthy recency signal).
+ *
+ * `nowMs` is the caller's deterministic reward timestamp (see `propagateReward`),
+ * not a wall-clock read — recall-usage fixtures and production reward events
+ * are both timestamped relative to that same reference, so `since` must be too.
  */
 async function buildRetrievalRecency(
 	provider: MemoryProvider,
+	nowMs: number,
 ): Promise<Map<string, number> | null> {
 	if (typeof provider.listRecallUsage !== 'function') return null;
 	// FB-005: bound iteration to recent recall events only — the `since` filter
 	// limits DB rows scanned, and the LIMIT prevents returning unbounded result sets.
-	const since = new Date(Date.now() - RECENCY_WINDOW_MS).toISOString();
+	const since = new Date(nowMs - RECENCY_WINDOW_MS).toISOString();
 	const usage =
 		(await provider.listRecallUsage({ since, limit: RECENCY_EVENT_LIMIT })) ??
 		[];
