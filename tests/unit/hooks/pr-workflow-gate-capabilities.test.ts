@@ -17,12 +17,19 @@ describe('PR workflow explicit capability contract', () => {
 		_test_exports.resolvePrWorkflowRevisionDigest;
 	const originalResolveIsWorkingTreeClean =
 		_test_exports.resolveIsWorkingTreeClean;
+	const originalResolveCurrentUpstreamPushTarget =
+		_test_exports.resolveCurrentUpstreamPushTarget;
 
 	beforeEach(() => {
 		_test_exports.resetTrackedStateCache();
 		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 		_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 		_test_exports.resolveIsWorkingTreeClean = () => true;
+		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
+			remoteName: 'origin',
+			remoteBranchRef: 'refs/heads/feature/pr-head',
+			remoteTrackingRef: 'refs/remotes/origin/feature/pr-head',
+		});
 	});
 
 	afterEach(() => {
@@ -31,6 +38,8 @@ describe('PR workflow explicit capability contract', () => {
 		_test_exports.resolvePrWorkflowRevisionDigest =
 			originalResolvePrWorkflowRevisionDigest;
 		_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+		_test_exports.resolveCurrentUpstreamPushTarget =
+			originalResolveCurrentUpstreamPushTarget;
 	});
 
 	test('admits required PR_REVIEW observation and safe validation tools', async () => {
@@ -87,7 +96,7 @@ describe('PR workflow explicit capability contract', () => {
 		).rejects.toThrow(/read-only and fail-closed/i);
 	});
 
-	test('permits only a narrow post-bind remote-tracking fetch', async () => {
+	test('RT-001 regression: permits only the exact bound post-bind tracking fetch', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {
 			prHeadSha: HEAD_SHA,
 		});
@@ -97,6 +106,8 @@ describe('PR workflow explicit capability contract', () => {
 			}),
 		).resolves.toBeUndefined();
 		for (const command of [
+			'git fetch untrusted-remote feature/pr-head',
+			'git fetch origin unrelated-branch',
 			'git fetch --force origin feature/pr-head',
 			'git fetch origin feature/pr-head:local-copy',
 			'git fetch origin feature/pr-head && git checkout feature/pr-head',
@@ -108,6 +119,17 @@ describe('PR workflow explicit capability contract', () => {
 				}),
 			).rejects.toThrow(/read-only and fail-closed/i);
 		}
+	});
+
+	test('PWR-001 regression: blocks build_check because it can execute PR-controlled scripts', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		await expect(
+			enforcePrWorkflowToolBefore(tempDir, SESSION_ID, 'build_check', {
+				scope: 'all',
+			}),
+		).rejects.toThrow(/read-only and fail-closed/i);
 	});
 
 	test('admits the dedicated scope controller only in PR_FEEDBACK', async () => {

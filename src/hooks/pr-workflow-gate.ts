@@ -147,6 +147,18 @@ export type PrReviewArtifactBoundary =
 	| 'post_reviewer'
 	| 'post_critic';
 
+type PrReviewArtifactRecord = {
+	finding_id: string;
+	status: 'PENDING' | 'CONFIRMED' | 'DISPROVED' | 'PRE_EXISTING';
+	next_action:
+		| 'route_to_reviewer'
+		| 'route_to_critic'
+		| 'report'
+		| 'suppress_with_reason'
+		| 'handoff_to_feedback';
+	severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+};
+
 interface PrFeedbackScopeDeclarationRecord {
 	taskId: string;
 	files: string[];
@@ -1642,6 +1654,31 @@ export async function assertPrReviewArtifactBoundary(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact',
 		);
 	}
+	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
+	const boundaryOrder: readonly PrReviewArtifactBoundary[] = [
+		'post_explorer',
+		'post_reviewer',
+		'post_critic',
+	];
+	const boundaryIndex = boundaryOrder.indexOf(boundary);
+	const requiredPriorBoundary = boundaryOrder[boundaryIndex - 1];
+	if (
+		requiredPriorBoundary &&
+		!persistedBoundaries.includes(requiredPriorBoundary)
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${boundary} findings require the prior ${requiredPriorBoundary} checkpoint`,
+		);
+	}
+	if (
+		persistedBoundaries.some(
+			(persisted) => boundaryOrder.indexOf(persisted) > boundaryIndex,
+		)
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${boundary} findings cannot be persisted after a later checkpoint`,
+		);
+	}
 	if (boundary === 'post_reviewer') {
 		state = await assertPrReviewValidationSettled(
 			directory,
@@ -1675,6 +1712,135 @@ export async function assertPrReviewArtifactBoundary(
 		);
 	}
 	return state;
+}
+
+/**
+ * Artifact records are a projection of lane receipts, never a caller-controlled
+ * replacement for them. Keep their workflow status/action aligned with the
+ * reviewer and critic rows that the gate already authenticated.
+ */
+export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
+	directory: string,
+	sessionID: string,
+	boundary: PrReviewArtifactBoundary,
+	records: readonly PrReviewArtifactRecord[],
+): Promise<void> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	if (boundary === 'post_explorer') {
+		for (const record of records) {
+			if (
+				record.status !== 'PENDING' ||
+				record.next_action !== 'route_to_reviewer'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW post_explorer record ${record.finding_id} must remain PENDING and route_to_reviewer`,
+				);
+			}
+		}
+		return;
+	}
+
+	const reviewerVerdicts = deriveLatestPrReviewReviewerVerdicts(
+		directory,
+		state,
+	);
+	const criticVerdicts =
+		boundary === 'post_critic'
+			? deriveLatestPrReviewCriticVerdicts(directory, state)
+			: undefined;
+	for (const record of records) {
+		const reviewer = reviewerVerdicts.get(record.finding_id);
+		if (!reviewer) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} has no authoritative reviewer verdict`,
+			);
+		}
+		if (record.severity && record.severity !== reviewer.severity) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} severity differs from its reviewer verdict`,
+			);
+		}
+		const requiresCritic =
+			reviewer.classification === 'CONFIRMED' &&
+			['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
+		if (boundary === 'post_reviewer') {
+			const expectedStatus =
+				reviewer.classification === 'UNVERIFIED'
+					? 'PENDING'
+					: reviewer.classification;
+			if (record.status !== expectedStatus) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} status differs from its reviewer verdict`,
+				);
+			}
+			const expectedAction = requiresCritic
+				? 'route_to_critic'
+				: reviewer.classification === 'CONFIRMED' ||
+						reviewer.classification === 'PRE_EXISTING'
+					? 'report'
+					: reviewer.classification === 'DISPROVED'
+						? 'suppress_with_reason'
+						: 'route_to_reviewer';
+			if (record.next_action !== expectedAction) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} action does not match reviewer disposition`,
+				);
+			}
+			continue;
+		}
+
+		if (!requiresCritic) {
+			const expectedStatus =
+				reviewer.classification === 'UNVERIFIED'
+					? 'PENDING'
+					: reviewer.classification;
+			const expectedAction =
+				reviewer.classification === 'CONFIRMED' ||
+				reviewer.classification === 'PRE_EXISTING'
+					? 'report'
+					: reviewer.classification === 'DISPROVED'
+						? 'suppress_with_reason'
+						: 'route_to_reviewer';
+			if (
+				record.status !== expectedStatus ||
+				record.next_action !== expectedAction
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} cannot override its non-critic reviewer disposition`,
+				);
+			}
+			continue;
+		}
+
+		const critic = criticVerdicts?.get(record.finding_id);
+		if (!critic) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} has no authoritative critic verdict`,
+			);
+		}
+		if (record.severity && record.severity !== critic.severity) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} severity differs from its critic verdict`,
+			);
+		}
+		if (critic.status === 'DISPROVED') {
+			if (
+				record.status !== 'DISPROVED' ||
+				record.next_action !== 'suppress_with_reason'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} must preserve the critic DISPROVED disposition`,
+				);
+			}
+		} else if (
+			record.status !== 'CONFIRMED' ||
+			!['report', 'handoff_to_feedback'].includes(record.next_action)
+		) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} action does not match its critic verdict`,
+			);
+		}
+	}
 }
 
 export async function markPrReviewArtifactBoundary(
@@ -1878,6 +2044,9 @@ export async function enforcePrWorkflowToolBefore(
 			allowCheckout: !state.prHeadSha,
 			allowFetch: !state.prHeadSha,
 			allowTrackingFetch: Boolean(state.prHeadSha),
+			trackingFetchTarget: state.prHeadSha
+				? _test_exports.resolveCurrentUpstreamPushTarget(directory)
+				: null,
 		});
 	const trustedCapability = getPrWorkflowToolCapability(
 		normalizedTool,
@@ -1888,7 +2057,8 @@ export async function enforcePrWorkflowToolBefore(
 		isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {});
 	const isNamedReadOnlyTool =
 		isTrustedWorkflowTool ||
-		(isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
+		(normalizedTool !== 'build_check' &&
+			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
 			readOnlyToolArgumentsAreSafe(args ?? {}));
 	if (
 		referencesProtectedWorkflowEvidence &&
@@ -2558,6 +2728,10 @@ function isAllowedPrWorkflowReadOnlyShell(
 		allowCheckout: boolean;
 		allowFetch: boolean;
 		allowTrackingFetch: boolean;
+		trackingFetchTarget?: {
+			remoteName: string;
+			remoteBranchRef: string;
+		} | null;
 	},
 ): boolean {
 	const normalized = command.trim().replace(/\s+/g, ' ');
@@ -2641,6 +2815,10 @@ function isAllowedPrWorkflowGitIntake(
 		allowCheckout: boolean;
 		allowFetch: boolean;
 		allowTrackingFetch: boolean;
+		trackingFetchTarget?: {
+			remoteName: string;
+			remoteBranchRef: string;
+		} | null;
 	},
 ): boolean {
 	if (
@@ -2658,7 +2836,10 @@ function isAllowedPrWorkflowGitIntake(
 		return true;
 
 	if (options.allowFetch && /^fetch(?:\s|$)/i.test(gitArgs)) return true;
-	if (options.allowTrackingFetch && isAllowedBoundRemoteTrackingFetch(gitArgs))
+	if (
+		options.allowTrackingFetch &&
+		isAllowedBoundRemoteTrackingFetch(gitArgs, options.trackingFetchTarget)
+	)
 		return true;
 
 	if (/^remote(?:\s+-v)?$/i.test(gitArgs)) return true;
@@ -2681,16 +2862,24 @@ function isAllowedPrWorkflowGitIntake(
 	);
 }
 
-function isAllowedBoundRemoteTrackingFetch(gitArgs: string): boolean {
+function isAllowedBoundRemoteTrackingFetch(
+	gitArgs: string,
+	target: { remoteName: string; remoteBranchRef: string } | null | undefined,
+): boolean {
+	if (!target?.remoteName || !target.remoteBranchRef.startsWith('refs/heads/'))
+		return false;
 	const tokens = gitArgs.trim().split(/\s+/);
 	if (tokens.length !== 3 || tokens[0].toLowerCase() !== 'fetch') return false;
 	const [, remote, remoteBranch] = tokens;
+	const expectedBranch = target.remoteBranchRef.slice('refs/heads/'.length);
 	return (
 		isSafeGitRefToken(remote) &&
 		!remote.includes('/') &&
 		isSafeGitRefToken(remoteBranch) &&
 		!remoteBranch.startsWith('-') &&
-		!remoteBranch.includes(':')
+		!remoteBranch.includes(':') &&
+		remote === target.remoteName &&
+		remoteBranch === expectedBranch
 	);
 }
 
@@ -3078,6 +3267,57 @@ function derivePrReviewCriticInventory(
 		)
 		.map(([itemId]) => itemId)
 		.sort();
+}
+
+function deriveLatestPrReviewCriticVerdicts(
+	directory: string,
+	state: PrWorkflowGateState,
+): Map<string, { status: string; severity: string }> {
+	const reviewerVerdicts = deriveLatestPrReviewReviewerVerdicts(
+		directory,
+		state,
+	);
+	const criticBatches = (state.prReviewValidationBatches ?? []).filter(
+		(batch) => batch.phase === 'critic',
+	);
+	for (const batch of [...criticBatches].reverse()) {
+		const successful = successfulObligationsFromExactBatch(
+			directory,
+			state,
+			batch.batchId,
+			batch.lanes,
+			'swarm-pr-review:critic',
+			batch.validatedAt,
+		);
+		if (
+			batch.lanes.some((lane) => !successful.has(lane.workflowLane)) ||
+			successful.size !== batch.lanes.length
+		) {
+			continue;
+		}
+		const required = batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []);
+		const verdicts = new Map<string, { status: string; severity: string }>();
+		for (const lane of batch.lanes) {
+			const record = findByBatchId(directory, batch.batchId, {
+				parentSessionId: state.sessionID,
+			}).find((candidate) => candidate.laneId === lane.laneId);
+			const ref = record?.result?.outputRef?.trim();
+			const artifact = ref
+				? readLaneOutput(directory, ref)?.artifact
+				: undefined;
+			if (!artifact) continue;
+			for (const itemId of lane.reviewItemIds ?? []) {
+				const verdict = parseCriticVerdict(
+					artifact.text,
+					itemId,
+					reviewerVerdicts.get(itemId)?.severity,
+				);
+				if (verdict) verdicts.set(itemId, verdict);
+			}
+		}
+		if (required.every((itemId) => verdicts.has(itemId))) return verdicts;
+	}
+	return new Map();
 }
 
 function deriveLatestPrReviewReviewerVerdicts(

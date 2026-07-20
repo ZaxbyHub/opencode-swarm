@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import {
 	assertPrReviewArtifactBoundary,
+	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	markPrReviewArtifactBoundary,
 	markPrReviewHandoffComplete,
 	readPrWorkflowGateState,
@@ -176,6 +177,12 @@ export async function executeWritePrReviewArtifact(
 			findingsInput.run_id,
 			findingsInput.boundary,
 			findingIds,
+		);
+		await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
+			directory,
+			sessionID,
+			findingsInput.boundary,
+			findingsInput.records,
 		);
 		const recordedAt = new Date().toISOString();
 		const appended: PersistedFinding[] = findingsInput.records.map(

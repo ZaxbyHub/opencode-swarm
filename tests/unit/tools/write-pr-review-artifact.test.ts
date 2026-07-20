@@ -190,7 +190,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 }
 
 describe('write_pr_review_artifact', () => {
-	test('validates exact discovery coverage and reviewer phase before writing', async () => {
+	test('ARTIFACT-ORDER regression: requires explorer, reviewer, then critic checkpoints', async () => {
 		await establishPrReviewPrerequisites();
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
@@ -215,6 +215,19 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).rejects.toThrow(/exactly cover/i);
+		await expect(
+			executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'coverage-order',
+					pr_head_sha: HEAD_SHA,
+					boundary: 'post_reviewer',
+					records: explorerRecords,
+				},
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		).rejects.toThrow(/prior post_explorer checkpoint/i);
 		await expect(
 			fs.stat(path.join(directory, '.swarm', 'pr-review', 'coverage-order')),
 		).rejects.toThrow();
@@ -246,7 +259,7 @@ describe('write_pr_review_artifact', () => {
 		).rejects.toThrow(/reviewer/i);
 	});
 
-	test('persists all boundaries and exact actionable handoff before completion', async () => {
+	test('ARTIFACT-VERDICT regression: persists only reviewer and critic-authoritative dispositions', async () => {
 		await establishPrReviewPrerequisites();
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
@@ -258,25 +271,33 @@ describe('write_pr_review_artifact', () => {
 			evidence: 'discovery evidence',
 			next_action: 'route_to_reviewer' as const,
 		}));
-		const reviewerRecords = candidateIds.map((id) => ({
+		const reviewerRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
-			status: 'CONFIRMED' as const,
+			status: index === 0 ? ('DISPROVED' as const) : ('CONFIRMED' as const),
 			file_line: 'src/index.ts:1',
 			evidence: 'reviewer evidence',
-			next_action: 'route_to_critic' as const,
+			next_action:
+				index === 0
+					? ('suppress_with_reason' as const)
+					: ('route_to_critic' as const),
 		}));
 		const criticRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
-			status: 'CONFIRMED' as const,
+			status: index === 0 ? ('DISPROVED' as const) : ('CONFIRMED' as const),
 			file_line: 'src/index.ts:1',
 			evidence: 'critic evidence',
 			next_action:
-				index === 0 ? ('handoff_to_feedback' as const) : ('report' as const),
+				index === 0
+					? ('suppress_with_reason' as const)
+					: index === 1
+						? ('handoff_to_feedback' as const)
+						: ('report' as const),
 		}));
 		const reviewerRows = candidateIds
-			.map(
-				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+			.map((id, index) =>
+				index === 0
+					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | LOW | YES | file.ts:1 | rationale | probe | reviewer`
+					: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
 			)
 			.join('\n');
 		await recordPrReviewValidationBatch(
@@ -309,7 +330,7 @@ describe('write_pr_review_artifact', () => {
 				{
 					laneId: 'critic-boundaries',
 					workflowLane: 'critic-boundaries',
-					reviewItemIds: candidateIds,
+					reviewItemIds: candidateIds.slice(1),
 				},
 			],
 			{ batchId: 'critic-boundaries', prHeadSha: HEAD_SHA },
@@ -334,6 +355,40 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
+		await expect(
+			executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'review-boundaries',
+					pr_head_sha: HEAD_SHA,
+					boundary: 'post_reviewer',
+					records: reviewerRecords.map((record) => ({
+						...record,
+						status: 'DISPROVED' as const,
+						next_action: 'suppress_with_reason' as const,
+					})),
+				},
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		).rejects.toThrow(/status differs from its reviewer verdict/i);
+		await expect(
+			executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'review-boundaries',
+					pr_head_sha: HEAD_SHA,
+					boundary: 'post_reviewer',
+					records: reviewerRecords.map((record, index) =>
+						index === 0
+							? { ...record, next_action: 'report' as const }
+							: record,
+					),
+				},
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		).rejects.toThrow(/action does not match reviewer disposition/i);
 
 		await expect(
 			executeWritePrReviewArtifact(
@@ -348,6 +403,23 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
+		await expect(
+			executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'review-boundaries',
+					pr_head_sha: HEAD_SHA,
+					boundary: 'post_critic',
+					records: criticRecords.map((record) => ({
+						...record,
+						status: 'DISPROVED' as const,
+						next_action: 'suppress_with_reason' as const,
+					})),
+				},
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		).rejects.toThrow(/action does not match its critic verdict/i);
 
 		await expect(
 			executeWritePrReviewArtifact(
@@ -381,7 +453,7 @@ describe('write_pr_review_artifact', () => {
 			pr_head_sha: HEAD_SHA,
 			handoff: {
 				pr_url: 'https://github.com/example/project/pull/123',
-				finding_ids: ['C-0'],
+				finding_ids: ['C-1'],
 				summary: 'validated actionable finding',
 				provenance: ['review-boundaries', 'critic-boundaries'],
 			},
@@ -389,7 +461,7 @@ describe('write_pr_review_artifact', () => {
 		const wrongHandoff = await executeWritePrReviewArtifact(
 			{
 				...handoffArgs,
-				handoff: { ...handoffArgs.handoff, finding_ids: ['C-1'] },
+				handoff: { ...handoffArgs.handoff, finding_ids: ['C-0'] },
 			},
 			directory,
 			{ sessionID: SESSION_ID },

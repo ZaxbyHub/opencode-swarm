@@ -126,10 +126,6 @@ export const TOOL_METADATA = {
 		description:
 			'discover and run build, typecheck, and test commands for various project ecosystems in the working directory',
 		agents: ['architect', 'coder', 'test_engineer'],
-		prWorkflow: {
-			modes: ['PR_REVIEW'],
-			capability: 'validate',
-		},
 	},
 	pre_check_batch: {
 		description:
