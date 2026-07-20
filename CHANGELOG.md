@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.126.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.1...v7.126.2) (2026-07-20)
+
+
+### Bug Fixes
+
+* **delegation-gate:** resolve task_id collision, split diagnostics, add gated-agent advisory ([5c9104d](https://github.com/ZaxbyHub/opencode-swarm/commit/5c9104dbaa7b350ab6e4dd03c4d6d78c8812e990))
+* **delegation-gate:** resolve task_id collision, split diagnostics, add gated-agent advisory ([#1914](https://github.com/ZaxbyHub/opencode-swarm/issues/1914)) ([324a65d](https://github.com/ZaxbyHub/opencode-swarm/commit/324a65d31c89a1957bebfdaf73d23a08991ca551))
+* **pr-workflow:** harden checkout preparation ([a723944](https://github.com/ZaxbyHub/opencode-swarm/commit/a723944bee24f2a8ba11f3d3754f359ec8f113a0))
+* **pr-workflow:** unblock dirty checkout preparation ([fb6124b](https://github.com/ZaxbyHub/opencode-swarm/commit/fb6124b082365ced1e2ab91c92c073b3d9f2e89d))
+* **pr-workflow:** unblock dirty checkout preparation ([da6b505](https://github.com/ZaxbyHub/opencode-swarm/commit/da6b50548e6c75b4c207b843c6d858356f2745d5))
+
 ## [7.126.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.0...v7.126.1) (2026-07-20)
 
 
