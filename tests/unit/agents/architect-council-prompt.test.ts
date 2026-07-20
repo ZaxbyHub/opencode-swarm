@@ -458,5 +458,54 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 				expect(prompt).not.toMatch(/bypass.*Stage B|Stage B.*bypass/i);
 			});
 		});
+
+		// architect-acceptance-criteria: the inline COUNCIL_WORKFLOW block
+		// (injected via {{COUNCIL_WORKFLOW}} when council.enabled === true)
+		// dispatches a gated reviewer member at both STEP 1 sites. Without an
+		// ACCEPTANCE reminder here, the model can follow the more-local inline
+		// block and construct the reviewer dispatch without ACCEPTANCE — the
+		// exact failure shown in the "Council: reviewer (phase 1)" screenshot.
+		describe('ACCEPTANCE reminder on council member dispatch (issue: architect-acceptance-criteria)', () => {
+			const { buildCouncilWorkflow } = require('../../../src/agents/architect');
+			const block = buildCouncilWorkflow({ enabled: true }) as string;
+
+			it('per-task council STEP 1 reminds the reviewer member needs ACCEPTANCE', () => {
+				const idx = block.indexOf(
+					'STEP 1 — DISPATCH all 5 council members in parallel (task-scoped)',
+				);
+				expect(idx).toBeGreaterThan(-1);
+				// Slice to the next STEP 2 header so the reminder must be inside STEP 1.
+				const next = block.indexOf('#### STEP 2', idx);
+				expect(next).toBeGreaterThan(idx);
+				const step1 = block.slice(idx, next);
+				expect(step1).toContain('ACCEPTANCE:');
+				expect(step1).toContain('ACCEPTANCE_FIELD_REQUIRED');
+				expect(step1).toContain('`reviewer`');
+			});
+
+			it('phase council STEP 1 reminds the reviewer member needs ACCEPTANCE', () => {
+				const idx = block.indexOf(
+					'STEP 1 — DISPATCH all 5 council members in parallel (phase-scoped)',
+				);
+				expect(idx).toBeGreaterThan(-1);
+				const next = block.indexOf('#### STEP 2', idx);
+				expect(next).toBeGreaterThan(idx);
+				const step1 = block.slice(idx, next);
+				expect(step1).toContain('ACCEPTANCE:');
+				expect(step1).toContain('ACCEPTANCE_FIELD_REQUIRED');
+				expect(step1).toContain('`reviewer`');
+			});
+
+			it('does NOT over-gate — only the reviewer member is named as gated', () => {
+				// Per critic I1: test_engineer, critic, sme, explorer are NOT gated.
+				// The reminder should name `reviewer` only.
+				const idx = block.indexOf(
+					'per ACCEPTANCE FIELD RESOLUTION above (same text',
+				);
+				expect(idx).toBeGreaterThan(-1);
+				const line = block.slice(idx, idx + 400);
+				expect(line).toContain('other four members are not gated');
+			});
+		});
 	});
 });

@@ -394,7 +394,12 @@ DELEGATION ENVELOPE FIELDS — include these in every delegation for traceabilit
 
 Before delegating to {{AGENT_PREFIX}}reviewer: call check_gate_status for the current task_id and include the gate results in the GATES field of the reviewer message. Format: GATES: lint=PASS/FAIL, sast_scan=PASS/FAIL, secretscan=PASS/FAIL (use PASS/FAIL/skipped for each gate). If no gates have been run yet, use GATES: none.
 
-ACCEPTANCE FIELD RESOLUTION — before every {{AGENT_PREFIX}}coder (and {{AGENT_PREFIX}}reviewer) delegation, populate that delegation's ACCEPTANCE field like this: (1) read the current task's \`fr_refs\` from the plan; (2) if \`fr_refs\` is non-empty, look up EVERY listed FR-###/SC-### id in the current \`.swarm/spec.md\` and copy each one's full requirement text into ACCEPTANCE VERBATIM — byte-for-byte, no summarizing or paraphrasing, and concatenate all of them when a task maps to more than one; (3) if \`fr_refs\` is empty or absent, populate ACCEPTANCE with a task-derived one-line restatement of what DONE looks like instead (the same pattern as \`acceptanceCriteria\` above). ACCEPTANCE must never be empty — lacking a spec mapping is normal and is not a reason to omit it.
+ACCEPTANCE FIELD RESOLUTION — REQUIRED on every {{AGENT_PREFIX}}coder and {{AGENT_PREFIX}}reviewer Task dispatch. A dispatch with no ACCEPTANCE: line is BLOCKED by the delegation gate before the agent runs (ACCEPTANCE_FIELD_REQUIRED). Resolve it as:
+1. Read the current task's \`fr_refs\` from the plan.
+2. If \`fr_refs\` is non-empty: look up EVERY listed FR-###/SC-### id in the current \`.swarm/spec.md\` and copy each one's full requirement text into ACCEPTANCE VERBATIM — byte-for-byte, no summarizing or paraphrasing, and concatenate all of them when a task maps to more than one.
+3. When the task has no spec mapping: if \`fr_refs\` is empty or absent, populate ACCEPTANCE with a task-derived one-line restatement of what DONE looks like instead (the same pattern as \`acceptanceCriteria\` above).
+ACCEPTANCE must never be empty — lacking a spec mapping is normal and is not a reason to omit it.
+NOTE: the plan-task \`acceptance\` field is a different thing. Writing acceptance on the plan task does NOT satisfy this rule. The delegation prompt needs its own literal \`ACCEPTANCE:\` line.
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 PARTIAL GATE RATIONALIZATIONS — automated gates ≠ agent review. Running SOME gates is NOT compliance:
@@ -572,7 +577,7 @@ FILE: src/auth/login.ts
 INPUT: Validate email format, password >= 8 chars
 OUTPUT: Modified file
 CONSTRAINT: Do not modify other functions
-ACCEPTANCE: [copied verbatim from spec.md, or a task-derived DONE restatement — see ACCEPTANCE FIELD RESOLUTION]
+ACCEPTANCE: FR-007 The login endpoint SHALL reject passwords shorter than 8 characters with HTTP 400 and a localized error message.
 SKILLS: file:.claude/skills/engineering-conventions/SKILL.md
 
 {{AGENT_PREFIX}}reviewer
@@ -580,10 +585,12 @@ TASK: Review login validation
 FILE: src/auth/login.ts
 CHECK: [security, correctness, edge-cases]
 GATES: lint=PASS, sast_scan=PASS, secretscan=PASS
-ACCEPTANCE: [copied verbatim from spec.md, or a task-derived DONE restatement — see ACCEPTANCE FIELD RESOLUTION; same text as the coder delegation for this task]
+ACCEPTANCE: FR-007 The login endpoint SHALL reject passwords shorter than 8 characters with HTTP 400 and a localized error message.
 SKILLS_USED_BY_CODER: file:.claude/skills/engineering-conventions/SKILL.md
 OUTPUT: VERDICT + RISK + ISSUES + ACCEPTANCE_SATISFACTION
 SKILLS: file:.claude/skills/engineering-conventions/SKILL.md
+
+NOTE (ACCEPTANCE examples above): the FR-### form applies when fr_refs is non-empty. When the task has no fr_refs, ACCEPTANCE instead carries a one-line task-derived DONE restatement, e.g. "DONE = login rejects <8-char passwords with HTTP 400; the 6 happy-path tests pass." The reviewer delegation for the same task uses the identical ACCEPTANCE text as the coder delegation.
 
 {{AGENT_PREFIX}}test_engineer
 TASK: Generate and run login validation tests
@@ -1222,6 +1229,7 @@ After Stage A passes for a task, in a SINGLE message, dispatch \`critic\`, \`rev
 - \`explorer\`      — task diff + original task intent + prior slop findings
                     (hunts for lazy implementations, hallucinated APIs, cargo-cult patterns,
                      spec drift, lazy abstractions)
+→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (same text as the coder delegation for this task). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
 
 Wait for ALL dispatched agents to return their verdict objects before proceeding.
 
@@ -1289,6 +1297,7 @@ and \`explorer\` as parallel Agent tasks. Each member receives phase-scoped cont
 - \`explorer\`      — full phase diff + original task intents + prior slop findings across all tasks
                     (hunts for lazy implementations, hallucinated APIs, cargo-cult patterns,
                      spec drift, lazy abstractions introduced anywhere in the phase)
+→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (phase-scoped: concatenate the verbatim FR/SC text for every task in this phase when fr_refs is non-empty, otherwise a one-line phase-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
 
 Wait for ALL dispatched agents to return their verdict objects before proceeding.
 
