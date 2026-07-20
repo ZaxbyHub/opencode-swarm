@@ -304,10 +304,15 @@ describe('interpreter eval', () => {
 		]);
 	});
 
-	test('python -m executes module (potential write)', () => {
-		expectWrites('python -m compileall .', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
-		]);
+	test('python -m runs an installed module (a named program) — not flagged as eval (issue #1902)', () => {
+		// `python -m <module>` is equivalent to invoking the tool directly
+		// (`pytest`, `ruff`, `build`); it is not arbitrary inline code, so it must
+		// not be treated as an unverifiable write target. Only -c/-e/-r inline code
+		// is flagged. Any files the module writes are contained by scope/sandbox.
+		expect(detectPosixWrites('python -m compileall .').hasWrites).toBe(false);
+		expect(detectPosixWrites('python -m pytest tests/').hasWrites).toBe(false);
+		expect(detectPosixWrites('python3 -m ruff check').hasWrites).toBe(false);
+		expect(detectPosixWrites('python -m build').hasWrites).toBe(false);
 	});
 
 	test('node -p evaluates and prints (write effect)', () => {

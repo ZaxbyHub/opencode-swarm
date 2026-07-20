@@ -7,6 +7,7 @@
  * inject warnings, detect loops, and enforce QA gate compliance.
  */
 
+import { getSwarmAgents } from '../../agents/index';
 import {
 	isLowCapabilityModel,
 	ORCHESTRATOR_NAME,
@@ -19,6 +20,11 @@ import { loadPlan } from '../../plan/manager';
 import { getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log } from '../../utils';
+import {
+	extractStatusCode,
+	TRANSIENT_MODEL_ERROR_PATTERN,
+	TRANSIENT_STATUS_CODES,
+} from '../../utils/provider-error-classification';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { extractModelInfo } from '../model-limits';
 import { hashArgs } from './file-authority';
@@ -46,16 +52,6 @@ type ChatMessageLike = {
 	parts?: Array<{ type?: string; text?: unknown }>;
 };
 
-/** v6.33: Known HTTP status codes that indicate transient provider errors. */
-const TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-
-/**
- * v6.33: Regex pattern for transient model errors that should trigger fallback.
- * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
- */
-const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
-
 const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
 
 function getMessageText(message: ChatMessageLike | undefined): string {
@@ -75,14 +71,6 @@ export function getMostRecentAssistantText(
 		}
 	}
 	return '';
-}
-
-function extractStatusCode(errorMsg: string): number | null {
-	const match = errorMsg.match(/\b(408|429|500|502|503|504|529)\b/);
-	if (match) {
-		return parseInt(match[1], 10);
-	}
-	return null;
 }
 
 export function isTransientProviderFailureText(text: string): boolean {
@@ -176,6 +164,64 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			: session
 				? stripKnownSwarmPrefix(session.agentName) === ORCHESTRATOR_NAME
 				: false;
+
+		// #1896: model-divergence detection, scoped to the ARCHITECT/primary session
+		// (its model is the UI-driven one; swarm fallback only mutates SUBAGENT
+		// models, so this scoping avoids a false positive on a swarm-initiated
+		// switch). Two one-shot advisories: (a) a model that silently changed across
+		// an interrupt/resume, and (b) a configured architect model that the UI has
+		// overridden (expected, since the primary's configured model is intentionally
+		// not applied — surfaced so the mismatch does not silently confuse the run).
+		if (isArchitectSession && session) {
+			const { modelID, providerID } = extractModelInfo(messages);
+			if (modelID) {
+				const observedFull = providerID ? `${providerID}/${modelID}` : modelID;
+				const previousObserved = session.lastObservedModel;
+
+				// (a) Silent switch across a resume — compare like-with-like across the
+				// interrupt, gated on no swarm fallback being in play (fallback resets
+				// model_fallback_index to 0 on rehydrate, and never targets the primary).
+				if (
+					session.sessionRehydratedAt > 0 &&
+					session.model_fallback_index === 0 &&
+					previousObserved &&
+					previousObserved !== observedFull &&
+					!session.resumeModelAdvisoryDone
+				) {
+					session.pendingAdvisoryMessages ??= [];
+					session.pendingAdvisoryMessages.push(
+						`MODEL CHANGED ACROSS RESUME: this run previously observed model "${previousObserved}"; the active model is now "${observedFull}". If this switch was unintended, re-select the intended model (or use /swarm handoff) before continuing.`,
+					);
+					session.resumeModelAdvisoryDone = true;
+				}
+
+				// (b) Config-vs-UI clarification (fires once per session). Gated on
+				// no fallback in play: the guardrails toolAfter path can mutate the
+				// architect's swarmAgents model to a fallback value, and the observed
+				// model would also be that fallback — both unreliable for a
+				// "config vs UI" comparison while a fallback is active.
+				if (
+					!session.configModelAdvisoryDone &&
+					session.model_fallback_index === 0
+				) {
+					const configuredArchitect = getSwarmAgents()?.architect?.model;
+					if (
+						configuredArchitect &&
+						configuredArchitect !== observedFull &&
+						configuredArchitect !== modelID
+					) {
+						session.pendingAdvisoryMessages ??= [];
+						session.pendingAdvisoryMessages.push(
+							`MODEL CONFIG NOTE: your config pins the architect to "${configuredArchitect}", but the UI has "${observedFull}" active. The UI selection wins for the primary/architect role (its configured model is intentionally not applied), so this difference is expected — switch the UI model if you meant to run "${configuredArchitect}".`,
+						);
+						session.configModelAdvisoryDone = true;
+					}
+				}
+
+				session.lastObservedModel = observedFull;
+				session.lastObservedProviderID = providerID;
+			}
+		}
 
 		// Find system message(s) for model-only guidance injection
 		const systemMessages = messages.filter(

@@ -786,10 +786,20 @@ export function extractSpecRequirementBodyById(
  * fold is symmetric (both sides go through this one function), so it can only
  * REDUCE false-blocks — it never opens a bypass, since covered/uncovered still
  * differ by whole words, not punctuation.
+ *
+ * Issue #1896: encoding tolerance. Canonicalizes Unicode via NFC first (so a
+ * decomposed accent vs its composed form compare equal — same text, different
+ * byte encoding), and folds the section sign `§` (U+00A7) — and the common
+ * Latin-1 mojibake `Â§` a non-UTF-8 web save produces — to the spaced word token
+ * " section " so `§4.2`, `§ 4.2`, `Â§ 4.2`, and `section 4.2` all compare equal.
+ * Both additions are symmetric and information-preserving, so they can only
+ * reduce false-blocks. A literal `??` (U+003F run, from a save that DESTROYED the
+ * `§`) is NOT recoverable here — the coverage-miss diagnostic surfaces it instead.
  */
 export function normalizeAcceptanceText(s: string): string {
 	return (
 		s
+			.normalize('NFC') // canonical Unicode compose (encoding tolerance, #1896)
 			.replace(/`/g, '') // inline code backticks
 			.replace(/\*\*/g, '') // bold markers
 			.replace(/\*/g, '') // italic / list-star markers
@@ -800,10 +810,90 @@ export function normalizeAcceptanceText(s: string): string {
 			.replace(/[“”]/g, '"') // curly double quotes -> straight
 			.replace(/[—–]/g, '-') // em/en dash -> hyphen
 			.replace(/-{2,}/g, '-') // collapse hyphen runs (incl. `--` for an em-dash)
+			// #1896: fold `§` and its Latin-1 mojibake `Â§` to a SPACED word token
+			// BEFORE the whitespace-collapse, so `§4.2` -> ` section 4.2` -> matches
+			// `section 4.2`. A bare (unspaced) fold would yield `section4.2` and
+			// false-block the no-space form.
+			.replace(/Â?§/g, ' section ')
 			.replace(/\s+/g, ' ') // collapse all whitespace (incl. newlines)
 			.trim()
 			.toLowerCase()
 	);
+}
+
+/**
+ * Issue #1896: bounded, diagnostic description of WHY an ACCEPTANCE text failed
+ * to cover a requirement body. The coverage check is a SUBSTRING match
+ * (`acceptance.includes(body)`), so "first divergence" is defined against the
+ * best-aligning window: the longest prefix of the normalized expected body that
+ * still appears as a substring of the normalized acceptance. `divergenceOffset`
+ * is the length of that matched prefix; the snippets show the expected text at
+ * the break and the acceptance text where the match ran out. All scans and
+ * snippets are capped so this stays O(1)-bounded on large spec bodies. When the
+ * raw (pre-normalization) text carries mojibake markers (a `??` run, U+FFFD, or a
+ * Latin-1 `Â`-prefixed byte), a corruption hint is attached — this is the signal
+ * that unblocks the destroyed-`§`-as-`??` case the diagnostic exists for.
+ */
+export interface CoverageMissDiagnostic {
+	expectedSnippet: string;
+	foundSnippet: string;
+	divergenceOffset: number;
+	corruptionHint?: string;
+}
+
+const COVERAGE_DIAG_SNIPPET_CAP = 80;
+const COVERAGE_DIAG_MAX_SCAN = 400;
+
+export function describeCoverageMiss(params: {
+	rawExpectedBody: string;
+	rawAcceptanceText: string;
+	normalizedExpected: string;
+	normalizedAcceptance: string;
+}): CoverageMissDiagnostic {
+	const { normalizedExpected, normalizedAcceptance } = params;
+	// Longest prefix of the expected body that is still a substring of the
+	// acceptance text (bounded scan). Since the full body is NOT a substring
+	// (that is why we are here), this stops at a proper prefix.
+	let divergenceOffset = 0;
+	const maxScan = Math.min(normalizedExpected.length, COVERAGE_DIAG_MAX_SCAN);
+	while (
+		divergenceOffset < maxScan &&
+		normalizedAcceptance.includes(
+			normalizedExpected.slice(0, divergenceOffset + 1),
+		)
+	) {
+		divergenceOffset++;
+	}
+	const expectedSnippet = normalizedExpected.slice(
+		divergenceOffset,
+		divergenceOffset + COVERAGE_DIAG_SNIPPET_CAP,
+	);
+	const matchedPrefix = normalizedExpected.slice(0, divergenceOffset);
+	const foundIdx =
+		matchedPrefix.length > 0 ? normalizedAcceptance.indexOf(matchedPrefix) : -1;
+	const foundPos = foundIdx >= 0 ? foundIdx + matchedPrefix.length : 0;
+	const foundSnippet = normalizedAcceptance.slice(
+		foundPos,
+		foundPos + COVERAGE_DIAG_SNIPPET_CAP,
+	);
+	const raw = `${params.rawExpectedBody}\n${params.rawAcceptanceText}`;
+	let corruptionHint: string | undefined;
+	if (/�/.test(raw)) {
+		corruptionHint =
+			'the text contains U+FFFD (the Unicode replacement char), a sign spec.md was decoded with the wrong encoding — re-save spec.md as UTF-8';
+	} else if (/\?{2,}/.test(raw)) {
+		corruptionHint =
+			"the text contains a '??' run — a non-UTF-8 save can turn characters like § into ?? on disk; open .swarm/spec.md and re-type the affected character, then re-save as UTF-8";
+	} else if (/Ã.|â€|Â[^\s]/.test(raw)) {
+		corruptionHint =
+			'the text contains a Latin-1 mojibake byte sequence (e.g. Â§, Ã©) — re-save spec.md as UTF-8';
+	}
+	return {
+		expectedSnippet,
+		foundSnippet,
+		divergenceOffset,
+		...(corruptionHint ? { corruptionHint } : {}),
+	};
 }
 
 /**
@@ -825,7 +915,11 @@ export function checkAcceptanceCoversFrRefs(params: {
 	acceptanceText: string;
 	frRefs: string[];
 	specText: string;
-}): { covered: boolean; missingId?: string } {
+}): {
+	covered: boolean;
+	missingId?: string;
+	diagnostic?: CoverageMissDiagnostic;
+} {
 	const normalizedAcceptance = normalizeAcceptanceText(params.acceptanceText);
 	for (const id of params.frRefs) {
 		const body = extractSpecRequirementBodyById(params.specText, id);
@@ -833,7 +927,18 @@ export function checkAcceptanceCoversFrRefs(params: {
 		const normalizedBody = normalizeAcceptanceText(body);
 		if (normalizedBody.length === 0) continue; // empty body — skip
 		if (!normalizedAcceptance.includes(normalizedBody)) {
-			return { covered: false, missingId: id };
+			// #1896: surface WHAT diverged (bounded diff + encoding-corruption hint)
+			// so the architect can fix the copy/encoding without hex-dumping spec.md.
+			return {
+				covered: false,
+				missingId: id,
+				diagnostic: describeCoverageMiss({
+					rawExpectedBody: body,
+					rawAcceptanceText: params.acceptanceText,
+					normalizedExpected: normalizedBody,
+					normalizedAcceptance,
+				}),
+			};
 		}
 	}
 	return { covered: true };
@@ -2052,7 +2157,13 @@ export function createDelegationGateHook(
 			// failure => skip (no block), and only a clear, high-confidence mismatch
 			// throws. The whole resolution runs inside try/catch: any unexpected error
 			// (fs/parse/etc.) is swallowed and treated as covered.
-			let coverageResult: { covered: boolean; missingId?: string } | undefined;
+			let coverageResult:
+				| {
+						covered: boolean;
+						missingId?: string;
+						diagnostic?: CoverageMissDiagnostic;
+				  }
+				| undefined;
 			let coverageTaskId: string | null = null;
 			try {
 				const coveragePlan = await _internals.loadPlanJsonOnly(directory);
@@ -2090,8 +2201,26 @@ export function createDelegationGateHook(
 				coverageResult = undefined;
 			}
 			if (coverageResult && coverageResult.covered === false) {
+				// #1896: the compare is a NORMALIZED substring match (Unicode NFC +
+				// punctuation/whitespace folding), not a raw byte compare — so the
+				// diagnostic below points at the first NORMALIZED divergence and, when
+				// the text looks mojibake'd, says so. This replaces the old, misleading
+				// "copy byte-for-byte" instruction that sent architects hex-dumping.
+				const diag = coverageResult.diagnostic;
+				const diagLines: string[] = [];
+				if (diag) {
+					diagLines.push(
+						`  first divergence at normalized offset ${diag.divergenceOffset}` +
+							(diag.divergenceOffset === 0 ? ' (no aligned prefix found)' : ''),
+					);
+					diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+					diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
+					if (diag.corruptionHint) {
+						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
+					}
+				}
 				throw new Error(
-					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not contain the verbatim requirement text for ${coverageResult.missingId} from .swarm/spec.md. The architect must copy ${coverageResult.missingId}'s full requirement text byte-for-byte into ACCEPTANCE (see ACCEPTANCE FIELD RESOLUTION in src/agents/architect.ts and the INPUT FORMAT in src/agents/${targetAgent}.ts), then re-dispatch.`,
+					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n  Fix: copy ${coverageResult.missingId}'s full requirement text into ACCEPTANCE (see ACCEPTANCE FIELD RESOLUTION in src/agents/architect.ts and the INPUT FORMAT in src/agents/${targetAgent}.ts); if the ENCODING WARNING is present, repair .swarm/spec.md first, then re-dispatch.`,
 				);
 			}
 		}

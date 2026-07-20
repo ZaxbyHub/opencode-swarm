@@ -123,7 +123,7 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 /** Builtins with in-place editing semantics (modify file argument in place). */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
 
-/** Interpreters that accept inline code via -c / -e / -r / -m flag. */
+/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). */
 const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
 	'python3',
@@ -665,9 +665,17 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	const suffixWords = getSuffixWords(cmd);
 
 	const evalFlags: Record<string, string[]> = {
-		python: ['-c', '-m'],
-		python3: ['-c', '-m'],
-		python2: ['-c', '-m'],
+		// `python -m <module>` runs an INSTALLED module as a program — e.g.
+		// `python -m pytest`, `python -m ruff`, `python -m build`. It is equivalent
+		// to invoking that tool directly (`pytest`, `ruff`) and is NOT arbitrary
+		// inline code, so it is deliberately excluded here. Only true inline-code
+		// eval flags (-c / -e / -p / -r / …) are treated as write effects with an
+		// unverifiable target. Treating `-m` as eval hard-blocked every
+		// `python -m pytest`/`ruff` (even the swarm's own test_runner-generated
+		// commands) with a misleading "unresolvable path target" error. (issue #1902)
+		python: ['-c'],
+		python3: ['-c'],
+		python2: ['-c'],
 		node: ['-e', '-p', '-pe'],
 		bun: ['-e', '-p', '-pe'],
 		ruby: ['-e'],
@@ -1549,7 +1557,7 @@ export function detectInteractiveSession(
  * - Redirection operators: >, >>, >|, <<, <<- (here-docs)
  * - Write-effect builtins: cp, mv, install, ln, truncate, dd (of=)
  * - In-place editors: sed -i, perl -i, awk -i
- * - Interpreter eval: python -c/-m, node -e, bun -e, ruby -e, perl -e, php -r
+ * - Interpreter eval: python -c, node -e, bun -e, ruby -e, perl -e, php -r
  * - Network downloaders: curl -o, wget -O, scp
  * - Archive extraction: tar -x, unzip, gunzip
  * - Git destructive: git checkout --, git restore, git reset --hard, git clean -fd

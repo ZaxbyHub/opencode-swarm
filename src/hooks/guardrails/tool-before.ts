@@ -981,8 +981,36 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		for (const write of resolvedWrites) {
 			if (write.resolvedPath === null) {
+				// A null resolved path has three distinct causes that must NOT be
+				// collapsed into one blanket "unresolvable path target" block:
+				if (
+					write.original.category === 'here_doc' &&
+					write.original.path === null
+				) {
+					// A bare here-doc marker (`<< EOF`) feeds stdin, not a file — it is
+					// not itself a write target. Any accompanying `> file` redirect is
+					// detected and scope-checked as its own resolved write, so skip the
+					// phantom marker instead of hard-blocking the whole command.
+					continue;
+				}
+				if (write.original.category === 'interpreter_eval') {
+					// Inline code (`python -c`, `node -e`, …) can write to arbitrary
+					// files whose targets are not statically knowable, so it cannot be
+					// verified against the declared scope. This stays fail-closed (it is
+					// how the scope/config-zone protections resist an eval bypass), but
+					// with an actionable message — the old text claimed an "unresolvable
+					// path target" that never existed for an eval.
+					throw new Error(
+						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
+					);
+				}
+				// A concrete redirect/builtin target that resolved to null because it
+				// uses a shell variable or command substitution ($VAR, $(cmd)) —
+				// genuinely unverifiable, so keep failing closed.
 				throw new Error(
-					`BLOCKED: bash/shell write operation with unresolvable path target — rejecting for safety`,
+					`BLOCKED: bash/shell write to a dynamic path target${
+						write.original.path ? ` "${write.original.path}"` : ''
+					} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
 				);
 			}
 

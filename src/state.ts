@@ -391,6 +391,23 @@ export interface AgentSessionState {
 	 * failed); callers must handle the miss with a bounded fallback.
 	 */
 	cachedCohortId?: string;
+
+	// Model divergence detection (#1896)
+	/**
+	 * The `provider/model` most recently OBSERVED on this (architect/primary)
+	 * session's assistant turns (e.g. "anthropic/claude"). Persisted through
+	 * snapshots and deliberately NOT reset on rehydration, so a silent model
+	 * switch across an interrupt can be detected on resume by comparing the
+	 * pre-interrupt observation with the first post-resume one. `undefined` until
+	 * first observed.
+	 */
+	lastObservedModel?: string;
+	/** Provider id paired with `lastObservedModel` (#1896). */
+	lastObservedProviderID?: string;
+	/** One-shot guard: the resume model-change advisory has fired for this rehydration (#1896). */
+	resumeModelAdvisoryDone?: boolean;
+	/** One-shot guard: the config-vs-UI model advisory has fired for this session (#1896). */
+	configModelAdvisoryDone?: boolean;
 }
 
 export type NonTransientErrorCategory =
