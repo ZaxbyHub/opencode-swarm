@@ -40,7 +40,11 @@ export {
 	ReviewEvidenceSchema,
 	TestEvidenceSchema,
 } from './evidence-schema';
-export type { ConfigBuildResult, ConfigRecovery } from './loader';
+export type {
+	ConfigBuildResult,
+	ConfigLoadResult,
+	ConfigRecovery,
+} from './loader';
 // Re-export loaders for DI seam
 export {
 	loadAgentPrompt,

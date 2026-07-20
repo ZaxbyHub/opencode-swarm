@@ -134,6 +134,14 @@ describe('config/loader — sync/async parity (issue #1900 FR-4)', () => {
 			name: 'no config files (defaults only)',
 			setup: (_xdg) => makeEmptyProjectDir(),
 		},
+		{
+			name: 'invalid external_skills section',
+			setup: (xdg) =>
+				makeProjectDir(xdg, {
+					max_iterations: 5,
+					external_skills: { curation_enabled: 'not-a-boolean' },
+				}),
+		},
 	];
 
 	for (const fixture of fixtures) {

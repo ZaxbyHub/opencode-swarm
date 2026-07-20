@@ -151,17 +151,21 @@ function migratePresetsConfig(
  * If the section is present but invalid, warn and strip it so the rest
  * of the config loads cleanly (AGENTS.md #1 fail-open).
  */
-function sanitizeExternalSkillsConfig(
-	raw: Record<string, unknown>,
-): Record<string, unknown> {
+function sanitizeExternalSkillsConfig(raw: Record<string, unknown>): {
+	result: Record<string, unknown>;
+	strippedKeys: string[];
+} {
 	if (!('external_skills' in raw) || raw.external_skills === undefined) {
-		return raw;
+		return { result: raw, strippedKeys: [] };
 	}
 	const esResult = ExternalSkillsConfigSchema.safeParse(raw.external_skills);
 	if (esResult.success) {
 		return {
-			...raw,
-			external_skills: resolveExternalSkillsConfig(esResult.data),
+			result: {
+				...raw,
+				external_skills: resolveExternalSkillsConfig(esResult.data),
+			},
+			strippedKeys: [],
 		};
 	}
 	advisoryWarn(
@@ -173,7 +177,7 @@ function sanitizeExternalSkillsConfig(
 	);
 	const cleaned = { ...raw };
 	delete cleaned.external_skills;
-	return cleaned;
+	return { result: cleaned, strippedKeys: ['external_skills'] };
 }
 
 function sanitizeGatesConfig(raw: Record<string, unknown>): {
@@ -272,8 +276,11 @@ function sanitizeSectionConfigs(raw: Record<string, unknown>): {
 	result: Record<string, unknown>;
 	strippedKeys: string[];
 } {
-	const afterExternal = sanitizeExternalSkillsConfig(raw);
-	return sanitizeGatesConfig(afterExternal);
+	const { result: afterExternal, strippedKeys: externalStripped } =
+		sanitizeExternalSkillsConfig(raw);
+	const { result, strippedKeys: gatesStripped } =
+		sanitizeGatesConfig(afterExternal);
+	return { result, strippedKeys: [...externalStripped, ...gatesStripped] };
 }
 
 /**
@@ -371,6 +378,31 @@ export type ConfigBuildResult = {
 	/** Human-readable summary messages about the recovery action. */
 	warnings: string[];
 };
+
+/**
+ * Full result from `loadPluginConfigWithMeta` and `loadPluginConfigWithMetaAsync`.
+ * Extends `ConfigBuildResult` with I/O-layer fields about whether a config
+ * file was found and whether it could be read.
+ */
+export type ConfigLoadResult = ConfigBuildResult & {
+	/** True when at least one config file (user or project) existed on disk. */
+	loadedFromFile: boolean;
+	/** True when a config file existed but could not be loaded (corrupt JSON,
+	 *  oversized, permission error). Consumers with fail-closed semantics —
+	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
+	 *  "config unknown", not "config defaults". */
+	configHadErrors: boolean;
+};
+
+/** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
+function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
+	if (!raw || typeof raw !== 'object') return false;
+	const fullAuto = raw.full_auto;
+	if (!fullAuto || typeof fullAuto !== 'object' || Array.isArray(fullAuto)) {
+		return false;
+	}
+	return (fullAuto as Record<string, unknown>).locked === true;
+}
 
 /**
  * Single shared core: merges, migrates, sanitizes, and parses raw user +
@@ -554,16 +586,6 @@ function buildConfigWithMeta(
  * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
  * Zod defaults don't override explicit user values.
  */
-/** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
-function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
-	if (!raw || typeof raw !== 'object') return false;
-	const fullAuto = raw.full_auto;
-	if (!fullAuto || typeof fullAuto !== 'object' || Array.isArray(fullAuto)) {
-		return false;
-	}
-	return (fullAuto as Record<string, unknown>).locked === true;
-}
-
 export function loadPluginConfig(directory: string): PluginConfig {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -592,18 +614,7 @@ export function loadPluginConfig(directory: string): PluginConfig {
  * this function.  `buildConfigWithMeta` is the shared core — files are read
  * exactly once, no double-read.
  */
-export function loadPluginConfigWithMeta(directory: string): {
-	config: PluginConfig;
-	loadedFromFile: boolean;
-	/** True when a config file existed but could not be loaded (corrupt JSON,
-	 *  oversized, permission error). Consumers with fail-closed semantics —
-	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
-	 *  "config unknown", not "config defaults". */
-	configHadErrors: boolean;
-	recovery: ConfigRecovery;
-	removedKeys: string[];
-	warnings: string[];
-} {
+export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
 		'opencode',
@@ -706,14 +717,7 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
  */
 export async function loadPluginConfigWithMetaAsync(
 	directory: string,
-): Promise<{
-	config: PluginConfig;
-	loadedFromFile: boolean;
-	configHadErrors: boolean;
-	recovery: ConfigRecovery;
-	removedKeys: string[];
-	warnings: string[];
-}> {
+): Promise<ConfigLoadResult> {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
 		'opencode',

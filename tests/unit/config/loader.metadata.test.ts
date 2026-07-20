@@ -280,4 +280,35 @@ describe('config/loader — metadata (issue #1900)', () => {
 			}
 		});
 	});
+
+	// 7. Invalid external_skills → recovery: 'stripped_keys', removedKeys includes 'external_skills'
+	describe('external_skills stripping', () => {
+		it('sync: invalid external_skills → recovery=stripped_keys, removedKeys=[external_skills]', () => {
+			const dir = projectDir({
+				max_iterations: 5,
+				external_skills: { curation_enabled: 'not-a-boolean' },
+			});
+			try {
+				const meta = loadPluginConfigWithMeta(dir);
+				expect(meta.recovery).toBe('stripped_keys');
+				expect(meta.removedKeys).toContain('external_skills');
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it('async: invalid external_skills → recovery=stripped_keys, removedKeys=[external_skills]', async () => {
+			const dir = projectDir({
+				max_iterations: 5,
+				external_skills: { curation_enabled: 'not-a-boolean' },
+			});
+			try {
+				const meta = await loadPluginConfigWithMetaAsync(dir);
+				expect(meta.recovery).toBe('stripped_keys');
+				expect(meta.removedKeys).toContain('external_skills');
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	});
 });
