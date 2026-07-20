@@ -48,6 +48,16 @@ describe('config/loader — metadata (issue #1900)', () => {
 		return dir;
 	}
 
+	function projectDirWithRaw(rawContent: string): string {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-proj-'));
+		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			rawContent,
+		);
+		return dir;
+	}
+
 	function userConfigDir(): string {
 		const dir = path.join(tempXdg, 'opencode');
 		fs.mkdirSync(dir, { recursive: true });
@@ -58,6 +68,13 @@ describe('config/loader — metadata (issue #1900)', () => {
 		fs.writeFileSync(
 			path.join(userConfigDir(), 'opencode-swarm.json'),
 			JSON.stringify(cfg),
+		);
+	}
+
+	function writeRawUserConfig(rawContent: string): void {
+		fs.writeFileSync(
+			path.join(userConfigDir(), 'opencode-swarm.json'),
+			rawContent,
 		);
 	}
 
@@ -191,12 +208,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 	//    'none'/'stripped_keys' depending on whether valid user config exists
 	describe('invalid JSON in project config', () => {
 		it('sync: invalid project JSON with no user config → configHadErrors=true, guardrails enabled', () => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-badjson-'));
-			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-			fs.writeFileSync(
-				path.join(dir, '.opencode', 'opencode-swarm.json'),
-				'{ not valid json',
-			);
+			const dir = projectDirWithRaw('{ not valid json');
 			try {
 				const meta = loadPluginConfigWithMeta(dir);
 				expect(meta.configHadErrors).toBe(true);
@@ -207,12 +219,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 		});
 
 		it('async: invalid project JSON with no user config → configHadErrors=true, guardrails enabled', async () => {
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-badjson-'));
-			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-			fs.writeFileSync(
-				path.join(dir, '.opencode', 'opencode-swarm.json'),
-				'{ not valid json',
-			);
+			const dir = projectDirWithRaw('{ not valid json');
 			try {
 				const meta = await loadPluginConfigWithMetaAsync(dir);
 				expect(meta.configHadErrors).toBe(true);
@@ -262,14 +269,9 @@ describe('config/loader — metadata (issue #1900)', () => {
 	// 6. Unrecoverable merged config → 'guardrails_defaults'
 	describe('guardrails defaults fallback', () => {
 		it('sync: irrecoverable config (invalid JSON in both) → recovery=guardrails_defaults', () => {
-			// Both user and project configs are invalid JSON
-			writeUserConfig('not json at all -- intentionally invalid');
-			const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-guardrails-'));
-			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-			fs.writeFileSync(
-				path.join(dir, '.opencode', 'opencode-swarm.json'),
-				'also not json',
-			);
+			// Both user and project configs are syntactically invalid JSON
+			writeRawUserConfig('not json at all -- intentionally invalid');
+			const dir = projectDirWithRaw('also not json');
 			try {
 				const meta = loadPluginConfigWithMeta(dir);
 				// configHadErrors = true because files exist but couldn't be loaded
