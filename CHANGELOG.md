@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.126.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.0...v7.126.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **pr-workflow:** close feedback and loader recovery gaps ([628b90e](https://github.com/ZaxbyHub/opencode-swarm/commit/628b90ead99435aad693e2155955b501e45a20b4))
+* **pr-workflow:** restore review gate capability contracts ([063fde5](https://github.com/ZaxbyHub/opencode-swarm/commit/063fde5c21d5380d467bb784813a8fa4a2708243))
+* **pr-workflow:** restore review gate capability contracts ([870cd45](https://github.com/ZaxbyHub/opencode-swarm/commit/870cd45153d3ba595142736d38a77dd423469809))
+
 ## [7.126.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.6...v7.126.0) (2026-07-20)
 
 

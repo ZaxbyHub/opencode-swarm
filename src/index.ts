@@ -2250,11 +2250,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    their durable lane and trigger obligations are satisfied.
 			const prWorkflowControllerSessionID =
 				await prWorkflowSessionResolver.resolve(input.sessionID);
+			const prWorkflowToolContext = resolveToolBeforeContext(
+				input as { tool: string; sessionID: string; callID: string },
+				output as { args?: unknown },
+			);
 			await enforcePrWorkflowToolBefore(
 				ctx.directory,
 				prWorkflowControllerSessionID,
 				normalizeToolName(input.tool) ?? input.tool,
-				input.args as Record<string, unknown> | undefined,
+				prWorkflowToolContext.args ?? undefined,
 				swarmState.generatedAgentNames,
 			);
 

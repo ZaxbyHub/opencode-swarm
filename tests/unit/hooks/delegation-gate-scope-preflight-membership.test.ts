@@ -12,10 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -64,7 +61,10 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 		fs.rmSync(directory, { recursive: true, force: true });
 	});
 
-	async function writePlan(taskIds: string[], files: string[] = []): Promise<Plan> {
+	async function writePlan(
+		taskIds: string[],
+		files: string[] = [],
+	): Promise<Plan> {
 		const plan = planWithTasks(taskIds, files);
 		fs.writeFileSync(
 			path.join(directory, '.swarm', 'plan.json'),
@@ -143,7 +143,9 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 			dispatch({
 				prompt: 'TASK: 1.1 — x\nACCEPTANCE: done',
 			}),
-		).rejects.toThrow(/no valid plan found at .*plan\.json \(file missing or invalid\)/);
+		).rejects.toThrow(
+			/no valid plan found at .*plan\.json \(file missing or invalid\)/,
+		);
 	});
 
 	test('acceptance #3b: corrupt plan.json produces the same plan-path diagnostic', async () => {
@@ -155,7 +157,9 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 			dispatch({
 				prompt: 'TASK: 1.1 — x\nACCEPTANCE: done',
 			}),
-		).rejects.toThrow(/no valid plan found at .*plan\.json \(file missing or invalid\)/);
+		).rejects.toThrow(
+			/no valid plan found at .*plan\.json \(file missing or invalid\)/,
+		);
 	});
 
 	test('acceptance #3c: plan present but no resolvable task id produces a no-signal diagnostic', async () => {
@@ -183,7 +187,9 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 			dispatch({
 				prompt: 'TASK: port from 1.1 to 2.1\nACCEPTANCE: done',
 			}),
-		).rejects.toThrow(/multiple candidate task ids found in TASK: line: \[1\.1, 2\.1\]/);
+		).rejects.toThrow(
+			/multiple candidate task ids found in TASK: line: \[1\.1, 2\.1\]/,
+		);
 	});
 
 	test('regression: plan-task-shaped explicit task_id still wins over prompt text (PR #961 preserved)', async () => {

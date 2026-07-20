@@ -19,37 +19,6 @@ const PROMPTS_DIR_NAME = 'opencode-swarm';
 export const MAX_CONFIG_FILE_BYTES = 102_400;
 
 /**
- * Recovery type indicating how the config was recovered from parse failure.
- * - 'none': config parsed cleanly on first attempt
- * - 'stripped_keys': Zod-confirmed unrecognized keys were surgically removed and parse succeeded
- * - 'user_only': project config was ignored (validation error); user config used alone
- * - 'guardrails_defaults': no recovery succeeded; fail-secure guardrails defaults applied
- */
-export type RecoveryType =
-	| 'none'
-	| 'stripped_keys'
-	| 'user_only'
-	| 'guardrails_defaults';
-
-/**
- * Structured recovery metadata returned by parseConfigWithFallback.
- * Exposed via loadPluginConfigWithMeta[Async] so programmatic callers can
- * introspect what recovery was performed.
- */
-export interface RecoveryInfo {
-	recovery: RecoveryType;
-	/** Dotted key paths that were removed during recovery (empty if none were stripped). */
-	removedKeys: string[];
-	/** Human-readable advisory messages describing what recovery was performed. */
-	warnings: string[];
-}
-
-/** Full parse result including recovery metadata. */
-interface ParseResult extends RecoveryInfo {
-	config: PluginConfig;
-}
-
-/**
  * Get the user's configuration directory (XDG Base Directory spec).
  */
 function getUserConfigDir(): string {
@@ -182,17 +151,21 @@ function migratePresetsConfig(
  * If the section is present but invalid, warn and strip it so the rest
  * of the config loads cleanly (AGENTS.md #1 fail-open).
  */
-function sanitizeExternalSkillsConfig(
-	raw: Record<string, unknown>,
-): Record<string, unknown> {
+function sanitizeExternalSkillsConfig(raw: Record<string, unknown>): {
+	result: Record<string, unknown>;
+	strippedKeys: string[];
+} {
 	if (!('external_skills' in raw) || raw.external_skills === undefined) {
-		return raw;
+		return { result: raw, strippedKeys: [] };
 	}
 	const esResult = ExternalSkillsConfigSchema.safeParse(raw.external_skills);
 	if (esResult.success) {
 		return {
-			...raw,
-			external_skills: resolveExternalSkillsConfig(esResult.data),
+			result: {
+				...raw,
+				external_skills: resolveExternalSkillsConfig(esResult.data),
+			},
+			strippedKeys: [],
 		};
 	}
 	advisoryWarn(
@@ -204,14 +177,16 @@ function sanitizeExternalSkillsConfig(
 	);
 	const cleaned = { ...raw };
 	delete cleaned.external_skills;
-	return cleaned;
+	return { result: cleaned, strippedKeys: ['external_skills'] };
 }
 
-function sanitizeGatesConfig(
-	raw: Record<string, unknown>,
-): Record<string, unknown> {
+function sanitizeGatesConfig(raw: Record<string, unknown>): {
+	result: Record<string, unknown>;
+	strippedKeys: string[];
+} {
+	const strippedKeys: string[] = [];
 	if (!('gates' in raw) || raw.gates === undefined) {
-		return raw;
+		return { result: raw, strippedKeys };
 	}
 	if (
 		typeof raw.gates !== 'object' ||
@@ -223,7 +198,8 @@ function sanitizeGatesConfig(
 		);
 		const cleaned = { ...raw };
 		delete cleaned.gates;
-		return cleaned;
+		strippedKeys.push('gates');
+		return { result: cleaned, strippedKeys };
 	}
 
 	const gateSchemas = GateConfigSchema.shape;
@@ -235,6 +211,7 @@ function sanitizeGatesConfig(
 				`[opencode-swarm] Unknown gates config section "gates.${key}" ignored. Other config sections remain active.`,
 			);
 			delete cleanedGates[key];
+			strippedKeys.push(`gates.${key}`);
 			continue;
 		}
 		const knownFields =
@@ -256,6 +233,7 @@ function sanitizeGatesConfig(
 						`[opencode-swarm] Unknown gates config key "gates.${key}.${fieldName}" ignored. Other config sections remain active.`,
 					);
 					delete cleanedSection[fieldName];
+					strippedKeys.push(`gates.${key}.${fieldName}`);
 				}
 			}
 			sectionValue = cleanedSection;
@@ -268,14 +246,17 @@ function sanitizeGatesConfig(
 				formatZodIssues(sectionResult.error),
 			);
 			delete cleanedGates[key];
+			if (!strippedKeys.includes(`gates.${key}`)) {
+				strippedKeys.push(`gates.${key}`);
+			}
 		}
 	}
 
 	const gatesResult = GateConfigSchema.safeParse(cleanedGates);
 	if (gatesResult.success) {
 		return {
-			...raw,
-			gates: gatesResult.data,
+			result: { ...raw, gates: gatesResult.data },
+			strippedKeys,
 		};
 	}
 
@@ -285,13 +266,21 @@ function sanitizeGatesConfig(
 	);
 	const cleaned = { ...raw };
 	delete cleaned.gates;
-	return cleaned;
+	if (!strippedKeys.includes('gates')) {
+		strippedKeys.push('gates');
+	}
+	return { result: cleaned, strippedKeys };
 }
 
-function sanitizeSectionConfigs(
-	raw: Record<string, unknown>,
-): Record<string, unknown> {
-	return sanitizeGatesConfig(sanitizeExternalSkillsConfig(raw));
+function sanitizeSectionConfigs(raw: Record<string, unknown>): {
+	result: Record<string, unknown>;
+	strippedKeys: string[];
+} {
+	const { result: afterExternal, strippedKeys: externalStripped } =
+		sanitizeExternalSkillsConfig(raw);
+	const { result, strippedKeys: gatesStripped } =
+		sanitizeGatesConfig(afterExternal);
+	return { result, strippedKeys: [...externalStripped, ...gatesStripped] };
 }
 
 /**
@@ -363,135 +352,52 @@ function stripUnrecognizedKeys(
 }
 
 /**
- * Centralized strict-parse fallback shared by the sync (`loadPluginConfig`) and
- * async (`reduceParsedConfig`) paths so they can never diverge (issue #1778 H6).
+ * Recovery classification returned by `buildConfigWithMeta`.
  *
- * Recovery order:
- *   1. Parse the merged raw config.
- *   2. On failure caused by unrecognized keys in strict sections, surgically
- *      drop ONLY those keys and re-parse — preserving every other user setting
- *      (the #1690 acceptance: one typo must not wipe the whole config).
- *   3. If still invalid, retry user-config-alone (ignoring a broken project
- *      config), then fall back to fail-secure guardrails-only defaults.
- *
- * All fallbacks name the offending key path(s) so the failure is actionable
- * instead of a generic error dump.
+ *   'none'               – config parsed cleanly, no keys removed.
+ *   'stripped_keys'      – pre-Zod section sanitization (gates, external_skills)
+ *                          and/or Zod-targeted key removal dropped some keys;
+ *                          the remaining configuration was preserved.
+ *   'user_only'          – project config was discarded (failed validation and
+ *                          targeted recovery); user config alone was used.
+ *   'guardrails_defaults'– neither merged nor user config was recoverable;
+ *                          fell back to fail-secure guardrails-only defaults.
  */
-function parseConfigWithFallback(
-	mergedRaw: Record<string, unknown>,
-	rawUserConfig: Record<string, unknown> | null,
-	failedResult: z.ZodSafeParseError<unknown>,
-	loadedFromFile: boolean,
-	configHadErrors: boolean,
-): ParseResult {
-	const result = failedResult;
+export type ConfigRecovery =
+	| 'none'
+	| 'stripped_keys'
+	| 'user_only'
+	| 'guardrails_defaults';
 
-	// A config file that existed but failed to LOAD (unreadable/oversized/
-	// malformed JSON) is a stronger fail-secure signal than a typo. When that
-	// happened, any config we recover must still force guardrails ENABLED —
-	// exactly as the success path does — so a user's `guardrails:false` on the
-	// surviving file cannot disable guardrails during a partial-load failure
-	// (issue #1778 H6 review F2). Never a downgrade.
-	const secure = (config: PluginConfig): PluginConfig =>
-		loadedFromFile && configHadErrors
-			? PluginConfigSchema.parse({
-					...(config as Record<string, unknown>),
-					guardrails: { enabled: true },
-				})
-			: config;
-
-	// Attempt targeted recovery: drop only the Zod-confirmed unrecognized keys
-	// and re-parse, so a single typo in one strict section does not discard the
-	// user's entire configuration.
-	const { cleaned, removed } = stripUnrecognizedKeys(mergedRaw, result.error);
-	if (removed.length > 0) {
-		const recovered = PluginConfigSchema.safeParse(cleaned);
-		if (recovered.success) {
-			const warning = `Ignored ${removed.length} unrecognized config key(s): ${removed.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`;
-			advisoryWarn(`[opencode-swarm] ${warning}`);
-			return {
-				config: secure(recovered.data),
-				recovery: 'stripped_keys',
-				removedKeys: removed,
-				warnings: [warning],
-			};
-		}
-	}
-
-	// If merged config still fails, try user config alone (a broken project
-	// config should not defeat a valid user config).
-	if (rawUserConfig) {
-		const userSanitized = sanitizeSectionConfigs(rawUserConfig ?? {});
-		const userParseResult = PluginConfigSchema.safeParse(userSanitized);
-		if (userParseResult.success) {
-			const warning =
-				'Project config ignored due to validation errors. Using user config.';
-			advisoryWarn(`[opencode-swarm] ${warning}`);
-			return {
-				config: secure(userParseResult.data),
-				recovery: 'user_only',
-				removedKeys: [],
-				warnings: [warning],
-			};
-		}
-		// Last targeted attempt: strip unrecognized keys from user config too.
-		const userStripped = stripUnrecognizedKeys(
-			userSanitized,
-			userParseResult.error,
-		);
-		if (userStripped.removed.length > 0) {
-			const userRecovered = PluginConfigSchema.safeParse(userStripped.cleaned);
-			if (userRecovered.success) {
-				const warning = `Project config ignored; also ignored ${userStripped.removed.length} unrecognized user-config key(s): ${userStripped.removed.join(', ')}.`;
-				advisoryWarn(`[opencode-swarm] ${warning}`);
-				return {
-					config: secure(userRecovered.data),
-					recovery: 'user_only',
-					removedKeys: userStripped.removed,
-					warnings: [warning],
-				};
-			}
-		}
-	}
-
-	// Neither merged nor user config is recoverable: fail-secure defaults with
-	// guardrails ENABLED. Name the offending keys so the loss is not silent.
-	const offending = stripUnrecognizedKeys(mergedRaw, result.error).removed;
-	const warnings: string[] = [];
-	if (offending.length > 0) {
-		const warning = `Merged config validation failed. Unrecognized key(s): ${offending.join(', ')}.`;
-		advisoryWarn(`[opencode-swarm] ${warning}`);
-		warnings.push(warning);
-	} else {
-		advisoryWarn(
-			'[opencode-swarm] Merged config validation failed:',
-			formatZodIssues(result.error),
-		);
-		warnings.push('Merged config validation failed.');
-	}
-	const securityWarning =
-		'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.';
-	advisoryWarn(`[opencode-swarm] ${securityWarning}`);
-	warnings.push(securityWarning);
-	return {
-		config: PluginConfigSchema.parse({ guardrails: { enabled: true } }),
-		recovery: 'guardrails_defaults',
-		removedKeys: offending,
-		warnings,
-	};
-}
+/** Full result from the shared config-build core. */
+export type ConfigBuildResult = {
+	config: PluginConfig;
+	recovery: ConfigRecovery;
+	/** Dotted key paths that were removed during recovery (gates, Zod strict, etc.). */
+	removedKeys: string[];
+	/** Human-readable summary messages about the recovery action. */
+	warnings: string[];
+};
 
 /**
- * Load plugin configuration from user and project config files.
- *
- * Config locations:
- * 1. User config: ~/.config/opencode/opencode-swarm.json
- * 2. Project config: <directory>/.opencode/opencode-swarm.json
- *
- * Project config takes precedence. Nested objects are deep-merged.
- * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
- * Zod defaults don't override explicit user values.
+ * Full result from `loadPluginConfigWithMeta` and `loadPluginConfigWithMetaAsync`.
+ * Extends `ConfigBuildResult` with I/O-layer fields about whether a config
+ * file was found and whether it could be read.
  */
+export type ConfigLoadResult = ConfigBuildResult & {
+	/** True when at least one config file (user or project) existed on disk. */
+	loadedFromFile: boolean;
+	/** True when a config file existed but could not be loaded (corrupt JSON,
+	 *  oversized, permission error). Consumers with fail-closed semantics —
+	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
+	 *  "config unknown", not "config defaults". */
+	configHadErrors: boolean;
+};
+
+function warningForRemovedKeys(removedKeys: readonly string[]): string {
+	return `Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`;
+}
+
 /** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
 function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
 	if (!raw || typeof raw !== 'object') return false;
@@ -502,106 +408,236 @@ function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
 	return (fullAuto as Record<string, unknown>).locked === true;
 }
 
+/**
+ * Single shared core: merges, migrates, sanitizes, and parses raw user +
+ * project configs, applying `full_auto.locked` OR-semantics and fail-secure
+ * defaults.  All entry points (sync and async) call this function; only the
+ * I/O layer (reading the files) differs between them.
+ *
+ * Recovery order:
+ *   1. Deep-merge → locked-OR → migrate → sanitize → first Zod parse.
+ *   2. On Zod failure: surgically drop only the confirmed unrecognized keys
+ *      and re-parse (issue #1778 H6 — one typo must not wipe the whole config).
+ *   3. If still invalid: retry user-config alone.
+ *   4. Last resort: fail-secure guardrails-only defaults.
+ *
+ * Returns `ConfigBuildResult` so callers that need metadata (e.g.
+ * `loadPluginConfigWithMeta[Async]`) have it without a second file-read.
+ */
+function buildConfigWithMeta(
+	rawUserConfig: Record<string, unknown> | null,
+	rawProjectConfig: Record<string, unknown> | null,
+	loadedFromFile: boolean,
+	configHadErrors: boolean,
+): ConfigBuildResult {
+	// 1. Deep-merge raw objects before Zod parsing so Zod defaults never
+	//    override explicit user values.
+	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
+	if (rawProjectConfig) {
+		mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
+			string,
+			unknown
+		>;
+	}
+
+	// 2. `full_auto.locked` is an administrative hard-off: a project-level
+	//    `locked: false` must NOT override a user-level `locked: true`.
+	//    OR across both raw configs before merging so deep-merge cannot
+	//    silently flip it back to false.
+	//    rawFullAutoLocked(raw): returns true when raw?.full_auto?.locked === true.
+	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
+		const fa =
+			mergedRaw.full_auto &&
+			typeof mergedRaw.full_auto === 'object' &&
+			!Array.isArray(mergedRaw.full_auto)
+				? (mergedRaw.full_auto as Record<string, unknown>)
+				: {};
+		mergedRaw = { ...mergedRaw, full_auto: { ...fa, locked: true } };
+	}
+
+	// 3. Migrate v6.12 presets format to v6.13+ agents format.
+	mergedRaw = migratePresetsConfig(mergedRaw);
+
+	// 4. Pre-validate section-local configs so one invalid section doesn't
+	//    block plugin load.  Track which gates keys were stripped so we can
+	//    report them in the recovery metadata (issue #1900 FR-3).
+	const { result: sanitized, strippedKeys: gatesStripped } =
+		sanitizeSectionConfigs(mergedRaw);
+	mergedRaw = sanitized;
+	const sanitizedWarning =
+		gatesStripped.length > 0 ? warningForRemovedKeys(gatesStripped) : undefined;
+
+	// Fail-secure closure: when a config file existed but could not be loaded,
+	// force guardrails ENABLED on any recovered config (issue #1778 H6 F2).
+	const secure = (cfg: PluginConfig): PluginConfig =>
+		loadedFromFile && configHadErrors
+			? PluginConfigSchema.parse({
+					...(cfg as Record<string, unknown>),
+					guardrails: { enabled: true },
+				})
+			: cfg;
+
+	// 5. First parse attempt.
+	const firstResult = PluginConfigSchema.safeParse(mergedRaw);
+	if (firstResult.success) {
+		const config = secure(firstResult.data);
+		if (loadedFromFile && configHadErrors) {
+			const securityWarning =
+				'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.';
+			advisoryWarn(`[opencode-swarm] ${securityWarning}`);
+			return {
+				config,
+				recovery: 'guardrails_defaults',
+				removedKeys: [...gatesStripped],
+				warnings: [
+					...(sanitizedWarning ? [sanitizedWarning] : []),
+					securityWarning,
+				],
+			};
+		}
+		if (sanitizedWarning) advisoryWarn(`[opencode-swarm] ${sanitizedWarning}`);
+		return {
+			config,
+			recovery: gatesStripped.length > 0 ? 'stripped_keys' : 'none',
+			removedKeys: [...gatesStripped],
+			warnings: sanitizedWarning ? [sanitizedWarning] : [],
+		};
+	}
+
+	// 6. Targeted recovery: drop only Zod-confirmed unrecognized keys and
+	//    re-parse so a single typo does not discard the user's entire config.
+	const { cleaned, removed } = stripUnrecognizedKeys(
+		mergedRaw,
+		firstResult.error,
+	);
+	if (removed.length > 0) {
+		const recovered = PluginConfigSchema.safeParse(cleaned);
+		if (recovered.success) {
+			const removedKeys = [...gatesStripped, ...removed];
+			const warning = warningForRemovedKeys(removedKeys);
+			advisoryWarn(`[opencode-swarm] ${warning}`);
+			return {
+				config: secure(recovered.data),
+				recovery: 'stripped_keys',
+				removedKeys,
+				warnings: [warning],
+			};
+		}
+	}
+
+	// 7. User-config-alone fallback: a broken project config should not defeat
+	//    a valid user config.
+	if (rawUserConfig) {
+		const { result: userSanitized, strippedKeys: userGatesStripped } =
+			sanitizeSectionConfigs(rawUserConfig);
+		const userParseResult = PluginConfigSchema.safeParse(userSanitized);
+		if (userParseResult.success) {
+			advisoryWarn(
+				'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
+			);
+			return {
+				config: secure(userParseResult.data),
+				recovery: 'user_only',
+				removedKeys: [...gatesStripped, ...userGatesStripped],
+				warnings: [
+					'Project config ignored due to validation errors; using user config.',
+				],
+			};
+		}
+		// Last targeted attempt: strip unrecognized keys from user config too.
+		const userStripped = stripUnrecognizedKeys(
+			userSanitized,
+			userParseResult.error,
+		);
+		if (userStripped.removed.length > 0) {
+			const userRecovered = PluginConfigSchema.safeParse(userStripped.cleaned);
+			if (userRecovered.success) {
+				advisoryWarn(
+					`[opencode-swarm] Project config ignored; also ignored ${userStripped.removed.length} unrecognized user-config key(s): ${userStripped.removed.join(', ')}.`,
+				);
+				return {
+					config: secure(userRecovered.data),
+					recovery: 'user_only',
+					removedKeys: [
+						...gatesStripped,
+						...userGatesStripped,
+						...userStripped.removed,
+					],
+					warnings: [
+						'Project config ignored due to validation errors; using user config.',
+					],
+				};
+			}
+		}
+	}
+
+	// 8. Guardrails defaults: nothing was recoverable.
+	const offending = stripUnrecognizedKeys(mergedRaw, firstResult.error).removed;
+	if (offending.length > 0) {
+		advisoryWarn(
+			`[opencode-swarm] Merged config validation failed. Unrecognized key(s): ${offending.join(', ')}.`,
+		);
+	} else {
+		advisoryWarn(
+			'[opencode-swarm] Merged config validation failed:',
+			formatZodIssues(firstResult.error),
+		);
+	}
+	advisoryWarn(
+		'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
+	);
+	return {
+		config: PluginConfigSchema.parse({ guardrails: { enabled: true } }),
+		recovery: 'guardrails_defaults',
+		removedKeys: [...gatesStripped],
+		warnings: [
+			'Config failed validation; using safe defaults with guardrails enabled.',
+		],
+	};
+}
+
+/**
+ * Load plugin configuration from user and project config files.
+ *
+ * Config locations:
+ * 1. User config: ~/.config/opencode/opencode-swarm.json
+ * 2. Project config: <directory>/.opencode/opencode-swarm.json
+ *
+ * Project config takes precedence. Nested objects are deep-merged, except
+ * `full_auto.locked`: it is a hard-off and OR-merges across both levels, so
+ * `locked: true` at either level cannot be overridden by `locked: false`.
+ * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
+ * Zod defaults don't override explicit user values.
+ */
 export function loadPluginConfig(directory: string): PluginConfig {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
 		'opencode',
 		CONFIG_FILENAME,
 	);
-
 	const projectConfigPath = path.join(directory, '.opencode', CONFIG_FILENAME);
-
-	// Load raw configs (no Zod defaults applied yet)
 	const userResult = loadRawConfigFromPath(userConfigPath);
 	const projectResult = loadRawConfigFromPath(projectConfigPath);
-
-	const rawUserConfig = userResult.config;
-	const rawProjectConfig = projectResult.config;
-
-	// Track whether any config files existed AND whether there were load errors
-	// Use fileExisted to track if files existed (regardless of whether they loaded successfully)
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
 	const configHadErrors = userResult.hadError || projectResult.hadError;
-
-	// Deep-merge raw objects before Zod parsing so that
-	// Zod defaults don't override explicit user values
-	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
-	if (rawProjectConfig) {
-		mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
-			string,
-			unknown
-		>;
-	}
-
-	// `full_auto.locked` is an administrative hard-off and must OR across
-	// config levels: a project-level `locked: false` must NOT override a
-	// user-level `locked: true` (deep-merge alone would let a repo-controlled
-	// .opencode/opencode-swarm.json defeat the user's lock).
-	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
-		const fullAutoRaw =
-			mergedRaw.full_auto &&
-			typeof mergedRaw.full_auto === 'object' &&
-			!Array.isArray(mergedRaw.full_auto)
-				? (mergedRaw.full_auto as Record<string, unknown>)
-				: {};
-		mergedRaw = {
-			...mergedRaw,
-			full_auto: { ...fullAutoRaw, locked: true },
-		};
-	}
-
-	// Migrate v6.12 presets format to v6.13+ agents format
-	mergedRaw = migratePresetsConfig(mergedRaw);
-
-	// Pre-validate section-local configs so one invalid section doesn't block plugin load.
-	mergedRaw = sanitizeSectionConfigs(mergedRaw);
-
-	// Validate merged config with Zod (applies defaults ONCE). Nested optional
-	// schemas (e.g. council.general) surface automatically here.
-	const result = PluginConfigSchema.safeParse(mergedRaw);
-	if (result.success) {
-		// If config files existed but had load errors, apply fail-secure defaults
-		if (loadedFromFile && configHadErrors) {
-			return PluginConfigSchema.parse({
-				...mergedRaw,
-				guardrails: { enabled: true },
-			});
-		}
-		return result.data;
-	}
-
-	// A typo in any strict section triggers targeted recovery instead of a
-	// whole-config wipe (issue #1778 H6) via the centralized helper shared with
-	// the async path. parseConfigWithFallback fully subsumes the user-config-
-	// alone retry and advisoryWarn-based fail-secure fallback that used to be
-	// inlined here (merged from origin/main).
-	const { config } = parseConfigWithFallback(
-		mergedRaw,
-		rawUserConfig,
-		result,
+	// Delegate all merge→locked-OR→migrate→sanitize→parse→fallback logic to
+	// the shared core so this path can never diverge from the async path.
+	return buildConfigWithMeta(
+		userResult.config,
+		projectResult.config,
 		loadedFromFile,
 		configHadErrors,
-	);
-	return config;
+	).config;
 }
 
 /**
- * Internal variant of loadPluginConfig that also returns loader metadata.
- * Used only by src/index.ts to determine guardrails fallback behavior.
- * NOT part of the public API — use loadPluginConfig() for all other callers.
+ * Variant of `loadPluginConfig` that also returns loader metadata, including
+ * recovery classification, removed keys, and warning messages.  All callers
+ * that need to surface config-health information (doctor, command-return) use
+ * this function.  `buildConfigWithMeta` is the shared core — files are read
+ * exactly once, no double-read.
  */
-export function loadPluginConfigWithMeta(directory: string): {
-	config: PluginConfig;
-	loadedFromFile: boolean;
-	/** True when a config file existed but could not be loaded (corrupt JSON,
-	 *  oversized, permission error). Consumers with fail-closed semantics —
-	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
-	 *  "config unknown", not "config defaults". */
-	configHadErrors: boolean;
-	recovery: RecoveryType;
-	removedKeys: string[];
-	warnings: string[];
-} {
+export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
 		'opencode',
@@ -610,73 +646,11 @@ export function loadPluginConfigWithMeta(directory: string): {
 	const projectConfigPath = path.join(directory, '.opencode', CONFIG_FILENAME);
 	const userResult = loadRawConfigFromPath(userConfigPath);
 	const projectResult = loadRawConfigFromPath(projectConfigPath);
-
-	const rawUserConfig = userResult.config;
-	const rawProjectConfig = projectResult.config;
-
-	// Use fileExisted to track if files existed (regardless of load success)
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
 	const configHadErrors = userResult.hadError || projectResult.hadError;
-
-	// Deep-merge raw objects before Zod parsing (same as loadPluginConfig)
-	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
-	if (rawProjectConfig) {
-		mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
-			string,
-			unknown
-		>;
-	}
-
-	// Handle full_auto.locked ORing (same as loadPluginConfig)
-	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
-		const fullAutoRaw =
-			mergedRaw.full_auto &&
-			typeof mergedRaw.full_auto === 'object' &&
-			!Array.isArray(mergedRaw.full_auto)
-				? (mergedRaw.full_auto as Record<string, unknown>)
-				: {};
-		mergedRaw = {
-			...mergedRaw,
-			full_auto: { ...fullAutoRaw, locked: true },
-		};
-	}
-
-	mergedRaw = migratePresetsConfig(mergedRaw);
-	mergedRaw = sanitizeSectionConfigs(mergedRaw);
-
-	const result = PluginConfigSchema.safeParse(mergedRaw);
-	if (result.success) {
-		// If config files existed but had load errors, apply fail-secure defaults
-		if (loadedFromFile && configHadErrors) {
-			const config = PluginConfigSchema.parse({
-				...mergedRaw,
-				guardrails: { enabled: true },
-			});
-			return {
-				config,
-				loadedFromFile,
-				configHadErrors,
-				recovery: 'guardrails_defaults',
-				removedKeys: [],
-				warnings: [
-					'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
-				],
-			};
-		}
-		return {
-			config: result.data,
-			loadedFromFile,
-			configHadErrors,
-			recovery: 'none',
-			removedKeys: [],
-			warnings: [],
-		};
-	}
-
-	const { config, recovery, removedKeys, warnings } = parseConfigWithFallback(
-		mergedRaw,
-		rawUserConfig,
-		result,
+	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
+		userResult.config,
+		projectResult.config,
 		loadedFromFile,
 		configHadErrors,
 	);
@@ -758,70 +732,15 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 	}
 }
 
-function reduceParsedConfig(
-	rawUserConfig: Record<string, unknown> | null,
-	rawProjectConfig: Record<string, unknown> | null,
-	loadedFromFile: boolean,
-	configHadErrors: boolean,
-): ParseResult {
-	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
-	if (rawProjectConfig) {
-		mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
-			string,
-			unknown
-		>;
-	}
-	mergedRaw = migratePresetsConfig(mergedRaw);
-	mergedRaw = sanitizeSectionConfigs(mergedRaw);
-	const result = PluginConfigSchema.safeParse(mergedRaw);
-	if (result.success) {
-		if (loadedFromFile && configHadErrors) {
-			return {
-				config: PluginConfigSchema.parse({
-					...mergedRaw,
-					guardrails: { enabled: true },
-				}),
-				recovery: 'guardrails_defaults',
-				removedKeys: [],
-				warnings: [
-					'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
-				],
-			};
-		}
-		return {
-			config: result.data,
-			recovery: 'none',
-			removedKeys: [],
-			warnings: [],
-		};
-	}
-	// Targeted section recovery instead of whole-config wipe (issue #1778 H6),
-	// shared with the sync path so the two can never diverge. parseConfigWithFallback
-	// fully subsumes the user-config-alone retry and advisoryWarn-based
-	// fail-secure fallback that used to be inlined here (merged from origin/main).
-	return parseConfigWithFallback(
-		mergedRaw,
-		rawUserConfig,
-		result,
-		loadedFromFile,
-		configHadErrors,
-	);
-}
-
 /**
  * Async variant of `loadPluginConfigWithMeta`. Used by the plugin entry
  * (issue #704) so initialization does not perform synchronous fs reads.
+ * Calls the same `buildConfigWithMeta` shared core as the sync path — the
+ * only difference is that file I/O uses `node:fs/promises` (issue #1900 FR-1).
  */
 export async function loadPluginConfigWithMetaAsync(
 	directory: string,
-): Promise<{
-	config: PluginConfig;
-	loadedFromFile: boolean;
-	configHadErrors: boolean;
-	recovery: RecoveryType;
-	removedKeys: string[];
-	warnings: string[];
-}> {
+): Promise<ConfigLoadResult> {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
 		'opencode',
@@ -834,7 +753,7 @@ export async function loadPluginConfigWithMetaAsync(
 	]);
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
 	const configHadErrors = userResult.hadError || projectResult.hadError;
-	const { config, recovery, removedKeys, warnings } = reduceParsedConfig(
+	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
 		userResult.config,
 		projectResult.config,
 		loadedFromFile,

@@ -91,6 +91,25 @@ describe('config/loader — strict-section typo recovery (#1778 H6)', () => {
 		fs.rmSync(projectDir, { recursive: true, force: true });
 	});
 
+	it('preserves the rest of the config when turbo.epic has a nested typo', () => {
+		const projectDir = writeProjectConfig({
+			max_iterations: 6,
+			turbo: {
+				strategy: 'standard',
+				epic: { mode: { enabled: true, misspelledEpicKey: true } },
+			},
+		});
+		const result = loadPluginConfig(projectDir);
+
+		expect(result.max_iterations).toBe(6);
+		expect(result.turbo?.epic?.mode?.enabled).toBe(true);
+		expect(
+			(result.turbo?.epic?.mode as Record<string, unknown>).misspelledEpicKey,
+		).toBeUndefined();
+
+		fs.rmSync(projectDir, { recursive: true, force: true });
+	});
+
 	it('does not delete valid z.record (open-ended) keys during recovery', () => {
 		// `agents` is a z.record — arbitrary user keys are legal and must survive
 		// even when another section carries a typo that triggers recovery.

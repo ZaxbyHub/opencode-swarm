@@ -15,8 +15,11 @@ import * as path from 'node:path';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
-const { resolveDelegatedPlanTaskId, describeCoderScopeFailure, resolveEvidenceTaskId } =
-	delegationGateInternals;
+const {
+	resolveDelegatedPlanTaskId,
+	describeCoderScopeFailure,
+	resolveEvidenceTaskId,
+} = delegationGateInternals;
 
 const PLAN_TASK_IDS = new Set(['1.1', '1.2', '2.1']);
 
@@ -154,7 +157,10 @@ describe('resolveDelegatedPlanTaskId — issue #1914 Defect 1', () => {
 
 		test('no signal at all returns null', () => {
 			expect(
-				resolveDelegatedPlanTaskId({ prompt: 'Just do some work' }, PLAN_TASK_IDS),
+				resolveDelegatedPlanTaskId(
+					{ prompt: 'Just do some work' },
+					PLAN_TASK_IDS,
+				),
 			).toBeNull();
 		});
 

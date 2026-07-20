@@ -12,12 +12,15 @@
 import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { getAuthorizedPrFeedbackScopeBinding } from '../scope/scope-binding';
 import {
+	resolveAuthorizedPrFeedbackScopeBindingFromDisk,
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
 } from '../scope/scope-persistence';
 import { type AgentSessionState, swarmState } from '../state';
 import { normalizeToolName } from './normalize-tool-name';
+import { validatePrFeedbackScopeBinding } from './pr-workflow-gate';
 import { resolveWriteTargets } from './write-target-resolver';
 
 // bash/shell tools are intentionally excluded from WRITE_TOOLS because the main
@@ -94,7 +97,7 @@ export function createScopeGuardHook(
 			// Resolve only an exact active child binding. If plugin memory restarted,
 			// recover one unique binding from disk against the current plan identity.
 			let taskId = _internals.resolveTaskId(session);
-			const binding = taskId
+			let binding = taskId
 				? _internals.resolveAuthorizedScopeBinding({
 						directory,
 						taskId,
@@ -104,6 +107,25 @@ export function createScopeGuardHook(
 						directory,
 						activeSessionId: sessionId,
 					});
+			if (!binding) {
+				binding =
+					_internals.getAuthorizedPrFeedbackScopeBinding({
+						directory,
+						activeSessionId: sessionId,
+						taskId: taskId ?? undefined,
+					}) ??
+					_internals.resolveAuthorizedPrFeedbackScopeBindingFromDisk({
+						directory,
+						activeSessionId: sessionId,
+						taskId: taskId ?? undefined,
+					});
+				if (
+					binding &&
+					!(await _internals.validatePrFeedbackScopeBinding(directory, binding))
+				) {
+					binding = null;
+				}
+			}
 			if (!taskId && binding && session) {
 				taskId = binding.taskId;
 				session.currentTaskId = binding.taskId;
@@ -203,6 +225,9 @@ export const _internals = {
 	resolveWriteTargets,
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
+	getAuthorizedPrFeedbackScopeBinding,
+	resolveAuthorizedPrFeedbackScopeBindingFromDisk,
+	validatePrFeedbackScopeBinding,
 	resolveTaskId: (session: AgentSessionState | undefined): string | null =>
 		session?.currentTaskId ?? null,
 };

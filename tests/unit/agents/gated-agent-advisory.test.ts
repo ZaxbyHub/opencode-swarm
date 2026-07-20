@@ -8,12 +8,12 @@
  * disabled. Also covers cross-swarm dedupe.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createAgents } from '../../../src/agents/index';
+import type { PluginConfig } from '../../../src/config';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
 } from '../../../src/services/warning-buffer';
-import { createAgents } from '../../../src/agents/index';
-import type { PluginConfig } from '../../../src/config';
 import { resetSwarmState } from '../../../src/state';
 
 describe('gated-agent config advisory — issue #1914 Defect 3', () => {

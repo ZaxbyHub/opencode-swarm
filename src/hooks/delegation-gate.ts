@@ -36,12 +36,14 @@ import {
 	canonicalWorkspaceIdentity,
 	claimScopeBindingForChild,
 	clearScopeBindings,
+	createPrFeedbackScopeBinding,
 	createScopeBinding,
 	deriveChildScopeBinding,
 	getScopeBinding,
 	MAX_PENDING_SCOPE_BINDINGS,
 	registerScopeBinding,
 	resolveCoderScopeSources,
+	type ScopeBinding,
 } from '../scope/scope-binding';
 import {
 	clearScopeBindingFromDisk,
@@ -80,6 +82,7 @@ import {
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
 } from './delegation-gate/worktree-isolation';
+import { consumePrFeedbackScopeDeclaration } from './pr-workflow-gate.js';
 export { resetStandardWorktreeIsolationState };
 
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
@@ -203,10 +206,10 @@ export function clearPendingCoderScope(): void {
 }
 
 interface PreparedCoderScope {
-	plan: Plan;
+	plan: Plan | null;
 	taskId: string;
 	declaredFiles: string[] | null;
-	binding: NonNullable<ReturnType<typeof createScopeBinding>>;
+	binding: ScopeBinding;
 }
 
 async function prepareCoderScope(
@@ -214,13 +217,71 @@ async function prepareCoderScope(
 	input: { sessionID: string; callID: string },
 	args: Record<string, unknown>,
 ): Promise<PreparedCoderScope> {
-	const planPath = path.join(directory, '.swarm', 'plan.json');
 	// loadPlanJsonOnly swallows read/parse errors and returns null for missing,
 	// corrupt, or schema-invalid plan.json — it never throws (see plan/manager.ts).
-	// One message covers all three cases; the validation warning was already
-	// logged by loadPlanJsonOnly itself.
 	const plan = await loadPlanJsonOnly(directory);
 	if (!plan) {
+		// PR #1915 PR-workflow gate: if there's no plan.json but the caller has
+		// declared a verified PR-feedback scope for an explicit plan-task-shaped
+		// task_id, bind that scope and return early (no plan needed).
+		const rawTaskId =
+			typeof args.task_id === 'string'
+				? args.task_id.trim()
+				: typeof args.taskId === 'string'
+					? args.taskId.trim()
+					: '';
+		if (isStrictTaskId(rawTaskId)) {
+			const feedbackScope = await consumePrFeedbackScopeDeclaration(
+				directory,
+				input.sessionID,
+				rawTaskId,
+				input.callID,
+			);
+			if (feedbackScope) {
+				const directives = extractTaskFileDirectives(args);
+				if (directives.present && !directives.files) {
+					throw new Error(
+						'SCOPE_NOT_DECLARED: FILE: directives are present but empty or ambiguous; provide one complete relative path per FILE: line.',
+					);
+				}
+				const resolved = resolveCoderScopeSources({
+					explicitFiles: feedbackScope.files,
+					planFiles: null,
+					fileDirectiveFiles: directives.files,
+				});
+				if (!resolved.ok) {
+					throw new Error(
+						`${resolved.code}: PR-feedback coder scope conflicts with the verified controller declaration.`,
+					);
+				}
+				const binding = createPrFeedbackScopeBinding({
+					directory,
+					taskId: rawTaskId,
+					files: resolved.files,
+					ownerSessionId: input.sessionID,
+					ownerMessageId: input.callID,
+					dispatchCallId: input.callID,
+					activation: 'pending_child',
+					workflowSessionId: input.sessionID,
+					workflowRevisionDigest: feedbackScope.revisionDigest,
+				});
+				if (!binding) {
+					throw new Error(
+						'SCOPE_NOT_DECLARED: PR-feedback scope could not be bound to this Task invocation.',
+					);
+				}
+				return {
+					plan: null,
+					taskId: rawTaskId,
+					declaredFiles: resolved.files,
+					binding,
+				};
+			}
+		}
+		// Issue #1914: no plan AND no PR-feedback declaration. One message
+		// covers missing / corrupt / schema-invalid (loadPlanJsonOnly already
+		// logged the validation warning).
+		const planPath = path.join(directory, '.swarm', 'plan.json');
 		throw new Error(
 			`SCOPE_NOT_DECLARED: no valid plan found at ${planPath} (file missing or invalid). Declare a plan via save_plan or run /swarm plan first.`,
 		);
@@ -2322,6 +2383,11 @@ export function createDelegationGateHook(
 		// gates. It creates a staged binding but does not publish authorization.
 		const preparedScope = await prepareCoderScope(directory, input, args);
 		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		if (!plan) {
+			rememberCoderTaskChangeContext(input.callID, preparedScope.declaredFiles);
+			await publishScopeBinding(input.callID, directory, preparedScope.binding);
+			return;
+		}
 		const profile = plan?.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
 		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
@@ -2434,10 +2500,6 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (!plan) {
-			clearCoderTaskChangeContext(input.callID);
-			return;
-		}
 		if (!parallelModeActive) {
 			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
 			await publishScopeBinding(input.callID, directory, correlatedBinding);
