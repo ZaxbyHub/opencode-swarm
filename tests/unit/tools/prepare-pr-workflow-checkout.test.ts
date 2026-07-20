@@ -147,7 +147,6 @@ describe('prepare_pr_workflow_checkout', () => {
 			}
 			return originalRename(...args);
 		};
-
 		const result = JSON.parse(
 			await executePreparePrWorkflowCheckout(
 				{ paths: ['.opencode/opencode-swarm.json'] },
@@ -174,13 +173,16 @@ describe('prepare_pr_workflow_checkout', () => {
 				])
 			).trim(),
 		).toBe('');
-		const stashedPaths = await expectGitSuccess([
-			'stash',
-			'show',
-			'--name-only',
-			'--format=',
-			result.stash_oid,
-		]);
+		const stashedPaths = (
+			await expectGitSuccess([
+				'stash',
+				'show',
+				'--name-only',
+				'--format=',
+				'-z',
+				result.stash_oid,
+			])
+		).split('\0');
 		expect(stashedPaths).toContain('.opencode/opencode-swarm.json');
 		const receiptRoot = path.join(directory, '.swarm', 'pr-workflow-checkouts');
 		const [sessionReceiptDirectory] = await fs.readdir(receiptRoot);
@@ -206,14 +208,12 @@ describe('prepare_pr_workflow_checkout', () => {
 				'utf-8',
 			),
 		).toContain('pr_workflow_checkout_prepared');
-
 		await expect(
 			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
 				command:
 					'git stash push -m "pr-review-stash" -- .opencode/opencode-swarm.json',
 			}),
 		).rejects.toThrow(/read-only and fail-closed/i);
-
 		const head = (await expectGitSuccess(['rev-parse', 'HEAD'])).trim();
 		// The temporary repo does not run plugin init, so its generated .swarm
 		// receipt is not in .git/info/exclude. This seam covers only the real-git
@@ -229,7 +229,6 @@ describe('prepare_pr_workflow_checkout', () => {
 		);
 		expect(postBind.success).toBe(false);
 		expect(postBind.message).toContain('only before the PR head is bound');
-
 		await expectGitSuccess(['stash', 'apply', '--index', result.stash_oid]);
 		expect(
 			(

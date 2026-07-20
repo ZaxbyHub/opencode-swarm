@@ -9,6 +9,7 @@ import {
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunSpawn } from '../utils/bun-compat.js';
+import { containsControlChars } from '../utils/path-security.js';
 import { createSwarmTool } from './create-tool.js';
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -18,7 +19,7 @@ const RECEIPT_DIR = 'pr-workflow-checkouts';
 
 const PreparePrWorkflowCheckoutArgsSchema = z
 	.object({
-		paths: z.array(z.string().trim().min(1).max(240)).min(1).max(32),
+		paths: z.array(z.string().min(1).max(240)).min(1).max(32),
 	})
 	.strict();
 
@@ -91,10 +92,13 @@ async function preparePrWorkflowCheckout(
 		directory,
 		sessionID,
 		async (gate) => {
-			const receiptCount = await countReceipts(directory, sessionID);
-			if (receiptCount >= MAX_CHECKOUT_RECEIPTS) {
+			const outstandingReceiptCount = await countOutstandingReceipts(
+				directory,
+				sessionID,
+			);
+			if (outstandingReceiptCount >= MAX_CHECKOUT_RECEIPTS) {
 				throw new Error(
-					'BLOCKED: PR workflow checkout preparation limit reached; restore or manually resolve the existing preserved changes before continuing',
+					'BLOCKED: PR workflow checkout preparation limit reached; resolve the existing preserved stashes before continuing',
 				);
 			}
 
@@ -175,7 +179,7 @@ function normalizePaths(
 	const normalized: string[] = [];
 	const seen = new Set<string>();
 	for (const value of requestedPaths) {
-		if (typeof value !== 'string' || value !== value.trim() || !value) {
+		if (typeof value !== 'string' || !value) {
 			throw new Error(
 				'BLOCKED: checkout preparation paths must be non-empty strings',
 			);
@@ -185,10 +189,10 @@ function normalizePaths(
 			path.posix.normalize(value) !== value ||
 			path.posix.isAbsolute(value) ||
 			/^[A-Za-z]:/.test(value) ||
-			!/^[A-Za-z0-9._/-]+$/.test(value)
+			containsControlChars(value)
 		) {
 			throw new Error(
-				`BLOCKED: checkout preparation path "${value}" must be a literal slash-separated repository-relative path`,
+				'BLOCKED: checkout preparation path must be a literal slash-separated repository-relative path',
 			);
 		}
 		const segments = value.split('/');
@@ -200,7 +204,7 @@ function normalizePaths(
 			segments[0] === '.swarm'
 		) {
 			throw new Error(
-				`BLOCKED: checkout preparation path "${value}" is not an allowed repository file path`,
+				'BLOCKED: checkout preparation path is not an allowed repository file path',
 			);
 		}
 		const resolved = path.resolve(root, ...segments);
@@ -211,12 +215,12 @@ function normalizePaths(
 			path.isAbsolute(relative)
 		) {
 			throw new Error(
-				`BLOCKED: checkout preparation path "${value}" escapes the project root`,
+				'BLOCKED: checkout preparation path escapes the project root',
 			);
 		}
 		if (seen.has(value)) {
 			throw new Error(
-				`BLOCKED: checkout preparation path "${value}" was supplied more than once`,
+				'BLOCKED: checkout preparation path was supplied more than once',
 			);
 		}
 		seen.add(value);
@@ -443,14 +447,10 @@ async function resolveMarkedStashOid(
 	const stashOid = matching[0][0];
 	const changed = await runGit(
 		directory,
-		['stash', 'show', '--name-only', '--format=', stashOid],
+		['stash', 'show', '--name-only', '--format=', '-z', stashOid],
 		{ captureStdout: true },
 	);
-	const changedPaths = changed.stdout
-		.split(/\r?\n/)
-		.map((value) => value.trim())
-		.filter(Boolean)
-		.sort();
+	const changedPaths = changed.stdout.split('\0').filter(Boolean).sort();
 	const expectedPaths = [...paths].sort();
 	if (
 		changed.exitCode !== 0 ||
@@ -464,7 +464,7 @@ async function resolveMarkedStashOid(
 	return stashOid;
 }
 
-async function countReceipts(
+async function countOutstandingReceipts(
 	directory: string,
 	sessionID: string,
 ): Promise<number> {
@@ -476,15 +476,38 @@ async function countReceipts(
 		const entries = await fsp.readdir(receiptDirectory, {
 			withFileTypes: true,
 		});
-		return entries.filter(
-			(entry) => entry.isFile() && /^[0-9a-f]{40,64}\.json$/i.test(entry.name),
-		).length;
+		const receiptOids = entries
+			.filter(
+				(entry) =>
+					entry.isFile() && /^[0-9a-f]{40,64}\.json$/i.test(entry.name),
+			)
+			.map((entry) => entry.name.replace(/\.json$/i, '').toLowerCase());
+		if (receiptOids.length === 0) return 0;
+		const activeStashOids = await readCurrentStashOids(directory);
+		return receiptOids.filter((oid) => activeStashOids.has(oid)).length;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
 		throw new Error(
 			'BLOCKED: unable to inspect checkout-preparation receipts safely',
 		);
 	}
+}
+
+async function readCurrentStashOids(directory: string): Promise<Set<string>> {
+	const list = await runGit(directory, ['stash', 'list', '--format=%H'], {
+		captureStdout: true,
+	});
+	if (list.exitCode !== 0) {
+		throw new Error(
+			'BLOCKED: unable to inspect checkout-preparation stashes safely',
+		);
+	}
+	return new Set(
+		list.stdout
+			.split(/\r?\n/)
+			.map((value) => value.trim().toLowerCase())
+			.filter((value) => /^[0-9a-f]{40,64}$/i.test(value)),
+	);
 }
 
 async function writeReceipt(
