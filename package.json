@@ -106,8 +106,8 @@
 		"repro:1873": "bun build scripts/repro-1873-entry.ts --outdir dist-build-test/repro-1873 --target node --format esm && node scripts/repro-1873.mjs"
 	},
 	"dependencies": {
-		"@opencode-ai/plugin": "^1.1.53",
-		"@opencode-ai/sdk": "^1.1.53",
+		"@opencode-ai/plugin": "^1.18.3",
+		"@opencode-ai/sdk": "^1.18.3",
 		"@vscode/tree-sitter-wasm": "^0.3.0",
 		"bash-parser": "^0.5.0",
 		"p-limit": "^7.3.0",
