@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.126.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.6...v7.126.0) (2026-07-20)
+
+
+### Features
+
+* **loader:** expose recovery metadata + tighten turbo disclosure (FR-001-004) ([bead6a5](https://github.com/ZaxbyHub/opencode-swarm/commit/bead6a54768b2215bbff8aff9e694332be1935ba))
+
 ## [7.125.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.5...v7.125.6) (2026-07-20)
 
 
