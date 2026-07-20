@@ -44,8 +44,6 @@ Four standard turbo enable messages + the Lean Turbo variant now enumerate:
 
 `src/commands/doctor.ts` uses `loadPluginConfigWithMeta`; surfaces a `## Config Recovery` section listing recovery type + removed keys + warnings when `meta.recovery !== 'none'`. 4 tests at `tests/unit/commands/doctor-command-recovery.test.ts` cover SC-004.1, SC-004.2, SC-004.3.
 
-`src/config/recovery-context.ts` — `formatRecoveryContext(meta)` helper for future per-command surface calls.
-
 ## Why
 
 Issue #1690 had two core complaints: silent recovery (no user-visible signal when config was wiped) and turbo's bypass scope was undocumented. FR-001 surfaces the recovery. FR-002 makes turbo's bypass explicit. FR-003 unifies the QA-gate selection dialogue. FR-004 gives doctor the data to surface the recovery.
