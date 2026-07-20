@@ -72,18 +72,31 @@ export function formatToolDoctorMarkdown(result: ConfigDoctorResult): string {
 }
 
 /**
+ * Strip C0 control characters (including `\r`, `\n`, and ESC `\x1b`) and DEL,
+ * collapsing each run to a single space. `removedKeys`/`warnings` are rendered
+ * to a terminal in many call paths, not just as markdown — an unstripped ESC
+ * lets an attacker-controlled config key smuggle ANSI escape sequences (e.g.
+ * `\x1b[2J\x1b[31mFAKE\x1b[0m`) to clear the screen or spoof output, on top of
+ * the markdown-structure risks newlines pose.
+ */
+function stripControlChars(s: string): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+	return s.replace(/[\x00-\x1f\x7f]+/g, ' ');
+}
+
+/**
  * Neutralize a string before it is interpolated INSIDE a backtick code span
  * (`` `${...}` ``) in rendered command output. `removedKeys` carries raw
  * config key names sourced from the project/user config file
  * (`stripUnrecognizedKeys` in `../config/loader`) — an attacker-controlled
  * `.opencode/opencode-swarm.json` could embed a backtick (breaking out of the
- * code span) or a newline (injecting extra markdown lines) into a key name.
- * Only those two need handling: CommonMark renders every other character
- * literally inside a code span, and backslash escapes are NOT interpreted
- * there — escaping e.g. `*` would show a literal backslash to the user.
+ * code span) on top of the control-character risks `stripControlChars`
+ * handles. CommonMark renders every other character literally inside a code
+ * span, and backslash escapes are NOT interpreted there — escaping e.g. `*`
+ * would show a literal backslash to the user.
  */
 function sanitizeForMarkdownCodeSpan(s: string): string {
-	return s.replace(/[\r\n]+/g, ' ').replace(/`/g, "'");
+	return stripControlChars(s).replace(/`/g, "'");
 }
 
 /**
@@ -94,7 +107,7 @@ function sanitizeForMarkdownCodeSpan(s: string): string {
  * altering the visible text.
  */
 function sanitizeForMarkdownText(s: string): string {
-	return s.replace(/[\r\n]+/g, ' ').replace(/([\\`*_[\]|])/g, '\\$1');
+	return stripControlChars(s).replace(/([\\`*_[\]|])/g, '\\$1');
 }
 
 /**

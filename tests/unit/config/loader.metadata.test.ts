@@ -365,6 +365,34 @@ describe('config/loader -- FR-001 metadata exposure (#1690)', () => {
 			expect(result.warnings.length).toBeGreaterThan(0);
 		});
 
+		it('async: user_only: project has type error; user config valid → falls back to user alone (parity with sync)', async () => {
+			// User config (via XDG_CONFIG_HOME) is minimal valid.
+			const userConfigPath = path.join(
+				tempDir,
+				'opencode',
+				'opencode-swarm.json',
+			);
+			fs.mkdirSync(path.dirname(userConfigPath), { recursive: true });
+			fs.writeFileSync(
+				userConfigPath,
+				JSON.stringify({ max_iterations: 7, gates: { enabled: true } }),
+				'utf-8',
+			);
+			// Project config has a Zod type error (council.enabled: "yes" instead of
+			// boolean) that survives the unrecognized_keys strip.
+			const projectDir = writeProjectConfig({
+				max_iterations: 9,
+				council: { enabled: 'yes' as unknown as boolean },
+			});
+			const result = await loadPluginConfigWithMetaAsync(projectDir);
+			expect(result.recovery).toBe('user_only');
+			expect(result.warnings.length).toBeGreaterThan(0);
+			const warningsText = result.warnings.join(' ');
+			expect(warningsText).toMatch(/user config|Project config ignored/i);
+			// user config is applied (not project overrides)
+			expect(result.config.max_iterations).toBe(7);
+		});
+
 		it('async: guardrails_defaults recovery surfaces SECURITY warning (parity with sync)', async () => {
 			// Project config file exists but contains invalid JSON — configHadErrors=true.
 			const projectDir = fs.mkdtempSync(

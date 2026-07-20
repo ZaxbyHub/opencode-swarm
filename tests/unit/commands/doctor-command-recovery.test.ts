@@ -122,6 +122,36 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 		}
 	});
 
+	test('SC-004.1: user_only recovery surfaces affected section', async () => {
+		// SC-004.1: a project-config type error that survives the unrecognized-keys
+		// strip (not just an unknown key) falls back to a valid user config alone.
+		const projectDir = mkdtempSync(join(tmpdir(), 'doctor-useronly-'));
+		const userDir = mkdtempSync(join(tmpdir(), 'doctor-user-'));
+		const origXdg = process.env.XDG_CONFIG_HOME;
+		try {
+			process.env.XDG_CONFIG_HOME = userDir;
+			mkdirSync(join(userDir, 'opencode'), { recursive: true });
+			writeFileSync(
+				join(userDir, 'opencode', 'opencode-swarm.json'),
+				JSON.stringify({ max_iterations: 7, gates: { enabled: true } }),
+				'utf-8',
+			);
+			writeProjectConfig(projectDir, {
+				max_iterations: 9,
+				council: { enabled: 'yes' },
+			});
+			const output = await handleDoctorCommand(projectDir, []);
+			expect(output).toContain('## Config Recovery');
+			expect(output).toContain('`user_only`');
+			expect(output).toMatch(/user config|Project config ignored/i);
+		} finally {
+			if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = origXdg;
+			rmSync(projectDir, { recursive: true, force: true });
+			rmSync(userDir, { recursive: true, force: true });
+		}
+	});
+
 	test('SC-004.3: _internals.loadPluginConfigWithMeta exposes recovery metadata', () => {
 		// SC-004.3: surgical command-return contract — programmatic consumers
 		// (commands like /swarm turbo, /swarm full-auto) can inspect the metadata
