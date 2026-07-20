@@ -91,6 +91,7 @@ import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
 import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
+import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
 import { quality_budget } from './quality-budget';
 import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
@@ -172,6 +173,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,
+	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,
 	submit_phase_council_verdicts: () => submit_phase_council_verdicts,
