@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.125.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.4...v7.125.5) (2026-07-20)
+
+
+### Bug Fixes
+
+* **pr-workflow:** bound auto-resume and add abort escape hatch to mechanical gate ([a2e5c0a](https://github.com/ZaxbyHub/opencode-swarm/commit/a2e5c0a96504d6ec56fb8ac60b2e6d4bcf7fb68e))
+* **pr-workflow:** bound auto-resume and add abort escape hatch to mechanical gate ([bf44dde](https://github.com/ZaxbyHub/opencode-swarm/commit/bf44ddee5f18420a26a74755f9c2af64db176bb4))
+
 ## [7.125.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.125.3...v7.125.4) (2026-07-19)
 
 
