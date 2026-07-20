@@ -622,7 +622,14 @@ describe('Command registration parity', () => {
 			// is a pre-existing alias that the canonical-aware derivation now
 			// also covers, closing a latent bypass.
 			// FR-004: sdd-project removed — canonical target (sdd project) is now agent
-			humanOnly: new Set(['memory-import', 'memory-migrate', 'clear']),
+			// `abort-pr-workflow` is a new restricted human-only escape hatch for
+			// unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gates.
+			humanOnly: new Set([
+				'memory-import',
+				'memory-migrate',
+				'clear',
+				'abort-pr-workflow',
+			]),
 			toolCommands: new Set([
 				'pr subscribe',
 				'pr unsubscribe',

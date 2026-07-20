@@ -9,6 +9,7 @@ import {
 	type PrWorkflowMode,
 } from '../hooks/pr-workflow-gate.js';
 import { warn } from '../utils/logger.js';
+import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -937,6 +938,17 @@ export const COMMAND_REGISTRY = {
 			'Requires council.general.enabled: true and a search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 		category: 'agent',
 		toolPolicy: 'none',
+	},
+	'abort-pr-workflow': {
+		handler: (ctx) =>
+			handleAbortPrWorkflowCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop [mode] [reason]',
+		args: '[PR_REVIEW|PR_FEEDBACK] [reason...]',
+		details:
+			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. An audit event is appended to .swarm/events.jsonl.',
+		category: 'utility',
+		toolPolicy: 'restricted',
 	},
 	'pr-review': {
 		handler: (ctx) =>

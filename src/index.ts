@@ -1758,6 +1758,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
 				},
+				'swarm-abort-pr-workflow': {
+					template: '/swarm abort-pr-workflow $ARGUMENTS',
+					description:
+						'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)',
+				},
 				'swarm-ci-monitor': {
 					template: '/swarm ci-monitor $ARGUMENTS',
 					description:

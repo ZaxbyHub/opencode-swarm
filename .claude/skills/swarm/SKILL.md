@@ -129,6 +129,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm issue` — ingest a GitHub issue (intake → localization → resolution spec) [--plan] [--trace] [--no-repro]
 - `/swarm pr-review` — launch deep PR review with multi-lane analysis
 - `/swarm pr-feedback` — ingest and close known PR feedback (review comments, CI failures, conflicts)
+- `/swarm abort-pr-workflow` — clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)
 - `/swarm ci-monitor` — drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles)
 - `/swarm pr subscribe` / `/swarm pr-subscribe` — subscribe session to PR state-change notifications
 - `/swarm pr unsubscribe` / `/swarm pr-unsubscribe` — unsubscribe session from PR notifications

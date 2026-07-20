@@ -23,6 +23,7 @@
  * Neither is implemented (no current tool needs them). Not tree-shakeable.
  */
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { abort_pr_workflow } from './abort-pr-workflow';
 import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
 import { ast_grep } from './ast-grep';
@@ -168,6 +169,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	check_gate_status: () => check_gate_status,
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
+	abort_pr_workflow: () => abort_pr_workflow,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,
 	submit_phase_council_verdicts: () => submit_phase_council_verdicts,

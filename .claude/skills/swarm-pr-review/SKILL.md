@@ -52,6 +52,8 @@ canonical workflow.
 - Call `complete_pr_workflow` before the user-facing final response. While the
   durable gate remains active, architect response text is mechanically replaced
   and an idle parent session is resumed rather than allowed to stop early.
+- If bind/checkout is genuinely unreachable, call `abort_pr_workflow` or run
+  `/swarm abort-pr-workflow` (see canonical abort section; never a shortcut).
 - If actionable findings remain, write the canonical handoff artifact and ask
   whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
   Carry validated findings forward with their original IDs and provenance.

@@ -31,6 +31,16 @@ Read and follow `../../../.opencode/skills/swarm-pr-feedback/SKILL.md` as the ca
 - Emit the user-facing final response only after the second completion call
   clears the durable gate. Until then, architect response text is mechanically
   replaced and an idle parent session is resumed rather than allowed to stop.
+- If the verification bind is genuinely unreachable (PR head cannot be
+  fetched/checked out, or a compound `git fetch … && git checkout …` keeps
+  being rejected — run them as TWO separate standalone commands first), call
+  `abort_pr_workflow` with `mode: "PR_FEEDBACK"` and a one-line `reason`
+  instead of looping. The tool refuses while PR workflow lanes are in flight
+  and refuses once `prFeedbackReadyToPublish` is armed — after arming, you
+  MUST complete via `complete_pr_workflow` because aborting an armed gate
+  would drop the immutable-commit binding and leave a half-published commit.
+  The user can also run `/swarm abort-pr-workflow` once the wake budget
+  suspends. Never abort as a gate-skip shortcut.
 - Use the repository commit/PR workflow before pushing or updating the PR.
 
 Final output must include a closure ledger for every original feedback item,
