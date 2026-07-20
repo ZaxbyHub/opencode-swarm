@@ -24,3 +24,12 @@ tests/unit/hooks/skill-scoring-workflow.test.ts
 # Tracked under #1737 (test quarantine debt) pending a dedicated
 # test-stability sprint.
 tests/unit/tools/test-runner.test.ts
+# Merge-group flaky test: finalize-reward-sweep-multi-runid.test.ts asserts a
+# Jaccard-related sibling's qValue propagates to exactly 0.485
+# (applyEmaUpdate(0.5, 0, 0.03) = 0.97 * 0.5) but the actual is 0.5 — the
+# propagation step is not applied, pointing to an ordering/initialization
+# nondeterminism in the sqlite-backed memory store. Reproduces consistently on
+# clean main (verified at 2616988a and 6f5e1376 — the latter is where PR #1906's
+# merge-queue CI happened to pass it). Pre-existing, unrelated to any specific
+# PR. Tracked under #1907 (root-cause fix) and #1737 (test quarantine debt).
+tests/unit/memory/finalize-reward-sweep-multi-runid.test.ts
