@@ -5,8 +5,8 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { _internals, handleTurboCommand } from '../commands/turbo';
-import { getAgentSession, swarmState } from '../state';
 import { TURBO_BYPASS_DISCLOSURE } from '../commands/turbo-constants';
+import { getAgentSession, swarmState } from '../state';
 
 describe('handleTurboCommand', () => {
 	let testSessionId: string;
