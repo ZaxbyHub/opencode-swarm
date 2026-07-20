@@ -71,6 +71,10 @@ export {
 	type ToolResult,
 } from './pre-check-batch';
 export {
+	executePreparePrFeedbackScope,
+	prepare_pr_feedback_scope,
+} from './prepare-pr-feedback-scope';
+export {
 	type QualityBudgetInput,
 	type QualityBudgetResult,
 	quality_budget,
@@ -199,6 +203,10 @@ export { write_drift_evidence } from './write-drift-evidence';
 export { write_final_council_evidence } from './write-final-council-evidence';
 export { write_hallucination_evidence } from './write-hallucination-evidence';
 export { write_mutation_evidence } from './write-mutation-evidence';
+export {
+	executeWritePrReviewArtifact,
+	write_pr_review_artifact,
+} from './write-pr-review-artifact';
 export {
 	executeWritePrReviewTriggerEval,
 	PR_REVIEW_TRIGGER_DEFINITIONS,

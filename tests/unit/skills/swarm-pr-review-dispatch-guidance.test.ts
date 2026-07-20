@@ -148,10 +148,10 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'Fall back to blocking `dispatch_lanes` when async launch is unavailable',
 		);
 		expect(handoffSection).toContain(
-			'.swarm/pr-review/<run_id>/feedback-handoff.md',
+			'.swarm/pr-review/<run_id>/feedback-handoff.json',
 		);
 		expect(handoffSection).toContain(
-			'/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.md',
+			'/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json',
 		);
 		expect(handoffSection).toContain('stop and ask the user');
 		expect(mergeabilitySection).toContain('remains read-only');

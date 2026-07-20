@@ -18,7 +18,7 @@ import { _internals } from '../../../src/config';
 const VALID_CONFIG = {
 	max_iterations: 9,
 	memory: { enabled: true },
-	gates: { enabled: true },
+	gates: { syntax_check: { enabled: true } },
 };
 
 function writeProjectConfig(projectDir: string, content: object): void {
@@ -69,7 +69,9 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 			// 1 bad key in 4 strict sections (gates is pre-Zod sanitized)
 			writeProjectConfig(projectDir, {
 				max_iterations: 9,
-				gates: { enabled: true, gatesBogusKey: 'val' },
+				gates: {
+					syntax_check: { enabled: true, gatesBogusKey: 'val' },
+				},
 				council: { enabled: true, councilBogusKey: 1 },
 				checkpoint: { enabled: true, checkpointBogusKey: 1 },
 				pr_monitor: { enabled: true, prMonitorBogusKey: 1 },
@@ -88,6 +90,7 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 			expect(output).toContain('## Config Recovery');
 			expect(output).toContain('`stripped_keys`');
 			// removedKeys listing present
+			expect(output).toContain('gates.syntax_check.gatesBogusKey');
 			expect(output).toContain('council.councilBogusKey');
 			expect(output).toContain('checkpoint.checkpointBogusKey');
 			expect(output).toContain('pr_monitor.prMonitorBogusKey');
@@ -133,7 +136,10 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 			mkdirSync(join(userDir, 'opencode'), { recursive: true });
 			writeFileSync(
 				join(userDir, 'opencode', 'opencode-swarm.json'),
-				JSON.stringify({ max_iterations: 7, gates: { enabled: true } }),
+				JSON.stringify({
+					max_iterations: 7,
+					gates: { syntax_check: { enabled: true } },
+				}),
 				'utf-8',
 			);
 			writeProjectConfig(projectDir, {

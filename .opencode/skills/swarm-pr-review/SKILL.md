@@ -24,11 +24,11 @@ without running a fresh broad review.
 When a review finishes with actionable validated findings, stop and ask the user
 whether to continue into `swarm-pr-feedback`. Do not auto-dispatch fix work from
 `PR_REVIEW`. Instead, write a handoff artifact under
-`.swarm/pr-review/<run_id>/feedback-handoff.md` (or `.json`) and include the
-exact continuation prompt:
+`.swarm/pr-review/<run_id>/feedback-handoff.json` with `write_pr_review_artifact`
+and include the exact continuation prompt:
 
 ```text
-/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.md
+/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json
 ```
 
 `<run_id>` is a stable identifier for this review run, such as
@@ -459,10 +459,10 @@ The context pack must include, when available:
 
 ## Review Finding Persistence
 
-Do not rely on conversation context to preserve review findings. Create a run
-artifact under `.swarm/pr-review/<run_id>/findings.jsonl` when file writes are
-allowed, or under `.swarm/evidence/pr-review-<run_id>-findings.jsonl` when the
-review already uses the evidence tree.
+Do not rely on conversation context to preserve review findings. Use
+`write_pr_review_artifact` with `kind: "findings"`; the controller creates and
+appends `.swarm/pr-review/<run_id>/findings.jsonl` without granting generic
+write authority over `.swarm/`.
 
 Each persisted finding record must include at least:
 
@@ -484,11 +484,14 @@ Minimum field contract:
 Persist after every major validation boundary:
 
 1. **Post-explorer:** after Phase 3/4 candidate parsing and before reviewer
-   dispatch, write all candidates as `PENDING` with their lane provenance.
-2. **Post-reviewer:** after Phase 6 reviewer validation, update each reviewed
+   dispatch, call `write_pr_review_artifact` with `boundary: "post_explorer"`
+   and all candidates as `PENDING` with their lane provenance.
+2. **Post-reviewer:** after Phase 6 reviewer validation, call the controller
+   with `boundary: "post_reviewer"` and update each reviewed
    record to `CONFIRMED`, `DISPROVED`, `PRE_EXISTING`, or keep `PENDING` with a
    concrete `next_action` if more evidence is required.
-3. **Post-critic:** after Phase 8 critic challenge, update final status,
+3. **Post-critic:** after Phase 8 critic challenge, call the controller with
+   `boundary: "post_critic"` and update final status,
    severity/action notes in `evidence`, and final reporting or handoff action.
 
 Resume/reload procedure:
@@ -1376,7 +1379,9 @@ Explain the recommendation in one short paragraph and list required actions befo
 ## Feedback handoff
 
 When the review produced actionable validated findings or operational blockers,
-include:
+call `write_pr_review_artifact` with `kind: "handoff"`. The controller writes
+`.swarm/pr-review/<run_id>/feedback-handoff.json` only when its finding IDs
+exactly match the latest confirmed `handoff_to_feedback` records. Include:
 
 - the handoff artifact path,
 - the preserved finding IDs and provenance that `swarm-pr-feedback` must carry
@@ -1387,7 +1392,7 @@ include:
 Use this exact continuation prompt format:
 
 ```text
-/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.md
+/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json
 ```
 
 ---
@@ -1435,4 +1440,3 @@ unproductive wakes, and the only exits are:
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
 bind/checkout path is genuinely unreachable; never use it to skip a
 coverage obligation that is merely expensive or inconvenient.
-

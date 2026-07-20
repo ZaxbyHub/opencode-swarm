@@ -45,20 +45,19 @@ describe('.opencode/skills/plan/SKILL.md ACCEPTANCE coverage (issue: architect-a
 });
 
 describe('.opencode/skills/swarm-pr-feedback/SKILL.md ACCEPTANCE coverage (issue: architect-acceptance-criteria)', () => {
-	it('direct-Task coder carve-out carries an ACCEPTANCE reminder', () => {
-		// The carve-out sanctions Task(subagent_type="<coder>", ...) without
-		// declare_scope. The dispatch is still gated by ACCEPTANCE_FIELD_REQUIRED.
-		const idx = feedbackContent.indexOf('Carve-out for direct Task delegation');
+	it('dedicated feedback scope controller requires matching Task directives and acceptance', () => {
+		const idx = feedbackContent.indexOf(
+			"When the plugin's mechanical controller is available",
+		);
 		expect(idx).toBeGreaterThan(-1);
-		// Slice to the next `##` markdown header rather than a cosmetic bold
-		// marker (e.g. `**Anti-pattern:**`) so the test is robust to harmless
-		// rebolding of unrelated section labels.
 		const next = feedbackContent.indexOf('\n## ', idx);
 		expect(next).toBeGreaterThan(idx);
 		const block = feedbackContent.slice(idx, next);
+		expect(block).toContain('prepare_pr_feedback_scope({ task_id, files })');
+		expect(block).toContain('matching `FILE:` directives');
+		expect(block).toContain('literal `ACCEPTANCE:` line');
 		expect(block).toContain(
-			'direct Task dispatch MUST contain a literal `ACCEPTANCE:` line',
+			'There is no one-file or single-function carve-out',
 		);
-		expect(block).toContain('ACCEPTANCE_FIELD_REQUIRED');
 	});
 });

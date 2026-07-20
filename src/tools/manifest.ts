@@ -90,6 +90,7 @@ import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
 import { pre_check_batch } from './pre-check-batch';
+import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { quality_budget } from './quality-budget';
 import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
@@ -132,6 +133,7 @@ import { write_drift_evidence } from './write-drift-evidence';
 import { write_final_council_evidence } from './write-final-council-evidence';
 import { write_hallucination_evidence } from './write-hallucination-evidence';
 import { write_mutation_evidence } from './write-mutation-evidence';
+import { write_pr_review_artifact } from './write-pr-review-artifact';
 import { write_pr_review_trigger_eval } from './write-pr-review-trigger-eval';
 import { write_retro } from './write-retro';
 
@@ -178,6 +180,8 @@ export const TOOL_MANIFEST = defineHandlers({
 	checkpoint: () => checkpoint,
 	pkg_audit: () => pkg_audit,
 	parse_lane_candidates: () => parse_lane_candidates,
+	prepare_pr_feedback_scope: () => prepare_pr_feedback_scope,
+	write_pr_review_artifact: () => write_pr_review_artifact,
 	write_pr_review_trigger_eval: () => write_pr_review_trigger_eval,
 	test_runner: () => test_runner,
 	test_impact: () => test_impact,

@@ -22,6 +22,11 @@ export interface ToolMeta {
 	description: string;
 	/** Agents granted this tool by default (inverted into AGENT_TOOL_MAP). Empty = overlay-only. */
 	agents: AgentName[];
+	/** Explicit PR-workflow capability. Omitted tools remain fail-closed. */
+	prWorkflow?: {
+		modes: Array<'PR_REVIEW' | 'PR_FEEDBACK'>;
+		capability: 'observe' | 'validate';
+	};
 }
 
 /**
@@ -38,20 +43,36 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	diff_summary: {
 		description:
 			'filter classified AST changes by category, risk level, or file for reviewer drill-down',
 		agents: ['architect', 'reviewer', 'critic_oversight'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	syntax_check: {
 		description:
 			'check syntax of source files using tree-sitter parsers across multiple languages, returning per-file errors',
 		agents: ['architect', 'coder', 'test_engineer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	placeholder_scan: {
 		description: 'todo and FIXME comment detection',
 		agents: ['architect', 'reviewer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	imports: {
 		description:
@@ -70,20 +91,36 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	lint: {
 		description:
 			'run project linter in check or fix mode; supports biome, eslint, ruff, clippy, and more, returns structured results',
 		agents: ['architect', 'reviewer', 'coder'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	secretscan: {
 		description:
 			'scan for secrets (API keys, tokens, passwords) via regex and entropy; returns redacted previews, excludes common dirs',
 		agents: ['architect', 'reviewer', 'critic_oversight'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	sast_scan: {
 		description: 'static analysis security scan',
 		agents: ['architect', 'reviewer', 'critic_oversight'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	build_check: {
 		description:
@@ -98,6 +135,10 @@ export const TOOL_METADATA = {
 	quality_budget: {
 		description: 'code quality budget check',
 		agents: ['architect'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	symbols: {
 		description:
@@ -138,10 +179,18 @@ export const TOOL_METADATA = {
 	schema_drift: {
 		description: 'OpenAPI spec vs route drift',
 		agents: ['architect', 'sme', 'researcher', 'docs', 'explorer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	todo_extract: {
 		description: 'structured TODO/FIXME extraction',
 		agents: ['architect', 'researcher', 'docs', 'explorer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	evidence_check: {
 		description: 'verify task evidence completeness',
@@ -203,6 +252,10 @@ export const TOOL_METADATA = {
 			'critic_oversight',
 			'test_engineer',
 		],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	parse_lane_candidates: {
 		description:
@@ -214,14 +267,32 @@ export const TOOL_METADATA = {
 			'persist the complete PR-review trigger evaluation with exact-set validation, dispatch provenance, and live merge-base verification',
 		agents: ['architect'],
 	},
+	write_pr_review_artifact: {
+		description:
+			'persist schema-validated PR-review findings checkpoints and exact actionable feedback handoffs under the active run',
+		agents: ['architect'],
+	},
+	prepare_pr_feedback_scope: {
+		description:
+			'prepare an exact file scope for one PR-feedback coder Task after immutable feedback verification settles',
+		agents: ['architect'],
+	},
 	test_runner: {
 		description: 'auto-detect and run tests',
 		agents: ['architect', 'reviewer', 'test_engineer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	test_impact: {
 		description:
 			'identify test files impacted by changed source files via import analysis',
 		agents: ['architect', 'reviewer', 'critic_oversight', 'test_engineer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	mutation_test: {
 		description:
@@ -252,10 +323,18 @@ export const TOOL_METADATA = {
 		description:
 			'per-line git blame metadata: sha, author, date, summary for each line in a file',
 		agents: ['reviewer', 'explorer', 'architect'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	gitingest: {
 		description: 'fetch a GitHub repository full content via gitingest.com',
 		agents: ['architect', 'docs', 'explorer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	retrieve_summary: {
 		description: 'retrieve the full content of a stored tool output summary',
@@ -280,6 +359,10 @@ export const TOOL_METADATA = {
 		description:
 			'retrieve paged full dispatch lane output by output_ref; use before consuming truncated lane previews or routing candidates from lane results',
 		agents: ['architect'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	extract_code_blocks: {
 		description: 'extract code blocks from text content and save them to files',
@@ -441,16 +524,28 @@ export const TOOL_METADATA = {
 		description:
 			'Run actionlint against GitHub Actions workflow YAML files with structured findings. Resolves actionlint lazily and does not modify files.',
 		agents: ['architect', 'test_engineer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	osv_scan: {
 		description:
 			'Run OSV-Scanner against a workspace path and return structured dependency vulnerability findings. Resolves osv-scanner lazily and does not modify files.',
 		agents: ['architect', 'test_engineer'],
+		prWorkflow: {
+			modes: ['PR_REVIEW'],
+			capability: 'validate',
+		},
 	},
 	gh_evidence: {
 		description:
 			'Fetch bounded GitHub pull request or issue metadata through gh for review and CI evidence. Resolves gh lazily and is read-only.',
 		agents: ['architect', 'researcher'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	batch_symbols: {
 		description:
@@ -500,6 +595,10 @@ export const TOOL_METADATA = {
 			'explorer',
 			'coder',
 		],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	get_qa_gate_profile: {
 		description:
@@ -774,6 +873,15 @@ export const TOOL_NAMES: readonly ToolName[] = Object.keys(
 
 /** Set for O(1) tool name validation. */
 export const TOOL_NAME_SET: ReadonlySet<ToolName> = new Set(TOOL_NAMES);
+
+export function getPrWorkflowToolCapability(
+	toolName: string,
+	mode: 'PR_REVIEW' | 'PR_FEEDBACK',
+): 'observe' | 'validate' | null {
+	const metadata = (TOOL_METADATA as Record<string, ToolMeta>)[toolName];
+	if (!metadata?.prWorkflow?.modes.includes(mode)) return null;
+	return metadata.prWorkflow.capability;
+}
 
 /** Human-readable descriptions, keyed by tool name. */
 export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> =

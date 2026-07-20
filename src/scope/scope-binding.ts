@@ -11,6 +11,7 @@ export type ScopeBindingSource =
 	| 'declare_scope'
 	| 'plan'
 	| 'file_directive'
+	| 'pr_feedback'
 	| 'worktree_derived';
 
 export interface ScopeBinding {
@@ -26,6 +27,9 @@ export interface ScopeBinding {
 	activation: 'declaration' | 'pending_child' | 'active';
 	parentOwnerSessionId?: string;
 	parentCallId?: string;
+	/** PR_FEEDBACK bindings carry their parent workflow identity and revision. */
+	workflowSessionId?: string;
+	workflowRevisionDigest?: string;
 	source: ScopeBindingSource;
 	files: string[];
 	declaredAt: number;
@@ -98,7 +102,7 @@ export function createScopeBinding(input: {
 	files: readonly string[];
 	ownerSessionId: string;
 	ownerMessageId: string;
-	source: Exclude<ScopeBindingSource, 'worktree_derived'>;
+	source: Exclude<ScopeBindingSource, 'pr_feedback' | 'worktree_derived'>;
 	dispatchCallId?: string;
 	activation?: ScopeBinding['activation'];
 	ttlMs?: number;
@@ -193,6 +197,83 @@ export function getScopeBinding(input: {
 	const candidate = candidates[0];
 	if (!candidate || candidate.planId !== derivePlanId(input.plan)) return null;
 	return candidate;
+}
+
+export function createPrFeedbackScopeBinding(input: {
+	directory: string;
+	taskId: string;
+	files: readonly string[];
+	ownerSessionId: string;
+	ownerMessageId: string;
+	workflowSessionId: string;
+	workflowRevisionDigest: string;
+	dispatchCallId?: string;
+	activation?: ScopeBinding['activation'];
+}): ScopeBinding | null {
+	if (
+		!input.ownerSessionId.trim() ||
+		!input.ownerMessageId.trim() ||
+		!input.workflowSessionId.trim() ||
+		!input.workflowRevisionDigest.trim() ||
+		!isStrictTaskId(input.taskId)
+	)
+		return null;
+	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
+	const files = normalizeScopeFiles(input.files);
+	if (!workspaceIdentity || !files) return null;
+	const now = Date.now();
+	const workflowIdentity = `pr-feedback:${input.workflowSessionId}`;
+	return {
+		version: 2,
+		workspaceIdentity,
+		planId: workflowIdentity,
+		planStructureHash: input.workflowRevisionDigest,
+		taskId: input.taskId,
+		ownerSessionId: input.ownerSessionId,
+		ownerMessageId: input.ownerMessageId,
+		dispatchCallId: input.dispatchCallId,
+		activation:
+			input.activation ??
+			(input.dispatchCallId ? 'pending_child' : 'declaration'),
+		source: 'pr_feedback',
+		files,
+		declaredAt: now,
+		expiresAt: now + DEFAULT_SCOPE_BINDING_TTL_MS,
+		workflowSessionId: input.workflowSessionId,
+		workflowRevisionDigest: input.workflowRevisionDigest,
+	};
+}
+
+export function getAuthorizedPrFeedbackScopeBinding(input: {
+	directory: string;
+	activeSessionId: string;
+	taskId?: string;
+}): ScopeBinding | null {
+	sweepExpired();
+	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
+	if (!workspaceIdentity || !input.activeSessionId.trim()) return null;
+	const matches = [...pendingScopeBindings.values()].filter(
+		(binding) =>
+			binding.workspaceIdentity === workspaceIdentity &&
+			binding.source === 'pr_feedback' &&
+			binding.activation === 'active' &&
+			binding.ownerSessionId === input.activeSessionId &&
+			(!input.taskId || binding.taskId === input.taskId) &&
+			typeof binding.dispatchCallId === 'string' &&
+			binding.dispatchCallId.length > 0 &&
+			binding.ownerMessageId === binding.dispatchCallId &&
+			typeof binding.parentOwnerSessionId === 'string' &&
+			binding.parentOwnerSessionId.length > 0 &&
+			binding.ownerSessionId !== binding.parentOwnerSessionId &&
+			binding.parentCallId === binding.dispatchCallId &&
+			typeof binding.workflowSessionId === 'string' &&
+			binding.workflowSessionId === binding.parentOwnerSessionId &&
+			typeof binding.workflowRevisionDigest === 'string' &&
+			binding.workflowRevisionDigest.length > 0 &&
+			binding.planId === `pr-feedback:${binding.workflowSessionId}` &&
+			binding.planStructureHash === binding.workflowRevisionDigest,
+	);
+	return matches.length === 1 ? matches[0] : null;
 }
 
 /** Resolve the one Task-correlated authorization for an executing coder. */
