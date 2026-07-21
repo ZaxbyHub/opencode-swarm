@@ -394,10 +394,6 @@ export type ConfigLoadResult = ConfigBuildResult & {
 	configHadErrors: boolean;
 };
 
-function warningForRemovedKeys(removedKeys: readonly string[]): string {
-	return `Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`;
-}
-
 /** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
 function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
 	if (!raw || typeof raw !== 'object') return false;
@@ -464,8 +460,6 @@ function buildConfigWithMeta(
 	const { result: sanitized, strippedKeys: gatesStripped } =
 		sanitizeSectionConfigs(mergedRaw);
 	mergedRaw = sanitized;
-	const sanitizedWarning =
-		gatesStripped.length > 0 ? warningForRemovedKeys(gatesStripped) : undefined;
 
 	// Fail-secure closure: when a config file existed but could not be loaded,
 	// force guardrails ENABLED on any recovered config (issue #1778 H6 F2).
@@ -481,26 +475,11 @@ function buildConfigWithMeta(
 	const firstResult = PluginConfigSchema.safeParse(mergedRaw);
 	if (firstResult.success) {
 		const config = secure(firstResult.data);
-		if (loadedFromFile && configHadErrors) {
-			const securityWarning =
-				'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.';
-			advisoryWarn(`[opencode-swarm] ${securityWarning}`);
-			return {
-				config,
-				recovery: 'guardrails_defaults',
-				removedKeys: [...gatesStripped],
-				warnings: [
-					...(sanitizedWarning ? [sanitizedWarning] : []),
-					securityWarning,
-				],
-			};
-		}
-		if (sanitizedWarning) advisoryWarn(`[opencode-swarm] ${sanitizedWarning}`);
 		return {
 			config,
 			recovery: gatesStripped.length > 0 ? 'stripped_keys' : 'none',
 			removedKeys: [...gatesStripped],
-			warnings: sanitizedWarning ? [sanitizedWarning] : [],
+			warnings: [],
 		};
 	}
 
@@ -513,14 +492,14 @@ function buildConfigWithMeta(
 	if (removed.length > 0) {
 		const recovered = PluginConfigSchema.safeParse(cleaned);
 		if (recovered.success) {
-			const removedKeys = [...gatesStripped, ...removed];
-			const warning = warningForRemovedKeys(removedKeys);
-			advisoryWarn(`[opencode-swarm] ${warning}`);
+			advisoryWarn(
+				`[opencode-swarm] Ignored ${removed.length} unrecognized config key(s): ${removed.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
+			);
 			return {
 				config: secure(recovered.data),
 				recovery: 'stripped_keys',
-				removedKeys,
-				warnings: [warning],
+				removedKeys: [...gatesStripped, ...removed],
+				warnings: [],
 			};
 		}
 	}
@@ -603,9 +582,7 @@ function buildConfigWithMeta(
  * 1. User config: ~/.config/opencode/opencode-swarm.json
  * 2. Project config: <directory>/.opencode/opencode-swarm.json
  *
- * Project config takes precedence. Nested objects are deep-merged, except
- * `full_auto.locked`: it is a hard-off and OR-merges across both levels, so
- * `locked: true` at either level cannot be overridden by `locked: false`.
+ * Project config takes precedence. Nested objects are deep-merged.
  * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
  * Zod defaults don't override explicit user values.
  */
