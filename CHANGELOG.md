@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.126.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.2...v7.126.3) (2026-07-21)
+
+
+### Bug Fixes
+
+* **init:** defer startup work until server resolves ([78fedf8](https://github.com/ZaxbyHub/opencode-swarm/commit/78fedf82f5c639942134578fd762f318672c61e8))
+* **pr-workflow:** harden interruption wake ordering ([07c9a21](https://github.com/ZaxbyHub/opencode-swarm/commit/07c9a21a208d9e771c2152e3e2fc150821f8e702))
+* **pr-workflow:** restore checkout bootstrap and interrupt control ([69b38c5](https://github.com/ZaxbyHub/opencode-swarm/commit/69b38c5ec8ae764926812234b1918918f2ca199a))
+* **pr-workflow:** restore checkout bootstrap and interrupt control ([df8203b](https://github.com/ZaxbyHub/opencode-swarm/commit/df8203b59ebd2a33593b6324f037f89d9c3745b1))
+
 ## [7.126.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.1...v7.126.2) (2026-07-20)
 
 
