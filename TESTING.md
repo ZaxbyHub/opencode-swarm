@@ -57,9 +57,12 @@ mock.module('node:child_process', () => ({
 1. All `mock.module` calls have `afterEach(mock.restore())` cleanup or file-scoped `mockClear`/`mockReset` pattern
 2. All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
 
+**Allowlist growth ratchet (issue #1666):** `scripts/check-invariants.sh` Check 4 ratchets `scripts/mock-allowlist.txt` closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in the allowlist (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code.
+
 Run locally before pushing:
 ```bash
 bash scripts/check-mock-cleanup.sh
+bash scripts/check-invariants.sh
 ```
 
 Intentionally skipped on Windows (async child process handles cause EBUSY):

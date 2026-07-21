@@ -148,13 +148,27 @@ describe('check-invariants.sh', () => {
 		expect(result.stdout).toContain('Check 1: Subprocess timeout required');
 	});
 
-	test('should run all three checks', () => {
+	test('should run all four checks', () => {
 		if (isWindows) return;
 		const result = runCheckInvariants(REPO_ROOT);
 		expect(result.stdout).toContain('Check 1:');
 		expect(result.stdout).toContain('Check 2:');
 		expect(result.stdout).toContain('Check 3:');
+		expect(result.stdout).toContain('Check 4:');
 		expect(result.stdout).toContain('Summary');
+	});
+
+	test('issue #1666: Check 4 growth ratchet header is present', () => {
+		if (isWindows) return;
+		const result = runCheckInvariants(REPO_ROOT);
+		// The full Check 4 header is emitted whenever the allowlist file
+		// exists and a base branch resolves (REPO_ROOT always has origin/main).
+		// Deep behavioral coverage of the ratchet lives in the sibling file
+		// check-mock-allowlist-ratchet.test.ts (real temp git repo).
+		expect(result.stdout).toContain(
+			'Check 4: mock.module allowlist growth ratchet',
+		);
+		expect(result.stdout).toContain('issue #1666');
 	});
 
 	test('regression: bun-compat.ts is exempt from timeout warning by basename', () => {

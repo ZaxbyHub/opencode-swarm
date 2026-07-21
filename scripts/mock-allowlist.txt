@@ -9,7 +9,15 @@
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
 #
-# Last updated: 2026-07-11 (normalization in scripts/lib/normalize-mock-target.sh)
+# The allowlist is growth-ratcheted by scripts/check-invariants.sh Check 4
+# (issue #1666). To approve a new target added in a PR, add a standalone
+# marker line:  # APPROVED-NEW: <normalized-target>
+# The marker may appear anywhere in this file (flat set-membership, not
+# adjacency); convention places it immediately above the approved entry,
+# and this script preserves that placement across regeneration.
+# Escape hatch for a deliberate growth PR: MOCK_ALLOWLIST_ENFORCE=0 (soft-warn).
+#
+# Last updated: 2026-07-21 (normalization in scripts/lib/normalize-mock-target.sh)
 
 # --- Node builtins ---
 node:child_process
