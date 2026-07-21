@@ -581,37 +581,39 @@ function buildConfigWithMeta(
 		(mergedRaw.guardrails as Record<string, unknown>).enabled === false;
 
 	if (!rawGuardrailsDisabled) {
-	const valueRecovery = sanitizeMalformedValues(PluginConfigSchema, mergedRaw);
-	if (valueRecovery.recoveryWarnings.length > 0) {
-		const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
-		if (recoveredParse.success) {
-			const removedKeys = [
-				...gatesStripped,
-				...valueRecovery.recoveryWarnings.map((w) => w.section),
-			];
-			const warning = warningForRemovedKeys(removedKeys);
-			advisoryWarn(`[opencode-swarm] ${warning}`);
-			// Force guardrails enabled on recovery — the user's config had
-			// invalid values, so we apply the same fail-secure default as
-			// step 8 (guardrails_defaults) to preserve the security posture.
-			const secureConfig = PluginConfigSchema.parse({
-				...(recoveredParse.data as Record<string, unknown>),
-				guardrails: {
-					...((recoveredParse.data as Record<string, unknown>).guardrails as
-						| Record<string, unknown>
-						| undefined),
-					enabled: true,
-				},
-			});
-			return {
-				config: secure(secureConfig),
-				recovery: 'sanitized_values',
-				removedKeys,
-				warnings: [warning],
-			};
+		const valueRecovery = sanitizeMalformedValues(
+			PluginConfigSchema,
+			mergedRaw,
+		);
+		if (valueRecovery.recoveryWarnings.length > 0) {
+			const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
+			if (recoveredParse.success) {
+				const removedKeys = [
+					...gatesStripped,
+					...valueRecovery.recoveryWarnings.map((w) => w.section),
+				];
+				const warning = warningForRemovedKeys(removedKeys);
+				advisoryWarn(`[opencode-swarm] ${warning}`);
+				// Force guardrails enabled on recovery — the user's config had
+				// invalid values, so we apply the same fail-secure default as
+				// step 8 (guardrails_defaults) to preserve the security posture.
+				const secureConfig = PluginConfigSchema.parse({
+					...(recoveredParse.data as Record<string, unknown>),
+					guardrails: {
+						...((recoveredParse.data as Record<string, unknown>).guardrails as
+							| Record<string, unknown>
+							| undefined),
+						enabled: true,
+					},
+				});
+				return {
+					config: secure(secureConfig),
+					recovery: 'sanitized_values',
+					removedKeys,
+					warnings: [warning],
+				};
+			}
 		}
-	}
-
 	} // end if (!rawGuardrailsDisabled)
 
 	// 8. Guardrails defaults: nothing was recoverable.
