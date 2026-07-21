@@ -475,6 +475,17 @@ function buildConfigWithMeta(
 	const firstResult = PluginConfigSchema.safeParse(mergedRaw);
 	if (firstResult.success) {
 		const config = secure(firstResult.data);
+		if (loadedFromFile && configHadErrors) {
+			advisoryWarn(
+				'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
+			);
+			return {
+				config,
+				recovery: 'guardrails_defaults',
+				removedKeys: [...gatesStripped],
+				warnings: [],
+			};
+		}
 		return {
 			config,
 			recovery: gatesStripped.length > 0 ? 'stripped_keys' : 'none',
