@@ -368,7 +368,7 @@ describe('planLeanTurboLanes', () => {
 					f.toLowerCase().replace(/\\/g, '/'),
 				),
 			).toEqual([
-				path.join(tempDir, 'package.json').toLowerCase().replace(/\\/g, '/'),
+				'package.json',
 			]);
 		});
 
@@ -892,7 +892,7 @@ describe('planLeanTurboLanes', () => {
 			expect(
 				result.lanes[0].files.map((f) => f.toLowerCase().replace(/\\/g, '/')),
 			).toContain(
-				path.join(tempDir, 'src/correct.ts').toLowerCase().replace(/\\/g, '/'),
+				'src/correct.ts',
 			);
 			expect(result.lanes[0].files).not.toContain('src/wrong.ts');
 		});
@@ -984,7 +984,7 @@ describe('planLeanTurboLanes', () => {
 			expect(
 				result.lanes[0].files.map((f) => f.toLowerCase().replace(/\\/g, '/')),
 			).toEqual([
-				path.join(tempDir, 'src/a.ts').toLowerCase().replace(/\\/g, '/'),
+				'src/a.ts',
 			]);
 			expect(result.lanes[0].status).toBe('pending');
 		});

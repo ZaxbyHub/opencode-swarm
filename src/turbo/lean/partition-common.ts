@@ -16,6 +16,7 @@
  * identical classifications and sort orders for the same inputs.
  */
 
+import * as path from 'node:path';
 import type { LeanTurboConfig } from '../../config/schema';
 import { criticalWarn } from '../../utils/logger.js';
 import { isPathSafe, normalizePath, readTaskScopes } from './conflicts';
@@ -95,8 +96,24 @@ export function getValidatedFiles(
 			continue;
 		}
 
-		const normalized = normalizePath(pathToCheck);
-		validFiles.push(normalized);
+		// Risk classification operates on repository-relative scope paths. Passing
+		// the absolute workspace prefix through here makes macOS temp roots such
+		// as /private/var look like a protected project path, so every normal
+		// scope is incorrectly degraded before worktree provisioning can begin.
+		const relativePath = path.relative(
+			path.resolve(directory),
+			path.resolve(pathToCheck),
+		);
+		if (
+			!relativePath ||
+			!isPathSafe(relativePath) ||
+			path.isAbsolute(relativePath)
+		) {
+			invalidCount++;
+			continue;
+		}
+
+		validFiles.push(normalizePath(relativePath));
 	}
 
 	return [validFiles, invalidCount];
