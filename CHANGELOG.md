@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.126.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.3...v7.126.4) (2026-07-21)
+
+
+### Bug Fixes
+
+* **tests:** retire stability quarantine backlog ([df4929b](https://github.com/ZaxbyHub/opencode-swarm/commit/df4929b95f5e9d726db7125ef8bfbf905f32236f))
+
 ## [7.126.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.2...v7.126.3) (2026-07-21)
 
 
