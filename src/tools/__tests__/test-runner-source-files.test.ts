@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { test_runner } from '../test-runner.js';
+import { _internals, test_runner } from '../test-runner.js';
 
 // ============ Mocks ============
 
@@ -38,9 +38,7 @@ const mockAnalyzeImpact =
 		>
 	>();
 
-vi.mock('../../test-impact/analyzer.js', () => ({
-	analyzeImpact: mockAnalyzeImpact,
-}));
+const originalAnalyzeImpact = _internals.analyzeImpact;
 
 // Mock Bun.spawn to prevent actual test execution for scope 'all' tests
 // This simulates a successful test run without actually running tests
@@ -144,6 +142,7 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 
 		// Reset and configure the impact mock
 		mockAnalyzeImpact.mockReset();
+		_internals.analyzeImpact = mockAnalyzeImpact;
 	});
 
 	afterEach(() => {
@@ -151,6 +150,7 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {}
+		_internals.analyzeImpact = originalAnalyzeImpact;
 	});
 
 	/**
@@ -341,12 +341,14 @@ describe('recordAndAnalyzeResults backward compatibility', () => {
 
 		execute = getExecute();
 		mockAnalyzeImpact.mockReset();
+		_internals.analyzeImpact = mockAnalyzeImpact;
 	});
 
 	afterEach(() => {
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {}
+		_internals.analyzeImpact = originalAnalyzeImpact;
 	});
 
 	/**

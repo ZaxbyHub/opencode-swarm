@@ -111,7 +111,6 @@ src/session/snapshot-writer
 src/state
 src/summaries/manager
 src/telemetry
-src/test-impact/analyzer
 src/tools/checkpoint
 src/tools/co-change-analyzer
 src/tools/knowledge-recall
