@@ -6,7 +6,7 @@
  *   - Calls cleanupOrphanedBranches(ctx.directory, []) at plugin init (no sessions active → all swarm-lane branches are orphans)
  *   - Writes results to `<directory>/.swarm/advisories/init-orphan-recovery.json`
  *   - Is wrapped in `withTimeout` so it never blocks plugin init
- *   - Runs via `queueMicrotask` off the `server()` resolution path (precedent: repoGraphHook.init)
+ *   - Runs from the wrapper-owned post-resolution queue after `server()` can settle (precedent: repoGraphHook.init)
  *
  * This module intentionally lives in `src/hooks/` so that `src/index.ts` can import
  * it without matching the forbidden `worktree/` or `merge-back/` patterns.

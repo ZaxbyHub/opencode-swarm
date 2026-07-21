@@ -114,6 +114,19 @@ function architectOutput(userText = 'please continue'): {
 const shownFile = (dir: string) =>
 	path.join(dir, '.swarm', '.knowledge-shown.json');
 
+function captureShownWrite(): () => Promise<void> {
+	const pendingWrites: Promise<void>[] = [];
+	_internals.recordLessonsShown = (...args) => {
+		const pending = originalRecordLessonsShown(...args);
+		pendingWrites.push(pending);
+		return pending;
+	};
+	return async () => {
+		await Promise.all(pendingWrites);
+		expect(pendingWrites).toHaveLength(1);
+	};
+}
+
 describe('knowledge injector shown-set integrity (#1768)', () => {
 	test('records exactly the FINAL rendered set under canonical Phase N', async () => {
 		// The injector renders what searchKnowledge returns (searchKnowledge is
@@ -133,6 +146,7 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 		_internals.recordKnowledgeEvent = async () => null;
 		_internals.recordKnowledgeShown = async () => {};
 		_internals.confirmEntriesPhase = async () => {};
+		const waitForShownWrite = captureShownWrite();
 
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
@@ -141,8 +155,7 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 		});
 		await hook({}, architectOutput());
 
-		// Drain fire-and-forget recordLessonsShown.
-		await new Promise((r) => setTimeout(r, 10));
+		await waitForShownWrite();
 
 		const data = JSON.parse(
 			readFileSync(shownFile(tempDir), 'utf-8'),
@@ -167,6 +180,7 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 		_internals.recordKnowledgeEvent = async () => null;
 		_internals.recordKnowledgeShown = async () => {};
 		_internals.confirmEntriesPhase = async () => {};
+		const waitForShownWrite = captureShownWrite();
 
 		const hook = createKnowledgeInjectorHook(tempDir, {
 			...baseConfig,
@@ -174,7 +188,7 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 			inject_char_budget: 4000,
 		});
 		await hook({}, architectOutput());
-		await new Promise((r) => setTimeout(r, 10));
+		await waitForShownWrite();
 
 		const data = JSON.parse(
 			readFileSync(shownFile(tempDir), 'utf-8'),
@@ -198,7 +212,6 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 			enabled: true,
 		});
 		await hook({}, architectOutput());
-		await new Promise((r) => setTimeout(r, 10));
 
 		expect(lessonsSpy).not.toHaveBeenCalled();
 	});
@@ -223,7 +236,6 @@ describe('knowledge injector shown-set integrity (#1768)', () => {
 			inject_char_budget: 4000,
 		});
 		await hook({}, architectOutput());
-		await new Promise((r) => setTimeout(r, 10));
 
 		expect(confirmSpy).toHaveBeenCalledTimes(1);
 		const args = confirmSpy.mock.calls[0];

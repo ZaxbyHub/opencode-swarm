@@ -34,6 +34,11 @@ const originalStageHead = _internals.resolveCurrentGitHead;
 const originalControlDigest = _internals.resolveGitControlStateDigest;
 const originalGateDigest = gateInternals.resolvePrWorkflowRevisionDigest;
 const originalHead = gateInternals.resolveCurrentGitHead;
+const originalWorkingTreeClean = gateInternals.resolveIsWorkingTreeClean;
+const originalUpstreamPushTarget =
+	gateInternals.resolveCurrentUpstreamPushTarget;
+const originalRemoteRefsContainingHead =
+	gateInternals.resolveRemoteRefsContainingHead;
 
 const validChecks = [
 	{ category: 'build', command: ['cargo', 'build'] },
@@ -66,6 +71,15 @@ beforeEach(async () => {
 	);
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => HEAD;
+	gateInternals.resolveIsWorkingTreeClean = () => true;
+	gateInternals.resolveCurrentUpstreamPushTarget = () => ({
+		remoteName: 'origin',
+		remoteBranchRef: 'refs/heads/pr-feedback-head',
+		remoteTrackingRef: 'refs/remotes/origin/pr-feedback-head',
+	});
+	gateInternals.resolveRemoteRefsContainingHead = () => [
+		'refs/remotes/origin/pr-feedback-head',
+	];
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_internals.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_internals.resolveCurrentGitHead = () => HEAD;
@@ -150,6 +164,10 @@ afterEach(async () => {
 	_internals.resolveGitControlStateDigest = originalControlDigest;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalGateDigest;
 	gateInternals.resolveCurrentGitHead = originalHead;
+	gateInternals.resolveIsWorkingTreeClean = originalWorkingTreeClean;
+	gateInternals.resolveCurrentUpstreamPushTarget = originalUpstreamPushTarget;
+	gateInternals.resolveRemoteRefsContainingHead =
+		originalRemoteRefsContainingHead;
 	gateInternals.resetTrackedStateCache();
 	await fs.rm(directory, { recursive: true, force: true });
 });

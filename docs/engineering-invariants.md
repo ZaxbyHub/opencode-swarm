@@ -106,7 +106,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 ### v7.0.3 — OpenCode Desktop loading-screen hang (`#704`)
 
 - **Symptom:** plugin init blocked the event loop. JavaScript executes async function bodies synchronously up to the first `await`; the recursive `readdir`/`statSync` walk in `repoGraphHook.init()` ran inline; OpenCode's `await server(...)` never resolved and Desktop displayed a frozen splash screen forever. Aggravating factors: symlink cycles in `findSourceFiles`, late `maxFiles` cap, direct `Bun.*` calls throwing under Node.
-- **Invariants established:** plugin init must be fast, bounded, and side-effect minimal. Yield to the event loop before doing any work. Use `queueMicrotask` + a watchdog (`unref`'d 30 s) for deferred init. `withTimeout` (5 s) for snapshot loads. Symlink cycles must be detected with `realpathSync`/`realpath` and a `seenRealPaths` set. `maxFiles` enforced inside the traversal loop. All `Bun.*` calls go through `src/utils/bun-compat.ts`.
+- **Invariants established:** plugin init must be fast, bounded, and side-effect minimal. Yield to the event loop before doing any work. Register detached init work in the wrapper-owned post-resolution task queue and retain a watchdog (`unref`'d 30 s) for repo-graph startup. `withTimeout` (5 s) protects snapshot loads. Symlink cycles must be detected with `realpathSync`/`realpath` and a `seenRealPaths` set. `maxFiles` is enforced inside the traversal loop. All `Bun.*` calls go through `src/utils/bun-compat.ts`.
 - **Maps to AGENTS.md:** invariants 1 (plugin init), 2 (runtime portability), 3 (subprocesses).
 
 ### Issue #1231 Phase 3 — Structural debt: delegation-gate split + Lean Turbo behavioral tests
@@ -142,11 +142,11 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 
 ### PR #1356 — `withTimeout`-bounded work is still on the critical path if you `await` it
 
-- **Context:** PR #1356 added an init-time step that materializes allowlisted bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The current form is the **correct** pattern — deferred via `queueMicrotask`, `withTimeout`-bounded, fail-open, content-aware with atomic replacement, byte/file-bounded, and confined to `.swarm/bundled-skills` (`src/index.ts`). It is cited here as an exemplar, not a regression.
-- **The lesson (recorded in the in-code comment at `src/index.ts`, ~line 381):** during development an earlier revision **`await`ed the sync inline** on the `server()`-resolution path. That version was still `withTimeout`-bounded and fail-open, yet the ~20 sequential `fsp.*` calls' real latency on a **cold Windows filesystem pushed `server()` past the `repro-704` T1 deadline** (`TIMING_DEADLINE_MS = 400` in `scripts/repro-704.mjs:42`). It was corrected to `queueMicrotask` deferral before merge; deferred, `server()` resolves in single-digit ms and the copy runs in the background. (No separate broken commit exists — the inline-await form was fixed pre-merge; the authority for this lesson is the in-code comment, not a CI artifact. Exact failing/passing millisecond figures were not recorded.)
-- **Root cause of the inline-await misstep:** treating `withTimeout` as if it makes work free. `withTimeout` is `Promise.race` against an (unref'd) timer (`src/utils/timeout.ts`) — it only protects against an *unbounded* await; it does nothing to remove the awaited work's actual latency from the `server()`-resolution path. The repo-graph scan (v7.0.3) established the deferral pattern via `queueMicrotask`; the skill sync now follows it.
+- **Context:** PR #1356 added an init-time step that materializes allowlisted bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The current form is the **correct** pattern — registered in the wrapper-owned post-resolution task queue, `withTimeout`-bounded, fail-open, content-aware with atomic replacement, byte/file-bounded, and confined to `.swarm/bundled-skills` (`src/index.ts`). It is cited here as an exemplar, not a regression.
+- **The lesson (recorded in the in-code comment near the bundled-skill registration in `src/index.ts`):** during development an earlier revision **`await`ed the sync inline** on the `server()`-resolution path. That version was still `withTimeout`-bounded and fail-open, yet the ~20 sequential `fsp.*` calls' real latency on a **cold Windows filesystem pushed `server()` past the `repro-704` T1 deadline** (`TIMING_DEADLINE_MS = 400` in `scripts/repro-704.mjs:42`). It was first corrected to `queueMicrotask` deferral before merge, then hardened after PR #1920's merge-queue smoke failure showed that a microtask scheduled inside an async initializer can start during that initializer's later awaits. The wrapper now starts the work from an unref'd timer only after `initializeOpenCodeSwarm` resolves. (No separate broken commit exists for the inline-await form — it was fixed pre-merge; the authority for that lesson is the in-code comment, not a CI artifact. Exact failing/passing millisecond figures were not recorded.)
+- **Root cause of the inline-await and microtask missteps:** treating `withTimeout` as if it makes work free, then treating `queueMicrotask` as if it waits for the enclosing async function. `withTimeout` is `Promise.race` against an (unref'd) timer (`src/utils/timeout.ts`) — it only protects against an *unbounded* await; it does nothing to remove awaited work's actual latency. A microtask runs at the next await boundary, so it can still overlap unresolved initialization. The wrapper-owned post-resolution task queue removes both hazards.
 - **Invariants established:** **Bounded ≠ free.** Decide await-vs-defer explicitly for every init step:
-  - **Defer (`queueMicrotask` + the existing `withTimeout`/`.catch`)** when the work does non-trivial I/O and **nothing downstream in `initializeOpenCodeSwarm` depends on its completion before `server()` resolves**. The deferred task starts on the next microtask tick — before any user turn — so runtime consumers (e.g. the architect reading `SKILL.md` as an LLM tool action) still observe the result; only the *latency* leaves the critical path. This is the `repoGraphHook` precedent (`src/index.ts:323`) and what the merged skill sync does (`src/index.ts:392`).
+  - **Defer via the wrapper-owned post-resolution task queue** when the work does non-trivial I/O and **nothing downstream in `initializeOpenCodeSwarm` depends on its completion before `server()` resolves**. Do not use `queueMicrotask` inside the initializer: a later `await` lets that microtask run while `server()` remains unresolved. The wrapper schedules registered tasks from an unref'd timer after the initializer resolves, before any realistic user turn. This is the `repoGraphHook` precedent and what bundled-skill sync follows.
   - **`await` (still `withTimeout`-bounded + fail-open)** only when the work is genuinely fast (<~50 ms typical) **and** must complete before a later init step — e.g. `ensureSwarmGitExcluded` (`src/index.ts:356`) must run before `.swarm/` artifacts are written.
   - **Cross-platform proof is mandatory.** Linux/macOS `repro-704` passing does **not** prove Windows; cold-FS op latency is several× higher there. The T1 400 ms assertion (`scripts/repro-704.mjs:42`) runs on the Windows runner in the `smoke` matrix (`.github/workflows/ci.yml`); the CI step's summary comment mentions the looser 10 s `BUDGET_MS` (T2/T3), but T1 is the tight bound that catches this class of regression. Green locally is necessary, not sufficient.
 - **Maps to AGENTS.md:** invariant 1 (plugin init).
@@ -205,9 +205,10 @@ I/O-heavy work with no such ordering dependency — see below.
 // `withTimeout` only bounds a HANG; an awaited copy of 20 skill dirs still adds
 // its real latency to server(). An inline-await revision of this sync (corrected
 // before PR #1356 merged) pushed server() past the 400ms repro-704 T1 deadline on
-// a cold Windows FS; deferring moves the latency off the critical path while the
-// work still completes before any user turn / runtime read.
-queueMicrotask(() => {
+// a cold Windows FS; deferring moves the latency off the critical path. Runtime
+// consumers normally observe the completed task, and command paths retain their
+// own backstops, but promise reactions are not ordered behind the timer.
+postResolutionTasks.push(() => {
   void withTimeout(
     syncBundledProjectSkillsIfMissingAsync(ctx.directory, PACKAGE_ROOT, config.quiet),
     SYNC_BUNDLED_SKILLS_TIMEOUT_MS,
@@ -220,8 +221,10 @@ queueMicrotask(() => {
 ```
 
 **Decision rule:** `await` init work only when it is fast (<~50 ms) *and* a later
-init step depends on it; otherwise defer with `queueMicrotask`. `withTimeout`
-wraps both — it bounds hangs, it does not erase latency.
+init step depends on it; otherwise register it in the wrapper-owned
+post-resolution task queue. Do not use an initializer-local `queueMicrotask` as
+a substitute. `withTimeout` wraps both paths — it bounds hangs, it does not erase
+latency.
 
 **Verification:**
 

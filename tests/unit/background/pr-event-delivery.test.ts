@@ -122,9 +122,13 @@ describe('wake and queue behavior', () => {
 		expect(promptAsync).toHaveBeenCalledTimes(1);
 		const args = promptAsync.mock.calls[0][0] as {
 			path: { id: string };
-			body: { parts: Array<{ type: string; text: string }> };
+			body: {
+				messageID: string;
+				parts: Array<{ type: string; text: string }>;
+			};
 		};
 		expect(args.path.id).toBe('sess1');
+		expect(args.body.messageID).toMatch(/^msg_swarm_wake_/);
 		expect(args.body.parts).toHaveLength(1);
 		expect(args.body.parts[0].type).toBe('text');
 		expect(args.body.parts[0].text).toContain('<pr-activity');

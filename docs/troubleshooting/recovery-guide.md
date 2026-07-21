@@ -174,7 +174,7 @@ re-dispatch a narrower lane or mark the affected coverage UNVERIFIED.
 3. Removes the orphaned worktree directory and its associated git branch (`sw-lane-<sessionId>/*`)
 4. Writes an advisory to `.swarm/advisories/init-orphan-recovery.json` describing what was cleaned up
 
-The orphan recovery runs via `queueMicrotask` during plugin initialization, so it does not block the plugin from loading.
+The orphan recovery is registered during plugin initialization and started from the wrapper-owned post-resolution queue, so it cannot block the plugin from loading.
 
 **Files cleaned up:**
 - `.swarm-worktrees/<sessionId>/` directory

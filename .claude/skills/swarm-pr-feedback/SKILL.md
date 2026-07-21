@@ -15,7 +15,7 @@ Read and follow `../../../.opencode/skills/swarm-pr-feedback/SKILL.md` as the ca
 ## Claude Code Execution Notes
 
 - **Batch-collect all CI failures before proposing any fix** (Issue #1746). On GitHub, run `gh pr checks <n> --json name,bucket,state,link`, filter to `bucket == "fail" || bucket == "cancel"`, then fetch each failed log with `gh run view <run-id> --log-failed`. On other hosts, use the host-equivalent API. Build the complete failure ledger before triaging or proposing fixes — do not iterate check-by-check through push cycles.
-- Check out the PR branch locally before verifying or fixing anything. Fetch the head ref if absent, confirm the working tree is clean, then verify against the PR branch rather than the base branch.
+- Check out the PR branch locally before dispatching feedback lanes or verifying/fixing anything. Fetch the head ref if absent, confirm the tree is clean, prove full HEAD equals the authoritative PR head SHA, and prove the branch tracks the intended PR head remote/branch. `gh pr checkout` may use only the PR number/URL plus optional `--repo` or `--branch`; never `--force`, `--recurse-submodules`, or detached checkout.
 - Build the complete feedback ledger before editing: pasted feedback, GitHub comments/threads, requested changes, CI/check failures, merge conflicts, stale branch state, PR body claims, linked issues, commits, and any validated `swarm-pr-review` handoff artifact.
 - Treat every feedback item as a claim until source evidence, tests, logs, or PR metadata prove or disprove it.
 - Preserve original finding IDs and reviewer/critic provenance from review handoff artifacts.
@@ -30,7 +30,8 @@ Read and follow `../../../.opencode/skills/swarm-pr-feedback/SKILL.md` as the ca
 - After local gates pass, create the reviewed commit with one standalone `git commit`, then call `complete_pr_workflow` once. It fails closed unless the index/worktree are clean and HEAD is a non-merge direct child whose sole parent is the immutable intake head; otherwise it binds that commit to the intended upstream remote-tracking ref and arms publication. Push only with the canonical single-ref form `git push <bound-remote> <bound-commit>:refs/heads/<bound-branch>`; force flags, aliases, wrappers, fetch-based local-ref forgery, extra refspecs, and other remote writes fail closed. Call `complete_pr_workflow` a second time immediately after read-only verification of both the actual remote ref and its local tracking ref proves they point to that exact commit; only then perform explicitly authorized PR comment/body/thread writes.
 - Emit the user-facing final response only after the second completion call
   clears the durable gate. Until then, architect response text is mechanically
-  replaced and an idle parent session is resumed rather than allowed to stop.
+  replaced and an idle parent session is normally resumed. A user interruption
+  pauses automatic wakes until a later explicit user turn.
 - If the verification bind is genuinely unreachable (PR head cannot be
   fetched/checked out, or a compound `git fetch … && git checkout …` keeps
   being rejected — run them as TWO separate standalone commands first), call

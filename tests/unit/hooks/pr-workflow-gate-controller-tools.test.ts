@@ -116,6 +116,6 @@ describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
 			enforcePrWorkflowToolBefore(directory, 'stuck-review-2', 'bash', {
 				command: 'git fetch origin && git checkout pr-431-head',
 			}),
-		).rejects.toThrow(/read-only and fail-closed/i);
+		).rejects.toThrow(/git switch --detach <full_pr_head_sha>/i);
 	});
 });

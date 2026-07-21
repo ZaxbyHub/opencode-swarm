@@ -10,10 +10,10 @@ box — no manual `/swarm` command and no session restart required.
   materialized privately under `.swarm/bundled-skills/` during plugin initialization via a new
   bounded, fail-open async sync (`syncBundledProjectSkillsIfMissingAsync`).
   Per AGENTS.md invariant 1 / issue #704 the sync is **deferred** off the
-  `server()`-resolution path via `queueMicrotask` (not `await`ed inline) and
+  `server()`-resolution path via the wrapper-owned post-resolution queue and
   bounded by `withTimeout`, so plugin init stays fast even on cold Windows
-  filesystems while the sync completes in the background before the architect
-  reads any `SKILL.md` at runtime.
+  filesystems. The sync runs in the background, and the command path remains a
+  backstop if an unusually early runtime read races it.
 - Previously these files were copied only as a side effect of a subset of
   `/swarm` mode commands, so a fresh project's architect hit missing skill files
   on its first auto-entered mode (e.g. SPECIFY for a new project) and a weaker
@@ -46,7 +46,7 @@ No breaking changes. All changes are additive:
 
 - The fix removes the restart requirement for the architect runtime-read path
   (the architect reads the materialized `SKILL.md` via its `read` tool). The sync
-  is dispatched at plugin init on the next microtask and runs in the background;
+  is registered at plugin init, starts post-resolution, and runs in the background;
   because the architect cannot read a `SKILL.md` until the user sends a turn
   (seconds later), the deferred sync has completed by then, and the command-path
   sync remains a backstop. Whether OpenCode's own native skill-discovery picks up

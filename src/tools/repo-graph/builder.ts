@@ -50,12 +50,13 @@ import {
 } from './validation';
 
 /**
- * _internals DI seam for safeRealpathSync.
- * Defaults to the real implementation. Tests can override this to inject
- * mock behavior without calling mock.module(...) which leaks across test files
- * in Bun's shared test-runner process.
+ * _internals DI seam for the walk clock and graph helpers.
+ * Defaults to the real implementations. Tests can override these to inject
+ * deterministic behavior without calling mock.module(...) which leaks across
+ * test files in Bun's shared test-runner process.
  */
 export const _internals: {
+	now: () => number;
 	safeRealpathSync: typeof safeRealpathSync;
 	extractTSSymbols: typeof extractTSSymbols;
 	extractPythonSymbols: typeof extractPythonSymbols;
@@ -67,6 +68,7 @@ export const _internals: {
 	computeUsedSymbols: typeof computeUsedSymbols;
 	extractFileSymbols: typeof extractFileSymbols;
 } = {
+	now: Date.now,
 	safeRealpathSync,
 	extractTSSymbols,
 	extractPythonSymbols,
@@ -131,6 +133,7 @@ const SUPPORTED_EXTENSIONS = new Set(
 const DEFAULT_WALK_FILE_CAP = 10000;
 const DEFAULT_WALK_BUDGET_MS = 5000;
 const ASYNC_WALK_YIELD_INTERVAL = 200;
+const ASYNC_SCAN_YIELD_INTERVAL = 16;
 const MAX_DIAGNOSTIC_ENTRIES = 200;
 
 /**
@@ -1274,7 +1277,7 @@ interface WalkContext {
 
 function isWalkBudgetExceeded(ctx: WalkContext): boolean {
 	if (ctx.abortReason !== undefined) return true;
-	if (Date.now() - ctx.startedAt > ctx.walkBudgetMs) {
+	if (_internals.now() - ctx.startedAt > ctx.walkBudgetMs) {
 		ctx.abortReason = 'budget';
 		return true;
 	}
@@ -1318,7 +1321,7 @@ function findSourceFiles(
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
-		startedAt: Date.now(),
+		startedAt: _internals.now(),
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
@@ -1409,7 +1412,7 @@ async function findSourceFilesAsync(
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
-		startedAt: Date.now(),
+		startedAt: _internals.now(),
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
@@ -1691,7 +1694,7 @@ export async function scanFileAsync(
 	let fileStats: fsSync.Stats;
 
 	try {
-		fileStats = fsSync.statSync(filePath);
+		fileStats = await fsPromises.stat(filePath);
 		if (fileStats.size > maxFileSize) {
 			return {
 				node: null,
@@ -1700,7 +1703,7 @@ export async function scanFileAsync(
 				diagnostics: { oversizedFiles: [toModuleName(filePath, absoluteRoot)] },
 			};
 		}
-		content = fsSync.readFileSync(filePath, 'utf-8');
+		content = await fsPromises.readFile(filePath, 'utf-8');
 	} catch {
 		return {
 			node: null,
@@ -2306,8 +2309,9 @@ export async function buildWorkspaceGraphAsync(
 
 	// Edge dedup tracked in a loop-local Set (O(1)); nodes inserted via
 	// appendNodeFast — metadata is computed once below. Keeps construction O(N)
-	// on large repos so the deferred startup scan no longer stalls the event
-	// loop for tens of seconds (issue #1144).
+	// on large repos. Async file reads yield naturally, and the smaller explicit
+	// scan interval bounds event-loop monopolization even when symbol extraction
+	// or its fail-open fallback resolves synchronously (issues #704 and #1144).
 	const seenEdges = new Set<string>();
 	const seenSymbolEdges = new Set<string>();
 	const allSymbolEdges: SymbolEdge[] = [];
@@ -2357,7 +2361,7 @@ export async function buildWorkspaceGraphAsync(
 			stats.skippedFiles++;
 		}
 		processedSinceYield++;
-		if (processedSinceYield % ASYNC_WALK_YIELD_INTERVAL === 0) {
+		if (processedSinceYield % ASYNC_SCAN_YIELD_INTERVAL === 0) {
 			await yieldToEventLoop();
 		}
 	}

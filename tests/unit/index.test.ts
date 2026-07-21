@@ -2,10 +2,22 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import OpenCodeSwarm, { capSessionMap } from '../../src/index';
+import OpenCodeSwarm, {
+	capSessionMap,
+	overrideIndexInternalsForTest,
+	schedulePostResolutionTasksForTest,
+} from '../../src/index';
+
+type IndexInternalsOverrides = Parameters<
+	typeof overrideIndexInternalsForTest
+>[0];
+type RepoGraphBuilderFactory = NonNullable<
+	IndexInternalsOverrides['createRepoGraphBuilderHook']
+>;
 
 describe('OpenCodeSwarm Plugin Registration', () => {
 	let tempDir: string;
+	let restoreIndexInternals = () => {};
 
 	const mockPluginInput = {
 		client: {} as any,
@@ -24,6 +36,8 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 	});
 
 	afterEach(async () => {
+		restoreIndexInternals();
+		restoreIndexInternals = () => {};
 		// Clean up temp directory
 		try {
 			await rm(tempDir, { recursive: true, force: true });
@@ -55,6 +69,85 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		expect(result.tool.doc_extract).toBeDefined();
 		expect(typeof result.tool.doc_scan.execute).toBe('function');
 		expect(typeof result.tool.doc_extract.execute).toBe('function');
+	});
+
+	test('5. server settles before deferred repo-graph startup begins (issue #704)', async () => {
+		const order: string[] = [];
+		let scheduledTasks: readonly (() => void)[] = [];
+		let markScanStarted!: () => void;
+		const scanStarted = new Promise<void>((resolve) => {
+			markScanStarted = resolve;
+		});
+		const createRepoGraphBuilderHook = (() => ({
+			init: async () => {
+				order.push('repo-graph-started');
+				markScanStarted();
+			},
+			toolAfter: async () => {},
+		})) as RepoGraphBuilderFactory;
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			createRepoGraphBuilderHook,
+			schedulePostResolutionTasks: (tasks) => {
+				scheduledTasks = [...tasks];
+			},
+		});
+
+		// Previous code queued init from inside initializeOpenCodeSwarm before its
+		// final awaits. The fake scan therefore started before this promise settled.
+		const serverPromise = OpenCodeSwarm.server(mockPluginInput);
+		void serverPromise.then(() => order.push('server-resolved'));
+		await serverPromise;
+		expect(order).toEqual(['server-resolved']);
+		expect(scheduledTasks.length).toBeGreaterThan(0);
+
+		scheduledTasks[0]?.();
+		await scanStarted;
+		expect(order).toEqual(['server-resolved', 'repo-graph-started']);
+	});
+
+	test('6. post-resolution scheduler launches tasks from a later timer turn', async () => {
+		const order = ['caller'];
+		let markTaskStarted!: () => void;
+		const taskStarted = new Promise<void>((resolve) => {
+			markTaskStarted = resolve;
+		});
+
+		schedulePostResolutionTasksForTest([
+			() => {
+				order.push('task');
+				markTaskStarted();
+			},
+		]);
+		expect(order).toEqual(['caller']);
+
+		await taskStarted;
+		expect(order).toEqual(['caller', 'task']);
+	});
+
+	test('7. post-resolution scheduler isolates synchronous and asynchronous task failures', async () => {
+		const order: string[] = [];
+		let markFinalTaskStarted!: () => void;
+		const finalTaskStarted = new Promise<void>((resolve) => {
+			markFinalTaskStarted = resolve;
+		});
+
+		schedulePostResolutionTasksForTest([
+			() => {
+				order.push('sync-failure');
+				throw new Error('expected synchronous failure');
+			},
+			async () => {
+				order.push('async-failure');
+				throw new Error('expected asynchronous failure');
+			},
+			() => {
+				order.push('final-task');
+				markFinalTaskStarted();
+			},
+		]);
+
+		await finalTaskStarted;
+		expect(order).toEqual(['sync-failure', 'async-failure', 'final-task']);
 	});
 });
 

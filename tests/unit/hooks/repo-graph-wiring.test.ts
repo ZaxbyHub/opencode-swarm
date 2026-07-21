@@ -404,7 +404,7 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 			expect(typeof hook.toolAfter).toBe('function');
 		});
 
-		test('repoGraphHook is created and initialized via deferred queueMicrotask in src/index.ts', () => {
+		test('repoGraphHook is registered with the wrapper-owned post-resolution queue', () => {
 			const indexPath = path.resolve(__dirname, '../../../src/index.ts');
 			const sourceCode = readFileSync(indexPath, 'utf-8');
 			const lines = sourceCode.split('\n');
@@ -418,8 +418,9 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 			);
 			expect(createLine).not.toBe(-1);
 
-			const initWindow = lines.slice(createLine, createLine + 15).join('\n');
-			expect(initWindow).toContain('queueMicrotask');
+			const initWindow = lines.slice(createLine, createLine + 25).join('\n');
+			expect(initWindow).toContain('postResolutionTasks.push');
+			expect(initWindow).not.toContain('queueMicrotask');
 			expect(initWindow).toMatch(/repoGraphHook\s*\.\s*init\s*\(/);
 		});
 	});

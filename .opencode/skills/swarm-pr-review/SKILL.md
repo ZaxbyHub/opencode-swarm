@@ -134,9 +134,26 @@ If scope cannot be determined, review the narrowest safe scope available and sta
 
 ### Pre-flight git ref availability
 
-Before launching explorers (Phase 3), confirm the PR branch refs are available:
-- If `head_ref` is a remote branch that is not checked out locally, fetch it via `git fetch origin <head_ref>`
-- **Check out the head branch locally.** Explorer agents read files from the working tree, not from git history — passing the commit range in the delegation prompt is not sufficient because `Read` / `Glob` / `Grep` tools operate on the filesystem. Without a checkout, explorers silently read the base branch's version of changed files and produce invalid candidates. **Before checking out, verify the working tree is clean (`git status --porcelain`). If tracked changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty tracked path. It creates an auditable, path-scoped stash and returns its recovery command. Do not issue `git stash` through shell. The controller never stashes untracked files; move or remove those manually, or abort the checkout.**
+Before launching explorers (Phase 3), perform this exact standalone sequence:
+
+1. Resolve and retain the authoritative full `pr_head_sha` from PR metadata.
+2. Verify the working tree is clean with `git status --porcelain`. If tracked
+   changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
+   tracked path. Do not issue `git stash` through shell. The controller never
+   stashes untracked files; move or remove those manually, or abort.
+3. Fetch the PR head as one standalone command, for example
+   `git fetch origin refs/pull/<N>/head`. Do not compose fetch and checkout.
+4. Prove the full commit exists locally with
+   `git cat-file -e <full_pr_head_sha>^{commit}`.
+5. Check out the exact PR filesystem with
+   `git switch --detach <full_pr_head_sha>`. Do not use `--track FETCH_HEAD`:
+   `FETCH_HEAD` is not a remote-tracking branch.
+6. Confirm `git rev-parse HEAD` equals the full `pr_head_sha`, bind that exact
+   head through the first PR-review controller call, and finish this before dispatching explorer lanes.
+
+Explorer agents read files from the working tree, not from git history. Passing
+the commit range in a prompt cannot substitute for this checkout because
+`Read` / `Glob` / `Grep` operate on the filesystem.
 - Explicitly pass the verified merge-base range (`base_sha...pr_head_sha`) in every explorer delegation so explorers inspect exactly the controller-bound PR diff. Include `base_ref` only as the live ref used to recompute `base_sha`; do not substitute a two-dot branch-tip range.
 
 If refs cannot be fetched or checked out, state the limitation in the context pack.
@@ -1405,7 +1422,9 @@ the same exact
 `pr_head_sha`. The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime replaces architect final-response
-text with a mechanical blocked notice and re-wakes an idle parent session. Only
+text with a mechanical blocked notice and re-wakes an idle parent session. A
+user interruption pauses every automatic wake path until a later explicit user
+turn settles; the durable gate remains available to continue or abort. Only
 emit the final report after the completion tool confirms that the gate cleared.
 
 ## Aborting an unrecoverable review
@@ -1419,9 +1438,11 @@ the merge-base bind can never verify. In that state the response gate
 suspends further auto-resumes after a small number of consecutive
 unproductive wakes, and the only exits are:
 
-1. **Diagnose and retry as two separate standalone commands.** First run
-   `git fetch origin refs/pull/<N>/head:pr-<N>-head` (single command), then
-   `git checkout pr-<N>-head` (single command). Then recompute the exact
+1. **Diagnose and retry the canonical standalone sequence.** Run
+   `git fetch origin refs/pull/<N>/head`, verify
+   `git cat-file -e <full_pr_head_sha>^{commit}`, then run
+   `git switch --detach <full_pr_head_sha>`. Do not use `--track FETCH_HEAD`.
+   Confirm `git rev-parse HEAD` equals the authoritative PR head, then recompute the exact
    merge base with `git merge-base -- <base_ref> <pr_head_sha>` (single
    command) and retry the `swarm-pr-review:base` dispatch with the exact
    `pr_head_sha`, `base_sha`, and `base_ref`.

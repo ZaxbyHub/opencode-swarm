@@ -344,8 +344,9 @@ async function performBundledProjectSkillSyncAsync(
  * tree so architect MODE dispatch never collides with repository-owned skills
  * that happen to use the same slug.
  *
- * Async, bounded, and fail-open: safe to `await withTimeout(...)` on the
- * plugin-init path (AGENTS.md Invariant 1). Runs at plugin init so the
+ * Async, bounded, and fail-open: register `withTimeout(...)` in the
+ * wrapper-owned post-resolution task queue on the plugin-init path
+ * (AGENTS.md Invariant 1). Runs at plugin init so the
  * architect's very first auto-entered mode (e.g. SPECIFY on a fresh project) can
  * load its SKILL.md without a manual `/swarm` command or session restart; the
  * command path calls it again as a backstop for pre-existing projects.
