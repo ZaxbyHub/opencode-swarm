@@ -568,6 +568,19 @@ function buildConfigWithMeta(
 	//     VALUE (wrong type). Drop the smallest recoverable unit (leaf field
 	//     → parent section) so valid sections survive. This is the last
 	//     targeted recovery before bare guardrails defaults.
+	//
+	//     SECURITY: skip recovery when the raw config explicitly sets
+	//     guardrails.enabled: false. In that case, fall through to step 8
+	//     (guardrails defaults) so the user's non-guardrails values are
+	//     NOT preserved alongside a forced guardrails override — preventing
+	//     the "Double-disable" attack vector (adversarial test v6.1.2 AV8).
+	const rawGuardrailsDisabled =
+		mergedRaw.guardrails &&
+		typeof mergedRaw.guardrails === 'object' &&
+		!Array.isArray(mergedRaw.guardrails) &&
+		(mergedRaw.guardrails as Record<string, unknown>).enabled === false;
+
+	if (!rawGuardrailsDisabled) {
 	const valueRecovery = sanitizeMalformedValues(PluginConfigSchema, mergedRaw);
 	if (valueRecovery.recoveryWarnings.length > 0) {
 		const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
@@ -598,6 +611,8 @@ function buildConfigWithMeta(
 			};
 		}
 	}
+
+	} // end if (!rawGuardrailsDisabled)
 
 	// 8. Guardrails defaults: nothing was recoverable.
 	const offending = stripUnrecognizedKeys(mergedRaw, firstResult.error).removed;
