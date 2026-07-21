@@ -29,6 +29,14 @@
 #     reviewer's independent re-derivation during issue #1737 review.
 #   - `coproc` — coprocess keyword, added in bash 4.0.
 #   - `mapfile` / `readarray` — builtins added in bash 4.0 (synonyms).
+#   - Empty-array `"${arr[@]}"` expansion under `set -u` when the array was
+#     initialized empty (`arr=()`) earlier in the file. Under bash 3.2 this
+#     aborts with "unbound variable"; fixed in bash 4.4 (Debian #529627,
+#     ShellCheck #2387). Issue #1922 PRR-001/002/011 — this exact class killed
+#     macOS CI for the Check 4 ratchet. The fix is the `${arr[@]+"${arr[@]}"}`
+#     alternate-value expansion. The detector only flags arrays with a visible
+#     `name=()` empty-init earlier in the file (not arrays that are always
+#     populated by construction — those cannot trip the bug).
 # NOT flagged: hex escapes like `\x27`. bash 3.2 DOES support `\xHH` inside
 # `$'...'` ANSI-C-quoted strings (that support predates 4.0) — the actual
 # check-invariants.sh incident was about `grep -P`'s `\x27`, not bash's own
@@ -84,6 +92,40 @@ while IFS= read -r file; do
         echo "ERROR: $file uses \`mapfile\`/\`readarray\` (bash 4+ builtins) — not supported on macOS's bash 3.2."
         echo "       Use a while-read loop instead (see scripts/check-invariants.sh for the established pattern)."
         file_has_violation=1
+    fi
+
+    # Empty-array expansion under `set -u` (issue #1922 PRR-001/002/011).
+    # Under bash 3.2 + `set -u`, `"${arr[@]}"` over a declared-but-empty
+    # array aborts with "unbound variable" (Debian #529627, ShellCheck #2387).
+    # Heuristic: scan only scripts that use `set -.*u`, and within those,
+    # for each `name=()` empty-init declaration, flag any later bare
+    # `"${name[@]}"` expansion NOT guarded by the `${name[@]+...}` form.
+    # This avoids false-positives on arrays always populated by construction
+    # (e.g. `PAIRS=(a b c)` then `for x in "${PAIRS[@]}"`).
+    if echo "$code_only" | grep -qE '(^|[[:space:]])set[[:space:]]+-[^-]*u|(^|[[:space:]])set[[:space:]]+-[^-]*[eu][^-]*u'; then
+        # Find empty-init array names: lines like `name=()` or `local name=()`.
+        # Use grep -oE to extract the name; bash identifier charset is [A-Za-z_][A-Za-z0-9_]*.
+        empty_init_names="$(echo "$code_only" | grep -E '^[[:space:]]*(local[[:space:]]+|readonly[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=\([[:space:]]*\)' | sed -E 's/^[[:space:]]*(local[[:space:]]+|readonly[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/' | sort -u || true)"
+        if [ -n "$empty_init_names" ]; then
+            while IFS= read -r arr_name; do
+                [ -n "$arr_name" ] || continue
+                # Match a BARE `"${arr_name[@]}"` (not the guarded `${arr_name[@]+"${arr_name[@]}"}`).
+                # The negative-lookbehind on `${arr_name[@]+` is approximated by
+                # searching for the bare pattern and then excluding lines that
+                # contain the guarded pattern.
+                bare_hits="$(echo "$code_only" | grep -F "\"\${${arr_name}[@]}\"" || true)"
+                guarded_hits="$(echo "$code_only" | grep -F "\${${arr_name}[@]+\"\${${arr_name}[@]}\"}" || true)"
+                # Remove any line that appears in guarded_hits from bare_hits.
+                # (Line-by-line set difference via grep -Fxv.)
+                unguarded="$(echo "$bare_hits" | grep -Fxvf <(printf '%s\n' "$guarded_hits") || true)"
+                if [ -n "$unguarded" ]; then
+                    echo "ERROR: $file expands \"\${${arr_name}[@]}\" under \`set -u\` but ${arr_name}=() is initialized empty somewhere in the file."
+                    echo "       Under bash 3.2 (macOS) this aborts with 'unbound variable' when ${arr_name} is empty (fixed in bash 4.4)."
+                    echo "       Use the alternate-value form: \${${arr_name}[@]+\"\${${arr_name}[@]}\"}"
+                    file_has_violation=1
+                fi
+            done <<< "$empty_init_names"
+        fi
     fi
 
     if [ "$file_has_violation" -eq 1 ]; then

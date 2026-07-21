@@ -83,12 +83,16 @@ while IFS= read -r file; do
             mods+=("$mod")
         fi
     done < <(grep -E "mock\.module\(['\"]node:" "$file" 2>/dev/null || true)
-    # Remove duplicates and sort
+    # Remove duplicates and sort.
+    # `${arr[@]+"${arr[@]}"}` is the bash-3.2-safe empty-array expansion
+    # (issue #1922 PRR-011): mods is initialized empty at line 78 and could
+    # be empty for files that have no node: mocks, which would trip `set -u`
+    # on macOS bash 3.2.
     if [ ${#mods[@]} -gt 0 ]; then
-        mods=($(printf "%s\n" "${mods[@]}" | sort -u))
+        mods=($(printf "%s\n" ${mods[@]+"${mods[@]}"} | sort -u))
     fi
 
-    for mod in "${mods[@]}"; do
+    for mod in ${mods[@]+"${mods[@]}"}; do
         # Convert snake_case to camelCase and handle subpaths.
         # First letter is uppercased; subsequent letters after _ or / are also uppercased.
         # Examples: fs -> Fs, child_process -> ChildProcess, fs/promises -> FsPromises

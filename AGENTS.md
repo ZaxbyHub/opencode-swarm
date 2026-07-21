@@ -94,6 +94,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
     readFileSync: mockFn, // override only what you need
   }));
   ```
+- **`mock.module` allowlist growth ratchet (issue #1666):** `scripts/mock-allowlist.txt` is closed against unapproved growth by `scripts/check-invariants.sh` Check 4. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer `_internals` DI for new code — the allowlist is a legacy-pattern debt surface, not a way to bypass the seam convention.
 - Use `os.tmpdir()` + `path.join(...)` for temp paths. No hardcoded `/tmp` or `C:\` strings.
 - `mkdtempSync` must be wrapped in `realpathSync` if the result is `chdir`'d on macOS.
 

@@ -143,4 +143,31 @@ describe('generate-mock-allowlist.sh', () => {
 
 		expect(normalize(firstRun)).toBe(normalize(secondRun));
 	});
+
+	test('issue #1666: preserves # APPROVED-NEW markers across regeneration', () => {
+		if (isWindows) return;
+		// The live allowlist has no markers today (none have ever been added),
+		// so this test seeds a synthetic one against an entry that already
+		// exists in the repo (src/agents/critic — confirmed at the head of
+		// the allowlist's `# --- src ---` section). The generator must
+		// re-emit the marker immediately above the entry after regen.
+		const markerLine = '# APPROVED-NEW: src/agents/critic';
+		fs.appendFileSync(ALLOWLIST_PATH, `\n${markerLine}\n`);
+		try {
+			runGenerateAllowlist(false);
+			const content = fs.readFileSync(ALLOWLIST_PATH, 'utf-8');
+			expect(content).toContain(markerLine);
+			// The marker must appear immediately above the entry it approves.
+			const lines = content.split('\n');
+			const markerIdx = lines.indexOf(markerLine);
+			expect(markerIdx).toBeGreaterThan(-1);
+			expect(lines[markerIdx + 1]).toBe('src/agents/critic');
+		} finally {
+			// afterEach() also restores via git checkout; this is belt-and-braces.
+			spawnSync('git', ['checkout', '--', 'scripts/mock-allowlist.txt'], {
+				cwd: REPO_ROOT,
+				stdio: 'pipe',
+			});
+		}
+	});
 });
