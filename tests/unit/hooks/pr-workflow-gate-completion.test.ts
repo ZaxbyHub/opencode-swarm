@@ -39,7 +39,6 @@ const originalResolveIsExactSingleChildCommit =
 	_test_exports.resolveIsExactSingleChildCommit;
 const originalResolveRevision = _test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveRemoteRefs = _test_exports.resolveRemoteRefsContainingHead;
-
 beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-completion-')),
@@ -58,7 +57,8 @@ beforeEach(() => {
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolveIsExactSingleChildCommit = () => true;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
-	_test_exports.resolveRemoteRefsContainingHead = () => [];
+	_test_exports.resolveRemoteRefsContainingHead = (_directory, headSha) =>
+		headSha === HEAD_SHA ? ['refs/remotes/origin/pr-head'] : [];
 });
 
 afterEach(async () => {

@@ -17,6 +17,8 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   inspect metadata, and check out the PR head after verifying a clean working
   tree, but do not fix code, resolve conflicts, commit, push, rebase, or reset
   from this mode.
+- Before dispatching explorer lanes, fetch the PR head and verify `git cat-file -e
+  <full_pr_head_sha>^{commit}`; run `git switch --detach <full_pr_head_sha>`, confirm and bind that exact HEAD. Do not use `--track FETCH_HEAD`.
 - Ingest every review signal before explorer lanes: PR comments,
   review summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
@@ -50,9 +52,8 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   diff/path heuristics may focus prompts but cannot produce a `NO-MATCH` waiver.
 - A newer reviewer batch invalidates all older critic evidence. Re-run the
   critic from the latest complete reviewer inventory before completion.
-- Call `complete_pr_workflow` before the user-facing final response. While the
-  durable gate remains active, architect response text is mechanically replaced
-  and an idle parent session is resumed rather than allowed to stop early.
+- Call `complete_pr_workflow` before the final response. While the gate remains
+  active it replaces the response and resumes idle work; a user interruption pauses automatic wakes until a later explicit user turn.
 - If actionable findings remain, write the canonical handoff artifact and ask
   whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
   Carry validated findings forward with their original IDs and provenance.

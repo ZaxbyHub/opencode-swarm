@@ -27,6 +27,10 @@ const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveCurrentUpstreamPushTarget =
+	_test_exports.resolveCurrentUpstreamPushTarget;
+const originalResolveRemoteRefsContainingHead =
+	_test_exports.resolveRemoteRefsContainingHead;
 
 beforeEach(() => {
 	tempDir = realpathSync(
@@ -36,6 +40,14 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	_test_exports.resolveCurrentUpstreamPushTarget = () => ({
+		remoteName: 'origin',
+		remoteBranchRef: 'refs/heads/pr-head',
+		remoteTrackingRef: 'refs/remotes/origin/pr-head',
+	});
+	_test_exports.resolveRemoteRefsContainingHead = () => [
+		'refs/remotes/origin/pr-head',
+	];
 });
 
 afterEach(async () => {
@@ -43,6 +55,10 @@ afterEach(async () => {
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveCurrentUpstreamPushTarget =
+		originalResolveCurrentUpstreamPushTarget;
+	_test_exports.resolveRemoteRefsContainingHead =
+		originalResolveRemoteRefsContainingHead;
 	await fs.rm(tempDir, { recursive: true, force: true });
 });
 

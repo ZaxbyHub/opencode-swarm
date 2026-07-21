@@ -18,6 +18,10 @@ const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
+const originalResolveCurrentUpstreamPushTarget =
+	_test_exports.resolveCurrentUpstreamPushTarget;
+const originalResolveRemoteRefsContainingHead =
+	_test_exports.resolveRemoteRefsContainingHead;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -27,6 +31,14 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => 'abc123';
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => 'revision-1';
+	_test_exports.resolveCurrentUpstreamPushTarget = () => ({
+		remoteName: 'origin',
+		remoteBranchRef: 'refs/heads/pr-branch',
+		remoteTrackingRef: 'refs/remotes/origin/pr-branch',
+	});
+	_test_exports.resolveRemoteRefsContainingHead = () => [
+		'refs/remotes/origin/pr-branch',
+	];
 });
 
 afterEach(async () => {
@@ -34,6 +46,10 @@ afterEach(async () => {
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
+	_test_exports.resolveCurrentUpstreamPushTarget =
+		originalResolveCurrentUpstreamPushTarget;
+	_test_exports.resolveRemoteRefsContainingHead =
+		originalResolveRemoteRefsContainingHead;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -123,6 +139,7 @@ describe('PR feedback shell mutation gate', () => {
 			'powershell -Command Set-Content src/x.txt x',
 			'git checkout -b bypass',
 			'git switch -c bypass',
+			'git switch --detach abc123',
 			'git config user.name bypass',
 			'git update-index --assume-unchanged src/index.ts',
 			'git diff --output=changed.patch',
@@ -130,6 +147,7 @@ describe('PR feedback shell mutation gate', () => {
 			'git grep --open-files-in-pager=fix.sh needle',
 			'rg --pre scripts/fix.py needle',
 			'gh api repos/o/r/issues/1 --method=PATCH -f title=changed',
+			'gh pr checkout 42 --detach',
 			'rg needle src && node scripts/fix.js',
 			'git ci -m bypass',
 			'git -c alias.ci=commit ci -m bypass',
@@ -155,7 +173,6 @@ describe('PR feedback shell mutation gate', () => {
 			'git remote -v',
 			'git config --show-origin --get remote.origin.url',
 			'git checkout main',
-			'git switch --detach abc123',
 			'git switch -c pr-local --track origin/pr-branch',
 			'git branch --set-upstream-to=origin/pr-branch pr-local',
 			'git fetch origin pull/42/head',
@@ -274,9 +291,10 @@ describe('PR feedback shell mutation gate', () => {
 
 	test('blocks direct explorer and validation Task bypasses in PR review', async () => {
 		await activatePrWorkflow(directory, 'review-direct', 'PR_REVIEW');
+		_test_exports.resolveCurrentGitHead = () => 'a'.repeat(40);
 		await expect(
 			enforcePrWorkflowToolBefore(directory, 'review-direct', 'shell', {
-				command: 'git checkout main',
+				command: `git switch --detach ${'a'.repeat(40)}`,
 			}),
 		).resolves.toBeUndefined();
 		for (const subagentType of [
@@ -296,7 +314,7 @@ describe('PR feedback shell mutation gate', () => {
 			).rejects.toThrow('structured dispatch_lanes_async');
 		}
 
-		await bindPrWorkflowHead(directory, 'review-direct', 'abc123');
+		await bindPrWorkflowHead(directory, 'review-direct', 'a'.repeat(40));
 		await expect(
 			enforcePrWorkflowToolBefore(directory, 'review-direct', 'shell', {
 				command: 'git status --short',

@@ -665,7 +665,10 @@ export async function bindPrWorkflowHead(
 	const state = await requireAnyActiveState(directory, sessionID);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
 	assertCurrentCheckoutHead(directory, normalizedHead);
-	if (state.mode === 'PR_REVIEW') assertPrReviewCleanCheckout(directory);
+	if (!state.prHeadSha) assertPrReviewCleanCheckout(directory, state.mode);
+	if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
+		assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+	}
 	if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
 		throw new Error(
 			`BLOCKED: active ${state.mode} workflow is bound to PR head "${state.prHeadSha}"; received "${normalizedHead}"`,
@@ -737,10 +740,34 @@ export function assertCurrentCheckoutHead(
 }
 
 /** Prove that every PR-review lane reads the immutable checked-out PR tree. */
-export function assertPrReviewCleanCheckout(directory: string): void {
+export function assertPrReviewCleanCheckout(
+	directory: string,
+	mode: PrWorkflowMode = 'PR_REVIEW',
+): void {
 	if (_test_exports.resolveIsWorkingTreeClean(directory) !== true) {
 		throw new Error(
-			'BLOCKED: PR_REVIEW requires a clean index and working tree at the exact PR head',
+			`BLOCKED: ${mode} requires a clean index and working tree at the exact PR head`,
+		);
+	}
+}
+
+function assertPrFeedbackTrackingCheckout(
+	directory: string,
+	prHeadSha: string,
+): void {
+	const upstream = _test_exports.resolveCurrentUpstreamPushTarget(directory);
+	if (!upstream) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK requires a current local branch bound to an exact remote name, remote branch ref, and remote-tracking ref before the first head bind; detached or non-tracking checkouts are not allowed',
+		);
+	}
+	const matchingRemoteRefs = _test_exports.resolveRemoteRefsContainingHead(
+		directory,
+		prHeadSha,
+	);
+	if (!matchingRemoteRefs?.includes(upstream.remoteTrackingRef)) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK upstream "${upstream.remoteTrackingRef}" must point to the exact intake PR head "${prHeadSha}" before the first head bind`,
 		);
 	}
 }
@@ -2128,6 +2155,11 @@ export async function enforcePrWorkflowToolBefore(
 		(normalizedTool === 'bash' || normalizedTool === 'shell') &&
 		(/\bgit\b(?:(?![;&|]).){0,200}\b(?:checkout|switch)\b/i.test(command) ||
 			/\bgh\s+pr\s+checkout\b/i.test(command));
+	const isCanonicalReviewCheckout =
+		/^git\s+switch\s+--detach\s+[0-9a-f]{40,64}$/i.test(command);
+	const isDetachedFeedbackCheckout =
+		/^git\s+switch\s+--detach\s+\S+$/i.test(command) ||
+		/^gh\s+pr\s+checkout\b.*\s--detach(?:\s|$)/i.test(command);
 	const containsGitCommitShell =
 		isShellCommandRequiringVerification &&
 		/\bgit\b(?:(?![;&|]).){0,200}\bcommit\b/i.test(command);
@@ -2144,11 +2176,18 @@ export async function enforcePrWorkflowToolBefore(
 		requestedRoles.every((role) => role === 'coder');
 	if (state.mode === 'PR_REVIEW') {
 		const isAllowedReviewTool =
-			isInternalWorkflowTool || isNamedReadOnlyTool || isReadOnlyShell;
+			isInternalWorkflowTool ||
+			isNamedReadOnlyTool ||
+			(isReadOnlyShell && (!isShellCheckout || isCanonicalReviewCheckout));
 		if (
 			!isAllowedReviewTool ||
 			(Boolean(state.prHeadSha) && (isRemoteCheckoutTool || isShellCheckout))
 		) {
+			if (!state.prHeadSha && isShellCheckout) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW checkout must use standalone commands: fetch the PR head, verify the full commit object with `git cat-file -e <full_pr_head_sha>^{commit}`, then run `git switch --detach <full_pr_head_sha>` and bind that exact head before dispatching explorer lanes. Do not use `--track FETCH_HEAD`.',
+				);
+			}
 			throw new Error(
 				'BLOCKED: PR_REVIEW is read-only and fail-closed; only controller tools and positively classified observation tools are allowed, and every agent lane requires structured dispatch_lanes_async',
 			);
@@ -2230,6 +2269,11 @@ export async function enforcePrWorkflowToolBefore(
 			'BLOCKED: PR_FEEDBACK is armed for publication; only read-only inspection, the exact approved push, and complete_pr_workflow are allowed',
 		);
 	}
+	if (!state.prHeadSha && isDetachedFeedbackCheckout) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK requires a tracked PR branch before the first head bind; detached checkout is valid for PR_REVIEW, not PR_FEEDBACK.',
+		);
+	}
 	if (isStandaloneGitCommitShell) {
 		await assertPrFeedbackReadyToPublish(directory, sessionID);
 		return;
@@ -2240,6 +2284,11 @@ export async function enforcePrWorkflowToolBefore(
 		);
 	}
 	if (isShellCommandRequiringVerification) {
+		if (!state.prHeadSha && isShellCheckout) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK checkout must use a safe standalone pre-bind form: `gh pr checkout <number-or-url>` without force/submodule flags, or `git switch -c <local> --track <remote>/<branch>`. Detached checkouts are not allowed in PR_FEEDBACK. Then verify exact HEAD, a clean tree, and the intended upstream before dispatching feedback lanes.',
+			);
+		}
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK shell commands fail closed unless they are explicit read-only intake or the one standalone approved git commit; use structured coder/write tools for fixes and run_pr_feedback_stage_a for validation',
 		);
@@ -2780,7 +2829,15 @@ function isAllowedPrWorkflowReadOnlyShell(
 	const gitMatch = normalized.match(
 		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
 	);
-	if (gitMatch?.[1]) return isAllowedPrWorkflowGitIntake(gitMatch[1], options);
+	if (gitMatch?.[1]) {
+		const hasDirectoryOverride = /^git -C /i.test(normalized);
+		if (
+			hasDirectoryOverride &&
+			/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
+		)
+			return false;
+		return isAllowedPrWorkflowGitIntake(gitMatch[1], options);
+	}
 
 	if (/^gh /i.test(normalized)) return isAllowedPrFeedbackGhIntake(normalized);
 
@@ -2956,10 +3013,11 @@ function isSafeGitRefToken(value: string): boolean {
 }
 
 function isAllowedPrFeedbackGhIntake(command: string): boolean {
+	if (/^gh\s+pr\s+checkout(?:\s|$)/i.test(command)) {
+		return isAllowedSafeGhPrCheckout(command);
+	}
 	if (
-		/^gh\s+pr\s+(?:view|diff|checks|status|list|checkout)(?:\s|$)/i.test(
-			command,
-		) ||
+		/^gh\s+pr\s+(?:view|diff|checks|status|list)(?:\s|$)/i.test(command) ||
 		/^gh\s+run\s+(?:view|list|watch)(?:\s|$)/i.test(command) ||
 		/^gh\s+issue\s+(?:view|list)(?:\s|$)/i.test(command) ||
 		/^gh\s+search\s+(?:code|commits|issues|prs|repos)(?:\s|$)/i.test(command) ||
@@ -2982,6 +3040,42 @@ function isAllowedPrFeedbackGhIntake(command: string): boolean {
 	// REST defaults to GET. GraphQL queries may use `-f query=...`; the explicit
 	// mutation rejection above keeps that review-thread intake read-only.
 	return !/\s(?:--field|-f)(?:\s|=)(?!query=)/i.test(command);
+}
+
+function isAllowedSafeGhPrCheckout(command: string): boolean {
+	if (/\s--(?:force|recurse-submodules)(?:\s|=|$)/i.test(command)) return false;
+	const tokens = command.trim().split(/\s+/);
+	if (
+		tokens.length < 4 ||
+		tokens[0] !== 'gh' ||
+		tokens[1] !== 'pr' ||
+		tokens[2] !== 'checkout'
+	)
+		return false;
+	const target = tokens[3];
+	if (
+		!/^\d+$/.test(target) &&
+		!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(
+			target,
+		)
+	)
+		return false;
+	for (let index = 4; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === '--repo' || token === '-R') {
+			const repo = tokens[++index];
+			if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+				return false;
+			continue;
+		}
+		if (token === '--branch' || token === '-b') {
+			const branch = tokens[++index];
+			if (!branch || !isSafeGitRefToken(branch)) return false;
+			continue;
+		}
+		return false;
+	}
+	return true;
 }
 
 function normalizePrHeadSha(prHeadSha: string): string {

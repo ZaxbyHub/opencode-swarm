@@ -1466,13 +1466,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// events. No-op unless prompt-mode delivery is registered.
 				if (prEventDelivery) {
 					const evt = input.event as
-						| { type?: string; properties?: { sessionID?: string } }
+						| {
+								type?: string;
+								properties?: { sessionID?: string };
+								data?: { sessionID?: string };
+						  }
 						| undefined;
+					const idleSessionID =
+						evt?.properties?.sessionID ?? evt?.data?.sessionID;
 					if (
 						evt?.type === 'session.idle' &&
-						typeof evt.properties?.sessionID === 'string'
+						typeof idleSessionID === 'string'
 					) {
-						prEventDelivery.noteSessionIdle(evt.properties.sessionID);
+						prEventDelivery.noteSessionIdle(idleSessionID);
 					}
 				}
 				await backgroundCompletionObserver.event(input);

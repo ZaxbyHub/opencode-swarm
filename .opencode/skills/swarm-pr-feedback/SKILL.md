@@ -144,7 +144,7 @@ tree:
   tracked path. It creates an auditable, path-scoped stash and returns its
   recovery command. Do not issue `git stash` through shell. The controller never
   stashes untracked files; move or remove those manually, or abort the checkout.
-- **Check out the head branch locally.** Feedback verification reads the working-tree
+- **Check out the head branch locally before dispatching feedback lanes.** Feedback verification reads the working-tree
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the
   exact `merge_base...head_ref` range for diff-scoped inspection.
@@ -159,6 +159,15 @@ tree:
   the upstream of an existing local branch with
   `git branch --set-upstream-to=<remote>/<remote-branch> <local-branch>`).
   Branch creation/tracking is blocked after the immutable head is bound.
+- `gh pr checkout` is permitted only in its non-force, non-submodule form with
+  the PR number/URL and optional `--repo` or `--branch` flags. Never use
+  `--force`, `--recurse-submodules`, or detached checkout during this
+  transition.
+- Before the first feedback verification dispatch binds the head, prove that
+  `git rev-parse HEAD` equals the authoritative full `pr_head_sha`,
+  `git status --porcelain` is empty, and the current branch tracks the intended
+  PR head remote/branch. A detached checkout is valid for review, not feedback
+  publication.
 
 When a verification lane result includes `output_ref`, treat `output` as a
 preview and call `retrieve_lane_output` before using it to classify, resolve,
@@ -733,8 +742,10 @@ the independently approved digest, the exact approved commit remains current,
 its bound upstream remote-tracking ref points to that exact commit, every
 feedback ID has exact-provenance evidence, and no PR-workflow lanes remain
 open. While the gate remains active, the runtime replaces architect
-final-response text with a mechanical blocked notice and re-wakes an idle
-parent session.
+final-response text with a mechanical blocked notice and normally re-wakes an
+idle parent session. A user interruption pauses automatic wakes until a later
+explicit user turn settles; the durable gate remains available to continue or
+abort.
 
 Report:
 

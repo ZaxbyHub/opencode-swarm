@@ -23,6 +23,11 @@
 
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import type { PrMonitorConfig } from '../config/schema';
+import {
+	cancelPrWorkflowPluginWake,
+	isPrWorkflowAutoWakeSuppressed,
+	markPrWorkflowPluginWake,
+} from '../hooks/pr-workflow-auto-wake';
 import { log } from '../utils';
 import { withTimeout } from '../utils/timeout';
 
@@ -158,7 +163,10 @@ export async function deliverPrActivity(
 			return true;
 		}
 
-		if (state.busy) {
+		if (
+			state.busy ||
+			isPrWorkflowAutoWakeSuppressed(registration.directory, sessionID)
+		) {
 			enqueueBounded(state, fresh);
 			_internals.log('[pr-monitor] Session busy — queued PR events', {
 				sessionID,
@@ -173,7 +181,7 @@ export async function deliverPrActivity(
 		const previouslyQueued = state.queue.splice(0, state.queue.length);
 		const toSend = [...previouslyQueued, ...fresh];
 		state.busy = true;
-		const ok = await _internals.sendWakePrompt(sessionID, toSend);
+		const ok = await sendWakePromptWithMarker(sessionID, toSend);
 		if (!ok) {
 			// Restore the previously queued events (the caller only owns the
 			// advisory fallback for the `events` it passed in this call).
@@ -207,12 +215,13 @@ export function noteSessionIdle(sessionID: string): void {
 		if (!state) return;
 
 		state.busy = false;
+		if (isPrWorkflowAutoWakeSuppressed(registration.directory, sessionID))
+			return;
 		if (state.queue.length === 0) return;
 
 		const toSend = state.queue.splice(0, state.queue.length);
 		state.busy = true;
-		void _internals
-			.sendWakePrompt(sessionID, toSend)
+		void sendWakePromptWithMarker(sessionID, toSend)
 			.then((ok) => {
 				if (ok) return;
 				// Re-queue on failure so the next idle flush retries (bounded).
@@ -236,6 +245,18 @@ export function noteSessionIdle(sessionID: string): void {
 			error: err instanceof Error ? err.message : String(err),
 		});
 	}
+}
+
+async function sendWakePromptWithMarker(
+	sessionID: string,
+	events: FormattedPrEvent[],
+): Promise<boolean> {
+	const active = registration;
+	if (!active) return false;
+	const messageID = markPrWorkflowPluginWake(active.directory, sessionID);
+	const ok = await _internals.sendWakePrompt(sessionID, events, messageID);
+	if (!ok) cancelPrWorkflowPluginWake(active.directory, sessionID, messageID);
+	return ok;
 }
 
 // ── Wake message ─────────────────────────────────────────────────────
@@ -312,6 +333,7 @@ export function buildWakeMessage(events: FormattedPrEvent[]): string {
 async function sendWakePrompt(
 	sessionID: string,
 	events: FormattedPrEvent[],
+	messageID: string,
 ): Promise<boolean> {
 	const active = registration;
 	if (!active) return false;
@@ -324,7 +346,7 @@ async function sendWakePrompt(
 		};
 		const args = {
 			path: { id: sessionID },
-			body: { parts: [{ type: 'text', text }] },
+			body: { messageID, parts: [{ type: 'text', text }] },
 		};
 		const call =
 			typeof session.promptAsync === 'function'

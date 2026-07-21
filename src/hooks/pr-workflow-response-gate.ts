@@ -1,3 +1,10 @@
+import {
+	cancelPrWorkflowPluginWake,
+	clearPrWorkflowAutoWakeState,
+	isPrWorkflowAutoWakeSuppressed,
+	markPrWorkflowPluginWake,
+	observePrWorkflowAutoWakeEvent,
+} from './pr-workflow-auto-wake.js';
 import { readPrWorkflowGateState } from './pr-workflow-gate.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
@@ -68,7 +75,11 @@ interface WakeBudget {
  */
 function blockedText(
 	mode: string,
-	options: { suspended?: boolean; maxConsecutive?: number } = {},
+	options: {
+		suspended?: boolean;
+		userInterrupted?: boolean;
+		maxConsecutive?: number;
+	} = {},
 ): string {
 	const lines: string[] = [
 		`[${mode} MECHANICAL GATE: FINAL RESPONSE BLOCKED]`,
@@ -79,6 +90,11 @@ function blockedText(
 		const max = options.maxConsecutive;
 		lines.push(
 			`Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries (the durable gate \`revision\` did not advance). The session will not be re-awoken automatically. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\` to publish normally.`,
+		);
+	}
+	if (options.userInterrupted) {
+		lines.push(
+			'Auto-resume is paused after a user interruption. The durable workflow gate is preserved, but the plugin will not re-awaken this session. Send a new user message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.',
 		);
 	}
 	return lines.join('\n');
@@ -141,22 +157,34 @@ export function createPrWorkflowResponseGate(options: {
 			// Gate cleared since the last event — drop any stale budget so a
 			// future activation of the same sessionID starts fresh.
 			resetBudget(input.sessionID);
+			clearPrWorkflowAutoWakeState(options.directory, input.sessionID);
 			return;
 		}
 		const budget = wakeBudgets.get(input.sessionID);
 		output.text = blockedText(state.mode, {
 			suspended: budget?.suspended ?? false,
+			userInterrupted: isPrWorkflowAutoWakeSuppressed(
+				options.directory,
+				input.sessionID,
+			),
 			maxConsecutive: maxConsecutive,
 		});
 	};
 
 	const event = async (input: { event: unknown }): Promise<void> => {
-		const event = input.event as IdleEvent | undefined;
-		const sessionID = event?.properties?.sessionID;
+		const wakeDecision = await observePrWorkflowAutoWakeEvent(
+			options.directory,
+			input.event,
+		);
+		const event = input.event as
+			| (IdleEvent & { data?: { sessionID?: unknown } })
+			| undefined;
+		const sessionID = event?.properties?.sessionID ?? event?.data?.sessionID;
 		if (
 			event?.type !== 'session.idle' ||
 			typeof sessionID !== 'string' ||
 			!sessionID.trim() ||
+			wakeDecision.suppressWake ||
 			activeWakeSessions.has(sessionID)
 		) {
 			return;
@@ -167,6 +195,7 @@ export function createPrWorkflowResponseGate(options: {
 			// any future clear path). Drop the budget uniformly — no test-seam
 			// coupling to a specific clear caller.
 			resetBudget(sessionID);
+			clearPrWorkflowAutoWakeState(options.directory, sessionID);
 			return;
 		}
 		if (!session) return;
@@ -215,11 +244,17 @@ export function createPrWorkflowResponseGate(options: {
 				: state.revision > budget.lastSeenRevision;
 
 		activeWakeSessions.add(sessionID);
+		const pluginWakeMessageID = markPrWorkflowPluginWake(
+			options.directory,
+			sessionID,
+		);
+		let promptRejected = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
 			const args = {
 				path: { id: sessionID },
 				body: {
+					messageID: pluginWakeMessageID,
 					parts: [
 						{
 							type: 'text',
@@ -244,6 +279,7 @@ export function createPrWorkflowResponseGate(options: {
 				}),
 			]);
 			if (result?.error != null) {
+				promptRejected = true;
 				throw new Error(
 					`PR workflow resume prompt failed: ${String(result.error)}`,
 				);
@@ -256,6 +292,13 @@ export function createPrWorkflowResponseGate(options: {
 			// exact failure mode this module exists to prevent.
 		} finally {
 			if (timer) clearTimeout(timer);
+			if (promptRejected) {
+				cancelPrWorkflowPluginWake(
+					options.directory,
+					sessionID,
+					pluginWakeMessageID,
+				);
+			}
 			activeWakeSessions.delete(sessionID);
 			// Record the budget state for every attempted wake, including
 			// failures. An attempted wake that did not produce progress must
