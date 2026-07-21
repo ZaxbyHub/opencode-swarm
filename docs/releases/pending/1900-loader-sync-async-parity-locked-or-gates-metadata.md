@@ -21,7 +21,7 @@ async path, and silent gates-strip recovery metadata (#1900).
   `removedKeys: string[]`, and `warnings: string[]` so consumers can surface
   config-health information without re-parsing the advisory buffer.
 - **Parity test**: `tests/unit/config/loader.metadata.parity.test.ts` runs both
-  loaders against eight fixture types and asserts deep equality on config +
+  loaders against nine fixture types and asserts deep equality on config +
   recovery metadata; a future edit to one path that forgets the other will fail
   this test immediately.
 

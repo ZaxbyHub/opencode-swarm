@@ -2,7 +2,7 @@
  * loader.metadata.parity.test.ts
  *
  * Property test: both `loadPluginConfigWithMeta` (sync) and
- * `loadPluginConfigWithMetaAsync` (async) must produce byte-identical
+ * `loadPluginConfigWithMetaAsync` (async) must produce deep-equal
  * `recovery`, `removedKeys`, `warnings`, and `config` for every fixture
  * in the battery.
  *
@@ -21,6 +21,7 @@
  *   6. single typo in gates section
  *   7. full_auto.locked user=true / project=false
  *   8. no config files at all (defaults only)
+ *   9. invalid external_skills section
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';

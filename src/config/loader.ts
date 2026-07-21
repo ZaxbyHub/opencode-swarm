@@ -476,6 +476,7 @@ function buildConfigWithMeta(
 	if (firstResult.success) {
 		const config = secure(firstResult.data);
 		if (loadedFromFile && configHadErrors) {
+			const securityWarning = '⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.';
 			advisoryWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
 			);
@@ -483,14 +484,17 @@ function buildConfigWithMeta(
 				config,
 				recovery: 'guardrails_defaults',
 				removedKeys: [...gatesStripped],
-				warnings: [],
+				warnings: [securityWarning],
 			};
 		}
+		const sanitizedWarning = gatesStripped.length > 0
+			? `Ignored ${gatesStripped.length} invalid or unrecognized config key(s): ${gatesStripped.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`
+			: undefined;
 		return {
 			config,
 			recovery: gatesStripped.length > 0 ? 'stripped_keys' : 'none',
 			removedKeys: [...gatesStripped],
-			warnings: [],
+			warnings: sanitizedWarning ? [sanitizedWarning] : [],
 		};
 	}
 
@@ -506,11 +510,12 @@ function buildConfigWithMeta(
 			advisoryWarn(
 				`[opencode-swarm] Ignored ${removed.length} unrecognized config key(s): ${removed.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
 			);
+			const strippedKeysWarning = `Ignored ${removed.length} unrecognized config key(s): ${removed.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`;
 			return {
 				config: secure(recovered.data),
 				recovery: 'stripped_keys',
 				removedKeys: [...gatesStripped, ...removed],
-				warnings: [],
+				warnings: [strippedKeysWarning],
 			};
 		}
 	}
@@ -593,7 +598,9 @@ function buildConfigWithMeta(
  * 1. User config: ~/.config/opencode/opencode-swarm.json
  * 2. Project config: <directory>/.opencode/opencode-swarm.json
  *
- * Project config takes precedence. Nested objects are deep-merged.
+ * Project config takes precedence. Nested objects are deep-merged, except
+ * `full_auto.locked`: it is a hard-off and OR-merges across both levels, so
+ * `locked: true` at either level cannot be overridden by `locked: false`.
  * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
  * Zod defaults don't override explicit user values.
  */

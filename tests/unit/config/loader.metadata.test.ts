@@ -139,6 +139,24 @@ describe('config/loader — metadata (issue #1900)', () => {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
 		});
+
+		it('sync: stripped_keys meta.warnings contains sanitized warning text', () => {
+			// Regression: stripped_keys recovery must populate meta.warnings with the
+			// ignored-keys text, not leave it as [].
+			const dir = projectDir({
+				max_iterations: 7,
+				council: { enabled: true, typoField: 99 },
+			});
+			try {
+				const meta = loadPluginConfigWithMeta(dir);
+				expect(meta.recovery).toBe('stripped_keys');
+				expect(meta.warnings).toContain(
+					'Ignored 1 unrecognized config key(s): council.typoField. The rest of your configuration was preserved. Fix or remove these keys.',
+				);
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	// 3. Gates-section typo → recovery: 'stripped_keys' (FR-3)
@@ -155,6 +173,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 				const meta = loadPluginConfigWithMeta(dir);
 				expect(meta.recovery).toBe('stripped_keys');
 				expect(meta.removedKeys).toContain('gates.unknownGateSection');
+				expect(meta.warnings.join(' ')).toContain('gates.unknownGateSection');
 				// Other config is preserved
 				expect(meta.config.max_iterations).toBe(8);
 			} finally {
@@ -171,6 +190,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 				const meta = await loadPluginConfigWithMetaAsync(dir);
 				expect(meta.recovery).toBe('stripped_keys');
 				expect(meta.removedKeys).toContain('gates.unknownGateSection');
+				expect(meta.warnings.join(' ')).toContain('gates.unknownGateSection');
 				expect(meta.config.max_iterations).toBe(8);
 			} finally {
 				fs.rmSync(dir, { recursive: true, force: true });
@@ -254,6 +274,17 @@ describe('config/loader — metadata (issue #1900)', () => {
 			}
 		});
 
+		it('sync: project locked=true + user locked=false → merged config has locked=true', () => {
+			writeUserConfig({ full_auto: { locked: false } });
+			const dir = projectDir({ full_auto: { locked: true } });
+			try {
+				const meta = loadPluginConfigWithMeta(dir);
+				expect(meta.config.full_auto?.locked).toBe(true);
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it('async: project locked=true + user locked=false → merged config has locked=true', async () => {
 			writeUserConfig({ full_auto: { locked: false } });
 			const dir = projectDir({ full_auto: { locked: true } });
@@ -281,6 +312,22 @@ describe('config/loader — metadata (issue #1900)', () => {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
 		});
+
+		it('sync: guardrails_defaults meta.warnings contains SECURITY warning text', () => {
+			// Regression: guardrails_defaults must populate meta.warnings with the
+			// SECURITY warning text, not leave it as [].
+			writeRawUserConfig('not json at all -- intentionally invalid');
+			const dir = projectDirWithRaw('also not json');
+			try {
+				const meta = loadPluginConfigWithMeta(dir);
+				expect(meta.recovery).toBe('guardrails_defaults');
+				expect(meta.warnings).toContain(
+					'⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
+				);
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	// 7. Invalid external_skills → recovery: 'stripped_keys', removedKeys includes 'external_skills'
@@ -294,6 +341,7 @@ describe('config/loader — metadata (issue #1900)', () => {
 				const meta = loadPluginConfigWithMeta(dir);
 				expect(meta.recovery).toBe('stripped_keys');
 				expect(meta.removedKeys).toContain('external_skills');
+				expect(meta.warnings.join(' ')).toContain('external_skills');
 			} finally {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
@@ -308,6 +356,28 @@ describe('config/loader — metadata (issue #1900)', () => {
 				const meta = await loadPluginConfigWithMetaAsync(dir);
 				expect(meta.recovery).toBe('stripped_keys');
 				expect(meta.removedKeys).toContain('external_skills');
+				expect(meta.warnings.join(' ')).toContain('external_skills');
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	// 8. Valid user config + invalid project config → user-only recovery
+	describe('user-only recovery', () => {
+		it('sync and async: valid user config survives an irrecoverable project config', async () => {
+			writeUserConfig({ max_iterations: 7 });
+			const dir = projectDir({ council: { enabled: 'not-a-boolean' } });
+			try {
+				const [syncMeta, asyncMeta] = await Promise.all([
+					Promise.resolve(loadPluginConfigWithMeta(dir)),
+					loadPluginConfigWithMetaAsync(dir),
+				]);
+				for (const meta of [syncMeta, asyncMeta]) {
+					expect(meta.recovery).toBe('user_only');
+					expect(meta.config.max_iterations).toBe(7);
+					expect(meta.warnings.join(' ')).toMatch(/project config ignored/i);
+				}
 			} finally {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
