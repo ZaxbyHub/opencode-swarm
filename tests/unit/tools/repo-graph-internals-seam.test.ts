@@ -23,6 +23,7 @@ import {
 describe('_internals DI seam — builder.ts', () => {
 	test('_internals is exported with safeRealpathSync function', () => {
 		expect(builder_internals).toBeDefined();
+		expect(typeof builder_internals.now).toBe('function');
 		expect(typeof builder_internals.safeRealpathSync).toBe('function');
 	});
 

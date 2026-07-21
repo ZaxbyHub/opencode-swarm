@@ -50,12 +50,13 @@ import {
 } from './validation';
 
 /**
- * _internals DI seam for safeRealpathSync.
- * Defaults to the real implementation. Tests can override this to inject
- * mock behavior without calling mock.module(...) which leaks across test files
- * in Bun's shared test-runner process.
+ * _internals DI seam for the walk clock and graph helpers.
+ * Defaults to the real implementations. Tests can override these to inject
+ * deterministic behavior without calling mock.module(...) which leaks across
+ * test files in Bun's shared test-runner process.
  */
 export const _internals: {
+	now: () => number;
 	safeRealpathSync: typeof safeRealpathSync;
 	extractTSSymbols: typeof extractTSSymbols;
 	extractPythonSymbols: typeof extractPythonSymbols;
@@ -67,6 +68,7 @@ export const _internals: {
 	computeUsedSymbols: typeof computeUsedSymbols;
 	extractFileSymbols: typeof extractFileSymbols;
 } = {
+	now: Date.now,
 	safeRealpathSync,
 	extractTSSymbols,
 	extractPythonSymbols,
@@ -1275,7 +1277,7 @@ interface WalkContext {
 
 function isWalkBudgetExceeded(ctx: WalkContext): boolean {
 	if (ctx.abortReason !== undefined) return true;
-	if (Date.now() - ctx.startedAt > ctx.walkBudgetMs) {
+	if (_internals.now() - ctx.startedAt > ctx.walkBudgetMs) {
 		ctx.abortReason = 'budget';
 		return true;
 	}
@@ -1319,7 +1321,7 @@ function findSourceFiles(
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
-		startedAt: Date.now(),
+		startedAt: _internals.now(),
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
@@ -1410,7 +1412,7 @@ async function findSourceFilesAsync(
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
-		startedAt: Date.now(),
+		startedAt: _internals.now(),
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,

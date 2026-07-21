@@ -14,11 +14,18 @@
  * src/tools/repo-graph.ts.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildWorkspaceGraph, buildWorkspaceGraphAsync } from '../repo-graph';
+import { _internals as builderInternals } from '../repo-graph/builder';
+
+const realNow = builderInternals.now;
+
+afterEach(() => {
+	builderInternals.now = realNow;
+});
 
 function makeTmpDir(prefix: string): string {
 	return fsSync.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -75,12 +82,14 @@ describe('repo-graph walker — issue #704 regression suite', () => {
 			for (let i = 0; i < 100; i++) {
 				fsSync.writeFileSync(path.join(dir, `f${i}.ts`), 'export {};');
 			}
-			const start = Date.now();
-			await buildWorkspaceGraphAsync(root, {
+			let now = 0;
+			builderInternals.now = () => now++;
+			const graph = await buildWorkspaceGraphAsync(root, {
 				walkBudgetMs: 1, // forces immediate truncation
 				maxFiles: 100000,
 			});
-			expect(Date.now() - start).toBeLessThan(2000);
+			expect(Object.keys(graph.nodes)).toHaveLength(0);
+			expect(now).toBeGreaterThanOrEqual(3);
 		} finally {
 			fsSync.rmSync(root, { recursive: true, force: true });
 		}
