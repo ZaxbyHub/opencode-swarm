@@ -79,6 +79,19 @@ afterEach(() => {
 const shownFile = (dir: string) =>
 	path.join(dir, '.swarm', '.knowledge-shown.json');
 
+function captureShownWrite(): () => Promise<void> {
+	const pendingWrites: Promise<void>[] = [];
+	_internals.recordLessonsShown = (...args) => {
+		const pending = originalRecordLessonsShown(...args);
+		pendingWrites.push(pending);
+		return pending;
+	};
+	return async () => {
+		await Promise.all(pendingWrites);
+		expect(pendingWrites).toHaveLength(1);
+	};
+}
+
 describe('delegate injection outcome attribution (#1768)', () => {
 	test('records under canonical Phase N (not the task title) when phase is passed', async () => {
 		// Use REAL recordLessonsShown so we can inspect the shown file, but
@@ -91,6 +104,7 @@ describe('delegate injection outcome attribution (#1768)', () => {
 		_internals.recordKnowledgeEvent = async () => null;
 		_internals.recordKnowledgeShown = async () => {};
 		_internals.confirmEntriesPhase = async () => {};
+		const waitForShownWrite = captureShownWrite();
 
 		const result = await injectForDelegate({
 			directory: tempDir,
@@ -100,7 +114,7 @@ describe('delegate injection outcome attribution (#1768)', () => {
 			phase: 'Phase 3',
 			config: baseConfig as KnowledgeConfig,
 		});
-		await new Promise((r) => setTimeout(r, 10));
+		await waitForShownWrite();
 
 		expect(result.entries.map((e) => e.id).sort()).toEqual(['del-1', 'del-2']);
 		// The shown file must use the canonical "Phase 3" key — NOT the task title.
@@ -131,7 +145,6 @@ describe('delegate injection outcome attribution (#1768)', () => {
 			// no phase
 			config: baseConfig as KnowledgeConfig,
 		});
-		await new Promise((r) => setTimeout(r, 10));
 
 		expect(lessonsSpy).not.toHaveBeenCalled();
 	});
@@ -155,7 +168,6 @@ describe('delegate injection outcome attribution (#1768)', () => {
 			phase: 'Phase 5',
 			config: baseConfig as KnowledgeConfig,
 		});
-		await new Promise((r) => setTimeout(r, 10));
 
 		expect(confirmSpy).toHaveBeenCalledTimes(1);
 		const args = confirmSpy.mock.calls[0];
