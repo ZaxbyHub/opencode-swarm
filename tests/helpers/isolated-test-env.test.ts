@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { resolveHiveDataDir } from '../../src/knowledge/hive-paths';
 import { assertSafeForWrite, createIsolatedTestEnv } from './isolated-test-env';
 
 describe('isolated-test-env', () => {
@@ -20,6 +21,24 @@ describe('isolated-test-env', () => {
 			const { configDir, cleanup } = createIsolatedTestEnv();
 
 			expect(process.env.XDG_CONFIG_HOME).toBe(configDir);
+
+			cleanup();
+		});
+
+		test('XDG_DATA_HOME is set to the temp dir while active', () => {
+			const { configDir, cleanup } = createIsolatedTestEnv();
+
+			expect(process.env.XDG_DATA_HOME).toBe(configDir);
+
+			cleanup();
+		});
+
+		test('hive data resolves below the isolated temp dir', () => {
+			const { configDir, cleanup } = createIsolatedTestEnv();
+
+			const relative = path.relative(configDir, resolveHiveDataDir());
+			expect(relative.startsWith('..')).toBe(false);
+			expect(path.isAbsolute(relative)).toBe(false);
 
 			cleanup();
 		});
@@ -51,18 +70,21 @@ describe('isolated-test-env', () => {
 		test('After cleanup(), original env vars are restored', () => {
 			// Save originals
 			const originalXDG = process.env.XDG_CONFIG_HOME;
+			const originalXDGData = process.env.XDG_DATA_HOME;
 			const originalAPPDATA = process.env.APPDATA;
 			const originalLOCALAPPDATA = process.env.LOCALAPPDATA;
 			const originalHOME = process.env.HOME;
 
 			const { cleanup } = createIsolatedTestEnv();
 			const newXDG = process.env.XDG_CONFIG_HOME;
+			const newXDGData = process.env.XDG_DATA_HOME;
 			const newAPPDATA = process.env.APPDATA;
 			const newLOCALAPPDATA = process.env.LOCALAPPDATA;
 			const newHOME = process.env.HOME;
 
 			// Verify they changed
 			expect(newXDG).not.toBe(originalXDG);
+			expect(newXDGData).not.toBe(originalXDGData);
 			expect(newAPPDATA).not.toBe(originalAPPDATA);
 			expect(newLOCALAPPDATA).not.toBe(originalLOCALAPPDATA);
 			expect(newHOME).not.toBe(originalHOME);
@@ -71,6 +93,7 @@ describe('isolated-test-env', () => {
 
 			// After cleanup, original values should be restored
 			expect(process.env.XDG_CONFIG_HOME).toBe(originalXDG);
+			expect(process.env.XDG_DATA_HOME).toBe(originalXDGData);
 			expect(process.env.APPDATA).toBe(originalAPPDATA);
 			expect(process.env.LOCALAPPDATA).toBe(originalLOCALAPPDATA);
 			expect(process.env.HOME).toBe(originalHOME);
@@ -79,12 +102,14 @@ describe('isolated-test-env', () => {
 		test('After cleanup(), env vars that were originally undefined are deleted', () => {
 			// Save originals
 			const originalXDG = process.env.XDG_CONFIG_HOME;
+			const originalXDGData = process.env.XDG_DATA_HOME;
 			const originalAPPDATA = process.env.APPDATA;
 			const originalLOCALAPPDATA = process.env.LOCALAPPDATA;
 			const originalHOME = process.env.HOME;
 
 			// Ensure env vars are undefined for this test
 			delete process.env.XDG_CONFIG_HOME;
+			delete process.env.XDG_DATA_HOME;
 			delete process.env.APPDATA;
 			delete process.env.LOCALAPPDATA;
 			delete process.env.HOME;
@@ -93,6 +118,7 @@ describe('isolated-test-env', () => {
 
 			// Verify they are set
 			expect(process.env.XDG_CONFIG_HOME).toBeDefined();
+			expect(process.env.XDG_DATA_HOME).toBeDefined();
 			expect(process.env.APPDATA).toBeDefined();
 			expect(process.env.LOCALAPPDATA).toBeDefined();
 			expect(process.env.HOME).toBeDefined();
@@ -103,6 +129,9 @@ describe('isolated-test-env', () => {
 			// Check that they are truly deleted (not present in env)
 			if (originalXDG === undefined) {
 				expect(process.env.XDG_CONFIG_HOME).toBeUndefined();
+			}
+			if (originalXDGData === undefined) {
+				expect(process.env.XDG_DATA_HOME).toBeUndefined();
 			}
 			if (originalAPPDATA === undefined) {
 				expect(process.env.APPDATA).toBeUndefined();
@@ -116,6 +145,8 @@ describe('isolated-test-env', () => {
 
 			// Restore original state
 			if (originalXDG !== undefined) process.env.XDG_CONFIG_HOME = originalXDG;
+			if (originalXDGData !== undefined)
+				process.env.XDG_DATA_HOME = originalXDGData;
 			if (originalAPPDATA !== undefined) process.env.APPDATA = originalAPPDATA;
 			if (originalLOCALAPPDATA !== undefined)
 				process.env.LOCALAPPDATA = originalLOCALAPPDATA;

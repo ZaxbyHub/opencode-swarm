@@ -1,66 +1,95 @@
-# Test-Stability Audit — opencode-swarm
+# Test-stability audit — issue #1908 resolution
 
-> Deliverable artifact (issue #1782, Phase 0). Lives under `docs/audits/` as a
-> version-controlled record of the known flaky-test inventory. The contributor
-> runbook is at `docs/testing/test-stability.md`.
+> Version-controlled inventory for the merge-group flake backlog consolidated by
+> issue #1908. The systemic detection and soak program remains tracked by #1782;
+> the contributor runbook is `docs/testing/test-stability.md`.
 
-## Summary statistics
+## Current status
 
-- **Total known flaky tests (from issue #1782 audit baseline):** 7
-- **By root-cause class:**
-  - Class 1 (time-sensitive): 2 (#1 skill-scoring-e2e, #3 cross-process-scope) + suspected #5 (skill-scoring-workflow)
-  - Class 2 (coverage sensitivity): 3 (#1, #4 swarm-artifact-cache, #6 test-runner Pester)
-  - Class 3 (cross-platform runtime): 2 (#2 infra runner starvation, #4 Windows bun exit-code)
-  - Class 4 (subprocess/env): 1 (#6 test-runner Pester)
-- **By quarantine status:** 4 quarantined (#4, #5, + 4 macOS lean-turbo in macos list), 3 fixed-at-root (#1, #2/#3, #6 Pester case-gated).
+- Tracked files investigated: **19** (9 ordinary candidates and 10 quarantined files).
+- Active global quarantines: **0**.
+- Active macOS-only quarantines: **0**.
+- Active integration quarantines: **0**.
+- Validation rule: an empty quarantine list is not proof by itself. Changes to
+  `scripts/` force the pull request's full Ubuntu/macOS/Windows unit matrix, and
+  merge-group validation owns the integration/coverage/smoke proof.
 
-## Flake inventory
+## Resolution inventory
 
-| # | Test file | Test / area | Root-cause class | First/last seen | Proposed fix | Quarantined? | Status |
-|---|-----------|-------------|------------------|-----------------|--------------|--------------|--------|
-| 1 | `tests/unit/hooks/skill-scoring-e2e.test.ts` | "scoring results are deterministic" / "idempotency" | 1, 2 | 2026-07-08/09 | Freeze `Date.now()` | No | **FIXED** — migrated to `withFrozenClock` (PR #1784) |
-| 2 | merge-group `quality`+`rust-sandbox-runner` jobs | n/a (infra) | 3 | 2026-07-08/10 | n/a (transient infra) | No | Infra — not a test flake; retry handles it |
-| 3 | `tests/integration/cross-process-scope.test.ts` | "TTL of zero is treated as already expired" | 1 | 2026-07-08 | `now >= expiresAt` (was `>`) | No | **FIXED** — `src/scope/scope-persistence.ts:295` (PR #1767) |
-| 4 | `tests/unit/utils/swarm-artifact-cache.test.ts` | whole file (Windows bun exit-code quirk) | 2, 3 | 2026-07-09 | bun/Windows quirk | **Yes** (`quarantined-tests.txt`) + per-case `skipIf` | Quarantined (double-protected) |
-| 5 | `tests/unit/hooks/skill-scoring-workflow.test.ts` | `computeSkillRelevanceScore` workflow boost | 1 (suspected) | 2026-07-09 | Freeze clock | **Yes** (`quarantined-tests.txt`) | **FIXED (PR #1784)** — wrapped in `withFrozenClock`; STAYS quarantined until merge-group confirms green (plan critic H1) |
-| 6 | `tests/unit/tools/test-runner.test.ts` | Pester convention-scope case (~L543) | 2, 4 | 2026-07-09 | gate on `hasPwsh` | No (case-gated) | **FIXED** — `test.skipIf(!hasPwsh)` guards the subprocess case |
-| 7 | (unknown — the "next to surface") | unknown | unknown | future | TBD | — | Addressed structurally by the flake-detection workflow (PR #1784) |
+| Test or cluster | Resolution | Evidence source |
+| --- | --- | --- |
+| `pr-monitor-status.test.ts` | Cross-session CLI state fixed | `53b7fb90` |
+| `stale-delegation-guard.test.ts` | Exact-boundary clock frozen | `7ab0a109` |
+| `update-command.test.ts` | Cross-platform path depth fixed; security fixtures now use unprivileged Windows junctions | `39c97866`, #1908 |
+| `knowledge-query.test.ts` | Scope-filter regression fixed | `5480cd62` |
+| `path-security.test.ts` | Drive-letter fallback fixed; asymmetric existence is simulated through a restored DI seam instead of writing to a drive root | `36bea060`, #1908 |
+| `knowledge-injector-shown-set.test.ts` | Real-host identity and receipt accounting fixed | `554d4972` |
+| `check-gate-status.gates.test.ts` | Platform-specific safe-miss categories accepted | `4fbcb7f4`, #1908 |
+| `suggest-patch.adversarial.test.ts` | Nonexistent-target containment fixed | `4fbcb7f4` |
+| `test-impact.adversarial.test.ts` | Windows separators normalized in every sibling assertion | `4fbcb7f4`, `d47d4e4e` |
+| `swarm-artifact-cache.test.ts` | Platform assertion semantics fixed; cleanup now retries transient Windows handle contention | `980e4a72`, #1908 |
+| `skill-scoring-workflow.test.ts` | Time-dependent workflow score frozen | `3c3bbadb` |
+| `test-runner.test.ts` | Pester test gates on the complete capability, not merely `pwsh` presence | #1908 |
+| `test-runner-impact.adversarial.test.ts` | Leaking module mocks replaced with restored dependency seams | #1908 |
+| `finalize-reward-sweep-multi-runid.test.ts` | Reward propagation uses the deterministic reward timestamp for recency | `e453e4c5` |
+| four Lean Turbo macOS tests | Removed from quarantine and required to execute in exact-head macOS CI | #1908 three-OS matrix |
+| `phase-complete-events*.test.ts` | Event-focused fixtures disable unrelated knowledge and curator pipelines | #1908 |
+| `unified-injection-budget.test.ts` | Fixture uses valid host messages/identity and a canonical external temp root | #1908 |
 
-### macOS-only quarantined (not in the issue's baseline, but related — issue #1729 follow-up)
+## Adjacent current-main recurrence
 
-| Test file | Root cause | Status |
-|-----------|-----------|--------|
-| `tests/unit/turbo/lean/integration-worktree.test.ts` | macOS lane-provisioning (provisionWorktree mock not called) | Quarantined (`quarantined-tests-macos.txt`) — needs macOS env to diagnose |
-| `tests/unit/turbo/lean/retroactive-adversarial.test.ts` | same cluster | Quarantined |
-| `tests/unit/turbo/lean/runner.adversarial.test.ts` | same cluster | Quarantined |
-| `tests/unit/turbo/lean/runner.test.ts` | same cluster | Quarantined |
+After the #1908 branch was rebased, the current `main` gates exposed four
+shell-script test files that resolved bare `bash` to the Windows WSL relay, two
+fixtures that still required privileged symbolic links, and three integration
+assertions that assumed POSIX paths, a stale TypeScript label, or an executable
+Unix package shim. The shell tests now share a Git-installation-derived Bash
+resolver, use bounded non-interactive spawns, and normalize native Git paths
+for MSYS coreutils. Link fixtures use unprivileged junctions or hard links on
+Windows, and integration fixtures resolve host-specific paths and binaries:
 
-## Priority ranking
+- `trace-init.test.ts`
+- `scan-deferred.test.ts`
+- `check-test-file-cap.test.ts`
+- `check-test-tmpdir-project-relative.test.ts`
+- `reset-backup.test.ts`
+- `delegation-gate-worktree-isolation.lane-teardown-fr205.supplemental.test.ts`
+- `issue-629-skill-improver.test.ts`
+- `lang/prompt-injection.test.ts`
+- `pre-check-batch.test.ts`
+- `subprocess-injection*.test.ts`
+- `checkpoint-schema-adversarial.test.ts`
 
-- **P0 (blocking the queue right now):** none remaining after this PR — the
-  systemic fixes (freezeClock + detection + lint) address the recurring class.
-- **P1 (next most likely to surface):** #5 (skill-scoring-workflow) if the
-  freeze proves incomplete cross-platform; the 4 macOS lean-turbo tests.
-- **P2 (latent/rare):** #2 (infra runner starvation — transient, retried).
+This adjacent recurrence repair does not change the original 19-file backlog
+count above; it prevents newly landed tests from reintroducing the same
+capability-detection and host-privilege failure classes while #1908 is open.
 
-## Acceptance-criteria status (issue #1782 §10)
+## Recurrence prevention
 
-This PR (partial delivery of the 6-phase sprint) meets the criteria achievable
-without elapsed wall-clock; the rest are explicitly tracked as open:
+- `scripts/check-test-tmpdir.sh` now rejects newly added project-relative test
+  temp roots as well as uncanonicalized system-temp paths.
+- Privilege-sensitive path regressions use DI seams or Windows junctions; they
+  do not require Developer Mode or drive-root write access.
+- Optional-runtime tests probe the complete capability they execute.
+- Shell-script tests resolve Git Bash from the active Git installation on
+  Windows instead of invoking the optional WSL relay by name.
+- Message-transform fixtures identify agents through the SDK-supported user
+  message/session paths enforced by `resolveMessageTransformContext`.
+- Impact-scope tests override restored `_internals` dependencies instead of
+  leaking `mock.module` replacements into later files.
+- Every test-runner detector and wiring suite now restores those `_internals`
+  dependencies after each case; no detector suite retains a module-scoped
+  discovery or filesystem mock.
+- Focused integration fixtures explicitly disable unrelated background work
+  when it is outside the behavior under test.
+- Checkpoint configuration rejects forbidden own keys and non-plain prototypes
+  before Zod can rebuild and erase the attack shape.
+- Shared test-environment isolation redirects `XDG_DATA_HOME` alongside the
+  existing config/home variables, so hive locks and data never reach a user's
+  real global store even under constrained-memory test runs.
 
-| AC | Status | Evidence |
-|----|--------|----------|
-| 1 (audit complete) | **MET** | this document (committed under `docs/audits/`) |
-| 2 (bulk quarantine + 5 green re-queues) | **NOT MET** | 5 consecutive green merge-group re-queues require elapsed wall-clock + multiple real PRs through the queue |
-| 3 (freezeClock adopted) | **PARTIAL** | helper + lint exist and work (PR #1784); 4 confirmed flaky sites migrated; the lint forces all NEW time-touching tests to use the helper. "Every Class 1 test" (~465 pre-existing files) is not migrated — diff-scoped lint is non-blocking for those by design |
-| 4 (coverage isolation) | **PARTIAL** | per-file coverage isolation already exists (`run-coverage-gate.sh`); `withIsolatedState` helper added. Coverage gate remains merge-group-only (extending to PR-branch is a separate change) |
-| 5 (cross-platform/subprocess) | **LARGELY PRE-EXISTING** | OS-specific quarantine lists + per-case `skipIf` guards already exist (#1729). Runbook documents the convention |
-| 6 (detection gate) | **PARTIAL** | detection workflow runs on failed merge-group runs; produces suggestion artifact + best-effort tracking issue. Auto-quarantine PR (needs PAT + branch-protection bypass) is out of scope |
-| 7 (runbook) | **MET** | `docs/testing/test-stability.md` |
-| 8 (2-week soak) | **NOT MET** | requires elapsed wall-clock with no new flakes |
+## Relationship to #1782
 
-**This PR does NOT close #1782.** It delivers the systemic tooling layer
-(Phases 0, 2, 5, 6 of the sprint) and the prevention/detection infrastructure.
-AC2 and AC8 require ongoing CI observation over weeks; AC3/AC4/AC6 are
-partially met and have clear follow-up work. The issue should remain open
-until those criteria are satisfied.
+Issue #1908 retires the concrete tracked backlog. It does **not** close #1782:
+that issue owns systemic flake detection, five consecutive green requeues, and
+the two-week soak. Those elapsed-time acceptance criteria remain separate from
+the code and quarantine debt resolved here.

@@ -2,18 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { detectTestFramework } from '../../../src/tools/test-runner';
+import {
+	_internals,
+	detectTestFramework,
+} from '../../../src/tools/test-runner';
 
-// Mock isCommandAvailable from discovery module
 const mockIsCommandAvailable = mock();
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-	// Preserve other exports as no-ops
-	clearToolchainCache: mock(),
-	discoverBuildCommands: mock(),
-	discoverBuildCommandsFromProfiles: mock(),
-	getEcosystems: mock(() => []),
-}));
+const originalIsCommandAvailable = _internals.isCommandAvailable;
 
 describe('Test Framework Detectors (Go, Java, Gradle, .NET, C/C++, Swift, Dart, Ruby)', () => {
 	let tempDirs: string[];
@@ -23,9 +18,11 @@ describe('Test Framework Detectors (Go, Java, Gradle, .NET, C/C++, Swift, Dart, 
 		tempDirs = [];
 		// Reset mock
 		mockIsCommandAvailable.mockReset();
+		_internals.isCommandAvailable = mockIsCommandAvailable as never;
 	});
 
 	afterEach(() => {
+		_internals.isCommandAvailable = originalIsCommandAvailable;
 		// Clean up all temp directories
 		for (const dir of tempDirs) {
 			try {
@@ -34,6 +31,7 @@ describe('Test Framework Detectors (Go, Java, Gradle, .NET, C/C++, Swift, Dart, 
 				// Ignore cleanup errors
 			}
 		}
+		mock.restore();
 	});
 
 	function createTempDir(suffix: string): string {

@@ -602,13 +602,11 @@ console.log('arg:' + (args[0] || ''));`,
 		fs.mkdirSync(outerDir, { recursive: true });
 
 		const symlinkPath = path.join(innerDir, 'link_to_outer');
-		try {
-			fs.symlinkSync(outerDir, symlinkPath);
-		} catch {
-			// Symlink creation may fail on some Windows configurations
-			test.skip('symlinks not supported on this configuration', () => {});
-			return;
-		}
+		fs.symlinkSync(
+			outerDir,
+			symlinkPath,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
 		const script = writeNodeScript(
 			'check-cwd.js',

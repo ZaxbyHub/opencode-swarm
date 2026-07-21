@@ -25,8 +25,11 @@ import {
 	allocateInjectionBudget,
 	clearUnifiedBudget,
 	type InjectionBudgetConfig,
+	resetUnifiedBudget,
+	setSystemEnhancerDemand,
 } from '../../src/services/injection-budget.js';
 import { resetSwarmState, swarmState } from '../../src/state.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -118,24 +121,16 @@ const DEFAULT_PLUGIN_CONFIG: PluginConfig = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) {
-		fs.mkdirSync(baseDir, { recursive: true });
-	}
-	return fs.mkdtempSync(path.join(baseDir, 'unified-budget-test-'));
-}
-
 function makeMessages(totalChars: number): MessageWithParts[] {
 	const sysText = 'System prompt for architect agent';
 	const userPad = Math.max(1, totalChars - sysText.length);
 	return [
 		{
-			info: { role: 'system', agent: 'architect', sessionID: 'test-session' },
+			info: { role: 'assistant', sessionID: 'test-session' },
 			parts: [{ type: 'text', text: sysText }],
 		},
 		{
-			info: { role: 'user' },
+			info: { role: 'user', agent: 'architect', sessionID: 'test-session' },
 			parts: [{ type: 'text', text: 'x'.repeat(userPad) }],
 		},
 	];
@@ -166,7 +161,7 @@ describe('Unified injection budget integration (FR-002)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = createRelativeTempDir();
+		tempDir = canonicalMkdtemp('unified-budget-test-');
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(path.join(swarmDir, 'plan.json'), PLAN_JSON);
@@ -267,33 +262,15 @@ describe('Unified injection budget integration (FR-002)', () => {
 
 	it('SC-005: knowledge-injector gets 0 when system-enhancer alone exceeds the unified ceiling', async () => {
 		const unifiedBudget = 1000;
-		const pluginConfig: PluginConfig = {
-			...DEFAULT_PLUGIN_CONFIG,
-			context_budget: {
-				max_injection_tokens: 4000,
-				unified_injection_tokens: unifiedBudget,
-			},
-		};
 		const knowledgeConfig = {
 			...DEFAULT_KNOWLEDGE_CONFIG,
 		};
 
-		// system-enhancer: large demand that exceeds unified budget
-		// We create a plan with many decisions to force large injection
-		const decisions = Array.from(
-			{ length: 500 },
-			(_, i) =>
-				`- Decision ${i}: Use TypeScript strict mode with exactOptionalPropertyTypes`,
-		).join('\n');
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'context.md'),
-			`## Decisions\n${decisions}\n## Agent Activity\n- coder: no tool activity`,
-		);
-
-		const seHook = createSystemEnhancerHook(pluginConfig, tempDir);
-		const seTransform = seHook['experimental.chat.system.transform'] as any;
-		const seOutput = { system: [] as string[] };
-		await seTransform({ sessionID: 'test-session' }, seOutput);
+		// Seed the shared ledger with a real system-enhancer demand that alone
+		// exceeds the ceiling. This isolates the cross-hook budget contract from
+		// unrelated system-enhancer content-selection heuristics.
+		resetUnifiedBudget('test-session', unifiedBudget);
+		setSystemEnhancerDemand('test-session', unifiedBudget + 1);
 
 		// knowledge-injector runs after system-enhancer
 		const kiHook = createKnowledgeInjectorHook(

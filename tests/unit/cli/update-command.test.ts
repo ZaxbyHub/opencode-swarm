@@ -560,6 +560,7 @@ describe('isSafeCachePath cross-platform path acceptance', () => {
 
 describe('M6 realpath canonicalization at delete sites', () => {
 	let tempDir: string;
+	const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
 
 	beforeEach(async () => {
 		tempDir = await realpath(
@@ -583,7 +584,7 @@ describe('M6 realpath canonicalization at delete sites', () => {
 		const linkDir = join(tempDir, 'opencode', 'node_modules');
 		await mkdir(linkDir, { recursive: true });
 		const symlinkPath = join(linkDir, 'opencode-swarm');
-		await symlink(evilTarget, symlinkPath);
+		await symlink(evilTarget, symlinkPath, symlinkType);
 
 		// Lexical guard (pre-M6 behavior) is fooled by the canonical-looking name.
 		expect(isSafeCachePath(symlinkPath)).toBe(true);
@@ -598,20 +599,18 @@ describe('M6 realpath canonicalization at delete sites', () => {
 	test('canonicalized symlinked lock leaf is refused after realpath (final-component swap)', async () => {
 		// Lock-file analogue: a symlink named bun.lock in a lexically-valid
 		// .../opencode/ dir that points at an unsafe real file.
-		const evilFileDir = join(tempDir, 'evil');
-		await mkdir(evilFileDir, { recursive: true });
-		const evilFile = join(evilFileDir, 'not-a-lock');
-		await writeFile(evilFile, '{}');
+		const evilTarget = join(tempDir, 'evil', 'not-a-lock');
+		await mkdir(evilTarget, { recursive: true });
 		const linkDir = join(tempDir, 'cache', 'opencode');
 		await mkdir(linkDir, { recursive: true });
 		const symlinkPath = join(linkDir, 'bun.lock');
-		await symlink(evilFile, symlinkPath);
+		await symlink(evilTarget, symlinkPath, symlinkType);
 
 		// Lexical guard is fooled: leaf bun.lock, parent opencode, grandparent cache.
 		expect(isSafeLockFilePath(symlinkPath)).toBe(true);
 
 		const canonical = safeRealpathSync(symlinkPath, symlinkPath);
-		expect(canonical).toBe(evilFile);
+		expect(canonical).toBe(evilTarget);
 		// Canonicalized guard refuses: leaf is 'not-a-lock'.
 		expect(isSafeLockFilePath(canonical as string)).toBe(false);
 	});

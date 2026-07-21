@@ -15,6 +15,22 @@ set -eu
 # strict ASCII-only ranges regardless of the invoking environment.
 export LC_ALL=C
 
+# Native Git for Windows prints drive-qualified paths (C:/...) even when it is
+# invoked from MSYS/Git Bash. Coreutils do not consistently interpret that form
+# as absolute in restricted/non-login shells, so normalize Git-reported paths
+# before passing them to cd, mkdir, or redirection. POSIX hosts are unchanged.
+to_shell_path() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW* | MSYS* | CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$1"
+        return
+      fi
+      ;;
+  esac
+  printf '%s\n' "$1"
+}
+
 slug="${1:-}"
 if [ -z "$slug" ]; then
   echo "usage: trace-init.sh <issue-slug>" >&2
@@ -37,6 +53,7 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "trace-init: not inside a git work tree — run this from within the target repository" >&2
   exit 2
 }
+root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 trace_dir="$root/.agents/issue-traces/$slug"
 
@@ -88,10 +105,13 @@ if [ -z "$git_dir" ]; then
     echo "trace-init: could not resolve the git directory" >&2
     exit 2
   }
+  git_dir="$(to_shell_path "$git_dir")"
   case "$git_dir" in
     /*) ;; # already absolute
     *) git_dir="$(pwd)/$git_dir" ;;
   esac
+else
+  git_dir="$(to_shell_path "$git_dir")"
 fi
 exclude_file="$git_dir/info/exclude"
 entry='.agents/issue-traces/'

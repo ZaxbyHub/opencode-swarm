@@ -7,15 +7,7 @@
  *
  * @note Tier 1 DI — uses real temp dirs and real functions.
  */
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	mock,
-	test,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as realFs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -69,24 +61,25 @@ describe('FR-205 SC-135: symlink safety — unlink removes symlink, not target',
 		}
 	});
 
-	it('removing a symlink does not delete the target file', async () => {
+	it('removing a linked file does not delete the target file', async () => {
 		// Create a real file in the target directory
 		const targetFile = path.join(symlinkTargetDir, 'real-content.txt');
 		fs.writeFileSync(targetFile, 'this is the real target content');
 
 		// Create a symlink at the lane env path pointing to the target file
 		const envSymlinkPath = path.join(tempDir, '.swarm', 'lanes', '0.env');
-		try {
+		if (process.platform === 'win32') {
+			fs.linkSync(targetFile, envSymlinkPath);
+		} else {
 			fs.symlinkSync(targetFile, envSymlinkPath);
-		} catch {
-			// On Windows, creating symlinks may require elevated privileges
-			test.skip('symlink creation failed — skipping on this platform');
-			return;
 		}
 
-		// Verify the symlink exists and target file exists
-		const symlinkExists = fs.lstatSync(envSymlinkPath).isSymbolicLink();
-		expect(symlinkExists).toBe(true);
+		const linkedEntry = fs.lstatSync(envSymlinkPath);
+		expect(
+			process.platform === 'win32'
+				? linkedEntry.isFile()
+				: linkedEntry.isSymbolicLink(),
+		).toBe(true);
 		const targetExistsBefore = fs.existsSync(targetFile);
 		expect(targetExistsBefore).toBe(true);
 
@@ -114,12 +107,11 @@ describe('FR-205 SC-135: symlink safety — unlink removes symlink, not target',
 
 		// Create a symlink to the directory at the env path
 		const envSymlinkPath = path.join(tempDir, '.swarm', 'lanes', '0.env');
-		try {
-			fs.symlinkSync(targetDir, envSymlinkPath, 'junction');
-		} catch {
-			test.skip('symlink creation failed — skipping on this platform');
-			return;
-		}
+		fs.symlinkSync(
+			targetDir,
+			envSymlinkPath,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
 		// Verify target dir has files before removal
 		const filesBefore = fs.readdirSync(targetDir);

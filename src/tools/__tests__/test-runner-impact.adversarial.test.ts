@@ -8,9 +8,7 @@ import {
 	test,
 } from 'bun:test';
 import type { ToolResult } from '../create-tool';
-
-// We need to use mock.module which is set up in beforeEach
-// This allows us to properly intercept the module imports
+import { _internals, test_runner } from '../test-runner';
 
 // Helper to convert ToolResult to string
 function resultToString(result: ToolResult): string {
@@ -23,19 +21,11 @@ function createToolContext(directory: string) {
 
 // Store mock references
 let mockAnalyzeImpact: Mock<(...args: any[]) => any>;
+const originalAnalyzeImpact = _internals.analyzeImpact;
+const originalIsCommandAvailable = _internals.isCommandAvailable;
 
 describe('test-runner impact scope ADVERSARIAL security tests', () => {
-	beforeEach(async () => {
-		// Reset module cache to ensure clean state
-		delete require.cache[require.resolve('../../../src/tools/test-runner.js')];
-		delete require.cache[
-			require.resolve('../../../src/test-impact/analyzer.js')
-		];
-		delete require.cache[
-			require.resolve('../../../src/utils/path-security.js')
-		];
-		delete require.cache[require.resolve('../../../src/build/discovery.js')];
-
+	beforeEach(() => {
 		// Create fresh mock for analyzeImpact
 		mockAnalyzeImpact = mock(() =>
 			Promise.resolve({
@@ -46,36 +36,13 @@ describe('test-runner impact scope ADVERSARIAL security tests', () => {
 			}),
 		);
 
-		// Mock the test-impact/analyzer module.
-		// Spread the real module so other named exports the test runner imports
-		// (e.g. loadImpactMap, used by estimateFanOut) survive the mock — only
-		// analyzeImpact is overridden. loadImpactMap with skipRebuild returns an
-		// empty map for the temp dirs used here, so it is safe and hermetic.
-		// See AGENTS.md invariant 7 (spread-real-exports).
-		const realAnalyzer = await import('../../../src/test-impact/analyzer.js');
-		mock.module('../../../src/test-impact/analyzer.js', () => ({
-			...realAnalyzer,
-			analyzeImpact: mockAnalyzeImpact,
-		}));
-
-		// Mock the build/discovery module to avoid real binary checks
-		mock.module('../../../src/build/discovery.js', () => ({
-			isCommandAvailable: () => false,
-		}));
-
-		// Mock the path-security module to avoid Windows path issues in tests
-		// Import real module and override only validateDirectory to allow test paths
-		const realPathSecurity = await import(
-			'../../../src/utils/path-security.js'
-		);
-		mock.module('../../../src/utils/path-security.js', () => ({
-			...realPathSecurity,
-			validateDirectory: () => {},
-			validateSymlinkBoundary: () => {},
-		}));
+		_internals.analyzeImpact = mockAnalyzeImpact;
+		_internals.isCommandAvailable = () => false;
 	});
 
 	afterEach(() => {
+		_internals.analyzeImpact = originalAnalyzeImpact;
+		_internals.isCommandAvailable = originalIsCommandAvailable;
 		mock.restore();
 	});
 
@@ -83,7 +50,6 @@ describe('test-runner impact scope ADVERSARIAL security tests', () => {
 		args: Record<string, unknown>,
 		directory?: string,
 	): Promise<{ parsed: Record<string, unknown>; raw: string }> {
-		const { test_runner } = await import('../../../src/tools/test-runner.js');
 		const result = await test_runner.execute(
 			args,
 			createToolContext(directory ?? '/fake/dir'),

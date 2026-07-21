@@ -119,9 +119,7 @@ describe('Language-specific prompt injection - Integration tests', () => {
 				'Update src/tools/lint.ts',
 			);
 			expect(result).not.toBeNull();
-			expect(result).toContain(
-				'[LANGUAGE-SPECIFIC CONSTRAINTS — TypeScript / JavaScript]',
-			);
+			expect(result).toContain('[LANGUAGE-SPECIFIC CONSTRAINTS — TypeScript]');
 			expect(result).toContain(
 				'Use strict TypeScript; no implicit any or type assertions without justification',
 			);
@@ -190,7 +188,7 @@ describe('Language-specific prompt injection - Integration tests', () => {
 			);
 			expect(result).not.toBeNull();
 			expect(result).toContain(
-				'[LANGUAGE-SPECIFIC REVIEW CHECKLIST — TypeScript / JavaScript]',
+				'[LANGUAGE-SPECIFIC REVIEW CHECKLIST — TypeScript]',
 			);
 			expect(result).toContain(
 				'- [ ] Verify no implicit any or unsafe type casts',

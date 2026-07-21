@@ -3,24 +3,24 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Import the module under test
 const testRunnerModule = await import('../../../src/tools/test-runner');
 
-// Runtime capability check: detect whether pwsh (PowerShell) is installed.
-// Tests that invoke pwsh are skipped when it is not available.
-let hasPwsh = false;
+const PESTER_PROBE =
+	'if (Get-Module -ListAvailable -Name Pester) { exit 0 }; exit 1';
+let hasPester = false;
 try {
-	const proc = Bun.spawnSync([
-		'pwsh',
-		'-NoLogo',
-		'-NonInteractive',
-		'-Command',
-		'exit 0',
-	]);
-	hasPwsh = proc.exitCode === 0;
-} catch {
-	hasPwsh = false;
-}
+	const proc = Bun.spawnSync(
+		['pwsh', '-NoLogo', '-NonInteractive', '-Command', PESTER_PROBE],
+		{
+			cwd: import.meta.dir,
+			stdin: 'ignore',
+			stdout: 'ignore',
+			stderr: 'ignore',
+			timeout: 10_000,
+		},
+	);
+	hasPester = proc.exitCode === 0;
+} catch {}
 
 // Extract the exports we need
 const {
@@ -540,7 +540,7 @@ describe('test-runner.ts - Security Validation', () => {
 		})();
 	}, 10000);
 
-	test.skipIf(!hasPwsh)(
+	test.skipIf(!hasPester)(
 		'accepts direct test files for convention scope without source extensions',
 		async () => {
 			const tempDir = fs.realpathSync(

@@ -28,9 +28,19 @@ describe('pre_check_batch integration', () => {
 	beforeEach(() => {
 		originalCwd = process.cwd();
 		originalPath = process.env.PATH || '';
-		// Add local node_modules/.bin to PATH so npx uses local biome
-		const projectBin = path.join(originalCwd, 'node_modules', '.bin');
-		process.env.PATH = projectBin + path.delimiter + originalPath;
+		// The Unix package shim is executable directly. On Windows, expose the
+		// optional native package directory because child-process array spawns do
+		// not execute the node_modules/.bin/biome.cmd shell shim.
+		const biomeBinDir =
+			process.platform === 'win32'
+				? path.join(
+						originalCwd,
+						'node_modules',
+						'@biomejs',
+						`cli-win32-${process.arch}`,
+					)
+				: path.join(originalCwd, 'node_modules', '.bin');
+		process.env.PATH = biomeBinDir + path.delimiter + originalPath;
 		tempDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), 'pre-check-batch-integration-'),
 		);

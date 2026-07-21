@@ -1032,17 +1032,50 @@ export const RepoGraphConfigSchema = z.object({
 
 export type RepoGraphConfig = z.infer<typeof RepoGraphConfigSchema>;
 
+const INVALID_CHECKPOINT_PROTO_FIELD = '__swarm_invalid_checkpoint_proto__';
+const FORBIDDEN_CHECKPOINT_CONFIG_KEYS = new Set([
+	'__proto__',
+	'prototype',
+	'constructor',
+]);
+
+/** Reject prototype-polluted checkpoint config before Zod rebuilds the object. */
+function rejectCheckpointPrototypePollution(raw: unknown): unknown {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+
+	try {
+		if (Object.getPrototypeOf(raw) !== Object.prototype) {
+			return { [INVALID_CHECKPOINT_PROTO_FIELD]: true };
+		}
+		for (const key of Reflect.ownKeys(raw)) {
+			if (
+				typeof key === 'string' &&
+				FORBIDDEN_CHECKPOINT_CONFIG_KEYS.has(key)
+			) {
+				return { [INVALID_CHECKPOINT_PROTO_FIELD]: true };
+			}
+		}
+	} catch {
+		return { [INVALID_CHECKPOINT_PROTO_FIELD]: true };
+	}
+
+	return raw;
+}
+
 // Checkpoint configuration
-export const CheckpointConfigSchema = z
-	.object({
-		enabled: z.boolean().default(true),
-		auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
-		// When false (default), checkpoint save skips the git commit if the working
-		// tree is clean, recording only the current HEAD SHA. Set to true to restore
-		// the previous behaviour of creating a git commit even with no file changes.
-		allow_empty_commits: z.boolean().default(false),
-	})
-	.strict();
+export const CheckpointConfigSchema = z.preprocess(
+	rejectCheckpointPrototypePollution,
+	z
+		.object({
+			enabled: z.boolean().default(true),
+			auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
+			// When false (default), checkpoint save skips the git commit if the working
+			// tree is clean, recording only the current HEAD SHA. Set to true to restore
+			// the previous behaviour of creating a git commit even with no file changes.
+			allow_empty_commits: z.boolean().default(false),
+		})
+		.strict(),
+);
 
 export type CheckpointConfig = z.infer<typeof CheckpointConfigSchema>;
 

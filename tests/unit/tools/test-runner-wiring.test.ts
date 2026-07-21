@@ -1,53 +1,41 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-
-afterEach(() => {
-	mock.restore();
-});
-
-import type * as fs from 'node:fs';
-import * as realFs from 'node:fs';
 import * as path from 'node:path';
 
-// IMPORTANT MOCK PATTERN
 const mockIsCommandAvailable = mock();
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) =>
-		mockIsCommandAvailable(...(args as [string])),
-}));
-
 const mockExistsSync = mock();
 const mockReaddirSync = mock();
 const mockReadFileSync = mock();
-mock.module('node:fs', () => ({
-	...realFs,
-	existsSync: (...args: unknown[]) =>
-		mockExistsSync(...(args as [fs.PathLike])),
-	readdirSync: (...args: unknown[]) => mockReaddirSync(...(args as [string])),
-	readFileSync: (...args: unknown[]) =>
-		mockReadFileSync(...(args as [string, string])),
-	default: {
-		...realFs,
-		existsSync: (...args: unknown[]) =>
-			mockExistsSync(...(args as [fs.PathLike])),
-		readdirSync: (...args: unknown[]) => mockReaddirSync(...(args as [string])),
-		readFileSync: (...args: unknown[]) =>
-			mockReadFileSync(...(args as [string, string])),
-	},
-}));
 
 import {
+	_internals,
 	detectTestFramework,
 	SUPPORTED_FRAMEWORKS,
 } from '../../../src/tools/test-runner';
 
+const originalIsCommandAvailable = _internals.isCommandAvailable;
+const originalExistsSync = _internals.existsSync;
+const originalReaddirSync = _internals.readdirSync;
+const originalReadFileSync = _internals.readFileSync;
+
 beforeEach(() => {
-	mock.restore();
 	mock.clearAllMocks();
 	// Default mocks for safety
 	mockIsCommandAvailable.mockImplementation(() => false);
 	mockExistsSync.mockImplementation(() => false);
 	mockReaddirSync.mockImplementation(() => []);
 	mockReadFileSync.mockImplementation(() => '{}');
+	_internals.isCommandAvailable = mockIsCommandAvailable as never;
+	_internals.existsSync = mockExistsSync as never;
+	_internals.readdirSync = mockReaddirSync as never;
+	_internals.readFileSync = mockReadFileSync as never;
+});
+
+afterEach(() => {
+	_internals.isCommandAvailable = originalIsCommandAvailable;
+	_internals.existsSync = originalExistsSync;
+	_internals.readdirSync = originalReaddirSync;
+	_internals.readFileSync = originalReadFileSync;
+	mock.restore();
 });
 
 describe('Group 1: SUPPORTED_FRAMEWORKS constant', () => {
