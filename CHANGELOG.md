@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.126.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.4...v7.126.5) (2026-07-21)
+
+
+### Bug Fixes
+
+* **config:** restore guardrails_defaults recovery when config file has errors ([a7583a7](https://github.com/ZaxbyHub/opencode-swarm/commit/a7583a77e881ed0c1fd85692455615a855c65def))
+* **config:** simplify recovery metadata warnings, remove warningForRemovedKeys helper ([1e4761e](https://github.com/ZaxbyHub/opencode-swarm/commit/1e4761ef7a02b3351a8225e7e223e6a74b2870db))
+
 ## [7.126.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.3...v7.126.4) (2026-07-21)
 
 
