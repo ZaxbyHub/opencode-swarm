@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { z } from 'zod';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	ExternalSkillsConfigSchema,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
@@ -367,6 +368,7 @@ export type ConfigRecovery =
 	| 'none'
 	| 'stripped_keys'
 	| 'user_only'
+	| 'sanitized_values'
 	| 'guardrails_defaults';
 
 /** Full result from the shared config-build core. */
@@ -558,6 +560,42 @@ function buildConfigWithMeta(
 					],
 				};
 			}
+		}
+	}
+
+	// 7b. Recursive malformed-value recovery (issue #1690): if user-config
+	//     fallback also failed, the remaining failure is likely a malformed
+	//     VALUE (wrong type). Drop the smallest recoverable unit (leaf field
+	//     → parent section) so valid sections survive. This is the last
+	//     targeted recovery before bare guardrails defaults.
+	const valueRecovery = sanitizeMalformedValues(PluginConfigSchema, mergedRaw);
+	if (valueRecovery.recoveryWarnings.length > 0) {
+		const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
+		if (recoveredParse.success) {
+			const removedKeys = [
+				...gatesStripped,
+				...valueRecovery.recoveryWarnings.map((w) => w.section),
+			];
+			const warning = warningForRemovedKeys(removedKeys);
+			advisoryWarn(`[opencode-swarm] ${warning}`);
+			// Force guardrails enabled on recovery — the user's config had
+			// invalid values, so we apply the same fail-secure default as
+			// step 8 (guardrails_defaults) to preserve the security posture.
+			const secureConfig = PluginConfigSchema.parse({
+				...(recoveredParse.data as Record<string, unknown>),
+				guardrails: {
+					...((recoveredParse.data as Record<string, unknown>).guardrails as
+						| Record<string, unknown>
+						| undefined),
+					enabled: true,
+				},
+			});
+			return {
+				config: secure(secureConfig),
+				recovery: 'sanitized_values',
+				removedKeys,
+				warnings: [warning],
+			};
 		}
 	}
 
