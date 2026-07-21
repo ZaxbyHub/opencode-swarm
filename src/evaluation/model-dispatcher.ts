@@ -197,7 +197,18 @@ export function createEvaluationModelDispatcher(
 					signal: controller.signal,
 				});
 				if (!response.data)
-					throw new Error('Evaluation session returned no data');
+					// #1905: preserve the SDK error body so the same-model retry
+					// classifier (isTransientProviderError at the call site below)
+					// can read the real provider message — without this, envelope-
+					// shaped 429/402 quota errors classify as non-retryable and the
+					// bounded same-model retry that exists to absorb a momentary
+					// quota hiccup (#1901 comment at line ~225) never fires. Parity
+					// with auto-review.ts / integration.ts / reviewer.ts. NOTE: this
+					// site is same-model-retry-only by design (benchmark attribution);
+					// no model substitution is added here.
+					throw new Error(
+						`Evaluation session returned no data: ${JSON.stringify(response.error)}`,
+					);
 				const text = response.data.parts
 					.filter((part) => part.type === 'text')
 					.map((part) => part.text ?? '')

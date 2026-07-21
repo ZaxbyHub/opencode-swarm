@@ -476,6 +476,9 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 						path: { id: sessionId },
 						body: {
 							agent: agentName,
+							// #1896/#1905: per-call model override on a fallback attempt
+							// (parity with the timeoutMs > 0 branch above).
+							...(model ? { model } : {}),
 							tools: { write: false, edit: false, patch: false },
 							parts: [{ type: 'text', text: promptText }],
 						},
@@ -483,7 +486,13 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 					});
 
 		if (!response.data) {
-			throw new Error('Reviewer session returned no data');
+			// #1905: preserve the SDK error body so the transient/quota
+			// classifier can read the real provider message — without this,
+			// envelope-shaped 429/402 errors classify as permanent and the
+			// failover never fires (parity with auto-review.ts / integration.ts).
+			throw new Error(
+				`Reviewer session returned no data: ${JSON.stringify(response.error)}`,
+			);
 		}
 
 		// Extract text from response parts
