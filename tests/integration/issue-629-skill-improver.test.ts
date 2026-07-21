@@ -9,23 +9,26 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../src/hooks/knowledge-types';
 import { runSkillImprover } from '../../src/services/skill-improver';
 import { resolveQuotaPath } from '../../src/services/skill-improver-quota';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
 
 let tmp: string;
+let cleanupEnv: () => void;
 beforeEach(() => {
 	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-issue629-'));
+	const isolatedEnv = createIsolatedTestEnv();
+	tmp = isolatedEnv.configDir;
+	cleanupEnv = isolatedEnv.cleanup;
 });
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
 	mock.restore();
+	cleanupEnv();
 });
 
 async function seedMatureKnowledge(): Promise<void> {
@@ -95,7 +98,9 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 			config,
 		});
 		expect(r.ran).toBe(true);
-		expect(r.proposalPath).toContain('.swarm/skill-improver/proposals/');
+		expect(r.proposalPath).toContain(
+			path.join('.swarm', 'skill-improver', 'proposals'),
+		);
 		expect(existsSync(r.proposalPath!)).toBe(true);
 		// proposal mentions the configured model
 		expect(readFileSync(r.proposalPath!, 'utf-8')).toContain(

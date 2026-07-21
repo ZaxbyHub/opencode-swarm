@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { test_runner } from '../test-runner.js';
+import { _internals, test_runner } from '../test-runner.js';
 
 // ============ Test Helpers ============
 
@@ -82,10 +82,7 @@ const mockAnalyzeImpact =
 		>
 	>();
 
-// Mock the analyzer module
-vi.mock('../../test-impact/analyzer.js', () => ({
-	analyzeImpact: mockAnalyzeImpact,
-}));
+const originalAnalyzeImpact = _internals.analyzeImpact;
 
 // ============ Tests ============
 
@@ -125,6 +122,7 @@ describe('impact scope execution', () => {
 
 		// Reset and configure the mock
 		mockAnalyzeImpact.mockReset();
+		_internals.analyzeImpact = mockAnalyzeImpact;
 	});
 
 	afterEach(() => {
@@ -132,6 +130,7 @@ describe('impact scope execution', () => {
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {}
+		_internals.analyzeImpact = originalAnalyzeImpact;
 	});
 
 	test('1. Impact scope with valid files and impacted tests found → returns impacted test files', async () => {

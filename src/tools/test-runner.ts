@@ -43,7 +43,9 @@ export async function estimateFanOut(
 	cwd: string,
 ): Promise<{ estimatedCount: number }> {
 	try {
-		const impactMap = await loadImpactMap(cwd, { skipRebuild: true });
+		const impactMap = await _internals.loadImpactMap(cwd, {
+			skipRebuild: true,
+		});
 		const uniqueTestFiles = new Set<string>();
 
 		for (const sourceFile of sourceFiles) {
@@ -262,34 +264,42 @@ function hasDevDependency(
 /** Detect Go test runner (go test ./...) */
 function detectGoTest(cwd: string): boolean {
 	// check: go.mod exists AND go binary on PATH
-	return fs.existsSync(path.join(cwd, 'go.mod')) && isCommandAvailable('go');
+	return (
+		_internals.existsSync(path.join(cwd, 'go.mod')) &&
+		_internals.isCommandAvailable('go')
+	);
 }
 
 /** Detect Java/Maven test runner (mvn test) */
 function detectJavaMaven(cwd: string): boolean {
 	// check: pom.xml exists AND mvn binary on PATH
-	return fs.existsSync(path.join(cwd, 'pom.xml')) && isCommandAvailable('mvn');
+	return (
+		_internals.existsSync(path.join(cwd, 'pom.xml')) &&
+		_internals.isCommandAvailable('mvn')
+	);
 }
 
 /** Detect Java/Gradle or Kotlin/Gradle test runner (gradlew test) */
 function detectGradle(cwd: string): boolean {
 	// check: build.gradle or build.gradle.kts exists AND (gradlew script OR gradle binary)
 	const hasBuildFile =
-		fs.existsSync(path.join(cwd, 'build.gradle')) ||
-		fs.existsSync(path.join(cwd, 'build.gradle.kts'));
+		_internals.existsSync(path.join(cwd, 'build.gradle')) ||
+		_internals.existsSync(path.join(cwd, 'build.gradle.kts'));
 	const hasGradlew =
-		fs.existsSync(path.join(cwd, 'gradlew')) ||
-		fs.existsSync(path.join(cwd, 'gradlew.bat'));
-	return hasBuildFile && (hasGradlew || isCommandAvailable('gradle'));
+		_internals.existsSync(path.join(cwd, 'gradlew')) ||
+		_internals.existsSync(path.join(cwd, 'gradlew.bat'));
+	return (
+		hasBuildFile && (hasGradlew || _internals.isCommandAvailable('gradle'))
+	);
 }
 
 /** Detect C#/.NET test runner (dotnet test) */
 function detectDotnetTest(cwd: string): boolean {
 	// check: any .csproj file exists AND dotnet binary on PATH
 	try {
-		const files = fs.readdirSync(cwd);
+		const files = _internals.readdirSync(cwd);
 		const hasCsproj = files.some((f) => f.endsWith('.csproj'));
-		return hasCsproj && isCommandAvailable('dotnet');
+		return hasCsproj && _internals.isCommandAvailable('dotnet');
 	} catch {
 		return false;
 	}
@@ -298,19 +308,19 @@ function detectDotnetTest(cwd: string): boolean {
 /** Detect C/C++ CTest runner */
 function detectCTest(cwd: string): boolean {
 	// ctest works from build directory; accept both source and build directories
-	const hasSource = fs.existsSync(path.join(cwd, 'CMakeLists.txt'));
+	const hasSource = _internals.existsSync(path.join(cwd, 'CMakeLists.txt'));
 	const hasBuildCache =
-		fs.existsSync(path.join(cwd, 'CMakeCache.txt')) ||
-		fs.existsSync(path.join(cwd, 'build', 'CMakeCache.txt'));
-	return (hasSource || hasBuildCache) && isCommandAvailable('ctest');
+		_internals.existsSync(path.join(cwd, 'CMakeCache.txt')) ||
+		_internals.existsSync(path.join(cwd, 'build', 'CMakeCache.txt'));
+	return (hasSource || hasBuildCache) && _internals.isCommandAvailable('ctest');
 }
 
 /** Detect Swift test runner (swift test) */
 function detectSwiftTest(cwd: string): boolean {
 	// check: Package.swift exists AND swift binary on PATH
 	return (
-		fs.existsSync(path.join(cwd, 'Package.swift')) &&
-		isCommandAvailable('swift')
+		_internals.existsSync(path.join(cwd, 'Package.swift')) &&
+		_internals.isCommandAvailable('swift')
 	);
 }
 
@@ -318,20 +328,23 @@ function detectSwiftTest(cwd: string): boolean {
 function detectDartTest(cwd: string): boolean {
 	// check: pubspec.yaml exists AND (dart or flutter binary on PATH)
 	return (
-		fs.existsSync(path.join(cwd, 'pubspec.yaml')) &&
-		(isCommandAvailable('dart') || isCommandAvailable('flutter'))
+		_internals.existsSync(path.join(cwd, 'pubspec.yaml')) &&
+		(_internals.isCommandAvailable('dart') ||
+			_internals.isCommandAvailable('flutter'))
 	);
 }
 
 /** Detect Ruby/RSpec test runner */
 function detectRSpec(cwd: string): boolean {
 	// Require .rspec file OR (Gemfile + spec/ dir) for Ruby specificity
-	const hasRSpecFile = fs.existsSync(path.join(cwd, '.rspec'));
-	const hasGemfile = fs.existsSync(path.join(cwd, 'Gemfile'));
-	const hasSpecDir = fs.existsSync(path.join(cwd, 'spec'));
+	const hasRSpecFile = _internals.existsSync(path.join(cwd, '.rspec'));
+	const hasGemfile = _internals.existsSync(path.join(cwd, 'Gemfile'));
+	const hasSpecDir = _internals.existsSync(path.join(cwd, 'spec'));
 	const hasRSpec = hasRSpecFile || (hasGemfile && hasSpecDir);
 	return (
-		hasRSpec && (isCommandAvailable('bundle') || isCommandAvailable('rspec'))
+		hasRSpec &&
+		(_internals.isCommandAvailable('bundle') ||
+			_internals.isCommandAvailable('rspec'))
 	);
 }
 
@@ -339,10 +352,10 @@ function detectRSpec(cwd: string): boolean {
 function detectMinitest(cwd: string): boolean {
 	// Require test/ dir + Ruby-specific markers (Gemfile or Rakefile)
 	return (
-		fs.existsSync(path.join(cwd, 'test')) &&
-		(fs.existsSync(path.join(cwd, 'Gemfile')) ||
-			fs.existsSync(path.join(cwd, 'Rakefile'))) &&
-		isCommandAvailable('ruby')
+		_internals.existsSync(path.join(cwd, 'test')) &&
+		(_internals.existsSync(path.join(cwd, 'Gemfile')) ||
+			_internals.existsSync(path.join(cwd, 'Rakefile'))) &&
+		_internals.isCommandAvailable('ruby')
 	);
 }
 
@@ -490,8 +503,8 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 	// Check for package.json to detect JS/TS frameworks
 	try {
 		const packageJsonPath = path.join(baseDir, 'package.json');
-		if (fs.existsSync(packageJsonPath)) {
-			const content = fs.readFileSync(packageJsonPath, 'utf-8');
+		if (_internals.existsSync(packageJsonPath)) {
+			const content = _internals.readFileSync(packageJsonPath, 'utf-8');
 			const pkg = JSON.parse(content) as {
 				dependencies?: Record<string, string>;
 				devDependencies?: Record<string, string>;
@@ -515,8 +528,8 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 
 			// Check for bun.lockb or bun.lock
 			if (
-				fs.existsSync(path.join(baseDir, 'bun.lockb')) ||
-				fs.existsSync(path.join(baseDir, 'bun.lock'))
+				_internals.existsSync(path.join(baseDir, 'bun.lockb')) ||
+				_internals.existsSync(path.join(baseDir, 'bun.lock'))
 			) {
 				// Check if bun test is in scripts
 				if (scripts.test?.includes('bun')) return 'bun';
@@ -532,19 +545,19 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 		const setupCfgPath = path.join(baseDir, 'setup.cfg');
 		const requirementsTxtPath = path.join(baseDir, 'requirements.txt');
 
-		if (fs.existsSync(pyprojectTomlPath)) {
-			const content = fs.readFileSync(pyprojectTomlPath, 'utf-8');
+		if (_internals.existsSync(pyprojectTomlPath)) {
+			const content = _internals.readFileSync(pyprojectTomlPath, 'utf-8');
 			if (content.includes('[tool.pytest')) return 'pytest';
 			if (content.includes('pytest')) return 'pytest';
 		}
 
-		if (fs.existsSync(setupCfgPath)) {
-			const content = fs.readFileSync(setupCfgPath, 'utf-8');
+		if (_internals.existsSync(setupCfgPath)) {
+			const content = _internals.readFileSync(setupCfgPath, 'utf-8');
 			if (content.includes('[pytest]')) return 'pytest';
 		}
 
-		if (fs.existsSync(requirementsTxtPath)) {
-			const content = fs.readFileSync(requirementsTxtPath, 'utf-8');
+		if (_internals.existsSync(requirementsTxtPath)) {
+			const content = _internals.readFileSync(requirementsTxtPath, 'utf-8');
 			if (content.includes('pytest')) return 'pytest';
 		}
 	} catch {
@@ -554,8 +567,8 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 	// Check for Cargo/Rust (Cargo.toml)
 	try {
 		const cargoTomlPath = path.join(baseDir, 'Cargo.toml');
-		if (fs.existsSync(cargoTomlPath)) {
-			const content = fs.readFileSync(cargoTomlPath, 'utf-8');
+		if (_internals.existsSync(cargoTomlPath)) {
+			const content = _internals.readFileSync(cargoTomlPath, 'utf-8');
 			if (content.includes('[dev-dependencies]')) {
 				// Check for common test dependencies
 				if (
@@ -578,9 +591,9 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 		const pesterPs1Path = path.join(baseDir, 'tests.ps1');
 
 		if (
-			fs.existsSync(pesterConfigPath) ||
-			fs.existsSync(pesterConfigJsonPath) ||
-			fs.existsSync(pesterPs1Path)
+			_internals.existsSync(pesterConfigPath) ||
+			_internals.existsSync(pesterConfigJsonPath) ||
+			_internals.existsSync(pesterPs1Path)
 		) {
 			return 'pester';
 		}
@@ -606,15 +619,15 @@ export async function detectTestFramework(cwd: string): Promise<TestFramework> {
 
 function detectPhpTest(cwd: string): TestFramework | null {
 	if (
-		fs.existsSync(path.join(cwd, 'artisan')) &&
-		fs.existsSync(path.join(cwd, 'composer.json'))
+		_internals.existsSync(path.join(cwd, 'artisan')) &&
+		_internals.existsSync(path.join(cwd, 'composer.json'))
 	) {
 		return 'php-artisan';
 	}
-	if (fs.existsSync(path.join(cwd, 'Pest.php'))) return 'pest';
+	if (_internals.existsSync(path.join(cwd, 'Pest.php'))) return 'pest';
 	if (
-		fs.existsSync(path.join(cwd, 'phpunit.xml')) ||
-		fs.existsSync(path.join(cwd, 'phpunit.xml.dist'))
+		_internals.existsSync(path.join(cwd, 'phpunit.xml')) ||
+		_internals.existsSync(path.join(cwd, 'phpunit.xml.dist'))
 	) {
 		return 'phpunit';
 	}
@@ -1263,12 +1276,12 @@ function buildTestCommand(
 		case 'dart-test':
 			// dart-test has no bail support — silently ignore
 			// Prefer flutter test for Flutter projects; fall back to dart test
-			return isCommandAvailable('flutter')
+			return _internals.isCommandAvailable('flutter')
 				? ['flutter', 'test', ...files]
 				: ['dart', 'test', ...files];
 		case 'rspec': {
 			// Use bundle exec when bundler is available, otherwise fall back to rspec directly
-			const args = isCommandAvailable('bundle')
+			const args = _internals.isCommandAvailable('bundle')
 				? ['bundle', 'exec', 'rspec']
 				: ['rspec'];
 			if (bail) args.push('--fail-fast');
@@ -2735,7 +2748,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			}
 
 			try {
-				const impactResult = await analyzeImpact(
+				const impactResult = await _internals.analyzeImpact(
 					sourceFiles,
 					workingDir,
 					MAX_SAFE_TEST_FILES,
@@ -2882,7 +2895,22 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	},
 });
 
-export const _internals = {
+export const _internals: {
+	analyzeImpact: typeof analyzeImpact;
+	loadImpactMap: typeof loadImpactMap;
+	isCommandAvailable: typeof isCommandAvailable;
+	existsSync: typeof fs.existsSync;
+	readdirSync: typeof fs.readdirSync;
+	readFileSync: typeof fs.readFileSync;
+	selectHistoryForAnalysis: typeof selectHistoryForAnalysis;
+	AGGREGATE_TEST_NAME: typeof AGGREGATE_TEST_NAME;
+} = {
+	analyzeImpact,
+	loadImpactMap,
+	isCommandAvailable,
+	existsSync: fs.existsSync,
+	readdirSync: fs.readdirSync,
+	readFileSync: fs.readFileSync,
 	selectHistoryForAnalysis,
 	AGGREGATE_TEST_NAME,
-} as const;
+};

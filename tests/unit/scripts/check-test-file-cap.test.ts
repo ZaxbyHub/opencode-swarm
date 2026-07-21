@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { bashCommand } from '../../helpers/bash';
 
 const SCRIPT = path.resolve(process.cwd(), 'scripts', 'check-test-file-cap.sh');
 
@@ -19,23 +20,21 @@ interface SpawnResult {
 	stderr: string;
 }
 
-async function runScript(
-	repoDir: string,
-	env?: Record<string, string>,
-): Promise<SpawnResult> {
-	const proc = Bun.spawn({
-		cmd: ['bash', SCRIPT],
+function runScript(repoDir: string, env?: Record<string, string>): SpawnResult {
+	const proc = Bun.spawnSync({
+		cmd: bashCommand(SCRIPT),
 		cwd: repoDir,
 		env: { ...process.env, ...env },
+		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
+		timeout: 30_000,
 	});
-	const [stdout, stderr] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
-	const exitCode = await proc.exited;
-	return { exitCode, stdout, stderr };
+	return {
+		exitCode: proc.exitCode,
+		stdout: proc.stdout.toString(),
+		stderr: proc.stderr.toString(),
+	};
 }
 
 function git(repoDir: string, ...args: string[]): void {
@@ -43,8 +42,10 @@ function git(repoDir: string, ...args: string[]): void {
 		cmd: ['git', ...args],
 		cwd: repoDir,
 		env: process.env,
+		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
+		timeout: 10_000,
 	});
 	if (proc.exitCode !== 0) {
 		throw new Error(

@@ -3,33 +3,4 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# Merge-group flaky tests — surface only in the broader Windows/macOS/coverage
-# matrix (PR-branch ubuntu-only CI doesn't hit them). Pre-existing, unrelated
-# to any specific PR. Tracked under #1737 (test quarantine debt) pending a
-# dedicated test-stability sprint.
-#
-# swarm-artifact-cache.test.ts: all assertions pass, but bun can exit
-# non-zero on Windows CI runners (e.g. AV holding a handle on the tmpdir
-# during afterEach's recursive rm) — a platform quirk, not a test-logic bug.
-tests/unit/utils/swarm-artifact-cache.test.ts
-# skill-scoring-workflow.test.ts: root-cause clock-freeze fix already applied
-# (see file header). Un-quarantine is intentionally gated on a confirmed-green
-# merge-group run across all 3 OSes per #1782, not just local passing —
-# tracked under #1737.
-tests/unit/hooks/skill-scoring-workflow.test.ts
-# Merge-group flaky test: test-runner.test.ts runs the real test-runner
-# tool against a fake Pester project (line 559-565 asserts parsed.success===true).
-# In the coverage context the subprocess behavior can return success=false
-# (environment-sensitive). Pre-existing, unrelated to any specific PR.
-# Tracked under #1737 (test quarantine debt) pending a dedicated
-# test-stability sprint.
-tests/unit/tools/test-runner.test.ts
-# Merge-group flaky test: finalize-reward-sweep-multi-runid.test.ts asserts a
-# Jaccard-related sibling's qValue propagates to exactly 0.485
-# (applyEmaUpdate(0.5, 0, 0.03) = 0.97 * 0.5) but the actual is 0.5 — the
-# propagation step is not applied, pointing to an ordering/initialization
-# nondeterminism in the sqlite-backed memory store. Reproduces consistently on
-# clean main (verified at 2616988a and 6f5e1376 — the latter is where PR #1906's
-# merge-queue CI happened to pass it). Pre-existing, unrelated to any specific
-# PR. Tracked under #1907 (root-cause fix) and #1737 (test quarantine debt).
-tests/unit/memory/finalize-reward-sweep-multi-runid.test.ts
+# No active global test quarantines. Issue #1908 retired the tracked backlog.

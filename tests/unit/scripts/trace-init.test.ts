@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { bashCommand } from '../../helpers/bash';
 
 const SCRIPT = path.resolve(
 	process.cwd(),
@@ -24,20 +25,25 @@ interface SpawnResult {
 	stderr: string;
 }
 
-async function runScript(cwd: string, args: string[]): Promise<SpawnResult> {
-	const proc = Bun.spawn({
-		cmd: ['bash', SCRIPT, ...args],
+function runScript(
+	cwd: string,
+	args: string[],
+	env: Record<string, string | undefined> = process.env,
+): SpawnResult {
+	const proc = Bun.spawnSync({
+		cmd: bashCommand(SCRIPT, ...args),
 		cwd,
-		env: process.env,
+		env,
+		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
+		timeout: 10_000,
 	});
-	const [stdout, stderr] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
-	const exitCode = await proc.exited;
-	return { exitCode, stdout, stderr };
+	return {
+		exitCode: proc.exitCode,
+		stdout: proc.stdout.toString(),
+		stderr: proc.stderr.toString(),
+	};
 }
 
 function git(repoDir: string, ...args: string[]): string {
@@ -45,8 +51,10 @@ function git(repoDir: string, ...args: string[]): string {
 		cmd: ['git', ...args],
 		cwd: repoDir,
 		env: process.env,
+		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
+		timeout: 10_000,
 	});
 	if (proc.exitCode !== 0) {
 		throw new Error(
@@ -101,13 +109,8 @@ function makeRepo(prefix: string): string {
  * path, so without this shim the fallback branch has zero coverage.
  */
 function makeOldGitShim(): string {
-	const realGit = Bun.spawnSync({
-		cmd: ['sh', '-c', 'command -v git'],
-		env: process.env,
-		stdout: 'pipe',
-	})
-		.stdout.toString()
-		.trim();
+	const realGit = Bun.which('git');
+	if (!realGit) throw new Error('git is required for trace-init tests');
 	const shimDir = fs.mkdtempSync(
 		path.join(os.tmpdir(), 'trace-init-old-git-shim-'),
 	);
@@ -208,7 +211,7 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 		expect(result.exitCode).toBe(0);
 	});
 
-	test('F-D1: refuses to follow a committed symlink that escapes the repo root', async () => {
+	test('F-D1: refuses to follow an existing directory link that escapes the repo root', async () => {
 		const outer = track(
 			fs.realpathSync(
 				fs.mkdtempSync(path.join(os.tmpdir(), 'trace-init-symlink-outer-')),
@@ -227,9 +230,12 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 		fs.symlinkSync(
 			path.join(outer, 'attacker-target'),
 			path.join(repo, '.agents'),
+			process.platform === 'win32' ? 'junction' : 'dir',
 		);
-		git(repo, 'add', '-A');
-		git(repo, 'commit', '-q', '-m', 'add symlink escape');
+		if (process.platform !== 'win32') {
+			git(repo, 'add', '-A');
+			git(repo, 'commit', '-q', '-m', 'add symlink escape');
+		}
 
 		const result = await runScript(repo, ['evil-slug']);
 		expect(result.exitCode).toBe(2);
@@ -271,13 +277,15 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 			],
 			cwd: linkedWorktree,
 			env: process.env,
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
+			timeout: 10_000,
 		});
 		expect(checkIgnore.exitCode).toBe(0);
 	});
 
-	test('F-D1: refuses a committed symlink escape at a deeper ancestor (.agents/issue-traces itself, not .agents)', async () => {
+	test('F-D1: refuses a directory-link escape at a deeper ancestor (.agents/issue-traces itself, not .agents)', async () => {
 		// Distinguishes the containment check's ancestor-walk from the
 		// already-covered case where `.agents` itself is the symlink: here
 		// `.agents` is a real, committed directory and only the nested
@@ -302,9 +310,15 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 		git(repo, 'add', '-A');
 		git(repo, 'commit', '-q', '-m', 'init');
 		fs.mkdirSync(path.join(repo, '.agents'));
-		fs.symlinkSync(attackerTarget, path.join(repo, '.agents', 'issue-traces'));
-		git(repo, 'add', '-A');
-		git(repo, 'commit', '-q', '-m', 'add deeper symlink escape');
+		fs.symlinkSync(
+			attackerTarget,
+			path.join(repo, '.agents', 'issue-traces'),
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		if (process.platform !== 'win32') {
+			git(repo, 'add', '-A');
+			git(repo, 'commit', '-q', '-m', 'add deeper symlink escape');
+		}
 
 		const result = await runScript(repo, ['evil-slug-deep']);
 		expect(result.exitCode).toBe(2);
@@ -344,21 +358,10 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 			);
 
 			const shimDir = track(makeOldGitShim());
-			const proc = Bun.spawn({
-				cmd: ['bash', SCRIPT, 'old-git-slug'],
-				cwd: linkedWorktree,
-				env: {
-					...process.env,
-					PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ''}`,
-				},
-				stdout: 'pipe',
-				stderr: 'pipe',
+			const { exitCode, stderr } = runScript(linkedWorktree, ['old-git-slug'], {
+				...process.env,
+				PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ''}`,
 			});
-			const [stdout, stderr] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			const exitCode = await proc.exited;
 
 			expect(exitCode).toBe(0);
 			expect(stderr).not.toContain('unrecognized option');

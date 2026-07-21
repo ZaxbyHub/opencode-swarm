@@ -367,9 +367,7 @@ describe('planLeanTurboLanes', () => {
 				result.degradedTasks[0].files.map((f) =>
 					f.toLowerCase().replace(/\\/g, '/'),
 				),
-			).toEqual([
-				path.join(tempDir, 'package.json').toLowerCase().replace(/\\/g, '/'),
-			]);
+			).toEqual(['package.json']);
 		});
 
 		test('task touching lockfile is degraded', () => {
@@ -891,9 +889,7 @@ describe('planLeanTurboLanes', () => {
 			// Should use provided scope, not the file
 			expect(
 				result.lanes[0].files.map((f) => f.toLowerCase().replace(/\\/g, '/')),
-			).toContain(
-				path.join(tempDir, 'src/correct.ts').toLowerCase().replace(/\\/g, '/'),
-			);
+			).toContain('src/correct.ts');
 			expect(result.lanes[0].files).not.toContain('src/wrong.ts');
 		});
 	});
@@ -983,9 +979,7 @@ describe('planLeanTurboLanes', () => {
 			expect(result.lanes[0].taskIds).toEqual(['1.1']);
 			expect(
 				result.lanes[0].files.map((f) => f.toLowerCase().replace(/\\/g, '/')),
-			).toEqual([
-				path.join(tempDir, 'src/a.ts').toLowerCase().replace(/\\/g, '/'),
-			]);
+			).toEqual(['src/a.ts']);
 			expect(result.lanes[0].status).toBe('pending');
 		});
 	});

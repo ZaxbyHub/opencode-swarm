@@ -112,14 +112,14 @@ export function validateSymlinkBoundary(
 ): void {
 	let realTarget: string;
 	try {
-		realTarget = fs.realpathSync(targetPath);
+		realTarget = _internals.realpathSync(targetPath);
 	} catch {
 		realTarget = path.resolve(targetPath);
 	}
 
 	let realRoot: string;
 	try {
-		realRoot = fs.realpathSync(rootPath);
+		realRoot = _internals.realpathSync(rootPath);
 	} catch {
 		realRoot = path.resolve(rootPath);
 	}
@@ -222,6 +222,7 @@ export function validateTargetWithinRoot(
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
 export const _internals: {
+	realpathSync: typeof fs.realpathSync;
 	containsPathTraversal: typeof containsPathTraversal;
 	containsControlChars: typeof containsControlChars;
 	validateDirectory: typeof validateDirectory;
@@ -229,6 +230,7 @@ export const _internals: {
 	isCanonicalPathWithinRoot: typeof isCanonicalPathWithinRoot;
 	validateTargetWithinRoot: typeof validateTargetWithinRoot;
 } = {
+	realpathSync: fs.realpathSync,
 	containsPathTraversal,
 	containsControlChars,
 	validateDirectory,

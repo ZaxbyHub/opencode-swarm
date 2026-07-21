@@ -3,8 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /**
- * Creates a temp directory and sets XDG_CONFIG_HOME + APPDATA + LOCALAPPDATA
- * so all config path resolution lands in the temp dir.
+ * Creates a temp directory and redirects config, data, and home environment
+ * roots so all test-owned global path resolution lands in the temp dir.
  * Returns a cleanup function that restores original env vars and
  * removes the temp dir.
  */
@@ -19,6 +19,7 @@ export function createIsolatedTestEnv(): {
 	// Save original values
 	const originalEnv: Record<string, string | undefined> = {
 		XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+		XDG_DATA_HOME: process.env.XDG_DATA_HOME,
 		APPDATA: process.env.APPDATA,
 		LOCALAPPDATA: process.env.LOCALAPPDATA,
 		HOME: process.env.HOME,
@@ -26,6 +27,7 @@ export function createIsolatedTestEnv(): {
 
 	// Set isolated config paths
 	process.env.XDG_CONFIG_HOME = configDir;
+	process.env.XDG_DATA_HOME = configDir;
 	process.env.APPDATA = configDir;
 	process.env.LOCALAPPDATA = configDir;
 	process.env.HOME = configDir;
@@ -36,6 +38,12 @@ export function createIsolatedTestEnv(): {
 			delete process.env.XDG_CONFIG_HOME;
 		} else {
 			process.env.XDG_CONFIG_HOME = originalEnv.XDG_CONFIG_HOME;
+		}
+
+		if (originalEnv.XDG_DATA_HOME === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = originalEnv.XDG_DATA_HOME;
 		}
 
 		if (originalEnv.APPDATA === undefined) {
@@ -57,7 +65,12 @@ export function createIsolatedTestEnv(): {
 		}
 
 		// Remove temp directory
-		fs.rmSync(configDir, { recursive: true, force: true });
+		fs.rmSync(configDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 	};
 
 	return { configDir, cleanup };

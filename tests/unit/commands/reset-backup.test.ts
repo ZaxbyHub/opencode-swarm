@@ -120,7 +120,11 @@ describe('backupSwarmStateBeforeReset', () => {
 		);
 		tempRoots.push(realTarget);
 		fs.writeFileSync(path.join(realTarget, 'plan.json'), '{"a":1}');
-		fs.symlinkSync(realTarget, path.join(root, '.swarm'), 'dir');
+		fs.symlinkSync(
+			realTarget,
+			path.join(root, '.swarm'),
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
 		const result = backupSwarmStateBeforeReset(root, 'reset', ['plan.json']);
 

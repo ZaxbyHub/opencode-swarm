@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	containsControlChars,
 	containsPathTraversal,
 	validateDirectory,
@@ -148,53 +149,22 @@ describe('validateSymlinkBoundary', () => {
 		).not.toThrow();
 	});
 
-	test.skipIf(process.platform !== 'win32')(
-		'handles asymmetric existence of a rootless-absolute path (root exists, target does not) without a spurious throw',
-		() => {
-			// Regression test for the drive-letter asymmetry bug: a rootless
-			// POSIX-style absolute path (leading '/', no drive letter) is
-			// resolved by Windows APIs relative to the CURRENT PROCESS DRIVE.
-			// If such a path happens to exist on disk (e.g. leftover state from
-			// an unrelated process/test) while a nested path under it does not,
-			// realpathSync succeeds for the existing one (producing a
-			// drive-letter-qualified resolved path) but throws for the
-			// non-existent one, falling back to the normalize/resolve branch.
-			// Before the fix (path.normalize fallback), that fallback did NOT
-			// add a drive letter, so the comparison was drive-lettered root vs
-			// non-drive-lettered target — a spurious "escaped boundary" throw
-			// unrelated to any real boundary violation. path.resolve anchors
-			// both consistently to the current drive regardless of which side
-			// actually exists.
-			//
-			// This exercises a genuinely current-drive-relative Windows path,
-			// which os.tmpdir() cannot express portably (it may live on a
-			// different drive than process.cwd()) — so this test intentionally
-			// creates a real directory directly under the current drive root
-			// rather than under os.tmpdir(), with a unique name and
-			// unconditional cleanup, and is skipped entirely off win32 where
-			// the drive-letter concept (and therefore this bug class) does not
-			// exist.
-			const rootless = `/boundary-asymmetric-test-${process.pid}-${Date.now()}`;
-			// Rootless target — keep it a POSIX-style string (no drive letter) so
-			// its realpathSync failure falls back through the same code path as
-			// root, rather than inheriting a drive letter via path.join from an
-			// already-resolved parent.
-			const targetRootless = `${rootless}/definitely-does-not-exist-subpath`;
-			const realRootDir = path.resolve(rootless);
-
-			// Create only the root — the nested target subpath must NOT exist,
-			// so realpathSync succeeds for root (drive-lettered) but throws for
-			// target (falls back to the normalize/resolve branch under test).
-			fs.mkdirSync(realRootDir, { recursive: true });
-			try {
-				expect(() =>
-					validateSymlinkBoundary(targetRootless, rootless),
-				).not.toThrow();
-			} finally {
-				fs.rmSync(realRootDir, { recursive: true, force: true });
-			}
-		},
-	);
+	test('handles asymmetric root existence without drive-root writes', () => {
+		const rootless = '/boundary-asymmetric-test';
+		const targetRootless = `${rootless}/definitely-does-not-exist`;
+		const originalRealpathSync = _internals.realpathSync;
+		_internals.realpathSync = ((candidate: fs.PathLike) => {
+			if (String(candidate) === rootless) return path.resolve(rootless);
+			throw new Error('ENOENT: synthetic non-existent child');
+		}) as typeof fs.realpathSync;
+		try {
+			expect(() =>
+				validateSymlinkBoundary(targetRootless, rootless),
+			).not.toThrow();
+		} finally {
+			_internals.realpathSync = originalRealpathSync;
+		}
+	});
 
 	test('works with subdirectory of root', () => {
 		expect(() => validateSymlinkBoundary('/foo/bar/baz', '/foo')).not.toThrow();

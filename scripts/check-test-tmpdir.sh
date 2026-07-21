@@ -25,12 +25,11 @@
 # `canonicalMkdtemp(prefix)` from tests/helpers/tmpdir.ts instead of
 # hand-rolling the wrap.
 #
-# Deliberately NOT matched: a bare `mkdtempSync(...)` call whose argument does
-# not reference `tmpdir()` at all (e.g. a project-relative `mkdtempSync(path.
-# join('tmp', prefix))`) — that has nothing to do with the macOS symlink gap
-# this lint exists to catch, and flagging it would be a false positive. Any
-# `mkdtempSync(...)` call built from `tmpdir()` is still caught, because the
-# line then also matches the `tmpdir()` pattern above.
+# Project-relative temp roots are also rejected. Tests that create `tmp/` below
+# the checkout can leave runtime `.swarm/` state in the repository and couple
+# otherwise-isolated files through a shared directory. The line-scoped check
+# catches both direct calls and the historical `const baseDir = 'tmp'` helper
+# shape while leaving pre-existing occurrences outside the diff untouched.
 #
 # KNOWN LIMITATION: Plain-text substring match, not syntax-aware, so `tmpdir()`
 # in string literals/comments also trips it. Accepted tradeoff for a portable bash
@@ -102,6 +101,12 @@ while IFS= read -r line; do
                     violations=$((violations + 1))
                 fi
             fi
+            if echo "$content" | grep -qE "(baseDir|tempDir|tmpDir)[[:space:]]*=[[:space:]]*['\"]tmp['\"]|(mkdtemp|mkdtempSync|mkdir|mkdirSync)\([^)]*['\"]tmp['\"]"; then
+                echo "ERROR: ${current_file}:${current_lineno} adds a project-relative test temp root."
+                echo "       Use canonicalMkdtemp(prefix) from tests/helpers/tmpdir.ts so fixtures"
+                echo "       remain outside the repository and are realpath-canonicalized."
+                violations=$((violations + 1))
+            fi
             current_lineno=$((current_lineno + 1))
             ;;
     esac
@@ -115,4 +120,4 @@ if [ "$violations" -gt 0 ]; then
     exit 1
 fi
 
-echo "All new/changed test-file tmpdir usage is canonicalized."
+echo "All new/changed test temp roots are external and canonicalized."

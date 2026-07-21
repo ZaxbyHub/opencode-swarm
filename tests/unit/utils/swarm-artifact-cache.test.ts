@@ -30,7 +30,12 @@ describe('swarm-artifact-cache', () => {
 
 	afterEach(async () => {
 		resetSwarmArtifactCache();
-		await rm(tempDir, { recursive: true, force: true });
+		await rm(tempDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 50,
+		});
 	});
 
 	test('reuses unchanged text reads and invalidates when size changes', async () => {

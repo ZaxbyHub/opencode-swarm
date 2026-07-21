@@ -3,18 +3,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Mock the discovery module before importing test-runner
 const mockIsCommandAvailable = mock();
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-	clearToolchainCache: mock(),
-	discoverBuildCommands: mock(),
-	discoverBuildCommandsFromProfiles: mock(),
-	getEcosystems: mock(() => []),
-}));
 
-// Now import after mocking is set up
-import { detectTestFramework } from '../../../src/tools/test-runner';
+import {
+	_internals,
+	detectTestFramework,
+} from '../../../src/tools/test-runner';
+
+const originalIsCommandAvailable = _internals.isCommandAvailable;
 
 describe('test-runner detector functions - adversarial tests', () => {
 	let tempDir: string;
@@ -28,9 +24,11 @@ describe('test-runner detector functions - adversarial tests', () => {
 		mockIsCommandAvailable.mockReset();
 		// Default: no commands available
 		mockIsCommandAvailable.mockImplementation(false);
+		_internals.isCommandAvailable = mockIsCommandAvailable as never;
 	});
 
 	afterEach(() => {
+		_internals.isCommandAvailable = originalIsCommandAvailable;
 		// Clean up all directories
 		for (const dir of cleanupDirs) {
 			try {
@@ -40,6 +38,7 @@ describe('test-runner detector functions - adversarial tests', () => {
 			}
 		}
 		cleanupDirs = [];
+		mock.restore();
 	});
 
 	describe('1. detectGoTest - go.mod exists but go binary unavailable', () => {

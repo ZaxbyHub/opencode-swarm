@@ -46,10 +46,9 @@ describe('phase_complete integration — events.jsonl', () => {
 		return events;
 	}
 
-	/**
-	 * Helper to write config file
-	 */
 	function writeConfig(config: Record<string, unknown>): void {
+		config.knowledge ??= { enabled: false, sweep_enabled: false };
+		config.curator ??= { enabled: false };
 		fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 		fs.writeFileSync(
 			path.join(tempDir, '.opencode', 'opencode-swarm.json'),
