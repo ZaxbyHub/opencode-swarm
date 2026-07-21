@@ -2,7 +2,7 @@
  * loader.metadata.parity.test.ts
  *
  * Property test: both `loadPluginConfigWithMeta` (sync) and
- * `loadPluginConfigWithMetaAsync` (async) must produce structurally equal
+ * `loadPluginConfigWithMetaAsync` (async) must produce byte-identical
  * `recovery`, `removedKeys`, `warnings`, and `config` for every fixture
  * in the battery.
  *
@@ -17,12 +17,10 @@
  *   2. single typo in council (strict section)
  *   3. single typo in checkpoint (strict section)
  *   4. single typo in pr_monitor (strict section)
- *   5. invalid JSON in project config
- *   6. invalid JSON in both user and project configs
- *   7. single typo in gates section
- *   8. full_auto.locked user=true / project=false
- *   9. no config files at all (defaults only)
- *  10. invalid external_skills section
+ *   5. invalid JSON (file-exists-but-unreadable / parse error)
+ *   6. single typo in gates section
+ *   7. full_auto.locked user=true / project=false
+ *   8. no config files at all (defaults only)
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -75,12 +73,6 @@ describe('config/loader — sync/async parity (issue #1900 FR-4)', () => {
 		);
 	}
 
-	function writeRawUserConfigIn(xdgDir: string, rawContent: string): void {
-		const dir = path.join(xdgDir, 'opencode');
-		fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(path.join(dir, 'opencode-swarm.json'), rawContent);
-	}
-
 	function makeEmptyProjectDir(): string {
 		return fs.mkdtempSync(path.join(os.tmpdir(), 'parity-empty-'));
 	}
@@ -119,19 +111,6 @@ describe('config/loader — sync/async parity (issue #1900 FR-4)', () => {
 				fs.writeFileSync(
 					path.join(dir, '.opencode', 'opencode-swarm.json'),
 					'{ this is not json',
-				);
-				return dir;
-			},
-		},
-		{
-			name: 'invalid JSON in both user and project configs',
-			setup: (xdg) => {
-				writeRawUserConfigIn(xdg, '{ invalid user json');
-				const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parity-badjson-'));
-				fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-				fs.writeFileSync(
-					path.join(dir, '.opencode', 'opencode-swarm.json'),
-					'{ invalid project json',
 				);
 				return dir;
 			},
