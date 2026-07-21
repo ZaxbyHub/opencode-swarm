@@ -186,8 +186,8 @@ const PACKAGE_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	'..',
 );
-// Upper bound for the DEFERRED bundled-skill materialization. The sync runs in a
-// queueMicrotask off the server()-resolution path, so this ceiling does not count
+// Upper bound for the DEFERRED bundled-skill materialization. The sync runs from
+// the wrapper-owned post-resolution queue, so this ceiling does not count
 // toward init latency (Invariant 1); it only protects the background task from
 // running unboundedly. The copy is content-aware and bounded to ≤64 small files
 // (<512KB total), so it completes in single-digit ms on a healthy FS and skips
@@ -232,9 +232,72 @@ function createSwarmCommandSystemRuleHook(
 	};
 }
 
+type PostResolutionTask = () => void | Promise<void>;
+
+/**
+ * Start detached initialization work only after the plugin manifest promise can
+ * settle. A microtask queued from inside `initializeOpenCodeSwarm` is not truly
+ * deferred when that function still has later awaits: the microtask can start
+ * expensive filesystem work while `server()` remains unresolved (issue #704).
+ */
+function schedulePostResolutionTasks(
+	tasks: readonly PostResolutionTask[],
+): void {
+	if (tasks.length === 0) return;
+	const timer = setTimeout(() => {
+		for (const task of tasks) {
+			try {
+				void Promise.resolve(task()).catch((err: unknown) => {
+					log('post-resolution startup task failed (non-fatal)', {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+			} catch (err) {
+				log('post-resolution startup task failed (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}, 0);
+	if (typeof (timer as { unref?: () => void }).unref === 'function') {
+		(timer as { unref: () => void }).unref();
+	}
+}
+
+let createRepoGraphBuilderHookForInit = createRepoGraphBuilderHook;
+let schedulePostResolutionTasksForInit = schedulePostResolutionTasks;
+
+export function overrideIndexInternalsForTest(overrides: {
+	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
+	schedulePostResolutionTasks?: typeof schedulePostResolutionTasks;
+}): () => void {
+	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
+	const previousSchedulePostResolutionTasks =
+		schedulePostResolutionTasksForInit;
+	if (overrides.createRepoGraphBuilderHook) {
+		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
+	}
+	if (overrides.schedulePostResolutionTasks) {
+		schedulePostResolutionTasksForInit = overrides.schedulePostResolutionTasks;
+	}
+	return () => {
+		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
+		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
+	};
+}
+
+export function schedulePostResolutionTasksForTest(
+	tasks: readonly PostResolutionTask[],
+): void {
+	schedulePostResolutionTasks(tasks);
+}
+
 const OpenCodeSwarm: Plugin = async (ctx) => {
+	const postResolutionTasks: PostResolutionTask[] = [];
 	try {
-		return await initializeOpenCodeSwarm(ctx);
+		const hooks = await initializeOpenCodeSwarm(ctx, postResolutionTasks);
+		schedulePostResolutionTasksForInit(postResolutionTasks);
+		return hooks;
 	} catch (err) {
 		// OpenCode's plugin loader silently drops plugins whose entry rejects,
 		// leaving the user staring at "in plugins" with no commands/agents and no
@@ -375,7 +438,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 // Return type intentionally inferred so the literal `{ name: ..., agent: ... }`
 // does not trip excess-property checks against `Hooks`. The wrapper above is
 // typed as `Plugin`, which validates the structural shape at the call site.
-async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
+async function initializeOpenCodeSwarm(
+	ctx: Parameters<Plugin>[0],
+	postResolutionTasks: PostResolutionTask[],
+) {
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,
 	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
@@ -480,21 +546,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
 	});
 
-	// Construct the repo-graph hook before any other side-task so we can
-	// dispatch its scan deferred to the next macrotask. Issue #704: the
+	// Construct the repo-graph hook before any other side-task, but register its
+	// scan with the wrapper-owned post-resolution queue. Issue #704: the
 	// previous code invoked `repoGraphHook.init()` inline; because async
 	// function bodies execute synchronously up to the first `await`, the
 	// inline call blocked the event loop on the recursive workspace scan.
 	// The fix is twofold: (a) `init()` itself yields before doing any work
-	// and uses an async chunked walker; (b) we still dispatch the call via
-	// `queueMicrotask` and bound it with an unref'd 30s watchdog.
+	// and uses an async chunked walker; (b) the wrapper starts it from an
+	// unref'd timer only after `initializeOpenCodeSwarm` resolves, with a 30s
+	// watchdog around the detached scan.
 	// Ensure .swarm/ exists before repo graph init tries to save the first graph.
 	initTelemetry(ctx.directory);
 
-	const repoGraphHook = createRepoGraphBuilderHook(ctx.directory, undefined, {
-		excludeDirs: config.repo_graph?.exclude_dirs,
-	});
-	queueMicrotask(() => {
+	const repoGraphHook = createRepoGraphBuilderHookForInit(
+		ctx.directory,
+		undefined,
+		{
+			excludeDirs: config.repo_graph?.exclude_dirs,
+		},
+	);
+	postResolutionTasks.push(() => {
 		const watchdog = setTimeout(() => {
 			log(
 				'[repo-graph] init exceeded 30s budget; scan will continue but is overdue',
@@ -523,10 +594,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// Bun-on-Windows stdin pipe semantics) this call could otherwise block
 	// plugin init forever and produce the symptom "no agents in TUI/GUI".
 	// On timeout we fail open: log non-fatal and let init continue.
-	// The repoGraphHook.init() above is queued via queueMicrotask and begins
-	// its async workspace scan during this await; writes .swarm/repo-graph.json
-	// only after a slow directory traversal — in practice the exclude write
-	// completes first. This ordering gap is accepted as non-critical.
+	// Repo-graph startup is registered above but cannot begin until the wrapper
+	// schedules the post-resolution queue, so this awaited hygiene check always
+	// completes before the graph can write `.swarm/repo-graph.json`.
 	await withTimeout(
 		ensureSwarmGitExcluded(ctx.directory, { quiet: config.quiet }),
 		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
@@ -547,12 +617,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// worktree metadata. Results are written to .swarm/advisories/ so the
 	// architect sees any state-unreadable conditions on their NEXT TURN.
 	//
-	// DEFERRED via queueMicrotask (NOT awaited on the server()-resolution path)
-	// per Invariant 1 / Issue #704 — see the repoGraphHook precedent above.
+	// DEFERRED via the wrapper-owned post-resolution queue (NOT awaited on the
+	// server()-resolution path) per Invariant 1 / Issue #704.
 	// Fails open so plugin init is never blocked. The companion hook
 	// createInitOrphanRecoveryAdvisoryHook surfaces results to the architect
 	// on their first turn after plugin init.
-	queueMicrotask(() => {
+	postResolutionTasks.push(() => {
 		void runInitOrphanRecovery(ctx.directory).catch((err: unknown) => {
 			const msg = err instanceof Error ? err.message : String(err);
 			log('initOrphanRecovery failed (non-fatal)', { error: msg });
@@ -571,18 +641,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// brand-new project's architect hit missing skill files on turn one and a
 	// weaker model would hallucinate the workflow instead of executing it.
 	//
-	// DEFERRED via queueMicrotask (NOT awaited on the server()-resolution path)
-	// per Invariant 1 / Issue #704 — see the repoGraphHook precedent above. The
+	// DEFERRED via the wrapper-owned post-resolution queue (NOT awaited on the
+	// server()-resolution path) per Invariant 1 / Issue #704. The
 	// sync touches the bounded bundled-skill inventory; awaiting it inline added cold-FS
 	// latency that pushed server() past the 400ms repro-704 T1 deadline on
-	// Windows. Deferring keeps server() fast: the sync starts on the next
-	// microtask, runs in the background, and completes long before the architect
-	// reads any SKILL.md at runtime (the user must send a turn first). It is
+	// Windows. Deferring keeps server() fast: the sync starts from the wrapper's
+	// post-resolution timer and runs in the background. The architect normally
+	// cannot read a SKILL.md until a later tool turn, and command-path sync remains
+	// a backstop if that practical timing assumption does not hold. It is
 	// still HARD-BOUNDED + fail-open: the async variant yields between files so
 	// withTimeout (which unref's its timer) can bound it; content-equality-checked,
 	// atomic-overwrite-with-rollback, symlink-guarded, byte/file-bounded. On timeout/error we
 	// fail open — the command-path sync remains as a backstop.
-	queueMicrotask(() => {
+	postResolutionTasks.push(() => {
 		void withTimeout(
 			syncBundledProjectSkillsIfMissingAsync(
 				ctx.directory,
@@ -603,13 +674,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// Background staleness check against npm. Detached, never blocks init,
 	// throttled to 24h on disk. See services/version-check.ts (issue #675).
 	if (config.version_check !== false) {
-		scheduleVersionCheck(packageJson.version, (msg) => {
-			if (config.quiet) {
-				addDeferredWarning(msg);
-			} else {
-				// biome-ignore lint/suspicious/noConsole: Version check warning — must surface to user when not quiet
-				console.warn(msg);
-			}
+		postResolutionTasks.push(() => {
+			scheduleVersionCheck(packageJson.version, (msg) => {
+				if (config.quiet) {
+					addDeferredWarning(msg);
+				} else {
+					// biome-ignore lint/suspicious/noConsole: Version check warning — must surface to user when not quiet
+					console.warn(msg);
+				}
+			});
 		});
 	}
 	// Phase 4b: resolve language-agnostic project context for agent prompt
@@ -917,8 +990,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		skillImproverConfig.enabled &&
 		skillImproverConfig.trigger === 'scheduled'
 	) {
-		queueMicrotask(() => {
-			import('./services/skill-consolidation.js')
+		postResolutionTasks.push(() => {
+			return import('./services/skill-consolidation.js')
 				.then(({ runSkillConsolidationFireAndForget }) => {
 					runSkillConsolidationFireAndForget(
 						{
@@ -1218,9 +1291,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 
 	// Startup scan: resume worker for existing subscriptions after plugin restart.
-	// Deferred via queueMicrotask so setup() returns promptly (fail-open).
+	// Deferred via the wrapper-owned post-resolution queue (fail-open).
 	if (prMonitorConfig.enabled) {
-		queueMicrotask(() => {
+		postResolutionTasks.push(() => {
 			void listActiveSubscriptions(ctx.directory)
 				.then((active) => {
 					if (active.length > 0) {
@@ -1253,74 +1326,83 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		const enableAutofix =
 			automationConfig.capabilities?.config_doctor_autofix === true;
 
-		// Dynamically import to avoid circular dependencies
-		import('./services/config-doctor').then(({ runConfigDoctorWithFixes }) => {
-			// Default to scan-only mode (autoFix=false) for security
-			// Autofix only runs when explicitly enabled via capability
-			runConfigDoctorWithFixes(ctx.directory, config, enableAutofix)
-				.then((doctorResult) => {
-					if (doctorResult.result.findings.length > 0) {
-						log('Config Doctor ran on startup', {
-							findings: doctorResult.result.findings.length,
-							errors: doctorResult.result.summary.error,
-							warnings: doctorResult.result.summary.warn,
-							appliedFixes: doctorResult.appliedFixes.length,
-							autofixEnabled: enableAutofix,
-						});
+		postResolutionTasks.push(() => {
+			// Dynamically import to avoid circular dependencies
+			return import('./services/config-doctor').then(
+				({ runConfigDoctorWithFixes }) => {
+					// Default to scan-only mode (autoFix=false) for security
+					// Autofix only runs when explicitly enabled via capability
+					return runConfigDoctorWithFixes(ctx.directory, config, enableAutofix)
+						.then((doctorResult) => {
+							if (doctorResult.result.findings.length > 0) {
+								log('Config Doctor ran on startup', {
+									findings: doctorResult.result.findings.length,
+									errors: doctorResult.result.summary.error,
+									warnings: doctorResult.result.summary.warn,
+									appliedFixes: doctorResult.appliedFixes.length,
+									autofixEnabled: enableAutofix,
+								});
 
-						// Emit advisory for auto-fixable findings.
-						// Guarded by config.quiet to avoid stderr writes that bypass the host TUI.
-						// Wrapped in try/catch per AGENTS.md invariant #1 (fail-open).
-						try {
-							const autoFixableCount = doctorResult.result.findings.filter(
-								(f) => f.autoFixable,
-							).length;
-							const appliedCount = doctorResult.appliedFixes.length;
+								// Emit advisory for auto-fixable findings.
+								// Guarded by config.quiet to avoid stderr writes that bypass the host TUI.
+								// Wrapped in try/catch per AGENTS.md invariant #1 (fail-open).
+								try {
+									const autoFixableCount = doctorResult.result.findings.filter(
+										(f) => f.autoFixable,
+									).length;
+									const appliedCount = doctorResult.appliedFixes.length;
 
-							if (!enableAutofix && autoFixableCount > 0) {
-								const msg = `[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`;
-								if (!config.quiet) {
-									// biome-ignore lint/suspicious/noConsole: Config Doctor auto-fixable warning — user must see to run --fix
-									console.warn(msg);
-								} else {
-									addDeferredWarning(msg);
-								}
-							} else if (enableAutofix) {
-								// Report what was applied, and — crucially — nudge for any
-								// auto-fixable finding NOT applied because it is lossy.
-								// Over-length fallback_models is never trimmed silently at
-								// startup; the user must opt in via --fix (issue #1886).
-								const parts: string[] = [];
-								if (appliedCount > 0) {
-									parts.push(`applied ${appliedCount} fix(es) automatically`);
-								}
-								const unapplied = Math.max(0, autoFixableCount - appliedCount);
-								if (unapplied > 0) {
-									parts.push(
-										`${unapplied} auto-fixable issue(s) need explicit review — run /swarm config doctor --fix`,
-									);
-								}
-								if (parts.length > 0) {
-									const msg = `[opencode-swarm] Config Doctor: ${parts.join('; ')}.`;
-									if (!config.quiet) {
-										// biome-ignore lint/suspicious/noConsole: Config Doctor autofix summary — user must see what was fixed / still needs --fix
-										console.warn(msg);
-									} else {
-										addDeferredWarning(msg);
+									if (!enableAutofix && autoFixableCount > 0) {
+										const msg = `[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`;
+										if (!config.quiet) {
+											// biome-ignore lint/suspicious/noConsole: Config Doctor auto-fixable warning — user must see to run --fix
+											console.warn(msg);
+										} else {
+											addDeferredWarning(msg);
+										}
+									} else if (enableAutofix) {
+										// Report what was applied, and — crucially — nudge for any
+										// auto-fixable finding NOT applied because it is lossy.
+										// Over-length fallback_models is never trimmed silently at
+										// startup; the user must opt in via --fix (issue #1886).
+										const parts: string[] = [];
+										if (appliedCount > 0) {
+											parts.push(
+												`applied ${appliedCount} fix(es) automatically`,
+											);
+										}
+										const unapplied = Math.max(
+											0,
+											autoFixableCount - appliedCount,
+										);
+										if (unapplied > 0) {
+											parts.push(
+												`${unapplied} auto-fixable issue(s) need explicit review — run /swarm config doctor --fix`,
+											);
+										}
+										if (parts.length > 0) {
+											const msg = `[opencode-swarm] Config Doctor: ${parts.join('; ')}.`;
+											if (!config.quiet) {
+												// biome-ignore lint/suspicious/noConsole: Config Doctor autofix summary — user must see what was fixed / still needs --fix
+												console.warn(msg);
+											} else {
+												addDeferredWarning(msg);
+											}
+										}
 									}
+								} catch {
+									// Advisory emission must never block startup
 								}
 							}
-						} catch {
-							// Advisory emission must never block startup
-						}
-					}
-				})
-				.catch((err) => {
-					// Config doctor errors should NOT block startup
-					log('Config Doctor error (non-fatal)', {
-						error: err instanceof Error ? err.message : String(err),
-					});
-				});
+						})
+						.catch((err) => {
+							// Config doctor errors should NOT block startup
+							log('Config Doctor error (non-fatal)', {
+								error: err instanceof Error ? err.message : String(err),
+							});
+						});
+				},
+			);
 		});
 	}
 

@@ -14,3 +14,10 @@ category: Fixed
   pause is published before durable-state I/O so late prompt acceptance or
   concurrently delivered idle events cannot be mistaken for that user turn. The
   durable workflow state remains available for a deliberate continue or abort.
+- Keep plugin initialization responsive on cold Windows filesystems by starting
+  repo-graph scans, orphan recovery, bundled-skill sync, version checks, and
+  other fire-and-forget startup work only after `server()` returns the plugin
+  manifest. Repo-graph file reads are asynchronous and the scan yields in small
+  batches so post-startup host timers and Esc/interruption events stay responsive.
+  This prevents deferred work from racing the issue #704 deadline or monopolizing
+  the event loop immediately afterward.

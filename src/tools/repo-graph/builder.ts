@@ -131,6 +131,7 @@ const SUPPORTED_EXTENSIONS = new Set(
 const DEFAULT_WALK_FILE_CAP = 10000;
 const DEFAULT_WALK_BUDGET_MS = 5000;
 const ASYNC_WALK_YIELD_INTERVAL = 200;
+const ASYNC_SCAN_YIELD_INTERVAL = 16;
 const MAX_DIAGNOSTIC_ENTRIES = 200;
 
 /**
@@ -1691,7 +1692,7 @@ export async function scanFileAsync(
 	let fileStats: fsSync.Stats;
 
 	try {
-		fileStats = fsSync.statSync(filePath);
+		fileStats = await fsPromises.stat(filePath);
 		if (fileStats.size > maxFileSize) {
 			return {
 				node: null,
@@ -1700,7 +1701,7 @@ export async function scanFileAsync(
 				diagnostics: { oversizedFiles: [toModuleName(filePath, absoluteRoot)] },
 			};
 		}
-		content = fsSync.readFileSync(filePath, 'utf-8');
+		content = await fsPromises.readFile(filePath, 'utf-8');
 	} catch {
 		return {
 			node: null,
@@ -2306,8 +2307,9 @@ export async function buildWorkspaceGraphAsync(
 
 	// Edge dedup tracked in a loop-local Set (O(1)); nodes inserted via
 	// appendNodeFast — metadata is computed once below. Keeps construction O(N)
-	// on large repos so the deferred startup scan no longer stalls the event
-	// loop for tens of seconds (issue #1144).
+	// on large repos. Async file reads yield naturally, and the smaller explicit
+	// scan interval bounds event-loop monopolization even when symbol extraction
+	// or its fail-open fallback resolves synchronously (issues #704 and #1144).
 	const seenEdges = new Set<string>();
 	const seenSymbolEdges = new Set<string>();
 	const allSymbolEdges: SymbolEdge[] = [];
@@ -2357,7 +2359,7 @@ export async function buildWorkspaceGraphAsync(
 			stats.skippedFiles++;
 		}
 		processedSinceYield++;
-		if (processedSinceYield % ASYNC_WALK_YIELD_INTERVAL === 0) {
+		if (processedSinceYield % ASYNC_SCAN_YIELD_INTERVAL === 0) {
 			await yieldToEventLoop();
 		}
 	}

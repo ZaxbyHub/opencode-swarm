@@ -9,9 +9,11 @@
  *   Test 1 — Deferred-scan timing proof (500-file workspace, tight 400ms deadline)
  *   Pre-fix: `server()` would block synchronously for the full scan duration
  *   (≈1–3s for 500 files on most filesystems), blowing the 400ms deadline.
- *   Post-fix: `server()` returns immediately (~5ms) because the scan is deferred
- *   via queueMicrotask + yieldToEventLoop() (a macrotask), so it cannot execute
- *   before the caller's `.then` on the returned promise.
+ *   Post-fix: `server()` returns immediately because the wrapper registers the
+ *   scan in a post-resolution queue and starts that queue from an unref'd timer,
+ *   so the scan cannot execute before the caller's `.then` on the returned
+ *   promise. The async scan also yields frequently enough to preserve host
+ *   timer and interruption handling after startup.
  *
  *   Test 2 — Portability: no `Bun is not defined` ReferenceError, no leaked
  *   timers, clean exit under Node.
@@ -83,10 +85,12 @@ async function runTest(plugin, ctx, deadlineMs, label) {
 		plugin.server(ctx, {}).then(() => 'ok'),
 		new Promise((resolve) => setTimeout(() => resolve('timeout'), deadlineMs)),
 	]);
-	const elapsed = (performance.now() - start).toFixed(1);
-	if (winner === 'timeout') {
+	const elapsedMs = performance.now() - start;
+	const elapsed = elapsedMs.toFixed(1);
+	if (winner === 'timeout' || elapsedMs > deadlineMs) {
+		const failure = winner === 'timeout' ? 'did not resolve' : 'resolved too late';
 		console.error(
-			`[repro-704] FAILED ${label}: server() did not resolve within ${deadlineMs}ms ` +
+			`[repro-704] FAILED ${label}: server() ${failure} within ${deadlineMs}ms ` +
 				`(elapsed=${elapsed}ms). Issue #704 has regressed.`,
 		);
 		return false;

@@ -1,9 +1,10 @@
 /**
  * Timeout primitives used by the plugin init path.
  *
- * Hard rule: every timer scheduled here must call `unref()` so it never holds
- * the process open, and every Promise.race must clear the timer in `finally`
- * so it does not leak the timer reference after the racer settles.
+ * Deadline timers must call `unref()` and every Promise.race must clear its
+ * timer in `finally`, so timeouts never pin or leak a process handle. Awaited
+ * cooperative-yield timers are deliberately ref'ed: unref'ing the only handle
+ * can strand their caller before the awaited promise resolves.
  */
 
 /**
@@ -38,13 +39,13 @@ export async function withTimeout<T>(
 
 /**
  * Yield to the macrotask queue. Works under both Node and Bun runtimes,
- * unlike `setImmediate` which is Node-only.
+ * unlike `setImmediate` which is Node-only. The timer intentionally remains
+ * ref'ed: callers await this promise, so unref'ing its only handle can strand a
+ * direct async caller when no unrelated host handle is active. Detached startup
+ * work is made non-pinning at its outer scheduling boundary instead.
  */
 export function yieldToEventLoop(): Promise<void> {
 	return new Promise((resolve) => {
-		const t = setTimeout(resolve, 0);
-		if (typeof (t as { unref?: () => void }).unref === 'function') {
-			(t as { unref: () => void }).unref();
-		}
+		setTimeout(resolve, 0);
 	});
 }

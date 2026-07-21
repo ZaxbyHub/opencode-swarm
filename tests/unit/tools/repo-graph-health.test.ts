@@ -69,6 +69,51 @@ describe('repo graph health diagnostics', () => {
 		});
 	});
 
+	test('async build yields to host timers during synchronous extraction fallback', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		for (let index = 0; index < 64; index++) {
+			fs.writeFileSync(
+				path.join(tmp, 'src', `file-${index}.ts`),
+				`export const value${index} = ${index};\n`,
+			);
+		}
+
+		let extractionCalls = 0;
+		let callsAtHeartbeat = Number.POSITIVE_INFINITY;
+		let resolveHeartbeat!: () => void;
+		const heartbeat = new Promise<void>((resolve) => {
+			resolveHeartbeat = resolve;
+		});
+		builderInternals.extractFileSymbols = async () => {
+			extractionCalls++;
+			if (extractionCalls === 1) {
+				setTimeout(() => {
+					callsAtHeartbeat = extractionCalls;
+					resolveHeartbeat();
+				}, 0);
+			}
+			return null;
+		};
+
+		const build = buildWorkspaceGraphAsync(tmp);
+		let watchdog: ReturnType<typeof setTimeout> | undefined;
+		const watchdogFailure = new Promise<never>((_, reject) => {
+			watchdog = setTimeout(
+				() => reject(new Error('repo graph liveness probe timed out')),
+				10_000,
+			);
+		});
+		try {
+			await heartbeat;
+			await Promise.race([build, watchdogFailure]);
+		} finally {
+			if (watchdog !== undefined) clearTimeout(watchdog);
+		}
+
+		expect(callsAtHeartbeat).toBeLessThanOrEqual(16);
+		expect(extractionCalls).toBe(64);
+	});
+
 	test('health sanitizes and caps persisted diagnostics without rejecting old graphs', async () => {
 		const graph = createEmptyGraph(tmp);
 		const validFailures = Array.from({ length: 60 }, (_, i) => ({
