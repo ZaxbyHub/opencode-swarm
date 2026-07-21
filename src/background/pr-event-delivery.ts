@@ -24,7 +24,6 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import type { PrMonitorConfig } from '../config/schema';
 import {
-	cancelPrWorkflowPluginWake,
 	isPrWorkflowAutoWakeSuppressed,
 	markPrWorkflowPluginWake,
 } from '../hooks/pr-workflow-auto-wake';
@@ -254,9 +253,11 @@ async function sendWakePromptWithMarker(
 	const active = registration;
 	if (!active) return false;
 	const messageID = markPrWorkflowPluginWake(active.directory, sessionID);
-	const ok = await _internals.sendWakePrompt(sessionID, events, messageID);
-	if (!ok) cancelPrWorkflowPluginWake(active.directory, sessionID, messageID);
-	return ok;
+	// A false transport result is not definitive rejection: withTimeout races
+	// the host call without aborting it, so promptAsync may still accept later
+	// and emit this exact message ID. Keep the bounded/TTL marker so that late
+	// synthetic event cannot be mistaken for a real post-interruption user turn.
+	return _internals.sendWakePrompt(sessionID, events, messageID);
 }
 
 // ── Wake message ─────────────────────────────────────────────────────

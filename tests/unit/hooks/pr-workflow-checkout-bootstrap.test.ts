@@ -128,6 +128,40 @@ describe('PR workflow checkout bootstrap', () => {
 		}
 	});
 
+	test('accepts safe gh checkout long flags in separate and equals forms (F-009)', async () => {
+		await activatePrWorkflow(directory, 'feedback-gh-equals', 'PR_FEEDBACK');
+		for (const command of [
+			'gh pr checkout 1911 --repo owner/repo --branch pr-head',
+			'gh pr checkout 1911 --repo=owner/repo --branch=pr-head',
+		]) {
+			await expect(
+				enforcePrWorkflowToolBefore(directory, 'feedback-gh-equals', 'shell', {
+					command,
+				}),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	test('does not classify a leading flag as a detached feedback ref (F-008)', async () => {
+		await activatePrWorkflow(directory, 'feedback-detach-flag', 'PR_FEEDBACK');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'feedback-detach-flag', 'shell', {
+				command: 'git switch --detach --help',
+			}),
+		).rejects.not.toThrow(
+			'requires a tracked PR branch before the first head bind',
+		);
+	});
+
+	test('rejects multiline checkout before the per-command matcher (F-011d)', async () => {
+		await activatePrWorkflow(directory, 'feedback-multiline', 'PR_FEEDBACK');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'feedback-multiline', 'shell', {
+				command: 'git switch -c local\n--track origin/pr-head',
+			}),
+		).rejects.toThrow('PR_FEEDBACK');
+	});
+
 	test('requires a clean checkout on the first PR_FEEDBACK head bind', async () => {
 		await activatePrWorkflow(directory, 'feedback-clean-bind', 'PR_FEEDBACK');
 		_test_exports.resolveIsWorkingTreeClean = () => false;

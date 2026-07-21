@@ -1,6 +1,12 @@
 import * as path from 'node:path';
 import { readPrWorkflowGateState } from './pr-workflow-gate.js';
 
+export const _internals: {
+	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+} = {
+	readPrWorkflowGateState,
+};
+
 /** Bound module state: every entry is keyed by project plus parent session. */
 export const MAX_TRACKED_PR_WORKFLOW_WAKE_STATES = 200;
 export const PLUGIN_WAKE_MARKER_TTL_MS = 60_000;
@@ -20,7 +26,6 @@ interface PluginWakeMarker {
 export interface PrWorkflowAutoWakeDecision {
 	sessionID?: string;
 	suppressWake: boolean;
-	resumedAfterUserTurn?: boolean;
 }
 
 const pauseStates = new Map<string, PauseState>();
@@ -60,7 +65,10 @@ function eventSessionID(event: Record<string, unknown>): string | undefined {
 		envelope.sessionID ??
 		envelope.sessionId ??
 		info?.sessionID ??
-		info?.sessionId;
+		info?.sessionId ??
+		(event.type === 'session.deleted' || event.type === 'session.removed'
+			? info?.id
+			: undefined);
 	return typeof candidate === 'string' && candidate.trim()
 		? candidate.trim()
 		: undefined;
@@ -90,7 +98,7 @@ function pruneMarkers(key: string, now = Date.now()): PluginWakeMarker[] {
 		(marker) => now - marker.createdAt <= PLUGIN_WAKE_MARKER_TTL_MS,
 	);
 	if (live.length === 0) pluginWakeMarkers.delete(key);
-	else rememberBounded(pluginWakeMarkers, key, live);
+	else if (live.length !== current.length) pluginWakeMarkers.set(key, live);
 	return live;
 }
 
@@ -148,6 +156,13 @@ export function clearPrWorkflowAutoWakeState(
 	directory: string,
 	sessionID: string,
 ): void {
+	pauseStates.delete(projectSessionKey(directory, sessionID));
+}
+
+function clearPrWorkflowAutoWakeSession(
+	directory: string,
+	sessionID: string,
+): void {
 	const key = projectSessionKey(directory, sessionID);
 	pauseStates.delete(key);
 	pluginWakeMarkers.delete(key);
@@ -170,21 +185,30 @@ export async function observePrWorkflowAutoWakeEvent(
 	const key = projectSessionKey(directory, sessionID);
 
 	if (event.type === 'session.deleted' || event.type === 'session.removed') {
-		clearPrWorkflowAutoWakeState(directory, sessionID);
+		clearPrWorkflowAutoWakeSession(directory, sessionID);
 		return { sessionID, suppressWake: false };
 	}
 
 	if (isExactAbortEvent(event)) {
+		// OpenCode dispatches event hooks without awaiting the prior hook call.
+		// Publish the pause before durable I/O so a following idle event cannot
+		// overtake this abort and enter an automatic wake path.
+		rememberBounded(pauseStates, key, {
+			phase: 'awaiting-idle',
+			pausedAt: Date.now(),
+		});
 		// Child-lane aborts must never pause the parent: only the exact session
-		// owning a durable gate is eligible.
-		if (await readPrWorkflowGateState(directory, sessionID)) {
-			rememberBounded(pauseStates, key, {
-				phase: 'awaiting-idle',
-				pausedAt: Date.now(),
-			});
+		// owning a durable gate is eligible. A transient read failure is
+		// ambiguous, so preserve the pause and fail closed toward less automation.
+		try {
+			if (await _internals.readPrWorkflowGateState(directory, sessionID)) {
+				return { sessionID, suppressWake: true };
+			}
+			clearPrWorkflowAutoWakeState(directory, sessionID);
+			return { sessionID, suppressWake: false };
+		} catch {
 			return { sessionID, suppressWake: true };
 		}
-		return { sessionID, suppressWake: false };
 	}
 
 	const paused = pauseStates.get(key);
@@ -206,21 +230,32 @@ export async function observePrWorkflowAutoWakeEvent(
 	}
 
 	if (event.type === 'session.idle' && paused) {
-		if (!(await readPrWorkflowGateState(directory, sessionID))) {
-			clearPrWorkflowAutoWakeState(directory, sessionID);
-			return { sessionID, suppressWake: false };
-		}
-		if (paused.phase === 'awaiting-idle') {
-			rememberBounded(pauseStates, key, { ...paused, phase: 'paused' });
+		try {
+			if (!(await _internals.readPrWorkflowGateState(directory, sessionID))) {
+				clearPrWorkflowAutoWakeState(directory, sessionID);
+				return { sessionID, suppressWake: false };
+			}
+		} catch {
+			// Preserve the existing pause on transient durable-state read failures.
 			return { sessionID, suppressWake: true };
 		}
-		if (paused.phase === 'resuming') {
+		// The durable read yields to concurrently dispatched host events. Use the
+		// current phase so a real user turn observed during that read cannot be
+		// overwritten by this idle handler's stale pre-read snapshot. If another
+		// event cleared the state, suppress this already-in-flight idle once
+		// without resurrecting it.
+		const currentPause = pauseStates.get(key);
+		if (!currentPause) return { sessionID, suppressWake: true };
+		if (currentPause.phase === 'awaiting-idle') {
+			rememberBounded(pauseStates, key, {
+				...currentPause,
+				phase: 'paused',
+			});
+			return { sessionID, suppressWake: true };
+		}
+		if (currentPause.phase === 'resuming') {
 			pauseStates.delete(key);
-			return {
-				sessionID,
-				suppressWake: true,
-				resumedAfterUserTurn: true,
-			};
+			return { sessionID, suppressWake: true };
 		}
 		return { sessionID, suppressWake: true };
 	}
@@ -237,7 +272,11 @@ export const _test_exports = {
 	getPausePhase(directory: string, sessionID: string): PausePhase | undefined {
 		return pauseStates.get(projectSessionKey(directory, sessionID))?.phase;
 	},
-	getPluginWakeMarkerCount(directory: string, sessionID: string): number {
-		return pruneMarkers(projectSessionKey(directory, sessionID)).length;
+	getPluginWakeMarkerCount(
+		directory: string,
+		sessionID: string,
+		now = Date.now(),
+	): number {
+		return pruneMarkers(projectSessionKey(directory, sessionID), now).length;
 	},
 };

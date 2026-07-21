@@ -9,6 +9,12 @@ import { readPrWorkflowGateState } from './pr-workflow-gate.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
 
+export const _internals: {
+	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+} = {
+	readPrWorkflowGateState,
+};
+
 /**
  * Maximum number of consecutive unproductive auto-resumes per gated session
  * before the response gate suspends further wakes. "Unproductive" means the
@@ -149,7 +155,7 @@ export function createPrWorkflowResponseGate(options: {
 		output: { text: string },
 	): Promise<void> => {
 		if (!input.sessionID?.trim()) return;
-		const state = await readPrWorkflowGateState(
+		const state = await _internals.readPrWorkflowGateState(
 			options.directory,
 			input.sessionID,
 		);
@@ -189,158 +195,172 @@ export function createPrWorkflowResponseGate(options: {
 		) {
 			return;
 		}
-		const state = await readPrWorkflowGateState(options.directory, sessionID);
-		if (!state) {
-			// Gate already cleared (complete_pr_workflow, abort_pr_workflow, or
-			// any future clear path). Drop the budget uniformly — no test-seam
-			// coupling to a specific clear caller.
-			resetBudget(sessionID);
-			clearPrWorkflowAutoWakeState(options.directory, sessionID);
-			return;
-		}
-		if (!session) return;
-
-		evictIfOverBound();
-		let budget = wakeBudgets.get(sessionID);
-		if (!budget) {
-			budget = {
-				consecutiveUnproductive: 0,
-				lastWakeAt: 0,
-				suspended: false,
-			};
-			wakeBudgets.set(sessionID, budget);
-		}
-		// Suspend check: once the consecutive-unproductive budget is
-		// exhausted, never auto-resume again. textComplete still rewrites
-		// text so the user sees the recovery instructions on their next turn.
-		if (budget.suspended) return;
-
-		const now = Date.now();
-		// Progress reset: if the durable gate's revision advanced since the
-		// last wake, the session is making healthy progress — zero the
-		// consecutive counter so long-running reviews never exhaust it.
-		if (
-			budget.lastSeenRevision !== undefined &&
-			state.revision > budget.lastSeenRevision
-		) {
-			budget.consecutiveUnproductive = 0;
-		}
-		// Cooldown: throttle only consecutive unproductive retries. The
-		// first wake after progress (consecutiveUnproductive === 0) fires
-		// immediately so active reviews are not delayed.
-		if (
-			budget.consecutiveUnproductive > 0 &&
-			budget.lastWakeAt > 0 &&
-			now - budget.lastWakeAt < wakeCooldownMs
-		) {
-			return;
-		}
-
-		const madeProgress =
-			budget.lastSeenRevision === undefined
-				? // First wake ever for this session: treat as a probe, not yet
-					// unproductive — we do not know the prior revision.
-					true
-				: state.revision > budget.lastSeenRevision;
-
+		// Claim synchronously before the first durable read. OpenCode does not
+		// await event hooks in dispatch order, so any ownership acquired after an
+		// await leaves a window for duplicate idle handlers to start together.
 		activeWakeSessions.add(sessionID);
-		const pluginWakeMessageID = markPrWorkflowPluginWake(
-			options.directory,
-			sessionID,
-		);
-		let promptRejected = false;
-		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const args = {
-				path: { id: sessionID },
-				body: {
-					messageID: pluginWakeMessageID,
-					parts: [
-						{
-							type: 'text',
-							text: `${blockedText(state.mode, {
-								suspended: false,
-								maxConsecutive: maxConsecutive,
-							})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.`,
-						},
-					],
-				},
-			};
-			const call = session.promptAsync
-				? session.promptAsync(args)
-				: session.prompt(args);
-			const result = await Promise.race([
-				call,
-				new Promise<never>((_resolve, reject) => {
-					timer = setTimeout(
-						() => reject(new Error('PR workflow resume prompt timed out')),
-						wakeTimeoutMs,
-					);
-				}),
-			]);
-			if (result?.error != null) {
-				promptRejected = true;
-				throw new Error(
-					`PR workflow resume prompt failed: ${String(result.error)}`,
-				);
-			}
-			// Note: budget bookkeeping runs in the finally block below so an
-			// attempted wake counts against the budget even when the resume
-			// prompt itself fails or times out. Otherwise a host that keeps
-			// returning {error: ...} would never advance the consecutive
-			// counter and the auto-resume loop would run unbounded — the
-			// exact failure mode this module exists to prevent.
-		} finally {
-			if (timer) clearTimeout(timer);
-			if (promptRejected) {
-				cancelPrWorkflowPluginWake(
-					options.directory,
-					sessionID,
-					pluginWakeMessageID,
-				);
-			}
-			activeWakeSessions.delete(sessionID);
-			// Record the budget state for every attempted wake, including
-			// failures. An attempted wake that did not produce progress must
-			// count toward the consecutive-unproductive budget; otherwise a
-			// failing host resume API would recreate the unbounded loop.
-			//
-			// Re-read the durable state AFTER the promptAsync await to detect
-			// mid-wake progress. `madeProgress` was computed from a snapshot
-			// read before the await (response-gate.ts:164); if a concurrent
-			// controller tool bumped `state.revision` during the await, the
-			// pre-await `madeProgress` would be stale `false`, the counter
-			// would wrongly increment, and a healthy session could be
-			// falsely suspended at MAX-1. The fresh read here corrects that
-			// race: if the revision advanced during the wake, the wake IS
-			// productive and the counter resets.
-			const postWakeState = await readPrWorkflowGateState(
+			const state = await _internals.readPrWorkflowGateState(
 				options.directory,
 				sessionID,
 			);
-			budget.lastWakeAt = now;
-			if (postWakeState === null) {
-				// Gate cleared during the wake (complete/abort). Drop the
-				// budget so a future activation starts fresh; never suspend
-				// a session whose gate just cleared. (No `return` here —
-				// biome: returning inside finally would mask try/catch flow.)
+			if (!state) {
+				// Gate already cleared (complete_pr_workflow, abort_pr_workflow, or
+				// any future clear path). Drop the budget uniformly — no test-seam
+				// coupling to a specific clear caller.
 				resetBudget(sessionID);
-			} else {
-				const currentRevision = postWakeState.revision;
-				const effectiveMadeProgress =
-					madeProgress ||
-					(budget.lastSeenRevision !== undefined &&
-						currentRevision > budget.lastSeenRevision);
-				budget.lastSeenRevision = currentRevision;
-				if (!effectiveMadeProgress) {
-					budget.consecutiveUnproductive += 1;
-					if (budget.consecutiveUnproductive >= maxConsecutive) {
-						budget.suspended = true;
-					}
+				clearPrWorkflowAutoWakeState(options.directory, sessionID);
+				return;
+			}
+			// The idle decision above can race a later abort because OpenCode does
+			// not await event hooks in dispatch order. Recheck after durable I/O so
+			// an abort published while this read was pending still prevents the wake.
+			if (isPrWorkflowAutoWakeSuppressed(options.directory, sessionID)) return;
+			if (!session) return;
+
+			evictIfOverBound();
+			let budget = wakeBudgets.get(sessionID);
+			if (!budget) {
+				budget = {
+					consecutiveUnproductive: 0,
+					lastWakeAt: 0,
+					suspended: false,
+				};
+				wakeBudgets.set(sessionID, budget);
+			}
+			// Suspend check: once the consecutive-unproductive budget is
+			// exhausted, never auto-resume again. textComplete still rewrites
+			// text so the user sees the recovery instructions on their next turn.
+			if (budget.suspended) return;
+
+			const now = Date.now();
+			// Progress reset: if the durable gate's revision advanced since the
+			// last wake, the session is making healthy progress — zero the
+			// consecutive counter so long-running reviews never exhaust it.
+			if (
+				budget.lastSeenRevision !== undefined &&
+				state.revision > budget.lastSeenRevision
+			) {
+				budget.consecutiveUnproductive = 0;
+			}
+			// Cooldown: throttle only consecutive unproductive retries. The
+			// first wake after progress (consecutiveUnproductive === 0) fires
+			// immediately so active reviews are not delayed.
+			if (
+				budget.consecutiveUnproductive > 0 &&
+				budget.lastWakeAt > 0 &&
+				now - budget.lastWakeAt < wakeCooldownMs
+			) {
+				return;
+			}
+
+			const madeProgress =
+				budget.lastSeenRevision === undefined
+					? // First wake ever for this session: treat as a probe, not yet
+						// unproductive — we do not know the prior revision.
+						true
+					: state.revision > budget.lastSeenRevision;
+
+			const pluginWakeMessageID = markPrWorkflowPluginWake(
+				options.directory,
+				sessionID,
+			);
+			let promptRejected = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const args = {
+					path: { id: sessionID },
+					body: {
+						messageID: pluginWakeMessageID,
+						parts: [
+							{
+								type: 'text',
+								text: `${blockedText(state.mode, {
+									suspended: false,
+									maxConsecutive: maxConsecutive,
+								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.`,
+							},
+						],
+					},
+				};
+				const call = session.promptAsync
+					? session.promptAsync(args)
+					: session.prompt(args);
+				const result = await Promise.race([
+					call,
+					new Promise<never>((_resolve, reject) => {
+						timer = setTimeout(
+							() => reject(new Error('PR workflow resume prompt timed out')),
+							wakeTimeoutMs,
+						);
+					}),
+				]);
+				if (result?.error != null) {
+					promptRejected = true;
+					throw new Error(
+						`PR workflow resume prompt failed: ${String(result.error)}`,
+					);
+				}
+				// Note: budget bookkeeping runs in the finally block below so an
+				// attempted wake counts against the budget even when the resume
+				// prompt itself fails or times out. Otherwise a host that keeps
+				// returning {error: ...} would never advance the consecutive
+				// counter and the auto-resume loop would run unbounded — the
+				// exact failure mode this module exists to prevent.
+			} finally {
+				if (timer) clearTimeout(timer);
+				if (promptRejected) {
+					cancelPrWorkflowPluginWake(
+						options.directory,
+						sessionID,
+						pluginWakeMessageID,
+					);
+				}
+				// Record the budget state for every attempted wake, including
+				// failures. An attempted wake that did not produce progress must
+				// count toward the consecutive-unproductive budget; otherwise a
+				// failing host resume API would recreate the unbounded loop.
+				//
+				// Re-read the durable state AFTER the promptAsync await to detect
+				// mid-wake progress. `madeProgress` was computed from a snapshot
+				// read before the await (response-gate.ts:164); if a concurrent
+				// controller tool bumped `state.revision` during the await, the
+				// pre-await `madeProgress` would be stale `false`, the counter
+				// would wrongly increment, and a healthy session could be
+				// falsely suspended at MAX-1. The fresh read here corrects that
+				// race: if the revision advanced during the wake, the wake IS
+				// productive and the counter resets.
+				const postWakeState = await _internals.readPrWorkflowGateState(
+					options.directory,
+					sessionID,
+				);
+				budget.lastWakeAt = now;
+				if (postWakeState === null) {
+					// Gate cleared during the wake (complete/abort). Drop the
+					// budget so a future activation starts fresh; never suspend
+					// a session whose gate just cleared. (No `return` here —
+					// biome: returning inside finally would mask try/catch flow.)
+					resetBudget(sessionID);
 				} else {
-					budget.consecutiveUnproductive = 0;
+					const currentRevision = postWakeState.revision;
+					const effectiveMadeProgress =
+						madeProgress ||
+						(budget.lastSeenRevision !== undefined &&
+							currentRevision > budget.lastSeenRevision);
+					budget.lastSeenRevision = currentRevision;
+					if (!effectiveMadeProgress) {
+						budget.consecutiveUnproductive += 1;
+						if (budget.consecutiveUnproductive >= maxConsecutive) {
+							budget.suspended = true;
+						}
+					} else {
+						budget.consecutiveUnproductive = 0;
+					}
 				}
 			}
+		} finally {
+			// Retain ownership through the post-wake durable read and budget update.
+			activeWakeSessions.delete(sessionID);
 		}
 	};
 

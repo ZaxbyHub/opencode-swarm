@@ -2157,9 +2157,14 @@ export async function enforcePrWorkflowToolBefore(
 			/\bgh\s+pr\s+checkout\b/i.test(command));
 	const isCanonicalReviewCheckout =
 		/^git\s+switch\s+--detach\s+[0-9a-f]{40,64}$/i.test(command);
+	const detachedFeedbackSwitchMatch = command.match(
+		/^git\s+switch\s+--detach\s+(\S+)$/i,
+	);
 	const isDetachedFeedbackCheckout =
-		/^git\s+switch\s+--detach\s+\S+$/i.test(command) ||
-		/^gh\s+pr\s+checkout\b.*\s--detach(?:\s|$)/i.test(command);
+		Boolean(
+			detachedFeedbackSwitchMatch?.[1] &&
+				isSafeGitRefToken(detachedFeedbackSwitchMatch[1]),
+		) || /^gh\s+pr\s+checkout\b.*\s--detach(?:\s|$)/i.test(command);
 	const containsGitCommitShell =
 		isShellCommandRequiringVerification &&
 		/\bgit\b(?:(?![;&|]).){0,200}\bcommit\b/i.test(command);
@@ -3062,6 +3067,16 @@ function isAllowedSafeGhPrCheckout(command: string): boolean {
 		return false;
 	for (let index = 4; index < tokens.length; index += 1) {
 		const token = tokens[index];
+		const repoEquals = token.match(/^--repo=(.+)$/)?.[1];
+		if (repoEquals) {
+			if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repoEquals)) return false;
+			continue;
+		}
+		const branchEquals = token.match(/^--branch=(.+)$/)?.[1];
+		if (branchEquals) {
+			if (!isSafeGitRefToken(branchEquals)) return false;
+			continue;
+		}
 		if (token === '--repo' || token === '-R') {
 			const repo = tokens[++index];
 			if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
