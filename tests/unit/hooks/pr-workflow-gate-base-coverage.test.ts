@@ -7,6 +7,7 @@ import {
 	activatePrWorkflow,
 	assertPrReviewBaseCoverageSettled,
 	bindPrReviewBase,
+	bindPrWorkflowHead,
 	enforcePrReviewBaseDimensions,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	readPrWorkflowGateState,
@@ -411,5 +412,34 @@ describe('pr-workflow-gate base coverage', () => {
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}
+	});
+
+	test('a gate state field this schema has never seen survives read and a subsequent read-modify-write round trip', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+
+		// Simulate a newer version of this code having persisted a top-level
+		// field this schema has no knowledge of at all (not just a field that
+		// predates a default, but one .passthrough() has never declared).
+		const relativePath =
+			_test_exports.workflowGateStateRelativePath(SESSION_ID);
+		const statePath = path.join(tempDir, '.swarm', relativePath);
+		const onDisk = JSON.parse(await fs.readFile(statePath, 'utf-8'));
+		onDisk.futureFieldFromNewerVersion = 'opaque-value-from-the-future';
+		await fs.writeFile(statePath, JSON.stringify(onDisk), 'utf-8');
+
+		_test_exports.resetTrackedStateCache();
+		const recovered = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		expect(recovered).not.toBeNull();
+		expect(recovered?.sessionID).toBe(SESSION_ID);
+
+		// A read-modify-write cycle must not silently drop the unknown field:
+		// a .strip() (default) schema would have already dropped it on the
+		// read above, so its absence here would surface only at this rewrite.
+		await bindPrWorkflowHead(tempDir, SESSION_ID, HEAD_SHA);
+
+		const onDiskAfterWrite = JSON.parse(await fs.readFile(statePath, 'utf-8'));
+		expect(onDiskAfterWrite.futureFieldFromNewerVersion).toBe(
+			'opaque-value-from-the-future',
+		);
 	});
 });
