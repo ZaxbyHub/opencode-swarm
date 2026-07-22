@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.127.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.127.0...v7.127.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **pr-workflow:** address review findings on banner-prefix change ([2a80a07](https://github.com/ZaxbyHub/opencode-swarm/commit/2a80a07f3253cc86ce967bfb3e96526b2ee02202))
+* **pr-workflow:** prepend workflow banner instead of replacing architect text ([8ef6aca](https://github.com/ZaxbyHub/opencode-swarm/commit/8ef6aca08c901ba93249515f22a06e0cb54dba51))
+* **pr-workflow:** prepend workflow banner instead of replacing architect text ([dc16748](https://github.com/ZaxbyHub/opencode-swarm/commit/dc167489338c07d18a660f693d3e0a6a45a478d7))
+
 ## [7.127.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.6...v7.127.0) (2026-07-22)
 
 
