@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.126.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.5...v7.126.6) (2026-07-22)
+
+
+### Bug Fixes
+
+* **pr-review:** enrich HEAD-verify, trigger-ID, and no-active-gate error messages (issue [#1931](https://github.com/ZaxbyHub/opencode-swarm/issues/1931)) ([27180d2](https://github.com/ZaxbyHub/opencode-swarm/commit/27180d290bda69de078d9b9dff5145c75a98032d))
+* **pr-review:** enrich HEAD-verify, trigger-ID, and no-active-gate error messages (issue [#1931](https://github.com/ZaxbyHub/opencode-swarm/issues/1931)) ([372ebe3](https://github.com/ZaxbyHub/opencode-swarm/commit/372ebe3e2d79146f6e97028afcaf780aea7edb2c))
+
 ## [7.126.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.4...v7.126.5) (2026-07-21)
 
 
