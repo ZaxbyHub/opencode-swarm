@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.127.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.6...v7.127.0) (2026-07-22)
+
+
+### Features
+
+* **pr-workflow:** cross-harness portability + depth-tiered dispatch for PR review skills ([123ad1d](https://github.com/ZaxbyHub/opencode-swarm/commit/123ad1dbc548dbec4d92c82fb511d90b20fcbe33))
+* **pr-workflow:** cross-harness portability + depth-tiered dispatch for PR review skills ([10c8345](https://github.com/ZaxbyHub/opencode-swarm/commit/10c83457e190f5b825d9bc5d836b704acc31ae9b))
+
+
+### Bug Fixes
+
+* **ci:** update stale skill-content assertions for the handoff-path and shim-parity fixes ([3fc7d7f](https://github.com/ZaxbyHub/opencode-swarm/commit/3fc7d7fdc624b2e5a9169549c5ef616fc8189ec4))
+* **pr-workflow:** close depth-tier, ownership-overlap, and schema-rollback gaps from PR [#1934](https://github.com/ZaxbyHub/opencode-swarm/issues/1934) review ([4b021e7](https://github.com/ZaxbyHub/opencode-swarm/commit/4b021e7001bc723f6aad2f1341a4a92e4df568d4))
+* **pr-workflow:** default hasSubmoduleChange for old gate state, fix embedded NUL bytes ([d5dbfc3](https://github.com/ZaxbyHub/opencode-swarm/commit/d5dbfc3dc819ad3e3a46b7ac68ccf3490ebd26eb))
+* **pr-workflow:** stop over-scoping candidate extraction for fully-owned base lanes ([1a918d8](https://github.com/ZaxbyHub/opencode-swarm/commit/1a918d819e40b083d6c15e63de84bb14ebfe3167))
+
 ## [7.126.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.126.5...v7.126.6) (2026-07-22)
 
 
