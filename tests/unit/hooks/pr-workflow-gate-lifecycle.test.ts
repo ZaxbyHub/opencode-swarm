@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_test_exports,
+	abortPrWorkflow,
 	activatePrWorkflow,
 	assertPrReviewBaseCoverageSettled,
 	bindPrReviewBase,
@@ -371,6 +372,49 @@ describe('pr-workflow-gate lifecycle and base coverage', () => {
 				changedFiles: 2,
 				hasSubmoduleChange: false,
 			});
+		} finally {
+			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
+		}
+	});
+
+	test('a gate state persisted before hasSubmoduleChange existed still parses and stays recoverable via abort', async () => {
+		const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
+		_test_exports.resolvePrReviewDiffStats = () => ({
+			changedLines: 12,
+			changedFiles: 2,
+			hasSubmoduleChange: false,
+		});
+		try {
+			await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+			await bindPrReviewBase(tempDir, SESSION_ID, {
+				prHeadSha: HEAD_SHA,
+				baseRef: 'origin/main',
+				baseSha: 'def456',
+			});
+
+			// Simulate a gate-state file written before hasSubmoduleChange was
+			// added to prReviewDiffStats (an older version of this exact PR's own
+			// code) by stripping it back out of the persisted JSON.
+			const relativePath =
+				_test_exports.workflowGateStateRelativePath(SESSION_ID);
+			const statePath = path.join(tempDir, '.swarm', relativePath);
+			const onDisk = JSON.parse(await fs.readFile(statePath, 'utf-8'));
+			expect(onDisk.prReviewDiffStats.hasSubmoduleChange).toBe(false);
+			delete onDisk.prReviewDiffStats.hasSubmoduleChange;
+			await fs.writeFile(statePath, JSON.stringify(onDisk), 'utf-8');
+
+			_test_exports.resetTrackedStateCache();
+			const recovered = await readPrWorkflowGateState(tempDir, SESSION_ID);
+			expect(recovered?.prReviewDiffStats).toEqual({
+				changedLines: 12,
+				changedFiles: 2,
+				hasSubmoduleChange: false,
+			});
+
+			_test_exports.resetTrackedStateCache();
+			await expect(abortPrWorkflow(tempDir, SESSION_ID)).resolves.toMatchObject(
+				{ mode: 'PR_REVIEW' },
+			);
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}

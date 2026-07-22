@@ -485,7 +485,12 @@ const PrWorkflowGateStateSchema = z
 			.object({
 				changedLines: z.number().int().nonnegative(),
 				changedFiles: z.number().int().nonnegative(),
-				hasSubmoduleChange: z.boolean(),
+				// Older persisted state (written before this field existed) omits
+				// it entirely; default to false rather than rejecting the whole
+				// record — the depth tier it backs was already computed and
+				// persisted under the pre-existing rules, so backfilling "no known
+				// submodule signal" does not retroactively change anything.
+				hasSubmoduleChange: z.boolean().default(false),
 			})
 			.strict()
 			.optional(),
@@ -4114,7 +4119,7 @@ function extractLaneCoverageEvidenceText(
 			fields[2].length >= 12 &&
 			fields[3].length >= 20
 		)
-			return `${fields[2]} ${fields[3]}`;
+			return `${fields[2]}\0${fields[3]}`;
 		if (fields[0] === '[CANDIDATE]') {
 			if (fields[1]?.toLowerCase() === 'candidate_id') {
 				candidateHeaderSeen = true;
@@ -4125,7 +4130,7 @@ function extractLaneCoverageEvidenceText(
 				fields[2] === expectedWorkflowLane &&
 				fields.slice(1, 10).every(Boolean)
 			)
-				return fields.slice(3, 10).join(' ');
+				return fields.slice(3, 10).join('\0');
 			continue;
 		}
 		if (
@@ -4135,7 +4140,7 @@ function extractLaneCoverageEvidenceText(
 			fields[1] === expectedWorkflowLane &&
 			fields.slice(0, 9).every(Boolean)
 		)
-			return fields.slice(2, 9).join(' ');
+			return fields.slice(2, 9).join('\0');
 	}
 	return null;
 }
