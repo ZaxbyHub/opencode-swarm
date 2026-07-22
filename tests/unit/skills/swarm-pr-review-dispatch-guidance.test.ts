@@ -177,7 +177,14 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'.swarm/pr-review/<run_id>/feedback-handoff.json',
 		);
 		expect(handoffSection).toContain(
-			'/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json',
+			'pr-review/<run_id>/feedback-handoff.json` inside your session/task workspace',
+		);
+		// The continuation-prompt example must use a profile-neutral placeholder,
+		// not either profile's concrete path hardcoded into an "exact" example —
+		// Profile A's path and the session-workspace path are genuinely
+		// different, so hardcoding either one here would misdocument the other.
+		expect(handoffSection).toContain(
+			'/swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>',
 		);
 		expect(handoffSection).toContain('stop and ask the user');
 		expect(mergeabilitySection).toContain('remains read-only');

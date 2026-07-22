@@ -49,12 +49,11 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
 - Only if this session actually exposes the swarm controller tools
   (`dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`),
   run Profile A instead: structured modes, incremental polling, full-text
-  retrieval for every `output_ref`, and `complete_pr_workflow` before the
-  final response. The initial base wave is one structured exact-six batch at
-  depth tier L, or a smaller consolidated batch whose `owned_workflow_lanes`
-  partition all six dimensions at tiers S/M — the controller computes the
-  tier from the bound diff. While that controller is active, blocking
-  dispatch and direct-Task dispatch are not equivalent — never bypass it.
+  retrieval for every `output_ref`, `complete_pr_workflow` before the final
+  response, and an initial base wave of one exact-six batch at tier L or a
+  smaller `owned_workflow_lanes`-partitioned batch at tiers S/M (controller
+  computes the tier from the bound diff). While active, blocking dispatch
+  and direct-Task dispatch are not equivalent — never bypass it.
 - If actionable findings remain, write the canonical handoff artifact and ask
   whether to continue with `swarm-pr-feedback`; carry validated findings
   forward with their original IDs and provenance.
