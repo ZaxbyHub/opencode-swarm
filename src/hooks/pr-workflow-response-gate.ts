@@ -72,10 +72,12 @@ interface WakeBudget {
 }
 
 /**
- * Compose the user-visible block text. Naming the abort path is the
- * load-bearing prompt-surface change: a trapped model reads this text every
- * turn, and without an explicit exit it will keep retrying the same blocked
- * tools forever (the deadlock). When `suspended` is true, the operational
+ * Compose the auto-wake continuation prompt text. This is sent to the model
+ * as a user-role message on session.idle — NOT as a replacement of the
+ * model's own text. It tells the model the gate is still active and names
+ * the recovery paths. Naming the abort path is load-bearing: a trapped model
+ * reads this every wake, and without an explicit exit it will keep retrying
+ * the same blocked tools forever. When `suspended` is true, the operational
  * notice (invariant 10 — always visible, not debug-gated) tells the user
  * the session will not auto-resume and how to recover.
  */
@@ -88,9 +90,9 @@ function blockedText(
 	} = {},
 ): string {
 	const lines: string[] = [
-		`[${mode} MECHANICAL GATE: FINAL RESPONSE BLOCKED]`,
-		'This workflow still has an active durable gate. The replaced text is not a valid review, closure ledger, or completion verdict.',
-		`Continue with the required structured lanes and evidence. If the bind/checkout path is unreachable — for example a compound \`git fetch && git checkout\` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — call \`abort_pr_workflow\` (mode: "${mode}", reason: "<one-line cause>") to clear the gate, or ask the user to run \`/swarm abort-pr-workflow\`. Only \`complete_pr_workflow\` clears the gate on terminal success.`,
+		`[${mode} WORKFLOW ACTIVE]`,
+		`The ${mode} workflow gate is still active. Continue with the required structured lanes, evidence, and controller tools until \`complete_pr_workflow\` succeeds.`,
+		`If the bind/checkout path is unreachable — for example a compound \`git fetch && git checkout\` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — call \`abort_pr_workflow\` (mode: "${mode}", reason: "<one-line cause>") to clear the gate, or ask the user to run \`/swarm abort-pr-workflow\`.`,
 	];
 	if (options.suspended) {
 		const max = options.maxConsecutive;
@@ -100,21 +102,59 @@ function blockedText(
 	}
 	if (options.userInterrupted) {
 		lines.push(
-			'Auto-resume is paused after a user interruption. The durable workflow gate is preserved, but the plugin will not re-awaken this session. Send a new user message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.',
+			'Auto-resume is paused after a user interruption. The durable workflow gate is preserved, but the plugin will not re-awaken this session. Send a new message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.',
 		);
 	}
 	return lines.join('\n');
 }
 
 /**
- * Prevent an architect from bypassing PR obligations by simply emitting text.
- * The text-complete hook replaces every architect-session text part while the
- * durable gate exists; session.idle then mechanically resumes that session.
+ * Compose a compact workflow-active banner prepended to architect text parts.
+ * Unlike {@link blockedText} (used for auto-wake continuation prompts), this
+ * banner does NOT replace the model's text — it is prepended so the user can
+ * see the architect's reasoning and progress while being clearly informed
+ * that the output is not a terminal verdict.
+ *
+ * Recovery instructions for suspended/interrupted states are always present
+ * in the banner so they remain visible on every text part regardless of
+ * content.
+ */
+function workflowBanner(
+	mode: string,
+	options: {
+		suspended?: boolean;
+		userInterrupted?: boolean;
+		maxConsecutive?: number;
+	} = {},
+): string {
+	const lines: string[] = [
+		`--- [${mode} WORKFLOW ACTIVE — output below is not a terminal verdict; only \`complete_pr_workflow\` clears the gate; if the bind/checkout path is unreachable call \`abort_pr_workflow\` or run \`/swarm abort-pr-workflow\`] ---`,
+	];
+	if (options.suspended) {
+		const max = options.maxConsecutive;
+		lines.push(
+			`[Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\`.]`,
+		);
+	}
+	if (options.userInterrupted) {
+		lines.push(
+			'[Auto-resume paused after a user interruption. Send a new message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.]',
+		);
+	}
+	return lines.join(' ');
+}
+
+/**
+ * Prevent an architect from masquerading a premature text output as a terminal
+ * verdict. The text-complete hook prepends a workflow-active banner to every
+ * architect-session text part while the durable gate exists; the model's
+ * original text is preserved below the banner. session.idle then mechanically
+ * resumes that session.
  *
  * The resume loop is bounded (see DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES)
  * so a session that cannot make progress suspends instead of spinning
- * forever. `textComplete` keeps rewriting text after suspension so the
- * user-visible surface always names the recovery path.
+ * forever. The banner always carries suspension/interruption recovery notices
+ * so the user-visible surface always names the recovery path.
  */
 export function createPrWorkflowResponseGate(options: {
 	directory: string;
@@ -167,7 +207,11 @@ export function createPrWorkflowResponseGate(options: {
 			return;
 		}
 		const budget = wakeBudgets.get(input.sessionID);
-		output.text = blockedText(state.mode, {
+		// Prepend a workflow-active banner to the model's text. The original
+		// text is preserved so the user can see the architect's reasoning and
+		// progress. The banner makes clear that this output is not a terminal
+		// verdict — only complete_pr_workflow clears the gate.
+		const banner = workflowBanner(state.mode, {
 			suspended: budget?.suspended ?? false,
 			userInterrupted: isPrWorkflowAutoWakeSuppressed(
 				options.directory,
@@ -175,6 +219,7 @@ export function createPrWorkflowResponseGate(options: {
 			),
 			maxConsecutive: maxConsecutive,
 		});
+		output.text = `${banner}\n\n${output.text}`;
 	};
 
 	const event = async (input: { event: unknown }): Promise<void> => {
