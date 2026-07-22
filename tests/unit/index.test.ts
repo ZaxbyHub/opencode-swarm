@@ -105,6 +105,94 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		expect(order).toEqual(['server-resolved', 'repo-graph-started']);
 	});
 
+	test('5b. issue #1782: config-load timeout falls back to safe defaults and init still completes', async () => {
+		// The parallel init I/O wraps loadPluginConfigWithMetaAsync in a 2s
+		// withTimeout. If the read stalls past 2s, init must STILL complete
+		// and the resulting config must equal getSafeDefaultConfigLoadResult().
+		// We deterministically inject a stall via the test seam added in
+		// issue #1782 (overrideIndexInternalsForTest).
+		const stall = new Promise(() => {
+			/* never resolves — simulates a hung AV scan */
+		});
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			loadPluginConfigWithMetaAsync: (() => stall) as any,
+			schedulePostResolutionTasks: () => {
+				/* swallow to keep test deterministic */
+			},
+		});
+
+		const start = Date.now();
+		const result = await OpenCodeSwarm.server(mockPluginInput);
+		const elapsed = Date.now() - start;
+
+		// Init completed despite the stall. Bounded by LOAD_PLUGIN_CONFIG_TIMEOUT_MS
+		// (~2000ms) plus the parallel reads' latencies; allow generous headroom.
+		expect(result).toHaveProperty('tool');
+		expect(elapsed).toBeLessThan(10_000);
+		// The other two parallel reads complete near-instantly (no real .swarm
+		// state, no real git exclude issues in a fresh tmpdir), so the bound
+		// on total time is dominated by the 2s config timeout.
+		expect(elapsed).toBeGreaterThanOrEqual(1900);
+	});
+
+	test('5c. issue #1782: parallel init I/O runs config+snapshot+git-exclude concurrently', async () => {
+		// Inject three stubs that record start timestamps; assert they all
+		// start within a small window (proves the reads are concurrent).
+		const started: Record<string, number> = {};
+
+		const makeStub = (key: 'config' | 'snapshot' | 'gitExclude') => {
+			const stub = (..._args: unknown[]) =>
+				new Promise<any>((resolve) => {
+					started[key] = Date.now();
+					// Resolve on next tick — gives the other two stubs time to
+					// also start before we let Promise.all complete.
+					setTimeout(() => {
+						resolve(
+							key === 'config'
+								? {
+										config: {
+											full_auto: { enabled: false },
+											guardrails: { enabled: true },
+											quiet: true,
+										},
+										recovery: 'none',
+										removedKeys: [],
+										warnings: [],
+										loadedFromFile: false,
+										configHadErrors: false,
+									}
+								: undefined,
+						);
+					}, 5);
+				});
+			return stub;
+		};
+
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			loadPluginConfigWithMetaAsync: makeStub('config') as any,
+			loadSnapshot: makeStub('snapshot') as any,
+			ensureSwarmGitExcluded: makeStub('gitExclude') as any,
+			createRepoGraphBuilderHook: (() => ({
+				init: async () => {},
+				toolAfter: async () => {},
+			})) as any,
+			schedulePostResolutionTasks: () => {
+				/* swallow */
+			},
+		});
+
+		await OpenCodeSwarm.server(mockPluginInput);
+
+		// All three started within a small window of each other (parallel).
+		const starts = Object.values(started);
+		expect(starts.length).toBe(3);
+		const maxDelta = Math.max(...starts) - Math.min(...starts);
+		// Concurrent: Promise.all starts all three within a single event-loop
+		// tick (a few ms). A sequential chain would space them ~5ms apart
+		// (each stub's setTimeout) → ~10ms total spread. Allow headroom.
+		expect(maxDelta).toBeLessThan(8);
+	});
+
 	test('6. post-resolution scheduler launches tasks from a later timer turn', async () => {
 		const order = ['caller'];
 		let markTaskStarted!: () => void;

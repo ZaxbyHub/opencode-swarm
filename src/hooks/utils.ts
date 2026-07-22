@@ -279,12 +279,49 @@ export async function readSwarmFileAsync(
 		cache.set(key, promise);
 		return promise;
 	}
-	// Retry loop to handle macOS/APFS rename-visibility race.
-	// After an atomic rename, the filesystem can take a few ms to update
-	// the directory entry. Immediately-following reads may see ENOENT.
-	// Retry up to 5 times with 10ms delay before giving up.
-	const maxAttempts = 5;
-	const retryDelayMs = 10;
+	// SPLIT retry budget constants — see comment below for rationale.
+	// ENOENT (macOS/APFS rename race): cheap, short window. Preserves the
+	// pre-#1782 hot-path latency for missing files (system-enhancer reads
+	// context.md/plan.md per message; loadPlanJsonOnly reads plan.json per
+	// evidence attribution).
+	const ENOENT_MAX_ATTEMPTS = 5;
+	const ENOENT_RETRY_DELAY_MS = 10;
+	// EBUSY/EPERM/EACCES (Windows AV scan): longer window. Sized for real
+	// Windows Defender scan windows (commonly 100–500ms).
+	const maxAttempts = 6;
+	// Retry loop to handle macOS/APFS rename-visibility race AND transient
+	// Windows FS errors from AV/indexing of a freshly-written file.
+	//
+	// After an atomic rename, the filesystem can take a few ms to update the
+	// directory entry; immediately-following reads may see ENOENT.
+	//
+	// On Windows, antivirus / Windows Defender / Search Indexer can briefly
+	// hold an exclusive handle on a file that was just written, surfacing as
+	// EBUSY / EPERM / EACCES on the first read attempt. The same Windows AV
+	// class was previously hardened at a higher layer in `getEvidenceTaskId`
+	// (src/hooks/delegation-gate.ts:1742-1747, v6.33.7) by swallowing the
+	// error and returning null; this is the source-level retry that prevents
+	// the swallow from being reached. Retry-set precedent: `RENAME_RETRY_CODES`
+	// at src/evidence/documents-retention.ts:67-70 (deliberately omits
+	// `ENOTEMPTY`, which is a rename-specific code not applicable to reads).
+	//
+	// SPLIT POLICY (issue #1782 final-critic finding): the two error classes
+	// have fundamentally different latency budgets.
+	//
+	//   - ENOENT (macOS/APFS rename race): short window — the prior flat
+	//     10ms × 4 sleeps = 40ms budget was sized for this. PRESERVED to avoid
+	//     a hot-path regression: `system-enhancer.ts` reads `context.md` and
+	//     `plan.md` per message transform, and `loadPlanJsonOnly` reads
+	//     `plan.json` per evidence attribution. On projects without those
+	//     files, `bunFile(...).text()` throws ENOENT — a 310ms miss path
+	//     would be unacceptable on the per-message path.
+	//   - EBUSY/EPERM/EACCES (Windows AV scan): commonly 100–500ms. Use
+	//     exponential backoff 10/20/40/80/160ms across 6 attempts (310ms total
+	//     worst-case) — sized for real Defender scan windows. The prior flat
+	//     10ms × 4 = 40ms budget was observed insufficient when both
+	//     unit-test-level retries of
+	//     `tests/unit/hooks/delegation-gate-resolve-task-id.test.ts` failed in
+	//     merge-group run 29854486821 (2026-07-21).
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
 		try {
 			const resolvedPath = _internals.validateSwarmPath(directory, filename);
@@ -293,12 +330,23 @@ export async function readSwarmFileAsync(
 				return await file.text();
 			});
 		} catch (err) {
-			// Only retry on ENOENT (file not found) — other errors should fail fast
-			const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
-			if (!isNotFound || attempt === maxAttempts - 1) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code === 'ENOENT') {
+				// Short-window rename-visibility race. Cheap flat backoff.
+				// Preserves the pre-#1782 hot-path latency for missing files.
+				if (attempt >= ENOENT_MAX_ATTEMPTS - 1) return null;
+				await new Promise((resolve) =>
+					setTimeout(resolve, ENOENT_RETRY_DELAY_MS),
+				);
+				continue;
+			}
+			const isAvRetryable =
+				code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+			if (!isAvRetryable || attempt === maxAttempts - 1) {
 				return null;
 			}
-			// Wait before retrying
+			// Exponential backoff for Windows AV class: 10/20/40/80/160ms.
+			const retryDelayMs = 10 * 2 ** attempt;
 			await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
 		}
 	}
