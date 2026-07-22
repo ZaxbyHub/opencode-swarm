@@ -67,12 +67,12 @@ describe('PR workflow exact checkout head', () => {
 			`cannot resolve the current Git HEAD in "${directory}"`,
 		);
 		await expect(promise).rejects.toThrow('git -C');
-		await expect(promise).rejects.toThrow(
-			'rev-parse --verify HEAD^{commit}',
-		);
+		await expect(promise).rejects.toThrow('rev-parse --verify HEAD^{commit}');
 		// Must enumerate at least one real cause so the caller knows where
 		// to look (unborn HEAD, shallow clone, missing binary, timeout, non-repo).
-		await expect(promise).rejects.toThrow(/unborn|shallow|PATH|timed out|repository/i);
+		await expect(promise).rejects.toThrow(
+			/unborn|shallow|PATH|timed out|repository/i,
+		);
 	});
 
 	test('diagnostic-rich error when HEAD does not match (issue #1931)', async () => {
@@ -80,17 +80,11 @@ describe('PR workflow exact checkout head', () => {
 		// remediation command (switch --detach) so the caller can recover.
 		await activatePrWorkflow(directory, 'review-mismatch', 'PR_REVIEW');
 		_test_exports.resolveCurrentGitHead = () => 'different-head';
-		const promise = bindPrWorkflowHead(
-			directory,
-			'review-mismatch',
-			HEAD_SHA,
-		);
+		const promise = bindPrWorkflowHead(directory, 'review-mismatch', HEAD_SHA);
 		await expect(promise).rejects.toThrow(
 			`does not match PR head "${HEAD_SHA}"`,
 		);
-		await expect(promise).rejects.toThrow(
-			`working directory: "${directory}"`,
-		);
+		await expect(promise).rejects.toThrow(`working directory: "${directory}"`);
 		await expect(promise).rejects.toThrow(/switch --detach/);
 	});
 
