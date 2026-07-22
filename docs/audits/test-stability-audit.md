@@ -93,3 +93,20 @@ Issue #1908 retires the concrete tracked backlog. It does **not** close #1782:
 that issue owns systemic flake detection, five consecutive green requeues, and
 the two-week soak. Those elapsed-time acceptance criteria remain separate from
 the code and quarantine debt resolved here.
+
+## Addendum: 2026-07-21 source-level fixes for two residual merge-group flakes
+
+After #1908 landed, the merge-group CI was still failing ~27% of runs (3
+failures in 11 runs, 2026-07-19 to 2026-07-21) on two concrete defects the
+infrastructure layer detected but did not fix at the source. Both are now
+fixed; rows appended to the resolution inventory.
+
+| Test or cluster | Resolution | Evidence source |
+| --- | --- | --- |
+| `repro-704` Windows T1 timeout (`smoke (windows-latest)` leg; 4 of 7 recent failures; elapsed 455/503/1127ms vs 400ms deadline) | Structural: parallelize the three independent bounded init-path I/O reads (`loadPluginConfigWithMetaAsync` ∥ `loadSnapshot` ∥ `ensureSwarmGitExcluded`) via `Promise.all` in `src/index.ts`. Cumulative latency drops from `sum()` to `max()`. Also bounds the previously-unbounded config read via `withTimeout(2_000)` (Invariant 1 compliance). **Status: structural fix shipped; "closed in production" requires the next ~5 merge-group Windows runs to confirm.** Local `node scripts/repro-704.mjs` T1 = 299ms post-fix (vs 455–1127ms pre-fix in CI). | `src/index.ts` (init parallelization); `src/config/loader.ts:getSafeDefaultConfigLoadResult` (timeout fallback); `tests/unit/index.test.ts` (5b timeout-fallback + 5c parallel-execution tests) |
+| `tests/unit/hooks/delegation-gate-resolve-task-id.test.ts` (1 failure; run 29854486821; both retries exhausted) | Source-level: extended `readSwarmFileAsync` retry set in `src/hooks/utils.ts` to include `EBUSY`/`EPERM`/`EACCES` (alongside `ENOENT`), with exponential backoff 10/20/40/80/160ms across 6 attempts (310ms total worst-case). Retry-set precedent: `RENAME_RETRY_CODES` at `src/evidence/documents-retention.ts:67-70`. **Status: closed at source.** Deterministic repro test added at `tests/unit/hooks/delegation-gate-resolve-task-id.test.ts:332`. | `src/hooks/utils.ts:282-330` (retry hardening); `tests/unit/hooks/utils-read-swarm-file.test.ts` (retry-set + latency-bound tests) |
+
+The systemic elapsed-time acceptance criteria (5 consecutive green requeues,
+two-week soak) remain tracked by issue #1782 and cannot be proven in one PR.
+The fix PR uses `Refs #1782` (not `Closes`) per the same convention as PRs
+#1784 and #1921.

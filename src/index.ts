@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import type { Plugin } from '@opencode-ai/plugin';
 import packageJson from '../package.json' with { type: 'json' };
@@ -22,7 +23,10 @@ import {
 	createSwarmCommandHandler,
 } from './commands';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
-import { loadPluginConfigWithMetaAsync } from './config';
+import {
+	getSafeDefaultConfigLoadResult,
+	loadPluginConfigWithMetaAsync,
+} from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
 import { resolveWorktreeIsolationConfig } from './config/index.js';
@@ -178,6 +182,7 @@ export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
 
 import {
 	addDeferredWarning,
+	advisoryWarn,
 	clearDeferredWarnings,
 } from './services/warning-buffer.js';
 
@@ -196,6 +201,17 @@ const PACKAGE_ROOT = path.resolve(
 // pathological filesystems (antivirus interception, NFS stalls) — on timeout we
 // fail open and the command-path sync remains a backstop.
 const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
+
+// Per Invariant 1 / Issue #704 / repro-704 T1 Windows failures: the plugin
+// init path used to await `loadPluginConfigWithMetaAsync` UNBOUNDED — the only
+// one of the three init-path I/O reads without a `withTimeout` wrapper. On
+// cold Windows CI runners with AV/indexing, the unbounded stat+read of up to
+// 2 config files can add 100–1000ms of latency, contributing to T1 misses.
+// 2s matches the SYNC_BUNDLED_SKILLS_TIMEOUT_MS precedent; on timeout we fail
+// open via `getSafeDefaultConfigLoadResult()` (empty config + guardrails
+// enabled), which is the same shape the loader itself returns for any config
+// read error. See `docs/audits/test-stability-audit.md` (issue #1782).
+const LOAD_PLUGIN_CONFIG_TIMEOUT_MS = 2_000;
 
 function createSwarmCommandSystemRuleHook(
 	agentDefinitions: Record<string, AgentDefinition>,
@@ -266,23 +282,51 @@ function schedulePostResolutionTasks(
 
 let createRepoGraphBuilderHookForInit = createRepoGraphBuilderHook;
 let schedulePostResolutionTasksForInit = schedulePostResolutionTasks;
+// Init-path I/O indirections (issue #1782): the three parallelized reads in
+// `initializeOpenCodeSwarm` route through these aliases so tests can inject
+// stalls / failures deterministically (the `overrideIndexInternalsForTest`
+// seam extension below). Default assignment preserves production behavior.
+let loadPluginConfigWithMetaAsyncForInit = loadPluginConfigWithMetaAsync;
+let loadSnapshotForInit = loadSnapshot;
+let ensureSwarmGitExcludedForInit = ensureSwarmGitExcluded;
 
 export function overrideIndexInternalsForTest(overrides: {
 	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
 	schedulePostResolutionTasks?: typeof schedulePostResolutionTasks;
+	loadPluginConfigWithMetaAsync?: typeof loadPluginConfigWithMetaAsync;
+	loadSnapshot?: typeof loadSnapshot;
+	ensureSwarmGitExcluded?: typeof ensureSwarmGitExcluded;
 }): () => void {
 	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
 	const previousSchedulePostResolutionTasks =
 		schedulePostResolutionTasksForInit;
+	const previousLoadPluginConfigWithMetaAsync =
+		loadPluginConfigWithMetaAsyncForInit;
+	const previousLoadSnapshot = loadSnapshotForInit;
+	const previousEnsureSwarmGitExcluded = ensureSwarmGitExcludedForInit;
 	if (overrides.createRepoGraphBuilderHook) {
 		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
 	}
 	if (overrides.schedulePostResolutionTasks) {
 		schedulePostResolutionTasksForInit = overrides.schedulePostResolutionTasks;
 	}
+	if (overrides.loadPluginConfigWithMetaAsync) {
+		loadPluginConfigWithMetaAsyncForInit =
+			overrides.loadPluginConfigWithMetaAsync;
+	}
+	if (overrides.loadSnapshot) {
+		loadSnapshotForInit = overrides.loadSnapshot;
+	}
+	if (overrides.ensureSwarmGitExcluded) {
+		ensureSwarmGitExcludedForInit = overrides.ensureSwarmGitExcluded;
+	}
 	return () => {
 		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
 		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
+		loadPluginConfigWithMetaAsyncForInit =
+			previousLoadPluginConfigWithMetaAsync;
+		loadSnapshotForInit = previousLoadSnapshot;
+		ensureSwarmGitExcludedForInit = previousEnsureSwarmGitExcluded;
 	};
 }
 
@@ -452,8 +496,80 @@ async function initializeOpenCodeSwarm(
 	// not raw stderr, so the buffer is the only /swarm diagnose channel).
 	clearDeferredWarnings();
 
-	const { config, loadedFromFile } = await loadPluginConfigWithMetaAsync(
-		ctx.directory,
+	// PARALLEL INIT I/O (issue #1782 / repro-704 T1 Windows failures).
+	//
+	// Three independent bounded reads used to be awaited SEQUENTIALLY here:
+	//   (1) loadPluginConfigWithMetaAsync — reads `.opencode/` config
+	//   (2) loadSnapshot                  — reads `.swarm/session-snapshot.json`
+	//   (3) ensureSwarmGitExcluded       — runs `git rev-parse` + writes `.git/info/exclude`
+	//
+	// Verified independent (cross-checked by two independent plan-critic rounds):
+	//   - loadSnapshot has NO `config` import (`src/session/snapshot-reader.ts`
+	//     imports only fs, state, hooks/utils, bun-compat, logger).
+	//   - loadPluginConfigWithMetaAsync does only `stat`+`readFile`+pure
+	//     computation; writes nothing other `init` steps read.
+	//   - ensureSwarmGitExcluded's `quiet` option is currently void-discarded
+	//     (`src/utils/gitignore-warning.ts:223-224`), so passing `{ quiet: false }`
+	//     is behavior-identical to the prior `{ quiet: config.quiet }`.
+	//   - `_swarmGitExcludedChecked` deduplication is sync check-and-set before
+	//     any `await`, so parallel invocation cannot double-spawn git.
+	//
+	// On cold Windows CI runners with AV/indexing, each step can take 100–500ms;
+	// the prior sequential shape summed them, easily exceeding the 400ms
+	// repro-704 T1 deadline. Parallelizing drops the floor to `max()` of the
+	// three. Promise.all also preserves the in-source ordering contract at
+	// `src/index.ts` (the `.swarm/` writes below run only after all three
+	// resolve, so `ensureSwarmGitExcluded` still completes before any `.swarm/`
+	// artifact is created).
+	const __initIoStart = performance.now();
+	const configLoadP = withTimeout(
+		loadPluginConfigWithMetaAsyncForInit(ctx.directory),
+		LOAD_PLUGIN_CONFIG_TIMEOUT_MS,
+		new Error(
+			`loadPluginConfigWithMetaAsync exceeded ${LOAD_PLUGIN_CONFIG_TIMEOUT_MS}ms budget; continuing with safe-default config`,
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('loadPluginConfig timed out or failed (non-fatal)', { error: msg });
+		// advisoryWarn (not debug log) so `/swarm diagnose` surfaces this: on
+		// this path the user's agents/models/guardrails/full_auto settings are
+		// silently ignored for the entire session. The safe-default shape
+		// matches what the loader itself returns when no config file exists.
+		advisoryWarn(
+			`[opencode-swarm] Config load exceeded ${LOAD_PLUGIN_CONFIG_TIMEOUT_MS}ms budget; running with default configuration for this session.`,
+		);
+		return getSafeDefaultConfigLoadResult();
+	});
+	const snapshotP = withTimeout(
+		loadSnapshotForInit(ctx.directory),
+		5_000,
+		new Error(
+			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
+	});
+	const gitExcludeP = withTimeout(
+		// `quiet` defaults to false; the option is currently void-discarded in
+		// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
+		// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
+		// parallelize without waiting on the config read.
+		ensureSwarmGitExcludedForInit(ctx.directory),
+		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+		new Error(
+			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
+			error: msg,
+		});
+	});
+	await Promise.all([configLoadP, snapshotP, gitExcludeP]);
+	const { config, loadedFromFile } = await configLoadP;
+	log(
+		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
 	);
 
 	// Full-auto mode validation: critic model must differ from architect model
@@ -530,21 +646,11 @@ async function initializeOpenCodeSwarm(
 	// Store SDK client for curator LLM delegation
 	swarmState.opencodeClient = ctx.client;
 
-	// v6.18 Session persistence — restore state from previous session.
-	// Bounded with a 5s timeout (issue #704): `loadSnapshot` is read-only, so
-	// timing out is safe — it only affects rehydration, not durable state. A
-	// slow filesystem (network home, iCloud-backed mount) must never block
-	// the plugin host's `await server(...)` indefinitely.
-	await withTimeout(
-		loadSnapshot(ctx.directory),
-		5_000,
-		new Error(
-			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
-	});
+	// `loadSnapshot` was awaited in the parallel block above. Its comment
+	// (preserved here for context): bounded with a 5s timeout (issue #704);
+	// read-only, so timing out is safe — it only affects rehydration, not
+	// durable state. A slow filesystem (network home, iCloud-backed mount)
+	// must never block the plugin host's `await server(...)` indefinitely.
 
 	// Construct the repo-graph hook before any other side-task, but register its
 	// scan with the wrapper-owned post-resolution queue. Issue #704: the
@@ -582,33 +688,14 @@ async function initializeOpenCodeSwarm(
 			.finally(() => clearTimeout(watchdog));
 	});
 
-	// Protect .swarm/ from Git before any write. Uses git CLI so worktrees and
-	// submodules (where .git is a file, not a directory) are handled correctly.
-	// The await is intentional: the exclude write should complete before the
-	// writes below create .swarm/ artifacts. The git subprocess calls finish in
-	// <50ms on a healthy host.
-	//
-	// HARD-BOUNDED via withTimeout because the OpenCode plugin host silently
-	// drops a plugin whose entry never resolves (issue #704). On a pathological
-	// host (antivirus interception, credential helper prompt, NFS-stalled .git,
-	// Bun-on-Windows stdin pipe semantics) this call could otherwise block
-	// plugin init forever and produce the symptom "no agents in TUI/GUI".
-	// On timeout we fail open: log non-fatal and let init continue.
-	// Repo-graph startup is registered above but cannot begin until the wrapper
-	// schedules the post-resolution queue, so this awaited hygiene check always
-	// completes before the graph can write `.swarm/repo-graph.json`.
-	await withTimeout(
-		ensureSwarmGitExcluded(ctx.directory, { quiet: config.quiet }),
-		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
-		new Error(
-			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
-			error: msg,
-		});
-	});
+	// `ensureSwarmGitExcluded` was awaited in the parallel block above. Its
+	// comment (preserved here for context): protects .swarm/ from Git before
+	// any write; uses git CLI so worktrees and submodules (where .git is a
+	// file, not a directory) are handled correctly. HARD-BOUNDED via
+	// withTimeout because the OpenCode plugin host silently drops a plugin
+	// whose entry never resolves (issue #704). Promise.all above guarantees
+	// the exclude write completes before any `.swarm/` artifact is created
+	// below — matching the in-source ordering contract.
 
 	// FR-103: Startup orphan recovery — reclaim orphaned worktrees and branches
 	// from crashed sessions. At plugin init no sessions are active yet, so

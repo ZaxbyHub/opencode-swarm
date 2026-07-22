@@ -653,6 +653,43 @@ export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 }
 
 /**
+ * Safe-default `ConfigLoadResult` for init-path timeout / error fallback.
+ *
+ * Produces the same shape `loadPluginConfigWithMeta[Async]` returns when no
+ * config file exists on disk: empty config + guardrails enabled + no recovery.
+ * Used by `src/index.ts` when the parallelized config read times out or fails
+ * (Invariant 1 — init must remain bounded). A parity test in
+ * `tests/unit/config/loader-safe-default.test.ts` asserts this matches the
+ * classification fields the loader returns for a missing config file.
+ *
+ * Classification fields:
+ *   - `loadedFromFile: false` — on timeout we cannot know whether a file
+ *     existed (the `stat` itself may have stalled); `false` is the safe
+ *     choice that avoids the guardrails-disabled warning gated by this
+ *     flag at `src/index.ts` (the only init-path consumer).
+ *   - `configHadErrors: false` — we did not observe a corrupt/oversized
+ *     config, only a slow one; fail-closed consumers (e.g. the Full-Auto
+ *     `locked` activation guard) treat this as "config defaults", which
+ *     matches the runtime behavior of the safe-default `PluginConfig`.
+ */
+export function getSafeDefaultConfigLoadResult(): ConfigLoadResult {
+	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
+		null,
+		null,
+		false,
+		false,
+	);
+	return {
+		config,
+		recovery,
+		removedKeys,
+		warnings,
+		loadedFromFile: false,
+		configHadErrors: false,
+	};
+}
+
+/**
  * Async variant of `loadRawConfigFromPath` — same shape, same validation,
  * but uses `node:fs/promises`. Issue #704: the plugin init path must avoid
  * synchronous fs calls so a slow filesystem (network home, iCloud) cannot

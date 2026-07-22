@@ -47,6 +47,7 @@ export type {
 } from './loader';
 // Re-export loaders for DI seam
 export {
+	getSafeDefaultConfigLoadResult,
 	loadAgentPrompt,
 	loadPluginConfig,
 	loadPluginConfigWithMeta,
