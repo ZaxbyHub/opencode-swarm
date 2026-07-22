@@ -8,8 +8,8 @@ Closes an unrecoverable deadlock in the PR-workflow mechanical gates
 trapped in an unbounded auto-resume loop with no tool path to clear the gate
 — for example when a compound `git fetch … && git checkout …` was repeatedly
 rejected as read-only shell syntax and the working tree never reached the PR
-head. Every turn ended with `[PR_REVIEW MECHANICAL GATE: FINAL RESPONSE
-BLOCKED]` and `session.idle` mechanically re-awoke the session indefinitely.
+head. Every turn ended with the gate replacing the architect's text and
+`session.idle` mechanically re-awoke the session indefinitely.
 
 Two compounding faults are fixed:
 
@@ -30,13 +30,14 @@ Two compounding faults are fixed:
    replaces it with a progress-aware wake budget: the consecutive-unproductive
    counter resets whenever the durable gate's `revision` advances (so healthy
    long reviews never exhaust it) and suspends further auto-resumes after a
-   small number of consecutive unproductive wakes. `textComplete` keeps
-   rewriting text after suspension so the user-visible surface always names
-   the recovery path.
+   small number of consecutive unproductive wakes. `textComplete` prepends a
+   workflow-active banner to the architect's text (preserving the model's
+   reasoning below it) so the user-visible surface always names the recovery
+   path.
 
-The block text now names `abort_pr_workflow` and `/swarm abort-pr-workflow`
+The banner text now names `abort_pr_workflow` and `/swarm abort-pr-workflow`
 and the triggering conditions, so a trapped model (and the user) see the exit
-on every turn. When the budget suspends, the block text carries an operational
+on every turn. When the budget suspends, the banner carries an operational
 notice naming the recovery command.
 
 Authorization and defense-in-depth:

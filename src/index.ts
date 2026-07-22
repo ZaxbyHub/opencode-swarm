@@ -2185,9 +2185,10 @@ async function initializeOpenCodeSwarm(
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
 
-		// Correctness boundary: while a durable PR workflow gate exists, no
-		// architect text can masquerade as a terminal verdict or closure response.
-		// Raw-await this hook so gate-state read failures block text completion.
+		// Correctness boundary: while a durable PR workflow gate exists, architect
+		// text is prepended with a workflow-active banner so it cannot masquerade
+		// as a terminal verdict or closure response. Raw-await this hook so
+		// gate-state read failures block text completion.
 		'experimental.text.complete': prWorkflowResponseGate.textComplete,
 
 		// Inject system prompt enhancements + phase monitor (when phase_preflight or knowledge enabled)

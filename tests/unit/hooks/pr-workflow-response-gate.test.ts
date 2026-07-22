@@ -4,6 +4,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_test_exports as autoWakeInternals,
+	isPrWorkflowAutoWakeSuppressed,
+} from '../../../src/hooks/pr-workflow-auto-wake.js';
+import {
 	activatePrWorkflow,
 	clearPrWorkflowGateState,
 	type PrWorkflowGateState,
@@ -18,10 +22,12 @@ beforeEach(() => {
 		mkdtempSync(path.join(os.tmpdir(), 'pr-response-gate-')),
 	);
 	workflowInternals.resetTrackedStateCache();
+	autoWakeInternals.reset();
 });
 
 afterEach(async () => {
 	workflowInternals.resetTrackedStateCache();
+	autoWakeInternals.reset();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -46,7 +52,7 @@ async function writeStateWithRevision(
 }
 
 describe('PR workflow response-level gate', () => {
-	test('replaces architect text until complete_pr_workflow clears durable state', async () => {
+	test('prepends workflow banner to architect text until complete_pr_workflow clears durable state', async () => {
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,
@@ -55,13 +61,96 @@ describe('PR workflow response-level gate', () => {
 		await activatePrWorkflow(directory, 'review-session', 'PR_REVIEW');
 		const blocked = { text: 'Looks good. APPROVE.' };
 		await gate.textComplete({ sessionID: 'review-session' }, blocked);
-		expect(blocked.text).toContain('FINAL RESPONSE BLOCKED');
-		expect(blocked.text).not.toContain('Looks good');
+		expect(blocked.text).toContain('WORKFLOW ACTIVE');
+		// The model's original text is preserved below the banner, not erased.
+		expect(blocked.text).toContain('Looks good');
+		// Banner appears BEFORE the model's text (F-004: ordering guard).
+		const bannerIdx = blocked.text.indexOf('WORKFLOW ACTIVE');
+		const textIdx = blocked.text.indexOf('Looks good');
+		expect(bannerIdx).toBeLessThan(textIdx);
 
 		await clearPrWorkflowGateState(directory, 'review-session');
 		const completed = { text: 'Verified completion.' };
 		await gate.textComplete({ sessionID: 'review-session' }, completed);
 		expect(completed.text).toBe('Verified completion.');
+	});
+
+	test('preserves intermediate reasoning text below the workflow banner', async () => {
+		const gate = createPrWorkflowResponseGate({ directory });
+		await activatePrWorkflow(directory, 'working-session', 'PR_REVIEW');
+		const output = {
+			text: 'Let me fetch the PR head and verify the merge base before dispatching lanes.',
+		};
+		await gate.textComplete({ sessionID: 'working-session' }, output);
+		// Banner present at the top.
+		expect(output.text).toContain('WORKFLOW ACTIVE');
+		expect(output.text).toContain('not a terminal verdict');
+		// The model's full reasoning text survives below the banner.
+		expect(output.text).toContain('Let me fetch the PR head');
+		expect(output.text).toContain('verify the merge base');
+	});
+
+	test('banner is mode-aware for PR_FEEDBACK as well as PR_REVIEW', async () => {
+		const gate = createPrWorkflowResponseGate({ directory });
+		await activatePrWorkflow(directory, 'feedback-mode-session', 'PR_FEEDBACK');
+		const output = { text: 'Stage A checks passing.' };
+		await gate.textComplete({ sessionID: 'feedback-mode-session' }, output);
+		expect(output.text).toContain('PR_FEEDBACK WORKFLOW ACTIVE');
+		expect(output.text).toContain('Stage A checks passing.');
+	});
+
+	test('banner appears even on empty text', async () => {
+		const gate = createPrWorkflowResponseGate({ directory });
+		await activatePrWorkflow(directory, 'empty-text-session', 'PR_REVIEW');
+		const output = { text: '' };
+		await gate.textComplete({ sessionID: 'empty-text-session' }, output);
+		expect(output.text).toContain('WORKFLOW ACTIVE');
+	});
+
+	test('banner carries both suspension and interruption notices when both are active (F-003)', async () => {
+		// Drive the wake budget to suspension (max=1 for quick exhaustion),
+		// then trigger a MessageAbortedError to set the interruption pause.
+		// textComplete must produce a banner containing BOTH recovery notices.
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 1,
+			wakeCooldownMs: 0,
+		});
+		await writeStateWithRevision('combined-session', 0);
+		const idle = {
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'combined-session' },
+			},
+		};
+		// Wake 1 (probe), wake 2 (unproductive → suspend at max=1).
+		await gate.event(idle);
+		await gate.event(idle);
+		expect(gate._inspectWakeBudget('combined-session')?.suspended).toBe(true);
+
+		// Now trigger a user interruption.
+		await gate.event({
+			event: {
+				type: 'session.error',
+				properties: {
+					sessionID: 'combined-session',
+					error: { name: 'MessageAbortedError', data: { message: 'aborted' } },
+				},
+			},
+		});
+		expect(isPrWorkflowAutoWakeSuppressed(directory, 'combined-session')).toBe(
+			true,
+		);
+
+		// textComplete must show BOTH the suspension notice and the interruption notice.
+		const output = { text: 'still working' };
+		await gate.textComplete({ sessionID: 'combined-session' }, output);
+		expect(output.text).toContain('Auto-resume is suspended');
+		expect(output.text).toContain('user interruption');
+		// Model text preserved below both notices.
+		expect(output.text).toContain('still working');
 	});
 
 	test('session idle mechanically resumes an active workflow', async () => {
@@ -104,7 +193,7 @@ describe('PR workflow response-level gate', () => {
 		expect(promptAsync).not.toHaveBeenCalled();
 	});
 
-	test('keeps text enforcement but skips resume when the host has no session API', async () => {
+	test('prepends workflow banner but skips resume when the host has no session API', async () => {
 		const gate = createPrWorkflowResponseGate({ directory });
 		await activatePrWorkflow(directory, 'limited-host-session', 'PR_REVIEW');
 		const output = { text: 'ordinary response' };
@@ -115,7 +204,9 @@ describe('PR workflow response-level gate', () => {
 				properties: { sessionID: 'limited-host-session' },
 			},
 		});
-		expect(output.text).toContain('FINAL RESPONSE BLOCKED');
+		expect(output.text).toContain('WORKFLOW ACTIVE');
+		// Original text preserved below banner.
+		expect(output.text).toContain('ordinary response');
 	});
 });
 
@@ -159,12 +250,14 @@ describe('PR workflow response-gate wake budget', () => {
 		await gate.event(idleEvent);
 		expect(promptAsync).toHaveBeenCalledTimes(3);
 
-		// textComplete still rewrites text so the user-visible surface is
-		// preserved and now carries the suspend notice.
+		// textComplete still prepends the banner so the user-visible surface
+		// is preserved and now carries the suspend notice.
 		const output = { text: 'x' };
 		await gate.textComplete({ sessionID: 'stuck-session' }, output);
 		expect(output.text).toContain('Auto-resume is suspended');
 		expect(output.text).toContain('/swarm abort-pr-workflow');
+		// The model's text is preserved below the banner even when suspended.
+		expect(output.text).toContain('x');
 	});
 
 	test('resets the consecutive counter when state.revision advances (progress)', async () => {
@@ -236,7 +329,7 @@ describe('PR workflow response-gate wake budget', () => {
 		// starts fresh, not stuck in the old suspended state.
 		expect(gate._inspectWakeBudget('cleared-session')).toBeUndefined();
 
-		// And textComplete stops rewriting once the gate is gone.
+		// And textComplete stops prepending the banner once the gate is gone.
 		const output = { text: 'final real text' };
 		await gate.textComplete({ sessionID: 'cleared-session' }, output);
 		expect(output.text).toBe('final real text');

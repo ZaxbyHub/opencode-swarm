@@ -1631,8 +1631,9 @@ before emitting the user-facing final report, call `complete_pr_workflow` with
 mode `PR_REVIEW` and the same exact
 `pr_head_sha`. The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
-While the gate remains active, the runtime replaces architect final-response
-text with a mechanical blocked notice and re-wakes an idle parent session. A
+While the gate remains active, the runtime prepends a workflow-active banner
+to architect text parts (the model's text is preserved below the banner) and
+re-wakes an idle parent session. A
 user interruption pauses every automatic wake path until a later explicit user
 turn settles; the durable gate remains available to continue or abort. Only
 emit the final report after the completion tool confirms that the gate cleared.
