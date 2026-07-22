@@ -824,6 +824,21 @@ specialist review outside this canonical ledger, but supplementary work never
 replaces these portable rows. The `unclassified-risk` lane always runs to cover
 novel failure modes and classification gaps.
 
+> **Trigger-ID namespace — do not mix (issue #1931).** The `trigger_id` field
+> passed to `write_pr_review_trigger_eval` accepts **only** the 11 micro-lane
+> IDs in the table below. Three different namespaces appear in this skill and
+> they are NOT interchangeable:
+>
+> | Namespace | Example values | Used where? | Valid as `trigger_id`? |
+> | --- | --- | --- | --- |
+> | Micro-lane IDs (this table) | `auth-identity-secrets`, `untrusted-input-boundaries`, ... | `workflow_lane` of `swarm-pr-review:micro` dispatch; `trigger_id` of trigger-eval rows | **YES — only these** |
+> | Base-lane IDs | `intent-architecture`, `correctness-state`, `tests-falsifiability`, `security-trust`, `reliability-performance`, `compatibility-delivery` | `workflow_lane` of `swarm-pr-review:base` dispatch; validated by `enforcePrReviewBaseDimensions` | NO |
+> | Dispatch modes | `swarm-pr-review:base`, `swarm-pr-review:micro`, `swarm-pr-review:reviewer`, `swarm-pr-review:critic` | `mode` field of `dispatch_lanes_async` | NO |
+>
+> The writer rejects unknown trigger IDs with the list of valid IDs. Short
+> informal names (`correctness`, `security`, `deps`, `docs`, `tests`, `perf`)
+> sometimes appear in prose summaries; they are shorthand, not literal IDs.
+
 | Trigger ID | Scope | Trigger in diff or context pack | Launch micro-lane | Invariants to check |
 |---|---|---|---|---|
 | `auth-identity-secrets` | universal | authentication, authorization, identity, sessions, permissions, secrets, cryptography | Identity and secret boundaries | least privilege, confused-deputy paths, credential lifecycle, cryptographic misuse, safe defaults |

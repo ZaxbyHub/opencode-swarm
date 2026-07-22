@@ -44,12 +44,48 @@ describe('PR workflow exact checkout head', () => {
 		_test_exports.resolveCurrentGitHead = () => null;
 		await expect(
 			bindPrWorkflowHead(directory, 'review-head', HEAD_SHA),
-		).rejects.toThrow('cannot verify the current Git HEAD');
+		).rejects.toThrow('cannot resolve the current Git HEAD');
 
 		_test_exports.resolveCurrentGitHead = () => 'different-head';
 		await expect(
 			bindPrWorkflowHead(directory, 'review-head', HEAD_SHA),
 		).rejects.toThrow('does not match PR head');
+	});
+
+	test('diagnostic-rich error when HEAD cannot be resolved (issue #1931)', async () => {
+		// The null-HEAD branch must name the directory and the exact
+		// remediation command so callers can self-diagnose instead of
+		// cascading into fictional root causes (missing gate file, etc).
+		await activatePrWorkflow(directory, 'review-diagnostic', 'PR_REVIEW');
+		_test_exports.resolveCurrentGitHead = () => null;
+		const promise = bindPrWorkflowHead(
+			directory,
+			'review-diagnostic',
+			HEAD_SHA,
+		);
+		await expect(promise).rejects.toThrow(
+			`cannot resolve the current Git HEAD in "${directory}"`,
+		);
+		await expect(promise).rejects.toThrow('git -C');
+		await expect(promise).rejects.toThrow('rev-parse --verify HEAD^{commit}');
+		// Must enumerate at least one real cause so the caller knows where
+		// to look (unborn HEAD, shallow clone, missing binary, timeout, non-repo).
+		await expect(promise).rejects.toThrow(
+			/unborn|shallow|PATH|timed out|repository/i,
+		);
+	});
+
+	test('diagnostic-rich error when HEAD does not match (issue #1931)', async () => {
+		// The mismatch branch must name the directory and the exact
+		// remediation command (switch --detach) so the caller can recover.
+		await activatePrWorkflow(directory, 'review-mismatch', 'PR_REVIEW');
+		_test_exports.resolveCurrentGitHead = () => 'different-head';
+		const promise = bindPrWorkflowHead(directory, 'review-mismatch', HEAD_SHA);
+		await expect(promise).rejects.toThrow(
+			`does not match PR head "${HEAD_SHA}"`,
+		);
+		await expect(promise).rejects.toThrow(`working directory: "${directory}"`);
+		await expect(promise).rejects.toThrow(/switch --detach/);
 	});
 
 	test('revalidates live HEAD throughout PR review after binding', async () => {
