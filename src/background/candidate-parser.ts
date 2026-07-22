@@ -34,6 +34,14 @@ const ParseFlagsSchema = z
 		producer: z.string().optional(),
 		expected_family: z.enum(['base_explorer', 'micro_lane']).optional(),
 		expected_micro_lane: z.string().trim().min(1).optional(),
+		/**
+		 * Full owned family set of a consolidated (depth-tiered) lane artifact.
+		 * Rows and CLEAN attestations for owned-but-not-expected families are
+		 * skipped as out-of-scope for this per-family call instead of counting
+		 * as mismatches; families outside this set still fail. Defaults to
+		 * [expected_micro_lane].
+		 */
+		expected_micro_lanes: z.array(z.string().trim().min(1)).min(1).optional(),
 	})
 	.strict();
 
@@ -680,6 +688,19 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		if (fields[0]?.trim() === '[CLEAN]') {
 			const cleanFamily = flags.expected_family ?? headerFamily;
 			const cleanFields = fields.map((field) => field.trim());
+			// Out-of-scope family from a consolidated lane artifact: another
+			// per-family call extracts it; this call skips it silently.
+			if (
+				cleanFamily === 'micro_lane' &&
+				cleanFields.length === 4 &&
+				flags.expected_micro_lane !== undefined &&
+				cleanFields[1] !== flags.expected_micro_lane &&
+				(flags.expected_micro_lanes ?? [flags.expected_micro_lane]).includes(
+					cleanFields[1],
+				)
+			) {
+				continue;
+			}
 			if (cleanFamily !== 'micro_lane') {
 				cleanErrorCode = 'invalid-clean-attestation';
 				cleanErrorMessage =
@@ -784,6 +805,16 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			flags.expected_micro_lane !== undefined &&
 			mapped.micro_lane !== flags.expected_micro_lane
 		) {
+			// Owned-but-not-expected families in a consolidated lane artifact are
+			// out of scope for this per-family call, not mismatches.
+			if (
+				mapped.micro_lane !== null &&
+				(flags.expected_micro_lanes ?? [flags.expected_micro_lane]).includes(
+					mapped.micro_lane,
+				)
+			) {
+				continue;
+			}
 			parseErrorDetails.push({
 				row_index: i,
 				field: 'micro_lane',

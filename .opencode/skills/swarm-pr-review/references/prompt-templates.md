@@ -94,10 +94,10 @@ For a clean micro-lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
 For a clean base lane, emit `[CLEAN] | workflow_lane | coverage_scope | evidence`.
 ```
 
-The orchestrator extracts candidates from the full lane artifact via
-`parse_lane_candidates` as the primary mechanism. The `[CANDIDATE]` row
-format above is a fallback convention for environments where the parser is
-unavailable. Explorers should still emit structured records regardless of
-whether the parser is present.
+Under Profile A the orchestrator extracts candidates from the full lane
+artifact via `parse_lane_candidates` as the primary mechanism. On Profiles
+B/C — and as a Profile A fallback when the parser is unavailable — the
+`[CANDIDATE]` row format above IS the extraction contract. Explorers emit
+structured records regardless of which harness runs them.
 
 Do not let speed degrade validation quality.

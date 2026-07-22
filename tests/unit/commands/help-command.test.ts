@@ -279,10 +279,11 @@ describe('buildDetailedHelp() — via handleHelpCommand for single-token command
 		const result = await handleHelpCommand(ctx);
 		expect(result).toContain('**Args:**');
 		expect(result).toContain('<pr-url|owner/repo#N|N>');
-		expect(result).toContain('launches all 6 fixed base explorer lanes');
+		expect(result).toContain('computes a depth tier (S/M/L)');
+		expect(result).toContain('all 6 review dimensions covered on every PR');
 		expect(result).toContain('architect keeps doing non-dependent work');
 		expect(result).toContain(
-			'runs all 11 mandatory repository-agnostic micro-lanes',
+			'evaluates all 11 mandatory repository-agnostic risk families',
 		);
 		expect(result).toContain(
 			'blocking or direct-Task dispatch is not provenance-equivalent',

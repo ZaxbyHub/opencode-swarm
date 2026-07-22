@@ -133,7 +133,7 @@ Review the actual `git diff` (open the changed files; do not trust your own summ
 - **Contract & regression risk:** any regressed public API, backward-compat, persistence, concurrency, or security behavior?
 - **Evidence integrity:** is every "passed"/"validated" claim backed by a captured command + output?
 
-If you find a refuting case, return to localization or resolution and fix it, then re-review. Only proceed to publication when the self-review finds no unresolved refutation. If a separate reviewer agent is available and the fix is high-risk (security, isolation, IPC, auth, payments, migrations, data integrity), delegate this review to it instead of self-reviewing.
+If you find a refuting case, return to localization or resolution and fix it, then re-review. Only proceed to publication when the review finds no unresolved refutation. GitHub coding agent sessions can spawn fresh-context subagents: when a reviewer agent is available, delegate this adversarial review to it by default — the doer is not the grader — and always for high-risk fixes (security, isolation, IPC, auth, payments, migrations, data integrity). Same-session self-review is the disclosed fallback for sessions that genuinely lack a delegation mechanism; it still stops for no human approval and costs no extra request.
 
 ## Mandatory Publication Gate
 

@@ -67,6 +67,13 @@ const ParseLaneCandidatesArgsSchema = z
 			.describe(
 				'Assert the micro-lane label linked to this dispatch provenance. Mismatched candidates and CLEAN attestations are refused.',
 			),
+		expected_micro_lanes: z
+			.array(z.string().trim().min(1))
+			.min(1)
+			.optional()
+			.describe(
+				'Full owned family set of a consolidated depth-tier lane. Rows for owned-but-not-expected families are skipped as out-of-scope for this per-family call instead of refused; families outside the set are still refused.',
+			),
 		use_lockfile: z
 			.boolean()
 			.default(false)
@@ -119,6 +126,8 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 			expected_family: ParseLaneCandidatesArgsSchema.shape.expected_family,
 			expected_micro_lane:
 				ParseLaneCandidatesArgsSchema.shape.expected_micro_lane,
+			expected_micro_lanes:
+				ParseLaneCandidatesArgsSchema.shape.expected_micro_lanes,
 			use_lockfile: ParseLaneCandidatesArgsSchema.shape.use_lockfile,
 			project_root: ParseLaneCandidatesArgsSchema.shape.project_root,
 		},
@@ -148,6 +157,7 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				producer,
 				expected_family,
 				expected_micro_lane,
+				expected_micro_lanes,
 				use_lockfile,
 				project_root,
 			} = parsed.data;
@@ -280,6 +290,7 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				...(producer ? { producer } : {}),
 				...(expected_family ? { expected_family } : {}),
 				...(expected_micro_lane ? { expected_micro_lane } : {}),
+				...(expected_micro_lanes ? { expected_micro_lanes } : {}),
 			};
 
 			// -------------------------------------------------------------------

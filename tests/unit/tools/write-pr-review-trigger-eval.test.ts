@@ -70,10 +70,16 @@ async function recordCompletedLane(
 		laneId: string;
 		workflowLane: string;
 		mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro';
+		ownedWorkflowLanes?: string[];
 	},
 ): Promise<void> {
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
-	const text = `[CLEAN] | ${input.workflowLane} | exact reviewed diff | no candidate survived the focused review`;
+	const text = (input.ownedWorkflowLanes ?? [input.workflowLane])
+		.map(
+			(family) =>
+				`[CLEAN] | ${family} | exact reviewed diff | no candidate survived the focused review`,
+		)
+		.join('\n');
 	await recordPendingDelegation(root, {
 		correlationId,
 		jobId: null,
@@ -88,6 +94,7 @@ async function recordCompletedLane(
 		laneId: input.laneId,
 		mode: input.mode,
 		workflowLane: input.workflowLane,
+		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {
 			directory: root,
 			gitHead: HEAD_SHA,
@@ -124,7 +131,10 @@ async function recordCompletedLane(
 	});
 }
 
-async function establishBoundReviewGate(root: string): Promise<void> {
+async function establishBoundReviewGate(
+	root: string,
+	options: { consolidatedMicro?: boolean } = {},
+): Promise<void> {
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
@@ -151,6 +161,25 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 			workflowLane: lane.workflowLane,
 			mode: 'swarm-pr-review:base',
 		});
+	}
+	if (options.consolidatedMicro) {
+		const sweepA = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6)];
+		const sweepB = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(6)];
+		await recordCompletedLane(root, {
+			batchId: 'micro-consolidated',
+			laneId: 'sweep-a',
+			workflowLane: sweepA[0],
+			ownedWorkflowLanes: sweepA,
+			mode: 'swarm-pr-review:micro',
+		});
+		await recordCompletedLane(root, {
+			batchId: 'micro-consolidated',
+			laneId: 'sweep-b',
+			workflowLane: sweepB[0],
+			ownedWorkflowLanes: sweepB,
+			mode: 'swarm-pr-review:micro',
+		});
+		return;
 	}
 	for (const [
 		index,
@@ -441,7 +470,7 @@ describe('write_pr_review_trigger_eval', () => {
 		expect(result.message).toMatch(/swarm-pr-review:base/);
 	});
 
-	test('rejects MATCHED without unique dispatch provenance', async () => {
+	test('rejects MATCHED rows missing dispatch provenance fields', async () => {
 		const missing = rows();
 		delete (missing[0] as { source_batch_id?: string }).source_batch_id;
 		const missingResult = JSON.parse(
@@ -451,7 +480,11 @@ describe('write_pr_review_trigger_eval', () => {
 			),
 		);
 		expect(missingResult.message).toContain('MATCHED rows require');
+	});
 
+	test('rejects a shared dispatch tuple whose lane never declared consolidated ownership', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root);
 		const duplicate = rows();
 		duplicate[1] = {
 			...duplicate[0],
@@ -459,11 +492,82 @@ describe('write_pr_review_trigger_eval', () => {
 		};
 		const duplicateResult = JSON.parse(
 			await executeWritePrReviewTriggerEval(
-				{ run_id: 'review-1805', pr_head_sha: 'abc123', rows: duplicate },
-				tempRoot(),
+				{
+					run_id: 'review-1805',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: duplicate,
+				},
+				root,
+				{ sessionID: SESSION_ID },
 			),
 		);
-		expect(duplicateResult.message).toContain('unique dispatch provenance');
+		expect(duplicateResult.success).toBe(false);
+		expect(duplicateResult.message).toContain(
+			'does not reference a completed non-degraded micro-lane artifact',
+		);
+	});
+
+	test('accepts consolidated micro lanes that declared and attested every owned family', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root, { consolidatedMicro: true });
+		const sweepAFamilies = PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6);
+		const consolidated = rows().map((row) => ({
+			...row,
+			source_batch_id: 'micro-consolidated',
+			source_lane_id: (sweepAFamilies as readonly string[]).includes(
+				row.trigger_id,
+			)
+				? 'sweep-a'
+				: 'sweep-b',
+		}));
+		const response = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-consolidated',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: consolidated,
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(response).toMatchObject({
+			success: true,
+			matched_count: PR_REVIEW_TRIGGER_DEFINITIONS.length,
+			no_match_count: 0,
+			dispatched_micro_lane_count: 2,
+		});
+	});
+
+	test('rejects a consolidated tuple citing a family outside its declared ownership', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root, { consolidatedMicro: true });
+		const consolidated = rows().map((row) => ({
+			...row,
+			source_batch_id: 'micro-consolidated',
+			source_lane_id: 'sweep-a',
+		}));
+		const result = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-overreach',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: consolidated,
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain(
+			'does not reference a completed non-degraded micro-lane artifact',
+		);
 	});
 
 	test('rejects any NO-MATCH waiver instead of guessing semantic applicability', async () => {

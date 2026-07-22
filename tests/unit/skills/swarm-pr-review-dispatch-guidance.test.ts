@@ -85,6 +85,15 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'single message with multiple Agent tool calls',
 		);
 		expect(phase3Section).toContain('do not dispatch reviewers yet');
+		// Depth tiers scale dispatch shape (never dimension coverage) on
+		// profiles without the controller.
+		expect(phase3Section).toContain('### Review depth tiers');
+		expect(phase3Section).toContain(
+			'no tier permits skipping a dimension or family',
+		);
+		expect(phase3Section).toContain(
+			'Under Profile B, dispatch the same wave as parallel subagents',
+		);
 		expect(phase4Section).toContain('[TRIGGER-EVAL]');
 		expect(phase4Section).toContain('one row per map row');
 		expect(phase4Section).toContain('write_pr_review_trigger_eval');
@@ -109,6 +118,13 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase4Section).toContain('Task-derived');
 		expect(phase4Section).toContain('Repository identity');
 		expect(phase4Section).toContain('never justifies skipping a row');
+		// Family evaluation is universal; dispatch shape scales by depth tier
+		// on profiles without the controller.
+		expect(phase4Section).toContain('**Profiles B/C dispatch.**');
+		expect(phase4Section).toContain(
+			'Scale the lane shape to the depth tier while',
+		);
+		expect(phase4Section).toContain('all eleven family evaluations');
 		expect(phase6Section).toContain('join barrier');
 		expect(phase6Section).toContain('malformed `[REVIEWED]`');
 		expect(phase0aSection).toContain(
@@ -122,8 +138,18 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			"commit-pr skill's publication contract",
 		);
 		expect(source).toContain(
-			'[VALIDATION] mandatory micro-lanes dispatched and settled: ___ / 11 OR BLOCKED — <missing rows>',
+			'[VALIDATION] micro risk families evaluated and attested: ___ / 11 OR BLOCKED — <missing rows> (micro lanes dispatched: ___)',
 		);
+		expect(source).toContain(
+			'[VALIDATION] capability profile (A/B/C) and depth tier (S/M/L): ___ / ___',
+		);
+		// Capability-profile model: the canonical skill must define all three
+		// profiles and must not treat controller absence as a BLOCKED condition.
+		expect(source).toContain('## Runtime Capability Profiles');
+		expect(source).toContain(
+			'first-class execution paths, not degraded fallbacks',
+		);
+		expect(source).toContain('Profile C — single context, no subagents');
 		expect(source).toContain(
 			'review comments, review summaries, requested changes',
 		);
@@ -192,7 +218,7 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 	}
 
 	// The Codex adapter uses runtime-agnostic capability phrasing while preserving
-	// the canonical no-fallback provenance contract.
+	// the controller-bypass prohibition for hosts where the controller is active.
 	test('.agents/skills/swarm-pr-review/SKILL.md uses capability phrasing, not runtime-specific tool names', () => {
 		const source = readSkill('.agents/skills/swarm-pr-review/SKILL.md');
 		expect(source).toContain("runtime's parallel-execution capability");
@@ -200,6 +226,11 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).toContain('one structured exact-six batch');
 		expect(source).toContain('PR publication contract');
 		expect(source).not.toContain('run the lanes sequentially');
+		// Controller absence is the normal Codex/ZCode state, never a dead end —
+		// and both runtimes dispatch fresh-context subagents (Profile B).
+		expect(source).toContain('Profile B, not an error');
+		expect(source).toContain('fresh-context');
+		expect(source).toContain('report BLOCKED merely because');
 		// Adapter must not leak runtime-specific tool names.
 		expect(source).not.toContain('dispatch_lanes_async');
 		expect(source).not.toContain('collect_lane_results');
@@ -209,13 +240,21 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).not.toContain('Task-tool dispatch');
 	});
 
-	test('.claude/skills/swarm-pr-review/SKILL.md preserves structured async wording without a Task fallback', () => {
+	test('.claude/skills/swarm-pr-review/SKILL.md gives Claude Code a native Profile B path and keeps controller tools conditional', () => {
 		const source = readSkill('.claude/skills/swarm-pr-review/SKILL.md');
+		// Controller tool names may appear only inside the conditional Profile A
+		// path; the default Claude Code path is native Agent/Task dispatch.
 		expect(source).toContain('dispatch_lanes_async');
 		expect(source).toContain('collect_lane_results');
 		expect(source).toContain('direct-Task dispatch are not');
 		expect(source).toContain('PR publication contract');
 		expect(source).not.toContain('Task-tool dispatch is the final fallback');
 		expect(source).toContain('retrieve_lane_output');
+		expect(source).toContain('Profile B, not an error');
+		expect(source).toContain('report BLOCKED merely');
+		expect(source).toContain('`Agent`/`Task` subagent tool');
+		expect(source).toContain(
+			'Only if this session actually exposes the swarm controller tools',
+		);
 	});
 });

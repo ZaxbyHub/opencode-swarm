@@ -25,9 +25,9 @@ Use the project skill at `.claude/skills/issue-tracer/SKILL.md` as your operatin
 7. Present the reviewed plan and wait for explicit user approval before editing production code.
 8. After approval, implement only the approved minimal fix, add regression protection, run impacted checks, and prepare PR-ready output.
 
-## Important Limitation
+## Delegation Availability
 
-Claude Code subagents cannot spawn nested subagents. This is a hard platform restriction. When running as this subagent, always use the fallback adversarial critic pass from `.opencode/skills/issue-tracer/references/critic-gate.md`. Label the review "Fallback self-critic: independent critic unavailable." Do not attempt to invoke Agent or Task.
+Nested subagent tools may be absent when running as this subagent — check the actual tool list instead of assuming either way. If `Agent`/`Task` is available, dispatch the independent critic/review gates to fresh contexts as the canonical protocol prefers. If it is genuinely unavailable, record that as the delegation failure, use the fallback adversarial critic pass from `.opencode/skills/issue-tracer/references/critic-gate.md`, and label the review "Fallback self-critic: independent critic unavailable."
 
 ## Final Output Before Approval
 

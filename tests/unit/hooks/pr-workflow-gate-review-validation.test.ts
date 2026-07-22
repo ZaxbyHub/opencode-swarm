@@ -11,6 +11,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	establishReviewPrerequisites,
+	establishReviewPrerequisitesWithConsolidatedMicroLane,
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
@@ -86,7 +87,7 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'missing-provenance-review', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('unique source provenance');
+		).rejects.toThrow('complete source provenance');
 	});
 
 	test('reviewer ownership is derived from discovery artifacts and critic routing is mandatory', async () => {
@@ -486,5 +487,43 @@ describe('pr-workflow-gate review validation', () => {
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).rejects.toThrow('one fully successful exact batch');
+	});
+
+	test('a consolidated micro lane cited by two trigger rows contributes its candidates exactly once', async () => {
+		const { consolidatedCandidateId, baseCandidateIds } =
+			await establishReviewPrerequisitesWithConsolidatedMicroLane();
+		const allCandidateIds = [...baseCandidateIds, consolidatedCandidateId];
+
+		// Before the fix, deriving the inventory extracted the consolidated
+		// lane's artifact once per citing trigger row, duplicating
+		// consolidatedCandidateId and permanently BLOCKing reviewer dispatch.
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'reviewer',
+			[
+				{
+					laneId: 'review-consolidated',
+					workflowLane: 'review-consolidated',
+					reviewItemIds: allCandidateIds,
+				},
+			],
+			{ batchId: 'review-consolidated', prHeadSha: HEAD_SHA },
+		);
+		const reviewerRows = allCandidateIds
+			.map(
+				(id) =>
+					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+			)
+			.join('\n');
+		await persistBatch(
+			'review-consolidated',
+			'swarm-pr-review:reviewer',
+			[{ laneId: 'review-consolidated', workflowLane: 'review-consolidated' }],
+			{ textOverride: reviewerRows },
+		);
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 });

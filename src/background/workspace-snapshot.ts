@@ -150,6 +150,45 @@ export function resolveExactMergeBase(
 	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
 }
 
+export interface PrReviewDiffStats {
+	changedLines: number;
+	changedFiles: number;
+}
+
+/**
+ * Compute bounded changed-line/file totals for the exact reviewed PR range.
+ * Returns null on any Git failure, malformed numstat row, or buffer overflow
+ * so callers can fail strict (treat unknown size as the largest tier).
+ */
+export function resolvePrReviewDiffStats(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): PrReviewDiffStats | null {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const output = runGit(directory, [
+		'diff',
+		'--numstat',
+		`${baseSha}...${prHeadSha}`,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	return { changedLines, changedFiles };
+}
+
 function isSafeGitRevisionToken(value: string): boolean {
 	return (
 		/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/.test(value) &&

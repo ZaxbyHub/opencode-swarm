@@ -9,6 +9,7 @@ import {
 	resolveGitControlStateDigest,
 	resolveIsExactSingleChildCommit,
 	resolveIsWorkingTreeClean,
+	resolvePrReviewDiffStats,
 	resolveRemoteRefsContainingHead,
 } from '../../../src/background/workspace-snapshot.js';
 
@@ -33,6 +34,65 @@ describe('PR workflow Git publication observations', () => {
 		expect(resolveExactMergeBase('.', 'origin/main', 'abc123')).toBe('def456');
 		expect(resolveExactMergeBase('.', '--all', 'abc123')).toBeNull();
 		expect(spawn).toHaveBeenCalledTimes(1);
+	});
+
+	test('diff stats sum numstat lines and files for the exact bound range', () => {
+		const spawn = mock((_command, args) => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: args.includes('--numstat')
+				? '10\t2\tsrc/a.ts\n3\t0\tsrc/b.ts\n-\t-\tassets/logo.png\n'
+				: '',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toEqual({
+			changedLines: 15,
+			changedFiles: 3,
+		});
+		// Unsafe revision tokens never reach Git.
+		expect(resolvePrReviewDiffStats('.', '--all', 'abc123')).toBeNull();
+		expect(spawn).toHaveBeenCalledTimes(1);
+	});
+
+	test('diff stats fail strict to null on git failure or malformed numstat', () => {
+		_internals.spawnSync = mock(() => ({
+			status: 1,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '',
+			stderr: 'fatal: bad revision',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+
+		_internals.spawnSync = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: 'not-a-numstat-row\n',
+			stderr: '',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+	});
+
+	test('diff stats return zero totals for an empty diff', () => {
+		_internals.spawnSync = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '',
+			stderr: '',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toEqual({
+			changedLines: 0,
+			changedFiles: 0,
+		});
 	});
 
 	test('publication proof accepts only a remote ref whose tip exactly equals HEAD', () => {

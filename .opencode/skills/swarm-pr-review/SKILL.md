@@ -1,7 +1,7 @@
 ---
 name: swarm-pr-review
 audience: swarm-plugin
-description: Run a graph-guided, tool-augmented PR review using context packing, parallel exploration, mandatory repository-agnostic micro-lanes, independent reviewer validation, critic challenge, and metrics writeback. Use for deep pull request review with low false-positive tolerance and high recall in any repository.
+description: Run a graph-guided, tool-augmented PR review using context packing, parallel exploration, mandatory repository-agnostic risk-family coverage with dispatch scaled to diff size and risk, independent reviewer validation, critic challenge, and metrics writeback. Use for deep pull request review with low false-positive tolerance and high recall in any repository, on any agent harness (structured lane controller, native parallel subagents, or single-context sequential passes).
 disable-model-invocation: true
 ---
 
@@ -11,7 +11,7 @@ Run a structured, high-confidence PR review that maximizes valid findings withou
 
 The review ladder is:
 
-**Scope → obligations → context pack → deterministic signals → parallel explorers → all repository-agnostic review micro-lanes → independent reviewer validation → critic challenge → grouped synthesis → metrics / knowledge writeback.**
+**Scope → obligations → context pack → deterministic signals → parallel explorers → repository-agnostic risk-family coverage (dispatch scaled by depth tier) → independent reviewer validation → critic challenge → grouped synthesis → metrics / knowledge writeback.**
 
 ## Handoff To PR Feedback
 
@@ -37,6 +37,12 @@ was already created. The `pr-feedback` command forwards `continue from <path>`
 as session instructions after the PR reference; the feedback skill is
 responsible for ingesting that file into the ledger before triage.
 
+On Profiles B/C (no controller — see Runtime Capability Profiles),
+`write_pr_review_artifact` is unavailable: write the same handoff JSON to
+`pr-review/<run_id>/feedback-handoff.json` inside your session/task workspace
+(never under `.swarm/`) and reference that exact path in the continuation
+prompt instead.
+
 Review closure is not the end of the PR lifecycle: when PR monitoring is
 enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
 `../swarm-pr-subscribe/SKILL.md` until it is merged or closed, so post-review
@@ -55,11 +61,69 @@ Never APPROVE a PR with unresolved CRITICAL findings. Do not silently drop overc
 
 ---
 
+## Runtime Capability Profiles
+
+This protocol runs on any agent harness. Before Phase 0, detect which profile
+this session is in by checking the actual tool list — never assume from the
+harness name, and never guess:
+
+- **Profile A — structured PR-workflow controller.** The swarm plugin's
+  controller tools are available in this session: `dispatch_lanes_async`,
+  `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`,
+  `write_pr_review_artifact`, `write_pr_review_trigger_eval`,
+  `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The
+  controller mechanically enforces this skill's accounting: it computes the
+  depth tier itself from the bound merge-base diff (never from caller
+  claims), enforces the tier's lane floors and full dimension/family
+  partitions for consolidated dispatch, and gates structured reviewer/critic
+  batches and the response gate. Its acceptance rules are authoritative, and
+  where the scaled-dispatch guidance below is more permissive than the
+  active controller, the controller wins. Bypassing an active controller —
+  blocking `dispatch_lanes`, direct Task/agent dispatch, prose verdicts — is
+  BLOCKED.
+- **Profile B — native parallel subagents, no controller.** The controller
+  tools are absent, but the harness can spawn independent fresh-context
+  subagents (for example Claude Code's `Agent`/`Task` tool, or the native
+  subagent mechanisms in Codex and ZCode). Run the same phases, role
+  boundaries, row contracts, and join barriers; you are the accounting layer
+  the controller would otherwise be: bind the exact `pr_head_sha` in every
+  lane prompt, record per-lane provenance (lane id, head SHA) on every ledger
+  row, settle every lane before the next phase begins, and persist ledgers to
+  files in your harness's session/task workspace. Never write runtime
+  artifacts under `.swarm/` — that directory belongs to the plugin controller.
+- **Profile C — single context, no subagents.** The harness cannot spawn
+  independent subagents in-session. Execute the same phases as strictly
+  separated sequential passes — candidate generation, then reviewer
+  validation, then critic challenge — re-deriving rather than restating
+  earlier reasoning in each pass, with the same ledger rows and per-family
+  attestations. Disclose in the validation provenance that reviewer/critic
+  independence was procedural (separate passes in one context), not
+  contextual.
+
+| Harness (typical) | Profile | Lane dispatch | Ledger persistence | Completion gate |
+|---|---|---|---|---|
+| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
+| Claude Code | B | parallel `Agent`/`Task` subagents | ledger files in the session task workspace | Pre-Synthesis Gate checklist |
+| OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
+| ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
+
+Verify each row against your own current tool list before relying on it; a
+harness may gain or lose capabilities between versions. OpenCode, Claude Code,
+Codex, and ZCode can all spawn fresh-context subagents in current versions —
+run Profile B wherever the session actually exposes that capability, and
+reserve Profile C for sessions that genuinely lack a subagent mechanism; never
+assign a harness to Profile C by name alone. The absence of the controller is
+NOT a BLOCKED condition — Profiles B and C are first-class execution paths, not degraded fallbacks.
+BLOCKED is reserved for bypassing an active controller and for coverage gaps
+that remain unclosable after bounded retries on any profile.
+
+---
+
 ## Review Modes
 
 ### Default layered workflow
 
-Always run the default mechanical workflow. Explorers produce only candidates. The orchestrator does not confirm or disprove candidates.
+Always run the default layered workflow (mechanically enforced under Profile A). Explorers produce only candidates. The orchestrator does not confirm or disprove candidates.
 
 ### Council mode — opt in only
 
@@ -73,7 +137,7 @@ Council mode applies only when the user explicitly says one of:
 - `[MODE: PR_REVIEW … council=true]`
 - `assume all work is wrong`
 
-Council mode supplements the default mechanical workflow; it never replaces or weakens it. Even when council mode is triggered, first complete the exact-six base dispatch, micro-lane ledger persistence, and every repository-agnostic micro-lane at the same exact `pr_head_sha`. Route supplementary council output into the candidate ledger before independent reviewer classification. If the council request arrives after classification has begun, run the council as an additional candidate pass and dispatch a new structured reviewer batch for those candidates before synthesis.
+Council mode supplements the default mechanical workflow; it never replaces or weakens it. Even when council mode is triggered, first complete the base-dimension coverage (the tier-floored base dispatch under Profile A — the exact-six wave at depth tier L), micro-lane ledger persistence, and every repository-agnostic risk-family evaluation at the same exact `pr_head_sha`. Route supplementary council output into the candidate ledger before independent reviewer classification. If the council request arrives after classification has begun, run the council as an additional candidate pass and dispatch a new structured reviewer batch for those candidates before synthesis.
 
 ---
 
@@ -85,8 +149,8 @@ The orchestrator may:
 
 - determine scope,
 - build or request the context pack,
-- launch explorers and every mandatory repository-agnostic micro-lane,
-- extract candidates from lane artifacts via `parse_lane_candidates` or equivalent parser,
+- launch explorers and the full risk-family micro coverage (every family evaluated; lane count per depth tier and profile),
+- extract candidates from lane artifacts via `parse_lane_candidates` (Profile A) or by collecting the structured `[CANDIDATE]` rows from lane reports (Profiles B/C),
 - filter, group, and chunk candidates for reviewer dispatch,
 - route candidates to reviewers,
 - route reviewer-confirmed findings to critics,
@@ -99,7 +163,7 @@ The orchestrator MUST NOT:
 - silently downgrade or discard an explorer candidate,
 - treat tool output as a confirmed finding,
 - report a finding that no reviewer validated,
-- classify or judge candidates based on preview text alone — always use the structured parser output.
+- classify or judge candidates based on preview text alone — always use the structured parser output (Profile A) or the verbatim-collected `[CANDIDATE]` rows (Profiles B/C).
 
 If the orchestrator catches itself validating code, it must stop and delegate validation to a reviewer subagent.
 
@@ -139,8 +203,10 @@ Before launching explorers (Phase 3), perform this exact standalone sequence:
 1. Resolve and retain the authoritative full `pr_head_sha` from PR metadata.
 2. Verify the working tree is clean with `git status --porcelain`. If tracked
    changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
-   tracked path. Do not issue `git stash` through shell. The controller never
-   stashes untracked files; move or remove those manually, or abort.
+   tracked path (Profile A). Without the controller, do not blind-stash over
+   dirty state: surface tracked changes to the user, or abort. Do not issue
+   `git stash` through shell. The controller never stashes untracked files;
+   move or remove those manually, or abort.
 3. Fetch the PR head as one standalone command, for example
    `git fetch origin refs/pull/<N>/head`. Do not compose fetch and checkout.
 4. Prove the full commit exists locally with
@@ -149,12 +215,14 @@ Before launching explorers (Phase 3), perform this exact standalone sequence:
    `git switch --detach <full_pr_head_sha>`. Do not use `--track FETCH_HEAD`:
    `FETCH_HEAD` is not a remote-tracking branch.
 6. Confirm `git rev-parse HEAD` equals the full `pr_head_sha`, bind that exact
-   head through the first PR-review controller call, and finish this before dispatching explorer lanes.
+   head (Profile A: through the first PR-review controller call; Profiles B/C:
+   record it at the top of the findings ledger and repeat it in every lane
+   prompt), and finish this before dispatching explorer lanes.
 
 Explorer agents read files from the working tree, not from git history. Passing
 the commit range in a prompt cannot substitute for this checkout because
 `Read` / `Glob` / `Grep` operate on the filesystem.
-- Explicitly pass the verified merge-base range (`base_sha...pr_head_sha`) in every explorer delegation so explorers inspect exactly the controller-bound PR diff. Include `base_ref` only as the live ref used to recompute `base_sha`; do not substitute a two-dot branch-tip range.
+- Explicitly pass the verified merge-base range (`base_sha...pr_head_sha`) in every explorer delegation so explorers inspect exactly the bound PR diff. Include `base_ref` only as the live ref used to recompute `base_sha`; do not substitute a two-dot branch-tip range.
 
 If refs cannot be fetched or checked out, state the limitation in the context pack.
 
@@ -359,10 +427,11 @@ For each new commit on the remote:
      hand off?
    - Does the remote commit introduce a new branch-state fact the handoff should
      mention?
-3. **Default stance: prefer the remote state as the next baseline.** Run
+3. **Default stance: prefer the remote state as the next baseline.** When the
+   bundled copy is available (plugin runtimes), run the
    `file:.swarm/bundled-skills/parallel-work-check/SKILL.md`
-   protocol for the formal decision template and record the outcome in the
-   handoff artifact.
+   protocol for the formal decision template; otherwise apply the three
+   outcomes below directly. Record the outcome in the handoff artifact.
 
 ### Step 3 — Three outcomes
 
@@ -476,10 +545,12 @@ The context pack must include, when available:
 
 ## Review Finding Persistence
 
-Do not rely on conversation context to preserve review findings. Use
-`write_pr_review_artifact` with `kind: "findings"`; the controller creates and
-appends `.swarm/pr-review/<run_id>/findings.jsonl` without granting generic
-write authority over `.swarm/`.
+Do not rely on conversation context to preserve review findings. On Profile A,
+use `write_pr_review_artifact` with `kind: "findings"`; the controller creates
+and appends `.swarm/pr-review/<run_id>/findings.jsonl` without granting generic
+write authority over `.swarm/`. On Profiles B/C, append the same records to a
+`findings.jsonl` ledger file in your harness's session/task workspace (never
+under `.swarm/`), with the review head SHA recorded at the top of the file.
 
 Each persisted finding record must include at least:
 
@@ -498,7 +569,9 @@ Minimum field contract:
 - `next_action`: the next required action, such as `route_to_reviewer`,
   `route_to_critic`, `report`, `suppress_with_reason`, or `handoff_to_feedback`.
 
-Persist after every major validation boundary:
+Persist after every major validation boundary (Profile A via the controller
+calls below; Profiles B/C by appending the same boundary-tagged records to the
+ledger file):
 
 1. **Post-explorer:** after Phase 3/4 candidate parsing and before reviewer
    dispatch, call `write_pr_review_artifact` with `boundary: "post_explorer"`
@@ -614,7 +687,45 @@ Tool candidate rules:
 
 ## Phase 3: Parallel Base Explorer Lanes
 
-Launch all base lanes with `dispatch_lanes_async` when available. Pass the six
+### Review depth tiers (size × risk)
+
+Before dispatching, classify the PR into a depth tier from the context pack.
+Record the tier and the active capability profile in the ledger and in the
+final validation provenance. The tier scales how many subagents you spawn —
+never which review dimensions or risk families get evaluated:
+
+| Tier | Diff shape | Dispatch shape (Profiles B/C) |
+|---|---|---|
+| S | ≤ ~50 changed lines, ≤ 3 files, no risk triggers | Consolidate: 1–2 explorer lanes covering all six dimensions (B), or one candidate-generation pass (C); Phase 4 risk families fold into the same lanes as an explicit per-family checklist |
+| M | ≤ ~500 changed lines, or any risk trigger | Dedicated lanes for the triggered dimensions/families; consolidate the remaining thin dimensions into 1–2 lanes |
+| L | > ~500 changed lines, > ~20 files, multi-subsystem, or security-sensitive surface | Full fan-out: one lane per dimension (six) and per-family micro dispatch in Phase 4 |
+
+Risk triggers (any one escalates to at least tier M, and the triggered
+dimension/family always gets a dedicated lane at M and above):
+auth/identity/sessions/permissions/secrets/cryptography; untrusted-input
+parsing or new input/output boundaries; subprocess/shell/filesystem execution;
+concurrency, state machines, retries, caching; dependency, lockfile, install,
+CI, or release changes; public API, schema, config, or migration changes;
+payments or PII handling; generated, vendored, or binary artifacts.
+
+Scaling is one-directional: a larger tier or an active controller may demand
+more lanes than the table; nothing — repository size, elapsed time, token
+cost, or predicted simplicity — permits fewer lanes than the classified tier,
+and no tier permits skipping a dimension or family. Under Profile A the
+controller computes the tier itself from the bound `base_sha...pr_head_sha`
+diff (`--numstat` totals; an uncomputable diff fails strict to tier L) and
+mechanically enforces the matching floors on every base and micro batch —
+initial waves and retries alike: tier L requires the historical
+full fan-out (six singleton base lanes, one micro-lane per family, on every
+batch, not only the first), while
+tiers S and M accept consolidated lanes that declare their complete
+`owned_workflow_lanes` set — every dimension and family still owned exactly
+once and attested per family. Risk triggers remain caller-side escalation on
+every profile: dispatch MORE than the floor whenever a trigger warrants it.
+
+### Dispatch
+
+Under Profile A, launch all base lanes with `dispatch_lanes_async`. Pass the six
 lane specs together, set `mode: "swarm-pr-review:base"`, assign each lane its
 exact `workflow_lane` identifier from the table below, set `max_concurrent` to
 `6`, bind the batch with the exact current `pr_head_sha`, record the returned
@@ -633,9 +744,23 @@ field, or have lanes read it from a file by absolute path, instead of inlining
 the same large blob into all six prompts — oversized inline prompts produce
 malformed or truncated tool-call JSON and force clumsy file workarounds.
 
-This is an exact six-lane gate, not a soft target. If the base wave is launched with fewer than six lanes, the review is BLOCKED until the missing lanes are dispatched and settled; "small PR", "docs-only", "CI-only", and "time-saving" are not exceptions.
+All six dimensions must be covered on every PR — "small PR", "docs-only", and
+"CI-only" change what each dimension examines, never whether it is evaluated.
+Every dimension ends in its own `[CANDIDATE]` rows or a fully populated
+per-dimension `[CLEAN]` attestation. Under Profile A at depth tier L this is an exact six-lane gate, not a soft target: the controller rejects an initial base wave with fewer than six singleton lanes, and the review is BLOCKED until the missing lanes are dispatched and settled; "time-saving" is not an exception. At tiers S and M the controller instead requires the initial wave's `owned_workflow_lanes` to partition all six dimensions exactly once across at least the tier's lane floor (S ≥ 1, M ≥ 3, `max_concurrent` equal to the lane count), and settlement demands per-dimension attestation from every consolidated lane — a lane that fails any owned dimension fails them all. Under Profiles B/C, the depth tier governs lane count the same way — a tier-S diff may cover the six dimensions in one or two consolidated lanes — while dimension coverage and per-dimension attestation remain mandatory.
 
-**Incremental collection:** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains.
+Under Profile B, dispatch the same wave as parallel subagents through your
+harness's subagent tool: one subagent per dimension by default, consolidated
+per the depth tier for small diffs. Every lane prompt must carry the exact
+`pr_head_sha`, the verified `base_sha...pr_head_sha` range, its assigned
+`workflow_lane` identifier(s), and the explorer context contract below; append
+every returned report to the findings ledger with its lane id and head SHA
+before any reviewer dispatch. Under Profile C, run the same lanes as
+sequential candidate-generation passes with the same per-lane ledger records.
+The join barrier is universal: all base lanes settle before Phase 4 completes
+or synthesis begins, whichever layer enforces it.
+
+**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
 
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
@@ -645,14 +770,14 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 
 For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
-2. If a base lane fails, retry only the failed `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, and explorer agents. The durable gate joins successful provenance across the initial wave and retry batches. Blocking `dispatch_lanes` and direct Task dispatch are not equivalent under this workflow because they cannot satisfy the structured provenance gate.
+2. If a base lane fails under Profile A, retry only the failed `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, and explorer agents. The durable gate joins successful provenance across the initial wave and retry batches. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
 3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
 
 ### Candidate extraction via parser
 
-After `collect_lane_results` returns for base lanes, process each lane result
-that carries an `output_ref`. The orchestrator MUST use the candidate parser
-rather than preview-text extraction:
+Under Profile A, after `collect_lane_results` returns for base lanes, process
+each lane result that carries an `output_ref`. The orchestrator MUST use the
+candidate parser rather than preview-text extraction:
 
 1. For each `output_ref`, call `parse_lane_candidates` with `output_ref`,
    `producer: "swarm-pr-review"`, and `expected_family: "base_explorer"`. The parser reads
@@ -669,16 +794,21 @@ rather than preview-text extraction:
 4. Stage reviewer-sized chunks, but do not dispatch reviewers yet. Phase 4 must
    complete trigger accounting and settle every launched micro-lane first.
 
-If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE (Phase 3). Do not use blocking or direct-Task fallbacks, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview.
+If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE (Phase 3). Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, a truncated, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
 candidate ledger using the Review Finding Persistence contract. This is the
 durable recovery point for context compaction before Phase 6.
 
-**Fallback convention:** If the parser is unavailable, the explorer MAY emit
-`[CANDIDATE]` rows in the lane output as a fallback convention (see the
-Explorer Prompt Template at the end of this skill), but the orchestrator
-SHOULD use the parser as the primary extraction mechanism.
+**Profiles B/C row convention:** without the parser, the `[CANDIDATE]` row
+format is the extraction contract itself. Explorers emit the rows directly in
+their reports (see the Explorer Prompt Template reference); the orchestrator
+collects them verbatim, validates each row's field count and lane id, and
+treats malformed rows — or output with neither `[CANDIDATE]` rows nor a fully
+populated `[CLEAN]` attestation — as a lane-output failure under the COVERAGE
+GATE. If the parser is unavailable under Profile A, the same row convention
+applies as a fallback, but the orchestrator SHOULD use the parser as the
+primary extraction mechanism.
 
 **lane id uniqueness for parallel dispatches:** When re-dispatching failed or
 re-running explorer lanes, every `dispatch_lanes_async` or `dispatch_lanes`
@@ -688,15 +818,18 @@ in the same batch unless intentionally replacing that exact lane before dispatch
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
-The six lanes are a fixed **check-type** partition, not an area partition: the
-count is intentionally constant — every PR needs all six review dimensions —
-and the lanes deliberately overlap by file, each receiving the same diff via
-`common_prompt` and viewing it through a different lens. Six is this workflow's
-high-assurance policy floor, not a claim that research proves a universal optimal
-agent count. Repository policy may add scrutiny but may never reduce the six.
-This is the deliberate exception to surface-scaled fan-out. Coverage is
-guaranteed by all six dimensions reading the whole diff, so the disjoint-partition
-rule that governs area-split fan-outs does not apply.
+The six dimensions are a fixed **check-type** partition, not an area
+partition: every PR needs all six review dimensions, and the lanes
+deliberately overlap by file, each receiving the same diff (via
+`common_prompt` under Profile A) and viewing it through a different lens. Six
+dimensions are this workflow's high-assurance coverage floor, not a claim that
+research proves a universal optimal agent count — the published evidence
+favors complementary, distinct-lens reviewers over duplicated generalists, and
+finding rates rise with diff size, which is why dispatch (not coverage)
+follows the depth tier. Repository policy may add scrutiny but may never
+reduce the six dimensions. Coverage is guaranteed by all six dimensions
+reading the whole diff, so the disjoint-partition rule that governs area-split
+fan-outs does not apply.
 
 | `workflow_lane` | Focus | Required checks |
 |---|---|---|
@@ -718,7 +851,7 @@ Every explorer must inspect or explicitly mark unavailable:
 5. the nearest relevant test or missing-test location,
 6. deterministic signal entries mapped to its files/symbols,
 7. relevant Swarm knowledge/evidence entries, if present.
-8. the exact controller-bound range to analyze (`base_sha...pr_head_sha`),
+8. the exact bound review range to analyze (`base_sha...pr_head_sha`),
 
 ### Explorer output format
 
@@ -729,9 +862,10 @@ artifact and extracts these records. The canonical record shape is:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence: LOW/MEDIUM/HIGH
 ```
 
-The parser normalizes this into a structured `candidates[]` array. If the
-parser is unavailable, the explorer MAY emit the `[CANDIDATE]` row format
-directly in the lane output as a fallback convention.
+Under Profile A the parser normalizes this into a structured `candidates[]`
+array. On Profiles B/C — and as a Profile A fallback when the parser is
+unavailable — the explorer emits the `[CANDIDATE]` row format directly in the
+lane output as the extraction contract.
 
 Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
@@ -758,19 +892,32 @@ in the micro-lane map and print a mandatory ledger with one row per map row:
 
 Focus evidence must name the changed files, manifests, imports/symbols, semantic
 signals, or explicit absence conditions the lane should examine. `MATCHED` means
-the lane is required, not that a keyword heuristic guessed applicability.
+the family's evaluation is required, not that a keyword heuristic guessed
+applicability.
 Repository identity, technology stack, PR size, elapsed time, or predicted risk
 never justifies skipping a row.
 
-Launch one focused micro-lane for every row, using
-`dispatch_lanes_async` with `mode: "swarm-pr-review:micro"` and each lane's
-`workflow_lane` equal to its trigger ID. Include the complete exact-set
-`trigger_evaluation` ledger and the same exact current `pr_head_sha` in that
-dispatch. Use a separate batch from base
-lanes. Because the dispatcher accepts at most eight lanes per call, split the
-eleven mandatory micro-lanes across bounded async batches. The runtime rejects
+Every row in the map is a risk **family** that must be evaluated against the
+diff on every PR, in every repository. What scales with the depth tier is the
+dispatch shape — how many subagents carry that evaluation — never the
+evaluation itself. Each family must end in its own attestation: `[CANDIDATE]`
+rows naming the family, or one fully populated per-family `[CLEAN]` row.
+
+**Profile A dispatch.** Launch the micro coverage with
+`dispatch_lanes_async` and `mode: "swarm-pr-review:micro"`. At depth tier L,
+dispatch one focused micro-lane for every row, each lane's
+`workflow_lane` equal to its trigger ID; because the dispatcher accepts at
+most eight lanes per call, split the
+eleven mandatory micro-lanes across bounded async batches. At tiers S and M,
+consolidated lanes may each own several families: set `workflow_lane` to one
+owned trigger ID and declare the complete `owned_workflow_lanes` set — every
+family owned exactly once across the dispatch, and every owned family
+attested in that lane's output, or the lane fails for all of them. Include
+the complete exact-set
+`trigger_evaluation` ledger and the same exact current `pr_head_sha` in every
+micro dispatch, in a separate batch from base lanes. The runtime rejects
 unrelated or duplicate micro-lanes within a batch, and final ledger persistence
-rejects any row whose completed unique provenance is absent.
+rejects any row whose completed owning-lane provenance is absent.
 Poll incrementally, then settle every launched lane. Persist
 the complete ledger with `write_pr_review_trigger_eval`; its rows use the stable
 trigger IDs below, and every row includes its returned `source_batch_id` and
@@ -781,13 +928,31 @@ pass the exact reviewed merge-base as `base_sha`, the exact live base branch
 tip/ref used to compute it as `base_ref`, and the same `pr_head_sha` to the
 writer. The writer runs bounded `git merge-base -- <base_ref> <pr_head_sha>` and
 rejects any claimed `base_sha` that is not the exact result. It accepts only the
-exact eleven-row `MATCHED` set backed by
-eleven completed, non-degraded, exact-head artifacts. It never uses keyword
-classification as permission to waive a lane. Any head mismatch makes
+exact eleven-row `MATCHED` set, each row backed by a completed, non-degraded,
+exact-head artifact from a lane that declared ownership of that family and
+attested every family it owns. It never uses keyword
+classification as permission to waive a family. Any head mismatch makes
 persistence fail.
 Do not add trigger results to the finding-status enum.
 
-For each micro `output_ref`, call `parse_lane_candidates` with
+**Profiles B/C dispatch.** Scale the lane shape to the depth tier while
+keeping all eleven family evaluations:
+
+- Tier L: one focused lane per family, mirroring Profile A.
+- Tier M: a dedicated lane for every risk-triggered family; consolidate the
+  remaining families into one or two sweep lanes that each carry an explicit
+  per-family checklist.
+- Tier S: fold the full eleven-family checklist into the base wave's lanes
+  (B) or into one consolidated micro sweep or sequential checklist pass (C).
+
+Whatever the dispatch shape: the ledger keeps one `[TRIGGER-EVAL]` row per
+family; each row's focus evidence names the lane or pass that evaluated it;
+each family gets its own `[CANDIDATE]`/`[CLEAN]` attestation naming the family
+id; and the completed ledger is persisted as `trigger-eval.json` in the
+session/task workspace before reviewer dispatch. A family with no attestation
+row is an unclosed coverage gap, exactly as if a Profile A lane had failed.
+
+For each micro `output_ref` (Profile A), call `parse_lane_candidates` with
 `producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
 `expected_micro_lane` set to the launch-micro-lane value from the
 provenance-linked trigger row. Accept a candidate only when its `producer`,
@@ -802,7 +967,7 @@ errors, zero malformed rows, and a complete, non-degraded source:
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
-Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). The structured async PR-workflow path is required to preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes. Task-derived findings or CLEAN prose cannot satisfy Phase 4.
+Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). Under Profile A, the structured async PR-workflow path is required to preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes, and Task-derived findings or CLEAN prose cannot satisfy Phase 4's controller ledger. Under Profiles B/C, acceptance is the row contract itself: accept a candidate or clean row only when its `micro_lane` field matches the trigger row it claims, and treat prose-only "clean" claims as `UNATTESTED`.
 
 Each micro-lane receives:
 
@@ -812,17 +977,19 @@ Each micro-lane receives:
 - relevant deterministic signals,
 - related historical knowledge with quarantine/staleness status,
 - expected invariants,
-- structured candidate output (parser-extracted). If the parser is unavailable,
-  the micro-lane MAY emit `[CANDIDATE]` rows as a fallback convention.
+- structured candidate output — parser-extracted under Profile A; on Profiles
+  B/C the micro-lane emits `[CANDIDATE]`/`[CLEAN]` rows directly as the
+  extraction contract.
 
 ### Repository-agnostic mandatory micro-lane map
 
-Every row runs in every repository. Diff/context analysis focuses each lane but
-cannot waive it: semantic applicability is not reliably decidable from paths or
-keywords, so `NO-MATCH` is invalid. Repository policy may require supplementary
-specialist review outside this canonical ledger, but supplementary work never
-replaces these portable rows. The `unclassified-risk` lane always runs to cover
-novel failure modes and classification gaps.
+Every row is evaluated in every repository. Diff/context analysis focuses each
+family's evaluation but cannot waive it: semantic applicability is not reliably
+decidable from paths or keywords, so `NO-MATCH` is invalid. Repository policy
+may require supplementary specialist review outside this canonical ledger, but
+supplementary work never replaces these portable rows. The `unclassified-risk`
+family is always evaluated to cover novel failure modes and classification
+gaps.
 
 > **Trigger-ID namespace — do not mix (issue #1931).** The `trigger_id` field
 > passed to `write_pr_review_trigger_eval` accepts **only** the 11 micro-lane
@@ -864,7 +1031,7 @@ Micro-lane output format:
 
 ## Phase 5: Swarm-Native Verifier Routing
 
-Use Swarm-native agents and artifacts when available. If exact agent names are unavailable, route the same task to the closest equivalent reviewer/critic role.
+Use Swarm-native agents and artifacts when available. If exact agent names are unavailable, route the same task to the closest equivalent reviewer/critic role. On harnesses without the plugin, most `.swarm/` artifacts will not exist: mark those rows N/A in the validation provenance rather than fabricating them.
 
 | Swarm verifier / artifact | When to use | Purpose |
 |---|---|---|
@@ -883,39 +1050,49 @@ Verifier output is advisory until incorporated by the independent reviewer or cr
 ## Phase 6: Independent Reviewer Confirmation
 
 **Reviewer-dispatch join barrier:** reviewer dispatch MUST NOT begin until the micro-lane ledger is
-complete and persisted, all eleven micro-lanes are settled, and every
-accepted micro result has parser-derived provenance or a valid CLEAN
-attestation.
+complete and persisted, every launched micro lane is settled with all eleven
+families attested (under Profile A: all eleven micro-lanes settled), and every
+accepted micro result has parser-derived provenance (Profile A) or a valid
+CLEAN attestation.
 
 Route candidates to reviewer subagents. The orchestrator routes candidates
-in bounded chunks produced by the parser-based extraction in Phase 3-4. Each
+in bounded chunks produced by the candidate extraction in Phase 3-4. Each
 reviewer lane receives a bounded list of candidates from a single chunk — by
 file area, category, or count — not the full candidate set. The reviewer must
 re-read the candidate's file:line evidence and relevant context pack entries
 directly.
 
-Dispatch reviewer chunks with `dispatch_lanes_async`,
+Under Profile A, dispatch reviewer chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:reviewer"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact candidate IDs assigned to that
 chunk, reviewer-role agents only, and the same exact `pr_head_sha`. The runtime
 requires one parseable `[REVIEWED]` row for every structurally assigned ID; a
 single marker or partial subset cannot settle the lane. Direct Task
-reviewers are rejected because they cannot carry the durable batch and head
-provenance required by this workflow.
+reviewers are rejected by the active controller because they cannot carry the
+durable batch and head provenance it requires. Under Profile B, dispatch each
+chunk to a fresh reviewer subagent — never the agent or conversation that
+generated the candidates — carrying the chunk's candidate IDs, the exact
+`pr_head_sha`, and the required checks below. Under Profile C, run a separate
+reviewer pass per chunk that re-reads every cited file:line before
+classifying. The one-parseable-`[REVIEWED]`-row-per-assigned-ID contract is
+universal.
 
-For every structured PR-review dispatch, the runtime appends an authoritative
-controller block after caller-authored prompt text. It binds the exact
+Under Profile A, for every structured PR-review dispatch, the runtime appends
+an authoritative controller block after caller-authored prompt text. It binds the exact
 `workflow_lane`, PR head, content revision, declared scope, and assigned item
 IDs and explicitly forbids speed/time/token waivers. Caller prompt text cannot
 override that block; output with placeholders, invented IDs, generic assurances,
 or evidence unrelated to the bound lane does not settle the artifact.
 
-Reviewer ownership is not accepted as an architect assertion. The controller
-derives the immutable candidate inventory from the integrity-checked base,
-	mandatory micro-lane, and council artifacts; the union of `review_item_ids` must
-equal that inventory exactly, with no omitted or invented IDs. If discovery
-produces no candidates, the derived sentinel is `CLEAN-REVIEW`, which still
-requires one independent semantic reviewer row.
+Reviewer ownership is not accepted as an architect assertion. Under Profile A,
+the controller derives the immutable candidate inventory from the
+integrity-checked base, mandatory micro-lane, and council artifacts; under
+Profiles B/C, the orchestrator derives the same inventory from the persisted
+ledgers. Either way, the union of `review_item_ids` must equal that inventory
+exactly, with no omitted or invented IDs. If discovery produces no candidates,
+the derived sentinel is `CLEAN-REVIEW`, which still requires one independent
+semantic reviewer row (a fresh subagent on Profile B; a separate reviewer pass
+on Profile C).
 
 Candidate IDs must therefore be globally unique across every discovery
 artifact in the run. Prefix IDs with the stable workflow-lane ID (or use
@@ -1031,12 +1208,16 @@ new reviewer rows happen to be identical. Dispatch a fresh critic wave from the
 latest coherent reviewer batch; critic evidence can never predate the reviewer
 evidence it purports to challenge.
 
-Dispatch critic chunks with `dispatch_lanes_async`,
+Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact finding IDs assigned to that
 chunk, critic-role agents only, and the same exact `pr_head_sha`. The runtime
 requires one parseable `[CRITIC]` row for every structurally assigned ID and
 requires one coherent fully successful exact reviewer batch before a critic wave.
+Under Profile B, dispatch each critic chunk to a fresh subagent that was
+neither the explorer nor the reviewer for those findings; under Profile C, run
+a separate critic pass. The one-parseable-`[CRITIC]`-row-per-assigned-ID
+contract and the reviewer-before-critic ordering are universal.
 
 The critic must challenge:
 
@@ -1071,7 +1252,7 @@ BLOCKED. Terminal critic rows are cross-field checked: `DISPROVED` requires
 `NONE`, `UPHELD` requires CRITICAL/HIGH/MEDIUM, and `DOWNGRADED` cannot remain
 CRITICAL.
 
-**COVERAGE GATE alignment:** Critic lane failures apply the COVERAGE GATE (Phase 3) using `dispatch_lanes_async` with `mode: "swarm-pr-review:critic"` and the same exact `pr_head_sha`. Do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
+**COVERAGE GATE alignment:** Critic lane failures apply the COVERAGE GATE (Phase 3) — under Profile A via `dispatch_lanes_async` with `mode: "swarm-pr-review:critic"` and the same exact `pr_head_sha`; under Profiles B/C via a fresh critic subagent or pass. Do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
 
 Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.
 
@@ -1137,8 +1318,9 @@ F-001 | severity | category | root cause | affected file:line refs | reviewer | 
 At the end of the review, include review quality metrics in the final report's
 validation provenance. Persist them only through an invoked evidence tool and
 record the exact `.swarm/evidence/` path returned by that tool; if no invoked
-tool supports metrics, state `NOT PERSISTED — no metrics evidence writer` rather
-than naming a nonexistent command or path.
+tool supports metrics (including all of Profiles B/C), state `NOT PERSISTED —
+no metrics evidence writer` and keep the metrics block in the final report and
+session ledger rather than naming a nonexistent command or path.
 
 Record:
 
@@ -1211,7 +1393,7 @@ Council mode is opt-in only and adversarial.
 When triggered:
 
 1. Build the same context pack as default mode.
-2. After the default exact-six base lanes and required micro-lanes are mechanically covered, launch all supplementary council agents with one `dispatch_lanes_async` call using `mode: "swarm-pr-review:council"`, the same exact `pr_head_sha`, and one unique `workflow_lane` per council member; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally. Use `wait: true` only when no independent work remains and agents are still pending. All agents must be settled and their candidates added to the ledger before reviewer classification; the runtime enforces this join barrier. If structured asynchronous dispatch with exact-head and workflow-lane provenance is unavailable, stop as `BLOCKED`; blocking, sequential, or direct-Task fallback is not equivalent.
+2. After the default base-dimension and risk-family coverage is complete, launch all supplementary council agents. Under Profile A, use one `dispatch_lanes_async` call with `mode: "swarm-pr-review:council"`, the same exact `pr_head_sha`, and one unique `workflow_lane` per council member; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally, and use `wait: true` only when no independent work remains. All agents must be settled and their candidates added to the ledger before reviewer classification; under Profile A the runtime enforces this join barrier, and blocking, sequential, or direct-Task fallback is not equivalent to the structured council dispatch — bypassing the active controller is `BLOCKED`. Under Profile B, dispatch council members as parallel subagents with the same marker contract and settle them all before reviewer classification; under Profile C, run each council lens as a separate sequential pass.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
 5. Agents return the same mechanically parseable candidate contract as other discovery lanes: one `[CANDIDATE]` row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | workflow_lane | coverage_scope | evidence` row when no candidate survives. Council prose without one of those markers does not settle the lane.
@@ -1272,9 +1454,9 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 11. Obligation precedence is deterministic. Do not skip higher-precedence sources to fill gaps with LLM synthesis.
 12. Do not leak secrets from logs, evidence bundles, config files, URLs, or scanner output.
 13. Do not recommend destructive git or filesystem actions as fixes unless they are clearly scoped, safe, and necessary.
-14. If subagents fail, timeout, or return malformed output, retry with corrected parameters (max 2 attempts) through the same structured `dispatch_lanes_async` workflow mode and exact `pr_head_sha`. Blocking or direct-Task dispatch cannot preserve the durable provenance contract and is not an equivalent fallback. If structured retries fail, the affected coverage dimension is BLOCKED and must be surfaced to the user before synthesis. Do not fabricate validation results, do not present partial findings, and do not silently mark candidates UNVERIFIED to proceed past the gap.
+14. If subagents fail, timeout, or return malformed output, retry with corrected parameters (max 2 attempts) through the dispatch mechanism of the active profile — Profile A: the same structured `dispatch_lanes_async` workflow mode and exact `pr_head_sha`, where blocking or direct-Task dispatch cannot preserve the durable provenance contract and is not an equivalent fallback; Profiles B/C: a fresh subagent or pass bound to the same exact `pr_head_sha`. If retries fail, the affected coverage dimension is BLOCKED and must be surfaced to the user before synthesis. Do not fabricate validation results, do not present partial findings, and do not silently mark candidates UNVERIFIED to proceed past the gap.
 
-15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, retry with alternative access paths. If unavailable after retry, the affected coverage dimension is BLOCKED and must be surfaced to the user. Do not proceed to synthesis with unclosed coverage gaps under a "best available evidence" rationale — the architect is not authorized to produce a degraded review.
+15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, retry with alternative access paths. If a source that should exist on the active profile is still unavailable after retry, the affected coverage dimension is BLOCKED and must be surfaced to the user. A source that cannot exist on the active profile (for example `.swarm/` artifacts outside Profile A) is marked N/A in the validation provenance instead — N/A is disclosure, never a waiver of the dimensions and families that must still be covered. Do not proceed to synthesis with unclosed coverage gaps under a "best available evidence" rationale — the architect is not authorized to produce a degraded review.
 
 ---
 
@@ -1284,14 +1466,15 @@ Before writing the final output, print this checklist with filled values. Every 
 
 ```text
 [VALIDATION] scope selected: ___
+[VALIDATION] capability profile (A/B/C) and depth tier (S/M/L): ___ / ___
 [VALIDATION] context pack built: YES/NO — ___
 [VALIDATION] obligation count: ___
 [VALIDATION] repo graph / impact cone source: ___
 [VALIDATION] deterministic signals ingested: ___
-[VALIDATION] deterministic lane dispatcher used: YES/NO — ___
-[VALIDATION] base explorer lanes dispatched: ___ / 6
-[VALIDATION] base explorer lanes returned: ___ / 6
-[VALIDATION] mandatory micro-lanes dispatched and settled: ___ / 11 OR BLOCKED — <missing rows>
+[VALIDATION] lane dispatch mechanism: controller / native subagents / sequential passes — ___
+[VALIDATION] base dimensions covered with attestation: ___ / 6 (lanes dispatched: ___)
+[VALIDATION] base explorer lanes returned: ___ / ___
+[VALIDATION] micro risk families evaluated and attested: ___ / 11 OR BLOCKED — <missing rows> (micro lanes dispatched: ___)
 [VALIDATION] Swarm verifier routing used: ___
 [VALIDATION] raw candidates: ___
 [VALIDATION] tool candidates: ___
@@ -1411,9 +1594,12 @@ Explain the recommendation in one short paragraph and list required actions befo
 ## Feedback handoff
 
 When the review produced actionable validated findings or operational blockers,
-call `write_pr_review_artifact` with `kind: "handoff"`. The controller writes
+call `write_pr_review_artifact` with `kind: "handoff"` (Profile A). The controller writes
 `.swarm/pr-review/<run_id>/feedback-handoff.json` only when its finding IDs
-exactly match the latest confirmed `handoff_to_feedback` records. Include:
+exactly match the latest confirmed `handoff_to_feedback` records. On Profiles
+B/C, write the same handoff content to the session/task workspace path
+described in "Handoff To PR Feedback" and reference that path in the
+continuation prompt. Include:
 
 - the handoff artifact path,
 - the preserved finding IDs and provenance that `swarm-pr-feedback` must carry
@@ -1431,9 +1617,9 @@ Use this exact continuation prompt format:
 
 For reviewer, critic, and explorer prompt templates, read `references/prompt-templates.md`.
 
-After metrics and durable review artifacts are complete, but before emitting the
-user-facing final report, call `complete_pr_workflow` with mode `PR_REVIEW` and
-the same exact
+Under Profile A, after metrics and durable review artifacts are complete, but
+before emitting the user-facing final report, call `complete_pr_workflow` with
+mode `PR_REVIEW` and the same exact
 `pr_head_sha`. The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime replaces architect final-response
@@ -1442,7 +1628,12 @@ user interruption pauses every automatic wake path until a later explicit user
 turn settles; the durable gate remains available to continue or abort. Only
 emit the final report after the completion tool confirms that the gate cleared.
 
-## Aborting an unrecoverable review
+Under Profiles B/C, no mechanical response gate exists: the Pre-Synthesis Gate
+checklist is the completion gate. Emit the final report only after every
+checklist line is filled, every dimension and family is attested, and every
+BLOCKED item is surfaced.
+
+## Aborting an unrecoverable review (Profile A)
 
 The mechanical gate can leave the session stuck if the PR head cannot be
 fetched or checked out — for example when a compound `git fetch … && git
@@ -1476,3 +1667,6 @@ unproductive wakes, and the only exits are:
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
 bind/checkout path is genuinely unreachable; never use it to skip a
 coverage obligation that is merely expensive or inconvenient.
+
+On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
+head bind is genuinely unreachable, report the blocker to the user and stop.

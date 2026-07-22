@@ -7,6 +7,7 @@ import {
 	_test_exports,
 	activatePrWorkflow,
 	assertPrReviewBaseCoverageSettled,
+	bindPrReviewBase,
 	bindPrWorkflowHead,
 	enforcePrReviewBaseDimensions,
 	enforcePrWorkflowDispatchLanesAsync,
@@ -237,5 +238,106 @@ describe('pr-workflow-gate lifecycle and base coverage', () => {
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
 		).rejects.toThrow('missing dimensions');
+	});
+
+	test('a retry base batch cannot consolidate ownership at depth tier L (legacy/unset tier)', async () => {
+		// No bindPrReviewBase call: prReviewDepthTier is unset, defaulting to
+		// 'L' exactly like a legacy gate state predating the depth-tier field.
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+		const singletonLanes = PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) => ({
+			laneId: workflowLane,
+			workflowLane,
+		}));
+		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, singletonLanes, {
+			batchId: 'base-initial',
+			prHeadSha: HEAD_SHA,
+		});
+		// The initial six lanes never complete — the retry batch below must not
+		// be able to settle all six dimensions on its own via consolidation.
+		const consolidatedRetryLane = [
+			{
+				laneId: 'retry-consolidated',
+				workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[0],
+				ownedWorkflowLanes: [...PR_REVIEW_BASE_DIMENSION_IDS],
+			},
+		];
+		await expect(
+			enforcePrReviewBaseDimensions(
+				tempDir,
+				SESSION_ID,
+				consolidatedRetryLane,
+				{
+					batchId: 'base-retry-consolidated',
+					prHeadSha: HEAD_SHA,
+				},
+			),
+		).rejects.toThrow('depth tier L requires one dedicated lane per dimension');
+	});
+
+	test('at depth tier S/M, a later base batch may consolidate ownership and settles all-or-none', async () => {
+		const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
+		_test_exports.resolvePrReviewDiffStats = () => ({
+			changedLines: 12,
+			changedFiles: 2,
+		});
+		try {
+			await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+			await bindPrReviewBase(tempDir, SESSION_ID, {
+				prHeadSha: HEAD_SHA,
+				baseRef: 'origin/main',
+				baseSha: 'def456',
+			});
+			const [dimA, dimB, ...restDims] = PR_REVIEW_BASE_DIMENSION_IDS;
+			const consolidatedLane = [
+				{
+					laneId: 'sweep-ab',
+					workflowLane: dimA,
+					ownedWorkflowLanes: [dimA, dimB],
+				},
+			];
+			await enforcePrReviewBaseDimensions(
+				tempDir,
+				SESSION_ID,
+				consolidatedLane,
+				{
+					batchId: 'base-consolidated',
+					prHeadSha: HEAD_SHA,
+				},
+			);
+			const remainingLanes = restDims.map((workflowLane) => ({
+				laneId: workflowLane,
+				workflowLane,
+			}));
+			await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, remainingLanes, {
+				batchId: 'base-remaining',
+				prHeadSha: HEAD_SHA,
+			});
+			const expectedScope = 'complete PR diff def456...abc123';
+			// Consolidated lane never completes: neither of its two owned
+			// dimensions may settle from the other's evidence (all-or-none).
+			await persistBatch(
+				'base-remaining',
+				'swarm-pr-review:base',
+				remainingLanes,
+				{
+					scope: expectedScope,
+				},
+			);
+			await expect(
+				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
+			).rejects.toThrow(`missing dimensions: ${dimA}, ${dimB}`);
+
+			await persistBatch(
+				'base-consolidated',
+				'swarm-pr-review:base',
+				consolidatedLane,
+				{ scope: expectedScope },
+			);
+			await expect(
+				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
+			).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		} finally {
+			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
+		}
 	});
 });

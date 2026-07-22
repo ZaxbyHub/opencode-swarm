@@ -4,7 +4,7 @@ audience: swarm-plugin
 description: Evidence-first investigation and full resolution of issues and bugs. Use when asked to investigate, trace, root-cause, reproduce, plan, fix, resolve, close, or prepare a PR for an issue, bug report, defect, regression, failing test, crash, or confusing runtime behavior. Drives intake, reproduction, reasoning-guided localization, no-gap fix planning, independent critic and implementation review, recurrence-class eradication, and invariant-aware PR-ready closure under a mandatory full-resolution contract that forbids partial fixes, deferred work, and unwired code.
 license: MIT
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   source: .opencode/skills/issue-tracer/SKILL.md
 ---
 
@@ -48,11 +48,11 @@ This skill is agent-neutral. Wherever the protocol says "your file-edit tool", "
 |---|---|---|---|---|
 | OpenCode | `edit`, `write` | `todowrite` | `webfetch` | `task` / lane dispatch |
 | Claude Code | `Edit`, `Write`, `MultiEdit` | `TodoWrite` | `WebFetch`, `WebSearch` | `Agent` / `Task` |
-| OpenAI Codex | `apply_patch` | `update_plan` | `web` | not available in-session |
-| ZCode | `apply_patch` | `update_plan` | `web` | not available in-session |
-| GitHub coding agent | `edit` (native commit) | built-in task list | `web` | not available in-session |
+| OpenAI Codex | `apply_patch` | `update_plan` | `web` | native subagent dispatch (fresh context) |
+| ZCode | `apply_patch` | `update_plan` | `web` | native subagent dispatch (fresh context) |
+| GitHub coding agent | `edit` (native commit) | built-in task list | `web` | native subagent dispatch (fresh context) |
 
-Fill each cell from your own current tool docs (see `references/install.md` for per-agent details and the rationale behind each row). "Not available in-session" means the agent cannot spawn an independent subagent; use the fallback self-review/self-critic passes (Phase 4.5 / 4.6) and disclose the limitation. Any agent without a plan/tasklist tool keeps the phase checklist inline in its working notes.
+Fill each cell from your own current tool docs (see `references/install.md` for per-agent details and the rationale behind each row). Every listed agent currently exposes fresh-context subagent dispatch — treat the subagent column as capability-first: detect availability from the session's actual tool list, never from the agent's name. A restricted session on any harness may genuinely lack a subagent mechanism; only then do the fallback self-review/self-critic passes (Phase 4.5 / 4.6) apply, with the limitation disclosed. Any agent without a plan/tasklist tool keeps the phase checklist inline in its working notes.
 
 ## Source Policy
 
@@ -155,6 +155,7 @@ Read the relevant reference before starting that phase:
 3. If the worktree has unrelated user changes, do not overwrite them. Continue read-only until you can isolate your changes or ask the user.
 4. Run `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>` (from the repo root) to create the trace directory and its exclusion, and initialize `state.md` (or the compact inline trail).
 5. Build a phase checklist with your plan/tasklist tool (or inline). Mark only one step in progress at a time, and mark steps complete only after gate verification.
+6. Scale investigation and review depth to change size and risk, mirroring the S/M/L depth-tier model of the sibling swarm PR skills: trivial low-risk fixes take the lighter paths already marked in this protocol (Phase 2 item 7's single pass, Phase 3 item 1's reduced candidate bar), while risk triggers — auth/identity/secrets, untrusted input, subprocess/filesystem execution, concurrency/state, dependencies/build/release, schema/migrations, payments or PII, generated artifacts — always take the deeper passes regardless of diff size. Depth scaling never waives a phase gate.
 
 ### Phase 0 Gate
 
@@ -180,7 +181,7 @@ Proceed only when one is true: the issue is reproduced with exact failing output
 Goal: isolate the root cause to the narrowest truthful granularity: file, symbol, line range, invariant, and triggering input. Use `references/localization-playbook.md`.
 
 1. Build candidate locations from issue evidence: stack traces and error text, failing test names, UI route/API endpoint/CLI command names, labels and linked PRs, recent commits touching related areas.
-2. Search and read in parallel where possible: search for symbols, routes, commands, strings, errors, config keys; confirm against tracked files; use `git log`/`git blame` where useful.
+2. Search and read in parallel where possible: search for symbols, routes, commands, strings, errors, config keys; confirm against tracked files; use `git log`/`git blame` where useful. When the candidate surface is broad or ambiguous, fan out to independent fresh-context explorer subagents with disjoint scopes — 1–2 for a trivial surface, 3–5 for a typical one, more only for genuinely multi-module scopes. Explorers return candidate locations with file:line evidence, never verdicts; their candidates enter the same ranking and bug-specific-explanation bar as your own.
 3. Use reasoning-guided hierarchical localization — file → element (function/class/handler/config) → line/condition.
 4. Maintain `03-localization-log.md`: every hypothesis, files read and why, commands run and results, evidence for and against, ruled-out paths.
 5. Follow call chains in both directions — from input/event to failure, and from failure back to origin — through config, serialization, async boundaries, state transitions, and feature flags.
