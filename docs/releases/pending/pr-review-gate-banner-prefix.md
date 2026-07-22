@@ -24,8 +24,9 @@ Let me fetch the PR head and verify the merge base...
 The model's reasoning is visible to the user, but the banner makes clear the
 output is not a terminal verdict. Recovery notices for suspended/interrupted
 states remain always-visible in the banner. Security is unchanged:
-`complete_pr_workflow` remains the sole clearing path; the banner is a
-visible signal, not a security boundary.
+`complete_pr_workflow` is the publication clearing path, while
+`abort_pr_workflow` can clear an unarmed workflow after its safety checks
+pass; the banner is a visible signal, not a security boundary.
 
 ## Why
 

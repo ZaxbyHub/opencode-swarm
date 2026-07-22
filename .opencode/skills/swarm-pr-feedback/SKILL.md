@@ -810,8 +810,8 @@ tool clears the durable session gate only when the content digest still equals
 the independently approved digest, the exact approved commit remains current,
 its bound upstream remote-tracking ref points to that exact commit, every
 feedback ID has exact-provenance evidence, and no PR-workflow lanes remain
-open. While the gate remains active, the runtime replaces architect
-final-response text with a mechanical blocked notice and normally re-wakes an
+open. While the gate remains active, the runtime prepends a workflow-active
+banner to architect text (the model's text is preserved below it) and normally re-wakes an
 idle parent session. A user interruption pauses automatic wakes until a later
 explicit user turn settles; the durable gate remains available to continue or
 abort.

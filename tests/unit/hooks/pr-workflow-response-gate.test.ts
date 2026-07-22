@@ -4,6 +4,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_test_exports as autoWakeInternals,
+	isPrWorkflowAutoWakeSuppressed,
+} from '../../../src/hooks/pr-workflow-auto-wake.js';
+import {
 	activatePrWorkflow,
 	clearPrWorkflowGateState,
 	type PrWorkflowGateState,
@@ -18,10 +22,12 @@ beforeEach(() => {
 		mkdtempSync(path.join(os.tmpdir(), 'pr-response-gate-')),
 	);
 	workflowInternals.resetTrackedStateCache();
+	autoWakeInternals.reset();
 });
 
 afterEach(async () => {
 	workflowInternals.resetTrackedStateCache();
+	autoWakeInternals.reset();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -58,6 +64,10 @@ describe('PR workflow response-level gate', () => {
 		expect(blocked.text).toContain('WORKFLOW ACTIVE');
 		// The model's original text is preserved below the banner, not erased.
 		expect(blocked.text).toContain('Looks good');
+		// Banner appears BEFORE the model's text (F-004: ordering guard).
+		const bannerIdx = blocked.text.indexOf('WORKFLOW ACTIVE');
+		const textIdx = blocked.text.indexOf('Looks good');
+		expect(bannerIdx).toBeLessThan(textIdx);
 
 		await clearPrWorkflowGateState(directory, 'review-session');
 		const completed = { text: 'Verified completion.' };
@@ -95,6 +105,52 @@ describe('PR workflow response-level gate', () => {
 		const output = { text: '' };
 		await gate.textComplete({ sessionID: 'empty-text-session' }, output);
 		expect(output.text).toContain('WORKFLOW ACTIVE');
+	});
+
+	test('banner carries both suspension and interruption notices when both are active (F-003)', async () => {
+		// Drive the wake budget to suspension (max=1 for quick exhaustion),
+		// then trigger a MessageAbortedError to set the interruption pause.
+		// textComplete must produce a banner containing BOTH recovery notices.
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			maxConsecutiveUnproductiveWakes: 1,
+			wakeCooldownMs: 0,
+		});
+		await writeStateWithRevision('combined-session', 0);
+		const idle = {
+			event: {
+				type: 'session.idle',
+				properties: { sessionID: 'combined-session' },
+			},
+		};
+		// Wake 1 (probe), wake 2 (unproductive → suspend at max=1).
+		await gate.event(idle);
+		await gate.event(idle);
+		expect(gate._inspectWakeBudget('combined-session')?.suspended).toBe(true);
+
+		// Now trigger a user interruption.
+		await gate.event({
+			event: {
+				type: 'session.error',
+				properties: {
+					sessionID: 'combined-session',
+					error: { name: 'MessageAbortedError', data: { message: 'aborted' } },
+				},
+			},
+		});
+		expect(isPrWorkflowAutoWakeSuppressed(directory, 'combined-session')).toBe(
+			true,
+		);
+
+		// textComplete must show BOTH the suspension notice and the interruption notice.
+		const output = { text: 'still working' };
+		await gate.textComplete({ sessionID: 'combined-session' }, output);
+		expect(output.text).toContain('Auto-resume is suspended');
+		expect(output.text).toContain('user interruption');
+		// Model text preserved below both notices.
+		expect(output.text).toContain('still working');
 	});
 
 	test('session idle mechanically resumes an active workflow', async () => {

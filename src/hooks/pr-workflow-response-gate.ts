@@ -128,7 +128,7 @@ function workflowBanner(
 	} = {},
 ): string {
 	const lines: string[] = [
-		`--- [${mode} WORKFLOW ACTIVE — output below is not a terminal verdict; only \`complete_pr_workflow\` clears the gate; if the bind/checkout path is unreachable call \`abort_pr_workflow\` or run \`/swarm abort-pr-workflow\`] ---`,
+		`--- [${mode} WORKFLOW ACTIVE — output below is not a terminal verdict; \`complete_pr_workflow\` clears the gate on success; if the bind/checkout path is unreachable call \`abort_pr_workflow\` or run \`/swarm abort-pr-workflow\`] ---`,
 	];
 	if (options.suspended) {
 		const max = options.maxConsecutive;
@@ -210,7 +210,8 @@ export function createPrWorkflowResponseGate(options: {
 		// Prepend a workflow-active banner to the model's text. The original
 		// text is preserved so the user can see the architect's reasoning and
 		// progress. The banner makes clear that this output is not a terminal
-		// verdict — only complete_pr_workflow clears the gate.
+		// verdict — complete_pr_workflow clears the gate on success;
+		// abort_pr_workflow can clear an unarmed workflow.
 		const banner = workflowBanner(state.mode, {
 			suspended: budget?.suspended ?? false,
 			userInterrupted: isPrWorkflowAutoWakeSuppressed(
