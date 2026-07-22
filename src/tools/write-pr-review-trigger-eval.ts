@@ -174,7 +174,21 @@ export async function executeWritePrReviewTriggerEval(
 
 	const unknownIds = [...seenIds].filter((id) => !expectedIds.has(id));
 	if (unknownIds.length > 0) {
-		return failure(`unknown trigger IDs: ${unknownIds.join(', ')}`);
+		// Issue #1931: the validator accepts ONLY the 11 micro-lane IDs in
+		// PR_REVIEW_REQUIRED_MICRO_LANE_IDS. Callers commonly confuse three
+		// namespaces — dispatch `mode` strings (swarm-pr-review:base,
+		// swarm-pr-review:micro), base-lane IDs (intent-architecture,
+		// correctness-state, tests-falsifiability, security-trust,
+		// reliability-performance, compatibility-delivery), and informal
+		// short names (correctness, security, deps, docs, tests, perf).
+		// Surface the valid set so the next call succeeds without a
+		// skill-prose treasure hunt.
+		return failure(
+			`unknown trigger IDs: ${unknownIds.join(', ')}. ` +
+				`trigger_id must be one of the 11 mandatory micro-lane IDs: ` +
+				`${[...expectedIds].join(', ')}. ` +
+				`Base-lane IDs and mode strings (e.g. swarm-pr-review:base) are NOT trigger IDs.`,
+		);
 	}
 	const missingIds = [...expectedIds].filter((id) => !seenIds.has(id));
 	if (missingIds.length > 0) {

@@ -514,8 +514,19 @@ export async function withPrWorkflowCheckoutPreparationLock<T>(
 			normalizedSessionID,
 		);
 		if (!state) {
+			// Issue #1931 RC3: prepare_pr_workflow_checkout is called AFTER the
+			// gate is activated (by `/swarm pr-review` at commands/registry.ts
+			// or by the first swarm-pr-review: dispatch in dispatch_lanes_async).
+			// Calling it before either of those ran is a protocol ordering
+			// error, not a missing-file bug — point the caller at the
+			// activation path so they don't go hunting for a fictional
+			// gate file.
 			throw new Error(
-				`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}"`,
+				`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
+					`The gate is activated by running \`/swarm pr-review <pr-ref>\` (which activates PR_REVIEW) ` +
+					`or \`/swarm pr-feedback <pr-ref>\` (which activates PR_FEEDBACK), or by the first ` +
+					`dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*". ` +
+					`Run the appropriate command first, then retry checkout preparation.`,
 			);
 		}
 		if (state.prHeadSha) {
@@ -719,7 +730,18 @@ export async function bindPrReviewBase(
 	return state;
 }
 
-/** Prove that caller-provided PR identity equals the actual checked-out commit. */
+/**
+ * Prove that caller-provided PR identity equals the actual checked-out commit.
+ *
+ * Two distinct failure modes are reported with separate, diagnostic-rich
+ * messages (issue #1931): a null HEAD means Git could not resolve HEAD at all
+ * (the directory may not be a repository, HEAD may be unborn, the commit may
+ * be missing from a shallow clone, the `git` binary may not be on PATH, or
+ * the bounded Git invocation may have timed out); a non-matching HEAD means
+ * a different commit is checked out. Both messages name `directory` and the
+ * exact remediation command so callers can self-diagnose instead of
+ * cascading into fictional root causes.
+ */
 export function assertCurrentCheckoutHead(
 	directory: string,
 	expectedHead: string,
@@ -728,12 +750,18 @@ export function assertCurrentCheckoutHead(
 	const currentHead = _test_exports.resolveCurrentGitHead(directory)?.trim();
 	if (!currentHead) {
 		throw new Error(
-			`BLOCKED: cannot verify the current Git HEAD against PR head "${normalizedExpected}"`,
+			`BLOCKED: cannot resolve the current Git HEAD in "${directory}" to verify against PR head "${normalizedExpected}". ` +
+				`This means Git could not resolve HEAD (the working directory may not be a Git repository, ` +
+				`HEAD may be unborn, the commit object may be missing in a shallow clone, the Git binary may not be on PATH, ` +
+				`or the bounded Git invocation may have timed out). ` +
+				`Verify with: git -C "${directory}" rev-parse --verify HEAD^{commit}`,
 		);
 	}
 	if (currentHead.toLowerCase() !== normalizedExpected.toLowerCase()) {
 		throw new Error(
-			`BLOCKED: current checkout HEAD "${currentHead}" does not match PR head "${normalizedExpected}"`,
+			`BLOCKED: current checkout HEAD "${currentHead}" does not match PR head "${normalizedExpected}" ` +
+				`(working directory: "${directory}"). ` +
+				`Check out the exact PR head with: git -C "${directory}" switch --detach ${normalizedExpected}`,
 		);
 	}
 	return normalizedExpected;
@@ -2515,8 +2543,13 @@ async function requireAnyActiveState(
 ): Promise<PrWorkflowGateState> {
 	const state = await readPrWorkflowGateState(directory, sessionID);
 	if (!state) {
+		// Issue #1931: surface the activation path so callers don't go
+		// hunting for a fictional gate file. See withPrWorkflowCheckoutPreparationLock
+		// for the same diagnostic on the prepare_pr_workflow_checkout path.
 		throw new Error(
-			`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}"`,
+			`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
+				`The gate is activated by running \`/swarm pr-review <pr-ref>\` (PR_REVIEW) or \`/swarm pr-feedback <pr-ref>\` (PR_FEEDBACK), ` +
+				`or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".`,
 		);
 	}
 	return state;

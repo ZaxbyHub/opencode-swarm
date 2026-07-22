@@ -392,6 +392,55 @@ describe('write_pr_review_trigger_eval', () => {
 		});
 	}
 
+	test('unknown-trigger-IDs error lists valid IDs and namespace boundaries (issue #1931)', async () => {
+		// The reporter of #1931 fed the validator mode strings and base-lane
+		// IDs. The error must surface the 11 valid micro-lane IDs and call
+		// out the three namespaces so the next call succeeds.
+		const confusedRows = [
+			...rows().slice(0, 10),
+			{
+				trigger_id: 'swarm-pr-review:base',
+				result: 'MATCHED' as const,
+				evidence: 'confused mode string for trigger_id',
+				source_batch_id: 'confused-batch',
+				source_lane_id: 'confused-lane',
+			},
+		];
+		const result = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-1931',
+					pr_head_sha: 'abc123',
+					rows: confusedRows,
+				},
+				tempRoot(),
+			),
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('unknown trigger IDs');
+		// Must list ALL 11 valid IDs (issue #1931 reviewer item: a regression
+		// that drops any ID from the error must fail this test).
+		for (const validId of [
+			'auth-identity-secrets',
+			'untrusted-input-boundaries',
+			'subprocess-platform',
+			'concurrency-state',
+			'dependencies-build-release',
+			'api-schema-migrations',
+			'test-infrastructure',
+			'ui-accessibility-i18n',
+			'privacy-observability',
+			'generated-provenance',
+			'unclassified-risk',
+		]) {
+			expect(result.message).toContain(validId);
+		}
+		// Must call out that base-lane IDs and mode strings are not trigger IDs.
+		expect(result.message).toMatch(/base-lane IDs/i);
+		expect(result.message).toMatch(/mode strings/i);
+		expect(result.message).toMatch(/swarm-pr-review:base/);
+	});
+
 	test('rejects MATCHED without unique dispatch provenance', async () => {
 		const missing = rows();
 		delete (missing[0] as { source_batch_id?: string }).source_batch_id;
