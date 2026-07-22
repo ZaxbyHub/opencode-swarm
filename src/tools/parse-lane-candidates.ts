@@ -63,13 +63,15 @@ const ParseLaneCandidatesArgsSchema = z
 			.string()
 			.trim()
 			.min(1)
+			.max(120)
 			.optional()
 			.describe(
 				'Assert the micro-lane label linked to this dispatch provenance. Mismatched candidates and CLEAN attestations are refused.',
 			),
 		expected_micro_lanes: z
-			.array(z.string().trim().min(1))
+			.array(z.string().trim().min(1).max(120))
 			.min(1)
+			.max(11)
 			.optional()
 			.describe(
 				'Full owned family set of a consolidated depth-tier lane. Rows for owned-but-not-expected families are skipped as out-of-scope for this per-family call instead of refused; families outside the set are still refused.',

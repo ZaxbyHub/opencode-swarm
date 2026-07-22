@@ -185,17 +185,48 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 			computePrReviewDepthTier({ changedLines: 20, changedFiles: 4 }),
 		).toBe('M');
 		expect(
-			computePrReviewDepthTier({ changedLines: 500, changedFiles: 40 }),
+			computePrReviewDepthTier({ changedLines: 500, changedFiles: 20 }),
 		).toBe('M');
 		expect(
 			computePrReviewDepthTier({ changedLines: 501, changedFiles: 2 }),
 		).toBe('L');
 	});
 
+	test('computePrReviewDepthTier escalates to L on file-count overflow or a submodule change, closing the file-count blind spot', () => {
+		// A many-small-files diff (e.g. a wide binary/generated-file sweep, or a
+		// mechanical multi-file rename) must not stay at tier M purely because
+		// its aggregate changed-line count is small: file count now has its own
+		// ceiling, mirroring the S-tier check.
+		expect(
+			computePrReviewDepthTier({ changedLines: 500, changedFiles: 21 }),
+		).toBe('L');
+		expect(
+			computePrReviewDepthTier({ changedLines: 0, changedFiles: 200 }),
+		).toBe('L');
+		// A submodule pointer bump reports as a fixed tiny numstat delta
+		// regardless of the referenced repository's real diff size, so it must
+		// escalate unconditionally, independent of both thresholds.
+		expect(
+			computePrReviewDepthTier({
+				changedLines: 2,
+				changedFiles: 1,
+				hasSubmoduleChange: true,
+			}),
+		).toBe('L');
+		expect(
+			computePrReviewDepthTier({
+				changedLines: 2,
+				changedFiles: 1,
+				hasSubmoduleChange: false,
+			}),
+		).toBe('S');
+	});
+
 	test('accepts a consolidated two-lane initial base wave at depth tier S', async () => {
 		gateInternals.resolvePrReviewDiffStats = () => ({
 			changedLines: 12,
 			changedFiles: 2,
+			hasSubmoduleChange: false,
 		});
 		uniqueSessionOps();
 		const result = await executeDispatchLanesAsync(
@@ -225,6 +256,7 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		gateInternals.resolvePrReviewDiffStats = () => ({
 			changedLines: 12,
 			changedFiles: 2,
+			hasSubmoduleChange: false,
 		});
 		const result = await executeDispatchLanesAsync(
 			{
@@ -255,6 +287,7 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		gateInternals.resolvePrReviewDiffStats = () => ({
 			changedLines: 4_000,
 			changedFiles: 60,
+			hasSubmoduleChange: false,
 		});
 		const result = await executeDispatchLanesAsync(
 			{
@@ -283,6 +316,7 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		gateInternals.resolvePrReviewDiffStats = () => ({
 			changedLines: 300,
 			changedFiles: 12,
+			hasSubmoduleChange: false,
 		});
 		const result = await executeDispatchLanesAsync(
 			{
@@ -305,6 +339,55 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		);
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('requires between 3 and 6 lanes');
+	});
+
+	test('rejects a consolidated retry base batch at depth tier L through the real dispatch_lanes_async tool surface', async () => {
+		// The initial-wave structural check in dispatch-lanes.ts only runs when
+		// prReviewBaseDispatches is still empty; a retry batch skips that block
+		// entirely and depends solely on enforcePrReviewBaseDimensions (called
+		// unconditionally below it) to reject tier-L consolidation. This proves
+		// that rejection survives through the actual tool call, not just a
+		// direct unit call to the internal gate function.
+		uniqueSessionOps();
+		const initial = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`base-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'tier-l-retry-session' },
+		);
+		expect(initial.success).toBe(true);
+
+		const retry = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 1,
+				lanes: [
+					lane(
+						'retry-consolidated',
+						PR_REVIEW_BASE_DIMENSION_IDS[0],
+						undefined,
+						[...PR_REVIEW_BASE_DIMENSION_IDS.slice(0, 2)],
+					),
+				],
+			},
+			directory,
+			{ sessionID: 'tier-l-retry-session' },
+		);
+		expect(retry.success).toBe(false);
+		expect(retry.message).toContain(
+			'depth tier L requires one dedicated lane per dimension',
+		);
 	});
 
 	test('rejects owned_workflow_lanes outside PR_REVIEW discovery lanes', async () => {

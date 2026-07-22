@@ -246,6 +246,12 @@ export async function executeWritePrReviewTriggerEval(
 			'Active PR_REVIEW trigger evaluation could not bind the current exact revision digest',
 		);
 	}
+	// Two different (batchId, laneId) tuples cited across the row set must never
+	// declare overlapping ownedWorkflowLanes: nothing else enforces that two
+	// independently-dispatched micro batches stay disjoint over time, and an
+	// overlap would let both artifacts legitimately back the same family,
+	// duplicating (or reintroducing stale) content for it downstream.
+	const citedLaneOwnership = new Map<string, string[]>();
 	for (const row of parsed.data.rows) {
 		if (row.result !== 'MATCHED') continue;
 		const records = findByBatchId(directory, row.source_batch_id!, {
@@ -259,6 +265,10 @@ export async function executeWritePrReviewTriggerEval(
 			: record?.workflowLane
 				? [record.workflowLane]
 				: [];
+		citedLaneOwnership.set(
+			`${row.source_batch_id}\0${row.source_lane_id}`,
+			recordOwnedLanes,
+		);
 		const outputRef = record?.result?.outputRef?.trim();
 		const outputArtifact = outputRef
 			? readLaneOutput(directory, outputRef)
@@ -301,6 +311,19 @@ export async function executeWritePrReviewTriggerEval(
 			return failure(
 				`MATCHED trigger ${row.trigger_id} does not reference a completed non-degraded micro-lane artifact`,
 			);
+		}
+	}
+	const citedLaneEntries = [...citedLaneOwnership.entries()];
+	for (let i = 0; i < citedLaneEntries.length; i++) {
+		for (let j = i + 1; j < citedLaneEntries.length; j++) {
+			const [keyA, ownedA] = citedLaneEntries[i];
+			const [keyB, ownedB] = citedLaneEntries[j];
+			const overlap = ownedA.filter((family) => ownedB.includes(family));
+			if (overlap.length > 0) {
+				return failure(
+					`PR_REVIEW trigger evaluation cites two lanes with overlapping ownership: "${keyA}" and "${keyB}" both declare ${overlap.join(', ')}`,
+				);
+			}
 		}
 	}
 	if (!parsed.data.base_sha) {

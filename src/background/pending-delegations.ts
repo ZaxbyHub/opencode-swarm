@@ -201,7 +201,11 @@ const RecordSchema = z
 		laneId: z.string().optional(),
 		mode: z.string().optional(),
 		workflowLane: z.string().optional(),
-		ownedWorkflowLanes: z.array(z.string().min(1)).min(1).optional(),
+		ownedWorkflowLanes: z
+			.array(z.string().min(1).max(120))
+			.min(1)
+			.max(11)
+			.optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),

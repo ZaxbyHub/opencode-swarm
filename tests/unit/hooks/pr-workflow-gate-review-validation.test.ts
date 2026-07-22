@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -11,12 +11,16 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	establishReviewPrerequisites,
-	establishReviewPrerequisitesWithConsolidatedMicroLane,
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 describe('pr-workflow-gate review validation', () => {
 	test('PR review completion cannot clear with zero reviewer obligations', async () => {
@@ -487,43 +491,5 @@ describe('pr-workflow-gate review validation', () => {
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).rejects.toThrow('one fully successful exact batch');
-	});
-
-	test('a consolidated micro lane cited by two trigger rows contributes its candidates exactly once', async () => {
-		const { consolidatedCandidateId, baseCandidateIds } =
-			await establishReviewPrerequisitesWithConsolidatedMicroLane();
-		const allCandidateIds = [...baseCandidateIds, consolidatedCandidateId];
-
-		// Before the fix, deriving the inventory extracted the consolidated
-		// lane's artifact once per citing trigger row, duplicating
-		// consolidatedCandidateId and permanently BLOCKing reviewer dispatch.
-		await recordPrReviewValidationBatch(
-			tempDir,
-			SESSION_ID,
-			'reviewer',
-			[
-				{
-					laneId: 'review-consolidated',
-					workflowLane: 'review-consolidated',
-					reviewItemIds: allCandidateIds,
-				},
-			],
-			{ batchId: 'review-consolidated', prHeadSha: HEAD_SHA },
-		);
-		const reviewerRows = allCandidateIds
-			.map(
-				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
-			)
-			.join('\n');
-		await persistBatch(
-			'review-consolidated',
-			'swarm-pr-review:reviewer',
-			[{ laneId: 'review-consolidated', workflowLane: 'review-consolidated' }],
-			{ textOverride: reviewerRows },
-		);
-		await expect(
-			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 });

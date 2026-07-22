@@ -23,12 +23,15 @@ without running a fresh broad review.
 
 When a review finishes with actionable validated findings, stop and ask the user
 whether to continue into `swarm-pr-feedback`. Do not auto-dispatch fix work from
-`PR_REVIEW`. Instead, write a handoff artifact under
-`.swarm/pr-review/<run_id>/feedback-handoff.json` with `write_pr_review_artifact`
-and include the exact continuation prompt:
+`PR_REVIEW`. Instead, write a handoff artifact — under Profile A,
+`.swarm/pr-review/<run_id>/feedback-handoff.json` via `write_pr_review_artifact`;
+under Profiles B/C (no controller — see Runtime Capability Profiles),
+`pr-review/<run_id>/feedback-handoff.json` inside your session/task workspace,
+never under `.swarm/` — and include the continuation prompt with that exact
+path substituted for `<handoff_artifact_path>`:
 
 ```text
-/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json
+/swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>
 ```
 
 `<run_id>` is a stable identifier for this review run, such as
@@ -36,12 +39,6 @@ and include the exact continuation prompt:
 was already created. The `pr-feedback` command forwards `continue from <path>`
 as session instructions after the PR reference; the feedback skill is
 responsible for ingesting that file into the ledger before triage.
-
-On Profiles B/C (no controller — see Runtime Capability Profiles),
-`write_pr_review_artifact` is unavailable: write the same handoff JSON to
-`pr-review/<run_id>/feedback-handoff.json` inside your session/task workspace
-(never under `.swarm/`) and reference that exact path in the continuation
-prompt instead.
 
 Review closure is not the end of the PR lifecycle: when PR monitoring is
 enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
@@ -955,7 +952,16 @@ row is an unclosed coverage gap, exactly as if a Profile A lane had failed.
 For each micro `output_ref` (Profile A), call `parse_lane_candidates` with
 `producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
 `expected_micro_lane` set to the launch-micro-lane value from the
-provenance-linked trigger row. Accept a candidate only when its `producer`,
+provenance-linked trigger row. When the artifact came from a consolidated
+tier-S/M lane (its dispatch declared more than one `owned_workflow_lanes`
+entry), also pass `expected_micro_lanes` set to that lane's complete
+`owned_workflow_lanes` array — the same set already declared at micro
+dispatch time. Without it, the parser has no way to tell a sibling owned
+family's row from a genuinely out-of-scope one: every row belonging to the
+lane's other owned families is treated as a parse error instead of being
+skipped as out-of-scope, which can also invalidate that lane's own otherwise-valid
+`[CLEAN]` attestation for the family being extracted. Omit `expected_micro_lanes`
+only for a singleton (tier-L) lane. Accept a candidate only when its `producer`,
 `source_batch_id`, and `source_lane_id` match an allow-listed tuple from the
 original or retry micro dispatch and its `micro_lane` matches that trigger row;
 never filter acceptance by `row_format_family`. A zero-candidate artifact is
@@ -1607,10 +1613,13 @@ continuation prompt. Include:
 - and an explicit question asking whether to continue into
   `swarm-pr-feedback`.
 
-Use this exact continuation prompt format:
+Use this exact continuation prompt format, substituting the exact path from
+whichever profile applies (`.swarm/pr-review/<run_id>/feedback-handoff.json`
+under Profile A, or the session/task workspace path under Profiles B/C — never
+mix the two):
 
 ```text
-/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json
+/swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>
 ```
 
 ---

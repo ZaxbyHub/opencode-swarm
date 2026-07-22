@@ -153,12 +153,24 @@ export function resolveExactMergeBase(
 export interface PrReviewDiffStats {
 	changedLines: number;
 	changedFiles: number;
+	/**
+	 * True when the range contains any gitlink (submodule) pointer change.
+	 * Git's numstat reports a submodule bump as a fixed 1-added/1-deleted row
+	 * regardless of the referenced repository's actual diff size, so size
+	 * thresholds cannot bound this case; callers must escalate unconditionally.
+	 */
+	hasSubmoduleChange: boolean;
 }
+
+const GITLINK_MODE_PATTERN = /^:\d{6} 160000 |^:160000 \d{6} /;
 
 /**
  * Compute bounded changed-line/file totals for the exact reviewed PR range.
  * Returns null on any Git failure, malformed numstat row, or buffer overflow
  * so callers can fail strict (treat unknown size as the largest tier).
+ * Rename detection is pinned off (`--no-renames`) so the same logical diff
+ * produces the same totals regardless of the executing machine's ambient
+ * git version/config.
  */
 export function resolvePrReviewDiffStats(
 	directory: string,
@@ -167,10 +179,12 @@ export function resolvePrReviewDiffStats(
 ): PrReviewDiffStats | null {
 	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
 		return null;
+	const range = `${baseSha}...${prHeadSha}`;
 	const output = runGit(directory, [
 		'diff',
+		'--no-renames',
 		'--numstat',
-		`${baseSha}...${prHeadSha}`,
+		range,
 	]);
 	if (output === null) return null;
 	let changedLines = 0;
@@ -186,7 +200,12 @@ export function resolvePrReviewDiffStats(
 		changedFiles += 1;
 		changedLines += added + deleted;
 	}
-	return { changedLines, changedFiles };
+	const rawOutput = runGit(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
 }
 
 function isSafeGitRevisionToken(value: string): boolean {

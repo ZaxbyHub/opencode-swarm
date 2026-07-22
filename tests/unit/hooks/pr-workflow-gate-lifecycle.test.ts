@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -18,8 +18,13 @@ import {
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 describe('pr-workflow-gate lifecycle and base coverage', () => {
 	test('activatePrWorkflow persists recoverable session-keyed state', async () => {
@@ -279,6 +284,7 @@ describe('pr-workflow-gate lifecycle and base coverage', () => {
 		_test_exports.resolvePrReviewDiffStats = () => ({
 			changedLines: 12,
 			changedFiles: 2,
+			hasSubmoduleChange: false,
 		});
 		try {
 			await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
@@ -336,6 +342,35 @@ describe('pr-workflow-gate lifecycle and base coverage', () => {
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
 			).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		} finally {
+			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
+		}
+	});
+
+	test('prReviewDepthTier and prReviewDiffStats survive a disk round-trip', async () => {
+		const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
+		_test_exports.resolvePrReviewDiffStats = () => ({
+			changedLines: 12,
+			changedFiles: 2,
+			hasSubmoduleChange: false,
+		});
+		try {
+			await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+			await bindPrReviewBase(tempDir, SESSION_ID, {
+				prHeadSha: HEAD_SHA,
+				baseRef: 'origin/main',
+				baseSha: 'def456',
+			});
+
+			_test_exports.resetTrackedStateCache();
+			const recovered = await readPrWorkflowGateState(tempDir, SESSION_ID);
+
+			expect(recovered?.prReviewDepthTier).toBe('S');
+			expect(recovered?.prReviewDiffStats).toEqual({
+				changedLines: 12,
+				changedFiles: 2,
+				hasSubmoduleChange: false,
+			});
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}

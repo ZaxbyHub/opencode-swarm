@@ -64,6 +64,7 @@ export const PR_REVIEW_DEPTH_TIER_THRESHOLDS = {
 	smallMaxChangedLines: 50,
 	smallMaxChangedFiles: 3,
 	mediumMaxChangedLines: 500,
+	mediumMaxChangedFiles: 20,
 } as const;
 
 /**
@@ -77,11 +78,24 @@ export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
 	L: PR_REVIEW_BASE_DIMENSION_IDS.length,
 };
 
-/** Unknown or uncomputable diff size fails strict to the deepest tier. */
+/**
+ * Unknown or uncomputable diff size fails strict to the deepest tier, as does
+ * any range containing a submodule pointer change: git's numstat reports a
+ * gitlink bump as a fixed 1-added/1-deleted row regardless of the referenced
+ * repository's actual diff size, so no line/file threshold can bound it.
+ */
 export function computePrReviewDepthTier(
-	stats: { changedLines: number; changedFiles: number } | null | undefined,
+	stats:
+		| {
+				changedLines: number;
+				changedFiles: number;
+				hasSubmoduleChange?: boolean;
+		  }
+		| null
+		| undefined,
 ): PrReviewDepthTier {
 	if (!stats) return 'L';
+	if (stats.hasSubmoduleChange) return 'L';
 	if (
 		stats.changedLines <=
 			PR_REVIEW_DEPTH_TIER_THRESHOLDS.smallMaxChangedLines &&
@@ -90,7 +104,9 @@ export function computePrReviewDepthTier(
 		return 'S';
 	}
 	if (
-		stats.changedLines <= PR_REVIEW_DEPTH_TIER_THRESHOLDS.mediumMaxChangedLines
+		stats.changedLines <=
+			PR_REVIEW_DEPTH_TIER_THRESHOLDS.mediumMaxChangedLines &&
+		stats.changedFiles <= PR_REVIEW_DEPTH_TIER_THRESHOLDS.mediumMaxChangedFiles
 	) {
 		return 'M';
 	}
@@ -243,7 +259,11 @@ export interface PrWorkflowGateState {
 	/** Controller-computed size tier for the bound merge-base scope. */
 	prReviewDepthTier?: PrReviewDepthTier;
 	/** Audit record of the bounded numstat totals behind prReviewDepthTier. */
-	prReviewDiffStats?: { changedLines: number; changedFiles: number };
+	prReviewDiffStats?: {
+		changedLines: number;
+		changedFiles: number;
+		hasSubmoduleChange: boolean;
+	};
 	prReviewBaseDispatches?: PrReviewBaseDispatchRecord[];
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
@@ -465,6 +485,7 @@ const PrWorkflowGateStateSchema = z
 			.object({
 				changedLines: z.number().int().nonnegative(),
 				changedFiles: z.number().int().nonnegative(),
+				hasSubmoduleChange: z.boolean(),
 			})
 			.strict()
 			.optional(),
@@ -503,7 +524,17 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 	})
-	.strict();
+	// .passthrough(), not .strict(): this state is written unconditionally on
+	// every PR_REVIEW/PR_FEEDBACK session and persists across process
+	// restarts by design. A .strict() schema means a code rollback that
+	// re-encounters a field a newer version added throws BLOCKED on every
+	// read (including the abort/reset escape hatch, since
+	// requireAnyActiveState reads through this same schema before
+	// clearPrWorkflowGateState ever runs), with no self-service recovery.
+	// Passthrough keeps unknown fields opaque but present through any
+	// read-modify-write cycle, so older code degrades to "ignore the field
+	// it doesn't know about" instead of "refuse to read the file at all".
+	.passthrough();
 
 export async function activatePrWorkflow(
 	directory: string,
@@ -615,17 +646,21 @@ export async function clearPrWorkflowGateState(
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		const current = await readPrWorkflowGateStateFromDisk(
-			directory,
-			normalizedSessionID,
-		);
-		if (
-			expectedRevision !== undefined &&
-			(!current || current.revision !== expectedRevision)
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
+		// The CAS-guard read is only meaningful when a caller supplies a
+		// revision to compare against; skip it entirely otherwise so a
+		// genuinely unreadable/malformed state file can still be cleared
+		// (the sole purpose of this escape hatch) instead of the read itself
+		// re-throwing the same failure it exists to recover from.
+		if (expectedRevision !== undefined) {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
 			);
+			if (!current || current.revision !== expectedRevision) {
+				throw new Error(
+					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
+				);
+			}
 		}
 		try {
 			await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
@@ -3353,8 +3388,34 @@ function derivePrReviewCandidateInventory(
 		laneId: string;
 		mode: string;
 		workflowLane?: string;
+		/**
+		 * Base-dimension sources only: the exact dimensions this lane is the
+		 * authoritative (most-recent) source for. When this is a strict subset
+		 * of the lane's actual ownedWorkflowLanes (a more recent batch claimed
+		 * the rest), extraction below scopes to only these dimensions so the
+		 * lane's stale content for an already-superseded dimension never
+		 * re-enters the candidate pool alongside whoever superseded it.
+		 */
+		creditedLanes?: string[];
 	}> = [];
-	const selectedBaseDimensions = new Set<string>();
+	// Assign each of the 6 canonical dimensions to exactly one authoritative
+	// (batchId, laneId) source: the most-recent successful lane that owns it
+	// (batches are scanned reverse-chronologically, so first-write-wins here
+	// means most-recent-wins). This is deliberately dimension-first, not
+	// lane-first: a lane-first admission (accept a whole lane once ANY of its
+	// owned dimensions is still unclaimed) can re-admit an older,
+	// already-partially-superseded consolidated lane purely because it also
+	// owns a second, still-unclaimed dimension — reintroducing that lane's
+	// stale content for the dimension a newer batch already settled. Scanning
+	// per-dimension instead means an older lane is only ever referenced for
+	// dimensions no newer batch has claimed, so each contributing lane is
+	// still extracted at most once (via the existing extractedLaneKeys dedup
+	// below) but never credited for a dimension someone more recent covers.
+	const baseDimensionSources = new Map<
+		string,
+		{ batchId: string; laneId: string }
+	>();
+	const baseSourceCreditedDimensions = new Map<string, string[]>();
 	for (const batch of [...(state.prReviewBaseDispatches ?? [])].reverse()) {
 		const successful = successfulObligationsFromExactBatch(
 			directory,
@@ -3368,22 +3429,36 @@ function derivePrReviewCandidateInventory(
 			const ownedDimensions = lane.ownedWorkflowLanes?.length
 				? lane.ownedWorkflowLanes
 				: [lane.workflowLane];
-			if (
-				ownedDimensions.every((dimension) => successful.has(dimension)) &&
-				ownedDimensions.some(
-					(dimension) => !selectedBaseDimensions.has(dimension),
-				)
-			) {
-				sources.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-					mode: 'swarm-pr-review:base',
-				});
-				for (const dimension of ownedDimensions) {
-					selectedBaseDimensions.add(dimension);
+			if (!ownedDimensions.every((dimension) => successful.has(dimension)))
+				continue;
+			for (const dimension of ownedDimensions) {
+				if (!baseDimensionSources.has(dimension)) {
+					baseDimensionSources.set(dimension, {
+						batchId: batch.batchId,
+						laneId: lane.laneId,
+					});
+					const key = `${batch.batchId}\0${lane.laneId}`;
+					const credited = baseSourceCreditedDimensions.get(key);
+					if (credited) {
+						credited.push(dimension);
+					} else {
+						baseSourceCreditedDimensions.set(key, [dimension]);
+					}
 				}
 			}
 		}
+	}
+	const seenBaseSourceKeys = new Set<string>();
+	for (const { batchId, laneId } of baseDimensionSources.values()) {
+		const key = `${batchId}\0${laneId}`;
+		if (seenBaseSourceKeys.has(key)) continue;
+		seenBaseSourceKeys.add(key);
+		sources.push({
+			batchId,
+			laneId,
+			mode: 'swarm-pr-review:base',
+			creditedLanes: baseSourceCreditedDimensions.get(key),
+		});
 	}
 	const selectedCouncilLanes = new Set<string>();
 	for (const batch of [...(state.prReviewValidationBatches ?? [])].reverse()) {
@@ -3540,7 +3615,9 @@ function derivePrReviewCandidateInventory(
 			const laneKey = `${source.batchId}\0${source.laneId}`;
 			if (!extractedLaneKeys.has(laneKey)) {
 				extractedLaneKeys.add(laneKey);
-				candidateIds.push(...extractCandidateIds(artifact.text));
+				candidateIds.push(
+					...extractCandidateIds(artifact.text, source.creditedLanes),
+				);
 			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
@@ -3553,9 +3630,22 @@ function derivePrReviewCandidateInventory(
 	return candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
 }
 
-function extractCandidateIds(text: string): string[] {
+/**
+ * Extract candidate ids from a discovery artifact's [CANDIDATE] rows. When
+ * `scopeToLanes` is given (base-dimension sources credited for only a subset
+ * of their owned dimensions), rows whose `lane` field is outside that set are
+ * skipped — the artifact may legitimately discuss a dimension this source is
+ * no longer the authoritative source for (a more recent batch superseded it),
+ * and that stale content must not re-enter the candidate pool.
+ */
+function extractCandidateIds(
+	text: string,
+	scopeToLanes?: readonly string[],
+): string[] {
 	const candidateIds: string[] = [];
 	let markerHeaderSeen = false;
+	const inScope = (lane: string | undefined) =>
+		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
 	for (const line of text.split(/\r?\n/)) {
 		const fields = pipeFields(line);
 		if (
@@ -3570,7 +3660,7 @@ function extractCandidateIds(text: string): string[] {
 			fields.length >= 10 &&
 			fields.slice(1, 10).every(Boolean)
 		) {
-			candidateIds.push(fields[1]);
+			if (inScope(fields[2])) candidateIds.push(fields[1]);
 			continue;
 		}
 		if (
@@ -3580,7 +3670,7 @@ function extractCandidateIds(text: string): string[] {
 			!fields[0].startsWith('[') &&
 			fields.slice(0, 9).every(Boolean)
 		) {
-			candidateIds.push(fields[0]);
+			if (inScope(fields[1])) candidateIds.push(fields[0]);
 		}
 	}
 	return candidateIds;
@@ -3924,9 +4014,36 @@ function workflowArtifactHasContractMarker(
 	const coveredLanes = ownedWorkflowLanes?.length
 		? ownedWorkflowLanes
 		: [expectedWorkflowLane];
-	return coveredLanes.every((coveredLane) =>
-		prReviewDiscoveryArtifactCoversLane(artifact.text, coveredLane),
-	);
+	if (
+		!coveredLanes.every((coveredLane) =>
+			prReviewDiscoveryArtifactCoversLane(artifact.text, coveredLane),
+		)
+	) {
+		return false;
+	}
+	if (coveredLanes.length > 1) {
+		// A single consolidated lane's coverage check above only verifies each
+		// owned family's row is long enough and correctly labeled; it has no
+		// way to tell a genuine per-family assessment from a copy-pasted
+		// template relabeled across families (a real, reproduced gap — the
+		// underlying length/label check requires no adversarial intent to
+		// defeat, only an honest-but-lazy subagent templating the remaining
+		// families instead of assessing each one). Requiring the matched
+		// evidence text to differ across owned families directly closes that
+		// path without any semantic understanding of the content.
+		const seenEvidence = new Map<string, string>();
+		for (const coveredLane of coveredLanes) {
+			const evidence = extractLaneCoverageEvidenceText(
+				artifact.text,
+				coveredLane,
+			);
+			if (evidence === null) continue;
+			const priorLane = seenEvidence.get(evidence);
+			if (priorLane) return false;
+			seenEvidence.set(evidence, coveredLane);
+		}
+	}
+	return true;
 }
 
 /** Require at least one real discovery row or a lane-bound CLEAN attestation. */
@@ -3971,6 +4088,56 @@ export function prReviewDiscoveryArtifactCoversLane(
 			return true;
 	}
 	return false;
+}
+
+/**
+ * Extract the exact evidence text that satisfies coverage for one lane,
+ * mirroring prReviewDiscoveryArtifactCoversLane's own matching rules but
+ * returning the matched substantive fields instead of a boolean. Used only
+ * for cross-family distinctness comparison on consolidated (multi-owned-lane)
+ * artifacts; returns null when the lane has no matching row.
+ */
+function extractLaneCoverageEvidenceText(
+	text: string,
+	expectedWorkflowLane: string,
+): string | null {
+	const lines = text.split(/\r?\n/);
+	let candidateHeaderSeen = false;
+	for (const line of lines) {
+		const fields = pipeFields(line);
+		if (fields.length === 0) continue;
+		if (
+			fields[0] === '[CLEAN]' &&
+			fields.length >= 4 &&
+			fields[1] === expectedWorkflowLane &&
+			fields.slice(1, 4).every(Boolean) &&
+			fields[2].length >= 12 &&
+			fields[3].length >= 20
+		)
+			return `${fields[2]} ${fields[3]}`;
+		if (fields[0] === '[CANDIDATE]') {
+			if (fields[1]?.toLowerCase() === 'candidate_id') {
+				candidateHeaderSeen = true;
+				continue;
+			}
+			if (
+				fields.length >= 10 &&
+				fields[2] === expectedWorkflowLane &&
+				fields.slice(1, 10).every(Boolean)
+			)
+				return fields.slice(3, 10).join(' ');
+			continue;
+		}
+		if (
+			candidateHeaderSeen &&
+			fields.length >= 9 &&
+			fields[0]?.toLowerCase() !== 'candidate_id' &&
+			fields[1] === expectedWorkflowLane &&
+			fields.slice(0, 9).every(Boolean)
+		)
+			return fields.slice(2, 9).join(' ');
+	}
+	return null;
 }
 
 const REVIEWER_CLASSIFICATIONS = new Set([

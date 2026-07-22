@@ -33,7 +33,7 @@ const ParseFlagsSchema = z
 		row_format_version: z.number().int().nonnegative(),
 		producer: z.string().optional(),
 		expected_family: z.enum(['base_explorer', 'micro_lane']).optional(),
-		expected_micro_lane: z.string().trim().min(1).optional(),
+		expected_micro_lane: z.string().trim().min(1).max(120).optional(),
 		/**
 		 * Full owned family set of a consolidated (depth-tiered) lane artifact.
 		 * Rows and CLEAN attestations for owned-but-not-expected families are
@@ -41,7 +41,11 @@ const ParseFlagsSchema = z
 		 * as mismatches; families outside this set still fail. Defaults to
 		 * [expected_micro_lane].
 		 */
-		expected_micro_lanes: z.array(z.string().trim().min(1)).min(1).optional(),
+		expected_micro_lanes: z
+			.array(z.string().trim().min(1).max(120))
+			.min(1)
+			.max(11)
+			.optional(),
 	})
 	.strict();
 

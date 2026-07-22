@@ -1,4 +1,3 @@
-import { afterEach, beforeEach } from 'bun:test';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -11,6 +10,7 @@ import {
 import {
 	_test_exports,
 	activatePrWorkflow,
+	bindPrReviewBase,
 	enforcePrReviewBaseDimensions,
 	markPrReviewTriggerEvaluationComplete,
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -20,6 +20,10 @@ import {
 export const SESSION_ID = 'session-123';
 export const HEAD_SHA = 'abc123';
 export const REVISION_DIGEST = 'revision-test';
+/** Merge-base used by fixtures that call bindPrReviewBase. */
+export const PR_REVIEW_BASE_SHA = 'def456';
+/** Scope every persisted artifact must carry once a fixture binds a base. */
+export const PR_REVIEW_SCOPE = `complete PR diff ${PR_REVIEW_BASE_SHA}...${HEAD_SHA}`;
 
 export let tempDir = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
@@ -32,7 +36,19 @@ const originalResolveCurrentUpstreamPushTarget =
 const originalResolveRemoteRefsContainingHead =
 	_test_exports.resolveRemoteRefsContainingHead;
 
-beforeEach(() => {
+/**
+ * Bun scopes a `beforeEach`/`afterEach` call to whichever test file's module
+ * evaluation was executing when the call happened. A shared fixtures module
+ * is only ever evaluated once (import caching), so calling these hooks here
+ * at module scope would register them for only the first consuming test
+ * file to import this module in a given process — every other consumer
+ * would silently run without setup/teardown when co-run in the same `bun
+ * test` invocation. Each consuming test file must call
+ * `beforeEach(setupPrWorkflowGateFixtures)` /
+ * `afterEach(teardownPrWorkflowGateFixtures)` itself so Bun scopes the hooks
+ * to that file.
+ */
+export function setupPrWorkflowGateFixtures(): void {
 	tempDir = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-gate-')),
 	);
@@ -48,9 +64,9 @@ beforeEach(() => {
 	_test_exports.resolveRemoteRefsContainingHead = () => [
 		'refs/remotes/origin/pr-head',
 	];
-});
+}
 
-afterEach(async () => {
+export async function teardownPrWorkflowGateFixtures(): Promise<void> {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
@@ -60,7 +76,7 @@ afterEach(async () => {
 	_test_exports.resolveRemoteRefsContainingHead =
 		originalResolveRemoteRefsContainingHead;
 	await fs.rm(tempDir, { recursive: true, force: true });
-});
+}
 
 export async function persistBatch(
 	batchId: string,
@@ -162,14 +178,18 @@ export async function persistBatch(
 }
 
 /**
- * Same base/micro coverage as establishReviewPrerequisites, but the first two
- * required micro families are settled by ONE consolidated lane (declaring
- * ownedWorkflowLanes for both) whose artifact carries one real [CANDIDATE]
- * row for the first family and a [CLEAN] attestation for the second —
- * exercising the depth-tier consolidated-ownership path with an actual
- * finding, not an all-CLEAN artifact.
+ * Same base/micro coverage as establishReviewPrerequisites, but the first
+ * `ownedFamilyCount` required micro families (default 2) are settled by ONE
+ * consolidated lane (declaring ownedWorkflowLanes for all of them) whose
+ * artifact carries one real [CANDIDATE] row for the first family and a
+ * [CLEAN] attestation for each remaining owned family — exercising the
+ * depth-tier consolidated-ownership path with an actual finding, not an
+ * all-CLEAN artifact, and (at ownedFamilyCount >= 3) proving the same
+ * consolidated lane can be cited by more than two trigger rows at once.
  */
-export async function establishReviewPrerequisitesWithConsolidatedMicroLane(): Promise<{
+export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
+	ownedFamilyCount = 2,
+): Promise<{
 	consolidatedCandidateId: string;
 	baseCandidateIds: string[];
 }> {
@@ -185,13 +205,24 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(): P
 	await persistBatch('base-all', 'swarm-pr-review:base', baseLanes);
 	const baseCandidateIds = baseLanes.map((_lane, index) => `C-${index}`);
 
-	const [familyA, familyB, ...remainingFamilies] =
-		PR_REVIEW_REQUIRED_MICRO_LANE_IDS;
+	const ownedFamilies = PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(
+		0,
+		ownedFamilyCount,
+	);
+	const remainingFamilies =
+		PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(ownedFamilyCount);
+	const [familyA, ...cleanFamilies] = ownedFamilies;
 	const consolidatedCandidateId = 'C-CONSOLIDATED';
 	const consolidatedText = [
 		'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
 		`${consolidatedCandidateId} | ${familyA} | HIGH | secrets | src/consolidated.ts:1 | leaked credential | LEAST_PRIVILEGE | observed in log output | HIGH`,
-		`[CLEAN] | ${familyB} | exact reviewed diff | no finding after focused invariant review`,
+		// Each clean family's evidence text must be genuinely distinct (not a
+		// copy-pasted template) to satisfy the multi-lane anti-templating check
+		// in workflowArtifactHasContractMarker.
+		...cleanFamilies.map(
+			(family) =>
+				`[CLEAN] | ${family} | exact reviewed diff scoped to ${family} | no ${family} finding after focused invariant review`,
+		),
 	].join('\n');
 	const consolidatedBatchId = 'micro-consolidated';
 	const consolidatedLaneId = 'micro-sweep-a';
@@ -209,7 +240,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(): P
 		laneId: consolidatedLaneId,
 		mode: 'swarm-pr-review:micro',
 		workflowLane: familyA,
-		ownedWorkflowLanes: [familyA, familyB],
+		ownedWorkflowLanes: [...ownedFamilies],
 		workspace: {
 			directory: tempDir,
 			gitHead: HEAD_SHA,
@@ -244,20 +275,14 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(): P
 		},
 	});
 
-	const triggerRows: Array<Record<string, string>> = [
-		{
-			trigger_id: familyA,
+	const triggerRows: Array<Record<string, string>> = ownedFamilies.map(
+		(family) => ({
+			trigger_id: family,
 			result: 'MATCHED',
 			source_batch_id: consolidatedBatchId,
 			source_lane_id: consolidatedLaneId,
-		},
-		{
-			trigger_id: familyB,
-			result: 'MATCHED',
-			source_batch_id: consolidatedBatchId,
-			source_lane_id: consolidatedLaneId,
-		},
-	];
+		}),
+	);
 	for (const [index, workflowLane] of remainingFamilies.entries()) {
 		const batchId = `micro-${index}`;
 		const laneId = `micro-lane-${index}`;
@@ -346,4 +371,145 @@ export async function establishReviewPrerequisites(): Promise<void> {
 		SESSION_ID,
 		triggerRelative,
 	);
+}
+
+/**
+ * Two base batches independently claim the same dimension: an initial
+ * consolidated lane (owning dimA + dimB, at forced depth tier S) contributes
+ * a real candidate for each, then a later retry lane re-claims dimB alone
+ * with a fresh candidate. Exercises the dimension-scoped extraction fix: the
+ * retry's fresh candidate must supersede the initial lane's now-stale dimB
+ * content, while the initial lane's still-uniquely-owned dimA candidate must
+ * still surface.
+ */
+export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Promise<{
+	onlyDimACandidateId: string;
+	freshDimBCandidateId: string;
+	staleDimBCandidateId: string;
+	remainingBaseCandidateIds: string[];
+}> {
+	await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+
+	const originalResolvePrReviewDiffStats =
+		_test_exports.resolvePrReviewDiffStats;
+	try {
+		_test_exports.resolvePrReviewDiffStats = () => ({
+			changedLines: 10,
+			changedFiles: 2,
+			hasSubmoduleChange: false,
+		});
+		await bindPrReviewBase(tempDir, SESSION_ID, {
+			prHeadSha: HEAD_SHA,
+			baseRef: 'origin/main',
+			baseSha: PR_REVIEW_BASE_SHA,
+		});
+	} finally {
+		_test_exports.resolvePrReviewDiffStats = originalResolvePrReviewDiffStats;
+	}
+
+	const [dimA, dimB, ...remainingDimensions] = PR_REVIEW_BASE_DIMENSION_IDS;
+	const onlyDimACandidateId = 'ONLY-DIMA';
+	const staleDimBCandidateId = 'STALE-DIMB';
+	const freshDimBCandidateId = 'FRESH-DIMB';
+	const candidateHeader =
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+
+	const consolidatedLane = {
+		laneId: 'sweep-ab',
+		workflowLane: dimA,
+		ownedWorkflowLanes: [dimA, dimB],
+	};
+	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [consolidatedLane], {
+		batchId: 'base-consolidated-ab',
+		prHeadSha: HEAD_SHA,
+	});
+	await persistBatch(
+		'base-consolidated-ab',
+		'swarm-pr-review:base',
+		[consolidatedLane],
+		{
+			textOverride: [
+				candidateHeader,
+				`${onlyDimACandidateId} | ${dimA} | HIGH | correctness | file.ts:1 | claim-a | evidence-a | impact-a | HIGH`,
+				`${staleDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:2 | claim-b-stale | evidence-b-stale | impact-b-stale | HIGH`,
+			].join('\n'),
+			scope: PR_REVIEW_SCOPE,
+		},
+	);
+
+	const retryLane = { laneId: 'retry-dimb', workflowLane: dimB };
+	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [retryLane], {
+		batchId: 'base-retry-dimb',
+		prHeadSha: HEAD_SHA,
+	});
+	await persistBatch('base-retry-dimb', 'swarm-pr-review:base', [retryLane], {
+		textOverride: [
+			candidateHeader,
+			`${freshDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:3 | claim-b-fresh | evidence-b-fresh | impact-b-fresh | HIGH`,
+		].join('\n'),
+		scope: PR_REVIEW_SCOPE,
+	});
+
+	const remainingLanes = remainingDimensions.map((workflowLane) => ({
+		laneId: workflowLane,
+		workflowLane,
+	}));
+	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, remainingLanes, {
+		batchId: 'base-remaining',
+		prHeadSha: HEAD_SHA,
+	});
+	await persistBatch('base-remaining', 'swarm-pr-review:base', remainingLanes, {
+		scope: PR_REVIEW_SCOPE,
+	});
+	const remainingBaseCandidateIds = remainingLanes.map(
+		(_lane, index) => `C-${index}`,
+	);
+
+	const triggerRows: Array<Record<string, string>> = [];
+	for (const [
+		index,
+		workflowLane,
+	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
+		const batchId = `micro-${index}`;
+		const laneId = `micro-lane-${index}`;
+		await persistBatch(
+			batchId,
+			'swarm-pr-review:micro',
+			[{ laneId, workflowLane }],
+			{
+				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				scope: PR_REVIEW_SCOPE,
+			},
+		);
+		triggerRows.push({
+			trigger_id: workflowLane,
+			result: 'MATCHED',
+			source_batch_id: batchId,
+			source_lane_id: laneId,
+		});
+	}
+	const triggerRelative = path.join(
+		'pr-review',
+		'test-run',
+		'trigger-eval.json',
+	);
+	const triggerAbsolute = path.join(tempDir, '.swarm', triggerRelative);
+	await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
+	await fs.writeFile(
+		triggerAbsolute,
+		JSON.stringify({ rows: triggerRows }),
+		'utf-8',
+	);
+	await markPrReviewTriggerEvaluationComplete(
+		tempDir,
+		SESSION_ID,
+		triggerRelative,
+	);
+
+	return {
+		onlyDimACandidateId,
+		freshDimBCandidateId,
+		staleDimBCandidateId,
+		remainingBaseCandidateIds,
+	};
 }
