@@ -5,6 +5,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	establishReviewPrerequisitesWithConsolidatedMicroLane,
+	establishReviewPrerequisitesWithMislabeledSingletonLane,
 	establishReviewPrerequisitesWithOverlappingBaseRetry,
 	HEAD_SHA,
 	PR_REVIEW_SCOPE,
@@ -157,6 +158,54 @@ describe('pr-workflow-gate candidate inventory deduplication', () => {
 			'swarm-pr-review:reviewer',
 			[{ laneId: 'review-correct', workflowLane: 'review-correct' }],
 			{ textOverride: reviewerRows, scope: PR_REVIEW_SCOPE },
+		);
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+	});
+
+	test('a singleton base lane credited for its full ownership is never lane-scoped, so a mislabeled row still contributes its candidate', async () => {
+		const { normalCandidateIds, coveringCandidateId, mislabeledCandidateId } =
+			await establishReviewPrerequisitesWithMislabeledSingletonLane();
+		const allCandidateIds = [
+			...normalCandidateIds,
+			coveringCandidateId,
+			mislabeledCandidateId,
+		];
+
+		// Before the fix, every base source (including a plain, never-superseded
+		// singleton lane) was unconditionally given a creditedLanes scope equal
+		// to its own single dimension, so extraction silently dropped any
+		// [CANDIDATE] row whose lane field didn't match that dimension exactly
+		// — even though nothing was ever superseded and historical behavior
+		// never filtered singleton-lane rows by label at all. Declaring the
+		// mislabeled candidate as required here would previously fail with
+		// "extra" (never mind reject an incomplete set) once dropped from the
+		// mechanically derived inventory.
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'reviewer',
+			[
+				{
+					laneId: 'review-all',
+					workflowLane: 'review-all',
+					reviewItemIds: allCandidateIds,
+				},
+			],
+			{ batchId: 'review-all', prHeadSha: HEAD_SHA },
+		);
+		const reviewerRows = allCandidateIds
+			.map(
+				(id) =>
+					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+			)
+			.join('\n');
+		await persistBatch(
+			'review-all',
+			'swarm-pr-review:reviewer',
+			[{ laneId: 'review-all', workflowLane: 'review-all' }],
+			{ textOverride: reviewerRows },
 		);
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),

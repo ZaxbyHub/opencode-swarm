@@ -66,6 +66,23 @@
   profiles, depth tiers, and adapter native paths, and new runtime tests
   cover tier computation, tier floors, consolidated ownership partitions,
   ownership-aware trigger-ledger acceptance, and per-family parsing.
+- Independent review of this change surfaced and closed several further
+  hardening gaps before merge: depth-tier classification now escalates to L
+  on file-count overflow (not just changed-line count) or any submodule
+  pointer change in the bound diff, since a gitlink bump reports a fixed,
+  size-independent numstat delta; a later base-dimension retry batch that
+  re-claims a subset of an earlier consolidated lane's dimensions no longer
+  resurrects that lane's stale content for the dimension it no longer owns,
+  while a lane still credited for its full original ownership (including
+  every tier-L singleton lane) is never label-scoped at all, so it keeps
+  extracting every well-formed `[CANDIDATE]` row exactly as before
+  regardless of a subagent's inconsistent lane-field labeling; the
+  equivalent cross-batch ownership-overlap check was added to trigger-ledger
+  validation; multi-family coverage attestations now require genuinely
+  distinct evidence text per family, closing a copy-paste-template gap; and
+  the persisted gate-state schema accepts unknown top-level fields and
+  recovers via `abort_pr_workflow` even when a stored record predates a
+  newly-added field, instead of permanently wedging the session.
 
 ## Why
 
@@ -93,3 +110,6 @@ Callers that want consolidated dispatch opt in by declaring
 `owned_workflow_lanes` on base/micro lanes when the controller-computed tier
 is S or M. Repositories consuming the bundled skills on other harnesses now
 get a real, attested execution path instead of an instructed dead end.
+Persisted gate-state records written before this change (missing the new
+`prReviewDiffStats.hasSubmoduleChange` field) continue to load correctly —
+the field defaults rather than rejecting the record.

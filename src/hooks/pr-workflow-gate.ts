@@ -3421,6 +3421,7 @@ function derivePrReviewCandidateInventory(
 		{ batchId: string; laneId: string }
 	>();
 	const baseSourceCreditedDimensions = new Map<string, string[]>();
+	const baseSourceFullOwnershipCount = new Map<string, number>();
 	for (const batch of [...(state.prReviewBaseDispatches ?? [])].reverse()) {
 		const successful = successfulObligationsFromExactBatch(
 			directory,
@@ -3436,13 +3437,14 @@ function derivePrReviewCandidateInventory(
 				: [lane.workflowLane];
 			if (!ownedDimensions.every((dimension) => successful.has(dimension)))
 				continue;
+			const key = `${batch.batchId}\0${lane.laneId}`;
+			baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
 			for (const dimension of ownedDimensions) {
 				if (!baseDimensionSources.has(dimension)) {
 					baseDimensionSources.set(dimension, {
 						batchId: batch.batchId,
 						laneId: lane.laneId,
 					});
-					const key = `${batch.batchId}\0${lane.laneId}`;
 					const credited = baseSourceCreditedDimensions.get(key);
 					if (credited) {
 						credited.push(dimension);
@@ -3458,11 +3460,23 @@ function derivePrReviewCandidateInventory(
 		const key = `${batchId}\0${laneId}`;
 		if (seenBaseSourceKeys.has(key)) continue;
 		seenBaseSourceKeys.add(key);
+		const credited = baseSourceCreditedDimensions.get(key);
+		const fullOwnershipCount = baseSourceFullOwnershipCount.get(key) ?? 0;
 		sources.push({
 			batchId,
 			laneId,
 			mode: 'swarm-pr-review:base',
-			creditedLanes: baseSourceCreditedDimensions.get(key),
+			// Scope extraction ONLY when this lane is credited for a strict
+			// subset of its full ownership (a more recent batch claimed the
+			// rest). A lane credited for its full ownership — every tier-L
+			// singleton lane, and any consolidated lane whose complete owned
+			// set remains uncontested — gets no filter at all, exactly
+			// matching pre-existing behavior: extract every well-formed
+			// [CANDIDATE] row regardless of its lane label, so a subagent's
+			// inconsistent lane-field labeling never silently drops a real
+			// candidate from the mandatory coverage set.
+			creditedLanes:
+				credited && credited.length < fullOwnershipCount ? credited : undefined,
 		});
 	}
 	const selectedCouncilLanes = new Set<string>();

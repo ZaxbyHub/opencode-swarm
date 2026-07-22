@@ -513,3 +513,134 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 		remainingBaseCandidateIds,
 	};
 }
+
+/**
+ * Same base/micro coverage as establishReviewPrerequisites, but one singleton
+ * (fully-owned, never-superseded) base lane's [CANDIDATE] row labels itself
+ * with a slightly different lane string than the exact dimension it was
+ * dispatched for — a realistic subagent labeling inconsistency. Exercises
+ * that a lane credited for its FULL ownership gets no extraction scoping at
+ * all (matching pre-existing behavior), so this mismatch never silently
+ * drops the candidate from the mandatory coverage set.
+ */
+export async function establishReviewPrerequisitesWithMislabeledSingletonLane(): Promise<{
+	normalCandidateIds: string[];
+	coveringCandidateId: string;
+	mislabeledCandidateId: string;
+}> {
+	await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+	const baseLanes = PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) => ({
+		laneId: workflowLane,
+		workflowLane,
+	}));
+	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, baseLanes, {
+		batchId: 'base-all',
+		prHeadSha: HEAD_SHA,
+	});
+	const [mislabeledLane, ...normalLanes] = baseLanes;
+	await persistBatch('base-all', 'swarm-pr-review:base', normalLanes);
+	const normalCandidateIds = normalLanes.map((_lane, index) => `C-${index}`);
+
+	// One correctly-labeled row proves this lane covers its dispatched
+	// dimension (required for base coverage to settle at all); a second,
+	// well-formed row for the SAME lane labels itself with a slightly
+	// different string — a realistic case of a subagent finding two issues
+	// in one dispatch and being inconsistent about the exact label on the
+	// second one.
+	const coveringCandidateId = 'C-COVERING';
+	const mislabeledCandidateId = 'C-MISLABELED';
+	const mislabeledText = [
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+		`${coveringCandidateId} | ${mislabeledLane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		`${mislabeledCandidateId} | ${mislabeledLane.workflowLane}-typo | HIGH | correctness | file.ts:2 | claim | evidence | impact | HIGH`,
+	].join('\n');
+	const mislabeledCorrelationId = 'base-all-mislabeled';
+	await recordPendingDelegation(tempDir, {
+		correlationId: mislabeledCorrelationId,
+		jobId: null,
+		subagentSessionId: mislabeledCorrelationId,
+		parentSessionId: SESSION_ID,
+		callID: `call-${mislabeledCorrelationId}`,
+		normalizedAgent: 'reviewer',
+		swarmPrefixedAgent: 'reviewer',
+		planTaskId: null,
+		evidenceTaskId: null,
+		batchId: 'base-all',
+		laneId: mislabeledLane.laneId,
+		mode: 'swarm-pr-review:base',
+		workflowLane: mislabeledLane.workflowLane,
+		workspace: {
+			directory: tempDir,
+			gitHead: HEAD_SHA,
+			dirtyHash: null,
+			prHeadSha: HEAD_SHA,
+			scope: null,
+		},
+	});
+	const stored = storeLaneOutput(tempDir, {
+		batchId: 'base-all',
+		laneId: mislabeledLane.laneId,
+		agent: 'reviewer',
+		role: 'reviewer',
+		sessionId: mislabeledCorrelationId,
+		parentSessionId: SESSION_ID,
+		mode: 'swarm-pr-review:base',
+		workflowLane: mislabeledLane.workflowLane,
+		prHeadSha: HEAD_SHA,
+		gitHead: HEAD_SHA,
+		revisionDigest: REVISION_DIGEST,
+		source: 'collect_lane_results',
+		text: mislabeledText,
+	});
+	await appendDelegationTransition(tempDir, mislabeledCorrelationId, {
+		status: 'completed',
+		result: {
+			text: mislabeledText,
+			chars: stored.chars,
+			truncated: false,
+			digest: stored.digest,
+			...(stored.ref ? { outputRef: stored.ref } : {}),
+		},
+	});
+
+	const triggerRows: Array<Record<string, string>> = [];
+	for (const [
+		index,
+		workflowLane,
+	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
+		const batchId = `micro-${index}`;
+		const laneId = `micro-lane-${index}`;
+		await persistBatch(
+			batchId,
+			'swarm-pr-review:micro',
+			[{ laneId, workflowLane }],
+			{
+				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+			},
+		);
+		triggerRows.push({
+			trigger_id: workflowLane,
+			result: 'MATCHED',
+			source_batch_id: batchId,
+			source_lane_id: laneId,
+		});
+	}
+	const triggerRelative = path.join(
+		'pr-review',
+		'test-run',
+		'trigger-eval.json',
+	);
+	const triggerAbsolute = path.join(tempDir, '.swarm', triggerRelative);
+	await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
+	await fs.writeFile(
+		triggerAbsolute,
+		JSON.stringify({ rows: triggerRows }),
+		'utf-8',
+	);
+	await markPrReviewTriggerEvaluationComplete(
+		tempDir,
+		SESSION_ID,
+		triggerRelative,
+	);
+	return { normalCandidateIds, coveringCandidateId, mislabeledCandidateId };
+}
