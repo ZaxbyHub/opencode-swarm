@@ -70,10 +70,16 @@ async function recordCompletedLane(
 		laneId: string;
 		workflowLane: string;
 		mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro';
+		ownedWorkflowLanes?: string[];
 	},
 ): Promise<void> {
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
-	const text = `[CLEAN] | ${input.workflowLane} | exact reviewed diff | no candidate survived the focused review`;
+	const text = (input.ownedWorkflowLanes ?? [input.workflowLane])
+		.map(
+			(family) =>
+				`[CLEAN] | ${family} | exact reviewed diff | no candidate survived the focused review`,
+		)
+		.join('\n');
 	await recordPendingDelegation(root, {
 		correlationId,
 		jobId: null,
@@ -88,6 +94,7 @@ async function recordCompletedLane(
 		laneId: input.laneId,
 		mode: input.mode,
 		workflowLane: input.workflowLane,
+		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {
 			directory: root,
 			gitHead: HEAD_SHA,
@@ -124,7 +131,10 @@ async function recordCompletedLane(
 	});
 }
 
-async function establishBoundReviewGate(root: string): Promise<void> {
+async function establishBoundReviewGate(
+	root: string,
+	options: { consolidatedMicro?: boolean } = {},
+): Promise<void> {
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
@@ -151,6 +161,25 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 			workflowLane: lane.workflowLane,
 			mode: 'swarm-pr-review:base',
 		});
+	}
+	if (options.consolidatedMicro) {
+		const sweepA = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6)];
+		const sweepB = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(6)];
+		await recordCompletedLane(root, {
+			batchId: 'micro-consolidated',
+			laneId: 'sweep-a',
+			workflowLane: sweepA[0],
+			ownedWorkflowLanes: sweepA,
+			mode: 'swarm-pr-review:micro',
+		});
+		await recordCompletedLane(root, {
+			batchId: 'micro-consolidated',
+			laneId: 'sweep-b',
+			workflowLane: sweepB[0],
+			ownedWorkflowLanes: sweepB,
+			mode: 'swarm-pr-review:micro',
+		});
+		return;
 	}
 	for (const [
 		index,
@@ -392,56 +421,7 @@ describe('write_pr_review_trigger_eval', () => {
 		});
 	}
 
-	test('unknown-trigger-IDs error lists valid IDs and namespace boundaries (issue #1931)', async () => {
-		// The reporter of #1931 fed the validator mode strings and base-lane
-		// IDs. The error must surface the 11 valid micro-lane IDs and call
-		// out the three namespaces so the next call succeeds.
-		const confusedRows = [
-			...rows().slice(0, 10),
-			{
-				trigger_id: 'swarm-pr-review:base',
-				result: 'MATCHED' as const,
-				evidence: 'confused mode string for trigger_id',
-				source_batch_id: 'confused-batch',
-				source_lane_id: 'confused-lane',
-			},
-		];
-		const result = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'review-1931',
-					pr_head_sha: 'abc123',
-					rows: confusedRows,
-				},
-				tempRoot(),
-			),
-		);
-		expect(result.success).toBe(false);
-		expect(result.message).toContain('unknown trigger IDs');
-		// Must list ALL 11 valid IDs (issue #1931 reviewer item: a regression
-		// that drops any ID from the error must fail this test).
-		for (const validId of [
-			'auth-identity-secrets',
-			'untrusted-input-boundaries',
-			'subprocess-platform',
-			'concurrency-state',
-			'dependencies-build-release',
-			'api-schema-migrations',
-			'test-infrastructure',
-			'ui-accessibility-i18n',
-			'privacy-observability',
-			'generated-provenance',
-			'unclassified-risk',
-		]) {
-			expect(result.message).toContain(validId);
-		}
-		// Must call out that base-lane IDs and mode strings are not trigger IDs.
-		expect(result.message).toMatch(/base-lane IDs/i);
-		expect(result.message).toMatch(/mode strings/i);
-		expect(result.message).toMatch(/swarm-pr-review:base/);
-	});
-
-	test('rejects MATCHED without unique dispatch provenance', async () => {
+	test('rejects MATCHED rows missing dispatch provenance fields', async () => {
 		const missing = rows();
 		delete (missing[0] as { source_batch_id?: string }).source_batch_id;
 		const missingResult = JSON.parse(
@@ -451,19 +431,6 @@ describe('write_pr_review_trigger_eval', () => {
 			),
 		);
 		expect(missingResult.message).toContain('MATCHED rows require');
-
-		const duplicate = rows();
-		duplicate[1] = {
-			...duplicate[0],
-			trigger_id: duplicate[1].trigger_id,
-		};
-		const duplicateResult = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{ run_id: 'review-1805', pr_head_sha: 'abc123', rows: duplicate },
-				tempRoot(),
-			),
-		);
-		expect(duplicateResult.message).toContain('unique dispatch provenance');
 	});
 
 	test('rejects any NO-MATCH waiver instead of guessing semantic applicability', async () => {

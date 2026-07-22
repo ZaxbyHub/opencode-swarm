@@ -337,4 +337,86 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 			expect(result.diagnostics.parse_errors).toBe(0);
 		});
 	});
+
+	describe('consolidated depth-tier lane artifacts (per-family extraction)', () => {
+		const consolidatedFlags: ParseFlags = {
+			...defaultFlags,
+			expected_family: 'micro_lane',
+			expected_micro_lane: 'auth-identity-secrets',
+			expected_micro_lanes: ['auth-identity-secrets', 'subprocess-platform'],
+		};
+
+		test('extracts only the expected family; owned sibling rows skip without errors', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-AUTH-1 | auth-identity-secrets | HIGH | secrets | src/auth.ts:10 | leaked token | LEAST_PRIVILEGE | token in log output | HIGH',
+				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(1);
+			expect(result.candidates[0].candidate_id).toBe('C-AUTH-1');
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('accepts a CLEAN for the expected family alongside sibling-family candidates', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
+				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(0);
+			expect(result.clean_attestation?.micro_lane).toBe(
+				'auth-identity-secrets',
+			);
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('sibling-family CLEAN rows skip so each per-family call sees one attestation', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
+				'[CLEAN] | subprocess-platform | exact reviewed diff | no candidate survived the focused review',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.clean_attestation?.micro_lane).toBe(
+				'auth-identity-secrets',
+			);
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('families outside the owned set are still refused as mismatches', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-UI-1 | ui-accessibility-i18n | LOW | focus | src/ui.ts:5 | focus trap | KEYBOARD_ACCESS | tab order breaks | LOW',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(0);
+			expect(result.diagnostics.malformed_rows).toBe(1);
+			expect(
+				result.diagnostics.parse_error_details.some((detail) =>
+					detail.message.includes('Expected micro_lane'),
+				),
+			).toBe(true);
+		});
+	});
 });

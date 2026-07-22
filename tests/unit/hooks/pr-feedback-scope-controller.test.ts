@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate.js';
 import {
 	_test_exports,
@@ -19,8 +19,13 @@ import {
 	persistBatch,
 	REVISION_DIGEST,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 async function settleFeedbackVerification(): Promise<void> {
 	await activatePrWorkflow(tempDir, SESSION_ID, 'PR_FEEDBACK');

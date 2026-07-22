@@ -13,46 +13,47 @@ description: >
 # Swarm PR Review
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
 ## Claude Code Execution Notes
-- `PR_REVIEW` is read-only with respect to the PR branch. You may fetch refs,
-  inspect metadata, and check out the PR head after verifying a clean working
-  tree, but do not fix code, resolve conflicts, commit, push, rebase, or reset
-  from this mode.
+- A plain Claude Code session has none of the swarm plugin's controller tools:
+  that is canonical Profile B, not an error. Never report BLOCKED merely
+  because controller tools are absent — dispatch the review through the
+  `Agent`/`Task` subagent tool, following the canonical phases, role
+  boundaries, row contracts, and join barriers.
+- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect
+  metadata, and check out the PR head after verifying a clean working tree,
+  but do not fix code, resolve conflicts, commit, push, rebase, or reset.
 - Before dispatching explorer lanes, fetch the PR head and verify `git cat-file -e
   <full_pr_head_sha>^{commit}`; run `git switch --detach <full_pr_head_sha>`, confirm and bind that exact HEAD. Do not use `--track FETCH_HEAD`.
-- Ingest every review signal before explorer lanes: PR comments,
-  review summaries, requested changes, bot findings, CI/check failures,
+- Ingest every review signal before explorer lanes: PR comments, review
+  summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
-  issues, and commit messages.
+  issues, and commit messages — each a claim until reviewer validation proves
+  or disproves it with file:line evidence.
 - If the repository defines a PR publication contract in local docs, templates,
-  skills, or CI, ingest it as an obligation source. Do not assume this repo's
-  title/body sections when the target repo does not define them.
-- Treat every ingested signal as a claim until reviewer validation proves or
-  disproves it with file:line evidence or explicit counter-evidence.
-- Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
-  comments, review threads, checks, conflicts, and head SHA.
-- Use the canonical deterministic lane flow: `dispatch_lanes_async` plus
-  incremental `collect_lane_results` polling (without `wait`) to process
-  settled lanes while continuing independent work; fall back to `wait: true`
-  only when no independent work remains. All lanes must be settled before
-  synthesis or phase transitions.
-- If structured lane retries cannot close required coverage, stop and surface
-  the lane failure as BLOCKED. Blocking and direct-Task dispatch are not
-  equivalent because they cannot preserve the canonical skill's durable
-  workflow-lane and exact-head provenance; do not produce a degraded review or
-  partial verdict.
-- When lane results include `output_ref`, call `retrieve_lane_output` for
-  full text, then `parse_lane_candidates` to extract structured candidates
-  for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
-- Clean lanes still require a fully populated row with evidence, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence` for a base lane or
-  `[CLEAN] | micro_lane | coverage_scope | evidence` for a micro-lane.
-- All 11 repository-agnostic micro-lanes in the canonical skill are mandatory;
-  diff/path heuristics may focus prompts but cannot produce a `NO-MATCH` waiver.
-- A newer reviewer batch invalidates all older critic evidence. Re-run the
-  critic from the latest complete reviewer inventory before completion.
-- Call `complete_pr_workflow` before the final response. While the gate remains
-  active it replaces the response and resumes idle work; a user interruption pauses automatic wakes until a later explicit user turn.
-- If bind/checkout is genuinely unreachable, call `abort_pr_workflow` or run `/swarm abort-pr-workflow` (see canonical abort section; never a shortcut).
+  skills, or CI, ingest it as an obligation source; do not assume this repo's
+  title/body sections elsewhere.
+- Prefer GitHub connector/MCP tools when available, or `gh`, to inspect PR
+  metadata, comments, review threads, checks, conflicts, and head SHA.
+- Profile B accounting: classify the depth tier (S/M/L); cover all six base
+  dimensions and evaluate all 11 risk families with lane counts scaled per the
+  canonical depth-tier table; stamp every subagent prompt and ledger row with
+  its workflow-lane id and exact-head provenance (the bound `pr_head_sha`);
+  persist findings and trigger ledgers as files in the session task workspace,
+  never under `.swarm/`.
+- Clean lanes still require a fully populated row, such as
+  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing per-family
+  attestation is an unclosed coverage gap — retry it or surface it as BLOCKED
+  rather than emitting a degraded review or partial verdict.
+- Use fresh reviewer subagents for candidate validation and fresh critic
+  subagents after review; a newer reviewer batch invalidates older critic
+  evidence. The Pre-Synthesis Gate checklist is the completion gate.
+- Only if this session actually exposes the swarm controller tools
+  (`dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`),
+  run Profile A instead: structured modes, incremental polling, full-text
+  retrieval for every `output_ref`, `complete_pr_workflow` before the final
+  response, and an initial base wave of one exact-six batch at tier L or a
+  smaller `owned_workflow_lanes`-partitioned batch at tiers S/M (controller
+  computes the tier from the bound diff). While active, blocking dispatch
+  and direct-Task dispatch are not equivalent — never bypass it.
 - If actionable findings remain, write the canonical handoff artifact and ask
-  whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
-  Carry validated findings forward with their original IDs and provenance.
+  whether to continue with `swarm-pr-feedback`; carry validated findings
+  forward with their original IDs and provenance.

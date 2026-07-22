@@ -77,6 +77,12 @@ export interface BackgroundDelegationRecord {
 	mode?: string;
 	/** Mechanical PR workflow obligation identifier, distinct from retry-safe laneId. */
 	workflowLane?: string;
+	/**
+	 * Complete set of PR-review dimensions/risk families this lane covers when a
+	 * depth tier consolidates dispatch. Always contains workflowLane. Absent for
+	 * singleton lanes (legacy and tier-L dispatches).
+	 */
+	ownedWorkflowLanes?: string[];
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -195,6 +201,11 @@ const RecordSchema = z
 		laneId: z.string().optional(),
 		mode: z.string().optional(),
 		workflowLane: z.string().optional(),
+		ownedWorkflowLanes: z
+			.array(z.string().min(1).max(120))
+			.min(1)
+			.max(11)
+			.optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -292,6 +303,7 @@ export interface RecordPendingInput {
 	laneId?: string;
 	mode?: string;
 	workflowLane?: string;
+	ownedWorkflowLanes?: string[];
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
@@ -330,6 +342,9 @@ export async function recordPendingDelegation(
 		...(input.laneId ? { laneId: input.laneId } : {}),
 		...(input.mode ? { mode: input.mode } : {}),
 		...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
+		...(input.ownedWorkflowLanes?.length
+			? { ownedWorkflowLanes: [...input.ownedWorkflowLanes] }
+			: {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
 		...(input.taskChangeContext

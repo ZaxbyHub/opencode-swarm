@@ -195,7 +195,6 @@ export async function executeWritePrReviewTriggerEval(
 		return failure(`missing trigger IDs: ${missingIds.join(', ')}`);
 	}
 
-	const provenance = new Set<string>();
 	for (const row of parsed.data.rows) {
 		if (row.result === 'MATCHED') {
 			if (!row.source_batch_id || !row.source_lane_id) {
@@ -203,15 +202,13 @@ export async function executeWritePrReviewTriggerEval(
 					`MATCHED rows require source_batch_id and source_lane_id: ${row.trigger_id}`,
 				);
 			}
-			const tuple = `${row.source_batch_id}\0${row.source_lane_id}`;
-			if (provenance.has(tuple)) {
-				return failure(
-					`MATCHED rows require unique dispatch provenance: ${row.trigger_id}`,
-				);
-			}
-			provenance.add(tuple);
 		}
 	}
+	// One dispatch tuple may back several rows only when the dispatched lane
+	// declared consolidated ownership of exactly those families; the per-row
+	// record validation below enforces ownership containment and all-owned
+	// artifact attestation, so a lane can never lend provenance to a family it
+	// did not declare and fully attest.
 
 	const sessionID = context.sessionID?.trim();
 	if (!sessionID) {
@@ -249,6 +246,12 @@ export async function executeWritePrReviewTriggerEval(
 			'Active PR_REVIEW trigger evaluation could not bind the current exact revision digest',
 		);
 	}
+	// Two different (batchId, laneId) tuples cited across the row set must never
+	// declare overlapping ownedWorkflowLanes: nothing else enforces that two
+	// independently-dispatched micro batches stay disjoint over time, and an
+	// overlap would let both artifacts legitimately back the same family,
+	// duplicating (or reintroducing stale) content for it downstream.
+	const citedLaneOwnership = new Map<string, string[]>();
 	for (const row of parsed.data.rows) {
 		if (row.result !== 'MATCHED') continue;
 		const records = findByBatchId(directory, row.source_batch_id!, {
@@ -257,6 +260,15 @@ export async function executeWritePrReviewTriggerEval(
 		const record = records.find(
 			(candidate) => candidate.laneId === row.source_lane_id,
 		);
+		const recordOwnedLanes = record?.ownedWorkflowLanes?.length
+			? record.ownedWorkflowLanes
+			: record?.workflowLane
+				? [record.workflowLane]
+				: [];
+		citedLaneOwnership.set(
+			`${row.source_batch_id}\0${row.source_lane_id}`,
+			recordOwnedLanes,
+		);
 		const outputRef = record?.result?.outputRef?.trim();
 		const outputArtifact = outputRef
 			? readLaneOutput(directory, outputRef)
@@ -264,7 +276,7 @@ export async function executeWritePrReviewTriggerEval(
 		if (
 			!record ||
 			record.mode !== 'swarm-pr-review:micro' ||
-			record.workflowLane !== row.trigger_id ||
+			!recordOwnedLanes.includes(row.trigger_id) ||
 			record.status !== 'completed' ||
 			record.result?.outputDegraded === true ||
 			record.result?.transcriptIncomplete === true ||
@@ -282,15 +294,16 @@ export async function executeWritePrReviewTriggerEval(
 			outputArtifact.artifact.role !== record.normalizedAgent ||
 			outputArtifact.artifact.source !== 'collect_lane_results' ||
 			outputArtifact.artifact.workflowLane !== record.workflowLane ||
-			outputArtifact.artifact.workflowLane !== row.trigger_id ||
 			outputArtifact.artifact.prHeadSha !== record.workspace?.prHeadSha ||
 			outputArtifact.artifact.gitHead !== record.workspace?.gitHead ||
 			outputArtifact.artifact.revisionDigest !== currentRevisionDigest ||
 			outputArtifact.artifact.digest !== record.result?.digest ||
 			outputArtifact.artifact.chars !== record.result?.chars ||
-			!prReviewDiscoveryArtifactCoversLane(
-				outputArtifact.artifact.text,
-				row.trigger_id,
+			!recordOwnedLanes.every((ownedFamily) =>
+				prReviewDiscoveryArtifactCoversLane(
+					outputArtifact.artifact.text,
+					ownedFamily,
+				),
 			) ||
 			record.workspace?.prHeadSha !== parsed.data.pr_head_sha ||
 			record.workspace?.gitHead !== parsed.data.pr_head_sha
@@ -298,6 +311,19 @@ export async function executeWritePrReviewTriggerEval(
 			return failure(
 				`MATCHED trigger ${row.trigger_id} does not reference a completed non-degraded micro-lane artifact`,
 			);
+		}
+	}
+	const citedLaneEntries = [...citedLaneOwnership.entries()];
+	for (let i = 0; i < citedLaneEntries.length; i++) {
+		for (let j = i + 1; j < citedLaneEntries.length; j++) {
+			const [keyA, ownedA] = citedLaneEntries[i];
+			const [keyB, ownedB] = citedLaneEntries[j];
+			const overlap = ownedA.filter((family) => ownedB.includes(family));
+			if (overlap.length > 0) {
+				return failure(
+					`PR_REVIEW trigger evaluation cites two lanes with overlapping ownership: "${keyA}" and "${keyB}" both declare ${overlap.join(', ')}`,
+				);
+			}
 		}
 	}
 	if (!parsed.data.base_sha) {
@@ -353,6 +379,11 @@ export async function executeWritePrReviewTriggerEval(
 		};
 	});
 	const matchedCount = artifactRows.length;
+	const dispatchedMicroLaneCount = new Set(
+		parsed.data.rows.map(
+			(row) => `${row.source_batch_id}\0${row.source_lane_id}`,
+		),
+	).size;
 	const artifact = {
 		schema_version: 1,
 		run_id: parsed.data.run_id,
@@ -363,7 +394,7 @@ export async function executeWritePrReviewTriggerEval(
 		trigger_count: artifactRows.length,
 		matched_count: matchedCount,
 		no_match_count: 0,
-		dispatched_micro_lane_count: matchedCount,
+		dispatched_micro_lane_count: dispatchedMicroLaneCount,
 		rows: artifactRows,
 	};
 
@@ -411,7 +442,7 @@ export async function executeWritePrReviewTriggerEval(
 			trigger_count: artifactRows.length,
 			matched_count: matchedCount,
 			no_match_count: 0,
-			dispatched_micro_lane_count: matchedCount,
+			dispatched_micro_lane_count: dispatchedMicroLaneCount,
 		},
 		null,
 		2,

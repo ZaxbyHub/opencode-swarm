@@ -6,41 +6,25 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	HEAD_SHA,
-	REVISION_DIGEST,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
 
 describe('PR workflow explicit capability contract', () => {
-	const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
-	const originalResolvePrWorkflowRevisionDigest =
-		_test_exports.resolvePrWorkflowRevisionDigest;
-	const originalResolveIsWorkingTreeClean =
-		_test_exports.resolveIsWorkingTreeClean;
-	const originalResolveCurrentUpstreamPushTarget =
-		_test_exports.resolveCurrentUpstreamPushTarget;
-
 	beforeEach(() => {
-		_test_exports.resetTrackedStateCache();
-		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
-		_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-		_test_exports.resolveIsWorkingTreeClean = () => true;
+		setupPrWorkflowGateFixtures();
+		// This suite's RT-001 regression targets a distinct bound branch name
+		// ("feature/pr-head") from the shared fixture default, so it layers its
+		// own upstream-push-target override on top of the shared setup.
 		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
 			remoteName: 'origin',
 			remoteBranchRef: 'refs/heads/feature/pr-head',
 			remoteTrackingRef: 'refs/remotes/origin/feature/pr-head',
 		});
 	});
-
-	afterEach(() => {
-		_test_exports.resetTrackedStateCache();
-		_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
-		_test_exports.resolvePrWorkflowRevisionDigest =
-			originalResolvePrWorkflowRevisionDigest;
-		_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
-		_test_exports.resolveCurrentUpstreamPushTarget =
-			originalResolveCurrentUpstreamPushTarget;
-	});
+	afterEach(teardownPrWorkflowGateFixtures);
 
 	test('admits required PR_REVIEW observation and safe validation tools', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {

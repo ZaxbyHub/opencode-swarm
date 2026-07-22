@@ -29,7 +29,10 @@ import {
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
 	enforcePrWorkflowDispatchLanesAsync,
+	PR_REVIEW_BASE_DIMENSION_IDS,
+	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
+	type PrReviewDepthTier,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
 } from '../hooks/pr-workflow-gate.js';
@@ -198,6 +201,14 @@ const LaneSchema = z.object({
 		.describe(
 			'Required mechanical policy identifier in PR workflows; distinct from the retry-safe lane id',
 		),
+	owned_workflow_lanes: z
+		.array(z.string().trim().min(1).max(120))
+		.min(1)
+		.max(11)
+		.optional()
+		.describe(
+			'Complete dimension/family set a consolidated PR-review base or micro lane covers under the controller-computed depth tier; must include workflow_lane. Omit for singleton lanes.',
+		),
 	feedback_item_ids: z
 		.array(z.string().trim().min(1).max(120))
 		.min(1)
@@ -336,7 +347,10 @@ const CollectLaneResultsArgsSchema = z.object({
 
 export type DispatchLaneSpec = z.infer<typeof LaneSchema>;
 
-function validatePrReviewMicroDispatch(args: DispatchLanesAsyncArgs): void {
+function validatePrReviewMicroDispatch(
+	args: DispatchLanesAsyncArgs,
+	depthTier: PrReviewDepthTier,
+): void {
 	const evaluation = args.trigger_evaluation;
 	if (!evaluation) {
 		throw new Error(
@@ -361,26 +375,40 @@ function validatePrReviewMicroDispatch(args: DispatchLanesAsyncArgs): void {
 		);
 	}
 	const required = new Set(evaluation.map((row) => row.trigger_id));
-	const laneTriggers = args.lanes.map((lane) => lane.workflow_lane ?? '');
-	const duplicates = laneTriggers.filter(
-		(value, index) => laneTriggers.indexOf(value) !== index,
-	);
-	const unmatched = laneTriggers.filter(
-		(triggerId) => !required.has(triggerId),
-	);
+	const laneOwnership = args.lanes.map((lane) => ({
+		label: lane.workflow_lane ?? '',
+		owned: lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes
+			: lane.workflow_lane
+				? [lane.workflow_lane]
+				: [],
+	}));
 	if (
-		laneTriggers.some((triggerId) => triggerId.length === 0) ||
+		depthTier === 'L' &&
+		laneOwnership.some((lane) => lane.owned.length !== 1)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW micro dispatch at depth tier L requires one dedicated lane per risk family; consolidated owned_workflow_lanes are allowed only at tiers S and M',
+		);
+	}
+	const flattened = laneOwnership.flatMap((lane) => lane.owned);
+	const duplicates = flattened.filter(
+		(value, index) => flattened.indexOf(value) !== index,
+	);
+	const unmatched = flattened.filter((triggerId) => !required.has(triggerId));
+	const invalidLabels = laneOwnership
+		.filter(
+			(lane) => lane.label.length === 0 || !lane.owned.includes(lane.label),
+		)
+		.map((lane) => lane.label || '(missing workflow_lane)');
+	if (
+		invalidLabels.length > 0 ||
 		duplicates.length > 0 ||
 		unmatched.length > 0
 	) {
-		const missingLabels = laneTriggers.some(
-			(triggerId) => triggerId.length === 0,
-		)
-			? ['(missing workflow_lane)']
-			: [];
 		throw new Error(
-			`BLOCKED: PR_REVIEW micro lanes must have unique workflow_lane IDs from the mandatory repository-agnostic lane set; invalid: ${[
-				...new Set([...missingLabels, ...duplicates, ...unmatched]),
+			`BLOCKED: PR_REVIEW micro lanes must have unique workflow_lane IDs from the mandatory repository-agnostic lane set, with workflow_lane contained in its own owned set; invalid: ${[
+				...new Set([...invalidLabels, ...duplicates, ...unmatched]),
 			].join(', ')}`,
 		);
 	}
@@ -810,17 +838,51 @@ export async function executeDispatchLanesAsync(
 					laneId: lane.id,
 					workflowLane: lane.workflow_lane,
 					reviewItemIds: lane.review_item_ids,
+					ownedWorkflowLanes: lane.owned_workflow_lanes,
 				}));
+				const depthTier: PrReviewDepthTier = gateState.prReviewDepthTier ?? 'L';
 				if (parsed.data.mode === 'swarm-pr-review:base') {
 					const isInitialBase =
 						(gateState.prReviewBaseDispatches?.length ?? 0) === 0;
-					if (
-						isInitialBase &&
-						(parsed.data.lanes.length !== 6 || parsed.data.max_concurrent !== 6)
-					) {
-						throw new Error(
-							'BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6',
+					if (isInitialBase) {
+						const ownedDimensionIds = parsed.data.lanes.flatMap((lane) =>
+							lane.owned_workflow_lanes?.length
+								? lane.owned_workflow_lanes
+								: lane.workflow_lane
+									? [lane.workflow_lane]
+									: [],
 						);
+						const coversAllSixExactlyOnce =
+							ownedDimensionIds.length ===
+								PR_REVIEW_BASE_DIMENSION_IDS.length &&
+							new Set(ownedDimensionIds).size ===
+								PR_REVIEW_BASE_DIMENSION_IDS.length &&
+							PR_REVIEW_BASE_DIMENSION_IDS.every((dimensionId) =>
+								ownedDimensionIds.includes(dimensionId),
+							);
+						if (depthTier === 'L') {
+							if (
+								parsed.data.lanes.length !== 6 ||
+								parsed.data.max_concurrent !== 6 ||
+								parsed.data.lanes.some(
+									(lane) => (lane.owned_workflow_lanes?.length ?? 1) !== 1,
+								)
+							) {
+								throw new Error(
+									'BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M)',
+								);
+							}
+						} else if (
+							!coversAllSixExactlyOnce ||
+							parsed.data.lanes.length <
+								PR_REVIEW_BASE_LANE_FLOORS[depthTier] ||
+							parsed.data.lanes.length > PR_REVIEW_BASE_DIMENSION_IDS.length ||
+							parsed.data.max_concurrent !== parsed.data.lanes.length
+						) {
+							throw new Error(
+								`BLOCKED: initial PR_REVIEW base dispatch at depth tier ${depthTier} requires between ${PR_REVIEW_BASE_LANE_FLOORS[depthTier]} and ${PR_REVIEW_BASE_DIMENSION_IDS.length} lanes whose owned_workflow_lanes partition all six dimensions exactly once, with max_concurrent equal to the lane count`,
+							);
+						}
 					}
 					for (const lane of parsed.data.lanes) {
 						if (
@@ -859,7 +921,7 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
-					validatePrReviewMicroDispatch(parsed.data);
+					validatePrReviewMicroDispatch(parsed.data, depthTier);
 				} else if (
 					parsed.data.mode === 'swarm-pr-review:council' ||
 					parsed.data.mode === 'swarm-pr-review:reviewer' ||
@@ -870,6 +932,11 @@ export async function executeDispatchLanesAsync(
 						: parsed.data.mode.endsWith(':reviewer')
 							? 'reviewer'
 							: 'critic';
+					if (parsed.data.lanes.some((lane) => lane.owned_workflow_lanes)) {
+						throw new Error(
+							`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
+						);
+					}
 					for (const lane of parsed.data.lanes) {
 						const role = resolveGeneratedAgentRole(
 							lane.agent,
@@ -901,6 +968,11 @@ export async function executeDispatchLanesAsync(
 				const headSha = parsed.data.pr_head_sha;
 				if (!headSha) {
 					throw new Error('BLOCKED: PR_FEEDBACK dispatch requires pr_head_sha');
+				}
+				if (parsed.data.lanes.some((lane) => lane.owned_workflow_lanes)) {
+					throw new Error(
+						'BLOCKED: PR_FEEDBACK lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to PR_REVIEW base and micro discovery lanes',
+					);
 				}
 				if (parsed.data.mode === 'swarm-pr-feedback:verification') {
 					await declarePrFeedbackInventory(
@@ -1233,6 +1305,7 @@ async function launchAsyncLane(args: {
 			laneId: args.lane.id,
 			mode: args.mode ?? 'advisory',
 			workflowLane: args.lane.workflow_lane,
+			ownedWorkflowLanes: args.lane.owned_workflow_lanes,
 			promptHash: promptHash(args.lane, args.directory, args.batchId),
 			workspace: {
 				directory: args.directory,
@@ -2061,9 +2134,20 @@ function applyExplorerFormatSuffix(
 		if (role !== 'explorer') return lane;
 		if (lane.prompt.includes('[CANDIDATE]')) return lane;
 		const exactLane = lane.workflow_lane ?? lane.id;
+		const ownedLanes = lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes
+			: [exactLane];
+		const identity =
+			ownedLanes.length === 1
+				? `every output row MUST use the exact lane value "${ownedLanes[0]}"`
+				: `this consolidated lane covers ${ownedLanes.length} obligations — evaluate EVERY one and emit a distinct [CANDIDATE] row set or fully populated [CLEAN] attestation for EACH of: ${ownedLanes
+						.map((owned) => `"${owned}"`)
+						.join(
+							', ',
+						)}; every output row MUST use the exact lane value of the obligation it reports`;
 		const prompt = `${lane.prompt}
 
-CONTROLLER-BOUND OUTPUT IDENTITY: every output row MUST use the exact lane value "${exactLane}". Placeholder text such as "workflow_lane" is invalid.${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
+CONTROLLER-BOUND OUTPUT IDENTITY: ${identity}. Placeholder text such as "workflow_lane" is invalid.${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			logger.log(
 				`[dispatch-lanes] applyExplorerFormatSuffix: lane "${lane.id}" prompt too long ` +
@@ -2105,18 +2189,30 @@ function applyPrWorkflowPromptContract(
 	const contracted = lanes.map((lane) => {
 		const workflowLane = lane.workflow_lane ?? '';
 		const assignedIds = lane.review_item_ids ?? lane.feedback_item_ids ?? [];
-		const checklist =
-			PR_WORKFLOW_LANE_CHECKLISTS[workflowLane] ??
-			(mode.endsWith(':reviewer')
-				? 're-read every assigned candidate at its exact location; prove classification, reachability, mitigation, severity, and falsification path'
-				: mode.endsWith(':critic')
-					? 'challenge every assigned verdict for evidence, reachability, mitigation, severity, coherence, and required report changes'
-					: 'inspect the bound scope using the complete repository-defined contract for this lane');
+		const fallbackChecklist = mode.endsWith(':reviewer')
+			? 're-read every assigned candidate at its exact location; prove classification, reachability, mitigation, severity, and falsification path'
+			: mode.endsWith(':critic')
+				? 'challenge every assigned verdict for evidence, reachability, mitigation, severity, coherence, and required report changes'
+				: 'inspect the bound scope using the complete repository-defined contract for this lane';
+		const ownedLanes = lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes
+			: undefined;
+		const checklist = ownedLanes
+			? ownedLanes
+					.map(
+						(owned) =>
+							`[${owned}] ${PR_WORKFLOW_LANE_CHECKLISTS[owned] ?? fallbackChecklist}`,
+					)
+					.join(' ')
+			: (PR_WORKFLOW_LANE_CHECKLISTS[workflowLane] ?? fallbackChecklist);
+		const ownedLine = ownedLanes
+			? `\nowned_workflow_lanes: ${ownedLanes.join(', ')} — every owned obligation requires its own [CANDIDATE] rows or fully populated [CLEAN] attestation naming that obligation`
+			: '';
 		const contract = `
 
 [CONTROLLER-BOUND PR WORKFLOW CONTRACT]
 mode: ${mode}
-workflow_lane: ${workflowLane}
+workflow_lane: ${workflowLane}${ownedLine}
 pr_head_sha: ${options.prHeadSha}
 revision_digest: ${options.revisionDigest}
 declared_scope: ${options.scope ?? 'the exact checked-out PR revision and repository-defined diff context'}

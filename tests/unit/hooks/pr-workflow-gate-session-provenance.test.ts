@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	assertPrReviewValidationSettled,
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -9,8 +9,13 @@ import {
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 describe('pr-workflow-gate independent session provenance', () => {
 	test('critic settlement rejects reuse of a reviewer child session', async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -14,8 +14,13 @@ import {
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 describe('pr-workflow-gate review validation', () => {
 	test('PR review completion cannot clear with zero reviewer obligations', async () => {
@@ -86,7 +91,7 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'missing-provenance-review', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('unique source provenance');
+		).rejects.toThrow('complete source provenance');
 	});
 
 	test('reviewer ownership is derived from discovery artifacts and critic routing is mandatory', async () => {

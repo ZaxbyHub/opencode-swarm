@@ -16,6 +16,7 @@ import {
 	resolveExactRemoteBranchHead,
 	resolveIsExactSingleChildCommit,
 	resolveIsWorkingTreeClean,
+	resolvePrReviewDiffStats,
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveRemoteRefsContainingHead,
@@ -52,10 +53,75 @@ export type PrReviewBaseDimensionId =
 	(typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
 export type PrWorkflowMode = 'PR_REVIEW' | 'PR_FEEDBACK';
 
+export type PrReviewDepthTier = 'S' | 'M' | 'L';
+
+/**
+ * Objective size thresholds for the controller-computed PR-review depth tier.
+ * Risk-trigger escalation is semantic and stays caller-side: callers may
+ * always dispatch more lanes than a tier's floor, never fewer.
+ */
+export const PR_REVIEW_DEPTH_TIER_THRESHOLDS = {
+	smallMaxChangedLines: 50,
+	smallMaxChangedFiles: 3,
+	mediumMaxChangedLines: 500,
+	mediumMaxChangedFiles: 20,
+} as const;
+
+/**
+ * Minimum initial base-wave lane counts per depth tier. Tier L preserves the
+ * historical exact-six singleton wave; S/M permit consolidated lanes that own
+ * multiple dimensions while every dimension stays mandatory to evaluate.
+ */
+export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
+	S: 1,
+	M: 3,
+	L: PR_REVIEW_BASE_DIMENSION_IDS.length,
+};
+
+/**
+ * Unknown or uncomputable diff size fails strict to the deepest tier, as does
+ * any range containing a submodule pointer change: git's numstat reports a
+ * gitlink bump as a fixed 1-added/1-deleted row regardless of the referenced
+ * repository's actual diff size, so no line/file threshold can bound it.
+ */
+export function computePrReviewDepthTier(
+	stats:
+		| {
+				changedLines: number;
+				changedFiles: number;
+				hasSubmoduleChange?: boolean;
+		  }
+		| null
+		| undefined,
+): PrReviewDepthTier {
+	if (!stats) return 'L';
+	if (stats.hasSubmoduleChange) return 'L';
+	if (
+		stats.changedLines <=
+			PR_REVIEW_DEPTH_TIER_THRESHOLDS.smallMaxChangedLines &&
+		stats.changedFiles <= PR_REVIEW_DEPTH_TIER_THRESHOLDS.smallMaxChangedFiles
+	) {
+		return 'S';
+	}
+	if (
+		stats.changedLines <=
+			PR_REVIEW_DEPTH_TIER_THRESHOLDS.mediumMaxChangedLines &&
+		stats.changedFiles <= PR_REVIEW_DEPTH_TIER_THRESHOLDS.mediumMaxChangedFiles
+	) {
+		return 'M';
+	}
+	return 'L';
+}
+
 export interface PrWorkflowLaneSpec {
 	laneId?: string;
 	workflowLane?: string;
 	reviewItemIds?: string[];
+	/**
+	 * Complete dimension/family set this lane covers under a consolidated depth
+	 * tier. Must contain workflowLane. Absent means the singleton [workflowLane].
+	 */
+	ownedWorkflowLanes?: string[];
 }
 
 export interface PrFeedbackLaneOwnership {
@@ -68,6 +134,7 @@ interface PrReviewBaseDispatchRecord {
 	lanes: Array<{
 		laneId: string;
 		workflowLane: PrReviewBaseDimensionId;
+		ownedWorkflowLanes?: PrReviewBaseDimensionId[];
 	}>;
 	validatedAt: string;
 }
@@ -189,6 +256,14 @@ export interface PrWorkflowGateState {
 	prHeadSha?: string;
 	prReviewBaseRef?: string;
 	prReviewBaseSha?: string;
+	/** Controller-computed size tier for the bound merge-base scope. */
+	prReviewDepthTier?: PrReviewDepthTier;
+	/** Audit record of the bounded numstat totals behind prReviewDepthTier. */
+	prReviewDiffStats?: {
+		changedLines: number;
+		changedFiles: number;
+		hasSubmoduleChange: boolean;
+	};
 	prReviewBaseDispatches?: PrReviewBaseDispatchRecord[];
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
@@ -229,6 +304,15 @@ const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
 const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
 const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
 
+const PrReviewBaseDimensionIdSchema = z.enum([
+	'intent-architecture',
+	'correctness-state',
+	'tests-falsifiability',
+	'security-trust',
+	'reliability-performance',
+	'compatibility-delivery',
+]);
+
 const PrReviewBaseDispatchRecordSchema = z
 	.object({
 		batchId: z.string().min(1),
@@ -237,14 +321,12 @@ const PrReviewBaseDispatchRecordSchema = z
 				z
 					.object({
 						laneId: z.string().min(1),
-						workflowLane: z.enum([
-							'intent-architecture',
-							'correctness-state',
-							'tests-falsifiability',
-							'security-trust',
-							'reliability-performance',
-							'compatibility-delivery',
-						]),
+						workflowLane: PrReviewBaseDimensionIdSchema,
+						ownedWorkflowLanes: z
+							.array(PrReviewBaseDimensionIdSchema)
+							.min(1)
+							.max(PR_REVIEW_BASE_DIMENSION_IDS.length)
+							.optional(),
 					})
 					.strict(),
 			)
@@ -398,6 +480,20 @@ const PrWorkflowGateStateSchema = z
 		prHeadSha: z.string().min(1).optional(),
 		prReviewBaseRef: z.string().min(1).optional(),
 		prReviewBaseSha: z.string().min(1).optional(),
+		prReviewDepthTier: z.enum(['S', 'M', 'L']).optional(),
+		prReviewDiffStats: z
+			.object({
+				changedLines: z.number().int().nonnegative(),
+				changedFiles: z.number().int().nonnegative(),
+				// Older persisted state (written before this field existed) omits
+				// it entirely; default to false rather than rejecting the whole
+				// record — the depth tier it backs was already computed and
+				// persisted under the pre-existing rules, so backfilling "no known
+				// submodule signal" does not retroactively change anything.
+				hasSubmoduleChange: z.boolean().default(false),
+			})
+			.strict()
+			.optional(),
 		prReviewBaseDispatches: z
 			.array(PrReviewBaseDispatchRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -433,7 +529,17 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 	})
-	.strict();
+	// .passthrough(), not .strict(): this state is written unconditionally on
+	// every PR_REVIEW/PR_FEEDBACK session and persists across process
+	// restarts by design. A .strict() schema means a code rollback that
+	// re-encounters a field a newer version added throws BLOCKED on every
+	// read (including the abort/reset escape hatch, since
+	// requireAnyActiveState reads through this same schema before
+	// clearPrWorkflowGateState ever runs), with no self-service recovery.
+	// Passthrough keeps unknown fields opaque but present through any
+	// read-modify-write cycle, so older code degrades to "ignore the field
+	// it doesn't know about" instead of "refuse to read the file at all".
+	.passthrough();
 
 export async function activatePrWorkflow(
 	directory: string,
@@ -545,17 +651,21 @@ export async function clearPrWorkflowGateState(
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		const current = await readPrWorkflowGateStateFromDisk(
-			directory,
-			normalizedSessionID,
-		);
-		if (
-			expectedRevision !== undefined &&
-			(!current || current.revision !== expectedRevision)
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
+		// The CAS-guard read is only meaningful when a caller supplies a
+		// revision to compare against; skip it entirely otherwise so a
+		// genuinely unreadable/malformed state file can still be cleared
+		// (the sole purpose of this escape hatch) instead of the read itself
+		// re-throwing the same failure it exists to recover from.
+		if (expectedRevision !== undefined) {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
 			);
+			if (!current || current.revision !== expectedRevision) {
+				throw new Error(
+					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
+				);
+			}
 		}
 		try {
 			await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
@@ -720,10 +830,18 @@ export async function bindPrReviewBase(
 	if (state.prReviewBaseRef === baseRef && state.prReviewBaseSha === baseSha) {
 		return state;
 	}
+	const prHeadSha = normalizePrHeadSha(options.prHeadSha).toLowerCase();
+	const diffStats = _test_exports.resolvePrReviewDiffStats(
+		directory,
+		baseSha,
+		prHeadSha,
+	);
 	state = {
 		...state,
 		prReviewBaseRef: baseRef,
 		prReviewBaseSha: baseSha,
+		prReviewDepthTier: computePrReviewDepthTier(diffStats),
+		...(diffStats ? { prReviewDiffStats: diffStats } : {}),
 		updatedAt: isoNow(),
 	};
 	await persistState(directory, state);
@@ -831,16 +949,30 @@ export async function enforcePrReviewBaseDimensions(
 		throw wrongModeError(state, 'PR_REVIEW');
 	}
 	const normalizedLanes = normalizeWorkflowLanes(lanes);
-	const workflowLaneIds = normalizedLanes.map((lane) => lane.workflowLane);
-	const extras = workflowLaneIds.filter(
+	const claimedDimensionIds = normalizedLanes.flatMap(
+		(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
+	);
+	const extras = claimedDimensionIds.filter(
 		(laneId) =>
 			!PR_REVIEW_BASE_DIMENSION_IDS.includes(laneId as PrReviewBaseDimensionId),
 	);
 	if (extras.length > 0) {
 		const expected = PR_REVIEW_BASE_DIMENSION_IDS.join(', ');
-		const received = workflowLaneIds.join(', ') || '(none)';
+		const received = claimedDimensionIds.join(', ') || '(none)';
 		throw new Error(
 			`BLOCKED: PR_REVIEW base dispatch lane ids must be drawn from: ${expected}. Received: ${received}`,
+		);
+	}
+	// Tier L requires one dedicated lane per dimension on every base batch, not
+	// only the initial wave — a later retry/supplementary batch may not use a
+	// consolidated lane to settle multiple dimensions from a single artifact
+	// that never went through the initial-wave tier check.
+	if (
+		(state.prReviewDepthTier ?? 'L') === 'L' &&
+		normalizedLanes.some((lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW base dispatch at depth tier L requires one dedicated lane per dimension; consolidated owned_workflow_lanes are allowed only at tiers S and M',
 		);
 	}
 	const batchId = normalizeBatchId(options.batchId);
@@ -858,6 +990,12 @@ export async function enforcePrReviewBaseDimensions(
 		lanes: normalizedLanes.map((lane) => ({
 			laneId: lane.laneId,
 			workflowLane: lane.workflowLane as PrReviewBaseDimensionId,
+			...(lane.ownedWorkflowLanes
+				? {
+						ownedWorkflowLanes:
+							lane.ownedWorkflowLanes as PrReviewBaseDimensionId[],
+					}
+				: {}),
 		})),
 		validatedAt: isoNow(),
 	};
@@ -2529,6 +2667,7 @@ export const _test_exports = {
 	resolveCommitCountSince,
 	resolveIsWorkingTreeClean,
 	resolveIsExactSingleChildCommit,
+	resolvePrReviewDiffStats,
 	resolvePrWorkflowRevisionDigest,
 	resolveRemoteRefsContainingHead,
 	parseCriticVerdict,
@@ -2585,9 +2724,12 @@ function wrongModeError(
 	);
 }
 
-function normalizeWorkflowLanes(
-	lanes: readonly PrWorkflowLaneSpec[],
-): Array<{ laneId: string; workflowLane: string; reviewItemIds?: string[] }> {
+function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
+	laneId: string;
+	workflowLane: string;
+	reviewItemIds?: string[];
+	ownedWorkflowLanes?: string[];
+}> {
 	if (!Array.isArray(lanes) || lanes.length === 0) {
 		throw new Error(
 			'BLOCKED: PR workflow lane validation requires at least one lane',
@@ -2612,10 +2754,30 @@ function normalizeWorkflowLanes(
 		if (reviewItemIds) {
 			assertNoDuplicates(reviewItemIds, 'review item ids within one lane');
 		}
+		const ownedWorkflowLanes = lane.ownedWorkflowLanes?.map((owned: string) =>
+			owned.trim(),
+		);
+		if (ownedWorkflowLanes) {
+			if (ownedWorkflowLanes.some((owned: string) => !owned)) {
+				throw new Error(
+					'BLOCKED: PR workflow owned_workflow_lanes must not contain empty values',
+				);
+			}
+			assertNoDuplicates(
+				ownedWorkflowLanes,
+				'owned workflow lanes within one lane',
+			);
+			if (!ownedWorkflowLanes.includes(workflowLane)) {
+				throw new Error(
+					`BLOCKED: PR workflow lane "${laneId}" must include its own workflow_lane "${workflowLane}" in owned_workflow_lanes`,
+				);
+			}
+		}
 		return {
 			laneId,
 			workflowLane,
 			...(reviewItemIds ? { reviewItemIds } : {}),
+			...(ownedWorkflowLanes ? { ownedWorkflowLanes } : {}),
 		};
 	});
 	assertNoDuplicates(
@@ -2625,6 +2787,12 @@ function normalizeWorkflowLanes(
 	assertNoDuplicates(
 		normalized.map((lane) => lane.workflowLane),
 		'workflow lane ids',
+	);
+	assertNoDuplicates(
+		normalized.flatMap(
+			(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
+		),
+		'owned workflow lane ids across lanes',
 	);
 	return normalized;
 }
@@ -3225,8 +3393,35 @@ function derivePrReviewCandidateInventory(
 		laneId: string;
 		mode: string;
 		workflowLane?: string;
+		/**
+		 * Base-dimension sources only: the exact dimensions this lane is the
+		 * authoritative (most-recent) source for. When this is a strict subset
+		 * of the lane's actual ownedWorkflowLanes (a more recent batch claimed
+		 * the rest), extraction below scopes to only these dimensions so the
+		 * lane's stale content for an already-superseded dimension never
+		 * re-enters the candidate pool alongside whoever superseded it.
+		 */
+		creditedLanes?: string[];
 	}> = [];
-	const selectedBaseDimensions = new Set<string>();
+	// Assign each of the 6 canonical dimensions to exactly one authoritative
+	// (batchId, laneId) source: the most-recent successful lane that owns it
+	// (batches are scanned reverse-chronologically, so first-write-wins here
+	// means most-recent-wins). This is deliberately dimension-first, not
+	// lane-first: a lane-first admission (accept a whole lane once ANY of its
+	// owned dimensions is still unclaimed) can re-admit an older,
+	// already-partially-superseded consolidated lane purely because it also
+	// owns a second, still-unclaimed dimension — reintroducing that lane's
+	// stale content for the dimension a newer batch already settled. Scanning
+	// per-dimension instead means an older lane is only ever referenced for
+	// dimensions no newer batch has claimed, so each contributing lane is
+	// still extracted at most once (via the existing extractedLaneKeys dedup
+	// below) but never credited for a dimension someone more recent covers.
+	const baseDimensionSources = new Map<
+		string,
+		{ batchId: string; laneId: string }
+	>();
+	const baseSourceCreditedDimensions = new Map<string, string[]>();
+	const baseSourceFullOwnershipCount = new Map<string, number>();
 	for (const batch of [...(state.prReviewBaseDispatches ?? [])].reverse()) {
 		const successful = successfulObligationsFromExactBatch(
 			directory,
@@ -3237,18 +3432,52 @@ function derivePrReviewCandidateInventory(
 			batch.validatedAt,
 		);
 		for (const lane of batch.lanes) {
-			if (
-				successful.has(lane.workflowLane) &&
-				!selectedBaseDimensions.has(lane.workflowLane)
-			) {
-				sources.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-					mode: 'swarm-pr-review:base',
-				});
-				selectedBaseDimensions.add(lane.workflowLane);
+			const ownedDimensions = lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane];
+			if (!ownedDimensions.every((dimension) => successful.has(dimension)))
+				continue;
+			const key = `${batch.batchId}\0${lane.laneId}`;
+			baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
+			for (const dimension of ownedDimensions) {
+				if (!baseDimensionSources.has(dimension)) {
+					baseDimensionSources.set(dimension, {
+						batchId: batch.batchId,
+						laneId: lane.laneId,
+					});
+					const credited = baseSourceCreditedDimensions.get(key);
+					if (credited) {
+						credited.push(dimension);
+					} else {
+						baseSourceCreditedDimensions.set(key, [dimension]);
+					}
+				}
 			}
 		}
+	}
+	const seenBaseSourceKeys = new Set<string>();
+	for (const { batchId, laneId } of baseDimensionSources.values()) {
+		const key = `${batchId}\0${laneId}`;
+		if (seenBaseSourceKeys.has(key)) continue;
+		seenBaseSourceKeys.add(key);
+		const credited = baseSourceCreditedDimensions.get(key);
+		const fullOwnershipCount = baseSourceFullOwnershipCount.get(key) ?? 0;
+		sources.push({
+			batchId,
+			laneId,
+			mode: 'swarm-pr-review:base',
+			// Scope extraction ONLY when this lane is credited for a strict
+			// subset of its full ownership (a more recent batch claimed the
+			// rest). A lane credited for its full ownership — every tier-L
+			// singleton lane, and any consolidated lane whose complete owned
+			// set remains uncontested — gets no filter at all, exactly
+			// matching pre-existing behavior: extract every well-formed
+			// [CANDIDATE] row regardless of its lane label, so a subagent's
+			// inconsistent lane-field labeling never silently drops a real
+			// candidate from the mandatory coverage set.
+			creditedLanes:
+				credited && credited.length < fullOwnershipCount ? credited : undefined,
+		});
 	}
 	const selectedCouncilLanes = new Set<string>();
 	for (const batch of [...(state.prReviewValidationBatches ?? [])].reverse()) {
@@ -3312,8 +3541,6 @@ function derivePrReviewCandidateInventory(
 			rows.length === PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length &&
 			new Set(rowIds).size === PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length &&
 			provenanceTuples.every(Boolean) &&
-			new Set(provenanceTuples).size ===
-				PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length &&
 			PR_REVIEW_REQUIRED_MICRO_LANE_IDS.every((id) => rowIds.includes(id)) &&
 			rows.every(
 				(row) =>
@@ -3323,9 +3550,12 @@ function derivePrReviewCandidateInventory(
 			);
 		if (!exactMandatorySet) {
 			throw new Error(
-				'BLOCKED: PR_REVIEW requires the exact all-MATCHED repository-agnostic micro-lane set with unique source provenance',
+				'BLOCKED: PR_REVIEW requires the exact all-MATCHED repository-agnostic micro-lane set with complete source provenance',
 			);
 		}
+		// A provenance tuple may back several rows only when the dispatched lane
+		// declared that consolidated ownership set; the per-row validation below
+		// enforces ownership containment and all-owned artifact attestation.
 		for (const row of rows) {
 			if (
 				typeof row === 'object' &&
@@ -3345,6 +3575,13 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	const candidateIds: string[] = [];
+	// A consolidated lane can be the provenance source for several sources
+	// (one base lane owning several dimensions collapses to one source
+	// already, but micro trigger rows are per-family: several rows may cite
+	// the same consolidated (batchId, laneId)). Extract that lane's full
+	// artifact text exactly once regardless of how many families cite it, so
+	// shared candidate ids are not duplicated into the inventory.
+	const extractedLaneKeys = new Set<string>();
 	for (const source of sources) {
 		let resolvedArtifact = false;
 		for (const record of findByBatchId(directory, source.batchId, {
@@ -3365,6 +3602,11 @@ function derivePrReviewCandidateInventory(
 			const artifact = ref
 				? readLaneOutput(directory, ref)?.artifact
 				: undefined;
+			const recordOwnedLanes = record.ownedWorkflowLanes?.length
+				? record.ownedWorkflowLanes
+				: record.workflowLane
+					? [record.workflowLane]
+					: undefined;
 			if (
 				!artifact ||
 				!workflowArtifactHasContractMarker(
@@ -3372,13 +3614,16 @@ function derivePrReviewCandidateInventory(
 					state,
 					record,
 					source.mode,
-					source.workflowLane ?? record.workflowLane ?? source.laneId,
+					record.workflowLane ?? source.workflowLane ?? source.laneId,
+					undefined,
+					undefined,
+					recordOwnedLanes,
 				)
 			)
 				continue;
 			if (
 				source.workflowLane &&
-				(record.workflowLane !== source.workflowLane ||
+				(!recordOwnedLanes?.includes(source.workflowLane) ||
 					!prReviewDiscoveryArtifactCoversLane(
 						artifact.text,
 						source.workflowLane,
@@ -3386,7 +3631,13 @@ function derivePrReviewCandidateInventory(
 			)
 				continue;
 			resolvedArtifact = true;
-			candidateIds.push(...extractCandidateIds(artifact.text));
+			const laneKey = `${source.batchId}\0${source.laneId}`;
+			if (!extractedLaneKeys.has(laneKey)) {
+				extractedLaneKeys.add(laneKey);
+				candidateIds.push(
+					...extractCandidateIds(artifact.text, source.creditedLanes),
+				);
+			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
 			throw new Error(
@@ -3398,9 +3649,22 @@ function derivePrReviewCandidateInventory(
 	return candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
 }
 
-function extractCandidateIds(text: string): string[] {
+/**
+ * Extract candidate ids from a discovery artifact's [CANDIDATE] rows. When
+ * `scopeToLanes` is given (base-dimension sources credited for only a subset
+ * of their owned dimensions), rows whose `lane` field is outside that set are
+ * skipped — the artifact may legitimately discuss a dimension this source is
+ * no longer the authoritative source for (a more recent batch superseded it),
+ * and that stale content must not re-enter the candidate pool.
+ */
+function extractCandidateIds(
+	text: string,
+	scopeToLanes?: readonly string[],
+): string[] {
 	const candidateIds: string[] = [];
 	let markerHeaderSeen = false;
+	const inScope = (lane: string | undefined) =>
+		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
 	for (const line of text.split(/\r?\n/)) {
 		const fields = pipeFields(line);
 		if (
@@ -3415,7 +3679,7 @@ function extractCandidateIds(text: string): string[] {
 			fields.length >= 10 &&
 			fields.slice(1, 10).every(Boolean)
 		) {
-			candidateIds.push(fields[1]);
+			if (inScope(fields[2])) candidateIds.push(fields[1]);
 			continue;
 		}
 		if (
@@ -3425,7 +3689,7 @@ function extractCandidateIds(text: string): string[] {
 			!fields[0].startsWith('[') &&
 			fields.slice(0, 9).every(Boolean)
 		) {
-			candidateIds.push(fields[0]);
+			if (inScope(fields[1])) candidateIds.push(fields[0]);
 		}
 	}
 	return candidateIds;
@@ -3550,6 +3814,7 @@ function successfulObligationsFromExactBatch(
 		laneId: string;
 		workflowLane: string;
 		reviewItemIds?: string[];
+		ownedWorkflowLanes?: string[];
 	}>,
 	expectedMode: string,
 	validatedAt: string,
@@ -3588,9 +3853,15 @@ function successfulObligationsFromExactBatch(
 			? expectedByLaneId.get(record.laneId)
 			: undefined;
 		const expectedWorkflowLane = expectedLane?.workflowLane;
+		const expectedOwnedLanes = expectedLane?.ownedWorkflowLanes?.length
+			? expectedLane.ownedWorkflowLanes
+			: expectedWorkflowLane !== undefined
+				? [expectedWorkflowLane]
+				: undefined;
 		const subagentSessionId = record.subagentSessionId?.trim();
 		if (
 			expectedWorkflowLane !== undefined &&
+			expectedOwnedLanes !== undefined &&
 			record.laneId !== undefined &&
 			recordCountByLaneId.get(record.laneId) === 1 &&
 			Boolean(subagentSessionId) &&
@@ -3598,6 +3869,8 @@ function successfulObligationsFromExactBatch(
 			!forbiddenSubagentSessionIds.has(subagentSessionId!) &&
 			record.createdAt >= validatedAtMs &&
 			(!checkWorkflowLane || record.workflowLane === expectedWorkflowLane) &&
+			(!checkWorkflowLane ||
+				ownedLaneSetsEqual(record.ownedWorkflowLanes, expectedOwnedLanes)) &&
 			record.mode === expectedMode &&
 			record.workspace?.prHeadSha === state.prHeadSha &&
 			record.workspace?.gitHead === state.prHeadSha &&
@@ -3616,12 +3889,43 @@ function successfulObligationsFromExactBatch(
 				expectedWorkflowLane,
 				expectedLane?.reviewItemIds,
 				expectedRevisionDigest,
+				expectedOwnedLanes,
 			)
 		) {
-			successful.add(expectedWorkflowLane);
+			for (const obligation of expectedOwnedLanes) {
+				successful.add(obligation);
+			}
 		}
 	}
 	return successful;
+}
+
+/**
+ * A dispatch record's persisted owned set must equal the batch's expected
+ * owned set. Absent record ownership means the singleton [workflowLane], so
+ * legacy singleton records stay valid while consolidated claims must have
+ * been declared at dispatch time — an expectation cannot widen after launch.
+ */
+function ownedLaneSetsEqual(
+	recordOwned: readonly string[] | undefined,
+	expectedOwned: readonly string[],
+): boolean {
+	if (!recordOwned || recordOwned.length === 0) {
+		return expectedOwned.length === 1;
+	}
+	const recordSet = new Set(recordOwned);
+	const expectedSet = new Set(expectedOwned);
+	// Strict set equality: reject a record whose owned list contains
+	// duplicates or does not have exactly the same distinct members as the
+	// expected set (defense in depth — declaration-time validation already
+	// rejects duplicate/mismatched ownership before a record can be written).
+	if (
+		recordSet.size !== recordOwned.length ||
+		recordSet.size !== expectedSet.size
+	) {
+		return false;
+	}
+	return recordOwned.every((owned) => expectedSet.has(owned));
 }
 
 function workflowArtifactHasContractMarker(
@@ -3632,6 +3936,7 @@ function workflowArtifactHasContractMarker(
 	expectedWorkflowLane: string,
 	reviewItemIds?: readonly string[],
 	expectedRevisionDigest?: string,
+	ownedWorkflowLanes?: readonly string[],
 ): boolean {
 	const ref = record.result?.outputRef?.trim();
 	if (!ref) return false;
@@ -3725,10 +4030,39 @@ function workflowArtifactHasContractMarker(
 				),
 		);
 	}
-	return prReviewDiscoveryArtifactCoversLane(
-		artifact.text,
-		expectedWorkflowLane,
-	);
+	const coveredLanes = ownedWorkflowLanes?.length
+		? ownedWorkflowLanes
+		: [expectedWorkflowLane];
+	if (
+		!coveredLanes.every((coveredLane) =>
+			prReviewDiscoveryArtifactCoversLane(artifact.text, coveredLane),
+		)
+	) {
+		return false;
+	}
+	if (coveredLanes.length > 1) {
+		// A single consolidated lane's coverage check above only verifies each
+		// owned family's row is long enough and correctly labeled; it has no
+		// way to tell a genuine per-family assessment from a copy-pasted
+		// template relabeled across families (a real, reproduced gap — the
+		// underlying length/label check requires no adversarial intent to
+		// defeat, only an honest-but-lazy subagent templating the remaining
+		// families instead of assessing each one). Requiring the matched
+		// evidence text to differ across owned families directly closes that
+		// path without any semantic understanding of the content.
+		const seenEvidence = new Map<string, string>();
+		for (const coveredLane of coveredLanes) {
+			const evidence = extractLaneCoverageEvidenceText(
+				artifact.text,
+				coveredLane,
+			);
+			if (evidence === null) continue;
+			const priorLane = seenEvidence.get(evidence);
+			if (priorLane) return false;
+			seenEvidence.set(evidence, coveredLane);
+		}
+	}
+	return true;
 }
 
 /** Require at least one real discovery row or a lane-bound CLEAN attestation. */
@@ -3773,6 +4107,56 @@ export function prReviewDiscoveryArtifactCoversLane(
 			return true;
 	}
 	return false;
+}
+
+/**
+ * Extract the exact evidence text that satisfies coverage for one lane,
+ * mirroring prReviewDiscoveryArtifactCoversLane's own matching rules but
+ * returning the matched substantive fields instead of a boolean. Used only
+ * for cross-family distinctness comparison on consolidated (multi-owned-lane)
+ * artifacts; returns null when the lane has no matching row.
+ */
+function extractLaneCoverageEvidenceText(
+	text: string,
+	expectedWorkflowLane: string,
+): string | null {
+	const lines = text.split(/\r?\n/);
+	let candidateHeaderSeen = false;
+	for (const line of lines) {
+		const fields = pipeFields(line);
+		if (fields.length === 0) continue;
+		if (
+			fields[0] === '[CLEAN]' &&
+			fields.length >= 4 &&
+			fields[1] === expectedWorkflowLane &&
+			fields.slice(1, 4).every(Boolean) &&
+			fields[2].length >= 12 &&
+			fields[3].length >= 20
+		)
+			return `${fields[2]}\0${fields[3]}`;
+		if (fields[0] === '[CANDIDATE]') {
+			if (fields[1]?.toLowerCase() === 'candidate_id') {
+				candidateHeaderSeen = true;
+				continue;
+			}
+			if (
+				fields.length >= 10 &&
+				fields[2] === expectedWorkflowLane &&
+				fields.slice(1, 10).every(Boolean)
+			)
+				return fields.slice(3, 10).join('\0');
+			continue;
+		}
+		if (
+			candidateHeaderSeen &&
+			fields.length >= 9 &&
+			fields[0]?.toLowerCase() !== 'candidate_id' &&
+			fields[1] === expectedWorkflowLane &&
+			fields.slice(0, 9).every(Boolean)
+		)
+			return fields.slice(2, 9).join('\0');
+	}
+	return null;
 }
 
 const REVIEWER_CLASSIFICATIONS = new Set([
