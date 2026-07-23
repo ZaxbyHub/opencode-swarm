@@ -59,7 +59,7 @@ describe('dispatch_lanes read-only tool permissions', () => {
 		expect(prompt).toContain('Do not waive or abbreviate work for speed');
 	});
 
-	test('passes the exact read-only tool map including shell and bash disables', async () => {
+	test('passes the exact read-only tool map with shell and bash removed (#1691)', async () => {
 		const directory = makeTempDir();
 		const ops: SessionOps = {
 			create: mock(async () => ({
@@ -91,9 +91,11 @@ describe('dispatch_lanes read-only tool permissions', () => {
 			edit: false,
 			patch: false,
 			lint: false,
-			shell: false,
-			bash: false,
 		});
+		// Issue #1691: shell and bash are REMOVED from read-only lane tools entirely
+		// (not just set to false) — they should not appear in the tool map at all.
+		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('shell');
+		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('bash');
 		const promptText = ops.prompt.mock.calls[0][0].body.parts[0].text;
 		expect(promptText).toContain(
 			'If either a standard explorer or micro-lane finds zero issues',
