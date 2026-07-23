@@ -51,8 +51,6 @@ describe('config/loader value recovery (issue #1690)', () => {
 		expect(result.config.max_iterations).toBe(5);
 		// removedKeys should contain 'max_iterations'
 		expect(result.removedKeys).toContain('max_iterations');
-		// warnings should mention the dropped key
-		expect(result.warnings.length).toBeGreaterThan(0);
 		// guardrails should be enabled (fail-secure on recovery)
 		expect(result.config.guardrails?.enabled).toBe(true);
 

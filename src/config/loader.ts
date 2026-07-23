@@ -592,8 +592,9 @@ function buildConfigWithMeta(
 					...gatesStripped,
 					...valueRecovery.recoveryWarnings.map((w) => w.section),
 				];
-				const warning = warningForRemovedKeys(removedKeys);
-				advisoryWarn(`[opencode-swarm] ${warning}`);
+				advisoryWarn(
+					`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
+				);
 				// Force guardrails enabled on recovery — the user's config had
 				// invalid values, so we apply the same fail-secure default as
 				// step 8 (guardrails_defaults) to preserve the security posture.
@@ -610,7 +611,7 @@ function buildConfigWithMeta(
 					config: secure(secureConfig),
 					recovery: 'sanitized_values',
 					removedKeys,
-					warnings: [warning],
+					warnings: [],
 				};
 			}
 		}
