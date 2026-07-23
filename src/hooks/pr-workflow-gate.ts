@@ -79,6 +79,24 @@ export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
 };
 
 /**
+ * Minimum lane counts for a FULL micro (risk-family) sweep per depth tier. These
+ * mirror the base floors' tier *semantics* — not their numbers — scaled to the
+ * eleven risk families: S does not bind (a tier-S PR of ≤50 lines/≤3 files may
+ * consolidate a full sweep into one lane, exactly as base tier S permits); M
+ * requires at least half the families to get independent lanes (ceil(11/2) = 6,
+ * the deliberate scale-up from base M's 3 = ceil(6/2)); L requires one lane per
+ * family (the family count, matching base L = dimension count). The floor binds
+ * only on a batch (or the final attestation) that covers all eleven families;
+ * partial retry batches covering a subset are exempt, and callers may always
+ * dispatch more lanes than a tier's floor, never fewer.
+ */
+export const PR_REVIEW_MICRO_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
+	S: 1,
+	M: 6,
+	L: PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length,
+};
+
+/**
  * Unknown or uncomputable diff size fails strict to the deepest tier, as does
  * any range containing a submodule pointer change: git's numstat reports a
  * gitlink bump as a fixed 1-added/1-deleted row regardless of the referenced
