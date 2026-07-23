@@ -39,8 +39,12 @@ const HEAD_SHA = 'abc123';
 const REVISION_DIGEST = 'review-revision';
 const REVIEW_SCOPE = `complete PR diff def456...${HEAD_SHA}`;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	gateInternals.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	gateInternals.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	gateInternals.resolveIsWorkingTreeCleanAsync;
 const originalGateRevisionDigest =
 	gateInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveRevisionDigest =
@@ -140,6 +144,12 @@ async function establishBoundReviewGate(
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	writerInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	writerInternals.resolveMergeBase = () => 'def456';
+	// Gate bind/verify resolves Git off the blocking spawn; route the async
+	// resolvers through the sync stubs above.
+	gateInternals.resolveCurrentGitHeadAsync = async (dir) =>
+		gateInternals.resolveCurrentGitHead(dir);
+	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		gateInternals.resolveIsWorkingTreeClean(dir);
 	await activatePrWorkflow(root, SESSION_ID, 'PR_REVIEW');
 	await bindPrReviewBase(root, SESSION_ID, {
 		prHeadSha: HEAD_SHA,
@@ -197,7 +207,10 @@ async function establishBoundReviewGate(
 afterEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	gateInternals.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalGateRevisionDigest;
 	writerInternals.resolvePrWorkflowRevisionDigest =
 		originalResolveRevisionDigest;

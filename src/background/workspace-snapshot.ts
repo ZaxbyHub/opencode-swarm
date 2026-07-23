@@ -138,6 +138,23 @@ export function resolveCurrentGitHead(directory: string): string | null {
 	return runGit(directory, ['rev-parse', '--verify', 'HEAD^{commit}']);
 }
 
+/**
+ * Async twin of {@link resolveCurrentGitHead}. PR-workflow gate/dispatch binding
+ * runs on the host tool/hook path, so HEAD verification must resolve Git off the
+ * blocking `spawnSync` path — a synchronous spawn on the long-running host (most
+ * acutely under Bun on Windows) can hang to its bound instead of returning, which
+ * a fail-closed gate would surface as a spurious "cannot resolve HEAD" block.
+ */
+export async function resolveCurrentGitHeadAsync(
+	directory: string,
+): Promise<string | null> {
+	return await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+}
+
 /** Resolve one exact PR merge base without shell interpolation or unbounded I/O. */
 export function resolveExactMergeBase(
 	directory: string,
@@ -147,6 +164,23 @@ export function resolveExactMergeBase(
 	if (!isSafeGitRevisionToken(baseRef) || !isSafeGitRevisionToken(prHeadSha))
 		return null;
 	const mergeBase = runGit(directory, ['merge-base', '--', baseRef, prHeadSha]);
+	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+/** Async twin of {@link resolveExactMergeBase} for the gate/dispatch bind path. */
+export async function resolveExactMergeBaseAsync(
+	directory: string,
+	baseRef: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	if (!isSafeGitRevisionToken(baseRef) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const mergeBase = await runGitAsync(directory, [
+		'merge-base',
+		'--',
+		baseRef,
+		prHeadSha,
+	]);
 	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
 }
 
@@ -201,6 +235,43 @@ export function resolvePrReviewDiffStats(
 		changedLines += added + deleted;
 	}
 	const rawOutput = runGit(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
+}
+
+/** Async twin of {@link resolvePrReviewDiffStats} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolvePrReviewDiffStatsAsync(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): Promise<PrReviewDiffStats | null> {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const range = `${baseSha}...${prHeadSha}`;
+	const output = await runGitAsync(directory, [
+		'diff',
+		'--no-renames',
+		'--numstat',
+		range,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	const rawOutput = await runGitAsync(directory, ['diff', '--raw', range]);
 	if (rawOutput === null) return null;
 	const hasSubmoduleChange = rawOutput
 		.split('\n')
@@ -268,6 +339,40 @@ export function resolveCurrentUpstreamPushTarget(
 	return { remoteName, remoteBranchRef, remoteTrackingRef };
 }
 
+/** Async twin of {@link resolveCurrentUpstreamPushTarget} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCurrentUpstreamPushTargetAsync(
+	directory: string,
+): Promise<PrUpstreamPushTarget | null> {
+	const localBranchRef = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	if (!localBranchRef?.startsWith('refs/heads/')) return null;
+	const encoded = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)',
+		localBranchRef,
+	]);
+	if (!encoded) return null;
+	const [remoteName, remoteBranchRef, remoteTrackingRef, ...extras] =
+		encoded.split('\0');
+	if (
+		extras.length > 0 ||
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef?.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef) ||
+		!remoteTrackingRef?.startsWith('refs/remotes/') ||
+		remoteTrackingRef.endsWith('/HEAD')
+	) {
+		return null;
+	}
+	return { remoteName, remoteBranchRef, remoteTrackingRef };
+}
+
 /** Query the actual remote ref; local tracking refs are not publication proof. */
 export function resolveExactRemoteBranchHead(
 	directory: string,
@@ -285,6 +390,42 @@ export function resolveExactRemoteBranchHead(
 		return null;
 	}
 	const output = runGit(
+		directory,
+		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
+		20_000,
+	);
+	if (!output) return null;
+	const rows = output.split(/\r?\n/).filter(Boolean);
+	if (rows.length !== 1) return null;
+	const [objectName, refName, ...extras] = rows[0].split(/\s+/);
+	if (
+		extras.length > 0 ||
+		refName !== remoteBranchRef ||
+		!objectName ||
+		!(/^[0-9a-f]{40}$/i.test(objectName) || /^[0-9a-f]{64}$/i.test(objectName))
+	) {
+		return null;
+	}
+	return objectName;
+}
+
+/** Async twin of {@link resolveExactRemoteBranchHead} for the gate bind/publish path. */
+export async function resolveExactRemoteBranchHeadAsync(
+	directory: string,
+	remoteName: string,
+	remoteBranchRef: string,
+): Promise<string | null> {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef)
+	) {
+		return null;
+	}
+	const output = await runGitAsync(
 		directory,
 		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
 		20_000,
@@ -339,9 +480,70 @@ export function resolveGitControlStateDigest(directory: string): string | null {
 	);
 }
 
+/** Async twin of {@link resolveGitControlStateDigest} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveGitControlStateDigestAsync(
+	directory: string,
+): Promise<string | null> {
+	const head = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+	const symbolicHead = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	const upstream = await resolveCurrentUpstreamPushTargetAsync(directory);
+	const refs = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(refname)%00%(objectname)',
+		'refs/heads',
+		'refs/remotes',
+		'refs/tags',
+	]);
+	const config = await runGitAsync(directory, [
+		'config',
+		'--null',
+		'--show-origin',
+		'--show-scope',
+		'--list',
+	]);
+	const index = await runGitAsync(directory, ['ls-files', '--stage', '-z']);
+	if (
+		head === null ||
+		symbolicHead === null ||
+		!upstream ||
+		refs === null ||
+		config === null ||
+		index === null
+	) {
+		return null;
+	}
+	return digest(
+		`head\0${head}\0symbolic\0${symbolicHead}\0upstream\0${upstream.remoteName}\0${upstream.remoteBranchRef}\0${upstream.remoteTrackingRef}\0refs\0${refs}\0config\0${config}\0index\0${index}`,
+	);
+}
+
 /** Require all independently reviewed content to be captured by the commit. */
 export function resolveIsWorkingTreeClean(directory: string): boolean | null {
 	const status = runGit(directory, [
+		'status',
+		'--porcelain=v1',
+		'--untracked-files=all',
+	]);
+	return status === null ? null : status.length === 0;
+}
+
+/**
+ * Async twin of {@link resolveIsWorkingTreeClean} for the gate/dispatch bind path.
+ * `git status` emits far more output than `rev-parse`, so it is the most exposed
+ * of the bind-path checks to a blocking synchronous spawn stalling the host.
+ */
+export async function resolveIsWorkingTreeCleanAsync(
+	directory: string,
+): Promise<boolean | null> {
+	const status = await runGitAsync(directory, [
 		'status',
 		'--porcelain=v1',
 		'--untracked-files=all',
@@ -356,6 +558,23 @@ export function resolveCommitCountSince(
 	currentHeadSha: string,
 ): number | null {
 	const output = runGit(directory, [
+		'rev-list',
+		'--count',
+		'--ancestry-path',
+		`${baseHeadSha}..${currentHeadSha}`,
+	]);
+	if (!output || !/^\d+$/.test(output)) return null;
+	const count = Number(output);
+	return Number.isSafeInteger(count) ? count : null;
+}
+
+/** Async twin of {@link resolveCommitCountSince} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCommitCountSinceAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<number | null> {
+	const output = await runGitAsync(directory, [
 		'rev-list',
 		'--count',
 		'--ancestry-path',
@@ -399,6 +618,39 @@ export function resolveIsExactSingleChildCommit(
 	);
 }
 
+/** Async twin of {@link resolveIsExactSingleChildCommit} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveIsExactSingleChildCommitAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<boolean | null> {
+	const base = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${baseHeadSha}^{commit}`,
+	]);
+	const current = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${currentHeadSha}^{commit}`,
+	]);
+	if (!base || !current) return null;
+	const commitAndParents = await runGitAsync(directory, [
+		'rev-list',
+		'--parents',
+		'-n',
+		'1',
+		current,
+	]);
+	if (commitAndParents === null) return null;
+	const fields = commitAndParents.trim().split(/\s+/);
+	return (
+		fields.length === 2 &&
+		fields[0]?.toLowerCase() === current.toLowerCase() &&
+		fields[1]?.toLowerCase() === base.toLowerCase()
+	);
+}
+
 /**
  * Return remote-tracking refs whose tip equals the exact checked-out commit.
  * Publication closeout uses this bounded local observation after a successful
@@ -409,6 +661,29 @@ export function resolveRemoteRefsContainingHead(
 	headSha: string,
 ): string[] | null {
 	const output = runGit(directory, [
+		'for-each-ref',
+		'--format=%(refname)%09%(objectname)',
+		'refs/remotes',
+	]);
+	if (output === null) return null;
+	return output
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.filter(
+			([ref, objectName]) =>
+				ref?.startsWith('refs/remotes/') &&
+				!ref.endsWith('/HEAD') &&
+				objectName?.toLowerCase() === headSha.toLowerCase(),
+		)
+		.map(([ref]) => ref);
+}
+
+/** Async twin of {@link resolveRemoteRefsContainingHead} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveRemoteRefsContainingHeadAsync(
+	directory: string,
+	headSha: string,
+): Promise<string[] | null> {
+	const output = await runGitAsync(directory, [
 		'for-each-ref',
 		'--format=%(refname)%09%(objectname)',
 		'refs/remotes',
