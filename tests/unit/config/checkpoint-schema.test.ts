@@ -10,12 +10,12 @@ describe('CheckpointConfigSchema', () => {
 			const result = CheckpointConfigSchema.safeParse({});
 			expect(result.success).toBe(true);
 			if (result.success) {
-			expect(result.data).toEqual({
-				enabled: true,
-				auto_checkpoint_threshold: 3,
-				max_retention: 20,
-				allow_empty_commits: false,
-			});
+				expect(result.data).toEqual({
+					enabled: true,
+					auto_checkpoint_threshold: 3,
+					max_retention: 20,
+					allow_empty_commits: false,
+				});
 			}
 		});
 
@@ -24,7 +24,7 @@ describe('CheckpointConfigSchema', () => {
 				enabled: false,
 				auto_checkpoint_threshold: 5,
 				allow_empty_commits: false,
-			max_retention: 20,
+				max_retention: 20,
 			};
 			const result = CheckpointConfigSchema.safeParse(config);
 			expect(result.success).toBe(true);
@@ -214,12 +214,12 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 		const result = PluginConfigSchema.safeParse(config);
 		expect(result.success).toBe(true);
 		if (result.success) {
-		expect(result.data.checkpoint).toEqual({
-			enabled: false,
-			auto_checkpoint_threshold: 7,
-			max_retention: 20,
-			allow_empty_commits: false,
-		});
+			expect(result.data.checkpoint).toEqual({
+				enabled: false,
+				auto_checkpoint_threshold: 7,
+				max_retention: 20,
+				allow_empty_commits: false,
+			});
 		}
 	});
 
@@ -238,12 +238,12 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 		const result = PluginConfigSchema.safeParse(config);
 		expect(result.success).toBe(true);
 		if (result.success) {
-		expect(result.data.checkpoint).toEqual({
-			enabled: true,
-			auto_checkpoint_threshold: 3,
-			max_retention: 20,
-			allow_empty_commits: false,
-		});
+			expect(result.data.checkpoint).toEqual({
+				enabled: true,
+				auto_checkpoint_threshold: 3,
+				max_retention: 20,
+				allow_empty_commits: false,
+			});
 		}
 	});
 
