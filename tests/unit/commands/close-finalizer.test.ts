@@ -34,6 +34,7 @@ import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
@@ -161,10 +162,19 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
+	isValidEvidenceType,
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	writeSnapshot: async () => {},
+}));
+
+mock.module('../../../src/hooks/hive-promoter.js', () => ({
+	isHiveEligible: () => false,
+	checkHivePromotions: async () => {},
+	promoteToHive: async () => '',
+	promoteFromSwarm: async () => '',
 }));
 
 // state.js mock — close.ts calls resetSwarmStatePreservingSingletons (NOT resetSwarmState)
@@ -201,6 +211,30 @@ mock.module('../../../src/state.js', () => {
 		},
 		resetSwarmStatePreservingSingletons:
 			mockResetSwarmStatePreservingSingletons,
+		// The remaining state.ts exports below are not exercised by this
+		// test's assertions, but must exist: some other module's import
+		// graph (reached transitively via createCuratorLLMDelegate ->
+		// agents/index.ts, #1927) now reaches them. Bound to
+		// `mockedSwarmState` (not a real import/spread) to avoid the
+		// real-vs-mock swarmState split-brain a full spread hits — real
+		// state.ts functions close over their own module-internal swarmState
+		// singleton, not this test's mocked one (see close.test.ts for the
+		// full incident notes).
+		getAgentSession: (sessionId: string) =>
+			mockedSwarmState.agentSessions?.get(sessionId),
+		ensureAgentSession: (sessionId: string, agentName?: string) => {
+			let session = mockedSwarmState.agentSessions.get(sessionId);
+			if (!session) {
+				session = { agentName };
+				mockedSwarmState.agentSessions.set(sessionId, session);
+			}
+			return session;
+		},
+		hasActiveTurboMode: () => false,
+		hasActiveFullAuto: () => false,
+		getActiveFullAutoSessionID: () => undefined,
+		hasActiveLeanTurbo: () => false,
+		hasActiveEpicMode: () => false,
 	};
 });
 
