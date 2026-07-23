@@ -2,12 +2,14 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	resolveCommitCountSince,
+	resolveCommitCountSinceAsync,
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamRemoteRef,
 	resolveExactMergeBase,
 	resolveExactRemoteBranchHead,
 	resolveGitControlStateDigest,
 	resolveIsExactSingleChildCommit,
+	resolveIsExactSingleChildCommitAsync,
 	resolveIsWorkingTreeClean,
 	resolvePrReviewDiffStats,
 	resolveRemoteRefsContainingHead,
@@ -184,6 +186,33 @@ describe('PR workflow Git publication observations', () => {
 		expect(resolveCommitCountSince('.', 'base', 'current')).toBe(1);
 	});
 
+	test('commit count rejects unsafe revision tokens before reaching Git', async () => {
+		const spawn = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '1\n',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolveCommitCountSince('.', '--upload-pack=evil', 'current')).toBe(
+			null,
+		);
+		expect(resolveCommitCountSince('.', 'base', '--upload-pack=evil')).toBe(
+			null,
+		);
+		expect(spawn).not.toHaveBeenCalled();
+
+		await expect(
+			resolveCommitCountSinceAsync('.', '--upload-pack=evil', 'current'),
+		).resolves.toBeNull();
+		await expect(
+			resolveCommitCountSinceAsync('.', 'base', '--upload-pack=evil'),
+		).resolves.toBeNull();
+	});
+
 	test('clean proof includes tracked, staged, and untracked worktree state', () => {
 		_internals.spawnSync = mock((_command, args) => ({
 			status: 0,
@@ -241,6 +270,37 @@ describe('PR workflow Git publication observations', () => {
 		}) as typeof _internals.spawnSync;
 
 		expect(resolveIsExactSingleChildCommit('.', 'base', 'current')).toBe(false);
+	});
+
+	test('single-child-commit proof rejects unsafe revision tokens before reaching Git', async () => {
+		const spawn = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: 'irrelevant\n',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(
+			resolveIsExactSingleChildCommit('.', '--upload-pack=evil', 'current'),
+		).toBe(null);
+		expect(
+			resolveIsExactSingleChildCommit('.', 'base', '--upload-pack=evil'),
+		).toBe(null);
+		expect(spawn).not.toHaveBeenCalled();
+
+		await expect(
+			resolveIsExactSingleChildCommitAsync(
+				'.',
+				'--upload-pack=evil',
+				'current',
+			),
+		).resolves.toBeNull();
+		await expect(
+			resolveIsExactSingleChildCommitAsync('.', 'base', '--upload-pack=evil'),
+		).resolves.toBeNull();
 	});
 });
 
