@@ -11,6 +11,7 @@ import {
 import {
 	assertPrReviewBaseCoverageSettled,
 	markPrReviewTriggerEvaluationComplete,
+	PR_REVIEW_MICRO_LANE_FLOORS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	prReviewDiscoveryArtifactCoversLane,
 	readPrWorkflowGateState,
@@ -384,6 +385,23 @@ export async function executeWritePrReviewTriggerEval(
 			(row) => `${row.source_batch_id}\0${row.source_lane_id}`,
 		),
 	).size;
+	// Aggregate per-tier micro-lane floor on the durable attestation. The final
+	// ledger attributes all eleven families to some number of distinct dispatch
+	// lanes; that count must meet the tier floor regardless of dispatch history.
+	// Normal one-for-one lane retries preserve the count, so legitimate flows are
+	// never rejected; only a final attestation that under-consolidates the eleven
+	// families into fewer than the floor's worth of independent lanes is blocked —
+	// which is exactly the gap this gate closes (including split-batch dodges that
+	// slip past the per-batch dispatch floor).
+	const microFloor =
+		PR_REVIEW_MICRO_LANE_FLOORS[gateState.prReviewDepthTier ?? 'L'];
+	if (dispatchedMicroLaneCount < microFloor) {
+		return failure(
+			`PR_REVIEW micro lane floor unmet: depth tier ${
+				gateState.prReviewDepthTier ?? 'L'
+			} requires at least ${microFloor} dispatched micro lane(s) across the attestation; the ledger attributes all ${PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length} families to only ${dispatchedMicroLaneCount}`,
+		);
+	}
 	const artifact = {
 		schema_version: 1,
 		run_id: parsed.data.run_id,

@@ -31,6 +31,7 @@ import {
 	enforcePrWorkflowDispatchLanesAsync,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_BASE_LANE_FLOORS,
+	PR_REVIEW_MICRO_LANE_FLOORS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	type PrReviewDepthTier,
 	recordPrFeedbackGateBatch,
@@ -412,6 +413,21 @@ function validatePrReviewMicroDispatch(
 			].join(', ')}`,
 		);
 	}
+	// Per-tier consolidation floor for a FULL micro sweep. Only a batch whose
+	// lanes collectively own all eleven risk families is floored — this mirrors
+	// the base floor, which binds only the wave that covers every dimension.
+	// Partial retry batches (a subset of families) are exempt so re-dispatching a
+	// failed family never deadlocks; the aggregate floor on the final attestation
+	// (write_pr_review_trigger_eval) catches any split-consolidation that dodges
+	// this per-batch check.
+	const coversAllFamilies =
+		required.size > 0 && [...required].every((id) => flattened.includes(id));
+	const microFloor = PR_REVIEW_MICRO_LANE_FLOORS[depthTier];
+	if (coversAllFamilies && laneOwnership.length < microFloor) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW micro dispatch at depth tier ${depthTier} covering all ${PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length} risk families requires at least ${microFloor} lanes; received ${laneOwnership.length}. Partial retry batches covering a subset of families are exempt.`,
+		);
+	}
 }
 export type DispatchLanesArgs = z.infer<typeof DispatchLanesArgsSchema>;
 export type DispatchLanesAsyncArgs = z.infer<
@@ -567,6 +583,7 @@ export const _internals: {
 };
 
 export const _test_exports = {
+	validatePrReviewMicroDispatch,
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
 	applyPrWorkflowPromptContract,
