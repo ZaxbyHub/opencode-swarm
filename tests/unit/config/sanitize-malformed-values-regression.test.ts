@@ -283,6 +283,61 @@ describe('Bug 5 regression — multiple malformed fields in one section', () => 
 	});
 });
 
+// ─── Escalation: leaf → ancestor → section (PRR-013) ──────────────────────────
+
+describe('escalation — drops ancestor section when leaf removal cannot satisfy schema', () => {
+	it('GIVEN a section with two required malformed fields, WHEN sanitizeMalformedValues parses, THEN it escalates from leaf-level to section-level drop AND the section-level path appears in warnings', () => {
+		// Both `a` and `b` are REQUIRED (non-optional) booleans/numbers and both
+		// are wrong type. Dropping just `a` leaves `{ b: 'wrong' }` which still
+		// fails (b malformed AND a now missing-required). The fixed-point loop
+		// therefore escalates: after leaf removal stalls, it walks up and drops
+		// the entire `section` (which is OPTIONAL, so dropping it lets the valid
+		// guardrails survive). We prove escalation by asserting the SURVIVING
+		// guardrails is intact AND the warning names `section` (the ancestor),
+		// not merely a leaf like `section.a`.
+		const escalationSchema = z.object({
+			section: z
+				.object({
+					a: z.boolean(),
+					b: z.number(),
+					name: z.string().optional(),
+				})
+				.optional(),
+			guardrails: z.object({ enabled: z.boolean() }).optional(),
+		});
+
+		const rawConfig = {
+			section: {
+				a: 'yes', // string, not boolean
+				b: 'two', // string, not number
+				name: 'keep-me',
+			},
+			guardrails: { enabled: true },
+		};
+
+		const { config, recoveryWarnings } = sanitizeMalformedValues(
+			escalationSchema,
+			rawConfig,
+		);
+
+		// guardrails survives the escalation.
+		expect(config).toHaveProperty('guardrails');
+		expect((config as Record<string, unknown>).guardrails).toEqual({
+			enabled: true,
+		});
+
+		// The section is gone entirely (escalation dropped the ancestor).
+		expect(config).not.toHaveProperty('section');
+
+		// Prove ESCALATION: a warning names the section-level path, not only a
+		// leaf. If only leaf-level warnings existed, `section` would still be
+		// present (only its fields removed). The ancestor-level warning is the
+		// signature that escalation fired.
+		const warnedPaths = recoveryWarnings.map((w) => w.section);
+		expect(warnedPaths).toContain('section');
+	});
+});
+
 // ─── Edge case: non-object inputs ─────────────────────────────────────────────
 
 describe('non-object inputs — returns {} with root warning', () => {
@@ -426,8 +481,10 @@ describe('termination — always-failing schema returns in bounded time', () => 
 		// Must complete in bounded time (under 2 seconds even on slow CI).
 		expect(elapsed).toBeLessThan(2000);
 
-		// Returns an object (possibly empty after top-level section drops).
-		expect(typeof config).toBe('object');
+		// The field can never satisfy the always-failing refine, so recovery
+		// exhausts its options and the post-loop last-resort drops every
+		// top-level key — leaving an empty object. Pin this final state.
+		expect(config).toEqual({});
 
 		// Warnings exist proving recovery was attempted.
 		expect(recoveryWarnings.length).toBeGreaterThan(0);

@@ -361,6 +361,10 @@ function stripUnrecognizedKeys(
  *                          the remaining configuration was preserved.
  *   'user_only'          – project config was discarded (failed validation and
  *                          targeted recovery); user config alone was used.
+ *   'sanitized_values'   – merged and user configs both failed, but recursive
+ *                          malformed-value recovery (step 7b, issue #1690)
+ *                          dropped the smallest invalid leaves/sections so the
+ *                          remaining valid configuration could load.
  *   'guardrails_defaults'– neither merged nor user config was recoverable;
  *                          fell back to fail-secure guardrails-only defaults.
  */
@@ -417,7 +421,11 @@ function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
  *   2. On Zod failure: surgically drop only the confirmed unrecognized keys
  *      and re-parse (issue #1778 H6 — one typo must not wipe the whole config).
  *   3. If still invalid: retry user-config alone.
- *   4. Last resort: fail-secure guardrails-only defaults.
+ *   4. Recursive malformed-value recovery (step 7b, issue #1690): drop the
+ *      smallest invalid leaves/sections via the fixed-point sanitizer so a
+ *      single wrong-type value does not wipe the rest. Skipped when the raw
+ *      config explicitly sets `guardrails.enabled: false` (double-disable guard).
+ *   5. Last resort: fail-secure guardrails-only defaults.
  *
  * Returns `ConfigBuildResult` so callers that need metadata (e.g.
  * `loadPluginConfigWithMeta[Async]`) have it without a second file-read.
