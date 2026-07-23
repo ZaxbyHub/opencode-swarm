@@ -169,8 +169,6 @@ const READ_ONLY_TOOL_DENYLIST = [
 		'summarize_work',
 		'doc_scan',
 		'lint',
-		'shell',
-		'bash',
 	]),
 ] as const;
 
