@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.129.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.128.0...v7.129.0) (2026-07-23)
+
+
+### Features
+
+* **loader:** recursive malformed-value config recovery ([#1690](https://github.com/ZaxbyHub/opencode-swarm/issues/1690)) ([96674c7](https://github.com/ZaxbyHub/opencode-swarm/commit/96674c740691be387044bf97e92e6a1bcfb3a9fc))
+* **loader:** recursive malformed-value config recovery ([#1690](https://github.com/ZaxbyHub/opencode-swarm/issues/1690)) ([5a950c1](https://github.com/ZaxbyHub/opencode-swarm/commit/5a950c1cb4bef84fe9f73e7f83683610a32a887b))
+
+
+### Bug Fixes
+
+* rebase onto main 7.128.0 — adapt to simplified warning API ([0f21419](https://github.com/ZaxbyHub/opencode-swarm/commit/0f214197ff8a0f31e1351dd199c11243b46bbaf5))
+* **security:** skip value recovery when guardrails explicitly disabled ([c1ac59f](https://github.com/ZaxbyHub/opencode-swarm/commit/c1ac59fa8aa0891c646735bd80efc02d2248e92f))
+
 ## [7.128.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.127.1...v7.128.0) (2026-07-23)
 
 
