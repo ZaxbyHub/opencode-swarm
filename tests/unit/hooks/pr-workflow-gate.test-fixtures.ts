@@ -27,14 +27,24 @@ export const PR_REVIEW_SCOPE = `complete PR diff ${PR_REVIEW_BASE_SHA}...${HEAD_
 
 export let tempDir = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalResolveCurrentUpstreamPushTarget =
 	_test_exports.resolveCurrentUpstreamPushTarget;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
 const originalResolveRemoteRefsContainingHead =
 	_test_exports.resolveRemoteRefsContainingHead;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
+const originalResolvePrReviewDiffStatsAsync =
+	_test_exports.resolvePrReviewDiffStatsAsync;
 
 /**
  * Bun scopes a `beforeEach`/`afterEach` call to whichever test file's module
@@ -56,25 +66,51 @@ export function setupPrWorkflowGateFixtures(): void {
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	// The gate bind/verify path resolves Git off the blocking spawn (async).
+	// Route the async resolvers through the sync stubs above so existing
+	// synchronous fixtures drive the async production path unchanged.
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 	_test_exports.resolveCurrentUpstreamPushTarget = () => ({
 		remoteName: 'origin',
 		remoteBranchRef: 'refs/heads/pr-head',
 		remoteTrackingRef: 'refs/remotes/origin/pr-head',
 	});
+	_test_exports.resolveCurrentUpstreamPushTargetAsync = async (dir) =>
+		_test_exports.resolveCurrentUpstreamPushTarget(dir);
 	_test_exports.resolveRemoteRefsContainingHead = () => [
 		'refs/remotes/origin/pr-head',
 	];
+	_test_exports.resolveRemoteRefsContainingHeadAsync = async (dir, head) =>
+		_test_exports.resolveRemoteRefsContainingHead(dir, head);
+	// bindPrReviewBase resolves diff stats off the blocking spawn (async).
+	// Consumers stub the sync member locally before calling bindPrReviewBase;
+	// this call-time delegation routes the async production read through
+	// whatever sync stub is in place when the bind runs.
+	_test_exports.resolvePrReviewDiffStatsAsync = async (...a) =>
+		_test_exports.resolvePrReviewDiffStats(...a);
 }
 
 export async function teardownPrWorkflowGateFixtures(): Promise<void> {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.resolveCurrentUpstreamPushTarget =
 		originalResolveCurrentUpstreamPushTarget;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
 	_test_exports.resolveRemoteRefsContainingHead =
 		originalResolveRemoteRefsContainingHead;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
+	_test_exports.resolvePrReviewDiffStatsAsync =
+		originalResolvePrReviewDiffStatsAsync;
 	await fs.rm(tempDir, { recursive: true, force: true });
 }
 
@@ -393,6 +429,9 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	const originalResolvePrReviewDiffStats =
 		_test_exports.resolvePrReviewDiffStats;
 	try {
+		// setupPrWorkflowGateFixtures installs a call-time
+		// resolvePrReviewDiffStatsAsync delegation that reads this sync member,
+		// so bindPrReviewBase's async production read routes through this stub.
 		_test_exports.resolvePrReviewDiffStats = () => ({
 			changedLines: 10,
 			changedFiles: 2,

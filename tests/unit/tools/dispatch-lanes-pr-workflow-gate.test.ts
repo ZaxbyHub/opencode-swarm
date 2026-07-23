@@ -18,12 +18,22 @@ import {
 let directory = '';
 const originalGetSessionOps = dispatchInternals.getSessionOps;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	gateInternals.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	gateInternals.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	gateInternals.resolveIsWorkingTreeCleanAsync;
 const originalResolveRevision =
 	dispatchInternals.resolvePrWorkflowRevisionDigest;
+const originalResolveRevisionAsync =
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync;
 const originalResolveMergeBase = dispatchInternals.resolveExactMergeBase;
+const originalResolveMergeBaseAsync =
+	dispatchInternals.resolveExactMergeBaseAsync;
 const originalResolveDiffStats = gateInternals.resolvePrReviewDiffStats;
+const originalResolveDiffStatsAsync =
+	gateInternals.resolvePrReviewDiffStatsAsync;
 
 function lane(
 	id: string,
@@ -59,8 +69,20 @@ beforeEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
+	// Production resolves Git off the blocking spawn (async); route the async
+	// twins through the sync stubs so these fixtures drive the async path.
+	gateInternals.resolveCurrentGitHeadAsync = async (dir) =>
+		gateInternals.resolveCurrentGitHead(dir);
+	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		gateInternals.resolveIsWorkingTreeClean(dir);
+	gateInternals.resolvePrReviewDiffStatsAsync = async (...a) =>
+		gateInternals.resolvePrReviewDiffStats(...a);
 	dispatchInternals.resolvePrWorkflowRevisionDigest = () => 'revision-1';
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync = async (...a) =>
+		dispatchInternals.resolvePrWorkflowRevisionDigest(...a);
 	dispatchInternals.resolveExactMergeBase = () => 'def456';
+	dispatchInternals.resolveExactMergeBaseAsync = async (...a) =>
+		dispatchInternals.resolveExactMergeBase(...a);
 	dispatchInternals.getSessionOps = () => ({
 		create: mock(async () => ({ data: { id: 'lane-session' } })),
 		promptAsync: mock(async () => ({ data: undefined, error: undefined })),
@@ -71,10 +93,17 @@ beforeEach(() => {
 afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	gateInternals.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
+	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	dispatchInternals.resolvePrWorkflowRevisionDigest = originalResolveRevision;
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
+		originalResolveRevisionAsync;
 	dispatchInternals.resolveExactMergeBase = originalResolveMergeBase;
+	dispatchInternals.resolveExactMergeBaseAsync = originalResolveMergeBaseAsync;
 	dispatchInternals.getSessionOps = originalGetSessionOps;
 	await fs.rm(directory, { recursive: true, force: true });
 });

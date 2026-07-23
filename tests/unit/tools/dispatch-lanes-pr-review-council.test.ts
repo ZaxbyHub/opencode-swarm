@@ -35,13 +35,18 @@ let createdSessions = 0;
 const originalGetSessionOps = dispatchInternals.getSessionOps;
 const originalGetGeneratedAgentNames = dispatchInternals.getGeneratedAgentNames;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	gateInternals.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	gateInternals.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	gateInternals.resolveIsWorkingTreeCleanAsync;
 const originalGateRevisionDigest =
 	gateInternals.resolvePrWorkflowRevisionDigest;
-const originalDispatchRevisionDigest =
-	dispatchInternals.resolvePrWorkflowRevisionDigest;
-const originalDispatchMergeBase = dispatchInternals.resolveExactMergeBase;
+const originalDispatchRevisionDigestAsync =
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync;
+const originalDispatchMergeBaseAsync =
+	dispatchInternals.resolveExactMergeBaseAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -52,8 +57,17 @@ beforeEach(() => {
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-	dispatchInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-	dispatchInternals.resolveExactMergeBase = () => 'def456';
+	// The gate/dispatch bind path resolves Git off the blocking spawn (async).
+	// The gate seam keeps a live sync twin (used by its override-detection path),
+	// so route the gate async resolvers through the sync stubs above; the dispatch
+	// seam is async-only, so stub those directly.
+	gateInternals.resolveCurrentGitHeadAsync = async (dir) =>
+		gateInternals.resolveCurrentGitHead(dir);
+	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		gateInternals.resolveIsWorkingTreeClean(dir);
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync = async () =>
+		REVISION_DIGEST;
+	dispatchInternals.resolveExactMergeBaseAsync = async () => 'def456';
 	dispatchInternals.getGeneratedAgentNames = () => [
 		'council_generalist',
 		'reviewer',
@@ -72,11 +86,14 @@ beforeEach(() => {
 afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	gateInternals.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalGateRevisionDigest;
-	dispatchInternals.resolvePrWorkflowRevisionDigest =
-		originalDispatchRevisionDigest;
-	dispatchInternals.resolveExactMergeBase = originalDispatchMergeBase;
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
+		originalDispatchRevisionDigestAsync;
+	dispatchInternals.resolveExactMergeBaseAsync = originalDispatchMergeBaseAsync;
 	dispatchInternals.getSessionOps = originalGetSessionOps;
 	dispatchInternals.getGeneratedAgentNames = originalGetGeneratedAgentNames;
 	await fs.rm(directory, { recursive: true, force: true });

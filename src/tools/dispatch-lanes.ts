@@ -12,8 +12,8 @@ import {
 	recordPendingDelegation,
 } from '../background/pending-delegations.js';
 import {
-	resolveExactMergeBase,
-	resolvePrWorkflowRevisionDigest,
+	resolveExactMergeBaseAsync,
+	resolvePrWorkflowRevisionDigestAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
@@ -550,8 +550,8 @@ export const _internals: {
 	getSessionOps: () => SessionOps | null;
 	getGeneratedAgentNames: () => readonly string[];
 	createParallelDispatcher: typeof createParallelDispatcher;
-	resolvePrWorkflowRevisionDigest: typeof resolvePrWorkflowRevisionDigest;
-	resolveExactMergeBase: typeof resolveExactMergeBase;
+	resolvePrWorkflowRevisionDigestAsync: typeof resolvePrWorkflowRevisionDigestAsync;
+	resolveExactMergeBaseAsync: typeof resolveExactMergeBaseAsync;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 } = {
@@ -560,8 +560,8 @@ export const _internals: {
 		null,
 	getGeneratedAgentNames: () => swarmState.generatedAgentNames,
 	createParallelDispatcher,
-	resolvePrWorkflowRevisionDigest,
-	resolveExactMergeBase,
+	resolvePrWorkflowRevisionDigestAsync,
+	resolveExactMergeBaseAsync,
 	now: () => Date.now(),
 	sleep,
 };
@@ -749,15 +749,15 @@ export async function executeDispatchLanesAsync(
 			parsed.data.mode?.startsWith('swarm-pr-feedback:'))
 	) {
 		try {
-			verifiedPrHead = assertCurrentCheckoutHead(
+			verifiedPrHead = await assertCurrentCheckoutHead(
 				directory,
 				parsed.data.pr_head_sha,
 			);
 			workflowRevisionDigest =
-				_internals.resolvePrWorkflowRevisionDigest(
+				(await _internals.resolvePrWorkflowRevisionDigestAsync(
 					directory,
 					parsed.data.pr_head_sha,
-				) ?? undefined;
+				)) ?? undefined;
 			if (!workflowRevisionDigest) {
 				throw new Error(
 					'BLOCKED: PR workflow could not compute a bounded current-revision digest',
@@ -769,7 +769,7 @@ export async function executeDispatchLanesAsync(
 						'BLOCKED: PR_REVIEW dispatch requires exact base_sha and base_ref',
 					);
 				}
-				const resolvedBase = _internals.resolveExactMergeBase(
+				const resolvedBase = await _internals.resolveExactMergeBaseAsync(
 					directory,
 					parsed.data.base_ref,
 					parsed.data.pr_head_sha,
@@ -1398,6 +1398,12 @@ async function collectOnce(
 		if (!messages.data) continue;
 		const transcript = extractAssistantTranscript(messages.data);
 		if (!transcript.text) continue;
+		const collectedRevisionDigest = record.workspace?.prHeadSha
+			? ((await _internals.resolvePrWorkflowRevisionDigestAsync(
+					directory,
+					record.workspace.prHeadSha,
+				)) ?? undefined)
+			: undefined;
 		const output = prepareLaneOutput({
 			directory,
 			batchId: record.batchId ?? record.callID,
@@ -1410,12 +1416,7 @@ async function collectOnce(
 			workflowLane: record.workflowLane,
 			prHeadSha: record.workspace?.prHeadSha ?? undefined,
 			gitHead: record.workspace?.gitHead ?? undefined,
-			revisionDigest: record.workspace?.prHeadSha
-				? (_internals.resolvePrWorkflowRevisionDigest(
-						directory,
-						record.workspace.prHeadSha,
-					) ?? undefined)
-				: undefined,
+			revisionDigest: collectedRevisionDigest,
 			scope: record.workspace?.scope ?? undefined,
 			source: 'collect_lane_results',
 			text: transcript.text,

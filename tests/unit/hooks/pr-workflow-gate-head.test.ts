@@ -12,11 +12,16 @@ import {
 	clearPrWorkflowGateState,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const HEAD_SHA = 'abcdef1234567890';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalIsProcessAlive = _test_exports.isProcessAlive;
 const originalNowMs = _test_exports.nowMs;
 let directory = '';
@@ -27,12 +32,22 @@ beforeEach(() => {
 	);
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	// The gate bind/verify path resolves Git off the blocking spawn (async).
+	// Route the async resolvers through the sync stubs each test already sets,
+	// so existing synchronous fixtures drive the async production path.
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.isProcessAlive = originalIsProcessAlive;
 	_test_exports.nowMs = originalNowMs;
 	await fs.rm(directory, { recursive: true, force: true });
@@ -148,7 +163,7 @@ describe('PR workflow exact checkout head', () => {
 		const external = {
 			...cached!,
 			revision: cached!.revision + 1,
-			updatedAt: new Date().toISOString(),
+			updatedAt: withFrozenClock(() => new Date().toISOString()),
 		};
 		await fs.writeFile(statePath, JSON.stringify(external), 'utf-8');
 

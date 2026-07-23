@@ -19,6 +19,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const SESSION_ID = 'feedback-completion';
 const HEAD_SHA = 'abc123';
@@ -26,6 +27,10 @@ const POST_COMMIT_SHA = 'def456';
 const REVISION = 'revision-1';
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalResolveCurrentUpstreamRemoteRef =
 	_test_exports.resolveCurrentUpstreamRemoteRef;
 const originalResolveCurrentUpstreamPushTarget =
@@ -39,6 +44,16 @@ const originalResolveIsExactSingleChildCommit =
 	_test_exports.resolveIsExactSingleChildCommit;
 const originalResolveRevision = _test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveRemoteRefs = _test_exports.resolveRemoteRefsContainingHead;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
+const originalResolveExactRemoteBranchHeadAsync =
+	_test_exports.resolveExactRemoteBranchHeadAsync;
+const originalResolveCommitCountSinceAsync =
+	_test_exports.resolveCommitCountSinceAsync;
+const originalResolveIsExactSingleChildCommitAsync =
+	_test_exports.resolveIsExactSingleChildCommitAsync;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
 beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-completion-')),
@@ -59,11 +74,30 @@ beforeEach(() => {
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_test_exports.resolveRemoteRefsContainingHead = (_directory, headSha) =>
 		headSha === HEAD_SHA ? ['refs/remotes/origin/pr-head'] : [];
+	// Gate bind/verify resolves Git off the blocking spawn; route the async
+	// resolvers through the (per-test-mutated) sync stubs above.
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
+	_test_exports.resolveCurrentUpstreamPushTargetAsync = async (dir) =>
+		_test_exports.resolveCurrentUpstreamPushTarget(dir);
+	_test_exports.resolveExactRemoteBranchHeadAsync = async (...a) =>
+		_test_exports.resolveExactRemoteBranchHead(...a);
+	_test_exports.resolveCommitCountSinceAsync = async (...a) =>
+		_test_exports.resolveCommitCountSince(...a);
+	_test_exports.resolveIsExactSingleChildCommitAsync = async (...a) =>
+		_test_exports.resolveIsExactSingleChildCommit(...a);
+	_test_exports.resolveRemoteRefsContainingHeadAsync = async (...a) =>
+		_test_exports.resolveRemoteRefsContainingHead(...a);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.resolveCurrentUpstreamRemoteRef =
 		originalResolveCurrentUpstreamRemoteRef;
 	_test_exports.resolveCurrentUpstreamPushTarget =
@@ -76,6 +110,16 @@ afterEach(async () => {
 		originalResolveIsExactSingleChildCommit;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevision;
 	_test_exports.resolveRemoteRefsContainingHead = originalResolveRemoteRefs;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
+	_test_exports.resolveExactRemoteBranchHeadAsync =
+		originalResolveExactRemoteBranchHeadAsync;
+	_test_exports.resolveCommitCountSinceAsync =
+		originalResolveCommitCountSinceAsync;
+	_test_exports.resolveIsExactSingleChildCommitAsync =
+		originalResolveIsExactSingleChildCommitAsync;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -479,7 +523,7 @@ describe('PR workflow terminal completion', () => {
 				updatedAt: string;
 			};
 			raw.revision += 1;
-			raw.updatedAt = new Date().toISOString();
+			raw.updatedAt = withFrozenClock(() => new Date().toISOString());
 			await fs.writeFile(statePath, JSON.stringify(raw), 'utf-8');
 			_test_exports.resetTrackedStateCache();
 		};
