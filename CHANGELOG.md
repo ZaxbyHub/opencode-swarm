@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.129.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.0...v7.129.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **hooks:** wire quota/rate-limit failover into curator + skill-improver opt-in dispatch ([c717988](https://github.com/ZaxbyHub/opencode-swarm/commit/c717988039f8a210937de152f1bbcfbb7912017c))
+* **init,plan-loader:** parallelize init I/O + harden readSwarmFileAsync for Windows AV class ([#1782](https://github.com/ZaxbyHub/opencode-swarm/issues/1782)) ([ca50249](https://github.com/ZaxbyHub/opencode-swarm/commit/ca502494f90017d6061114ff9d8c9d5662207cf3))
+
 ## [7.129.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.128.0...v7.129.0) (2026-07-23)
 
 
