@@ -1069,6 +1069,11 @@ export const CheckpointConfigSchema = z.preprocess(
 		.object({
 			enabled: z.boolean().default(true),
 			auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
+			// Maximum number of checkpoints to retain in the log. Older entries
+			// are evicted (FIFO) when this limit is exceeded. Distinct from
+			// auto_checkpoint_threshold (which controls how many completed tasks
+			// trigger an auto-checkpoint, consumed by update_task_status).
+			max_retention: z.number().int().min(1).max(100).default(20),
 			// When false (default), checkpoint save skips the git commit if the working
 			// tree is clean, recording only the current HEAD SHA. Set to true to restore
 			// the previous behaviour of creating a git commit even with no file changes.
