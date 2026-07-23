@@ -21,6 +21,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { _internals, readSwarmFileAsync } from '../../../src/hooks/utils';
 import { resetSwarmState } from '../../../src/state';
 
@@ -130,18 +131,20 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 				throw errno('EBUSY', 'persistent lock');
 			}) as typeof _internals.readCachedTextFile;
 
-			const start = Date.now();
+			const start = performance.now();
 			const result = await readSwarmFileAsync(tmp, 'plan.json');
-			const elapsed = Date.now() - start;
+			const elapsed = performance.now() - start;
 
 			expect(result).toBeNull();
 			// 6 attempts (maxAttempts for the AV-class branch), 5 inter-attempt sleeps.
 			expect(calls).toBe(6);
-			// Worst-case added latency is 10+20+40+80+160 = 310ms. Use a
-			// generous upper bound to avoid platform flakiness; the floor
-			// catches a regression that drops the retry budget too low.
+			// Worst-case added latency is 10+20+40+80+160 = 310ms. The upper
+			// bound (< 600) catches a regression that roughly doubles the
+			// backoff schedule (e.g. 20/40/80/160/320 = 620ms would fail)
+			// while still allowing platform scheduling jitter headroom on the
+			// documented 310ms worst case. (PRR-008: was < 1000, too loose.)
 			expect(elapsed).toBeGreaterThanOrEqual(200);
-			expect(elapsed).toBeLessThan(1000);
+			expect(elapsed).toBeLessThan(600);
 		} finally {
 			rmSyncHardened(tmp);
 		}
@@ -187,16 +190,19 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 				throw errno('ENOENT', 'no such file or directory');
 			}) as typeof _internals.readCachedTextFile;
 
-			const start = Date.now();
+			const start = performance.now();
 			const result = await readSwarmFileAsync(tmp, 'plan.json');
-			const elapsed = Date.now() - start;
+			const elapsed = performance.now() - start;
 
 			expect(result).toBeNull();
 			// 5 attempts (ENOENT_MAX_ATTEMPTS), 4 inter-attempt sleeps of 10ms.
 			expect(calls).toBe(5);
-			// Cheap budget: 4 × 10ms = 40ms plus small overhead. Well under
-			// the AV-class 310ms budget — proves the split policy is in effect.
-			expect(elapsed).toBeLessThan(150);
+			// Cheap budget: 4 × 10ms = 40ms plus small overhead. The upper
+			// bound (< 80) allows ~2x slack on the 40ms baseline while still
+			// catching a regression that routes ENOENT through the AV-class
+			// 310ms path (which would blow past 80ms). (PRR-009: was < 150,
+			// too loose — allowed ~3.75x regression.)
+			expect(elapsed).toBeLessThan(80);
 		} finally {
 			rmSyncHardened(tmp);
 		}
