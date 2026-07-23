@@ -10,10 +10,28 @@
  *
  * The dispatched critic agent receives `tools: { write: false, edit: false, patch: false }`
  * to enforce that it performs only verification and never modifies the codebase.
+ *
+ * #1896 / #1905: on a transient/quota dispatch error the critic fails over to a
+ * configured `fallback_models` entry via the shared `dispatchWithModelFallback`
+ * helper, instead of immediately writing a REJECTED verdict (a quota blip
+ * previously cascaded into a false phase rejection). The SDK error envelope is
+ * preserved in the thrown message so the classifier sees the quota token on the
+ * dominant SDK error shape.
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { swarmState } from '../../state';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { stripKnownSwarmPrefix } from '../../config/schema';
+import { getAgentSession, swarmState } from '../../state';
+import { telemetry } from '../../telemetry';
+import {
+	dispatchWithModelFallback,
+	type ModelOverride,
+} from '../../utils/model-dispatch-fallback';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../../utils/provider-error-classification';
 import {
 	type LaneEvidence,
 	listLaneEvidence,
@@ -391,6 +409,9 @@ async function defaultDispatchCriticAgent(
 	agentName: string,
 	timeoutMs: number,
 	parentSessionId?: string,
+	// #1905: per-call model override on a fallback attempt; omitted (undefined)
+	// means the registered critic agent model.
+	model?: ModelOverride,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -463,6 +484,8 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 
 		// When timeoutMs > 0: race prompt against a rejecting timeout promise
 		// When timeoutMs <= 0 or undefined: await prompt directly (no race)
+		// #1905: per-call model override on a fallback attempt; omitted
+		// (undefined) means the registered critic agent model.
 		const response =
 			timeoutMs > 0
 				? await Promise.race([
@@ -470,6 +493,7 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 							path: { id: sessionId },
 							body: {
 								agent: agentName,
+								...(model ? { model } : {}),
 								tools: { write: false, edit: false, patch: false },
 								parts: [{ type: 'text', text: promptText }],
 							},
@@ -488,6 +512,7 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 						path: { id: sessionId },
 						body: {
 							agent: agentName,
+							...(model ? { model } : {}),
 							tools: { write: false, edit: false, patch: false },
 							parts: [{ type: 'text', text: promptText }],
 						},
@@ -495,7 +520,13 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 					});
 
 		if (!response.data) {
-			throw new Error('Critic session returned no data');
+			// #1905: preserve the SDK error body so the transient/quota
+			// classifier can read the real provider message — without this,
+			// envelope-shaped 429/402 errors classify as permanent and the
+			// failover never fires.
+			throw new Error(
+				`Critic session returned no data: ${JSON.stringify(response.error)}`,
+			);
 		}
 
 		// Extract text from response parts
@@ -528,6 +559,7 @@ export const _internals: {
 		agentName: string,
 		timeoutMs: number,
 		parentSessionId?: string,
+		model?: ModelOverride,
 	) => Promise<string>;
 	resolveDefaultCriticAgent: typeof resolveDefaultCriticAgent;
 	readReviewerEvidence: typeof readReviewerEvidence;
@@ -588,18 +620,70 @@ export async function dispatchPhaseCritic(
 		sessionID,
 	);
 
-	// Dispatch the critic agent and await its response
+	// Dispatch the critic agent and await its response.
+	// #1896 / #1905: on a transient/quota dispatch error, fail over to a
+	// configured critic fallback_model instead of immediately writing a REJECTED
+	// verdict (a quota blip previously cascaded into a false phase rejection).
+	// Only after the primary + all fallbacks are exhausted does the fail-closed
+	// REJECTED path run.
+	const criticBase = stripKnownSwarmPrefix(agentName);
+	const criticSwarmId =
+		criticBase !== agentName
+			? agentName.slice(0, agentName.length - criticBase.length - 1)
+			: undefined;
+	const criticSwarmAgents = getSwarmAgents(criticSwarmId);
 	let responseText: string;
 	try {
-		responseText = await _internals.dispatchCriticAgent(
-			directory,
-			pkg,
-			agentName,
-			mergedConfig.timeoutMs,
-			sessionID,
-		);
+		const dispatched = await dispatchWithModelFallback<string>({
+			dispatch: (model) =>
+				_internals.dispatchCriticAgent(
+					directory,
+					pkg,
+					agentName,
+					mergedConfig.timeoutMs,
+					sessionID,
+					model,
+				),
+			resolveFallback: (index) =>
+				resolveFallbackModel(criticBase, index, criticSwarmAgents),
+			// Advance to the next model immediately on a transient/quota error — an
+			// instant same-model retry cannot clear an exhausted quota.
+			maxTransientRetriesPerModel: 0,
+			classify: (err) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				// A critic dispatch TIMEOUT is not a provider transient — keep
+				// the existing fail-closed-then-REJECTED behavior instead of
+				// failing over (a slow call on one model does not predict quota
+				// exhaustion on the next). Mirrors the reviewer/runner carve-out.
+				if (/Critic dispatch timed out/i.test(msg)) return 'permanent';
+				return isTransientProviderError(msg) ? 'transient' : 'permanent';
+			},
+			onFallback: ({ toModel, fallbackIndex }) => {
+				telemetry.modelFallback(
+					sessionID,
+					agentName,
+					criticSwarmAgents?.[criticBase]?.model ?? 'default',
+					toModel,
+					'transient_model_error',
+				);
+				// Site 3 (lean-turbo integration) has no injected advisory
+				// channel (unlike auto-review.ts), so the advisory lands via the
+				// shared session-state path — same as the sibling reviewer.ts.
+				const session = getAgentSession(sessionID);
+				if (session) {
+					session.pendingAdvisoryMessages ??= [];
+					session.pendingAdvisoryMessages.push(
+						`MODEL FALLBACK: lean-turbo critic failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
+					);
+				}
+			},
+		});
+		responseText = dispatched.result;
 	} catch (error) {
-		// Fail-closed: dispatch failure → write REJECTED verdict
+		// Fail-closed: dispatch failure (after fallbacks exhausted) → REJECTED verdict
+		const isQuota = isQuotaError(
+			error instanceof Error ? error.message : String(error),
+		);
 		const evidencePath = await _internals.writeCriticEvidence(
 			directory,
 			phase,
@@ -608,7 +692,7 @@ export async function dispatchPhaseCritic(
 		);
 		return {
 			verdict: 'REJECTED',
-			reason: `Critic dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+			reason: `Critic dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${error instanceof Error ? error.message : String(error)}`,
 			evidencePath,
 		};
 	}

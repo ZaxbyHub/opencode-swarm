@@ -21,18 +21,35 @@
  * Bounds (AGENTS.md invariants 3 and 8): the diff subprocess uses execFile
  * with cwd/timeout/maxBuffer and ignored stdin; dispatches are guarded by a
  * per-session in-flight set plus a 60s cooldown in a bounded FIFO map.
+ *
+ * #1896 / #1905: on a transient/quota dispatch error the reviewer fails over to
+ * a configured `fallback_models` entry via the shared `dispatchWithModelFallback`
+ * helper, instead of immediately writing a `verdict: 'error'` event (a quota
+ * blip previously dropped the review pass with no recovery). The SDK error
+ * envelope is preserved in the thrown message so the classifier sees the quota
+ * token on the dominant SDK error shape.
  */
 
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import { ORCHESTRATOR_NAME } from '../config/constants.js';
 import {
 	type AutoReviewConfig,
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import { swarmState } from '../state.js';
+import { telemetry } from '../telemetry.js';
 import { resolveDefaultReviewerAgent } from '../turbo/lean/reviewer.js';
 import * as logger from '../utils/logger.js';
+import {
+	dispatchWithModelFallback,
+	type ModelOverride,
+} from '../utils/model-dispatch-fallback.js';
+import {
+	isQuotaError,
+	isTransientProviderError,
+} from '../utils/provider-error-classification.js';
 import { normalizeToolName } from './normalize-tool-name.js';
 import {
 	buildApprovedReceipt,
@@ -191,6 +208,9 @@ async function dispatchReviewer(
 	agentName: string,
 	timeoutMs: number,
 	parentSessionId: string,
+	// #1905: per-call model override on a fallback attempt; omitted (undefined)
+	// means the registered reviewer agent model.
+	model?: ModelOverride,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -215,6 +235,8 @@ async function dispatchReviewer(
 			path: { id: sessionId },
 			body: {
 				agent: agentName,
+				// #1905: per-call model override on a fallback attempt.
+				...(model ? { model } : {}),
 				// Read-only reviewer: verification only, never modification.
 				tools: { write: false, edit: false, patch: false },
 				parts: [{ type: 'text', text: prompt }],
@@ -231,7 +253,13 @@ async function dispatchReviewer(
 			}),
 		]);
 		if (!response.data) {
-			throw new Error('auto-review session returned no data');
+			// #1905: preserve the SDK error body so the transient/quota
+			// classifier can read the real provider message — without this,
+			// envelope-shaped 429/402 errors classify as permanent and the
+			// failover never fires.
+			throw new Error(
+				`auto-review session returned no data: ${JSON.stringify(response.error)}`,
+			);
 		}
 		return response.data.parts
 			.filter((p): p is typeof p & { text: string } => p.type === 'text')
@@ -357,20 +385,68 @@ export async function runAutoReview(input: AutoReviewRunInput): Promise<void> {
 		);
 		const prompt = buildReviewPrompt(trigger, diff, taskId, phase);
 
+		// #1896 / #1905: on a transient/quota dispatch error, fail over to a
+		// configured reviewer fallback_model instead of immediately writing a
+		// `verdict: 'error'` event (a quota blip previously dropped the review
+		// pass with no recovery). Only after the primary + all fallbacks are
+		// exhausted does the fail-open error path run.
+		const reviewerBase = stripKnownSwarmPrefix(agentName);
+		const reviewerSwarmId =
+			reviewerBase !== agentName
+				? agentName.slice(0, agentName.length - reviewerBase.length - 1)
+				: undefined;
+		const reviewerSwarmAgents = getSwarmAgents(reviewerSwarmId);
 		let transcript: string;
 		try {
-			transcript = await _internals.dispatchReviewer(
-				directory,
-				prompt,
-				agentName,
-				config.timeout_ms,
-				sessionID,
-			);
+			const dispatched = await dispatchWithModelFallback<string>({
+				dispatch: (model) =>
+					_internals.dispatchReviewer(
+						directory,
+						prompt,
+						agentName,
+						config.timeout_ms,
+						sessionID,
+						model,
+					),
+				resolveFallback: (index) =>
+					resolveFallbackModel(reviewerBase, index, reviewerSwarmAgents),
+				// Advance to the next model immediately on a transient/quota error —
+				// an instant same-model retry cannot clear an exhausted quota.
+				maxTransientRetriesPerModel: 0,
+				classify: (err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					// An auto-review dispatch TIMEOUT is not a provider transient —
+					// keep the existing fail-open error behavior instead of failing
+					// over (a slow call on one model does not predict quota
+					// exhaustion on the next). Mirrors the reviewer/runner carve-out.
+					if (/auto-review timed out/i.test(msg)) return 'permanent';
+					return isTransientProviderError(msg) ? 'transient' : 'permanent';
+				},
+				onFallback: ({ toModel, fallbackIndex }) => {
+					telemetry.modelFallback(
+						sessionID,
+						agentName,
+						reviewerSwarmAgents?.[reviewerBase]?.model ?? 'default',
+						toModel,
+						'transient_model_error',
+					);
+					// #1905: use the module's existing injected advisory channel
+					// (not getAgentSession — auto-review.ts already has its own).
+					input.injectAdvisory(
+						sessionID,
+						`MODEL FALLBACK: auto-review reviewer failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
+					);
+				},
+			});
+			transcript = dispatched.result;
 		} catch (err) {
+			const isQuota = isQuotaError(
+				err instanceof Error ? err.message : String(err),
+			);
 			writeAutoReviewEvent(directory, {
 				...base,
 				verdict: 'error',
-				detail: `dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+				detail: `dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${err instanceof Error ? err.message : String(err)}`,
 			});
 			return;
 		}

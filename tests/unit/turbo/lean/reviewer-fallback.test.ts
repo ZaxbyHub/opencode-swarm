@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { getAgentConfigs } from '../../../../src/agents/index';
 import type { PluginConfig } from '../../../../src/config';
-import { resetSwarmState } from '../../../../src/state';
+import { resetSwarmState, swarmState } from '../../../../src/state';
 import {
 	_internals,
 	dispatchPhaseReviewer,
@@ -138,5 +138,62 @@ describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 		expect(result.verdict).toBe('REJECTED');
 		// Only the primary attempted — timeout is permanent, no failover.
 		expect(calls).toEqual([undefined]);
+	});
+
+	test('envelope-shaped quota error via the real defaultDispatchReviewerAgent (data:null + error envelope) triggers failover — pins the #1905 envelope-preservation parity fix', async () => {
+		// Issue #1905 critic item 1 (Critical): the sibling reviewer site
+		// (already wired in PR #1901) had the SAME envelope-discard gap as
+		// auto-review.ts and integration.ts. Without the parity fix at
+		// reviewer.ts:486, the classifier would see only "Reviewer session
+		// returned no data" with no quota token → permanent → no failover. The
+		// fix embeds JSON.stringify(response.error) in the thrown message.
+		//
+		// Drive the REAL defaultDispatchReviewerAgent with a mock client
+		// returning { data: null, error: { message: '429 ...' } }.
+		const promptCalls: Array<string | undefined> = [];
+		swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'reviewer-session-1' } }),
+				prompt: async (params: { body?: { model?: unknown } }) => {
+					const override = params.body?.model;
+					promptCalls.push(
+						override
+							? `${(override as { providerID: string; modelID: string }).providerID}/${(override as { providerID: string; modelID: string }).modelID}`
+							: undefined,
+					);
+					if (!override) {
+						return {
+							data: null,
+							error: {
+								code: 'RATE_LIMITED',
+								message: '429 rate_limit_exceeded: too many requests',
+							},
+						};
+					}
+					return {
+						data: { parts: [{ type: 'text', text: 'VERDICT: APPROVED' }] },
+					};
+				},
+				delete: async () => ({}),
+			},
+		} as typeof swarmState.opencodeClient;
+		// Restore the REAL default dispatch fn (beforeEach stubbed it).
+		_internals.dispatchReviewerAgent = originalInternals.dispatchReviewerAgent;
+
+		try {
+			const result = await dispatchPhaseReviewer(
+				'/tmp/does-not-matter',
+				1,
+				'sess-envelope',
+				{ reviewerAgent: 'reviewer', timeoutMs: 0 },
+			);
+
+			// Failover fired on the envelope-shaped error → APPROVED.
+			expect(result.verdict).toBe('APPROVED');
+			expect(promptCalls[0]).toBeUndefined();
+			expect(promptCalls[1]).toBe('prov/fb1');
+		} finally {
+			swarmState.opencodeClient = undefined;
+		}
 	});
 });
