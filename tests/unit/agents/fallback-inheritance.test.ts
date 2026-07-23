@@ -27,6 +27,49 @@ describe('resolveFallbackModel - curator fallback inheritance', () => {
 		expect(fallback3).toBeNull();
 	});
 
+	test('curator_consolidation inherits fallback_models from explorer when not explicitly set (#1927)', () => {
+		// curator_consolidation's model already defaults to explorer's in
+		// createSwarmAgents, so it must inherit explorer's fallback chain too —
+		// otherwise the opt-in memory-consolidation dispatch fails over to nothing.
+		const swarmAgents = {
+			explorer: {
+				model: 'opencode/big-pickle',
+				fallback_models: ['consol-fb-1', 'consol-fb-2'],
+			},
+			curator_consolidation: {
+				model: 'opencode/big-pickle',
+				// No fallback_models explicitly set
+			},
+		};
+
+		expect(resolveFallbackModel('curator_consolidation', 1, swarmAgents)).toBe(
+			'consol-fb-1',
+		);
+		expect(resolveFallbackModel('curator_consolidation', 2, swarmAgents)).toBe(
+			'consol-fb-2',
+		);
+		expect(
+			resolveFallbackModel('curator_consolidation', 3, swarmAgents),
+		).toBeNull();
+	});
+
+	test('curator_consolidation uses explicit fallback_models when set, ignoring explorer (#1927)', () => {
+		const swarmAgents = {
+			explorer: {
+				model: 'opencode/big-pickle',
+				fallback_models: ['explorer-fallback-1'],
+			},
+			curator_consolidation: {
+				model: 'custom-model',
+				fallback_models: ['consol-explicit'],
+			},
+		};
+
+		expect(resolveFallbackModel('curator_consolidation', 1, swarmAgents)).toBe(
+			'consol-explicit',
+		);
+	});
+
 	test('curator_phase inherits fallback_models from explorer when not explicitly set', () => {
 		const swarmAgents = {
 			explorer: {

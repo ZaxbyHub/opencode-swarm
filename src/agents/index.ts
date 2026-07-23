@@ -201,12 +201,17 @@ export function resolveFallbackModel(
 	let fallbackModels = agentConfig?.fallback_models;
 
 	// 2. If not explicitly set, check if this is a curator agent that should inherit from explorer
-	// Only inherit if the curator agent does NOT have fallback_models key at all
+	// Only inherit if the curator agent does NOT have fallback_models key at all.
+	// All four curator modes default their model to explorer's (see createSwarmAgents:
+	// curator_init/phase/postmortem/consolidation all use `?? getModel('explorer')`), so
+	// they inherit explorer's fallback chain too — otherwise consolidation-mode dispatch
+	// (memory-consolidation service) would fail over to nothing while the other modes do.
 	if (
 		fallbackModels === undefined &&
 		(agentBaseName === 'curator_init' ||
 			agentBaseName === 'curator_phase' ||
-			agentBaseName === 'curator_postmortem')
+			agentBaseName === 'curator_postmortem' ||
+			agentBaseName === 'curator_consolidation')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
