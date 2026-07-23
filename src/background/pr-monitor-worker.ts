@@ -111,6 +111,14 @@ export class PrMonitorWorker {
 	/** In-memory circuit-breaker state per PR correlationId. */
 	private readonly circuitBreakerMap = new Map<string, CircuitBreakerState>();
 
+	/** In-memory idle-backoff counter per PR correlationId (issue #1691).
+	 *  Incremented when a poll cycle detects zero changes; reset on any change.
+	 *  Used to skip polls for PRs that have been idle for many cycles. */
+	private readonly idlePollCountMap = new Map<string, number>();
+
+	/** In-memory total poll cycle counter for deterministic skip scheduling. */
+	private pollCycleCount = 0;
+
 	/** In-memory review decision per PR correlationId (not persisted). */
 	private readonly reviewStateMap = new Map<string, string>();
 
@@ -250,6 +258,8 @@ export class PrMonitorWorker {
 			const toPoll = activeSubs.slice(0, this.config.max_prs_per_cycle);
 			const concurrencyLimit = this.config.max_concurrent_pr_polls;
 
+			this.pollCycleCount++;
+
 			await this.processWithConcurrency(toPoll, concurrencyLimit);
 			await this.runSweep();
 		} catch (err) {
@@ -361,6 +371,18 @@ export class PrMonitorWorker {
 			return;
 		}
 
+		// Idle backoff (issue #1691): skip polls for PRs that have been
+		// unchanged for many consecutive cycles. This reduces steady-state
+		// gh subprocess volume from 4×polls/cycle to near-zero for idle PRs.
+		const idleCount = this.idlePollCountMap.get(correlationId) ?? 0;
+		if (this.shouldSkipIdlePoll(idleCount, this.pollCycleCount)) {
+			log('[PrMonitorWorker] Skipping idle PR poll (backoff)', {
+				correlationId,
+				idleCount,
+			});
+			return;
+		}
+
 		try {
 			const [statusResult, commentsResult, mergeResult, reviewResult] =
 				await Promise.all([
@@ -439,6 +461,17 @@ export class PrMonitorWorker {
 			// Reset circuit breaker on success
 			if (!isTimedOut?.()) {
 				this.circuitBreakerMap.delete(correlationId);
+
+				// Update idle backoff counter (issue #1691)
+				if (changes.events.length > 0) {
+					this.idlePollCountMap.set(correlationId, 0);
+				} else {
+					this.idlePollCountMap.set(
+						correlationId,
+						(this.idlePollCountMap.get(correlationId) ?? 0) + 1,
+					);
+				}
+
 				await _internals.updateSnapshot(this.directory, correlationId, {
 					errorCount: 0,
 					lastCheckedAt: Date.now(),
@@ -874,6 +907,24 @@ export class PrMonitorWorker {
 				error: error.message,
 			});
 		}
+	}
+
+	/**
+	 * Determine whether to skip polling a PR based on idle backoff (issue #1691).
+	 *
+	 * After N consecutive no-change polls, skip cycles deterministically:
+	 *   idle 0-2:  poll every cycle (no skip)
+	 *   idle 3-5:  poll every 2nd cycle (50% reduction)
+	 *   idle 6-9:  poll every 3rd cycle (67% reduction)
+	 *   idle 10+:  poll every 5th cycle (80% reduction)
+	 *
+	 * Uses pollCycleCount for deterministic scheduling (no random skips).
+	 * Any detected change resets the counter to 0.
+	 */
+	private shouldSkipIdlePoll(idleCount: number, cycleNumber: number): boolean {
+		if (idleCount < 3) return false;
+		const skipEvery = idleCount >= 10 ? 5 : idleCount >= 6 ? 3 : 2;
+		return cycleNumber % skipEvery !== 0;
 	}
 
 	// ── Event Publishing ─────────────────────────────────────────────
