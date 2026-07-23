@@ -44,6 +44,8 @@ const originalResolveRevisionDigest =
 	writerInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveMergeBase = writerInternals.resolveMergeBase;
 const originalResolveDiffStats = gateInternals.resolvePrReviewDiffStats;
+const originalResolveDiffStatsAsync =
+	gateInternals.resolvePrReviewDiffStatsAsync;
 
 // Deterministic diff-stat fixtures for the controller depth tier. Without an
 // override the real numstat resolver runs against a git-less temp dir and fails
@@ -158,6 +160,8 @@ async function establishBoundReviewGate(
 		gateInternals.resolveCurrentGitHead(dir);
 	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
 		gateInternals.resolveIsWorkingTreeClean(dir);
+	gateInternals.resolvePrReviewDiffStatsAsync = async (dir, base, head) =>
+		gateInternals.resolvePrReviewDiffStats(dir, base, head);
 	await activatePrWorkflow(root, SESSION_ID, 'PR_REVIEW');
 	await bindPrReviewBase(root, SESSION_ID, {
 		prHeadSha: HEAD_SHA,
@@ -224,6 +228,7 @@ afterEach(() => {
 		originalResolveRevisionDigest;
 	writerInternals.resolveMergeBase = originalResolveMergeBase;
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
+	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
 	}
