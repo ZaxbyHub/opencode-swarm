@@ -111,13 +111,24 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		// The parallel init I/O wraps loadPluginConfigWithMetaAsync in a 2s
 		// withTimeout. If the read stalls past 2s, init must STILL complete
 		// and the resulting config must equal getSafeDefaultConfigLoadResult().
-		// We deterministically inject a stall via the test seam added in
-		// issue #1782 (overrideIndexInternalsForTest).
-		const stall = new Promise(() => {
-			/* never resolves — simulates a hung AV scan */
+		//
+		// We stub ALL THREE parallel I/O functions so the test is purely about
+		// the config-read timeout mechanism — no real fs/git I/O that could
+		// interact with the event loop on Windows CI. The config stub resolves
+		// after 5s (well past the 2s timeout), NOT never — a never-resolving
+		// promise can hang the event loop under Bun on Windows when combined
+		// with unref'd timers in withTimeout.
+		const slowConfig = new Promise<any>((resolve) => {
+			setTimeout(() => resolve({ config: {}, loadedFromFile: false }), 5_000);
 		});
 		restoreIndexInternals = overrideIndexInternalsForTest({
-			loadPluginConfigWithMetaAsync: (() => stall) as any,
+			loadPluginConfigWithMetaAsync: (() => slowConfig) as any,
+			loadSnapshot: (async () => {
+				/* no-op — stubbed to avoid real fs I/O */
+			}) as any,
+			ensureSwarmGitExcluded: (async () => {
+				/* no-op — stubbed to avoid real git spawn */
+			}) as any,
 			schedulePostResolutionTasks: () => {
 				/* swallow to keep test deterministic */
 			},
@@ -129,12 +140,10 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		const elapsed = performance.now() - start;
 
 		// Init completed despite the stall. Bounded by LOAD_PLUGIN_CONFIG_TIMEOUT_MS
-		// (~2000ms) plus the parallel reads' latencies; allow generous headroom.
+		// (~2000ms); the other two stubs resolve immediately.
 		expect(result).toHaveProperty('tool');
 		expect(elapsed).toBeLessThan(10_000);
-		// The other two parallel reads complete near-instantly (no real .swarm
-		// state, no real git exclude issues in a fresh tmpdir), so the bound
-		// on total time is dominated by the 2s config timeout.
+		// The 2s timeout dominates the total time.
 		expect(elapsed).toBeGreaterThanOrEqual(1900);
 	});
 
