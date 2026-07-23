@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.128.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.127.1...v7.128.0) (2026-07-23)
+
+
+### Features
+
+* **failover:** wire quota/rate-limit failover into remaining dispatch sites ([#1905](https://github.com/ZaxbyHub/opencode-swarm/issues/1905)) ([41c7399](https://github.com/ZaxbyHub/opencode-swarm/commit/41c739960c3740dee2ee66fb8d6c4a8b62b466c9))
+
 ## [7.127.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.127.0...v7.127.1) (2026-07-22)
 
 
