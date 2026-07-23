@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { z } from 'zod';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	ExternalSkillsConfigSchema,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
@@ -360,6 +361,10 @@ function stripUnrecognizedKeys(
  *                          the remaining configuration was preserved.
  *   'user_only'          – project config was discarded (failed validation and
  *                          targeted recovery); user config alone was used.
+ *   'sanitized_values'   – merged and user configs both failed, but recursive
+ *                          malformed-value recovery (step 7b, issue #1690)
+ *                          dropped the smallest invalid leaves/sections so the
+ *                          remaining valid configuration could load.
  *   'guardrails_defaults'– neither merged nor user config was recoverable;
  *                          fell back to fail-secure guardrails-only defaults.
  */
@@ -367,6 +372,7 @@ export type ConfigRecovery =
 	| 'none'
 	| 'stripped_keys'
 	| 'user_only'
+	| 'sanitized_values'
 	| 'guardrails_defaults';
 
 /** Full result from the shared config-build core. */
@@ -415,7 +421,11 @@ function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
  *   2. On Zod failure: surgically drop only the confirmed unrecognized keys
  *      and re-parse (issue #1778 H6 — one typo must not wipe the whole config).
  *   3. If still invalid: retry user-config alone.
- *   4. Last resort: fail-secure guardrails-only defaults.
+ *   4. Recursive malformed-value recovery (step 7b, issue #1690): drop the
+ *      smallest invalid leaves/sections via the fixed-point sanitizer so a
+ *      single wrong-type value does not wipe the rest. Skipped when the raw
+ *      config explicitly sets `guardrails.enabled: false` (double-disable guard).
+ *   5. Last resort: fail-secure guardrails-only defaults.
  *
  * Returns `ConfigBuildResult` so callers that need metadata (e.g.
  * `loadPluginConfigWithMeta[Async]`) have it without a second file-read.
@@ -560,6 +570,60 @@ function buildConfigWithMeta(
 			}
 		}
 	}
+
+	// 7b. Recursive malformed-value recovery (issue #1690): if user-config
+	//     fallback also failed, the remaining failure is likely a malformed
+	//     VALUE (wrong type). Drop the smallest recoverable unit (leaf field
+	//     → parent section) so valid sections survive. This is the last
+	//     targeted recovery before bare guardrails defaults.
+	//
+	//     SECURITY: skip recovery when the raw config explicitly sets
+	//     guardrails.enabled: false. In that case, fall through to step 8
+	//     (guardrails defaults) so the user's non-guardrails values are
+	//     NOT preserved alongside a forced guardrails override — preventing
+	//     the "Double-disable" attack vector (adversarial test v6.1.2 AV8).
+	const rawGuardrailsDisabled =
+		mergedRaw.guardrails &&
+		typeof mergedRaw.guardrails === 'object' &&
+		!Array.isArray(mergedRaw.guardrails) &&
+		(mergedRaw.guardrails as Record<string, unknown>).enabled === false;
+
+	if (!rawGuardrailsDisabled) {
+		const valueRecovery = sanitizeMalformedValues(
+			PluginConfigSchema,
+			mergedRaw,
+		);
+		if (valueRecovery.recoveryWarnings.length > 0) {
+			const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
+			if (recoveredParse.success) {
+				const removedKeys = [
+					...gatesStripped,
+					...valueRecovery.recoveryWarnings.map((w) => w.section),
+				];
+				advisoryWarn(
+					`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
+				);
+				// Force guardrails enabled on recovery — the user's config had
+				// invalid values, so we apply the same fail-secure default as
+				// step 8 (guardrails_defaults) to preserve the security posture.
+				const secureConfig = PluginConfigSchema.parse({
+					...(recoveredParse.data as Record<string, unknown>),
+					guardrails: {
+						...((recoveredParse.data as Record<string, unknown>).guardrails as
+							| Record<string, unknown>
+							| undefined),
+						enabled: true,
+					},
+				});
+				return {
+					config: secure(secureConfig),
+					recovery: 'sanitized_values',
+					removedKeys,
+					warnings: [],
+				};
+			}
+		}
+	} // end if (!rawGuardrailsDisabled)
 
 	// 8. Guardrails defaults: nothing was recoverable.
 	const offending = stripUnrecognizedKeys(mergedRaw, firstResult.error).removed;

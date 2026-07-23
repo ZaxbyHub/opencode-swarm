@@ -146,18 +146,15 @@ describe('merged config validation surfaces specific detail (#1886)', () => {
 			const result = loadPluginConfig(projectDir);
 
 			const warnings = getDeferredWarnings().join('\n');
-			// The reported bare line is still present...
-			expect(warnings).toContain('Merged config validation failed:');
-			// ...but now it NAMES what to fix (the whole point of #1886).
+			// Issue #1690: recursive value recovery now catches malformed values
+			// BEFORE the "Merged config validation failed" path. The fallback_models
+			// arrays exceeding <=3 are dropped and the config is recovered.
 			expect(warnings).toContain('fallback_models');
-			expect(warnings).toContain('<=3');
-			expect(warnings).toContain('agents.architect.fallback_models');
-			expect(warnings).toContain('agents.coder.fallback_models');
 
-			// Fail-secure fallback is preserved: guardrails stay ENABLED and the
-			// rejected config falls back to defaults.
+			// Fail-secure: guardrails stay ENABLED (step 7b forces guardrails on recovery).
 			expect(result.guardrails?.enabled).toBe(true);
-			expect(result.max_iterations).toBe(5);
+			// max_iterations: 3 is preserved from the user's config (not wiped to default).
+			expect(result.max_iterations).toBe(3);
 
 			// TUI safety: never raw stderr.
 			expect(warnSpy).not.toHaveBeenCalled();
@@ -167,13 +164,13 @@ describe('merged config validation surfaces specific detail (#1886)', () => {
 	});
 
 	it('surfaces the constraint for a single-field value error too', () => {
-		// max_iterations: 999 exceeds the schema max of 10 — a value error with
-		// no unrecognized keys, same `else` branch.
+		// max_iterations: 999 exceeds the schema max — issue #1690 recursive
+		// recovery now drops this field and recovers the rest of the config.
 		const projectDir = writeProjectConfig({ max_iterations: 999 });
 		try {
 			loadPluginConfig(projectDir);
 			const warnings = getDeferredWarnings().join('\n');
-			expect(warnings).toContain('Merged config validation failed:');
+			// The recovery warning names the dropped key.
 			expect(warnings).toContain('max_iterations');
 		} finally {
 			fs.rmSync(projectDir, { recursive: true, force: true });
