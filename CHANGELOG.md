@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.129.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.1...v7.129.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **pr-workflow:** add per-tier micro-lane consolidation floor ([0bc6a8b](https://github.com/ZaxbyHub/opencode-swarm/commit/0bc6a8b53b4462091ed4af8c2a1d39e2403d859e))
+
 ## [7.129.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.0...v7.129.1) (2026-07-23)
 
 

@@ -43,6 +43,17 @@ const originalGateRevisionDigest =
 const originalResolveRevisionDigest =
 	writerInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveMergeBase = writerInternals.resolveMergeBase;
+const originalResolveDiffStats = gateInternals.resolvePrReviewDiffStats;
+
+// Deterministic diff-stat fixtures for the controller depth tier. Without an
+// override the real numstat resolver runs against a git-less temp dir and fails
+// strict to tier L; the micro-lane floor (issue #1936) is tier-sensitive, so the
+// consolidated-ownership cases pin an explicit tier.
+const DIFF_STATS_BY_TIER = {
+	S: { changedLines: 10, changedFiles: 1, hasSubmoduleChange: false },
+	M: { changedLines: 300, changedFiles: 12, hasSubmoduleChange: false },
+	L: null,
+} as const;
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-')));
@@ -130,11 +141,15 @@ async function recordCompletedLane(
 
 async function establishBoundReviewGate(
 	root: string,
-	options: { consolidatedMicro?: boolean } = {},
+	options: { consolidatedMicro?: boolean; depthTier?: 'S' | 'M' | 'L' } = {},
 ): Promise<void> {
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
+	if (options.depthTier) {
+		const stats = DIFF_STATS_BY_TIER[options.depthTier];
+		gateInternals.resolvePrReviewDiffStats = () => stats;
+	}
 	writerInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	writerInternals.resolveMergeBase = () => 'def456';
 	// Gate bind/verify resolves Git off the blocking spawn; route the async
@@ -208,6 +223,7 @@ afterEach(() => {
 	writerInternals.resolvePrWorkflowRevisionDigest =
 		originalResolveRevisionDigest;
 	writerInternals.resolveMergeBase = originalResolveMergeBase;
+	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -290,9 +306,14 @@ describe('write_pr_review_trigger_eval provenance and ownership', () => {
 		);
 	});
 
-	test('accepts consolidated micro lanes that declared and attested every owned family', async () => {
+	test('accepts consolidated micro lanes that declared and attested every owned family (tier S — floor does not bind)', async () => {
 		const root = tempRoot();
-		await establishBoundReviewGate(root, { consolidatedMicro: true });
+		// Tier S: the micro-lane floor (issue #1936) is 1, so a two-lane
+		// consolidation of all eleven families is legal on the smallest PRs.
+		await establishBoundReviewGate(root, {
+			consolidatedMicro: true,
+			depthTier: 'S',
+		});
 		const sweepAFamilies = PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6);
 		const consolidated = rows().map((row) => ({
 			...row,
@@ -322,6 +343,43 @@ describe('write_pr_review_trigger_eval provenance and ownership', () => {
 			no_match_count: 0,
 			dispatched_micro_lane_count: 2,
 		});
+	});
+
+	test('rejects a below-floor consolidated micro attestation at tier M (issue #1936 aggregate floor)', async () => {
+		const root = tempRoot();
+		// Tier M: the floor is 6. A durable attestation attributing all eleven
+		// families to only two dispatch lanes under-consolidates the record and
+		// must be rejected — including split-batch dodges of the dispatch floor.
+		await establishBoundReviewGate(root, {
+			consolidatedMicro: true,
+			depthTier: 'M',
+		});
+		const sweepAFamilies = PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6);
+		const consolidated = rows().map((row) => ({
+			...row,
+			source_batch_id: 'micro-consolidated',
+			source_lane_id: (sweepAFamilies as readonly string[]).includes(
+				row.trigger_id,
+			)
+				? 'sweep-a'
+				: 'sweep-b',
+		}));
+		const response = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-consolidated-m',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: consolidated,
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(response.success).toBe(false);
+		expect(response.message).toContain('micro lane floor unmet');
+		expect(response.message).toContain('depth tier M');
 	});
 
 	test('rejects a consolidated tuple citing a family outside its declared ownership', async () => {
