@@ -113,14 +113,19 @@ export function validateRepoRelativeGlob(
 // Subprocess helper
 // ============================================================================
 
-/** Find a binary on PATH (Bun.which misses runtime PATH changes). */
+/** Find a binary on PATH (Bun.which misses runtime PATH changes).
+ *  On Windows, checks .exe, .cmd, .bat, and bare name (issue #1691). */
 function findBinaryInPath(binary: string): string | null {
 	const isWindows = process.platform === 'win32';
-	const exeName = isWindows ? `${binary}.exe` : binary;
+	const candidates = isWindows
+		? [`${binary}.exe`, `${binary}.cmd`, `${binary}.bat`, binary]
+		: [binary];
 	for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
 		if (!dir) continue;
-		const candidate = path.join(dir, exeName);
-		if (existsSync(candidate)) return candidate;
+		for (const name of candidates) {
+			const candidate = path.join(dir, name);
+			if (existsSync(candidate)) return candidate;
+		}
 	}
 	return null;
 }
