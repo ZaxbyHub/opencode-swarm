@@ -557,11 +557,17 @@ export function resolveCommitCountSince(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): number | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const output = runGit(directory, [
 		'rev-list',
 		'--count',
 		'--ancestry-path',
 		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
 	]);
 	if (!output || !/^\d+$/.test(output)) return null;
 	const count = Number(output);
@@ -574,11 +580,17 @@ export async function resolveCommitCountSinceAsync(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): Promise<number | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const output = await runGitAsync(directory, [
 		'rev-list',
 		'--count',
 		'--ancestry-path',
 		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
 	]);
 	if (!output || !/^\d+$/.test(output)) return null;
 	const count = Number(output);
@@ -591,15 +603,22 @@ export function resolveIsExactSingleChildCommit(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): boolean | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const base = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${baseHeadSha}^{commit}`,
+		'--',
 	]);
 	const current = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${currentHeadSha}^{commit}`,
+		'--',
 	]);
 	if (!base || !current) return null;
 	const commitAndParents = runGit(directory, [
@@ -624,15 +643,22 @@ export async function resolveIsExactSingleChildCommitAsync(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): Promise<boolean | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const base = await runGitAsync(directory, [
 		'rev-parse',
 		'--verify',
 		`${baseHeadSha}^{commit}`,
+		'--',
 	]);
 	const current = await runGitAsync(directory, [
 		'rev-parse',
 		'--verify',
 		`${currentHeadSha}^{commit}`,
+		'--',
 	]);
 	if (!base || !current) return null;
 	const commitAndParents = await runGitAsync(directory, [
