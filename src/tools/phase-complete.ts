@@ -1373,6 +1373,28 @@ export async function executePhaseComplete(
 		warnings,
 	};
 
+	// Plan-free code-change enforcement (issue #1744): when there's no plan.json,
+	// the agent-dispatch fallback can't infer from task gates. If reviewer/
+	// test_engineer weren't dispatched independently, emit a prominent warning
+	// so the gap is visible in phase-complete output and curator reports.
+	let hasPlan = false;
+	try {
+		hasPlan = fs.existsSync(validateSwarmPath(dir, 'plan.json'));
+	} catch {
+		// Non-blocking — treat as plan-free if path validation fails
+	}
+	if (
+		!hasPlan &&
+		!crossSessionResult.agents.has('reviewer') &&
+		!crossSessionResult.agents.has('test_engineer')
+	) {
+		warnings.push(
+			`⚠️ Plan-free phase ${phase}: no independent reviewer or test_engineer dispatch detected. ` +
+				`Code changes in plan-free sessions should have independent review. ` +
+				`Consider dispatching reviewer + test_engineer before completing future plan-free phases.`,
+		);
+	}
+
 	// Record retrieval outcome for shown lessons from this phase, using the
 	// REAL outcome. Previously this was hardcoded `true` and ran before `success`
 	// was determined — so a failed phase (policy=enforce + missing required
