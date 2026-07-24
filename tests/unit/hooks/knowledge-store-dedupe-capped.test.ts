@@ -94,9 +94,11 @@ describe('dedupeCapped — step 4: case-insensitive dedupe, first casing wins', 
 	});
 
 	it('keeps distinct values in first-seen order', () => {
-		expect(
-			dedupeCapped(['b', 'a', 'B', 'c', 'A', 'a'], { cap: 20 }),
-		).toEqual(['b', 'a', 'c']);
+		expect(dedupeCapped(['b', 'a', 'B', 'c', 'A', 'a'], { cap: 20 })).toEqual([
+			'b',
+			'a',
+			'c',
+		]);
 	});
 
 	it('does not collapse values that merely share a prefix', () => {

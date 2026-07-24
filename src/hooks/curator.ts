@@ -694,6 +694,41 @@ function arrayOfStrings(v: unknown): string[] {
 	return dedupeCapped(v, { cap: 20, itemMaxChars: 200 });
 }
 
+/**
+ * Mirror of WRITE_FIELD_CAP in src/hooks/knowledge-store.ts. Not imported,
+ * because adding a second named import from that module would force every
+ * non-spreading `mock.module('…/knowledge-store.js')` factory in the test tree
+ * to stub one more export. Keep the two values in sync; CI Check 5 does not
+ * cover this.
+ */
+const TAG_WRITE_CAP = 20;
+
+/**
+ * Attach a `contradiction:<reason>` marker to an entry's tag list (#1821).
+ *
+ * The store write boundary caps `tags` at 20 keeping the FIRST N, so a plain
+ * append would silently evict the marker from an entry that already carries 20
+ * tags — the curator would count the update as applied and emit a
+ * `contradicted` event while `buildCuratorBriefing`'s
+ * `e.tags.some((t) => t.includes('contradiction'))` never saw it.
+ *
+ * Appending is therefore kept for the common (under-cap) case, which preserves
+ * historical tag order — `slugSeed` in src/services/skill-generator.ts falls
+ * back to `tags[0]`. Only when the list is already at or above the cap does the
+ * marker move to the front, which guarantees it survives at the cost of
+ * dropping the last tag. Something must be dropped at 21 values; the fresh,
+ * actionable marker is the wrong thing to lose. The tradeoff is pinned by
+ * tests/unit/hooks/knowledge-contradiction.test.ts.
+ */
+function withContradictionMarker(
+	existing: string[] | undefined,
+	reason: string | undefined,
+): string[] {
+	const marker = `contradiction:${(reason ?? '').slice(0, 50)}`;
+	const tags = existing ?? [];
+	return tags.length >= TAG_WRITE_CAP ? [marker, ...tags] : [...tags, marker];
+}
+
 function readLatestPostMortemDigest(directory: string): string | null {
 	try {
 		const swarmDir = path.join(directory, '.swarm');
@@ -2170,10 +2205,7 @@ export async function applyCuratorKnowledgeUpdates(
 					});
 					return {
 						...entry,
-						tags: [
-							...(entry.tags ?? []),
-							`contradiction:${(rec.reason ?? '').slice(0, 50)}`,
-						],
+						tags: withContradictionMarker(entry.tags, rec.reason),
 						updated_at: new Date().toISOString(),
 						...genStamp,
 					};

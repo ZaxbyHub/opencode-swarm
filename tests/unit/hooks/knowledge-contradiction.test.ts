@@ -62,7 +62,10 @@ function writeEvents(
 	writeFileSync(fp, content, 'utf-8');
 }
 
-function writeEntry(dir: string, opts: { id: string; status?: string }): void {
+function writeEntry(
+	dir: string,
+	opts: { id: string; status?: string; tags?: string[] },
+): void {
 	const fp = resolveSwarmKnowledgePath(dir);
 	mkdirSync(join(dir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -72,7 +75,7 @@ function writeEntry(dir: string, opts: { id: string; status?: string }): void {
 			tier: 'swarm',
 			lesson: 'a test lesson long enough to pass validation checks here',
 			category: 'process',
-			tags: [],
+			tags: opts.tags ?? [],
 			scope: 'global',
 			confidence: 0.7,
 			status: opts.status ?? 'established',
@@ -183,6 +186,62 @@ describe('G3 contradiction unification (#1715)', () => {
 			resolveSwarmKnowledgePath(dir),
 		);
 		expect(entries[0].tags).toContain('contradiction:spaces vs tabs');
+	});
+
+	async function flagContradiction(
+		id: string,
+		reason: string,
+	): Promise<string[]> {
+		await applyCuratorKnowledgeUpdates(
+			dir,
+			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason }],
+			defaultConfig,
+		);
+		const entries = await readKnowledge<{ id: string; tags?: string[] }>(
+			resolveSwarmKnowledgePath(dir),
+		);
+		return entries[0].tags ?? [];
+	}
+
+	test('flag_contradiction appends the marker and preserves tag order under the cap (#1821)', async () => {
+		// Under the cap nothing has to be evicted, so historical tag order is
+		// preserved — src/services/skill-generator.ts derives `slugSeed` from
+		// `tags[0]` when an entry has no triggers/required_actions.
+		const id = randomUUID();
+		writeEntry(dir, { id, tags: ['alpha', 'beta'] });
+		const tags = await flagContradiction(id, 'spaces vs tabs');
+		expect(tags).toEqual(['alpha', 'beta', 'contradiction:spaces vs tabs']);
+	});
+
+	test('flag_contradiction marker survives the write-boundary cap on a full tag list (#1821)', async () => {
+		// The #1821 Lane 0b store guardrail caps `tags` at 20 keeping the FIRST N.
+		// While flag_contradiction APPENDED unconditionally, an entry already
+		// carrying 20 tags lost the marker on write: the curator still counted the
+		// update as applied and emitted a `contradicted` event, but
+		// buildCuratorBriefing's `e.tags.some((t) => t.includes('contradiction'))`
+		// never saw it.
+		//
+		// At 21 values something MUST be dropped. This pins the deliberate
+		// tradeoff: the marker moves to the front and survives, and the OLDEST
+		// listed tag (`tag-19`) is what gets evicted — asserted explicitly so the
+		// loss is visible rather than silent.
+		const id = randomUUID();
+		writeEntry(dir, {
+			id,
+			tags: Array.from({ length: 20 }, (_, i) => `tag-${i}`),
+		});
+		const tags = await flagContradiction(
+			id,
+			'conflicting advice about retries',
+		);
+
+		expect(tags).toHaveLength(20);
+		expect(tags[0]).toBe('contradiction:conflicting advice about retries');
+		// Everything except the final tag is retained, in its original order.
+		expect(tags.slice(1)).toEqual(
+			Array.from({ length: 19 }, (_, i) => `tag-${i}`),
+		);
+		expect(tags).not.toContain('tag-19');
 	});
 
 	test('maybeQuarantineOnContradiction quarantines when threshold crossed', async () => {

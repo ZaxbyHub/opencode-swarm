@@ -148,15 +148,44 @@ describe('check-invariants.sh', () => {
 		expect(result.stdout).toContain('Check 1: Subprocess timeout required');
 	});
 
-	test('should run all four checks', () => {
-		if (isWindows) return;
-		const result = runCheckInvariants(REPO_ROOT);
-		expect(result.stdout).toContain('Check 1:');
-		expect(result.stdout).toContain('Check 2:');
-		expect(result.stdout).toContain('Check 3:');
-		expect(result.stdout).toContain('Check 4:');
-		expect(result.stdout).toContain('Summary');
-	});
+	// NOTE on the explicit timeouts below: `runCheckInvariants` spawns the real
+	// script and already allows it 30s, but bun:test's own per-test default is
+	// 5s. On a cold/slow filesystem the script exceeds that, so every test in
+	// this file that shells out is timing-sensitive (6 of them already fail this
+	// way at b0284ca, before issue #1821 touched anything). The two tests below
+	// are the ones #1821 owns, so they carry an explicit budget matching the
+	// spawn allowance instead of inheriting the 5s default.
+	test(
+		'should run all five checks',
+		() => {
+			if (isWindows) return;
+			const result = runCheckInvariants(REPO_ROOT);
+			expect(result.stdout).toContain('Check 1:');
+			expect(result.stdout).toContain('Check 2:');
+			expect(result.stdout).toContain('Check 3:');
+			expect(result.stdout).toContain('Check 4:');
+			expect(result.stdout).toContain('Check 5:');
+			expect(result.stdout).toContain('Summary');
+		},
+		30000,
+	);
+
+	test(
+		'issue #1821: Check 5 knowledge array dedup guardrail reports a clean repo',
+		() => {
+			if (isWindows) return;
+			const result = runCheckInvariants(REPO_ROOT);
+			expect(result.stdout).toContain(
+				'Check 5: knowledge array dedup guardrail',
+			);
+			// The guardrail ships with an EMPTY exempt list by design, so the only
+			// honest steady state is zero unguarded positional caps. If this ever
+			// reports a non-zero count, a call site regressed to a bare
+			// `.slice(0, 20)` instead of `dedupeCapped`.
+			expect(result.stdout).toContain('Unguarded positional caps: 0');
+		},
+		30000,
+	);
 
 	test('issue #1666: Check 4 growth ratchet header is present', () => {
 		if (isWindows) return;

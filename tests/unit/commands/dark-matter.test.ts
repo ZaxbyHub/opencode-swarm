@@ -38,6 +38,11 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	// computeContentHash; expose the named export so this non-spreading mock
 	// doesn't SyntaxError at load. Deterministic content-derived stub.
 	computeContentHash: (lesson: string) => String(lesson).slice(0, 12),
+	// #1821: same recurrence class as computeContentHash above — curator.ts
+	// (transitively loaded) now imports dedupeCapped, so this non-spreading mock
+	// must expose it or Bun SyntaxErrors at load. Behaviour-faithful stub:
+	// non-array -> [], otherwise pass through (dedupe/cap are irrelevant here).
+	dedupeCapped: (values: unknown) => (Array.isArray(values) ? values : []),
 	getPlatformConfigDir: mock(() => ''),
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
 	resolveSwarmRejectedPath: mock(

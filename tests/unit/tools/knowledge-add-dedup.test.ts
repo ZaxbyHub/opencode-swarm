@@ -12,21 +12,32 @@
  * empty field, consumed by validateActionableFields / validateActionability);
  * only the inner filter+slice became `dedupeCapped`.
  *
- * Note on layering: the store also normalizes these arrays at the write
- * boundary (tests/unit/hooks/knowledge-store-write-normalization.test.ts), so
- * plain tag dedupe is defense-in-depth here. The assertions below that are
- * call-site-specific — and therefore cannot be satisfied by the store
- * guardrail — are the inferred-tag merge, the caller-tags-win ordering, and the
- * pre-validation cap that keeps validateActionableFields from rejecting an
- * over-long list outright.
+ * IMPORTANT — masking, stated honestly. The store ALSO normalizes `tags` and
+ * the five actionability arrays at the write boundary, with identical
+ * semantics. So an assertion made against a PERSISTED entry generally CANNOT
+ * distinguish "call site fixed" from "call site reverted" — the guardrail
+ * would produce the same bytes either way.
+ *
+ * Two consequences, both handled below:
+ *   1. The `_test_exports` block asserts `mergeLessonTags` / `strArray`
+ *      DIRECTLY, with no store in the loop. Those are the falsifiable
+ *      call-site tests.
+ *   2. The end-to-end blocks are labelled for what they actually are —
+ *      behavior pins over the whole tool path (call site + guardrail
+ *      together), not per-call-site regression coverage. The only end-to-end
+ *      assertions the guardrail cannot satisfy are the inferred-tag merge
+ *      ones, because the store never invents tags.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { invalidateKnowledgeStoreDirCache } from '../../../src/hooks/knowledge-link';
-import { knowledge_add } from '../../../src/tools/knowledge-add';
+import { _test_exports, knowledge_add } from '../../../src/tools/knowledge-add';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+const { mergeLessonTags, strArray } = _test_exports;
 
 /** A lesson `inferTags` maps to exactly ['typescript']. */
 const LESSON_INFERS_TS =
@@ -43,8 +54,14 @@ const V3_FIELDS = {
 
 let tmpDir: string;
 let cleanupDir: () => void;
+let cleanupEnv: () => void;
 
 beforeEach(() => {
+	// knowledge_add calls loadPluginConfigWithMeta, which resolves a global
+	// config from XDG_CONFIG_HOME / APPDATA / HOME. Without this redirect a
+	// developer's real opencode-swarm.json (knowledge.validation_enabled,
+	// dedup_threshold, swarm_max_entries) would change these results.
+	cleanupEnv = createIsolatedTestEnv().cleanup;
 	const created = createSafeTestDir('knowledge-add-dedup-');
 	tmpDir = created.dir;
 	cleanupDir = created.cleanup;
@@ -54,6 +71,75 @@ beforeEach(() => {
 afterEach(() => {
 	invalidateKnowledgeStoreDirCache();
 	cleanupDir();
+	cleanupEnv();
+});
+
+describe('#1821 site 1+2 — call-site helpers, asserted with no store in the loop', () => {
+	it('mergeLessonTags dedupes caller tags case-insensitively', () => {
+		expect(
+			mergeLessonTags(['Bun', 'bun', 'BUN', 'linting'], LESSON_INFERS_NOTHING),
+		).toEqual(['Bun', 'linting']);
+	});
+
+	it('mergeLessonTags keeps distinct tags a positional slice would evict', () => {
+		const merged = mergeLessonTags(
+			[
+				...Array.from({ length: 15 }, () => 'dup'),
+				...Array.from({ length: 10 }, (_, i) => `keep-${i}`),
+			],
+			LESSON_INFERS_NOTHING,
+		);
+		expect(merged).toHaveLength(11);
+		expect(merged).toContain('keep-5');
+		expect(merged).toContain('keep-9');
+	});
+
+	it('mergeLessonTags appends inferred tags AFTER caller tags', () => {
+		expect(mergeLessonTags(['build'], LESSON_INFERS_TS)).toEqual([
+			'build',
+			'typescript',
+		]);
+	});
+
+	it('mergeLessonTags drops inferred tags first when the cap is reached', () => {
+		const caller = Array.from({ length: 20 }, (_, i) => `caller-${i}`);
+		expect(mergeLessonTags(caller, LESSON_INFERS_TS)).toEqual(caller);
+	});
+
+	it('mergeLessonTags returns inferred tags alone for absent/malformed input', () => {
+		expect(mergeLessonTags(undefined, LESSON_INFERS_TS)).toEqual([
+			'typescript',
+		]);
+		expect(mergeLessonTags('typescript,build', LESSON_INFERS_TS)).toEqual([
+			'typescript',
+		]);
+		expect(mergeLessonTags(undefined, LESSON_INFERS_NOTHING)).toEqual([]);
+	});
+
+	it('strArray dedupes case-insensitively and caps at 20', () => {
+		expect(strArray(['run tests', 'RUN TESTS', 'lint'])).toEqual([
+			'run tests',
+			'lint',
+		]);
+		expect(
+			strArray(Array.from({ length: 25 }, (_, i) => `a-${i}`)),
+		).toHaveLength(20);
+	});
+
+	it('strArray keeps distinct directives a positional slice would evict', () => {
+		const out = strArray([
+			...Array.from({ length: 15 }, () => 'same'),
+			...Array.from({ length: 10 }, (_, i) => `keep-${i}`),
+		]);
+		expect(out).toHaveLength(11);
+		expect(out).toContain('keep-9');
+	});
+
+	it('strArray returns undefined for a non-array — absent stays absent', () => {
+		expect(strArray(undefined)).toBeUndefined();
+		expect(strArray('coder')).toBeUndefined();
+		expect(strArray([])).toEqual([]);
+	});
 });
 
 function readEntries(): Array<Record<string, unknown>> {
@@ -81,7 +167,7 @@ async function add(args: Record<string, unknown>): Promise<{
 	);
 }
 
-describe('site 1 — knowledge_add tags dedupe', () => {
+describe('#1821 end-to-end — stored tags are deduped (call site + write guardrail)', () => {
 	it('dedupes caller tags case-insensitively, keeping the first casing', async () => {
 		const res = await add({
 			lesson: LESSON_INFERS_NOTHING,
@@ -121,7 +207,7 @@ describe('site 1 — knowledge_add tags dedupe', () => {
 	});
 });
 
-describe('site 1 — inferred tags merged after caller tags', () => {
+describe('#1821 end-to-end — inferred tags merged after caller tags (guardrail cannot fake this)', () => {
 	it('appends inferred tags AFTER the caller tags', async () => {
 		const res = await add({
 			lesson: LESSON_INFERS_TS,
@@ -171,7 +257,7 @@ describe('site 1 — inferred tags merged after caller tags', () => {
 	});
 });
 
-describe('site 1 — behavior when tags is omitted or malformed', () => {
+describe('#1821 end-to-end — tags omitted or malformed', () => {
 	it('still succeeds and stores the inferred tags when tags is omitted', async () => {
 		const res = await add({
 			lesson: LESSON_INFERS_TS,
@@ -204,12 +290,13 @@ describe('site 1 — behavior when tags is omitted or malformed', () => {
 	});
 });
 
-describe('site 2 — strArray dedupe on the actionability arrays', () => {
-	it('accepts 25 duplicate required_actions that previously failed validation', async () => {
-		// Before the fix, strArray sliced positionally without deduping, so 25
-		// duplicates reached validateActionableFields as 20 items — right at the
-		// limit — while 25 DISTINCT actions were rejected outright. Deduping
-		// first collapses the duplicates to a single directive.
+describe('#1821 end-to-end — stored actionability arrays are deduped', () => {
+	it('collapses 25 duplicate required_actions to one stored directive', async () => {
+		// Prior behavior: strArray sliced positionally without deduping, so the
+		// entry was STORED with 20 identical directives — 20 copies of the same
+		// instruction injected into every matching agent prompt. (Validation
+		// passed either way: the slice already capped the list at
+		// ACTIONABLE_LIST_MAX = 20 before validateActionableFields saw it.)
 		const res = await add({
 			lesson: LESSON_INFERS_NOTHING,
 			category: 'process',
@@ -220,7 +307,10 @@ describe('site 2 — strArray dedupe on the actionability arrays', () => {
 		expect(readEntries()[0].required_actions).toEqual(['always run tests']);
 	});
 
-	it('caps 25 distinct required_actions at 20 instead of failing validation', async () => {
+	// Characterization pin, NOT regression coverage: the pre-fix code also
+	// capped at 20, so this passes with the fix reverted. It exists to catch a
+	// future change that lets an over-cap list through to the store.
+	it('still caps 25 distinct required_actions at 20 (unchanged behavior)', async () => {
 		const res = await add({
 			lesson: LESSON_INFERS_NOTHING,
 			category: 'process',
@@ -276,7 +366,7 @@ describe('site 2 — strArray dedupe on the actionability arrays', () => {
 	});
 });
 
-describe('site 2 — absent field stays absent (the undefined is load-bearing)', () => {
+describe('#1821 — absent field stays absent (the undefined is load-bearing; unchanged by the fix)', () => {
 	it('omits the key entirely when the caller omits the field', async () => {
 		const res = await add({
 			lesson: LESSON_INFERS_NOTHING,

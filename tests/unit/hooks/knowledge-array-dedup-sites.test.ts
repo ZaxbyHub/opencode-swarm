@@ -42,7 +42,7 @@ function candidate(extra: Partial<InsightCandidate> = {}): InsightCandidate {
 	};
 }
 
-describe('site 3 — knowledge-curator insightCandidateToEntry tags', () => {
+describe('#1821 site 3 — regression: knowledge-curator insightCandidateToEntry tags', () => {
 	it('dedupes tags case-insensitively, keeping the first casing', () => {
 		const entry = insightCandidateToEntry(
 			candidate({ tags: ['Testing', 'testing', 'TESTING', 'ci-cd'] }),
@@ -103,7 +103,7 @@ describe('site 3 — knowledge-curator insightCandidateToEntry tags', () => {
 	});
 });
 
-describe('site 4 — micro-reflector parseMicroCandidates directive arrays', () => {
+describe('#1821 site 4 — regression: micro-reflector parseMicroCandidates arrays', () => {
 	const meta = {
 		agent: 'coder' as const,
 		outcome: 'failure_test' as const,
@@ -180,7 +180,7 @@ describe('site 4 — micro-reflector parseMicroCandidates directive arrays', () 
 	});
 });
 
-describe('site 6 — curator evidence_refs in knowledge_application_findings', () => {
+describe('#1821 site 6 — regression: curator evidence_refs', () => {
 	function parseFindings(evidence_refs: unknown) {
 		return parseStructuredCuratorBlocks(
 			[
@@ -200,7 +200,12 @@ describe('site 6 — curator evidence_refs in knowledge_application_findings', (
 	}
 
 	it('dedupes duplicate evidence refs case-insensitively', () => {
-		const out = parseFindings(['plan.md:42', 'plan.md:42', 'PLAN.MD:42', 'x.ts:1']);
+		const out = parseFindings([
+			'plan.md:42',
+			'plan.md:42',
+			'PLAN.MD:42',
+			'x.ts:1',
+		]);
 		expect(out.diagnostics).toEqual([]);
 		expect(out.findings[0].evidence_refs).toEqual(['plan.md:42', 'x.ts:1']);
 	});
@@ -236,7 +241,7 @@ describe('site 6 — curator evidence_refs in knowledge_application_findings', (
 	});
 });
 
-describe('site 5 — curator arrayOfStrings in skill_candidates', () => {
+describe('#1821 site 5 — regression: curator arrayOfStrings in skill_candidates', () => {
 	function parseCandidate(fields: Record<string, unknown>) {
 		return parseStructuredCuratorBlocks(
 			[

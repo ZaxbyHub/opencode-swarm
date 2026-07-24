@@ -4,9 +4,15 @@
  * The six positional-`.slice(0, 20)` call sites were fixed individually, but a
  * per-call-site fix cannot stop a SEVENTH caller from persisting duplicate or
  * over-cap arrays. The structural guardrail normalizes `tags` and the five
- * actionability arrays at the store WRITE boundary — `appendKnowledge` and the
- * `transactKnowledge` commit path — so the defect cannot reach disk regardless
- * of which call site produced the entry.
+ * actionability arrays at the three store WRITE paths in `knowledge-store.ts`
+ * — `appendKnowledge`, `rewriteKnowledge`, and the `transactKnowledge` commit
+ * path — so the defect cannot reach disk through any of them.
+ *
+ * Scope, stated precisely: this is not a whole-repo guarantee. Writers that
+ * deliberately bypass the guardrail (`applyConfidenceDeltas`, the validator's
+ * quarantine/restore/unarchive paths, `hive-transaction.ts`,
+ * `knowledge/family-migration.ts`) are documented on
+ * `normalizeEntryArraysForWrite` in the source.
  *
  * These tests use real temp directories and real file I/O (no mocks) and assert
  * on the RAW persisted JSONL, which is the only thing the guardrail promises.
@@ -18,6 +24,7 @@ import * as path from 'node:path';
 import {
 	appendKnowledge,
 	readKnowledge,
+	rewriteKnowledge,
 	transactKnowledge,
 } from '../../../src/hooks/knowledge-store';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
@@ -161,6 +168,31 @@ describe('write boundary — transactKnowledge commit path normalizes too', () =
 	});
 });
 
+describe('write boundary — rewriteKnowledge normalizes too', () => {
+	it('normalizes every entry on a full rewrite', async () => {
+		// rewriteKnowledge is the third store write path (knowledge-migrator,
+		// knowledge-curator cap/sweep, system-enhancer). Leaving it unguarded
+		// would let a migrated or enhanced entry re-persist duplicates.
+		await rewriteKnowledge(knowledgePath, [
+			entry({ id: 'a', tags: ['x', 'X', 'y'] }),
+			entry({
+				id: 'b',
+				verification_checks: Array.from({ length: 25 }, (_, i) => `c-${i}`),
+			}),
+		]);
+
+		const persisted = readPersisted();
+		expect(persisted).toHaveLength(2);
+		expect(persisted[0].tags).toEqual(['x', 'y']);
+		expect(persisted[1].verification_checks).toHaveLength(20);
+	});
+
+	it('still writes an empty file for an empty entry list', async () => {
+		await rewriteKnowledge(knowledgePath, []);
+		expect(readFileSync(knowledgePath, 'utf-8')).toBe('');
+	});
+});
+
 describe('write boundary — exclusions and non-interference', () => {
 	it('does NOT cap or dedupe source_knowledge_ids', async () => {
 		// source_knowledge_ids carries dedup markers for a separate workstream; a
@@ -211,6 +243,40 @@ describe('write boundary — exclusions and non-interference', () => {
 		await appendKnowledge(knowledgePath, input);
 		expect(input.tags).toEqual(['a', 'A', 'b']);
 		expect(readPersisted()[0].tags).toEqual(['a', 'b']);
+	});
+
+	it('passes non-object payloads through untouched', async () => {
+		// The guard `!entry || typeof entry !== 'object' || Array.isArray(entry)`
+		// exists because appendKnowledge/transactKnowledge are generic; a bare
+		// value must serialize exactly as it would without the guardrail.
+		await appendKnowledge(knowledgePath, null);
+		await appendKnowledge(knowledgePath, 42);
+		await appendKnowledge(knowledgePath, 'plain string');
+		await appendKnowledge(knowledgePath, ['a', 'A', 'a']);
+
+		const lines = readFileSync(knowledgePath, 'utf-8')
+			.split('\n')
+			.filter((l) => l.trim().length > 0);
+		expect(lines).toEqual(['null', '42', '"plain string"', '["a","A","a"]']);
+	});
+
+	it('survives a throwing getter on a normalized field', async () => {
+		// Prototype-pollution edge case: reading obj[field] can throw. The field
+		// is skipped rather than taking down the whole write.
+		const hostile: Record<string, unknown> = { id: 'hostile' };
+		Object.defineProperty(hostile, 'tags', {
+			get() {
+				throw new Error('poisoned getter');
+			},
+			enumerable: false,
+			configurable: true,
+		});
+		hostile.required_actions = ['do it', 'DO IT'];
+
+		await appendKnowledge(knowledgePath, hostile);
+		const persisted = readPersisted()[0];
+		expect(persisted.id).toBe('hostile');
+		expect(persisted.required_actions).toEqual(['do it']);
 	});
 });
 

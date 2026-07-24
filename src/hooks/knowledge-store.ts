@@ -406,10 +406,15 @@ const WRITE_FIELD_CAP = 20;
 /**
  * Entry fields normalized at the store write boundary (issue #1821 Lane 0b).
  *
- * `source_knowledge_ids` is DELIBERATELY EXCLUDED: it carries dedup markers for
- * a separate workstream and a cap of 20 would silently evict them. `triggers`
- * and `source_refs` are likewise left alone — this list is scoped to `tags`
- * plus the five actionability arrays that the six fixed call sites produce.
+ * `source_knowledge_ids` is DELIBERATELY EXCLUDED. Its producer in
+ * `curator.ts` caps it at FIFTY ids, not 20, and `skill-invalidator.ts` walks
+ * the full list to retire skills whose source entry was archived — a cap of 20
+ * would silently drop ids and leave those skills live. Issue #1821 additionally
+ * reserves the field for a sibling workstream's markers.
+ *
+ * `triggers` and `source_refs` are likewise left alone — this list is scoped to
+ * `tags` plus the five actionability arrays that the six fixed call sites
+ * produce.
  */
 const WRITE_NORMALIZED_ARRAY_FIELDS = [
 	'tags',
@@ -422,12 +427,48 @@ const WRITE_NORMALIZED_ARRAY_FIELDS = [
 
 /**
  * Structural guardrail: normalize an entry's array fields immediately before it
- * is serialized to disk, so duplicate / over-cap arrays cannot be persisted
- * regardless of which call site produced the entry.
+ * is serialized to disk, so a call site that forgets to dedupe cannot persist
+ * duplicate / over-cap arrays.
+ *
+ * COVERAGE — be precise, this is not a whole-repo guarantee. Three writers in
+ * this module route through it: `appendKnowledge`, `rewriteKnowledge`, and the
+ * `transactKnowledge` commit path. Those cover every current producer of the
+ * six normalized fields. Writers that still bypass it, deliberately:
+ *   - `applyConfidenceDeltas` (below) — re-persists exactly what `readKnowledge`
+ *     returned, and the read path is intentionally un-normalized, so passing
+ *     entries through here would silently rewrite untouched historical records.
+ *   - `knowledge-validator.ts` quarantine / restore / unarchive, and
+ *     `hive-transaction.ts` — outside this module; they relocate existing
+ *     records rather than author new field values. (That module's
+ *     `appendUnactionable` DOES go through `transactKnowledge` and IS
+ *     normalized.)
+ *   - `knowledge/family-migration.ts` — outside this module, and it DOES author
+ *     a new `tags` value (`mergeEntryFields` unions two entries' tags,
+ *     case-sensitively, src last). Its output is normalized only on the next
+ *     transaction through this module, at which point tags past the cap are
+ *     dropped. Closing that is out of scope for Lane 0b; see issue #1821.
+ * A NEW producer of `tags` or an actionability array must still call
+ * `dedupeCapped` at its own call site. CI Check 5 is a recurrence tripwire for
+ * the literal `.slice(0, 20)` spelling inside four path globs — it is NOT a
+ * complete enforcement of that rule.
  *
  * WRITE ONLY. `normalizeEntry` (the v1/v2 read-path back-compat shim) is
  * deliberately untouched — normalizing on read would rewrite history for
  * records written before this guardrail existed.
+ *
+ * ORDER MATTERS AT THE CALL SITE: the cap keeps the FIRST N values, so a
+ * caller that appends a semantically important marker to an already-full tag
+ * list would see that marker silently evicted. `withContradictionMarker` in
+ * `curator.ts` is the worked example — it appends under the cap (preserving
+ * historical tag order) and prepends at or above it.
+ *
+ * RETROACTIVE TRUNCATION IS REAL AND INTENDED: normalization applies to EVERY
+ * entry in the written array, not just the one a mutation touched. A record
+ * that predates this guardrail and carries 30 tags comes back with 20 after any
+ * transaction on its file. That is the point — the store converges on the
+ * invariant — but it does mean a write can shorten a record the caller never
+ * looked at. `applyConfidenceDeltas` is excluded precisely to avoid doing this
+ * on a path whose only job is to bump a number.
  *
  * Returns the original reference when nothing changed; otherwise a shallow
  * copy with the offending fields replaced, so callers never observe their own
@@ -484,8 +525,9 @@ export async function appendKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		// #1821 Lane 0b: normalize at the write boundary so no call site can
-		// persist duplicate / over-cap array fields.
+		// #1821 Lane 0b: normalize at the write boundary — see
+		// normalizeEntryArraysForWrite for the exact coverage this does and
+		// does not give.
 		await appendFile(
 			filePath,
 			`${JSON.stringify(normalizeEntryArraysForWrite(entry))}\n`,
@@ -520,9 +562,13 @@ export async function rewriteKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
+		// #1821 Lane 0b: rewriteKnowledge is the third store write path
+		// (knowledge-migrator, knowledge-curator cap/sweep, system-enhancer) and
+		// would otherwise be a hole in the structural guardrail.
 		const content =
-			entries.map((e) => JSON.stringify(e)).join('\n') +
-			(entries.length > 0 ? '\n' : '');
+			entries
+				.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
+				.join('\n') + (entries.length > 0 ? '\n' : '');
 		await atomicWriteFile(filePath, content);
 	} finally {
 		if (release) {
@@ -597,8 +643,8 @@ export async function transactKnowledge<T>(
 		filePath,
 		readKnowledge,
 		async (fp, entries) => {
-			// #1821 Lane 0b: normalize at the write boundary so no call site can
-			// persist duplicate / over-cap array fields.
+			// #1821 Lane 0b: normalize at the write boundary — see
+			// normalizeEntryArraysForWrite for the exact coverage.
 			const content =
 				entries
 					.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))

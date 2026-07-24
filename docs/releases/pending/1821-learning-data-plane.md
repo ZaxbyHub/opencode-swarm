@@ -1,0 +1,45 @@
+# `feat(knowledge)`: learning data plane — dedup hygiene, provenance, and shared immutable reports
+
+## Summary
+
+- `knowledge_add` now merges inferred tags with caller-supplied tags. Caller tags are kept first, so when the
+  20-tag cap truncates, inferred tags are dropped before anything you asked for.
+- Knowledge array fields (tags and the five actionability arrays) are now **deduplicated** before the 20-item
+  cap is applied, at every site that builds them. Previously the cap was purely positional, so a run of
+  duplicates could push distinct values off the end and silently lose them.
+- Deduplication is also enforced on the knowledge **store write path**, so an entry with duplicate or
+  over-cap arrays cannot be persisted regardless of which code path produced it.
+- New `learning` and `consensus` configuration blocks, and a new
+  `knowledge.promotion_require_actionable` setting.
+
+## User-facing changes
+
+- **Tags you pass to `knowledge_add` are preserved in order and de-duplicated**, and relevant tags inferred
+  from the lesson text are appended. A lesson that previously stored `["ci","ci","ci"]` now stores `["ci"]`,
+  leaving room under the cap for genuinely distinct tags.
+- **Duplicate entries in `applies_to_agents`, `applies_to_tools`, `required_actions`, `forbidden_actions`,
+  and `verification_checks` are collapsed.** Deduplication is case-insensitive and keeps the first
+  occurrence's original casing.
+- **Existing stored entries are normalized the next time they are written.** A legacy record holding more
+  than 20 tags returns from its next transaction capped at 20. This is intentional — it is the same cap that
+  has always applied to new writes — but it means an over-cap legacy record will lose its tail on the next
+  update rather than keeping it indefinitely.
+- `evidence_refs` recorded by the curator are likewise de-duplicated. Note this is case-insensitive, so
+  `plan.md:42` and `PLAN.MD:42` collapse to one reference.
+
+## Migration notes
+
+None required. All changes are backward compatible: existing knowledge records load unchanged, and
+normalization applies only when a record is written. No configuration change is needed — the new `learning`
+and `consensus` blocks have working defaults, and `knowledge.promotion_require_actionable` is additive.
+
+## Known limitations
+
+- Normalization runs on write, not on read, so an over-cap legacy record keeps its full tail until something
+  next writes it.
+- `src/knowledge/family-migration.ts` authors merged tag values and writes them through a path that bypasses
+  the store-level normalizer, so a cohort merge can transiently exceed the cap until the next transaction
+  normalizes it.
+- One further instance of the same positional-cap pattern remains at `src/hooks/curator.ts` on
+  `source_knowledge_ids` (cap 50). It is deliberately excluded: that field is used to carry
+  deduplication markers, and capping or reordering it would break that mechanism.

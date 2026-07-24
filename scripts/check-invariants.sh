@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Engineering invariant checks for opencode-swarm.
-# Runs five grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7
-# (Checks 1-3), the mock.module allowlist growth ratchet from issue #1666
-# (Check 4), and the knowledge-array dedup guardrail from issue #1821 Lane 0b
-# (Check 5). Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
+# Runs five static checks corresponding to AGENTS.md invariants 3, 4, and 7
+# (Checks 1-3, grep-based), the mock.module allowlist growth ratchet from issue
+# #1666 (Check 4, grep-based), and the knowledge-array dedup guardrail from
+# issue #1821 Lane 0b (Check 5, a small POSIX awk pass — it must see across
+# lines, which grep cannot do portably).
+# Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
 # Portability constraints (issue #1729 merge_group macOS failures):
 #   - macOS ships bash 3.2 as /bin/bash: NO associative arrays (`declare -A`),
 #     NO `[[ ${arr["x"]} ]]` subscript syntax. Use plain files + grep -Fxf.
@@ -335,25 +337,97 @@ echo "=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ==="
 # new match is a new instance of the defect, not pre-existing debt. Scope is
 # limited to the knowledge parse/write surface where the class lives.
 #
-# Comment-only lines are filtered (same technique as Check 3) so prose that
-# names the banned pattern does not self-trigger. Colocated *.test.ts files
-# under the scanned globs are excluded — grep --exclude is not portable to
-# command-line file arguments across GNU/BSD grep, so the filter is a pipe.
+# MULTI-LINE AWARE, deliberately. A line-anchored grep would be blind to the
+# form Biome actually emits once the receiver expression is long enough:
+#
+#     ).slice(
+#         0,
+#         20,
+#     )
+#
+# Eight such wrapped `.slice(` calls already exist inside the scanned files, so
+# reintroducing the defect on any long expression would defeat a grep-only
+# check. Instead a small awk pass anchors on each line containing `.slice(`,
+# joins it with the next three lines of CODE, strips whitespace and a trailing
+# comma before `)`, and matches the literal `.slice(0,20)`. `index()` is used
+# rather than a regex so no metacharacter escaping is involved. awk is POSIX
+# and present on every supported runner; no bash-4 or GNU-only construct is
+# used.
+#
+# COMMENTS ARE STRIPPED FROM THE WHOLE WINDOW, not just the anchor line. These
+# files necessarily discuss the banned pattern in prose, so a naive window join
+# both false-POSITIVES (a `.slice(` wrapped over two lines followed by a comment
+# that mentions `.slice(0, 20)`) and false-NEGATIVES (a genuine violation with a
+# comment or blank line between its arguments). Comment-only and blank lines are
+# skipped when filling the window and trailing `// …` text is dropped, which
+# closes both.
+#
+# Colocated *.test.ts files matching the globs (e.g.
+# src/tools/knowledge-tools.integration.test.ts) are skipped by path, not by a
+# text filter, so a violating line whose own text mentions ".test.ts:" is still
+# reported.
+#
+# Known residual blind spots (accepted; this is a recurrence tripwire, not a
+# type system): a cap written as a named constant (`.slice(0, TAG_CAP)`), a
+# different constant (`.slice(0, 50)`), a receiver split so wide that `20,`
+# falls outside the 3-code-line window, and files outside the four globs.
+#
+# The scope is also ASSERTED: if a glob or literal path resolves to nothing
+# (file renamed or deleted), that is a hard error rather than a silent drop to
+# zero coverage while still printing "expected 0".
 KNOWLEDGE_DEDUP_SCOPE="src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts"
 slice_violations=0
-while IFS= read -r hit; do
-  [ -n "$hit" ] || continue
-  echo "ERROR: $hit"
-  echo "       Positional .slice(0, 20) with no dedup on a knowledge array field."
-  echo "       Use dedupeCapped(values, { cap: 20 }) from src/hooks/knowledge-store.ts"
-  echo "       (add itemMaxChars when the site also truncates each item)."
-  slice_violations=$((slice_violations + 1))
-  violations=$((violations + 1))
-done < <(grep -nE '\.slice\([[:space:]]*0[[:space:]]*,[[:space:]]*20[[:space:]]*\)' \
-  $KNOWLEDGE_DEDUP_SCOPE 2>/dev/null \
-  | grep -vE '\.test\.ts:' \
-  | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(//|\*|/\*)' || true)
+slice_scanned=0
+for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
+  case "$scoped_file" in
+    *.test.ts) continue ;;
+  esac
+  if [ ! -f "$scoped_file" ]; then
+    echo "ERROR: Check 5 scope entry '$scoped_file' resolved to no file."
+    echo "       The guardrail would silently scan less than it claims."
+    echo "       Update KNOWLEDGE_DEDUP_SCOPE in $0 after the rename/deletion."
+    violations=$((violations + 1))
+    continue
+  fi
+  slice_scanned=$((slice_scanned + 1))
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    echo "ERROR: $hit"
+    echo "       Positional .slice(0, 20) with no dedup on a knowledge array field."
+    echo "       Use dedupeCapped(values, { cap: 20 }) from src/hooks/knowledge-store.ts"
+    echo "       (add itemMaxChars when the site also truncates each item)."
+    slice_violations=$((slice_violations + 1))
+    violations=$((violations + 1))
+  done < <(awk '
+    function code_of(s) { sub(/\/\/.*$/, "", s); return s }
+    function is_comment(s) { return (s ~ /^[ \t]*(\/\/|\*|\/\*)/) }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (is_comment(line[i])) continue
+        anchor = code_of(line[i])
+        if (index(anchor, ".slice(") == 0) continue
+        joined = anchor
+        taken = 0
+        for (k = i + 1; k <= NR && taken < 3; k++) {
+          if (is_comment(line[k])) continue
+          piece = code_of(line[k])
+          gsub(/[ \t]/, "", piece)
+          if (piece == "") continue
+          joined = joined piece
+          taken++
+        }
+        gsub(/[ \t]/, "", joined)
+        gsub(/,\)/, ")", joined)
+        if (index(joined, ".slice(0,20)") > 0) {
+          printf "%s:%d:%s\n", FILENAME, i, line[i]
+        }
+      }
+    }
+  ' "$scoped_file" || true)
+done
 echo "Scope: $KNOWLEDGE_DEDUP_SCOPE"
+echo "Files scanned: $slice_scanned"
 echo "Unguarded positional caps: $slice_violations (expected 0 — no exempt list by design)"
 
 echo ""
