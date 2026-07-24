@@ -86,7 +86,7 @@ describe('config/loader value recovery (issue #1690)', () => {
 		fs.rmSync(projectDir, { recursive: true, force: true });
 	});
 
-	it('falls to guardrails_defaults when sanitizeMalformedValues cannot recover', () => {
+	it('recovers to sanitized_values when every top-level section is malformed', () => {
 		const projectDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'vr-test-')),
 		);
@@ -94,7 +94,10 @@ describe('config/loader value recovery (issue #1690)', () => {
 		const configFile = path.join(configDir, 'opencode-swarm.json');
 		fs.mkdirSync(configDir, { recursive: true });
 
-		// Multiple sections malformed in ways that can't be recovered
+		// Every top-level section has a malformed value. sanitizeMalformedValues
+		// drops all of them; the resulting empty object parses cleanly (all
+		// fields are optional with defaults), so recovery SUCCEEDS as
+		// 'sanitized_values' — it does not fall through to guardrails_defaults.
 		fs.writeFileSync(
 			configFile,
 			JSON.stringify({
@@ -106,10 +109,41 @@ describe('config/loader value recovery (issue #1690)', () => {
 
 		const result = loadPluginConfigWithMeta(projectDir);
 
-		// If sanitizeMalformedValues can't recover everything, falls to guardrails_defaults
-		expect(['sanitized_values', 'guardrails_defaults']).toContain(
-			result.recovery,
+		expect(result.recovery).toBe('sanitized_values');
+		// Every malformed top-level section was dropped.
+		expect(result.removedKeys).toContain('council');
+		expect(result.removedKeys).toContain('guardrails');
+		expect(result.removedKeys).toContain('max_iterations');
+		// guardrails is re-enabled (forced on recovery — fail-secure).
+		expect(result.config.guardrails?.enabled).toBe(true);
+
+		fs.rmSync(projectDir, { recursive: true, force: true });
+	});
+
+	it('falls to guardrails_defaults when guardrails.enabled === false (double-disable skip)', () => {
+		const projectDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'vr-test-')),
 		);
+		const configDir = path.join(projectDir, '.opencode');
+		const configFile = path.join(configDir, 'opencode-swarm.json');
+		fs.mkdirSync(configDir, { recursive: true });
+
+		// SECURITY (adversarial test v6.1.2 AV8): when the raw config explicitly
+		// disables guardrails alongside a malformed value, step 7b SKIPS value
+		// recovery so attacker-controlled values are not preserved alongside a
+		// forced guardrails override. It falls through to step 8 (defaults),
+		// which discards ALL user values.
+		fs.writeFileSync(
+			configFile,
+			JSON.stringify({
+				guardrails: { enabled: false },
+				max_iterations: 'string-not-number',
+			}),
+		);
+
+		const result = loadPluginConfigWithMeta(projectDir);
+
+		expect(result.recovery).toBe('guardrails_defaults');
 		expect(result.config.guardrails?.enabled).toBe(true);
 
 		fs.rmSync(projectDir, { recursive: true, force: true });

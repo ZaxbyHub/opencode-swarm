@@ -416,3 +416,9 @@ export const _internals = {
 	runDirectivePredicate,
 	TOOL_BINARY_ALLOWLIST,
 };
+
+// Tier 0 test seam (writing-tests SKILL.md): findBinaryInPath is a pure PATH
+// resolver (reads process.env.PATH + existsSync only). Exporting it directly
+// avoids mock.module for the #1691 .cmd/.bat resolution tests — they assert
+// real behavior with a fake PATH and temp files on disk.
+export const _test_exports = { findBinaryInPath };
