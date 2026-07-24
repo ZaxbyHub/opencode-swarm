@@ -1,62 +1,30 @@
 import { describe, expect, test } from 'bun:test';
-import type {
-	KnowledgeEntryBase,
-	PhaseConfirmationRecord,
-	RetrievalOutcome,
-} from '../../../src/hooks/knowledge-types.js';
+import { computeContentHash } from '../../../src/hooks/knowledge-store.js';
+import type { RetrievalOutcome } from '../../../src/hooks/knowledge-types.js';
 import { _internals } from '../../../src/knowledge/family-migration.js';
+import {
+	entry,
+	outcomes,
+	phaseRecAt as phaseRec,
+} from './_entry-merge-fixtures.js';
 
 /**
  * CHARACTERIZATION tests — part 2 of `entry-merge-characterization.test.ts`
- * (split for the 500-line FR-006 cap).
+ * (split for the 500-line FR-006 cap). The issue #1821 Lane A fixes that are
+ * NOT inverted pins live in `entry-merge-fixes.test.ts`.
  *
- * Covers the evidence-weighted confidence formula, the asymmetric merge guards,
- * and the fields the merge silently does NOT carry today. Everything here pins
- * CURRENT behavior so a later change (issue #1821) is a deliberate diff.
+ * Covers the evidence-weighted confidence formula and the merge's previously
+ * asymmetric guards. `weightedConfidence` is INTENTIONALLY unchanged by #1821
+ * (changing it would move `/swarm link` cohort-merge results), so everything in
+ * the confidence block below is still a pin on current behavior. The
+ * asymmetric-guard and dropped-field blocks were inverted by #1821 and each
+ * carries an inline note naming the assertion it replaced.
  *
- * `weightedConfidence` is module-private; it is exercised through the
- * `_internals.mergeEntryFields` seam, which is the only reachable entry point.
+ * `weightedConfidence` is exercised through the `_internals.mergeEntryFields`
+ * seam on `family-migration.ts` — the migration engine's production entry point.
  */
 
 const { mergeEntryFields, mergeStoreEntries } = _internals;
-
-type LooseEntry = KnowledgeEntryBase & Record<string, unknown>;
-
-function outcomes(over: Record<string, unknown> = {}): RetrievalOutcome {
-	return {
-		applied_count: 0,
-		succeeded_after_count: 0,
-		failed_after_count: 0,
-		...over,
-	} as RetrievalOutcome;
-}
-
-function entry(over: Record<string, unknown> = {}): LooseEntry {
-	return {
-		id: 'target-1',
-		tier: 'swarm',
-		lesson: 'run focused tests before claiming done',
-		category: 'testing',
-		tags: [],
-		scope: 'global',
-		confidence: 0.5,
-		status: 'candidate',
-		confirmed_by: [],
-		retrieval_outcomes: outcomes(),
-		schema_version: 3,
-		created_at: '2026-01-01T00:00:00.000Z',
-		updated_at: '2026-01-01T00:00:00.000Z',
-		...over,
-	} as LooseEntry;
-}
-
-function phaseRec(phase: number): PhaseConfirmationRecord {
-	return {
-		phase_number: phase,
-		confirmed_at: `2026-01-0${phase}T00:00:00.000Z`,
-		project_name: 'proj',
-	};
-}
 
 // ---------------------------------------------------------------------------
 // weightedConfidence — the exact formula
@@ -246,11 +214,11 @@ describe('mergeEntryFields — repeat merges compound', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Asymmetric guards — CURRENT silent-drop behavior
+// Guards that used to silently drop one side (issue #1821 inverted these pins)
 // ---------------------------------------------------------------------------
 
-describe('mergeEntryFields — asymmetric guards (characterization only)', () => {
-	test('source_refs union requires BOTH sides to be arrays', () => {
+describe('mergeEntryFields — formerly asymmetric guards (#1821 made them symmetric)', () => {
+	test('source_refs present on BOTH sides are unioned (unchanged by #1821)', () => {
 		const target = entry({ source_refs: ['a.ts:1', 'b.ts:2'] });
 		const src = entry({ id: 'src-1', source_refs: ['b.ts:2', 'c.ts:3'] });
 
@@ -259,16 +227,18 @@ describe('mergeEntryFields — asymmetric guards (characterization only)', () =>
 		expect(target.source_refs).toEqual(['a.ts:1', 'b.ts:2', 'c.ts:3']);
 	});
 
-	test('CHARACTERIZATION: src-only source_refs are SILENTLY DROPPED', () => {
-		// `if (Array.isArray(tRefs) && Array.isArray(sRefs))` — the target has no
-		// array, so the whole union is skipped and src's refs vanish.
-		// Current behavior; issue #1821 is expected to change it.
+	test('src-only source_refs are CARRIED, not dropped (issue #1821)', () => {
+		// Was pinned as `toBeUndefined()`. The guard was
+		// `if (Array.isArray(tRefs) && Array.isArray(sRefs))`, so a target with no
+		// array skipped the whole union and the loser's refs vanished — a real
+		// loss on a store mixing legacy and enriched entries. #1821 unions
+		// whichever side has an array.
 		const target = entry({ source_refs: undefined });
 		const src = entry({ id: 'src-1', source_refs: ['only-src.ts:9'] });
 
 		mergeEntryFields(target, src);
 
-		expect(target.source_refs).toBeUndefined();
+		expect(target.source_refs).toEqual(['only-src.ts:9']);
 	});
 
 	test('target-only source_refs are preserved unchanged', () => {
@@ -280,20 +250,25 @@ describe('mergeEntryFields — asymmetric guards (characterization only)', () =>
 		expect(target.source_refs).toEqual(['only-target.ts:1']);
 	});
 
-	test('CHARACTERIZATION: src-only retrieval_outcomes are SILENTLY DROPPED', () => {
-		// `sumRetrievalOutcomes` bails on `if (!t || !s) return;`.
+	test('src-only retrieval_outcomes are ADOPTED, not dropped (issue #1821)', () => {
+		// Was pinned as `toBeUndefined()`: `sumRetrievalOutcomes` bailed on
+		// `if (!t || !s) return;`, so the loser's entire counter record was
+		// discarded. #1821 adopts a COPY (a copy, so the winner and the archived
+		// loser never share one mutable record).
+		const srcOutcomes = outcomes({ shown_count: 42, applied_count: 7 });
 		const target = entry({ retrieval_outcomes: undefined });
-		const src = entry({
-			id: 'src-1',
-			retrieval_outcomes: outcomes({ shown_count: 42, applied_count: 7 }),
-		});
+		const src = entry({ id: 'src-1', retrieval_outcomes: srcOutcomes });
 
 		mergeEntryFields(target, src);
 
-		expect(target.retrieval_outcomes).toBeUndefined();
+		expect(target.retrieval_outcomes).toEqual(srcOutcomes);
+		expect(target.retrieval_outcomes).not.toBe(srcOutcomes);
 	});
 
-	test('CHARACTERIZATION: target-only retrieval_outcomes are left completely unsummed', () => {
+	test('target-only retrieval_outcomes are untouched (src has nothing to add)', () => {
+		// Not an inverted pin — with no src counters there is nothing to sum, so
+		// this stays the correct outcome after #1821. Kept as the symmetric
+		// partner of the src-only case above.
 		const target = entry({
 			retrieval_outcomes: outcomes({ shown_count: 3, applied_count: 2 }),
 		});
@@ -308,10 +283,10 @@ describe('mergeEntryFields — asymmetric guards (characterization only)', () =>
 });
 
 // ---------------------------------------------------------------------------
-// Fields the merge does NOT carry today
+// Fields the merge used to drop silently (issue #1821 inverted these pins)
 // ---------------------------------------------------------------------------
 
-describe('mergeEntryFields — fields currently dropped (characterization)', () => {
+describe('mergeEntryFields — actionability carry and CAS integrity', () => {
 	const ACTIONABILITY_FIELDS = [
 		'required_actions',
 		'forbidden_actions',
@@ -321,7 +296,10 @@ describe('mergeEntryFields — fields currently dropped (characterization)', () 
 		'triggers',
 	] as const;
 
-	test('CHARACTERIZATION: src-only actionability fields are NOT carried over; issue #1821 changes it', () => {
+	test('src-only actionability fields are CARRIED over (issue #1821)', () => {
+		// Was pinned as `expect(target[f]).toBeUndefined()` for all six fields:
+		// the merge handled none of them, so absorbing a near-duplicate could turn
+		// an enforceable directive into an inert lesson. #1821 unions them.
 		const srcFields: Record<string, string[]> = {};
 		for (const f of ACTIONABILITY_FIELDS) srcFields[f] = [`src-${f}`];
 		const target = entry();
@@ -329,16 +307,19 @@ describe('mergeEntryFields — fields currently dropped (characterization)', () 
 
 		mergeEntryFields(target, src);
 
-		// Non-vacuity guards: the merge really ran, and src really carried the
-		// fields — so `toBeUndefined()` below means "dropped", not "never set".
+		// Non-vacuity guard: the merge really ran and src was not mutated.
 		expect(target.merged_from).toEqual(['src-1']);
 		for (const f of ACTIONABILITY_FIELDS) {
 			expect(src[f]).toEqual([`src-${f}`]);
-			expect(target[f]).toBeUndefined();
+			expect(target[f]).toEqual([`src-${f}`]);
+			expect(target[f]).not.toBe(src[f]);
 		}
 	});
 
-	test('CHARACTERIZATION: actionability fields present on BOTH sides are NOT unioned; issue #1821 changes it', () => {
+	test('actionability fields present on BOTH sides are UNIONED (issue #1821)', () => {
+		// Was pinned as target-only (`['t-action']` etc.). Both sides of a
+		// near-duplicate independently earned their predicates, so the union is
+		// the provenance-preserving answer; target order first, then src.
 		const target = entry({
 			required_actions: ['t-action'],
 			forbidden_actions: ['t-forbidden'],
@@ -357,23 +338,31 @@ describe('mergeEntryFields — fields currently dropped (characterization)', () 
 
 		mergeEntryFields(target, src);
 
-		expect(target.required_actions).toEqual(['t-action']);
-		expect(target.forbidden_actions).toEqual(['t-forbidden']);
-		expect(target.verification_checks).toEqual(['t-check']);
-		expect(target.applies_to_agents).toEqual(['t-agent']);
-		expect(target.applies_to_tools).toEqual(['t-tool']);
+		expect(target.required_actions).toEqual(['t-action', 's-action']);
+		expect(target.forbidden_actions).toEqual(['t-forbidden', 's-forbidden']);
+		expect(target.verification_checks).toEqual(['t-check', 's-check']);
+		expect(target.applies_to_agents).toEqual(['t-agent', 's-agent']);
+		expect(target.applies_to_tools).toEqual(['t-tool', 's-tool']);
 	});
 
-	test('CHARACTERIZATION: source_knowledge_ids are NOT unioned; issue #1821 changes it', () => {
+	test('source_knowledge_ids are UNIONED (issue #1821)', () => {
+		// Was pinned as `['k-1']`. Capped at 50, not 20: knowledge-store.ts
+		// excludes this field from its 20-cap because the producer caps at FIFTY
+		// and skill-invalidator walks the full list — a 20-cap here would silently
+		// orphan generated skills.
 		const target = entry({ source_knowledge_ids: ['k-1'] });
 		const src = entry({ id: 'src-1', source_knowledge_ids: ['k-2'] });
 
 		mergeEntryFields(target, src);
 
-		expect(target.source_knowledge_ids).toEqual(['k-1']);
+		expect(target.source_knowledge_ids).toEqual(['k-1', 'k-2']);
 	});
 
-	test('CHARACTERIZATION: content_hash is NOT recomputed and goes STALE when the lesson is swapped; issue #1821 changes it', () => {
+	test('content_hash is RECOMPUTED when the lesson is swapped (issue #1821)', () => {
+		// Was pinned as `toBe('aaaaaaaaaaaa')` — the stale hash of the DISCARDED
+		// text. `content_hash` is the CAS token `transactKnowledgeWithCas`
+		// compares against, so every later authorized curation of a merged entry
+		// silently failed CAS. Now restamped from the surviving lesson.
 		const target = entry({
 			lesson: 'short lesson',
 			content_hash: 'aaaaaaaaaaaa',
@@ -387,11 +376,17 @@ describe('mergeEntryFields — fields currently dropped (characterization)', () 
 		mergeEntryFields(target, src);
 
 		expect(target.lesson).toBe('a considerably longer and richer lesson text');
-		// The hash still describes the DISCARDED lesson text.
-		expect(target.content_hash).toBe('aaaaaaaaaaaa');
+		expect(target.content_hash).toBe(
+			computeContentHash('a considerably longer and richer lesson text'),
+		);
+		expect(target.content_hash).not.toBe('aaaaaaaaaaaa');
 	});
 
-	test('CHARACTERIZATION: revision is NOT bumped by the merge; issue #1821 changes it', () => {
+	test('revision is NOT bumped when the lesson is unchanged', () => {
+		// Still the pinned outcome after #1821: both lessons are equal length, so
+		// no swap happens and the CAS revision must not move. The original pin's
+		// label ("revision is NOT bumped by the merge") was too broad — the swap
+		// case now bumps, see `entry-merge-fixes.test.ts`.
 		const target = entry({ revision: 3 });
 		const src = entry({ id: 'src-1', revision: 7 });
 

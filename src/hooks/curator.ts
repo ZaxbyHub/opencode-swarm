@@ -67,6 +67,7 @@ import type {
 	KnowledgeRecommendation,
 	PhaseDigestEntry,
 } from './curator-types.js';
+import { sweepActiveNearDuplicates } from './knowledge-dedup-sweep.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
@@ -1924,6 +1925,42 @@ export async function runCuratorPhase(
 		} catch (learningErr) {
 			logger.warn(
 				`[curator] learning summary failed: ${learningErr instanceof Error ? learningErr.message : String(learningErr)}`,
+			);
+		}
+
+		// 9c. Near-duplicate dedup sweep (issue #1821 Lane A). Merges active
+		// near-duplicate knowledge entries into a single surviving winner and
+		// archives the losers (tombstone + skill invalidation included).
+		//
+		// CONFIG: the sweep reads its own budgets via `loadPluginConfigWithMeta`
+		// and self-guards on `learning.dedup_sweep.enabled`. It is NOT gated here
+		// because `knowledgeConfig` is only `{ directory?: string }` and cannot
+		// carry thresholds; widening that signature would ripple through all
+		// three curator entry points.
+		//
+		// REACHABILITY: `phase_complete`, the `curator_analyze` tool, and
+		// `/swarm curate` ALL funnel through runCuratorPhase, so the sweep runs
+		// under all three. That is intended, not an accident — the sweep is
+		// idempotent (losers are archived and only active entries are considered)
+		// and hard-bounded by `max_comparisons` / `max_merges_per_sweep`, so
+		// running it more often costs a bounded scan and converges to the same
+		// store.
+		//
+		// Placed after auto-retire (§9) so the retire pass and the sweep's own
+		// per-loser skill invalidation do not contend for the same skill
+		// directories. Non-blocking: a sweep failure must never fail a phase.
+		try {
+			const dedupSweep = await sweepActiveNearDuplicates(directory, {
+				knowledgeDirectory,
+			});
+			if (dedupSweep.merges.length > 0) {
+				phaseDigest.summary += ` [${dedupSweep.merges.length} duplicate knowledge ${
+					dedupSweep.merges.length === 1 ? 'entry' : 'entries'
+				} merged]`;
+			}
+		} catch (sweepErr) {
+			logger.warn(
+				`[curator] knowledge dedup sweep failed: ${sweepErr instanceof Error ? sweepErr.message : String(sweepErr)}`,
 			);
 		}
 

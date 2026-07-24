@@ -1,71 +1,36 @@
 import { describe, expect, test } from 'bun:test';
 import type {
-	KnowledgeEntryBase,
 	PhaseConfirmationRecord,
 	RetrievalOutcome,
 } from '../../../src/hooks/knowledge-types.js';
 import { _internals } from '../../../src/knowledge/family-migration.js';
+import {
+	ALL_COUNTERS,
+	entry,
+	outcomes,
+	phaseRec,
+} from './_entry-merge-fixtures.js';
 
 /**
- * CHARACTERIZATION tests for the knowledge-entry merge helpers in
- * `src/knowledge/family-migration.ts`. Confidence weighting, asymmetric guards,
- * and dropped fields live in `entry-merge-characterization-confidence.test.ts`
- * (split for the 500-line FR-006 cap).
+ * CHARACTERIZATION tests for the knowledge-entry merge helpers. Split across
+ * three files for the 500-line FR-006 cap: confidence weighting and asymmetric
+ * guards in `entry-merge-characterization-confidence.test.ts`, the issue #1821
+ * Lane A fixes in `entry-merge-fixes.test.ts`.
  *
- * These pin CURRENT observable behavior so a later change to the merge
- * semantics (issue #1821) is a deliberate, visible diff rather than a silent
- * regression. Assertions describe what the code DOES today, not what it SHOULD
- * do; `CHARACTERIZATION:` marks a known wart, not an endorsement.
+ * These pin observable merge behavior so a change is a deliberate, visible diff.
+ * `CHARACTERIZATION:` means "known wart, pinned deliberately", not an
+ * endorsement. Issue #1821 Lane A moved the helpers into
+ * `src/knowledge/entry-merge.ts` and fixed the data-destroying ones; every
+ * assertion it inverted carries an inline note naming the old pin.
  *
- * Reachability (verified against `_internals` at family-migration.ts:617):
- *  - `mergeEntryFields` / `mergeStoreEntries` — exported via `_internals`.
- *  - `unionConfirmedBy` / `sumRetrievalOutcomes` / `weightedConfidence` — module
- *    private, NOT exported; only observable through `mergeEntryFields`, so every
- *    assertion below drives them through that single entry point.
+ * Reachability: everything below drives the helpers through
+ * `_internals.mergeEntryFields` / `_internals.mergeStoreEntries` on
+ * `src/knowledge/family-migration.ts`. Testing through that seam (rather than
+ * importing `entry-merge.ts`) is what proves `/swarm link` still routes to the
+ * fixed helpers after the extraction.
  */
 
 const { mergeEntryFields, mergeStoreEntries } = _internals;
-
-type LooseEntry = KnowledgeEntryBase & Record<string, unknown>;
-
-function outcomes(over: Record<string, unknown> = {}): RetrievalOutcome {
-	return {
-		applied_count: 0,
-		succeeded_after_count: 0,
-		failed_after_count: 0,
-		...over,
-	} as RetrievalOutcome;
-}
-
-function entry(over: Record<string, unknown> = {}): LooseEntry {
-	return {
-		id: 'target-1',
-		tier: 'swarm',
-		lesson: 'run focused tests before claiming done',
-		category: 'testing',
-		tags: [],
-		scope: 'global',
-		confidence: 0.5,
-		status: 'candidate',
-		confirmed_by: [],
-		retrieval_outcomes: outcomes(),
-		schema_version: 3,
-		created_at: '2026-01-01T00:00:00.000Z',
-		updated_at: '2026-01-01T00:00:00.000Z',
-		...over,
-	} as LooseEntry;
-}
-
-function phaseRec(
-	over: Partial<PhaseConfirmationRecord> = {},
-): PhaseConfirmationRecord {
-	return {
-		phase_number: 1,
-		confirmed_at: '2026-01-01T00:00:00.000Z',
-		project_name: 'proj',
-		...over,
-	};
-}
 
 // ---------------------------------------------------------------------------
 // tags
@@ -120,8 +85,7 @@ describe('mergeEntryFields — confirmed_by union', () => {
 	});
 
 	test('DEDUP BRANCH: identical phase_number|project_name|confirmed_at collapse to one', () => {
-		// This branch was previously untested. The dedup key is exactly
-		// `${phase_number}|${project_name}|${confirmed_at}`.
+		// Dedup key is exactly `${phase_number}|${project_name}|${confirmed_at}`.
 		const shared = {
 			phase_number: 7,
 			project_name: 'proj',
@@ -176,49 +140,44 @@ describe('mergeEntryFields — confirmed_by union', () => {
 		).toEqual([1, 9]);
 	});
 
-	test('CHARACTERIZATION: undefined target confirmed_by ALIASES src array (no copy)', () => {
-		// `unionConfirmedBy` short-circuits `if (!a) return b ?? []`, returning the
-		// src array by reference. Later mutation of one side mutates the other.
+	test('undefined target confirmed_by COPIES the src array (issue #1821)', () => {
+		// Was pinned as `toBe(srcConfirmed)`: `unionConfirmedBy` short-circuited
+		// `if (!a) return b ?? []` and handed back the SOURCE array by reference,
+		// so a surviving winner and the loser it absorbed shared one mutable list
+		// — a later push on either corrupted the other. #1821 always copies.
 		const srcConfirmed = [phaseRec({ phase_number: 4 })];
 		const target = entry({ confirmed_by: undefined });
 		const src = entry({ id: 'src-1', confirmed_by: srcConfirmed });
 
 		mergeEntryFields(target, src);
 
-		expect(target.confirmed_by).toBe(srcConfirmed);
+		expect(target.confirmed_by).toEqual(srcConfirmed);
+		expect(target.confirmed_by).not.toBe(srcConfirmed);
+		// Falsifier: mutating the winner must not reach the archived loser.
+		(target.confirmed_by as PhaseConfirmationRecord[]).push(
+			phaseRec({ phase_number: 99 }),
+		);
+		expect(srcConfirmed).toHaveLength(1);
 	});
 
-	test('undefined src confirmed_by leaves target array untouched (same reference)', () => {
+	test('undefined src confirmed_by COPIES the target array (issue #1821)', () => {
+		// Was pinned as `toBe(targetConfirmed)`. `unionConfirmedBy` copies on BOTH
+		// short-circuits now, so the merge always publishes a fresh array
+		// (matching `tags`) and no caller keeps a live handle into the winner.
 		const targetConfirmed = [phaseRec({ phase_number: 5 })];
 		const target = entry({ confirmed_by: targetConfirmed });
 		const src = entry({ id: 'src-1', confirmed_by: undefined });
 
 		mergeEntryFields(target, src);
 
-		expect(target.confirmed_by).toBe(targetConfirmed);
-		expect(target.confirmed_by).toHaveLength(1);
+		expect(target.confirmed_by).toEqual(targetConfirmed);
+		expect(target.confirmed_by).not.toBe(targetConfirmed);
 	});
 });
 
 // ---------------------------------------------------------------------------
 // retrieval_outcomes (sumRetrievalOutcomes)
 // ---------------------------------------------------------------------------
-
-const ALL_COUNTERS = [
-	'applied_count',
-	'succeeded_after_count',
-	'failed_after_count',
-	'shown_count',
-	'acknowledged_count',
-	'applied_explicit_count',
-	'ignored_count',
-	'violated_count',
-	'contradicted_count',
-	'n_a_count',
-	'succeeded_after_shown_count',
-	'failed_after_shown_count',
-	'partial_after_shown_count',
-] as const;
 
 describe('mergeEntryFields — retrieval_outcomes counters', () => {
 	test('all 13 summed counters add correctly', () => {
@@ -415,9 +374,9 @@ describe('mergeEntryFields — created_at / updated_at', () => {
 	});
 
 	test('CHARACTERIZATION: updated_at is NOT stamped to merge time', () => {
-		// A merge that changes confidence/counters leaves updated_at at the
-		// max of the two inputs — a consumer cannot tell the entry was merged
-		// from updated_at alone.
+		// A merge leaves updated_at at the max of the two inputs — a consumer
+		// cannot tell the entry was merged from updated_at alone. (The dedup
+		// sweep stamps it separately, at the transaction boundary.)
 		const target = entry({ updated_at: '2026-01-01T00:00:00.000Z' });
 		const src = entry({ id: 'src-1', updated_at: '2026-01-01T00:00:00.000Z' });
 

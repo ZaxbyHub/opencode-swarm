@@ -35,6 +35,7 @@ import type { CounterRollup } from '../hooks/knowledge-events.js';
 import { _internals as eventsInternals } from '../hooks/knowledge-events.js';
 import { findNearDuplicate } from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import { mergeEntryFields } from './entry-merge.js';
 import {
 	KNOWLEDGE_FAMILY,
 	type KnowledgeFamilyMember,
@@ -126,6 +127,11 @@ function keySelectorFor(
  * confidence becomes an evidence-weighted average; the losing entry's `id` is
  * preserved in `merged_from` for retraction traceability. A `merge` is NOT
  * silent. (Critic C8: this is "provenance-preserving", not "lossless".)
+ *
+ * The field-level merge itself lives in `./entry-merge.ts` (issue #1821 Lane A)
+ * so the active-store near-duplicate sweep in `hooks/knowledge-dedup-sweep.ts`
+ * shares EXACTLY these semantics. `DEDUP_THRESHOLD` and this function stay here
+ * because they are migration policy, not merge mechanics.
  */
 function mergeStoreEntries(
 	destination: KnowledgeEntryBase[],
@@ -153,150 +159,6 @@ function mergeStoreEntries(
 		added++;
 	}
 	return { merged: result, added, skipped };
-}
-
-/** Field-level union of `src` into `target` (mutates target). */
-function mergeEntryFields(
-	target: KnowledgeEntryBase,
-	src: KnowledgeEntryBase,
-): void {
-	// Loose-record view for optional/extra fields not on the base type.
-	const tAny = target as unknown as Record<string, unknown>;
-	const sAny = src as unknown as Record<string, unknown>;
-	// confirmed_by: array union by a stable key.
-	target.confirmed_by = unionConfirmedBy(target.confirmed_by, src.confirmed_by);
-	// tags: array union (case-sensitive, ordered).
-	target.tags = Array.from(
-		new Set([...(target.tags ?? []), ...(src.tags ?? [])]),
-	);
-	// source_refs is optional on some shapes; union if present.
-	const tRefs = tAny.source_refs;
-	const sRefs = sAny.source_refs;
-	if (Array.isArray(tRefs) && Array.isArray(sRefs)) {
-		tAny.source_refs = Array.from(new Set([...tRefs, ...sRefs]));
-	}
-	// Retrieval outcomes: sum per-counter fields (these are independent event
-	// counts, so summing is correct; we do NOT double-count a single human
-	// action because each side's counts come from distinct event logs).
-	sumRetrievalOutcomes(target, src);
-	// Confidence: evidence-weighted average (weight = outcome count + confirmed_by).
-	target.confidence = weightedConfidence(target, src);
-	// Preserve the losing entry's id for retraction traceability.
-	const mergedFrom = tAny.merged_from;
-	const trail: string[] = Array.isArray(mergedFrom) ? [...mergedFrom] : [];
-	if (!trail.includes(src.id)) trail.push(src.id);
-	tAny.merged_from = trail;
-	// created_at: keep the earliest; updated_at: keep the latest.
-	if (
-		src.created_at &&
-		src.created_at < (target.created_at ?? src.created_at)
-	) {
-		target.created_at = src.created_at;
-	}
-	if (
-		src.updated_at &&
-		src.updated_at > (target.updated_at ?? src.updated_at)
-	) {
-		target.updated_at = src.updated_at;
-	}
-	// Keep the richer (longer) lesson text.
-	if (src.lesson.length > target.lesson.length) {
-		// Preserve the original id; only swap the text.
-		target.lesson = src.lesson;
-	}
-}
-
-function unionConfirmedBy(
-	a: KnowledgeEntryBase['confirmed_by'],
-	b: KnowledgeEntryBase['confirmed_by'],
-): KnowledgeEntryBase['confirmed_by'] {
-	if (!a) return b ?? [];
-	if (!b) return a;
-	// Dedup by a composite key of available identifying fields.
-	const key = (r: unknown): string => {
-		if (!r || typeof r !== 'object') return JSON.stringify(r);
-		const o = r as Record<string, unknown>;
-		return `${o.phase_number ?? ''}|${o.project_name ?? ''}|${o.confirmed_at ?? ''}`;
-	};
-	const seen = new Set(a.map(key));
-	const merged = [...a];
-	for (const rec of b) {
-		const k = key(rec);
-		if (!seen.has(k)) {
-			seen.add(k);
-			merged.push(rec);
-		}
-	}
-	return merged;
-}
-
-function sumRetrievalOutcomes(
-	target: KnowledgeEntryBase,
-	src: KnowledgeEntryBase,
-): void {
-	const t = target.retrieval_outcomes;
-	const s = src.retrieval_outcomes;
-	if (!t || !s) return;
-	const tAny = t as unknown as Record<string, unknown>;
-	const sAny = s as unknown as Record<string, unknown>;
-	const numericKeys = [
-		'applied_count',
-		'succeeded_after_count',
-		'failed_after_count',
-		'shown_count',
-		'acknowledged_count',
-		'applied_explicit_count',
-		'ignored_count',
-		'violated_count',
-		'contradicted_count',
-		'n_a_count',
-		'succeeded_after_shown_count',
-		'failed_after_shown_count',
-		'partial_after_shown_count',
-	] as const;
-	for (const k of numericKeys) {
-		const tv = tAny[k];
-		const sv = sAny[k];
-		if (typeof tv === 'number' || typeof sv === 'number') {
-			tAny[k] =
-				(typeof tv === 'number' ? tv : 0) + (typeof sv === 'number' ? sv : 0);
-		}
-	}
-	// Timestamps: keep the latest.
-	if (
-		s.last_applied_at &&
-		(!t.last_applied_at || s.last_applied_at > t.last_applied_at)
-	) {
-		t.last_applied_at = s.last_applied_at;
-	}
-}
-
-function weightedConfidence(
-	target: KnowledgeEntryBase,
-	src: KnowledgeEntryBase,
-): number {
-	const weightOf = (e: KnowledgeEntryBase): number => {
-		const o = e.retrieval_outcomes as unknown as
-			| Record<string, unknown>
-			| undefined;
-		let n = 0;
-		if (o) {
-			for (const k of [
-				'shown_count',
-				'acknowledged_count',
-				'applied_explicit_count',
-			] as const) {
-				const v = o[k];
-				if (typeof v === 'number') n += v;
-			}
-		}
-		n += Array.isArray(e.confirmed_by) ? e.confirmed_by.length : 0;
-		// Floor so an entry with no evidence still gets a tiny weight.
-		return Math.max(n, 0.5);
-	};
-	const wt = weightOf(target);
-	const ws = weightOf(src);
-	return (target.confidence * wt + src.confidence * ws) / (wt + ws);
 }
 
 /**
