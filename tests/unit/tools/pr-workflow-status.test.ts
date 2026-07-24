@@ -156,6 +156,28 @@ describe('pr_workflow_status — git state observation', () => {
 			expect(['rev-parse', 'status', 'remote']).toContain(verb);
 		}
 	});
+
+	// PRR-013: `runGitCapture` collapses every failure class (non-zero exit,
+	// spawn error, timeout) into `null` alike, including when ONLY the
+	// `rev-parse --abbrev-ref HEAD` call fails while sibling concurrent git
+	// reads (status, HEAD verify) succeed — an ordinary independent-spawn
+	// partial-failure mode, not a contrived case. `resolveBranch` must report
+	// that as `detached: null` (unknown), never `false` (which would assert a
+	// verified non-detached branch that was never actually confirmed).
+	test('reports detached as null (unknown), not false, when rev-parse fails in isolation', async () => {
+		_internals.runGitCapture = async (_dir: string, args: string[]) => {
+			if (args[0] === 'rev-parse') return null;
+			if (args[0] === 'status') return '';
+			if (args[0] === 'remote') return '';
+			return null;
+		};
+		const git = (await runTool(tempDir, SESSION_ID)).git as Record<
+			string,
+			unknown
+		>;
+		expect(git.branch).toBeNull();
+		expect(git.detached).toBeNull();
+	});
 });
 
 describe('pr_workflow_status — session-pinned gate read', () => {
@@ -235,6 +257,36 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0][0]).toBe(tempDir);
 		expect(calls[0][1]).toBe('caller-xyz');
+	});
+});
+
+// PRR-008: `describeNextStep`'s final branch must not conflate a genuinely
+// clean tree (`isClean === true`) with an unknown one (`isClean === null`,
+// meaning `git status` itself failed). Collapsing both into the "all clear,
+// continue" message would report a git failure as "all clear".
+describe('pr_workflow_status — nextStep tree-state messaging', () => {
+	test('reports the tree state as unknown, not "continue read-only review", when git status fails', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		_internals.resolveIsWorkingTreeCleanAsync = async () => null;
+		const parsed = await runTool(tempDir, SESSION_ID);
+		const git = parsed.git as Record<string, unknown>;
+		expect(git.isClean).toBeNull();
+		const nextStep = parsed.nextStep as string;
+		expect(nextStep).not.toContain('Continue read-only review');
+		expect(nextStep).toContain(
+			'could not determine whether the working tree is clean',
+		);
+	});
+
+	test('still reports "Continue read-only review" when isClean is genuinely true', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		_internals.resolveIsWorkingTreeCleanAsync = async () => true;
+		const parsed = await runTool(tempDir, SESSION_ID);
+		expect(parsed.nextStep).toContain('Continue read-only review');
 	});
 });
 

@@ -7,12 +7,16 @@ import {
 	activatePrWorkflow,
 	prWorkflowSessionFileStem,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import { executePreparePrWorkflowCheckout } from '../../../src/tools/prepare-pr-workflow-checkout.js';
+import {
+	_internals as checkoutInternals,
+	executePreparePrWorkflowCheckout,
+} from '../../../src/tools/prepare-pr-workflow-checkout.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 
 const SESSION_ID = 'checkout-discovery';
 const GIT_TIMEOUT_MS = 30_000;
 let directory = '';
+const originalRunGit = checkoutInternals.runGit;
 
 async function runGit(
 	args: string[],
@@ -92,6 +96,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	checkoutInternals.runGit = originalRunGit;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -233,16 +238,21 @@ describe('prepare_pr_workflow_checkout — discovery mode', () => {
 		});
 	});
 
-	test('untracked churn under .swarm/ is refused before any stash is created', async () => {
+	test('untracked churn under .swarm/ is refused before any stash is created, with a control character stripped from the message (PRR-011)', async () => {
 		// `.swarm/` must stay git-excluded; a visible untracked `.swarm/` file is a
 		// containment regression, not checkout dirt to preserve. Re-init without the
-		// exclude so the churn surfaces to `git status`.
+		// exclude so the churn surfaces to `git status`. The filename also carries a
+		// NEL control character — `git status` output is exactly as PR-author-
+		// controlled as any other repository content — proving the BLOCKED message
+		// strips it instead of echoing it raw.
 		await fs.rm(directory, { recursive: true, force: true });
 		await fs.mkdir(directory, { recursive: true });
 		await initializeRepository(false);
 		await fs.mkdir(path.join(directory, '.swarm'), { recursive: true });
+		const controlChar = String.fromCharCode(0x85); // NEL
+		const unsafeName = `bad${controlChar}churn.txt`;
 		await fs.writeFile(
-			path.join(directory, '.swarm', 'churn.txt'),
+			path.join(directory, '.swarm', unsafeName),
 			'leaked\n',
 			'utf-8',
 		);
@@ -256,6 +266,8 @@ describe('prepare_pr_workflow_checkout — discovery mode', () => {
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('.swarm/');
 		expect(result.message).toContain('git-excluded');
+		expect(result.message).toContain('bad churn.txt');
+		expect(result.message).not.toContain(controlChar);
 		// Nothing was stashed — the refusal happens before `git stash push`.
 		expect((await expectGitSuccess(['stash', 'list'])).trim()).toBe('');
 	});
@@ -327,5 +339,155 @@ describe('prepare_pr_workflow_checkout — discovery mode', () => {
 		expect(receipt.pathsTruncated).toBe(true);
 		expect(Array.isArray(receipt.paths)).toBe(true);
 		expect((receipt.paths as string[]).length).toBe(64);
+	});
+
+	describe('git-failure error paths (PRR-003)', () => {
+		test('a discovery stash-push failure surfaces a clear BLOCKED message and leaves no stash behind', async () => {
+			await fs.writeFile(
+				path.join(directory, 'unrelated.txt'),
+				'changed\n',
+				'utf-8',
+			);
+			await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+			checkoutInternals.runGit = async (gitDirectory, args, options) => {
+				if (args[0] === 'stash' && args[1] === 'push') {
+					return { exitCode: 1, stdout: '' };
+				}
+				return originalRunGit(gitDirectory, args, options);
+			};
+
+			const result = JSON.parse(
+				await executePreparePrWorkflowCheckout({}, directory, {
+					sessionID: SESSION_ID,
+				}),
+			);
+			expect(result.success).toBe(false);
+			expect(result.message).toContain(
+				'Git could not preserve the discovered working-tree changes',
+			);
+			checkoutInternals.runGit = originalRunGit;
+			expect((await expectGitSuccess(['stash', 'list'])).trim()).toBe('');
+		});
+
+		test('regression: a post-stash status-verification failure still returns the exact stash recovery command (PRR-005)', async () => {
+			// The stash push and marker resolution both succeed for real; only the
+			// SECOND `git status` call (assertCleanWorkingTree's post-stash
+			// cleanliness check) is forced to fail. The stash genuinely exists at
+			// that point, so the caller must still learn how to recover it instead
+			// of getting a bare "could not verify" message.
+			await fs.writeFile(
+				path.join(directory, 'unrelated.txt'),
+				'changed\n',
+				'utf-8',
+			);
+			await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+			let statusCalls = 0;
+			checkoutInternals.runGit = async (gitDirectory, args, options) => {
+				if (args[0] === 'status') {
+					statusCalls++;
+					// First call is the pre-stash "Bug A" cleanliness probe; let it run
+					// for real so the stash push actually happens.
+					if (statusCalls === 2) {
+						return { exitCode: 1, stdout: '' };
+					}
+				}
+				return originalRunGit(gitDirectory, args, options);
+			};
+
+			const result = JSON.parse(
+				await executePreparePrWorkflowCheckout({}, directory, {
+					sessionID: SESSION_ID,
+				}),
+			);
+			expect(result.success).toBe(false);
+			expect(result.message).toContain('could not be verified');
+			expect(result.message).toMatch(
+				/git stash apply --index [0-9a-f]{40,64}/i,
+			);
+			checkoutInternals.runGit = originalRunGit;
+			// The stash really does exist and really is recoverable.
+			const stashList = await expectGitSuccess([
+				'stash',
+				'list',
+				'--format=%H',
+			]);
+			expect(stashList.trim().split('\n').length).toBe(1);
+			const oidMatch = result.message.match(
+				/git stash apply --index ([0-9a-f]{40,64})/i,
+			);
+			expect(stashList.trim().toLowerCase()).toBe(oidMatch?.[1]?.toLowerCase());
+		});
+
+		test('a marker-list lookup failure after a real stash push returns a generic BLOCKED message without fabricating a recovery oid', async () => {
+			// If `git stash list` itself fails immediately after a successful
+			// `stash push`, no oid can be safely attributed to the new stash (the
+			// list command is the only source of that oid) — fabricating one would
+			// risk pointing recovery at the wrong entry. This documents that this
+			// narrow branch intentionally stays generic instead of guessing, while
+			// still confirming the stash was genuinely (if orphanedly) created.
+			await fs.writeFile(
+				path.join(directory, 'unrelated.txt'),
+				'changed\n',
+				'utf-8',
+			);
+			await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+			checkoutInternals.runGit = async (gitDirectory, args, options) => {
+				if (args[0] === 'stash' && args[1] === 'list') {
+					return { exitCode: 1, stdout: '' };
+				}
+				return originalRunGit(gitDirectory, args, options);
+			};
+
+			const result = JSON.parse(
+				await executePreparePrWorkflowCheckout({}, directory, {
+					sessionID: SESSION_ID,
+				}),
+			);
+			expect(result.success).toBe(false);
+			expect(result.message).toBe(
+				'BLOCKED: unable to identify the checkout-preparation stash safely',
+			);
+			checkoutInternals.runGit = originalRunGit;
+			const stashList = await expectGitSuccess(['stash', 'list']);
+			expect(stashList.trim().split('\n').length).toBe(1);
+		});
+
+		test('regression: control characters in a still-dirty path are stripped from the BLOCKED message (PRR-011)', async () => {
+			// Simulate a still-dirty tree after the stash (e.g. a submodule pointer
+			// change, which --include-untracked does not preserve) whose reported
+			// path carries a control character — `git status --porcelain` output is
+			// PR-author-controlled, not guaranteed-clean text.
+			await fs.writeFile(
+				path.join(directory, 'unrelated.txt'),
+				'changed\n',
+				'utf-8',
+			);
+			await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+			const controlChar = String.fromCharCode(0x85); // NEL
+			let statusCalls = 0;
+			checkoutInternals.runGit = async (gitDirectory, args, options) => {
+				if (args[0] === 'status') {
+					statusCalls++;
+					if (statusCalls === 2) {
+						return {
+							exitCode: 0,
+							stdout: `?? bad${controlChar}leftover.txt\0`,
+						};
+					}
+				}
+				return originalRunGit(gitDirectory, args, options);
+			};
+
+			const result = JSON.parse(
+				await executePreparePrWorkflowCheckout({}, directory, {
+					sessionID: SESSION_ID,
+				}),
+			);
+			expect(result.success).toBe(false);
+			expect(result.message).toContain('still not clean');
+			expect(result.message).toContain('bad leftover.txt');
+			expect(result.message).not.toContain(controlChar);
+			checkoutInternals.runGit = originalRunGit;
+		});
 	});
 });

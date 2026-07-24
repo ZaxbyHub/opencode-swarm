@@ -122,6 +122,31 @@ describe('PR_REVIEW shell wrapper tolerance', () => {
 		}
 	});
 
+	// PRR-009: the compound-syntax reject charset (`/[\r\n;&|<>` + backtick +
+	// `]/`) covers pipe and redirect metacharacters too, not just `;`/`&&` — but
+	// the pre-existing regression coverage above only exercised `;`. Lock in
+	// that `|`, `>`, and `<` are still BLOCKED, both bare and behind the
+	// cd-prefix-stripping wrapper this PR introduced (the stripped prefix must
+	// not smuggle a pipe/redirect past the reject, since it runs against the
+	// post-strip remainder).
+	test('blocks pipe and redirect metacharacters, alone and behind a cd prefix', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+		for (const command of [
+			'git status | grep foo',
+			'cd /repo && git status | grep foo',
+			'git log > out.txt',
+			'cd /repo && git log > out.txt',
+			'git log < input.txt',
+			'cd /repo && git log < input.txt',
+		]) {
+			const message = await reviewOutcome(command);
+			expect(message).toContain('BLOCKED');
+			expect(message).toContain('PR_REVIEW is read-only');
+			expect(message).toContain('fail-closed');
+			expect(message).toContain('Reason: compound-syntax');
+		}
+	});
+
 	test('blocks a cd-wrapped `gh pr checkout` with a wrapper-aware diagnosis', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
 		// `gh pr checkout` trips the raw checkout backstop, so this lands on the

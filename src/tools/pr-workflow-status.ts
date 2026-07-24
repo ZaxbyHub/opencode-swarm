@@ -41,7 +41,13 @@ function truncateToByteBudget(value: string, maxBytes: number): string {
 interface PrWorkflowStatusGitState {
 	head: string | null;
 	branch: string | null;
-	detached: boolean;
+	/**
+	 * `null` means git could not determine detached-vs-branch state at all (the
+	 * `rev-parse --abbrev-ref HEAD` read failed) — distinct from `false`, which
+	 * asserts a verified non-detached branch checkout. Collapsing the failure
+	 * into `false` would assert "not detached" when the truth is "unknown".
+	 */
+	detached: boolean | null;
 	isClean: boolean | null;
 	dirtyFileCount: number;
 	dirtyFiles: Array<{ status: string; path: string }>;
@@ -129,13 +135,18 @@ async function runGitCapture(
 
 async function resolveBranch(
 	directory: string,
-): Promise<{ branch: string | null; detached: boolean }> {
+): Promise<{ branch: string | null; detached: boolean | null }> {
 	const raw = await _internals.runGitCapture(directory, [
 		'rev-parse',
 		'--abbrev-ref',
 		'HEAD',
 	]);
-	if (raw === null) return { branch: null, detached: false };
+	// `runGitCapture` collapses every failure class (non-zero exit, spawn
+	// error, timeout) into `null` alike. Reporting `detached: false` here
+	// would assert a verified non-detached branch when the truth is "git
+	// failed and we never found out" — report the unknown state instead of
+	// guessing at it.
+	if (raw === null) return { branch: null, detached: null };
 	const value = raw.trim();
 	// `--abbrev-ref HEAD` prints the literal "HEAD" for a detached checkout,
 	// which is the PR_REVIEW/PR_FEEDBACK steady state (detached review HEAD).
@@ -234,6 +245,9 @@ function describeNextStep(
 	}
 	if (git.isClean === false) {
 		return `${gate.mode} gate active and head bound, but the working tree is dirty. Read-only observation only; the gate keeps writes and non-tracking fetches fail-closed.`;
+	}
+	if (git.isClean === null) {
+		return `${gate.mode} gate active and head bound, but this session could not determine whether the working tree is clean (git status failed). Treat the tree state as unknown and verify manually before assuming it is clean; read-only observation only.`;
 	}
 	return `${gate.mode} gate active and head bound. Continue read-only review using the admitted observe/validate tools (diff, gh_evidence, repo_map, lint check, etc.).`;
 }

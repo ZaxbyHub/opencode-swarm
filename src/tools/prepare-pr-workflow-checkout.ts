@@ -16,6 +16,7 @@ const GIT_TIMEOUT_MS = 30_000;
 const MAX_CHECKOUT_PATHS = 32;
 const MAX_CHECKOUT_RECEIPTS = 8;
 const MAX_RECEIPT_PATHS = 64;
+const MAX_ECHOED_PATH_LEN = 200;
 const RECEIPT_DIR = 'pr-workflow-checkouts';
 
 const PreparePrWorkflowCheckoutArgsSchema = z
@@ -233,7 +234,12 @@ async function prepareDiscoveredCheckout(
 	);
 	if (swarmUntracked.length > 0) {
 		throw new Error(
-			`BLOCKED: checkout preparation refuses untracked churn under .swarm/ (${swarmUntracked.slice(0, 5).join(', ')}); that directory must stay git-excluded (.git/info/exclude). Resolve the .swarm/ tracking regression before preparing a checkout.`,
+			`BLOCKED: checkout preparation refuses untracked churn under .swarm/ (${swarmUntracked
+				.slice(0, 5)
+				.map((entry) => boundUntrustedPath(entry))
+				.join(
+					', ',
+				)}); that directory must stay git-excluded (.git/info/exclude). Resolve the .swarm/ tracking regression before preparing a checkout.`,
 		);
 	}
 
@@ -462,7 +468,18 @@ async function assertCleanWorkingTree(
 	stashOid: string,
 	options: { discovery?: boolean } = {},
 ): Promise<void> {
-	const status = await readPorcelainStatus(directory);
+	let status: Awaited<ReturnType<typeof readPorcelainStatus>>;
+	try {
+		status = await readPorcelainStatus(directory);
+	} catch (error) {
+		// The stash was already created before this verification step ran, so it
+		// exists and is recoverable even though its cleanliness could not be
+		// confirmed here — the caller must still get the exact recovery command
+		// instead of a bare "could not verify" dead end (PRR-005 / PRR-006).
+		throw new Error(
+			`BLOCKED: stash ${stashOid} was created, but the post-stash working-tree status could not be verified (${error instanceof Error ? error.message : String(error)}). Do not continue; ${recoveryInstruction(stashOid)} and resolve manually.`,
+		);
+	}
 	if (
 		status.dirtyTrackedPaths.length > 0 ||
 		status.untrackedPaths.length > 0 ||
@@ -475,7 +492,7 @@ async function assertCleanWorkingTree(
 			].slice(0, 5);
 			const remainingText =
 				remaining.length > 0
-					? remaining.join(', ')
+					? remaining.map((entry) => boundUntrustedPath(entry)).join(', ')
 					: 'rename/copy changes only';
 			throw new Error(
 				`BLOCKED: stash ${stashOid} was created, but the checkout is still not clean (remaining: ${remainingText}). Submodule pointer changes are not preserved by --include-untracked and must be resolved manually. Do not continue; ${recoveryInstruction(stashOid)} and resolve manually.`,
@@ -492,7 +509,7 @@ async function readPorcelainStatus(directory: string): Promise<{
 	untrackedPaths: string[];
 	renameOrCopy: boolean;
 }> {
-	const result = await runGit(
+	const result = await _internals.runGit(
 		directory,
 		['status', '--porcelain=v1', '-z', '--untracked-files=all'],
 		{ captureStdout: true },
@@ -587,7 +604,7 @@ async function findUniqueMarkedStashOid(
 	stashMarker: string,
 	notFoundMessage: string,
 ): Promise<string> {
-	const list = await runGit(
+	const list = await _internals.runGit(
 		directory,
 		['stash', 'list', '--format=%H%x00%gs'],
 		{ captureStdout: true },
@@ -622,7 +639,7 @@ async function resolveMarkedStashOid(
 		stashMarker,
 		'BLOCKED: Git did not expose one uniquely identifiable checkout-preparation stash; do not continue to checkout until the requested changes are preserved manually',
 	);
-	const changed = await runGit(
+	const changed = await _internals.runGit(
 		directory,
 		['stash', 'show', '--name-only', '--format=', '-z', stashOid],
 		{ captureStdout: true },
@@ -634,8 +651,12 @@ async function resolveMarkedStashOid(
 		changedPaths.length !== expectedPaths.length ||
 		changedPaths.some((value, index) => value !== expectedPaths[index])
 	) {
+		// The stash already exists (found uniquely above); only its content could
+		// not be verified against the requested paths. Give the exact recovery
+		// command rather than vague prose — the caller has no other way to learn
+		// the apply syntax for a stash it never asked to create (PRR-006).
 		throw new Error(
-			`BLOCKED: stash ${stashOid} does not contain exactly the requested checkout-preparation paths; do not continue and recover it manually`,
+			`BLOCKED: stash ${stashOid} does not contain exactly the requested checkout-preparation paths; do not continue. ${recoveryInstruction(stashOid)} and resolve manually.`,
 		);
 	}
 	return stashOid;
@@ -690,9 +711,11 @@ async function countOutstandingReceipts(
 }
 
 async function readCurrentStashOids(directory: string): Promise<Set<string>> {
-	const list = await runGit(directory, ['stash', 'list', '--format=%H'], {
-		captureStdout: true,
-	});
+	const list = await _internals.runGit(
+		directory,
+		['stash', 'list', '--format=%H'],
+		{ captureStdout: true },
+	);
 	if (list.exitCode !== 0) {
 		throw new Error(
 			'BLOCKED: unable to inspect checkout-preparation stashes safely',
@@ -752,12 +775,48 @@ async function appendPreparationEvent(
 	}
 }
 
-/** Test-only seam for serializing concurrent real-Git checkout preparation. */
+/**
+ * Test-only seam for every Git invocation this file makes (stash push/list/show,
+ * status). Originally added to serialize concurrent real-Git checkout
+ * preparation in tests; now the single DI point so exit-code and malformed-output
+ * failure branches can be exercised without a real git-command failure.
+ */
 export const _internals: {
 	runGit: typeof runGit;
 } = {
 	runGit,
 };
+
+/**
+ * Lightweight neutralizer for Git-derived path strings (git status output is
+ * exactly as PR-author-controlled as a branch name or remote URL) before they
+ * are echoed into a BLOCKED error message. Strips control/bidi characters (the
+ * same ranges as containsControlChars) and markdown/HTML metacharacters, then
+ * bounds length. Mirrors src/tools/pr-workflow-status.ts's `boundUntrusted`
+ * helper, kept local here since that module is a separate change lane.
+ */
+function boundUntrustedPath(value: string): string {
+	// Mirrors containsControlChars' exact codepoint ranges (C0/C1 controls plus
+	// bidi override/isolate characters), applied character-by-character rather
+	// than via a regex literal so the ranges being stripped stay unambiguous.
+	let cleaned = '';
+	for (const ch of value) {
+		const code = ch.codePointAt(0) ?? 0;
+		const strip =
+			code <= 0x1f ||
+			(code >= 0x7f && code <= 0x9f) ||
+			(code >= 0x202a && code <= 0x202e) ||
+			(code >= 0x2066 && code <= 0x2069) ||
+			ch === '`' ||
+			ch === '<' ||
+			ch === '>';
+		cleaned += strip ? ' ' : ch;
+	}
+	cleaned = cleaned.replace(/\s+/g, ' ').trim();
+	return cleaned.length > MAX_ECHOED_PATH_LEN
+		? `${cleaned.slice(0, MAX_ECHOED_PATH_LEN)}…`
+		: cleaned;
+}
 
 function recoveryInstruction(stashOid: string): string {
 	return `After complete_pr_workflow or abort_pr_workflow clears the gate, restore only these preserved changes with: git stash apply --index ${stashOid}`;
