@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.130.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.1...v7.130.2) (2026-07-24)
+
+
+### Bug Fixes
+
+* **background:** validate revision tokens in commit-count/single-child resolvers ([95a60e7](https://github.com/ZaxbyHub/opencode-swarm/commit/95a60e775be28b61c9d07efc96b5314d0458b296))
+
 ## [7.130.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.0...v7.130.1) (2026-07-24)
 
 
