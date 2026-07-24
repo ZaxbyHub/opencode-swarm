@@ -447,6 +447,17 @@ export const TOOL_METADATA = {
 			'run curator phase analysis and optionally apply knowledge recommendations',
 		agents: ['architect'],
 	},
+	consensus_mine: {
+		description:
+			'mine cross-run consensus from existing .swarm evidence and persist an immutable proposals-only report',
+		// The curator phase/postmortem roles are the consumers of cross-run
+		// evidence; `curator` itself is NOT an AgentName (see
+		// src/config/agent-names.ts) and using it here would be a compile error.
+		agents: ['architect', 'curator_phase', 'curator_postmortem'],
+		// `prWorkflow` is deliberately omitted: omitted tools are fail-closed in
+		// PR_REVIEW / PR_FEEDBACK, which is the correct posture for a tool that
+		// writes .swarm state during a review-only workflow.
+	},
 	knowledge_add: {
 		description: 'store a new lesson in the knowledge base',
 		agents: ['architect', 'coder'],

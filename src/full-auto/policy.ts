@@ -153,6 +153,11 @@ const WRITE_LIKE_TOOLS = new Set<string>([
 	'knowledge_add',
 	'knowledge_remove',
 	'curator_analyze',
+	// Issue #1821 Workstream C: writes an immutable report under
+	// `.swarm/evolution/consensus/`. Classified here so it never falls through
+	// to the unknown-tool branch below, which escalates to the critic on EVERY
+	// invocation.
+	'consensus_mine',
 	'suggest_patch',
 ]);
 
@@ -815,6 +820,10 @@ export function classifyFullAutoToolAction(
 				'knowledge_add',
 				'knowledge_remove',
 				'curator_analyze',
+				// Pathless by construction: its only write target is
+				// `.swarm/evolution/consensus/<reportId>.json`, derived from mined
+				// content rather than any caller-supplied path.
+				'consensus_mine',
 			]);
 			if (SAFE_PATHLESS_WRITES.has(tool)) {
 				return {

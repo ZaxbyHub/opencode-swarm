@@ -43,6 +43,33 @@ A lesson that fails the floor is **blocked**, not silently promoted. `--force --
 overrides and records a durable audited override naming the failed gate. Set
 `knowledge.promotion_require_actionable = false` to restore the previous behavior.
 
+### New `consensus_mine` tool (proposals only)
+
+A new `consensus_mine` tool mines the evidence you already have — evaluation runs, gate audits, trajectories,
+skill-usage/compliance records, knowledge outcomes, and retros — into evidence-backed *consensus attributes*
+and deduplicated improvement proposals.
+
+It **changes no active artifact**. It activates no skills, edits no knowledge, and runs no optimization
+rounds; it only writes a versioned, immutable report under `.swarm/evolution/consensus/`.
+
+Guarantees worth knowing:
+
+- **Deterministic first.** All filtering, co-occurrence, support counting, and diversity math run before any
+  model call. Summarization is optional and, when no dispatcher is available, falls back to the deterministic
+  statement rather than failing.
+- **One anecdote is never a proposal.** An attribute supported by a single task (`taskDiversity < 2`) is
+  emitted as an investigation note with `proposedTarget: 'none'`.
+- **Negative evidence is preserved.** `failureSupport` and `counterexampleRefs` are always retained; an
+  attribute is never published with its counterexamples dropped.
+- **Reports are reproducible.** The same inputs produce an identical `integrityHash`. Wall-clock fields are
+  excluded from the hash so re-running does not fabricate a difference.
+- **Excerpts are bounded and secret-redacted**, and no prompt or reasoning text is ever persisted.
+
+`modelDiversity` is `0` when no contributing observation carries a model id — that means "not measurable from
+this corpus", not "measured as none", and never blocks emission on its own.
+
+See `docs/consensus-mining.md`.
+
 ## Migration notes
 
 None required. All changes are backward compatible: existing knowledge records load unchanged, and
