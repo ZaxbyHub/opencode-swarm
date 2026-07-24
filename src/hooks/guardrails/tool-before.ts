@@ -31,7 +31,10 @@ import {
 	beginInvocation,
 	ensureAgentSession,
 	getActiveWindow,
+	getModifiedFilesForTask,
 	type InvocationWindow,
+	recordModifiedFileForTask,
+	resetModifiedFilesForTask,
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
@@ -1319,7 +1322,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (coderDeleg.isDelegation && coderDeleg.targetAgent === 'coder') {
 				const coderSession = swarmState.agentSessions.get(sessionID);
 				if (coderSession) {
-					coderSession.modifiedFilesThisCoderTask = [];
+					const taskId =
+						coderSession.currentTaskId ??
+						coderSession.lastCoderDelegationTaskId ??
+						`${sessionID}:unknown`;
+					coderSession.currentTaskId = taskId;
+					resetModifiedFilesForTask(coderSession, taskId);
 					if (!coderSession.revisionLimitHit) {
 						coderSession.coderRevisions = 0;
 					}
@@ -1381,7 +1389,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const loopSession = swarmState.agentSessions.get(sessionID);
 			if (loopSession) {
 				const loopPattern = loopResult.pattern;
-				const modifiedFiles = loopSession.modifiedFilesThisCoderTask ?? [];
+				const modifiedFiles = loopSession.currentTaskId
+					? getModifiedFilesForTask(loopSession, loopSession.currentTaskId)
+					: [];
 				const accomplishmentSummary =
 					modifiedFiles.length > 0
 						? `Modified ${modifiedFiles.length} file(s): ${modifiedFiles.slice(0, 3).join(', ')}${modifiedFiles.length > 3 ? '...' : ''}`
@@ -2278,11 +2288,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					warn('Config file write attempt', logEntry);
 				}
 
-				if (
-					trackingSession?.delegationActive &&
-					!trackingSession.modifiedFilesThisCoderTask.includes(targetPath)
-				) {
-					trackingSession.modifiedFilesThisCoderTask.push(targetPath);
+				if (trackingSession?.delegationActive) {
+					const taskId =
+						trackingSession.currentTaskId ??
+						trackingSession.lastCoderDelegationTaskId ??
+						`${input.sessionID}:unknown`;
+					trackingSession.currentTaskId = taskId;
+					recordModifiedFileForTask(trackingSession, taskId, targetPath);
 				}
 			}
 		}

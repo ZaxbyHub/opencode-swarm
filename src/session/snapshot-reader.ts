@@ -10,6 +10,7 @@ import type { AgentSessionState, TaskWorkflowState } from '../state';
 import {
 	applyRehydrationCache,
 	buildRehydrationCache,
+	MAX_TRACKED_TASK_FILE_ATTRIBUTIONS,
 	swarmState,
 } from '../state';
 import { bunFile } from '../utils/bun-compat';
@@ -71,6 +72,29 @@ function deserializeTaskWorkflowStates(
 	return m;
 }
 
+function deserializeModifiedFilesByTask(
+	raw: Record<string, string[]> | undefined,
+): Map<string, string[]> {
+	const entries = new Map<string, string[]>();
+	if (!raw || typeof raw !== 'object') return entries;
+
+	const serializedEntries = Object.entries(raw);
+	// Oversized snapshots are malformed. Reject the attribution payload as a
+	// unit instead of partially evicting possibly-live task data.
+	if (serializedEntries.length > MAX_TRACKED_TASK_FILE_ATTRIBUTIONS) {
+		return entries;
+	}
+
+	for (const [taskId, files] of serializedEntries) {
+		if (!taskId.trim() || !Array.isArray(files)) continue;
+		const validFiles = files.filter(
+			(file): file is string => typeof file === 'string' && file.length > 0,
+		);
+		entries.set(taskId, [...new Set(validFiles)]);
+	}
+	return entries;
+}
+
 /**
  * Deserialize a SerializedAgentSession back to AgentSessionState.
  * Handles Map/Set conversion and migration safety defaults.
@@ -78,6 +102,12 @@ function deserializeTaskWorkflowStates(
 export function deserializeAgentSession(
 	s: SerializedAgentSession,
 ): AgentSessionState {
+	const taskWorkflowStates = deserializeTaskWorkflowStates(
+		s.taskWorkflowStates,
+	);
+	const modifiedFilesByTask = deserializeModifiedFilesByTask(
+		s.modifiedFilesByTask,
+	);
 	// Convert gateLog: Record<string, string[]> -> Map<string, Set<string>>
 	const gateLog = new Map<string, Set<string>>();
 	if (s.gateLog) {
@@ -176,12 +206,16 @@ export function deserializeAgentSession(
 		lastCompletedPhaseAgentsDispatched,
 		qaSkipCount: s.qaSkipCount ?? 0,
 		qaSkipTaskIds: s.qaSkipTaskIds ?? [],
-		taskWorkflowStates: deserializeTaskWorkflowStates(s.taskWorkflowStates),
+		taskWorkflowStates,
 		lastGateOutcome: null,
 		declaredCoderScope: null,
 		lastScopeViolation: null,
 		scopeViolationDetected: s.scopeViolationDetected,
-		modifiedFilesThisCoderTask: [],
+		modifiedFilesByTask,
+		modifiedFilesThisCoderTask:
+			s.currentTaskId && modifiedFilesByTask.has(s.currentTaskId)
+				? [...(modifiedFilesByTask.get(s.currentTaskId) ?? [])]
+				: [],
 		loopDetectionWindow: [],
 		pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
 		model_fallback_index: s.model_fallback_index ?? 0,

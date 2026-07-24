@@ -22,7 +22,12 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
-import { advanceTaskState, getActiveWindow, swarmState } from '../../state';
+import {
+	advanceTaskState,
+	getActiveWindow,
+	getModifiedFilesForTask,
+	swarmState,
+} from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import * as logger from '../../utils/logger';
@@ -675,7 +680,11 @@ export function createGuardrailsHooks(
 
 					// v6.21 Task 5.4: Scope containment check
 					if (session.declaredCoderScope !== null) {
-						const undeclaredFiles = session.modifiedFilesThisCoderTask
+						const modifiedFiles = getModifiedFilesForTask(
+							session,
+							session.currentTaskId,
+						);
+						const undeclaredFiles = modifiedFiles
 							.map((f) => f.replace(/[\r\n\t]/g, '_'))
 							.filter(
 								(f) =>
@@ -699,7 +708,6 @@ export function createGuardrailsHooks(
 							);
 						}
 					}
-					session.modifiedFilesThisCoderTask = [];
 				}
 			}
 

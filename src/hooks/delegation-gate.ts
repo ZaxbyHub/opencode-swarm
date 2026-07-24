@@ -8,7 +8,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
-import type { BackgroundTaskChangeContext } from '../background/pending-delegations.js';
+import type {
+	BackgroundCoderReservation,
+	BackgroundTaskChangeContext,
+} from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
@@ -55,6 +58,7 @@ import {
 	advanceTaskState,
 	advanceTaskStateAndPersist,
 	ensureAgentSession,
+	getModifiedFilesForTask,
 	getTaskState,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -362,19 +366,19 @@ async function prepareCoderScope(
  * `Task` with `background=true` (gated upstream by
  * `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`) returns a "running" placeholder
  * immediately and completes later via synthetic parent injection. The delegation gate
- * treats a `Task` result as completion, so a background swarm delegation would advance
- * Stage B / record gate evidence before any review/test output exists. Until swarm can
- * correlate the deferred completion safely (a separate, spike-gated PR), background
- * swarm delegations are fail-closed-blocked. We do NOT silently coerce `background` to
- * false — the unsupported capability is surfaced explicitly.
+ * treats a foreground `Task` result as completion, so the running placeholder must be
+ * tracked without terminal side effects. When the opt-in is enabled, trusted deferred
+ * completion ingestion performs exact parent correlation, workspace settlement, and
+ * role-appropriate state/evidence updates. With the opt-in disabled (the default while
+ * upstream remains experimental), background swarm delegations are fail-closed-blocked.
+ * We do NOT silently coerce `background` to false.
  */
 export const SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE =
 	'SWARM_BACKGROUND_TASK_BLOCKED: OpenCode background subagents (Task with background=true, ' +
-	'requires OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true) are recognized upstream, but swarm ' +
-	'cannot yet safely consume their deferred completion events — the Task returns a running ' +
-	'placeholder now and completes later via synthetic injection, which would advance swarm gates ' +
-	'before any review/test output exists. Omit `background` (or set background=false) for swarm ' +
-	'delegations until the completion-ingestion PR lands.';
+	'requires OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true or OPENCODE_EXPERIMENTAL=true) ' +
+	'remain experimental upstream and are disabled by default in swarm. Omit `background` ' +
+	'(or set background=false), or explicitly enable hooks.background_subagents only after ' +
+	'reviewing the background-subagent recovery and readiness guidance.';
 
 /**
  * Fail-closed background-flag detector. Treats both the boolean `true` and the
@@ -1804,6 +1808,36 @@ async function resolveEvidenceTaskId(
 	return getEvidenceTaskId(session, directory);
 }
 
+const recordPendingDelegationForBackground: typeof import('../background/pending-delegations.js').recordPendingDelegation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).recordPendingDelegation(...args);
+
+const writeDelegationFallbackForBackground: typeof import('../background/pending-delegations.js').writeDelegationFallback =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).writeDelegationFallback(...args);
+
+const reserveBackgroundCoderSlotForDispatch: typeof import('../background/pending-delegations.js').reserveBackgroundCoderSlot =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).reserveBackgroundCoderSlot(...args);
+
+const bindBackgroundCoderReservationForDispatch: typeof import('../background/pending-delegations.js').bindBackgroundCoderReservation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).bindBackgroundCoderReservation(...args);
+
+const releaseBackgroundCoderReservationForDispatch: typeof import('../background/pending-delegations.js').releaseBackgroundCoderReservation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).releaseBackgroundCoderReservation(...args);
+
 /**
  * _internals export for testing — do not use in production code.
  * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId,
@@ -1820,6 +1854,11 @@ export const _internals = {
 	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
+	recordPendingDelegationForBackground,
+	writeDelegationFallbackForBackground,
+	reserveBackgroundCoderSlotForDispatch,
+	bindBackgroundCoderReservationForDispatch,
+	releaseBackgroundCoderReservationForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
 	get provisionWorktree() {
@@ -1845,6 +1884,12 @@ export const _internals = {
 	},
 	set postMergeCleanup(v: typeof _wtiInternals.postMergeCleanup) {
 		_wtiInternals.postMergeCleanup = v;
+	},
+	get preserveBackgroundWorktreeOwnershipForCallId() {
+		return _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId;
+	},
+	set preserveBackgroundWorktreeOwnershipForCallId(v: typeof _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId,) {
+		_wtiInternals.preserveBackgroundWorktreeOwnershipForCallId = v;
 	},
 };
 
@@ -1883,6 +1928,7 @@ export function createDelegationGateHook(
 		childSessionID: string;
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
+	backgroundCompletionClaimed: (callID: string) => void;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -1894,9 +1940,9 @@ export function createDelegationGateHook(
 		((config.hooks as Record<string, unknown> | undefined)
 			?.delegation_max_chars as number | undefined) ?? 4000;
 
-	// Issue #1151 PR 2 (Stage A): opt-in background-subagent support. When false (default)
-	// background swarm Task dispatches are fail-closed-blocked (PR 1). When true, they are
-	// allowed and tracked as durable pending records (no gate advancement in Stage A).
+	// Opt-in background-subagent support. When false (default), background swarm
+	// Task dispatches remain fail-closed-blocked. When true, running placeholders
+	// are durably tracked for later trusted completion settlement.
 	const backgroundSubagentsEnabled =
 		(config.hooks as Record<string, unknown> | undefined)
 			?.background_subagents === true;
@@ -1908,6 +1954,10 @@ export function createDelegationGateHook(
 	const coderTaskChangeContextByCallID = new Map<
 		string,
 		BackgroundTaskChangeContext
+	>();
+	const backgroundCoderReservationByCallID = new Map<
+		string,
+		BackgroundCoderReservation
 	>();
 	const coderObservedFilesByCallID = new Map<string, string[] | null>();
 	const publishedScopeBindingsByCallID = new Map<
@@ -2066,6 +2116,24 @@ export function createDelegationGateHook(
 		coderTaskChangeContextByCallID.delete(callID);
 		coderObservedFilesByCallID.delete(callID);
 	};
+	const releasePrelaunchBackgroundCoderReservation = async (
+		callID: string,
+	): Promise<void> => {
+		const reservation = backgroundCoderReservationByCallID.get(callID);
+		if (!reservation) return;
+		const released =
+			await _internals.releaseBackgroundCoderReservationForDispatch(directory, {
+				...reservation,
+				reason: 'recovered',
+			});
+		if (released) {
+			backgroundCoderReservationByCallID.delete(callID);
+			return;
+		}
+		logger.warn(
+			`[delegation-gate] pre-launch background coder reservation ${reservation.reservationId} could not be released; later admission remains fail-closed`,
+		);
+	};
 	const rememberCoderObservedFiles = (
 		callID: string,
 		observedFiles: string[] | null,
@@ -2084,21 +2152,28 @@ export function createDelegationGateHook(
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
 	): void => {
-		if (!isMarkdownOnlyDeclaredScope(declaredFiles)) {
-			clearCoderTaskChangeContext(callID);
-			return;
-		}
 		if (
 			!coderTaskChangeContextByCallID.has(callID) &&
 			coderTaskChangeContextByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
 		) {
-			const oldest = coderTaskChangeContextByCallID.keys().next().value;
-			if (oldest !== undefined) clearCoderTaskChangeContext(oldest);
+			throw new Error(
+				`BACKGROUND_CODER_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live change baselines are already tracked`,
+			);
 		}
 		coderTaskChangeContextByCallID.set(callID, {
 			declaredFiles,
 			baseline: captureWorkspaceSnapshot(observationDirectory),
 		});
+	};
+	const shouldRememberCoderTaskChangeContext = (
+		declaredFiles: string[] | null,
+		background: unknown,
+	): boolean =>
+		isBackgroundTrue(background) || isMarkdownOnlyDeclaredScope(declaredFiles);
+	const backgroundCompletionClaimed = (callID: string): void => {
+		clearPublishedScopeBindings(callID);
+		clearCoderTaskChangeContext(callID);
+		deleteStoredInputArgs(callID);
 	};
 
 	if (!enabled) {
@@ -2133,6 +2208,7 @@ export function createDelegationGateHook(
 			},
 			taskMetadata,
 			sessionEnded,
+			backgroundCompletionClaimed,
 		};
 	}
 
@@ -2217,9 +2293,10 @@ export function createDelegationGateHook(
 		// tool.execute.before chain in src/index.ts (no safeHook wrapper), so OpenCode
 		// rejects the tool before launching the background task.
 		//
-		// PR 2 Stage A: when background_subagents is opted in, the block is lifted — the
-		// dispatch is allowed and tracked as a durable pending record in toolAfter (still
-		// no gate advancement in Stage A). When disabled (default), PR 1 behavior stands.
+		// When background_subagents is opted in, the block is lifted and toolAfter
+		// records the running placeholder without terminal effects. Only the later
+		// trusted completion observer may apply role-appropriate state/evidence.
+		// When disabled (default), the fail-closed behavior stands.
 		if (
 			!backgroundSubagentsEnabled &&
 			isBackgroundTrue(args.background) &&
@@ -2233,8 +2310,16 @@ export function createDelegationGateHook(
 			try {
 				const reviewSession = swarmState.agentSessions.get(input.sessionID);
 				if (reviewSession) {
-					// Use modified files from the current coder task as changed files
-					const changedFiles = reviewSession.modifiedFilesThisCoderTask ?? [];
+					const reviewTaskId = await resolveEvidenceTaskId(
+						args,
+						reviewSession,
+						directory,
+					);
+					// Route against the exact reviewed task. The singular projection is
+					// compatibility-only and may point at a different concurrent task.
+					const changedFiles = reviewTaskId
+						? getModifiedFilesForTask(reviewSession, reviewTaskId)
+						: [];
 					if (changedFiles.length > 0) {
 						const routing = await routeReviewForChanges(
 							directory,
@@ -2383,9 +2468,63 @@ export function createDelegationGateHook(
 		// gates. It creates a staged binding but does not publish authorization.
 		const preparedScope = await prepareCoderScope(directory, input, args);
 		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		const reserveBackgroundCoderIfNeeded = async (
+			maxConcurrent: number,
+		): Promise<void> => {
+			if (!backgroundSubagentsEnabled || !isBackgroundTrue(args.background)) {
+				return;
+			}
+			const occupiedTaskIds = [...session.taskWorkflowStates.entries()]
+				.filter(([, state]) => state === 'coder_delegated')
+				.map(([taskId]) => taskId);
+			const claim = await _internals.reserveBackgroundCoderSlotForDispatch(
+				directory,
+				{
+					parentSessionId: input.sessionID,
+					planTaskId: incomingCoderTaskId || null,
+					callID: input.callID,
+					maxConcurrent,
+					occupiedTaskIds,
+				},
+			);
+			if (!claim.ok) {
+				const detail = claim.detail ? ` ${claim.detail}` : '';
+				const code =
+					claim.reason === 'capacity'
+						? 'PARALLEL_SLOTS_EXHAUSTED'
+						: claim.reason === 'duplicate_task' ||
+								claim.reason === 'duplicate_call'
+							? 'BACKGROUND_CODER_TASK_RESERVED'
+							: 'BACKGROUND_CODER_RESERVATION_UNCERTAIN';
+				throw new Error(
+					`${code}: background coder admission was blocked (${claim.reason}).${detail}`,
+				);
+			}
+			backgroundCoderReservationByCallID.set(input.callID, claim.reservation);
+		};
 		if (!plan) {
-			rememberCoderTaskChangeContext(input.callID, preparedScope.declaredFiles);
-			await publishScopeBinding(input.callID, directory, preparedScope.binding);
+			await reserveBackgroundCoderIfNeeded(1);
+			try {
+				if (
+					shouldRememberCoderTaskChangeContext(
+						preparedScope.declaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						preparedScope.declaredFiles,
+					);
+				}
+				await publishScopeBinding(
+					input.callID,
+					directory,
+					preparedScope.binding,
+				);
+			} catch (error) {
+				await releasePrelaunchBackgroundCoderReservation(input.callID);
+				throw error;
+			}
 			return;
 		}
 		const profile = plan?.execution_profile;
@@ -2500,87 +2639,122 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (!parallelModeActive) {
-			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
-			await publishScopeBinding(input.callID, directory, correlatedBinding);
-			return;
-		}
-
-		const resolvedTaskId = incomingCoderTaskId;
-		// FR-102: pass declared scope (from pending map populated by FILE: extraction
-		// or prior declare_scope) so provisionWorktree can materialize it into the
-		// lane's .swarm/scopes/ for durability across plugin restart.
-		const laneScope = correlatedBinding.files;
-		await precreateStandardWorktreeSession({
-			config,
-			directory,
-			parentSessionID: input.sessionID,
-			callID: input.callID,
-			taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
-			planTaskId: resolvedTaskId ?? undefined,
-			description:
-				typeof args.description === 'string' ? args.description : undefined,
-			outputArgs: args,
-			scope:
-				laneScope && laneScope.length > 0 && resolvedTaskId
-					? { taskId: resolvedTaskId, files: laneScope }
-					: undefined,
-		});
-		const standardDispatch = standardWorktreeByCallID.get(input.callID);
-		if (standardDispatch) {
-			if (resolvedTaskId) {
-				try {
-					const childSessionId =
-						typeof args.task_id === 'string' ? args.task_id.trim() : '';
-					if (!childSessionId || childSessionId === input.sessionID) {
-						throw new Error(
-							'SCOPE_CHILD_IDENTITY_MISSING: worktree dispatch did not return a distinct child session id',
-						);
-					}
-					// Materialize the current authoritative plan in the isolated root via
-					// the ledger-aware writer. Strict child authorization never trusts a
-					// binding-era snapshot or a raw hand-written plan projection.
-					await savePlan(standardDispatch.handle.worktreePath, plan, {
-						preserveCompletedStatuses: false,
-					});
-					const childBinding = deriveChildScopeBinding(correlatedBinding, {
-						childDirectory: standardDispatch.handle.worktreePath,
-						childSessionId,
-						parentCallId: input.callID,
-					});
-					await publishScopeBinding(
+		await reserveBackgroundCoderIfNeeded(
+			parallelModeActive ? effectiveMaxConcurrent : 1,
+		);
+		try {
+			if (!parallelModeActive) {
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
 						input.callID,
-						standardDispatch.handle.worktreePath,
-						childBinding,
+						incomingCoderDeclaredFiles,
 					);
-					const childSession = ensureAgentSession(
-						childSessionId,
-						'coder',
-						standardDispatch.handle.worktreePath,
-					);
-					childSession.currentTaskId = childBinding.taskId;
-					childSession.declaredCoderScope = [...childBinding.files];
-				} catch (error) {
-					clearPublishedScopeBindings(input.callID);
-					await cleanupStandardWorktreeForCallId(
-						input.callID,
-						'denied',
-						directory,
-						resolveWorktreeIsolationConfig(config).worktree_dir,
-					);
-					throw error;
 				}
+				await publishScopeBinding(input.callID, directory, correlatedBinding);
+				return;
 			}
-			rememberCoderTaskChangeContext(
-				input.callID,
-				incomingCoderDeclaredFiles,
-				standardDispatch.handle.worktreePath,
-			);
-		} else {
-			// Isolation may degrade to the project root; capture only after the
-			// provisioning attempt and before the upstream coder begins execution.
-			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
-			await publishScopeBinding(input.callID, directory, correlatedBinding);
+
+			const resolvedTaskId = incomingCoderTaskId;
+			// FR-102: pass declared scope (from pending map populated by FILE: extraction
+			// or prior declare_scope) so provisionWorktree can materialize it into the
+			// lane's .swarm/scopes/ for durability across plugin restart.
+			const laneScope = correlatedBinding.files;
+			await precreateStandardWorktreeSession({
+				config,
+				directory,
+				parentSessionID: input.sessionID,
+				callID: input.callID,
+				taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
+				planTaskId: resolvedTaskId ?? undefined,
+				description:
+					typeof args.description === 'string' ? args.description : undefined,
+				outputArgs: args,
+				scope:
+					laneScope && laneScope.length > 0 && resolvedTaskId
+						? { taskId: resolvedTaskId, files: laneScope }
+						: undefined,
+			});
+			const standardDispatch = standardWorktreeByCallID.get(input.callID);
+			if (standardDispatch) {
+				if (resolvedTaskId) {
+					try {
+						const childSessionId =
+							typeof args.task_id === 'string' ? args.task_id.trim() : '';
+						if (!childSessionId || childSessionId === input.sessionID) {
+							throw new Error(
+								'SCOPE_CHILD_IDENTITY_MISSING: worktree dispatch did not return a distinct child session id',
+							);
+						}
+						// Materialize the current authoritative plan in the isolated root via
+						// the ledger-aware writer. Strict child authorization never trusts a
+						// binding-era snapshot or a raw hand-written plan projection.
+						await savePlan(standardDispatch.handle.worktreePath, plan, {
+							preserveCompletedStatuses: false,
+						});
+						const childBinding = deriveChildScopeBinding(correlatedBinding, {
+							childDirectory: standardDispatch.handle.worktreePath,
+							childSessionId,
+							parentCallId: input.callID,
+						});
+						await publishScopeBinding(
+							input.callID,
+							standardDispatch.handle.worktreePath,
+							childBinding,
+						);
+						const childSession = ensureAgentSession(
+							childSessionId,
+							'coder',
+							standardDispatch.handle.worktreePath,
+						);
+						childSession.currentTaskId = childBinding.taskId;
+						childSession.declaredCoderScope = [...childBinding.files];
+					} catch (error) {
+						clearPublishedScopeBindings(input.callID);
+						await cleanupStandardWorktreeForCallId(
+							input.callID,
+							'denied',
+							directory,
+							resolveWorktreeIsolationConfig(config).worktree_dir,
+						);
+						throw error;
+					}
+				}
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+						standardDispatch.handle.worktreePath,
+					);
+				}
+			} else {
+				// Isolation may degrade to the project root; capture only after the
+				// provisioning attempt and before the upstream coder begins execution.
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+					);
+				}
+				await publishScopeBinding(input.callID, directory, correlatedBinding);
+			}
+		} catch (error) {
+			await releasePrelaunchBackgroundCoderReservation(input.callID);
+			throw error;
 		}
 	};
 
@@ -2889,17 +3063,66 @@ export function createDelegationGateHook(
 					isBackgroundTrue(storedArgs?.background) ||
 					backgroundResultIsRunning)
 			) {
+				const coderReservation = backgroundCoderReservationByCallID.get(
+					input.callID,
+				);
+				let backgroundRecordDurable = !backgroundSubagentsEnabled;
+				let backgroundOwnershipDurable = backgroundRecordDurable;
 				if (backgroundSubagentsEnabled) {
+					const protectUntrackedBackgroundWorktree = async (
+						taskId: string | null | undefined,
+						reason: string,
+					): Promise<{ detail: string; durable: boolean }> => {
+						if (!standardDispatch) {
+							return {
+								detail: 'no isolated worktree ownership tag was available',
+								durable: false,
+							};
+						}
+						let detail: string;
+						let durable = false;
+						try {
+							const preserved =
+								await _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId(
+									input.callID,
+								);
+							durable = preserved.outcome === 'preserved';
+							detail = durable
+								? `ownership tag ${preserved.tag} at ${preserved.ref}`
+								: `ownership preservation failed: ${preserved.error ?? preserved.outcome}`;
+						} catch (err) {
+							detail = `ownership preservation threw: ${err instanceof Error ? err.message : String(err)}`;
+						}
+						recordWorktreeMergeFailure(taskId ?? undefined, {
+							outcome: 'failed',
+							stage: 'background-correlation-persist',
+							message:
+								`${reason}; ${detail}. ` +
+								'Automatic orphan reclamation is blocked until the dispatch is recovered.',
+							worktreePath: standardDispatch.handle.worktreePath,
+							branch: standardDispatch.handle.branchName,
+							queuedAt: Date.now(),
+						});
+						return { detail, durable };
+					};
 					try {
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { buildPromptSnapshot, recordPendingDelegation } =
-							await import('../background/pending-delegations.js');
+						const { buildPromptSnapshot } = await import(
+							'../background/pending-delegations.js'
+						);
 						const { captureWorkspaceSnapshot } = await import(
 							'../background/workspace-snapshot.js'
 						);
 						const { subagentSessionId, jobId } = extractDispatchIds(_output);
+						if (!subagentSessionId && !backgroundResultIsRunning) {
+							await releasePrelaunchBackgroundCoderReservation(input.callID);
+							clearPublishedScopeBindings(input.callID);
+							clearCoderTaskChangeContext(input.callID);
+							if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+							return;
+						}
 						if (subagentSessionId) {
 							const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
 							const evidenceTaskId = await resolveEvidenceTaskId(
@@ -2920,53 +3143,136 @@ export function createDelegationGateHook(
 								stripKnownSwarmPrefix(subagentType) === 'coder'
 									? coderTaskChangeContextByCallID.get(input.callID)
 									: undefined;
-							await recordPendingDelegation(
-								directory,
-								{
-									correlationId: subagentSessionId,
-									jobId,
-									subagentSessionId,
-									parentSessionId: input.sessionID,
-									callID: input.callID,
-									normalizedAgent: stripKnownSwarmPrefix(subagentType),
-									swarmPrefixedAgent: subagentType,
-									planTaskId: evidenceTaskId,
-									evidenceTaskId,
-									workspace: taskChangeContext
-										? { ...taskChangeContext.baseline, prHeadSha, scope }
-										: captureWorkspaceSnapshot(directory, {
-												prHeadSha,
-												scope,
-											}),
-									taskChangeContext,
-									prompt:
-										typeof mergedArgs.prompt === 'string'
-											? buildPromptSnapshot(
-													mergedArgs.prompt,
-													delegationMaxChars,
-												)
-											: undefined,
-									generation: 1,
-								},
-								{ staleTimeoutMs: backgroundPendingTimeoutMs },
-							);
+							const pendingInput = {
+								correlationId: subagentSessionId,
+								jobId,
+								subagentSessionId,
+								parentSessionId: input.sessionID,
+								callID: input.callID,
+								normalizedAgent: stripKnownSwarmPrefix(subagentType),
+								swarmPrefixedAgent: subagentType,
+								planTaskId: evidenceTaskId,
+								evidenceTaskId,
+								workspace: taskChangeContext
+									? { ...taskChangeContext.baseline, prHeadSha, scope }
+									: captureWorkspaceSnapshot(directory, {
+											prHeadSha,
+											scope,
+										}),
+								taskChangeContext,
+								worktree: standardDispatch
+									? {
+											callID: standardDispatch.callID,
+											parentSessionId: standardDispatch.parentSessionID,
+											taskId: standardDispatch.taskId,
+											planTaskId: standardDispatch.planTaskId ?? null,
+											worktreePath: standardDispatch.handle.worktreePath,
+											branchName: standardDispatch.handle.branchName,
+											worktreeId: standardDispatch.handle.id,
+											worktreeSessionId: standardDispatch.handle.sessionId,
+											mergeStrategy: standardDispatch.mergeStrategy,
+											laneIndex: standardDispatch.laneIndex,
+											worktreeDir: standardDispatch.worktree_dir ?? null,
+										}
+									: undefined,
+								coderReservationId: coderReservation?.reservationId,
+								prompt:
+									typeof mergedArgs.prompt === 'string'
+										? buildPromptSnapshot(mergedArgs.prompt, delegationMaxChars)
+										: undefined,
+								generation: 1,
+							};
+							const primary =
+								await _internals.recordPendingDelegationForBackground(
+									directory,
+									pendingInput,
+									{ staleTimeoutMs: backgroundPendingTimeoutMs },
+								);
+							backgroundRecordDurable = primary !== null;
+							if (!primary) {
+								backgroundRecordDurable =
+									(await _internals.writeDelegationFallbackForBackground(
+										directory,
+										pendingInput,
+									)) !== null;
+								if (backgroundRecordDurable) {
+									logger.warn(
+										`[delegation-gate] background delegation ${subagentSessionId} persisted to the independent fallback artifact after the primary ledger write failed`,
+									);
+								}
+							}
+							if (!backgroundRecordDurable) {
+								const preservation = await protectUntrackedBackgroundWorktree(
+									evidenceTaskId ?? standardDispatch?.planTaskId,
+									'both background correlation stores failed',
+								);
+								backgroundOwnershipDurable = preservation.durable;
+								session.pendingAdvisoryMessages ??= [];
+								session.pendingAdvisoryMessages.push(
+									`BACKGROUND DELEGATION UNTRACKED: ${subagentType} (${subagentSessionId}) launched, but both durable correlation stores failed. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the dispatch is recovered.`,
+								);
+							} else {
+								backgroundOwnershipDurable = true;
+								if (coderReservation) {
+									const bound =
+										await _internals.bindBackgroundCoderReservationForDispatch(
+											directory,
+											{
+												...coderReservation,
+												correlationId: subagentSessionId,
+											},
+										);
+									if (!bound) {
+										session.pendingAdvisoryMessages ??= [];
+										session.pendingAdvisoryMessages.push(
+											`BACKGROUND CODER RESERVATION UNBOUND: task ${evidenceTaskId ?? 'unknown'} is durably tracked, but its pre-launch reservation could not be bound to ${subagentSessionId}. Further coder admission remains fail-closed until completion or recovery reconciles it.`,
+										);
+									}
+								}
+							}
 						} else {
 							// No usable correlation id (no jobId and no parseable dispatch
-							// envelope). Do NOT write an unkeyable/orphan record; the dispatch
-							// already launched upstream, but Stage A has no gate effect so an
-							// untracked background dispatch is safe (it is simply unobservable).
+							// envelope). Do not invent an owner. Preserve the isolated
+							// worktree durably and tell the architect to fail closed.
+							const preservation = await protectUntrackedBackgroundWorktree(
+								standardDispatch?.planTaskId,
+								'background dispatch returned no trusted correlation id',
+							);
+							backgroundOwnershipDurable = preservation.durable;
 							logger.warn(
 								'[delegation-gate] background dispatch had no correlation id (no jobId / no envelope) — not tracked',
 							);
+							session.pendingAdvisoryMessages ??= [];
+							session.pendingAdvisoryMessages.push(
+								`BACKGROUND DELEGATION UNCORRELATED: ${subagentType} launched without a trusted session correlation. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered or safely re-dispatched.`,
+							);
 						}
 					} catch (err) {
+						const preservation = await protectUntrackedBackgroundWorktree(
+							standardDispatch?.planTaskId,
+							'background dispatch correlation recording threw',
+						);
+						backgroundOwnershipDurable = preservation.durable;
 						logger.warn(
 							`[delegation-gate] background pending recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
+						session.pendingAdvisoryMessages ??= [];
+						session.pendingAdvisoryMessages.push(
+							`BACKGROUND DELEGATION DURABILITY FAILURE: ${subagentType} launched, but its completion owner could not be persisted. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered.`,
+						);
 					}
 				}
-				clearCoderTaskChangeContext(input.callID);
-				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+				if (backgroundOwnershipDurable) {
+					_wtiInternals.removeWorktreeProvisioningOwner(
+						directory,
+						input.callID,
+					);
+				}
+				if (backgroundRecordDurable) {
+					clearCoderTaskChangeContext(input.callID);
+					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+				}
+				backgroundCoderReservationByCallID.delete(input.callID);
 				if (!backgroundResultIsRunning)
 					clearPublishedScopeBindings(input.callID);
 				return;
@@ -3010,6 +3316,7 @@ export function createDelegationGateHook(
 				}
 			}
 
+			let standardWorktreeSettled = !standardDispatch;
 			if (standardDispatch) {
 				const taskChangeContext = coderTaskChangeContextByCallID.get(
 					input.callID,
@@ -3040,7 +3347,7 @@ export function createDelegationGateHook(
 					mergeStrategy: standardDispatch.mergeStrategy,
 					queuedAt: Date.now(),
 				});
-				await finishStandardWorktreeDispatch(
+				const settlement = await finishStandardWorktreeDispatch(
 					directory,
 					standardDispatch,
 					config,
@@ -3075,6 +3382,7 @@ export function createDelegationGateHook(
 					// SC-115: Remove from awaiting-merge registry after recording failure.
 					awaitingMergeByCallID.delete(input.callID);
 				});
+				standardWorktreeSettled = settlement?.outcome === 'merged';
 			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args
@@ -3624,6 +3932,9 @@ export function createDelegationGateHook(
 					}
 				}
 			}
+			if (standardWorktreeSettled) {
+				_wtiInternals.removeWorktreeProvisioningOwner(directory, input.callID);
+			}
 		}
 	};
 
@@ -4040,5 +4351,6 @@ ${warningLines.join('\n')}`;
 		toolAfter,
 		taskMetadata,
 		sessionEnded,
+		backgroundCompletionClaimed,
 	};
 }

@@ -442,6 +442,7 @@ export type DispatchLaneStatus =
 	| 'rejected'
 	| 'cancelled'
 	| 'stale'
+	| 'ingesting'
 	| 'consumed';
 
 export interface DispatchLaneResult {

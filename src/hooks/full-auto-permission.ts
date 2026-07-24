@@ -50,7 +50,7 @@ import {
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
 } from '../scope/scope-persistence';
-import { swarmState } from '../state';
+import { getModifiedFilesForTask, swarmState } from '../state';
 import {
 	consumePendingInputWarning,
 	peekPendingInputWarning,
@@ -138,7 +138,7 @@ export function createFullAutoPermissionHook(
 				ORCHESTRATOR_NAME;
 			const normalizedAgentName = stripKnownSwarmPrefix(activeAgent);
 
-			const taskId = session?.currentTaskId ?? null;
+			let taskId = session?.currentTaskId ?? null;
 			const binding = taskId
 				? resolveAuthorizedScopeBinding({
 						directory,
@@ -150,6 +150,7 @@ export function createFullAutoPermissionHook(
 						activeSessionId: sessionID,
 					});
 			if (!taskId && binding && session) {
+				taskId = binding.taskId;
 				session.currentTaskId = binding.taskId;
 				session.declaredCoderScope = [...binding.files];
 			}
@@ -208,7 +209,10 @@ export function createFullAutoPermissionHook(
 				currentTaskID: taskId,
 				currentPhase: effectivePhase,
 				planSummary: undefined,
-				changedFiles: session?.modifiedFilesThisCoderTask,
+				changedFiles:
+					session && taskId
+						? getModifiedFilesForTask(session, taskId)
+						: undefined,
 				fullAutoConfig: effectiveFullAutoConfig,
 			};
 

@@ -58,6 +58,8 @@ export interface SerializedAgentSession {
 	qaSkipTaskIds: string[];
 	pendingAdvisoryMessages: string[];
 	taskWorkflowStates?: Record<string, string>;
+	/** Task-keyed coder file attribution. Optional for backward compatibility. */
+	modifiedFilesByTask?: Record<string, string[]>;
 	/** Flag for one-shot scope violation warning injection (omitted when undefined for additive-only schema) */
 	scopeViolationDetected?: boolean;
 	/** Current index into the fallback_models array (v6.33) */
@@ -180,6 +182,11 @@ export function serializeAgentSession(
 		}
 	}
 
+	const modifiedFilesByTask: Record<string, string[]> = Object.create(null);
+	for (const [taskId, files] of s.modifiedFilesByTask ?? new Map()) {
+		modifiedFilesByTask[taskId] = [...files];
+	}
+
 	// Convert windows: Record<string, InvocationWindow> (already serializable)
 	const windows: Record<string, SerializedInvocationWindow> = {};
 	const rawWindows = s.windows ?? {};
@@ -233,6 +240,9 @@ export function serializeAgentSession(
 		qaSkipTaskIds: s.qaSkipTaskIds ?? [],
 		pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
 		taskWorkflowStates: Object.fromEntries(s.taskWorkflowStates ?? new Map()),
+		...(Object.keys(modifiedFilesByTask).length > 0 && {
+			modifiedFilesByTask,
+		}),
 		...(s.scopeViolationDetected !== undefined && {
 			scopeViolationDetected: s.scopeViolationDetected,
 		}),

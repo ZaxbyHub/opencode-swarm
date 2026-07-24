@@ -8,9 +8,11 @@ import { collectReviewerReceiptFromTranscript } from '../hooks/review-receipt-co
 import {
 	type AgentSessionState,
 	advanceTaskState,
+	advanceTaskStateAndPersist,
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	recordModifiedFilesForTask,
 	recordStageBCompletion,
 	swarmState,
 } from '../state.js';
@@ -86,13 +88,54 @@ export async function ingestBackgroundStageBCompletion(args: {
 	}
 
 	if (args.record.normalizedAgent === 'coder') {
+		const parentSession = swarmState.agentSessions.get(
+			args.record.parentSessionId,
+		);
+		if (!parentSession) {
+			return {
+				ok: false,
+				consumed: false,
+				reason: `background coder parent session is unavailable: ${args.record.parentSessionId}`,
+			};
+		}
 		const taskChangeContext = args.record.taskChangeContext;
-		const observedFiles = taskChangeContext
-			? changedFilesSinceSnapshot(
-					taskChangeContext.baseline.directory,
-					taskChangeContext.baseline,
-				)
-			: null;
+		const settledFiles =
+			args.record.coderSettlement?.state === 'settled'
+				? args.record.coderSettlement.observedFiles
+				: undefined;
+		const observedFiles =
+			settledFiles !== undefined
+				? settledFiles
+				: taskChangeContext
+					? changedFilesSinceSnapshot(
+							taskChangeContext.baseline.directory,
+							taskChangeContext.baseline,
+						)
+					: null;
+		if (observedFiles === null) {
+			return {
+				ok: false,
+				consumed: false,
+				stale: true,
+				reason:
+					'background coder files could not be attributed to a clean immutable baseline',
+			};
+		}
+		const state = getTaskState(parentSession, taskId);
+		if (state !== 'idle' && state !== 'coder_delegated') {
+			return {
+				ok: false,
+				consumed: false,
+				reason: `background coder completion is late for task ${taskId}: current state is ${state}`,
+			};
+		}
+		if (!recordModifiedFilesForTask(parentSession, taskId, observedFiles)) {
+			return {
+				ok: false,
+				consumed: false,
+				reason: `background coder file-attribution capacity is exhausted for task ${taskId}`,
+			};
+		}
 		try {
 			await recordAgentDispatch(args.directory, taskId, 'coder', undefined, {
 				testEngineerExempt: isMarkdownOnlyTaskChange(
@@ -100,6 +143,15 @@ export async function ingestBackgroundStageBCompletion(args: {
 					observedFiles,
 				),
 			});
+			if (state === 'idle') {
+				await advanceTaskStateAndPersist(
+					parentSession,
+					taskId,
+					'coder_delegated',
+					args.directory,
+					{ telemetrySessionId: args.record.parentSessionId },
+				);
+			}
 			return { ok: true, consumed: true };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
