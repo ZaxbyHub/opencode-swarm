@@ -329,7 +329,11 @@ describe('mergeEntryFields — fields currently dropped (characterization)', () 
 
 		mergeEntryFields(target, src);
 
+		// Non-vacuity guards: the merge really ran, and src really carried the
+		// fields — so `toBeUndefined()` below means "dropped", not "never set".
+		expect(target.merged_from).toEqual(['src-1']);
 		for (const f of ACTIONABILITY_FIELDS) {
+			expect(src[f]).toEqual([`src-${f}`]);
 			expect(target[f]).toBeUndefined();
 		}
 	});
