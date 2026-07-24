@@ -261,12 +261,14 @@ function isGitRepo(directory: string): GitRepoProbe {
 function handleSave(label: string, directory: string): string {
 	try {
 		// Read checkpoint config
-		let maxCheckpoints = 20; // sensible default
+		let maxCheckpoints = 20; // sensible default (must match max_retention default(20) in CheckpointConfigSchema)
 		let allowEmptyCommits = false;
 		try {
 			const { config } = loadPluginConfigWithMeta(directory);
-			maxCheckpoints =
-				config.checkpoint?.auto_checkpoint_threshold ?? maxCheckpoints;
+			// max_retention controls how many checkpoints are kept (issue #1691).
+			// Previously misused auto_checkpoint_threshold (which controls
+			// completed-task-count auto-save trigger, not retention).
+			maxCheckpoints = config.checkpoint?.max_retention ?? maxCheckpoints;
 			allowEmptyCommits = config.checkpoint?.allow_empty_commits === true;
 		} catch {
 			// Config load failure — use defaults

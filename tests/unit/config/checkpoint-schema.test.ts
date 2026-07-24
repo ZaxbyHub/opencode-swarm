@@ -13,6 +13,7 @@ describe('CheckpointConfigSchema', () => {
 				expect(result.data).toEqual({
 					enabled: true,
 					auto_checkpoint_threshold: 3,
+					max_retention: 20,
 					allow_empty_commits: false,
 				});
 			}
@@ -23,6 +24,7 @@ describe('CheckpointConfigSchema', () => {
 				enabled: false,
 				auto_checkpoint_threshold: 5,
 				allow_empty_commits: false,
+				max_retention: 20,
 			};
 			const result = CheckpointConfigSchema.safeParse(config);
 			expect(result.success).toBe(true);
@@ -158,6 +160,73 @@ describe('CheckpointConfigSchema', () => {
 		});
 	});
 
+	describe('bounds - max_retention', () => {
+		it('accepts minimum boundary: 1', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 1,
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.max_retention).toBe(1);
+			}
+		});
+
+		it('accepts maximum boundary: 100', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 100,
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.max_retention).toBe(100);
+			}
+		});
+
+		it('accepts mid-range value: 50', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 50,
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.max_retention).toBe(50);
+			}
+		});
+
+		it('rejects below minimum: 0', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 0,
+			});
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects above maximum: 101', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 101,
+			});
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects negative value: -1', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: -1,
+			});
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects non-integer: 3.5', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: 3.5,
+			});
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects non-number: "10"', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				max_retention: '10',
+			});
+			expect(result.success).toBe(false);
+		});
+	});
+
 	describe('edge cases', () => {
 		it('rejects non-boolean enabled: "true"', () => {
 			const result = CheckpointConfigSchema.safeParse({ enabled: 'true' });
@@ -215,6 +284,7 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 			expect(result.data.checkpoint).toEqual({
 				enabled: false,
 				auto_checkpoint_threshold: 7,
+				max_retention: 20,
 				allow_empty_commits: false,
 			});
 		}
@@ -238,6 +308,7 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 			expect(result.data.checkpoint).toEqual({
 				enabled: true,
 				auto_checkpoint_threshold: 3,
+				max_retention: 20,
 				allow_empty_commits: false,
 			});
 		}

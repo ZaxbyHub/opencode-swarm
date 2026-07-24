@@ -32,17 +32,13 @@ describe('checkpoint retention policy', () => {
 		execSync('git add .', { encoding: 'utf-8' });
 		execSync('git commit -m "initial"', { encoding: 'utf-8' });
 
-		// Set auto_checkpoint_threshold in config to match our expected threshold
+		// Set max_retention in config to match our expected retention limit.
 		// Note: loadPluginConfigWithMeta reads from .opencode/opencode-swarm.json, not .swarm/
 		const configDir = path.join(tempDir, '.opencode');
 		fs.mkdirSync(configDir, { recursive: true });
 		fs.writeFileSync(
 			path.join(configDir, 'opencode-swarm.json'),
-			JSON.stringify(
-				{ checkpoint: { auto_checkpoint_threshold: 20 } },
-				null,
-				2,
-			),
+			JSON.stringify({ checkpoint: { max_retention: 20 } }, null, 2),
 		);
 	});
 

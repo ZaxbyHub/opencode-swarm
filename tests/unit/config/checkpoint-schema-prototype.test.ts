@@ -44,6 +44,7 @@ describe('CheckpointConfigSchema prototype safety', () => {
 		expect(result).toEqual({
 			enabled: true,
 			auto_checkpoint_threshold: 3,
+			max_retention: 20,
 			allow_empty_commits: false,
 		});
 	});
