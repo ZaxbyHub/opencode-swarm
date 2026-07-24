@@ -600,13 +600,14 @@ function buildConfigWithMeta(
 					...gatesStripped,
 					...valueRecovery.recoveryWarnings.map((w) => w.section),
 				];
-				advisoryWarn(
-					`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
-				);
 				// Force guardrails enabled on recovery — the user's config had
 				// invalid values, so we apply the same fail-secure default as
 				// step 8 (guardrails_defaults) to preserve the security posture.
-				const secureConfig = PluginConfigSchema.parse({
+				// Use safeParse (not parse) so a future schema refinement or an
+				// edge-case merge artifact cannot throw and bypass step 8's
+				// guardrails_defaults fallback (review PRR-009). On failure we
+				// fall through to step 8 rather than throwing.
+				const secureParse = PluginConfigSchema.safeParse({
 					...(recoveredParse.data as Record<string, unknown>),
 					guardrails: {
 						...((recoveredParse.data as Record<string, unknown>).guardrails as
@@ -615,12 +616,21 @@ function buildConfigWithMeta(
 						enabled: true,
 					},
 				});
-				return {
-					config: secure(secureConfig),
-					recovery: 'sanitized_values',
-					removedKeys,
-					warnings: [],
-				};
+				if (secureParse.success) {
+					// Only announce recovery once it has actually succeeded —
+					// otherwise the "rest of your configuration was preserved"
+					// message would be misleading on the safeParse-failure path
+					// that falls through to step 8 (which discards everything).
+					advisoryWarn(
+						`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
+					);
+					return {
+						config: secure(secureParse.data),
+						recovery: 'sanitized_values',
+						removedKeys,
+						warnings: [],
+					};
+				}
 			}
 		}
 	} // end if (!rawGuardrailsDisabled)

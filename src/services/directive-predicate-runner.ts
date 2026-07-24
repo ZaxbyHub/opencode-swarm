@@ -113,14 +113,19 @@ export function validateRepoRelativeGlob(
 // Subprocess helper
 // ============================================================================
 
-/** Find a binary on PATH (Bun.which misses runtime PATH changes). */
+/** Find a binary on PATH (Bun.which misses runtime PATH changes).
+ *  On Windows, checks .exe, .cmd, .bat, and bare name (issue #1691). */
 function findBinaryInPath(binary: string): string | null {
 	const isWindows = process.platform === 'win32';
-	const exeName = isWindows ? `${binary}.exe` : binary;
+	const candidates = isWindows
+		? [`${binary}.exe`, `${binary}.cmd`, `${binary}.bat`, binary]
+		: [binary];
 	for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
 		if (!dir) continue;
-		const candidate = path.join(dir, exeName);
-		if (existsSync(candidate)) return candidate;
+		for (const name of candidates) {
+			const candidate = path.join(dir, name);
+			if (existsSync(candidate)) return candidate;
+		}
 	}
 	return null;
 }
@@ -411,3 +416,9 @@ export const _internals = {
 	runDirectivePredicate,
 	TOOL_BINARY_ALLOWLIST,
 };
+
+// Tier 0 test seam (writing-tests SKILL.md): findBinaryInPath is a pure PATH
+// resolver (reads process.env.PATH + existsSync only). Exporting it directly
+// avoids mock.module for the #1691 .cmd/.bat resolution tests — they assert
+// real behavior with a fake PATH and temp files on disk.
+export const _test_exports = { findBinaryInPath };
