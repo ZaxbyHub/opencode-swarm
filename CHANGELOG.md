@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.130.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.4...v7.130.0) (2026-07-24)
+
+
+### Features
+
+* **pr-monitor:** adaptive idle backoff for idle PRs ([#1691](https://github.com/ZaxbyHub/opencode-swarm/issues/1691)) ([f28343d](https://github.com/ZaxbyHub/opencode-swarm/commit/f28343dc876a22c6cfe5b5a40773ae23f0047c6d))
+
 ## [7.129.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.3...v7.129.4) (2026-07-24)
 
 
