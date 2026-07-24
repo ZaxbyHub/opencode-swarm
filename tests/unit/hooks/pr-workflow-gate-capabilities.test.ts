@@ -33,6 +33,7 @@ describe('PR workflow explicit capability contract', () => {
 		for (const [toolName, args] of [
 			['skill', { name: 'swarm-pr-review' }],
 			['gh_evidence', { kind: 'pr', number: 123 }],
+			['pr_workflow_status', {}],
 			['gitingest', { repo: 'owner/repo' }],
 			['retrieve_lane_output', { output_ref: 'lane-output-ref' }],
 			['parse_lane_candidates', { output_ref: 'lane-output-ref' }],

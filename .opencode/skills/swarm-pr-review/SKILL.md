@@ -198,12 +198,17 @@ If scope cannot be determined, review the narrowest safe scope available and sta
 Before launching explorers (Phase 3), perform this exact standalone sequence:
 
 1. Resolve and retain the authoritative full `pr_head_sha` from PR metadata.
-2. Verify the working tree is clean with `git status --porcelain`. If tracked
-   changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
-   tracked path (Profile A). Without the controller, do not blind-stash over
+2. Verify the working tree is clean with `git status --porcelain`. If it is
+   dirty at all — tracked changes, untracked files, or both — call
+   `prepare_pr_workflow_checkout` (Profile A). The tool supports
+   self-discovery: call it with no `paths` argument to auto-discover and
+   preserve every dirty path in one step, including untracked files; an
+   already-clean tree returns a no-op (nothing is stashed, no receipt is
+   written). Pass explicit `paths` only when you already have the exact,
+   bounded list of dirty tracked files and want the older exact-match
+   contract. Without the controller (Profiles B/C), do not blind-stash over
    dirty state: surface tracked changes to the user, or abort. Do not issue
-   `git stash` through shell. The controller never stashes untracked files;
-   move or remove those manually, or abort.
+   `git stash` through shell.
 3. Fetch the PR head as one standalone command, for example
    `git fetch origin refs/pull/<N>/head`. Do not compose fetch and checkout.
 4. Prove the full commit exists locally with
@@ -222,6 +227,29 @@ the commit range in a prompt cannot substitute for this checkout because
 - Explicitly pass the verified merge-base range (`base_sha...pr_head_sha`) in every explorer delegation so explorers inspect exactly the bound PR diff. Include `base_ref` only as the live ref used to recompute `base_sha`; do not substitute a two-dot branch-tip range.
 
 If refs cannot be fetched or checked out, state the limitation in the context pack.
+
+### Shell rules under the PR_REVIEW gate
+
+The gate accepts one command per tool call — never compose commands with
+`&&`, `;`, `|`, redirects (`>`, `>>`, `<`), or `$(...)`/`` ` `` substitution.
+A single leading `cd <dir> &&` prefix and a trailing `2>&1` suffix are
+tolerated, but only on read-only commands. State-transition verbs — `git
+fetch`, `git checkout`, `git switch`, `git branch`, and `gh pr checkout` —
+must always run bare: no `cd` prefix, no `2>&1` suffix.
+
+Allowed read-only `git` subcommands: `status`, `log`, `show`, `diff`,
+`rev-parse`, `merge-base`, `ls-files`, `grep`, `blame`, `cat-file`,
+`for-each-ref`, `branch --list` (listing only — mutation flags are blocked),
+`remote -v`, and `config --get`.
+
+Prefer tools over raw shell for state that a single read-only command cannot
+cover cleanly:
+
+- `pr_workflow_status` — observe local HEAD, branch, dirty-file state,
+  remotes, and gate state in one read-only call.
+- `gh_evidence` — bounded PR/issue/run metadata without a shell round-trip.
+- If `gh` is not installed, the web fetch tool against the equivalent
+  `api.github.com` REST URL is the degraded read-only path.
 
 ## Phase 0A: Existing PR Signal Ingestion
 
@@ -291,17 +319,20 @@ gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
 
 # Review summaries (approve/request-changes/comment events)
 gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/reviews
-
-# Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
-# Inline review comments — use REST API for reliable bot detection via user.type
-gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
 ```
 
-`--paginate` requests every REST page; with `--jq`, `gh` applies the filter to
-the combined page stream. Filter bot identities from the complete issue-comment
-result using the same predicate when needed. `gh pr view --json comments,reviews`
-is convenience-only because those fields have item caps; never use it as the
-authoritative “all signals” intake.
+`--paginate` requests every REST page. These three calls are gate-allowed as
+written; do not pipe any of them through `--jq`, `jq`, or another filter under
+the PR_REVIEW gate — piped commands are blocked (fail-closed on `|`). To
+separate bot/automated reviews (Copilot, Codex, CodeRabbit, etc.) from human
+ones, apply the same predicate in context to the JSON already returned above
+— `user.type == "Bot"` or a `user.login` match against
+`bot|copilot|coderabbit|codex` (case-insensitive) — instead of re-fetching
+with a shell-side `--jq` filter. `gh_evidence` with `target: "pr"` and
+`fields: "comments"` is the sanctioned read-only tool path for the same PR
+comment data when a tool call is preferred over a raw shell command. `gh pr
+view --json comments,reviews` is convenience-only because those fields have
+item caps; never use it as the authoritative "all signals" intake.
 
 ### Step 2 — Classify each comment
 
@@ -369,12 +400,15 @@ The response has two independent fields. Handle each:
 
 When the PR has merge conflicts:
 
-1. **Determine the PR's base branch and verify the state:**
-   ```bash
-   BASE_REF=$(gh pr view <PR_NUMBER> --json baseRefName --jq '.baseRefName')
-   git fetch origin $BASE_REF
-   gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus,baseRefName,headRefName
-   ```
+1. **Determine the PR's base branch and verify the state**, as separate
+   standalone commands — never with `$(...)` command substitution, which the
+   PR_REVIEW gate blocks:
+   - Read the base ref: `gh pr view <PR_NUMBER> --json baseRefName` (or
+     `gh_evidence` with `target: "pr"`, `fields: "baseRefName"`).
+   - Fetch it by its literal value, substituted for `<base-ref>`:
+     `git fetch origin <base-ref>`.
+   - Re-check merge state: `gh pr view <PR_NUMBER> --json
+     mergeable,mergeStateStatus,baseRefName,headRefName`.
 
 2. **Capture the affected scope without changing the branch:**
    - List the files or subsystems implicated by the conflict if GitHub exposes them,
@@ -405,19 +439,34 @@ reviewer, or another swarm may have pushed commits while you were reviewing.
 This is still read-only: capture the remote state so the handoff artifact starts
 from the right branch facts.
 
-### Step 1 — Refetch and compare
+### Step 1 — Compare remote state (read-only, no post-bind fetch)
+
+Once the PR head is bound, the gate allows only the exact bound tracking
+fetch (when one is armed), and a detached review HEAD has no tracking branch
+to refetch against — `git fetch origin <pr-branch>` is blocked here. Compare
+state through the read-only API instead, as one standalone command:
 
 ```bash
-git fetch origin <pr-branch>
-git log HEAD..origin/<pr-branch> --oneline
+gh pr view <PR_NUMBER> --json headRefOid,commits
 ```
+
+or the equivalent `gh_evidence` call with `target: "pr"` and
+`fields: "headRefOid,commits"`. If the returned `headRefOid` differs from the
+`pr_head_sha` bound at the start of this review, the remote has moved; the
+`commits` field lists every commit's message and author to date, enough to
+judge relevance to the pending findings. (The legitimate place to `git fetch`
+is the pre-bind sequence under "Pre-flight git ref availability" above — this
+step never repeats that fetch post-bind.)
 
 ### Step 2 — Evaluate new commits
 
-For each new commit on the remote:
+For each new commit on the remote (identified by comparing `headRefOid` /
+`commits` above against the SHA bound at the start of the review):
 
-1. **Read the commit message and diff.** Use `git show <commit> --stat` to see
-   file scope, then `git show <commit> -- <file>` to see the actual changes.
+1. **Read the commit message from the `commits` field above.** For file
+   scope, use one standalone read-only call —
+   `gh api repos/{owner}/{repo}/commits/<sha>` — rather than a local
+   `git show`: the new commit's object is not fetched locally post-bind.
 2. **Compare against the pending handoff scope:**
    - Does the remote commit touch the same files as the validated findings?
    - Does the remote commit appear to already address a finding you planned to

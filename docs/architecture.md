@@ -595,6 +595,10 @@ Three read-only wrappers expose high-yield external project checks without addin
 
 All three tools resolve their executable lazily at call time and share the bounded external-tool runner: explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and best-effort cleanup. Missing binaries return structured guidance instead of failing plugin registration.
 
+### PR Workflow Observation Tool — `pr_workflow_status`
+
+- `pr_workflow_status` gives the architect a single architect-only, read-only view of the current PR-workflow state under the fail-closed PR_REVIEW / PR_FEEDBACK gate. It reports local git state (HEAD, branch, detached flag, clean/dirty with a bounded changed-file list, and remotes) and a session-pinned gate summary (mode, whether the PR head is bound, base ref/sha, depth tier, base-dispatch and validation batch counts, checkout-receipt count, and a next-step hint). The gate is resolved from the caller's own `sessionID` only — it never enumerates other sessions' gate state — and it never runs a PR-controlled script (consistent with the `build_check` block, PWR-001). It uses the bounded null-on-fail git snapshot resolvers plus fixed-argv `status --porcelain` / `remote -v` / `rev-parse` reads (explicit `cwd`, ignored stdin, timeout, best-effort kill), and neutralizes author-controlled strings such as branch names and remote URLs before echoing them.
+
 ### Reviewer-Safe Patch Suggestion Tool — `suggest_patch` (v6.45.0)
 
 Generates structured diff hunks for a target file without modifying it. Used by the reviewer agent to deliver actionable remediation artifacts in read-only review passes.
