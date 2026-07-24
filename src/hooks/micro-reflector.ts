@@ -27,7 +27,7 @@ import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
-import { transactFile } from './knowledge-store.js';
+import { dedupeCapped, transactFile } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
 import {
 	validateActionability,
@@ -311,10 +311,9 @@ export function parseMicroCandidates(
 		for (const key of CANDIDATE_ALLOWED_FIELDS) {
 			const v = rec[key];
 			if (Array.isArray(v)) {
-				const arr = v
-					.filter((x): x is string => typeof x === 'string')
-					.map((x) => x.slice(0, 200))
-					.slice(0, 20);
+				// #1821: truncate → dedupe (case-insensitive) → cap, in that order,
+				// so duplicates cannot evict distinct directives off the end.
+				const arr = dedupeCapped(v, { cap: 20, itemMaxChars: 200 });
 				if (arr.length > 0) (fields as Record<string, unknown>)[key] = arr;
 			}
 		}

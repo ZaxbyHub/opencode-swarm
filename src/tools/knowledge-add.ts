@@ -8,7 +8,9 @@ import {
 } from '../hooks/knowledge-reinforcement.js';
 import {
 	computeContentHash,
+	dedupeCapped,
 	findNearDuplicate,
+	inferTags,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
@@ -138,15 +140,18 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			// Parse tags (optional, default to empty array)
-			let tags: string[] = [];
-			if (tagsInput !== undefined) {
-				if (Array.isArray(tagsInput)) {
-					tags = tagsInput
-						.filter((t): t is string => typeof t === 'string')
-						.slice(0, 20); // cap at 20 tags
-				}
-			}
+			// Parse tags (optional) and merge in the tags inferred from the lesson.
+			// Caller tags come FIRST so that when the combined list exceeds the cap,
+			// truncation drops inferred tags before it drops user intent.
+			// dedupeCapped is case-insensitive (first casing wins) and caps at 20,
+			// so duplicates can no longer evict distinct tags off the end (#1821).
+			const tags: string[] = dedupeCapped(
+				[
+					...(Array.isArray(tagsInput) ? tagsInput : []),
+					...inferTags(lesson),
+				],
+				{ cap: 20 },
+			);
 
 			// Parse scope (optional, default to 'global')
 			const scope =
@@ -156,10 +161,12 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 
 			// Parse optional v3 actionability fields (Change 4). Untrusted input:
 			// shape-validated below via validateActionableFields.
+			// The `undefined` return is load-bearing: validateActionableFields (and
+			// validateActionability below) distinguish an ABSENT field from an empty
+			// one, so the Array.isArray wrapper must stay. Only the inner
+			// filter+slice becomes dedupeCapped (#1821).
 			const strArray = (v: unknown): string[] | undefined =>
-				Array.isArray(v)
-					? v.filter((x): x is string => typeof x === 'string').slice(0, 20)
-					: undefined;
+				Array.isArray(v) ? dedupeCapped(v, { cap: 20 }) : undefined;
 			const obj =
 				args && typeof args === 'object'
 					? (args as Record<string, unknown>)

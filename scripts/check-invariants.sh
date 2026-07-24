@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Engineering invariant checks for opencode-swarm.
-# Runs four grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7
-# (Checks 1-3) plus the mock.module allowlist growth ratchet from issue #1666
-# (Check 4). Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
+# Runs five grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7
+# (Checks 1-3), the mock.module allowlist growth ratchet from issue #1666
+# (Check 4), and the knowledge-array dedup guardrail from issue #1821 Lane 0b
+# (Check 5). Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
 # Portability constraints (issue #1729 merge_group macOS failures):
 #   - macOS ships bash 3.2 as /bin/bash: NO associative arrays (`declare -A`),
 #     NO `[[ ${arr["x"]} ]]` subscript syntax. Use plain files + grep -Fxf.
@@ -321,7 +322,45 @@ else
 fi
 
 echo ""
+echo "=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ==="
+# A positional `.slice(0, 20)` on a knowledge array field keeps the FIRST 20
+# items without deduplicating: duplicates survive AND, because the cap is
+# positional, a run of duplicates evicts distinct values off the end. The class
+# recurred at six call sites (knowledge-add tags + actionability arrays,
+# knowledge-curator insight tags, micro-reflector candidate fields, curator
+# arrayOfStrings + evidence_refs). All six now route through `dedupeCapped()`
+# in src/hooks/knowledge-store.ts, which orders truncate -> dedupe -> cap.
+#
+# The expected match count is ZERO and there is deliberately NO exempt list: a
+# new match is a new instance of the defect, not pre-existing debt. Scope is
+# limited to the knowledge parse/write surface where the class lives.
+#
+# Comment-only lines are filtered (same technique as Check 3) so prose that
+# names the banned pattern does not self-trigger. Colocated *.test.ts files
+# under the scanned globs are excluded — grep --exclude is not portable to
+# command-line file arguments across GNU/BSD grep, so the filter is a pipe.
+KNOWLEDGE_DEDUP_SCOPE="src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts"
+slice_violations=0
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  echo "ERROR: $hit"
+  echo "       Positional .slice(0, 20) with no dedup on a knowledge array field."
+  echo "       Use dedupeCapped(values, { cap: 20 }) from src/hooks/knowledge-store.ts"
+  echo "       (add itemMaxChars when the site also truncates each item)."
+  slice_violations=$((slice_violations + 1))
+  violations=$((violations + 1))
+done < <(grep -nE '\.slice\([[:space:]]*0[[:space:]]*,[[:space:]]*20[[:space:]]*\)' \
+  $KNOWLEDGE_DEDUP_SCOPE 2>/dev/null \
+  | grep -vE '\.test\.ts:' \
+  | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(//|\*|/\*)' || true)
+echo "Scope: $KNOWLEDGE_DEDUP_SCOPE"
+echo "Unguarded positional caps: $slice_violations (expected 0 — no exempt list by design)"
+
+echo ""
 echo "=== Summary ==="
+echo "Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |"
+echo "            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |"
+echo "            5 (knowledge array dedup guardrail)"
 if [ "$violations" -gt 0 ]; then
   echo "$violations invariant violation(s) found."
   exit 1

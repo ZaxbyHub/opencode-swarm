@@ -71,6 +71,7 @@ import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
 	computeContentHash,
+	dedupeCapped,
 	getArchivedKnowledgeIds,
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -589,15 +590,13 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 					const observed = String(
 						(item as { observed_behavior?: unknown }).observed_behavior ?? '',
 					).slice(0, 500);
-					const refs = Array.isArray(
+					// #1821: dedupe (case-insensitive, first casing wins) before the
+					// cap so duplicate refs cannot evict distinct ones. No per-item
+					// truncation here — matching this site's existing behavior.
+					const refs = dedupeCapped(
 						(item as { evidence_refs?: unknown }).evidence_refs,
-					)
-						? (
-								(item as { evidence_refs: unknown[] }).evidence_refs.filter(
-									(r) => typeof r === 'string',
-								) as string[]
-							).slice(0, 20)
-						: [];
+						{ cap: 20 },
+					);
 					out.findings.push({
 						knowledge_id,
 						expected_behavior: expected,
@@ -689,12 +688,10 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 	return out;
 }
 
+// #1821: truncate → dedupe (case-insensitive, first casing wins) → cap, in
+// that order, so duplicates cannot evict distinct values off the end.
 function arrayOfStrings(v: unknown): string[] {
-	if (!Array.isArray(v)) return [];
-	return v
-		.filter((x) => typeof x === 'string')
-		.map((x) => (x as string).slice(0, 200))
-		.slice(0, 20);
+	return dedupeCapped(v, { cap: 20, itemMaxChars: 200 });
 }
 
 function readLatestPostMortemDigest(directory: string): string | null {

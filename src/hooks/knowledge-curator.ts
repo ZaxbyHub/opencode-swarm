@@ -27,6 +27,7 @@ import {
 	appendRetractionRecord,
 	computeConfidence,
 	computeOutcomeSignal,
+	dedupeCapped,
 	enforceKnowledgeCap,
 	inferTags,
 	normalize,
@@ -965,7 +966,10 @@ export function insightCandidateToEntry(
 		tier: 'swarm',
 		lesson: cand.lesson.slice(0, 280),
 		category,
-		tags: Array.isArray(cand.tags) ? cand.tags.slice(0, 20) : [],
+		// #1821: dedupe (case-insensitive, first casing wins) before the cap so a
+		// run of duplicate tags cannot evict distinct ones. dedupeCapped also
+		// drops non-string items, which the bare slice did not.
+		tags: dedupeCapped(cand.tags, { cap: 20 }),
 		scope: 'global',
 		confidence: computeConfidence(1, true),
 		status: 'candidate',

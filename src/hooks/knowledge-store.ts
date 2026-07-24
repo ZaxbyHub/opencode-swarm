@@ -353,6 +353,115 @@ export async function readRewriteHistory(
 }
 
 // ============================================================================
+// Field Normalization — dedupe + positional cap (issue #1821 Lane 0b)
+// ============================================================================
+
+/**
+ * Normalize a loosely-typed knowledge array field: keep only strings,
+ * optionally truncate each item, deduplicate case-insensitively, then cap.
+ *
+ * The steps run in EXACTLY this order and the order is observable:
+ *
+ *  1. non-array input      → `[]`
+ *  2. drop non-string items
+ *  3. truncate each item to `itemMaxChars` (when provided)
+ *  4. deduplicate on a case-insensitive key, PRESERVING the first
+ *     occurrence's original casing
+ *  5. cap to `opts.cap`, keeping the first N survivors
+ *
+ * Truncation happens BEFORE deduplication, so two items that differ only past
+ * `itemMaxChars` collapse into one. Deduplication happens BEFORE the cap, so a
+ * run of duplicates can no longer evict distinct values off the end — that
+ * eviction was the defect this helper eradicates (a bare positional cap of 20
+ * with no dedup, repeated at six call sites — issue #1821 Lane 0b).
+ *
+ * `values` is typed `unknown` because every call site receives untrusted or
+ * loosely-typed input (LLM output, tool arguments, on-disk records).
+ */
+export function dedupeCapped(
+	values: unknown,
+	opts: { cap: number; itemMaxChars?: number },
+): string[] {
+	if (!Array.isArray(values)) return [];
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const raw of values) {
+		// Early exit once the cap is reached: identical to filter → truncate →
+		// dedupe → slice(0, cap), because dedup preserves input order.
+		if (out.length >= opts.cap) break;
+		if (typeof raw !== 'string') continue;
+		const item =
+			opts.itemMaxChars === undefined ? raw : raw.slice(0, opts.itemMaxChars);
+		const key = item.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(item);
+	}
+	return out;
+}
+
+/** Cap applied to every normalized knowledge array field on the write path. */
+const WRITE_FIELD_CAP = 20;
+
+/**
+ * Entry fields normalized at the store write boundary (issue #1821 Lane 0b).
+ *
+ * `source_knowledge_ids` is DELIBERATELY EXCLUDED: it carries dedup markers for
+ * a separate workstream and a cap of 20 would silently evict them. `triggers`
+ * and `source_refs` are likewise left alone — this list is scoped to `tags`
+ * plus the five actionability arrays that the six fixed call sites produce.
+ */
+const WRITE_NORMALIZED_ARRAY_FIELDS = [
+	'tags',
+	'applies_to_agents',
+	'applies_to_tools',
+	'required_actions',
+	'forbidden_actions',
+	'verification_checks',
+] as const;
+
+/**
+ * Structural guardrail: normalize an entry's array fields immediately before it
+ * is serialized to disk, so duplicate / over-cap arrays cannot be persisted
+ * regardless of which call site produced the entry.
+ *
+ * WRITE ONLY. `normalizeEntry` (the v1/v2 read-path back-compat shim) is
+ * deliberately untouched — normalizing on read would rewrite history for
+ * records written before this guardrail existed.
+ *
+ * Returns the original reference when nothing changed; otherwise a shallow
+ * copy with the offending fields replaced, so callers never observe their own
+ * in-memory object being mutated underneath them.
+ */
+function normalizeEntryArraysForWrite<T>(entry: T): T {
+	if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+	const obj = entry as unknown as Record<string, unknown>;
+	let copy: Record<string, unknown> | null = null;
+	for (const field of WRITE_NORMALIZED_ARRAY_FIELDS) {
+		let value: unknown;
+		try {
+			value = obj[field];
+		} catch {
+			// Throwing getter (prototype-pollution edge case) — leave it alone.
+			continue;
+		}
+		// Only arrays are in scope. A non-array value is a different defect class
+		// and is already handled by normalizeEntry() on the read path.
+		if (!Array.isArray(value)) continue;
+		const normalized = dedupeCapped(value, { cap: WRITE_FIELD_CAP });
+		if (
+			normalized.length === value.length &&
+			normalized.every((v, i) => v === value[i])
+		) {
+			continue;
+		}
+		if (!copy) copy = { ...obj };
+		copy[field] = normalized;
+	}
+	return (copy ?? entry) as T;
+}
+
+// ============================================================================
 // Write Functions
 // ============================================================================
 
@@ -375,7 +484,13 @@ export async function appendKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		await appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf-8');
+		// #1821 Lane 0b: normalize at the write boundary so no call site can
+		// persist duplicate / over-cap array fields.
+		await appendFile(
+			filePath,
+			`${JSON.stringify(normalizeEntryArraysForWrite(entry))}\n`,
+			'utf-8',
+		);
 	} finally {
 		if (release) {
 			try {
@@ -482,9 +597,12 @@ export async function transactKnowledge<T>(
 		filePath,
 		readKnowledge,
 		async (fp, entries) => {
+			// #1821 Lane 0b: normalize at the write boundary so no call site can
+			// persist duplicate / over-cap array fields.
 			const content =
-				entries.map((e) => JSON.stringify(e)).join('\n') +
-				(entries.length > 0 ? '\n' : '');
+				entries
+					.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
+					.join('\n') + (entries.length > 0 ? '\n' : '');
 			await atomicWriteFile(fp, content);
 		},
 		mutate,
