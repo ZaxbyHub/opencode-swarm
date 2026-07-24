@@ -5,11 +5,11 @@ issue: 1691
 
 ## What changed
 
-Read-only advisory lanes (reviewer, explorer, critic, sme, researcher) had `bash` and `shell` in their allowed-tools list via `dispatch-lanes.ts`. A "read-only" reviewer could execute arbitrary mutating shell commands against the working tree.
+Read-only advisory lanes (reviewer, explorer, critic, sme, researcher) previously included `bash` and `shell` in the read-only tool permission map via `dispatch-lanes.ts`. These tools are OpenCode built-in commands that are not assigned to read-only agent types by default; this change tightens defense-in-depth by removing them from the tool map entirely.
 
 ## Fix
 
-Removed `shell` and `bash` from the `READONLY_LANE_TOOLS` set in `src/tools/dispatch-lanes.ts`. Read-only agents retain access to `lint` (which internally spawns linters safely) and all read/search/evidence tools. They can no longer run raw shell commands.
+Removed `shell` and `bash` from the `READ_ONLY_TOOL_DENYLIST` in `src/tools/dispatch-lanes.ts`. These tools no longer appear in the read-only lane tool permission map at all — they are completely invisible to read-only agents, rather than merely set to `false`. Read-only agents retain all read/search/evidence tools and can no longer run raw shell commands.
 
 ## Acceptance
 
