@@ -744,60 +744,22 @@ export type { ActionableDirectiveFields, DirectivePriority };
 // Layer 5 — Actionability (Change 4)
 // ============================================================================
 
-export interface ActionabilityResult {
-	actionable: boolean;
-	/** Present only when not actionable. */
-	reason?:
-		| 'missing_predicate'
-		| 'missing_scope'
-		| 'missing_predicate_and_scope';
-}
-
-function hasNonEmptyList(v: unknown): boolean {
-	return Array.isArray(v) && v.length > 0;
-}
-
 /**
- * Layer 5: an entry is actionable only when it carries at least one
- * machine-checkable predicate AND at least one scope tag.
+ * The predicate itself now lives in the leaf module
+ * `./actionability-predicate.js` (issue #1821 Workstream A3). It is re-exported
+ * here so every historical consumer of `knowledge-validator` is unaffected.
  *
- *   predicate := forbidden_actions | required_actions | verification_checks
- *                | verification_predicate
- *   scope     := applies_to_tools | applies_to_agents
- *
- * Plain-prose lessons (no predicate, no scope) are NOT actionable and must be
- * quarantined rather than activated.
+ * Why it moved: this module imports `node:fs/promises` and `proper-lockfile` at
+ * the top level, while `hive-policy.ts` documents that it performs NO I/O
+ * (invariant 8). The promotion `actionability_floor` gate needs the predicate,
+ * so the predicate moved to a leaf with no I/O imports instead of the purity
+ * comment being weakened.
  */
-export function validateActionability(
-	entry: Pick<
-		KnowledgeEntryBase,
-		| 'forbidden_actions'
-		| 'required_actions'
-		| 'verification_checks'
-		| 'verification_predicate'
-		| 'applies_to_tools'
-		| 'applies_to_agents'
-	>,
-): ActionabilityResult {
-	const hasPredicate =
-		hasNonEmptyList(entry.forbidden_actions) ||
-		hasNonEmptyList(entry.required_actions) ||
-		hasNonEmptyList(entry.verification_checks) ||
-		(typeof entry.verification_predicate === 'string' &&
-			entry.verification_predicate.trim().length > 0);
-	const hasScope =
-		hasNonEmptyList(entry.applies_to_tools) ||
-		hasNonEmptyList(entry.applies_to_agents);
-
-	if (hasPredicate && hasScope) return { actionable: true };
-	const reason: ActionabilityResult['reason'] =
-		!hasPredicate && !hasScope
-			? 'missing_predicate_and_scope'
-			: !hasPredicate
-				? 'missing_predicate'
-				: 'missing_scope';
-	return { actionable: false, reason };
-}
+export type {
+	ActionabilityInput,
+	ActionabilityResult,
+} from './actionability-predicate.js';
+export { validateActionability } from './actionability-predicate.js';
 
 /** Returns the knowledge-unactionable.jsonl path for the given directory (link-aware). */
 export function resolveUnactionablePath(directory: string): string {

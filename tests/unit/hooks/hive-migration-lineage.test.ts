@@ -34,6 +34,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
 
 const FIXED_COHORT = {
 	cohortId: 'cohort-mig-aaa',
@@ -41,47 +42,6 @@ const FIXED_COHORT = {
 	normalizedRemote: 'github.com/t/r',
 	degraded: false,
 };
-
-function makeConfig(overrides: Partial<KnowledgeConfig> = {}): KnowledgeConfig {
-	return {
-		enabled: true,
-		swarm_max_entries: 100,
-		hive_max_entries: 200,
-		auto_promote_days: 90,
-		max_inject_count: 5,
-		dedup_threshold: 0.8,
-		scope_filter: ['global'],
-		hive_enabled: true,
-		rejected_max_entries: 20,
-		validation_enabled: true,
-		evergreen_confidence: 0.9,
-		evergreen_utility: 0.8,
-		low_utility_threshold: 0.3,
-		min_retrievals_for_utility: 3,
-		schema_version: 2,
-		same_project_weight: 1.0,
-		cross_project_weight: 0.5,
-		min_encounter_score: 0.1,
-		initial_encounter_score: 1.0,
-		encounter_increment: 0.1,
-		max_encounter_score: 10.0,
-		default_max_phases: 10,
-		todo_max_phases: 3,
-		sweep_enabled: true,
-		confidence_floor_action: 'demote',
-		confidence_floor_min_outcomes: 3,
-		confidence_floor_signal_threshold: 0,
-		contradiction_threshold_action: 'quarantine',
-		contradiction_quarantine_threshold: 3,
-		contradiction_quarantine_window_days: 30,
-		promoted_demotion_min_negative_phases: 3,
-		promoted_demotion_signal_threshold: -0.3,
-		promotion_min_terminal_applications: 0,
-		promotion_min_distinct_cohorts: 0,
-		directive_min_confidence: 0.75,
-		...overrides,
-	};
-}
 
 function legacyHiveEntry(
 	overrides: Partial<HiveKnowledgeEntry> = {},
@@ -111,21 +71,6 @@ function legacyHiveEntry(
 		encounter_score: 1.0,
 		...overrides,
 	};
-}
-
-async function readRawHive(): Promise<HiveKnowledgeEntry[]> {
-	try {
-		const content = await fsPromises.readFile(
-			resolveHiveKnowledgePath(),
-			'utf-8',
-		);
-		return content
-			.split('\n')
-			.filter((l) => l.trim().length > 0)
-			.map((l) => JSON.parse(l) as HiveKnowledgeEntry);
-	} catch {
-		return [];
-	}
 }
 
 describe('hive migration & lineage gate (#1847)', () => {
@@ -183,6 +128,8 @@ describe('hive migration & lineage gate (#1847)', () => {
 				created_at: '2026-01-01T00:00:00Z',
 				updated_at: '2026-01-01T00:00:00Z',
 				project_name: 'p',
+				// #1821 A3: clears the default-ON actionability_floor gate.
+				...ACTIONABLE_FIELDS,
 			};
 			await checkHivePromotions([swarm], makeConfig(), swarmDir);
 			const hive = await readRawHive();
@@ -395,6 +342,8 @@ describe('hive migration & lineage gate (#1847)', () => {
 				created_at: '2026-01-01T00:00:00Z',
 				updated_at: '2026-01-01T00:00:00Z',
 				project_name: 'p',
+				// #1821 A3: clears the default-ON actionability_floor gate.
+				...ACTIONABLE_FIELDS,
 			};
 			_internals.resolveCohortId = mock(async () => FIXED_COHORT);
 			_internals.validateLesson = mock(() => ({

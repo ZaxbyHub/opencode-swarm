@@ -24,7 +24,13 @@ import type {
 	PromotionEvidenceRecord,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { ACTIONABLE_FIELDS } from './hive-fixtures.js';
 
+/**
+ * A policy-evaluation fixture. Carries `ACTIONABLE_FIELDS` so it clears the
+ * default-ON #1821 A3 `actionability_floor` gate; tests that target that gate
+ * override the fields explicitly (see the actionability_floor describe block).
+ */
 function makeEntry(
 	overrides: Partial<SwarmKnowledgeEntry> = {},
 ): SwarmKnowledgeEntry {
@@ -47,6 +53,7 @@ function makeEntry(
 		created_at: '2026-01-01T00:00:00Z',
 		updated_at: '2026-01-01T00:00:00Z',
 		project_name: 'p',
+		...ACTIONABLE_FIELDS,
 		...overrides,
 	};
 }
@@ -344,6 +351,89 @@ describe('evaluatePromotionPolicy — conservative application evidence (#1847)'
 			decision.gates.find((g) => g.name === 'validated_terminal_applications')
 				?.passed,
 		).toBe(true);
+	});
+});
+
+describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () => {
+	/** An otherwise-eligible entry stripped of every predicate/scope field. */
+	function proseOnly(): SwarmKnowledgeEntry {
+		return makeEntry({
+			tags: ['hive-fast-track'],
+			applies_to_tools: undefined,
+			applies_to_agents: undefined,
+			required_actions: undefined,
+			forbidden_actions: undefined,
+			verification_checks: undefined,
+			verification_predicate: undefined,
+		});
+	}
+
+	it('a prose-only entry fails the gate and is NOT eligible (default ON)', () => {
+		// baseConfig does not declare promotion_require_actionable at all, so this
+		// also pins the `?? true` read of the OPTIONAL interface field: an
+		// operator who never heard of the flag still gets the floor.
+		expect(baseConfig.promotion_require_actionable).toBeUndefined();
+		const decision = evaluatePromotionPolicy({
+			entry: proseOnly(),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		// The fast-track tag satisfies eligibility_route ONLY — it is a separate
+		// gate and never bypasses the floor.
+		expect(
+			decision.gates.find((g) => g.name === 'eligibility_route')?.passed,
+		).toBe(true);
+		const gate = decision.gates.find((g) => g.name === 'actionability_floor');
+		expect(gate?.passed).toBe(false);
+		expect(gate?.detail).toContain('missing_predicate_and_scope');
+		expect(failedGateNames(decision)).toContain('actionability_floor');
+		expect(decision.reason).toContain('actionability_floor');
+	});
+
+	it('a predicate with no scope tag fails with missing_scope', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: makeEntry({
+				tags: ['hive-fast-track'],
+				applies_to_tools: undefined,
+				applies_to_agents: undefined,
+				required_actions: ['run the type checker'],
+			}),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		expect(
+			decision.gates.find((g) => g.name === 'actionability_floor')?.detail,
+		).toContain('missing_scope');
+	});
+
+	it('a scope tag with no predicate fails with missing_predicate', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: makeEntry({
+				tags: ['hive-fast-track'],
+				applies_to_tools: ['write'],
+				required_actions: undefined,
+			}),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		expect(
+			decision.gates.find((g) => g.name === 'actionability_floor')?.detail,
+		).toContain('missing_predicate');
+	});
+
+	it('promotion_require_actionable=false restores legacy behavior', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: proseOnly(),
+			config: { ...baseConfig, promotion_require_actionable: false },
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(true);
+		const gate = decision.gates.find((g) => g.name === 'actionability_floor');
+		expect(gate?.passed).toBe(true);
+		expect(gate?.detail).toContain('not enforced');
 	});
 });
 

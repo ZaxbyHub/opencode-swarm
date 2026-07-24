@@ -27,6 +27,22 @@
 - `evidence_refs` recorded by the curator are likewise de-duplicated. Note this is case-insensitive, so
   `plan.md:42` and `PLAN.MD:42` collapse to one reference.
 
+### Promotion now enforces an actionability floor
+
+`/swarm promote` and every hive-promotion path now require a lesson to carry at least one **predicate**
+(`--required-actions`, `--forbidden-actions`, `--verification-checks`) and at least one **scope**
+(`--applies-to-tools`, `--applies-to-agents`) before it can reach hive knowledge. Previously a lesson could be
+promoted as un-actionable prose that no agent could act on.
+
+Those five flags are new on `/swarm promote` — before this change the direct-text path had no way to supply
+actionability fields at all, so the floor would have been impossible to satisfy there. A related bug is fixed
+in the same path: the direct-text promotion wrote its hive entry without carrying actionability fields
+through, so even correctly-supplied predicates were dropped on write.
+
+A lesson that fails the floor is **blocked**, not silently promoted. `--force --reason "<why>"` still
+overrides and records a durable audited override naming the failed gate. Set
+`knowledge.promotion_require_actionable = false` to restore the previous behavior.
+
 ## Migration notes
 
 None required. All changes are backward compatible: existing knowledge records load unchanged, and
