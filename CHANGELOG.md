@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.129.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.3...v7.129.4) (2026-07-24)
+
+
+### Bug Fixes
+
+* **windows:** resolve .cmd/.bat toolchain shims ([#1691](https://github.com/ZaxbyHub/opencode-swarm/issues/1691)) ([2413eab](https://github.com/ZaxbyHub/opencode-swarm/commit/2413eabc37b5f42546236ca0f53a6cc2a34f1d2d))
+
 ## [7.129.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.2...v7.129.3) (2026-07-23)
 
 
