@@ -552,6 +552,15 @@ export const TOOL_METADATA = {
 			capability: 'observe',
 		},
 	},
+	pr_workflow_status: {
+		description:
+			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary. Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
+		agents: ['architect'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
+	},
 	batch_symbols: {
 		description:
 			'Batched symbol extraction across multiple files. Returns per-file symbol summaries with isolated error handling.',

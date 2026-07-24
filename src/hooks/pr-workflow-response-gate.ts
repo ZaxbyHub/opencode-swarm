@@ -41,8 +41,27 @@ export const DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES = 5;
 export const DEFAULT_WAKE_COOLDOWN_MS = 30_000;
 
 /**
+ * Minimum time between FULL workflow banners prepended to a single session's
+ * completed text parts. The textComplete hook prepends a banner to every
+ * architect text part while the durable gate exists; without a cooldown a
+ * burst of reasoning parts repeats the full multi-line banner many times
+ * (field report: ~8 repeats between two model thoughts). Within the cooldown a
+ * short one-line marker is prepended instead; the full banner (and its
+ * suspension/interruption recovery notices) returns once the cooldown elapses.
+ *
+ * The input event exposes only `{ sessionID }` — there is NO message/part ID —
+ * so this dedupe is necessarily a per-session cooldown, not a per-message one.
+ *
+ * Suspended and user-interrupted states BYPASS the cooldown entirely: those are
+ * invariant-10 operational notices that must appear in full on every part.
+ * Overridable via `createPrWorkflowResponseGate({ bannerCooldownMs })`.
+ */
+export const DEFAULT_BANNER_COOLDOWN_MS = 20_000;
+
+/**
  * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global
- * state): module-level state must have an explicit eviction strategy.
+ * state): module-level state must have an explicit eviction strategy. The
+ * banner-stamp map (last full-banner instant per session) shares this bound.
  */
 export const MAX_TRACKED_WAKE_SESSIONS = 200;
 
@@ -146,15 +165,19 @@ function workflowBanner(
 
 /**
  * Prevent an architect from masquerading a premature text output as a terminal
- * verdict. The text-complete hook prepends a workflow-active banner to every
- * architect-session text part while the durable gate exists; the model's
- * original text is preserved below the banner. session.idle then mechanically
+ * verdict. The text-complete hook prepends a workflow-active banner to
+ * architect-session text parts while the durable gate exists; the model's
+ * original text is preserved below the banner. To avoid spamming the full
+ * multi-line banner across a burst of reasoning parts, the full banner is
+ * throttled per session (see DEFAULT_BANNER_COOLDOWN_MS) — within the cooldown a
+ * short one-line marker is prepended instead. session.idle then mechanically
  * resumes that session.
  *
  * The resume loop is bounded (see DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES)
  * so a session that cannot make progress suspends instead of spinning
- * forever. The banner always carries suspension/interruption recovery notices
- * so the user-visible surface always names the recovery path.
+ * forever. Suspended and user-interrupted parts bypass the cooldown and always
+ * carry the full suspension/interruption recovery notices so the user-visible
+ * surface always names the recovery path.
  */
 export function createPrWorkflowResponseGate(options: {
 	directory: string;
@@ -162,14 +185,24 @@ export function createPrWorkflowResponseGate(options: {
 	wakeTimeoutMs?: number;
 	maxConsecutiveUnproductiveWakes?: number;
 	wakeCooldownMs?: number;
+	bannerCooldownMs?: number;
 }) {
 	const wakeTimeoutMs = options.wakeTimeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS;
 	const maxConsecutive =
 		options.maxConsecutiveUnproductiveWakes ??
 		DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES;
 	const wakeCooldownMs = options.wakeCooldownMs ?? DEFAULT_WAKE_COOLDOWN_MS;
+	const bannerCooldownMs =
+		options.bannerCooldownMs ?? DEFAULT_BANNER_COOLDOWN_MS;
 	const activeWakeSessions = new Set<string>();
 	const wakeBudgets = new Map<string, WakeBudget>();
+	/**
+	 * Per-session instant of the last FULL banner emission (see
+	 * {@link DEFAULT_BANNER_COOLDOWN_MS}). Bounded with the same FIFO discipline
+	 * as {@link wakeBudgets} (invariant 8) and cleared alongside it in
+	 * {@link resetBudget} when the gate clears.
+	 */
+	const bannerStamps = new Map<string, number>();
 	const session = options.client?.session as SessionClient | undefined;
 
 	/** FIFO-evict the oldest budget entry when the map exceeds the bound. */
@@ -182,12 +215,26 @@ export function createPrWorkflowResponseGate(options: {
 	}
 
 	/**
+	 * FIFO-evict the oldest banner-stamp entry when the map exceeds the bound.
+	 * Mirrors {@link evictIfOverBound} for the banner-dedupe map (invariant 8).
+	 */
+	function evictBannerStampsIfOverBound(): void {
+		while (bannerStamps.size > MAX_TRACKED_WAKE_SESSIONS) {
+			const oldestKey = bannerStamps.keys().next().value;
+			if (oldestKey === undefined) break;
+			bannerStamps.delete(oldestKey);
+		}
+	}
+
+	/**
 	 * Reset helper exposed for production reset paths (state cleared) and for
-	 * tests. Mirrors the eviction semantics — never leaves stale budget
-	 * state behind after a gate clears.
+	 * tests. Mirrors the eviction semantics — never leaves stale budget or
+	 * banner-cooldown state behind after a gate clears, so a re-activation of
+	 * the same sessionID starts with a fresh full banner.
 	 */
 	function resetBudget(sessionID: string): void {
 		wakeBudgets.delete(sessionID);
+		bannerStamps.delete(sessionID);
 	}
 
 	const textComplete = async (
@@ -200,26 +247,57 @@ export function createPrWorkflowResponseGate(options: {
 			input.sessionID,
 		);
 		if (!state) {
-			// Gate cleared since the last event — drop any stale budget so a
-			// future activation of the same sessionID starts fresh.
+			// Gate cleared since the last event — drop any stale budget and
+			// banner stamp so a future activation of the same sessionID starts
+			// fresh (with a full banner).
 			resetBudget(input.sessionID);
 			clearPrWorkflowAutoWakeState(options.directory, input.sessionID);
 			return;
 		}
 		const budget = wakeBudgets.get(input.sessionID);
-		// Prepend a workflow-active banner to the model's text. The original
-		// text is preserved so the user can see the architect's reasoning and
-		// progress. The banner makes clear that this output is not a terminal
-		// verdict — complete_pr_workflow clears the gate on success;
+		const suspended = budget?.suspended ?? false;
+		const userInterrupted = isPrWorkflowAutoWakeSuppressed(
+			options.directory,
+			input.sessionID,
+		);
+		// Suspended and user-interrupted states carry invariant-10 operational
+		// recovery notices that MUST appear on every text part — never deduped.
+		// Every other part is throttled by a per-session cooldown so a burst of
+		// reasoning parts does not repeat the full multi-line banner (field
+		// report: ~8 repeats between two model thoughts). The input exposes only
+		// { sessionID } — no message/part ID — so the dedupe is a per-session
+		// cooldown, not per-message. Uses Date.now() to match the wake-budget
+		// path's clock (see `now` in the idle handler below); tests freeze the
+		// clock via the test-clock helper to exercise cooldown boundaries.
+		const forceFullBanner = suspended || userInterrupted;
+		const now = Date.now();
+		const lastBannerAt = bannerStamps.get(input.sessionID);
+		const withinCooldown =
+			lastBannerAt !== undefined && now - lastBannerAt < bannerCooldownMs;
+		if (!forceFullBanner && withinCooldown) {
+			// A full banner was shown for this session within the cooldown
+			// window — prepend only a short active marker so the user still
+			// knows the output is gated without re-reading the full banner on
+			// every part. The stamp is NOT refreshed here, so the cooldown is
+			// measured from the last FULL banner and the full form reliably
+			// returns once it elapses. The model's original text is preserved
+			// below the marker.
+			output.text = `--- [${state.mode} WORKFLOW ACTIVE] ---\n\n${output.text}`;
+			return;
+		}
+		// Prepend the full workflow-active banner and stamp the instant so
+		// subsequent parts within the cooldown get the short marker. The
+		// original text is preserved so the user can see the architect's
+		// reasoning and progress. The banner makes clear that this output is not
+		// a terminal verdict — complete_pr_workflow clears the gate on success;
 		// abort_pr_workflow can clear an unarmed workflow.
 		const banner = workflowBanner(state.mode, {
-			suspended: budget?.suspended ?? false,
-			userInterrupted: isPrWorkflowAutoWakeSuppressed(
-				options.directory,
-				input.sessionID,
-			),
+			suspended,
+			userInterrupted,
 			maxConsecutive: maxConsecutive,
 		});
+		bannerStamps.set(input.sessionID, now);
+		evictBannerStampsIfOverBound();
 		output.text = `${banner}\n\n${output.text}`;
 	};
 

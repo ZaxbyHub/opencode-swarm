@@ -315,7 +315,9 @@ describe('createSwarmTool', () => {
 					throw new Error(
 						'BLOCKED: current checkout HEAD "deadbeef" does not match PR head "abc" ' +
 							'(working directory: "/repo"). ' +
-							'Check out the exact PR head with: git -C "/repo" switch --detach abc',
+							'Run these bare, standalone commands from that directory: if the commit is not present locally, ' +
+							'`git fetch origin <pr-head-ref>`; then `git switch --detach abc`. ' +
+							'Do not prefix the switch with `git -C`; the read-only shell classifier refuses `git -C ... switch`.',
 					);
 				},
 			});

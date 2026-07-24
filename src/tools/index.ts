@@ -62,6 +62,7 @@ export {
 	placeholder_scan,
 	placeholderScan,
 } from './placeholder-scan';
+export { pr_workflow_status } from './pr-workflow-status';
 // v6.10
 export {
 	type PreCheckBatchInput,

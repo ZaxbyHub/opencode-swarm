@@ -89,6 +89,7 @@ import { parse_lane_candidates } from './parse-lane-candidates';
 import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
+import { pr_workflow_status } from './pr-workflow-status';
 import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
@@ -218,6 +219,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	actionlint_scan: () => actionlint_scan,
 	osv_scan: () => osv_scan,
 	gh_evidence: () => gh_evidence,
+	pr_workflow_status: () => pr_workflow_status,
 	batch_symbols: () => batch_symbols,
 	suggest_patch: () => suggestPatch,
 	req_coverage: () => req_coverage,

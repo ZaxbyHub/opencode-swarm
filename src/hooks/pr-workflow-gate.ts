@@ -905,10 +905,16 @@ export async function assertCurrentCheckoutHead(
 		);
 	}
 	if (currentHead.toLowerCase() !== normalizedExpected.toLowerCase()) {
+		// Remediation must use the bare, standalone form the read-only shell
+		// classifier actually accepts: `git -C ... switch` is banned as a state
+		// transition (see isAllowedPrWorkflowReadOnlyShell), so instructing it
+		// here contradicted the gate and left callers stuck (#1931 follow-up).
 		throw new Error(
 			`BLOCKED: current checkout HEAD "${currentHead}" does not match PR head "${normalizedExpected}" ` +
 				`(working directory: "${directory}"). ` +
-				`Check out the exact PR head with: git -C "${directory}" switch --detach ${normalizedExpected}`,
+				`Run these bare, standalone commands from that directory: if the commit is not present locally, ` +
+				`\`git fetch origin <pr-head-ref>\`; then \`git switch --detach ${normalizedExpected}\`. ` +
+				`Do not prefix the switch with \`git -C\`; the read-only shell classifier refuses \`git -C ... switch\`.`,
 		);
 	}
 	return normalizedExpected;
@@ -2303,16 +2309,31 @@ export async function enforcePrWorkflowToolBefore(
 	// the tool is actually a non-empty shell command, so non-shell tools do not
 	// pay for an extra Git invocation.
 	let isReadOnlyShell = false;
+	// Hoisted so the BLOCKED diagnosis (C2) re-classifies against the exact same
+	// permission envelope the classifier evaluated, computed once.
+	let shellPermissionEnvelope: {
+		allowCheckout: boolean;
+		allowFetch: boolean;
+		allowTrackingFetch: boolean;
+		trackingFetchTarget?: {
+			remoteName: string;
+			remoteBranchRef: string;
+		} | null;
+	} | null = null;
 	if (isShellTool && command.length > 0) {
 		const trackingFetchTarget = state.prHeadSha
 			? await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory)
 			: null;
-		isReadOnlyShell = isAllowedPrWorkflowReadOnlyShell(command, {
+		shellPermissionEnvelope = {
 			allowCheckout: !state.prHeadSha,
 			allowFetch: !state.prHeadSha,
 			allowTrackingFetch: Boolean(state.prHeadSha),
 			trackingFetchTarget,
-		});
+		};
+		isReadOnlyShell = isAllowedPrWorkflowReadOnlyShell(
+			command,
+			shellPermissionEnvelope,
+		);
 	}
 	const trustedCapability = getPrWorkflowToolCapability(
 		normalizedTool,
@@ -2361,8 +2382,22 @@ export async function enforcePrWorkflowToolBefore(
 		(normalizedTool === 'bash' || normalizedTool === 'shell') &&
 		(/\bgit\b(?:(?![;&|]).){0,200}\b(?:checkout|switch)\b/i.test(command) ||
 			/\bgh\s+pr\s+checkout\b/i.test(command));
+	// Mirror ONLY the trailing `2>&1` tolerance the read-only classifier grants,
+	// so the canonical detached review checkout stays canonical when a model
+	// appends the stderr merge. cd-prefixes are deliberately NOT normalized here:
+	// a cd-wrapped transition is already rejected by the classifier, so the
+	// backstop below must still see (and block) the raw wrapped form.
+	const stderrMergeNormalizedCommand = command
+		.replace(PR_WORKFLOW_TRAILING_STDERR_MERGE_PATTERN, '')
+		.trim();
 	const isCanonicalReviewCheckout =
-		/^git\s+switch\s+--detach\s+[0-9a-f]{40,64}$/i.test(command);
+		/^git\s+switch\s+--detach\s+[0-9a-f]{40,64}$/i.test(
+			stderrMergeNormalizedCommand,
+		);
+	// The write-side predicates below (isDetachedFeedbackCheckout, git commit,
+	// publication/push) intentionally evaluate the RAW `command`: a wrapped form
+	// of a state transition or publication has no usability necessity, so any
+	// cd-prefix or 2>&1 wrapper on those keeps them fail-closed.
 	const detachedFeedbackSwitchMatch = command.match(
 		/^git\s+switch\s+--detach\s+(\S+)$/i,
 	);
@@ -2385,6 +2420,14 @@ export async function enforcePrWorkflowToolBefore(
 		isDirectAgentTask &&
 		requestedRoles.length > 0 &&
 		requestedRoles.every((role) => role === 'coder');
+	// A bounded, append-only diagnosis for blocked shell commands (C2). Only
+	// computed when the blocked tool is actually a shell command the classifier
+	// rejected; never widens anything — it explains WHY and points at the
+	// read-only alternative plus the pr_workflow_status observation tool.
+	const blockedShellDiagnosis =
+		isShellTool && command && !isReadOnlyShell && shellPermissionEnvelope
+			? ` ${describeBlockedPrReviewShellCommand(command, shellPermissionEnvelope)}`
+			: '';
 	if (state.mode === 'PR_REVIEW') {
 		const isAllowedReviewTool =
 			isInternalWorkflowTool ||
@@ -2396,11 +2439,13 @@ export async function enforcePrWorkflowToolBefore(
 		) {
 			if (!state.prHeadSha && isShellCheckout) {
 				throw new Error(
-					'BLOCKED: PR_REVIEW checkout must use standalone commands: fetch the PR head, verify the full commit object with `git cat-file -e <full_pr_head_sha>^{commit}`, then run `git switch --detach <full_pr_head_sha>` and bind that exact head before dispatching explorer lanes. Do not use `--track FETCH_HEAD`.',
+					'BLOCKED: PR_REVIEW checkout must use standalone commands: fetch the PR head, verify the full commit object with `git cat-file -e <full_pr_head_sha>^{commit}`, then run `git switch --detach <full_pr_head_sha>` and bind that exact head before dispatching explorer lanes. Do not use `--track FETCH_HEAD`.' +
+						blockedShellDiagnosis,
 				);
 			}
 			throw new Error(
-				'BLOCKED: PR_REVIEW is read-only and fail-closed; only controller tools and positively classified observation tools are allowed, and every agent lane requires structured dispatch_lanes_async',
+				'BLOCKED: PR_REVIEW is read-only and fail-closed; only controller tools and positively classified observation tools are allowed, and every agent lane requires structured dispatch_lanes_async' +
+					blockedShellDiagnosis,
 			);
 		}
 		return;
@@ -2948,6 +2993,7 @@ const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
 	'codesearch',
 	'glob',
 	'grep',
+	'list',
 	'lsp',
 	'open',
 	'read',
@@ -2955,6 +3001,11 @@ const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
 	'skill',
 	'tree',
 	'view',
+	// Both spellings of web fetch/search are intentional: normalizeToolName
+	// lowercases but does NOT collapse underscores, and harnesses disagree —
+	// some ship `web_fetch`/`web_search`, others `webfetch`/`websearch`.
+	'web_fetch',
+	'web_search',
 	'webfetch',
 	'websearch',
 ]);
@@ -3067,6 +3118,50 @@ function readOnlyToolArgumentsAreSafe(
 	return false;
 }
 
+/**
+ * Read-only-neutral wrapper grammar for the intake shell. Field reports showed
+ * models habitually emitting `cd <dir> && <cmd> 2>&1`, which the compound-syntax
+ * reject turned into a 100% block of otherwise-allowlisted read-only commands.
+ * Both tolerated wrappers are provably read-only-neutral: `cd` only moves the
+ * subshell working directory and `2>&1` merges stderr into stdout without
+ * touching files. Fail-closed grammar: cd targets — quoted or bare — may contain
+ * ONLY a conservative path charset. Shell metacharacters, `$`, `%`, backticks,
+ * and nested quotes never match, so cross-shell quoting/expansion differentials
+ * (bash vs cmd.exe vs PowerShell) cannot smuggle syntax through the stripped
+ * region. A target outside the grammar leaves the command unstripped and the
+ * pre-existing compound-syntax reject fails it closed.
+ */
+const PR_WORKFLOW_CD_PREFIX_PATTERN =
+	/^cd\s+(?:\/d\s+)?(?:"[A-Za-z0-9 _.\\/:~+-]+"|'[A-Za-z0-9 _.\\/:~+-]+'|[A-Za-z0-9_.\\/:~+-]+)\s*&&\s*/i;
+const PR_WORKFLOW_TRAILING_STDERR_MERGE_PATTERN = /\s+2>&1\s*$/;
+const PR_WORKFLOW_MAX_CD_PREFIX_STRIPS = 3;
+
+/**
+ * Strip the tolerated read-only wrappers (leading `cd <path> &&` segments and one
+ * trailing `2>&1`), reporting whether a cd prefix was removed so state-transition
+ * verbs can keep requiring the bare form (see the git `-C` ban those verbs carry).
+ */
+export function normalizePrWorkflowShellCommand(command: string): {
+	normalized: string;
+	strippedCdPrefix: boolean;
+} {
+	let normalized = command.trim();
+	const withoutTrailingMerge = normalized.replace(
+		PR_WORKFLOW_TRAILING_STDERR_MERGE_PATTERN,
+		'',
+	);
+	if (withoutTrailingMerge !== normalized)
+		normalized = withoutTrailingMerge.trim();
+	let strippedCdPrefix = false;
+	for (let index = 0; index < PR_WORKFLOW_MAX_CD_PREFIX_STRIPS; index += 1) {
+		const next = normalized.replace(PR_WORKFLOW_CD_PREFIX_PATTERN, '');
+		if (next === normalized) break;
+		normalized = next.trim();
+		strippedCdPrefix = true;
+	}
+	return { normalized, strippedCdPrefix };
+}
+
 function isAllowedPrWorkflowReadOnlyShell(
 	command: string,
 	options: {
@@ -3079,13 +3174,28 @@ function isAllowedPrWorkflowReadOnlyShell(
 		} | null;
 	},
 ): boolean {
-	const normalized = command.trim().replace(/\s+/g, ' ');
+	const { normalized: inner, strippedCdPrefix } =
+		normalizePrWorkflowShellCommand(command);
+	const normalized = inner.replace(/\s+/g, ' ');
 	if (!normalized) return false;
 
 	// A pre-verification shell is an intake-only surface. Reject composition,
 	// redirection, interpolation, and multiline scripts before considering an
 	// individual command. This deliberately fails closed for unknown syntax.
-	if (/[\r\n;&|<>`]/.test(command) || /\$\(|@\(/.test(command)) return false;
+	// Runs against the post-wrapper-strip remainder (`inner`) so a chained
+	// command hidden after the tolerated `cd <dir> &&` wrapper is still caught.
+	if (/[\r\n;&|<>`]/.test(inner) || /\$\(|@\(/.test(inner)) return false;
+
+	// A stripped `cd <dir> &&` prefix must never smuggle a state transition past
+	// the bare-form requirement those verbs carry (mirror of the `git -C` ban,
+	// extended to `gh pr checkout`): re-block them here even though the remainder
+	// looks like an otherwise-allowlisted command.
+	if (
+		strippedCdPrefix &&
+		(/^git (?:fetch|checkout|switch|branch)(?:\s|$)/i.test(normalized) ||
+			/^gh pr checkout(?:\s|$)/i.test(normalized))
+	)
+		return false;
 
 	const gitMatch = normalized.match(
 		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
@@ -3108,9 +3218,75 @@ function isAllowedPrWorkflowReadOnlyShell(
 	)
 		return false;
 
-	return /^(?:rg|grep|cat|Get-Content|Select-String|Test-Path|Get-ChildItem|ls|dir|pwd)(?:\s|$)/i.test(
+	return /^(?:rg|grep|cat|Get-Content|Select-String|Test-Path|Get-ChildItem|ls|dir|pwd|which|where)(?:\s|$)/i.test(
 		normalized,
 	);
+}
+
+/**
+ * Bounded, append-only prose explaining WHY a shell command was rejected under
+ * the PR_REVIEW gate, the working read-only alternative, and a pointer to the
+ * pr_workflow_status observation tool. Mirrors the classifier's decision order
+ * so the named reason is accurate. Pure string builder — it never authorizes
+ * anything and never widens the classifier. Kept well under ~600 chars.
+ */
+function describeBlockedPrReviewShellCommand(
+	command: string,
+	options: {
+		allowCheckout: boolean;
+		allowFetch: boolean;
+		allowTrackingFetch: boolean;
+		trackingFetchTarget?: {
+			remoteName: string;
+			remoteBranchRef: string;
+		} | null;
+	},
+): string {
+	const { normalized: inner, strippedCdPrefix } =
+		normalizePrWorkflowShellCommand(command);
+	const normalized = inner.replace(/\s+/g, ' ');
+	const gitMatch = normalized.match(
+		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
+	);
+	const pointer =
+		' Observe HEAD/branch/dirty/remotes/gate state read-only with the pr_workflow_status tool.';
+	let detail: string;
+	if (/[\r\n;&|<>`]/.test(inner) || /\$\(|@\(/.test(inner)) {
+		detail =
+			'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
+	} else if (
+		strippedCdPrefix &&
+		(/^git (?:fetch|checkout|switch|branch)(?:\s|$)/i.test(normalized) ||
+			/^gh pr checkout(?:\s|$)/i.test(normalized))
+	) {
+		detail =
+			'Reason: cd-prefix-on-checkout-verb. Run fetch/checkout/switch/branch or `gh pr checkout` bare, with no `cd <dir> &&` prefix.';
+	} else if (
+		/^git -C /i.test(normalized) &&
+		gitMatch?.[1] &&
+		/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
+	) {
+		detail =
+			'Reason: git -C on a state transition. Run fetch/checkout/switch/branch from the target directory, not via `git -C <dir>`.';
+	} else if (
+		!options.allowFetch &&
+		gitMatch?.[1] &&
+		/^fetch(?:\s|$)/i.test(gitMatch[1])
+	) {
+		detail = options.allowTrackingFetch
+			? 'Reason: bound-fetch-restriction. After the PR head is bound only the exact bound remote-tracking fetch is allowed; read remote state via gh_evidence otherwise.'
+			: 'Reason: bound-fetch-restriction. Fetch is not permitted in this bound state; read remote state via gh_evidence instead.';
+	} else if (gitMatch?.[1] || /^git(?:\s|$)/i.test(normalized)) {
+		detail =
+			'Reason: unlisted git verb. Allowed git reads: status/log/show/diff/rev-parse/merge-base/ls-files/grep/blame/cat-file/for-each-ref, `branch` with listing flags only, `remote -v`, `config --get`.';
+	} else if (/^gh(?:\s|$)/i.test(normalized)) {
+		detail =
+			'Reason: unlisted gh form. Allowed gh reads: pr view/diff/checks/status/list, run view/list/watch, issue view/list, search, api GET. If gh is missing, fetch the api.github.com REST URL with the web fetch tool.';
+	} else {
+		detail =
+			'Reason: unlisted binary. Allowed: rg/grep/cat/ls/dir/pwd/which/where plus read-only git/gh intake.';
+	}
+	return detail + pointer;
 }
 
 function hasUnsafeShellControlSyntax(command: string): boolean {
@@ -3182,11 +3358,17 @@ function isAllowedPrWorkflowGitIntake(
 		return false;
 
 	if (
-		/^(?:status|log|show|diff|rev-parse|merge-base|ls-files|grep|blame|cat-file|for-each-ref)(?:\s|$)/i.test(
+		/^(?:status|log|show|diff|rev-parse|merge-base|ls-files|grep|blame|cat-file|for-each-ref|--version|version)(?:\s|$)/i.test(
 			gitArgs,
 		)
 	)
 		return true;
+
+	// `git branch` with listing/read flags only is a pure read. Mutation and
+	// creation forms are rejected by the dedicated helper, which falls through
+	// (returns false) so the `--set-upstream-to=` pre-bind carve-out below can
+	// still admit its own narrow shape.
+	if (isAllowedReadOnlyGitBranchListing(gitArgs)) return true;
 
 	if (options.allowFetch && /^fetch(?:\s|$)/i.test(gitArgs)) return true;
 	if (
@@ -3261,6 +3443,45 @@ function isAllowedPreBindBranchSetup(gitArgs: string): boolean {
 	return false;
 }
 
+/**
+ * Admit `git branch` ONLY in read-only listing forms. Fail-closed: every token
+ * after `branch` must be a recognized listing/read flag, a `=`-bearing read flag
+ * (`--sort=`, `--format=`, `--color=`), or — only while a listing selector
+ * (`--list`/`--contains`/`--merged`/`--no-merged`/`--points-at`) is in effect —
+ * the selector's positional argument. Any mutation/creation flag (`-d`/`-D`,
+ * `-m`/`-M`, `-c`/`-C`, `-f`/`--force`, `-u`/`--set-upstream-to=`,
+ * `--unset-upstream`, `-t`/`--track`, `--edit-description`), any unrecognized
+ * `-` flag, and any bare positional with no selector in effect (a plain token =
+ * branch creation) fall through to a reject.
+ */
+function isAllowedReadOnlyGitBranchListing(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length === 0 || tokens[0].toLowerCase() !== 'branch') return false;
+	let listingSelectorInEffect = false;
+	for (let index = 1; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (
+			/^(?:--list|--contains|--merged|--no-merged|--points-at)$/i.test(token)
+		) {
+			listingSelectorInEffect = true;
+			continue;
+		}
+		if (
+			/^(?:-a|--all|-r|--remotes|-v|-vv|--verbose|--show-current|--color|--no-color|--column|--no-column|-i|--ignore-case)$/i.test(
+				token,
+			) ||
+			/^--(?:sort|format|color)=/i.test(token)
+		) {
+			continue;
+		}
+		// Unrecognized flags (which includes every mutation/creation form) fail
+		// closed. A bare positional is only ever the selector's argument.
+		if (token.startsWith('-')) return false;
+		if (!listingSelectorInEffect) return false;
+	}
+	return true;
+}
+
 function isSafeGitRefToken(value: string): boolean {
 	return (
 		/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) &&
@@ -3278,6 +3499,7 @@ function isAllowedPrFeedbackGhIntake(command: string): boolean {
 		return isAllowedSafeGhPrCheckout(command);
 	}
 	if (
+		/^gh\s+--version$/i.test(command) ||
 		/^gh\s+pr\s+(?:view|diff|checks|status|list)(?:\s|$)/i.test(command) ||
 		/^gh\s+run\s+(?:view|list|watch)(?:\s|$)/i.test(command) ||
 		/^gh\s+issue\s+(?:view|list)(?:\s|$)/i.test(command) ||
