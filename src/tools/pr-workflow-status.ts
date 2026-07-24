@@ -21,6 +21,22 @@ const MAX_REMOTES = 20;
 const MAX_REMOTE_URL_LEN = 200;
 const MAX_FIELD_LEN = 240;
 const RECEIPT_DIR = 'pr-workflow-checkouts';
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
+/**
+ * Truncate to an exact UTF-8 byte budget. `String.prototype.length`/`.slice`
+ * operate on UTF-16 code units, not bytes — for multi-byte content (non-ASCII
+ * filenames, emoji) that under-counts real byte size and can split a
+ * surrogate pair at the cut point. Round-tripping through TextEncoder/Decoder
+ * truncates by actual byte count and safely replaces any multi-byte sequence
+ * severed at the boundary instead of leaving a lone surrogate.
+ */
+function truncateToByteBudget(value: string, maxBytes: number): string {
+	const encoded = utf8Encoder.encode(value);
+	if (encoded.length <= maxBytes) return value;
+	return utf8Decoder.decode(encoded.subarray(0, maxBytes));
+}
 
 interface PrWorkflowStatusGitState {
 	head: string | null;
@@ -99,9 +115,7 @@ async function runGitCapture(
 			proc.stdout.text(),
 		]);
 		if (exitCode !== 0) return null;
-		return stdout.length > GIT_MAX_STDOUT_BYTES
-			? stdout.slice(0, GIT_MAX_STDOUT_BYTES)
-			: stdout;
+		return truncateToByteBudget(stdout, GIT_MAX_STDOUT_BYTES);
 	} catch {
 		return null;
 	} finally {
@@ -326,9 +340,11 @@ export const _internals: {
 	resolveCurrentGitHeadAsync: typeof resolveCurrentGitHeadAsync;
 	resolveIsWorkingTreeCleanAsync: typeof resolveIsWorkingTreeCleanAsync;
 	runGitCapture: typeof runGitCapture;
+	truncateToByteBudget: typeof truncateToByteBudget;
 } = {
 	readPrWorkflowGateState,
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
 	runGitCapture,
+	truncateToByteBudget,
 };

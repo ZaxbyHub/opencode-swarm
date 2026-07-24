@@ -237,3 +237,39 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 		expect(calls[0][1]).toBe('caller-xyz');
 	});
 });
+
+describe('truncateToByteBudget — byte-accurate stdout cap', () => {
+	test('leaves content under the byte budget untouched', () => {
+		expect(_internals.truncateToByteBudget('hello', 512 * 1024)).toBe('hello');
+	});
+
+	test('truncates ASCII content to the exact byte count', () => {
+		const value = 'a'.repeat(100);
+		expect(_internals.truncateToByteBudget(value, 40)).toBe('a'.repeat(40));
+	});
+
+	test('truncates by real UTF-8 byte count, not UTF-16 code-unit count', () => {
+		// Each emoji is 1 JS string element pair (2 UTF-16 code units) but 4 UTF-8
+		// bytes. A naive `.slice(0, N)` on `.length` would keep far more actual
+		// bytes than a byte-oriented cap name promises; encoding-based truncation
+		// must stop after exactly 2 emoji (8 bytes) for a budget of 8.
+		const twoEmoji = '😀😀';
+		const encodedLen = new TextEncoder().encode(twoEmoji).length;
+		expect(encodedLen).toBe(8);
+		const result = _internals.truncateToByteBudget(`${twoEmoji}${twoEmoji}`, 8);
+		expect(new TextEncoder().encode(result).length).toBeLessThanOrEqual(8);
+		expect(result).toBe(twoEmoji);
+	});
+
+	test('does not leave a lone surrogate when the budget splits a multi-byte character', () => {
+		// A budget landing mid-emoji must decode cleanly (replacement char or
+		// clean drop), never an unpaired UTF-16 surrogate that breaks JSON output.
+		const value = '😀'; // 4 UTF-8 bytes, 2 UTF-16 code units
+		const result = _internals.truncateToByteBudget(value, 2);
+		for (let i = 0; i < result.length; i++) {
+			const code = result.charCodeAt(i);
+			const isLoneSurrogate = code >= 0xd800 && code <= 0xdfff;
+			expect(isLoneSurrogate).toBe(false);
+		}
+	});
+});
