@@ -78,6 +78,15 @@ while IFS= read -r file; do
   if $exempt; then
     continue
   fi
+  # Comment-blind matching would fail CI on CORRECT code: a file documenting
+  # "ctx.directory is injected; there is no process.cwd() here" is exactly the
+  # kind of file that mentions the banned call in prose. Strip line comments and
+  # block-comment bodies before deciding, then re-check for a real call. Same
+  # false-positive class Check 5 handles (issue #1821).
+  if ! sed -e 's://.*::' -e 's:^[[:space:]]*\*.*::' -e 's:/\*.*\*/::' "$file" \
+    | grep -q 'process\.cwd()'; then
+    continue
+  fi
   echo "ERROR: $file uses process.cwd() — tools must use ctx.directory via resolveWorkingDirectory"
   violations=$((violations + 1))
 done < <(grep -rl --include="*.ts" 'process\.cwd()' src/tools/ src/hooks/ \
