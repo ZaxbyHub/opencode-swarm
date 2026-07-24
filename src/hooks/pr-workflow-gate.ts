@@ -10,16 +10,24 @@ import {
 } from '../background/pending-delegations.js';
 import {
 	resolveCommitCountSince,
+	resolveCommitCountSinceAsync,
 	resolveCurrentGitHead,
+	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
+	resolveCurrentUpstreamPushTargetAsync,
 	resolveCurrentUpstreamRemoteRef,
 	resolveExactRemoteBranchHead,
+	resolveExactRemoteBranchHeadAsync,
 	resolveIsExactSingleChildCommit,
+	resolveIsExactSingleChildCommitAsync,
 	resolveIsWorkingTreeClean,
+	resolveIsWorkingTreeCleanAsync,
 	resolvePrReviewDiffStats,
+	resolvePrReviewDiffStatsAsync,
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveRemoteRefsContainingHead,
+	resolveRemoteRefsContainingHeadAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import { resolveGeneratedAgentRole } from '../config/schema.js';
@@ -76,6 +84,24 @@ export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
 	S: 1,
 	M: 3,
 	L: PR_REVIEW_BASE_DIMENSION_IDS.length,
+};
+
+/**
+ * Minimum lane counts for a FULL micro (risk-family) sweep per depth tier. These
+ * mirror the base floors' tier *semantics* — not their numbers — scaled to the
+ * eleven risk families: S does not bind (a tier-S PR of ≤50 lines/≤3 files may
+ * consolidate a full sweep into one lane, exactly as base tier S permits); M
+ * requires at least half the families to get independent lanes (ceil(11/2) = 6,
+ * the deliberate scale-up from base M's 3 = ceil(6/2)); L requires one lane per
+ * family (the family count, matching base L = dimension count). The floor binds
+ * only on a batch (or the final attestation) that covers all eleven families;
+ * partial retry batches covering a subset are exempt, and callers may always
+ * dispatch more lanes than a tier's floor, never fewer.
+ */
+export const PR_REVIEW_MICRO_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
+	S: 1,
+	M: 6,
+	L: PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length,
 };
 
 /**
@@ -563,7 +589,7 @@ export async function activatePrWorkflow(
 		);
 	}
 	const initialHead = options.prHeadSha
-		? assertCurrentCheckoutHead(directory, options.prHeadSha)
+		? await assertCurrentCheckoutHead(directory, options.prHeadSha)
 		: undefined;
 	const timestamp = isoNow();
 	const nextState: PrWorkflowGateState = {
@@ -785,10 +811,11 @@ export async function bindPrWorkflowHead(
 ): Promise<PrWorkflowGateState> {
 	const state = await requireAnyActiveState(directory, sessionID);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
-	assertCurrentCheckoutHead(directory, normalizedHead);
-	if (!state.prHeadSha) assertPrReviewCleanCheckout(directory, state.mode);
+	await assertCurrentCheckoutHead(directory, normalizedHead);
+	if (!state.prHeadSha)
+		await assertPrReviewCleanCheckout(directory, state.mode);
 	if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
-		assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+		await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
 	}
 	if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
 		throw new Error(
@@ -831,7 +858,7 @@ export async function bindPrReviewBase(
 		return state;
 	}
 	const prHeadSha = normalizePrHeadSha(options.prHeadSha).toLowerCase();
-	const diffStats = _test_exports.resolvePrReviewDiffStats(
+	const diffStats = await _test_exports.resolvePrReviewDiffStatsAsync(
 		directory,
 		baseSha,
 		prHeadSha,
@@ -860,12 +887,14 @@ export async function bindPrReviewBase(
  * exact remediation command so callers can self-diagnose instead of
  * cascading into fictional root causes.
  */
-export function assertCurrentCheckoutHead(
+export async function assertCurrentCheckoutHead(
 	directory: string,
 	expectedHead: string,
-): string {
+): Promise<string> {
 	const normalizedExpected = normalizePrHeadSha(expectedHead);
-	const currentHead = _test_exports.resolveCurrentGitHead(directory)?.trim();
+	const currentHead = (
+		await _test_exports.resolveCurrentGitHeadAsync(directory)
+	)?.trim();
 	if (!currentHead) {
 		throw new Error(
 			`BLOCKED: cannot resolve the current Git HEAD in "${directory}" to verify against PR head "${normalizedExpected}". ` +
@@ -886,31 +915,35 @@ export function assertCurrentCheckoutHead(
 }
 
 /** Prove that every PR-review lane reads the immutable checked-out PR tree. */
-export function assertPrReviewCleanCheckout(
+export async function assertPrReviewCleanCheckout(
 	directory: string,
 	mode: PrWorkflowMode = 'PR_REVIEW',
-): void {
-	if (_test_exports.resolveIsWorkingTreeClean(directory) !== true) {
+): Promise<void> {
+	if (
+		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
+	) {
 		throw new Error(
 			`BLOCKED: ${mode} requires a clean index and working tree at the exact PR head`,
 		);
 	}
 }
 
-function assertPrFeedbackTrackingCheckout(
+async function assertPrFeedbackTrackingCheckout(
 	directory: string,
 	prHeadSha: string,
-): void {
-	const upstream = _test_exports.resolveCurrentUpstreamPushTarget(directory);
+): Promise<void> {
+	const upstream =
+		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
 	if (!upstream) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK requires a current local branch bound to an exact remote name, remote branch ref, and remote-tracking ref before the first head bind; detached or non-tracking checkouts are not allowed',
 		);
 	}
-	const matchingRemoteRefs = _test_exports.resolveRemoteRefsContainingHead(
-		directory,
-		prHeadSha,
-	);
+	const matchingRemoteRefs =
+		await _test_exports.resolveRemoteRefsContainingHeadAsync(
+			directory,
+			prHeadSha,
+		);
 	if (!matchingRemoteRefs?.includes(upstream.remoteTrackingRef)) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK upstream "${upstream.remoteTrackingRef}" must point to the exact intake PR head "${prHeadSha}" before the first head bind`,
@@ -1822,19 +1855,22 @@ async function assertPrFeedbackPublicationArmed(
 		);
 	}
 	if (
-		_test_exports.resolveCurrentGitHead(directory)?.trim() !== armed.localHead
+		(await _test_exports.resolveCurrentGitHeadAsync(directory))?.trim() !==
+		armed.localHead
 	) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK current Git HEAD changed after publication was armed',
 		);
 	}
-	if (_test_exports.resolveIsWorkingTreeClean(directory) !== true) {
+	if (
+		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
+	) {
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK working tree changed after publication was armed',
 		);
 	}
 	const currentTarget =
-		_test_exports.resolveCurrentUpstreamPushTarget(directory);
+		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
 	if (
 		!currentTarget ||
 		currentTarget.remoteName !== armed.remoteName ||
@@ -2263,17 +2299,21 @@ export async function enforcePrWorkflowToolBefore(
 		normalizedTool,
 	);
 	const isShellTool = normalizedTool === 'bash' || normalizedTool === 'shell';
-	const isReadOnlyShell =
-		isShellTool &&
-		command.length > 0 &&
-		isAllowedPrWorkflowReadOnlyShell(command, {
+	// Preserve the original short-circuit: only resolve the upstream target when
+	// the tool is actually a non-empty shell command, so non-shell tools do not
+	// pay for an extra Git invocation.
+	let isReadOnlyShell = false;
+	if (isShellTool && command.length > 0) {
+		const trackingFetchTarget = state.prHeadSha
+			? await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory)
+			: null;
+		isReadOnlyShell = isAllowedPrWorkflowReadOnlyShell(command, {
 			allowCheckout: !state.prHeadSha,
 			allowFetch: !state.prHeadSha,
 			allowTrackingFetch: Boolean(state.prHeadSha),
-			trackingFetchTarget: state.prHeadSha
-				? _test_exports.resolveCurrentUpstreamPushTarget(directory)
-				: null,
+			trackingFetchTarget,
 		});
+	}
 	const trustedCapability = getPrWorkflowToolCapability(
 		normalizedTool,
 		state.mode,
@@ -2508,7 +2548,7 @@ export async function completePrWorkflow(
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
-		assertPrReviewCleanCheckout(directory);
+		await assertPrReviewCleanCheckout(directory);
 		await assertPrReviewBaseCoverageSettled(directory, sessionID);
 		if (!state.prReviewTriggerEvalPath) {
 			throw new Error(
@@ -2566,13 +2606,15 @@ export async function completePrWorkflow(
 		);
 		const armed = readyState.prFeedbackReadyToPublish;
 		if (!armed) {
-			const localHead = _test_exports.resolveCurrentGitHead(directory)?.trim();
+			const localHead = (
+				await _test_exports.resolveCurrentGitHeadAsync(directory)
+			)?.trim();
 			if (!localHead) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK cannot arm publication without a verified local Git HEAD',
 				);
 			}
-			const commitCount = _test_exports.resolveCommitCountSince(
+			const commitCount = await _test_exports.resolveCommitCountSinceAsync(
 				directory,
 				state.prHeadSha!,
 				localHead,
@@ -2583,23 +2625,25 @@ export async function completePrWorkflow(
 				);
 			}
 			if (
-				_test_exports.resolveIsExactSingleChildCommit(
+				(await _test_exports.resolveIsExactSingleChildCommitAsync(
 					directory,
 					state.prHeadSha!,
 					localHead,
-				) !== true
+				)) !== true
 			) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK publication commit must be a non-merge direct child of the immutable intake head',
 				);
 			}
-			if (_test_exports.resolveIsWorkingTreeClean(directory) !== true) {
+			if (
+				(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
+			) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK publication requires a clean index and working tree so all approved content is captured by the bound commit',
 				);
 			}
 			const upstreamTarget =
-				_test_exports.resolveCurrentUpstreamPushTarget(directory);
+				await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
 			if (!upstreamTarget) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK cannot arm publication without a current branch bound to an exact remote name, remote branch ref, and remote-tracking ref',
@@ -2624,13 +2668,16 @@ export async function completePrWorkflow(
 				'BLOCKED: PR_FEEDBACK publication revision differs from the independently approved content digest',
 			);
 		}
-		const publishedHead = _test_exports
-			.resolveCurrentGitHead(directory)
-			?.trim();
+		const publishedHead = (
+			await _test_exports.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
 		const remoteRefs = publishedHead
-			? _test_exports.resolveRemoteRefsContainingHead(directory, publishedHead)
+			? await _test_exports.resolveRemoteRefsContainingHeadAsync(
+					directory,
+					publishedHead,
+				)
 			: null;
-		const remoteHead = _test_exports.resolveExactRemoteBranchHead(
+		const remoteHead = await _test_exports.resolveExactRemoteBranchHeadAsync(
 			directory,
 			armed.remoteName,
 			armed.remoteBranchRef,
@@ -2661,15 +2708,23 @@ export const _test_exports = {
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	resolveCurrentGitHead,
+	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
+	resolveCurrentUpstreamPushTargetAsync,
 	resolveCurrentUpstreamRemoteRef,
 	resolveExactRemoteBranchHead,
+	resolveExactRemoteBranchHeadAsync,
 	resolveCommitCountSince,
+	resolveCommitCountSinceAsync,
 	resolveIsWorkingTreeClean,
+	resolveIsWorkingTreeCleanAsync,
 	resolveIsExactSingleChildCommit,
+	resolveIsExactSingleChildCommitAsync,
 	resolvePrReviewDiffStats,
+	resolvePrReviewDiffStatsAsync,
 	resolvePrWorkflowRevisionDigest,
 	resolveRemoteRefsContainingHead,
+	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	isProcessAlive,
 	rename: fsp.rename,
@@ -2709,8 +2764,8 @@ async function requireBoundState(
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
-		assertCurrentCheckoutHead(directory, state.prHeadSha);
-		assertPrReviewCleanCheckout(directory);
+		await assertCurrentCheckoutHead(directory, state.prHeadSha);
+		await assertPrReviewCleanCheckout(directory);
 	}
 	return state;
 }

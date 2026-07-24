@@ -4,9 +4,13 @@ import { z } from 'zod';
 import {
 	readGitTextAtRevision,
 	resolveCurrentGitHead,
+	resolveCurrentGitHeadAsync,
 	resolveExactMergeBase,
+	resolveExactMergeBaseAsync,
 	resolveGitControlStateDigest,
+	resolveGitControlStateDigestAsync,
 	resolvePrWorkflowRevisionDigest,
+	resolvePrWorkflowRevisionDigestAsync,
 } from '../background/workspace-snapshot.js';
 import {
 	assertCurrentCheckoutHead,
@@ -896,19 +900,19 @@ function readRepositoryValidationContract(
 	}
 }
 
-function resolveContractBaseProvenance(
+async function resolveContractBaseProvenance(
 	directory: string,
 	prHeadSha: string,
 	baseRef: string | undefined,
 	baseSha: string | undefined,
-): ContractBaseProvenance | undefined {
+): Promise<ContractBaseProvenance | undefined> {
 	if (!baseRef && !baseSha) return undefined;
 	if (!baseRef || !baseSha) {
 		throw new Error(
 			'BLOCKED: Stage A contract authorization requires both base_ref and base_sha',
 		);
 	}
-	const resolvedBase = _internals.resolveExactMergeBase(
+	const resolvedBase = await _internals.resolveExactMergeBaseAsync(
 		directory,
 		baseRef,
 		prHeadSha,
@@ -1716,7 +1720,7 @@ export async function executeRunPrFeedbackStageA(
 	}
 	let contractBase: ContractBaseProvenance | undefined;
 	try {
-		contractBase = resolveContractBaseProvenance(
+		contractBase = await resolveContractBaseProvenance(
 			directory,
 			parsed.data.pr_head_sha,
 			parsed.data.base_ref,
@@ -1952,17 +1956,19 @@ export async function executeRunPrFeedbackStageA(
 				`PR_FEEDBACK head mismatch: expected ${state.prHeadSha ?? '(unbound)'}, received ${parsed.data.pr_head_sha}`,
 			);
 		}
-		assertCurrentCheckoutHead(directory, parsed.data.pr_head_sha);
-		const beforeDigest = _internals.resolvePrWorkflowRevisionDigest(
+		await assertCurrentCheckoutHead(directory, parsed.data.pr_head_sha);
+		const beforeDigest = await _internals.resolvePrWorkflowRevisionDigestAsync(
 			directory,
 			parsed.data.pr_head_sha,
 		);
 		if (!beforeDigest) {
 			return failure('Could not compute a bounded Stage A revision digest');
 		}
-		const boundHead = _internals.resolveCurrentGitHead(directory)?.trim();
+		const boundHead = (
+			await _internals.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
 		const boundControlState =
-			_internals.resolveGitControlStateDigest(directory);
+			await _internals.resolveGitControlStateDigestAsync(directory);
 		if (!boundHead || !boundControlState) {
 			return failure(
 				'Could not bind Stage A to the current Git HEAD, refs, config, and index state',
@@ -1972,15 +1978,18 @@ export async function executeRunPrFeedbackStageA(
 		const results: Array<Record<string, unknown>> = [];
 		const receipts = [];
 		for (const check of parsed.data.checks) {
-			const commandRevision = _internals.resolvePrWorkflowRevisionDigest(
-				directory,
-				parsed.data.pr_head_sha,
-			);
-			const commandControl = _internals.resolveGitControlStateDigest(directory);
+			const commandRevision =
+				await _internals.resolvePrWorkflowRevisionDigestAsync(
+					directory,
+					parsed.data.pr_head_sha,
+				);
+			const commandControl =
+				await _internals.resolveGitControlStateDigestAsync(directory);
 			if (
 				commandRevision !== beforeDigest ||
 				commandControl !== boundControlState ||
-				_internals.resolveCurrentGitHead(directory)?.trim() !== boundHead
+				(await _internals.resolveCurrentGitHeadAsync(directory))?.trim() !==
+					boundHead
 			) {
 				return failure(
 					`Stage A Git or content state changed before ${check.category}; restart the complete sequence`,
@@ -2010,16 +2019,18 @@ export async function executeRunPrFeedbackStageA(
 					maxStderrBytes: MAX_OUTPUT_BYTES,
 				});
 			} catch (error) {
-				const afterThrowRevision = _internals.resolvePrWorkflowRevisionDigest(
-					directory,
-					parsed.data.pr_head_sha,
-				);
+				const afterThrowRevision =
+					await _internals.resolvePrWorkflowRevisionDigestAsync(
+						directory,
+						parsed.data.pr_head_sha,
+					);
 				const afterThrowControl =
-					_internals.resolveGitControlStateDigest(directory);
+					await _internals.resolveGitControlStateDigestAsync(directory);
 				if (
 					afterThrowRevision !== beforeDigest ||
 					afterThrowControl !== boundControlState ||
-					_internals.resolveCurrentGitHead(directory)?.trim() !== boundHead
+					(await _internals.resolveCurrentGitHeadAsync(directory))?.trim() !==
+						boundHead
 				) {
 					return failure(
 						`Stage A ${check.category} threw after mutating content, HEAD, refs, Git config, or index state`,
@@ -2046,16 +2057,18 @@ export async function executeRunPrFeedbackStageA(
 				stderr_truncated: result.stderrTruncated,
 				...(result.message ? { message: result.message } : {}),
 			});
-			const afterCommandRevision = _internals.resolvePrWorkflowRevisionDigest(
-				directory,
-				parsed.data.pr_head_sha,
-			);
+			const afterCommandRevision =
+				await _internals.resolvePrWorkflowRevisionDigestAsync(
+					directory,
+					parsed.data.pr_head_sha,
+				);
 			const afterCommandControl =
-				_internals.resolveGitControlStateDigest(directory);
+				await _internals.resolveGitControlStateDigestAsync(directory);
 			if (
 				afterCommandRevision !== beforeDigest ||
 				afterCommandControl !== boundControlState ||
-				_internals.resolveCurrentGitHead(directory)?.trim() !== boundHead
+				(await _internals.resolveCurrentGitHeadAsync(directory))?.trim() !==
+					boundHead
 			) {
 				return failure(
 					`Stage A ${check.category} mutated content, HEAD, refs, Git config, or index state`,
@@ -2119,7 +2132,7 @@ export async function executeRunPrFeedbackStageA(
 			});
 		}
 
-		const afterDigest = _internals.resolvePrWorkflowRevisionDigest(
+		const afterDigest = await _internals.resolvePrWorkflowRevisionDigestAsync(
 			directory,
 			parsed.data.pr_head_sha,
 		);
@@ -2130,9 +2143,10 @@ export async function executeRunPrFeedbackStageA(
 			);
 		}
 		if (
-			_internals.resolveGitControlStateDigest(directory) !==
+			(await _internals.resolveGitControlStateDigestAsync(directory)) !==
 				boundControlState ||
-			_internals.resolveCurrentGitHead(directory)?.trim() !== boundHead
+			(await _internals.resolveCurrentGitHeadAsync(directory))?.trim() !==
+				boundHead
 		) {
 			return failure(
 				'Stage A changed HEAD, refs, Git config, or index state; rerun the complete sequence',
@@ -2165,9 +2179,13 @@ export const _internals = {
 	runExternalTool,
 	readGitTextAtRevision,
 	resolveExactMergeBase,
+	resolveExactMergeBaseAsync,
 	resolveCurrentGitHead,
+	resolveCurrentGitHeadAsync,
 	resolveGitControlStateDigest,
+	resolveGitControlStateDigestAsync,
 	resolvePrWorkflowRevisionDigest,
+	resolvePrWorkflowRevisionDigestAsync,
 	isPlausibleStageACommand,
 	discoverApplicableStageACategories,
 	discoverApplicableStageAObligations,

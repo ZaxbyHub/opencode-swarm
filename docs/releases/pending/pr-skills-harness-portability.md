@@ -24,10 +24,12 @@
   (`resolvePrReviewDiffStats`; any failure fails strict to tier L) and
   persists the tier plus audit totals in the gate state. Base and micro
   discovery lanes accept a new optional `owned_workflow_lanes` field: at
-  tiers S and M one lane may own several review dimensions or risk families
-  (S: base wave ≥ 1 lane; M: ≥ 3; micro sweeps consolidated), while tier L
-  preserves the historical exact-six singleton wave and one micro-lane per
-  family byte-for-byte. All six dimensions and all eleven risk families
+  tiers S and M one lane may own several review dimensions or risk families,
+  with a per-tier lane-count floor bounding how far a full sweep may
+  consolidate (base lanes: S ≥ 1, M ≥ 3; micro lanes: S ≥ 1, M ≥ 6 for a
+  full sweep — see the micro-lane floor note), while tier L preserves the
+  historical exact-six singleton wave and one micro-lane per family
+  byte-for-byte. All six dimensions and all eleven risk families
   remain mandatory to EVALUATE on every PR: ownership sets must partition
   the required sets exactly, every owned family needs its own
   `[CANDIDATE]`/`[CLEAN]` attestation, and a consolidated lane that fails

@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 
@@ -162,14 +163,28 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 mock.module('../../../src/hooks/hive-promoter.js', () => ({
 	isHiveEligible: () => false,
 	checkHivePromotions: mockCheckHivePromotions,
+	// Not exercised by this test (isHiveEligible is stubbed false so
+	// promotion never triggers); must exist for transitive imports to
+	// resolve against.
+	promoteToHive: async () => '',
+	promoteFromSwarm: async () => '',
 }));
 
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
+	// Pure, stateless type-guard — safe to keep real. Any code path
+	// transitively reached from close.ts's import graph that imports it
+	// needs a real binding, or Bun's mock.module throws "export not found"
+	// at import time for the whole file.
+	isValidEvidenceType,
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	// Real writeSnapshot does file I/O; flushPendingSnapshot (mocked above)
+	// is this test's actual entry point, so a no-op is safe here — it only
+	// needs to exist for any transitively-reached import to resolve against.
+	writeSnapshot: async () => {},
 }));
 
 mock.module('../../../src/config.js', () => ({
@@ -178,6 +193,9 @@ mock.module('../../../src/config.js', () => ({
 
 mock.module('../../../src/config/index.js', () => ({
 	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+	// Pure filesystem lookup for a user prompt override; not exercised by
+	// this test and must not touch the real filesystem in a unit test.
+	loadAgentPrompt: () => ({}),
 }));
 
 mock.module('../../../src/services/skill-improver.js', () => ({
@@ -258,6 +276,37 @@ mock.module('../../../src/state.js', () => ({
 	endAgentSession: mockEndAgentSession,
 	resetSwarmState: mockResetSwarmState,
 	resetSwarmStatePreservingSingletons: mockResetSwarmStatePreservingSingletons,
+	// getAgentSession is not exercised by this test's expectations, but must
+	// stay present: any code path transitively reached from close.ts's
+	// import graph that imports it from state.js needs a real binding to
+	// resolve against, or Bun's mock.module throws "export not found" at
+	// import time for the whole file (not a spread — see close.test.ts's
+	// endAgentSession/resetSwarmStatePreservingSingletons regression when a
+	// full spread was tried: some real, non-overridden state.ts functions
+	// call these internally by direct reference, bypassing the mock).
+	getAgentSession: (sessionId: string) =>
+		mockSwarmState.agentSessions?.get(sessionId),
+	// Minimal stub matching the real function's essential shape (an upsert
+	// against agentSessions); this test's expectations don't depend on its
+	// precise fields, only that it exists and doesn't throw.
+	ensureAgentSession: (sessionId: string, agentName?: string) => {
+		let session = mockSwarmState.agentSessions.get(sessionId);
+		if (!session) {
+			session = { agentName };
+			mockSwarmState.agentSessions.set(sessionId, session);
+		}
+		return session;
+	},
+	// This test doesn't exercise turbo/full-auto/lean-turbo/epic mode; these
+	// read-only checks are bound to mockSwarmState (not a real import) to
+	// avoid the exact real-vs-mock swarmState split-brain the spread
+	// attempt above hit — real state.ts functions close over their own
+	// module-internal swarmState singleton, not this test's mockSwarmState.
+	hasActiveTurboMode: () => false,
+	hasActiveFullAuto: () => false,
+	getActiveFullAutoSessionID: () => undefined,
+	hasActiveLeanTurbo: () => false,
+	hasActiveEpicMode: () => false,
 }));
 
 // Import after mock setup

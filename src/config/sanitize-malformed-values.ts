@@ -122,8 +122,12 @@ function startsWith(path: Path, prefix: Path): boolean {
  * Mutate the clone at `obj` by removing the value at `path`.
  * Returns true if removal succeeded, false if the path was unreachable.
  *
- * For numeric segments into arrays, collects per-parent-array and splices
- * in descending index order (never `delete arr[i]` — leaves holes).
+ * Handles exactly ONE path per call. For a numeric final segment into an
+ * array, `splice(idx, 1)` shifts later indices down — so when a caller batch
+ * contains multiple indices into the same array, the fixed-point loop's
+ * re-parse on the next iteration re-reports any still-invalid element at its
+ * shifted position (the out-of-bounds case returns false rather than removing
+ * a wrong element). Never `delete arr[i]` — that leaves holes.
  */
 function removeAtPath(obj: Record<string, unknown>, path: Path): boolean {
 	if (path.length === 0) return false;

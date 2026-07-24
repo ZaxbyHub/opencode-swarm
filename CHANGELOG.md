@@ -1,5 +1,43 @@
 # Changelog
 
+## [7.129.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.2...v7.129.3) (2026-07-23)
+
+
+### Bug Fixes
+
+* **pr-workflow:** resolve Git off the blocking spawn on every bind/verify path ([2c8a51f](https://github.com/ZaxbyHub/opencode-swarm/commit/2c8a51f3fd27c7e7fa46c6572179e02d7406424e))
+* **tests:** route diff-stats resolver through async twin after main merge ([a46d2f0](https://github.com/ZaxbyHub/opencode-swarm/commit/a46d2f0f4578fa8d5da8cd414e8a72129a900440))
+* **tests:** route two more gate seam consumers through async twin delegation ([06b6db2](https://github.com/ZaxbyHub/opencode-swarm/commit/06b6db206118651630e8222d37d7bb52ec625e37))
+
+## [7.129.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.1...v7.129.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **pr-workflow:** add per-tier micro-lane consolidation floor ([0bc6a8b](https://github.com/ZaxbyHub/opencode-swarm/commit/0bc6a8b53b4462091ed4af8c2a1d39e2403d859e))
+
+## [7.129.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.0...v7.129.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **hooks:** wire quota/rate-limit failover into curator + skill-improver opt-in dispatch ([c717988](https://github.com/ZaxbyHub/opencode-swarm/commit/c717988039f8a210937de152f1bbcfbb7912017c))
+* **init,plan-loader:** parallelize init I/O + harden readSwarmFileAsync for Windows AV class ([#1782](https://github.com/ZaxbyHub/opencode-swarm/issues/1782)) ([ca50249](https://github.com/ZaxbyHub/opencode-swarm/commit/ca502494f90017d6061114ff9d8c9d5662207cf3))
+
+## [7.129.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.128.0...v7.129.0) (2026-07-23)
+
+
+### Features
+
+* **loader:** recursive malformed-value config recovery ([#1690](https://github.com/ZaxbyHub/opencode-swarm/issues/1690)) ([96674c7](https://github.com/ZaxbyHub/opencode-swarm/commit/96674c740691be387044bf97e92e6a1bcfb3a9fc))
+* **loader:** recursive malformed-value config recovery ([#1690](https://github.com/ZaxbyHub/opencode-swarm/issues/1690)) ([5a950c1](https://github.com/ZaxbyHub/opencode-swarm/commit/5a950c1cb4bef84fe9f73e7f83683610a32a887b))
+
+
+### Bug Fixes
+
+* rebase onto main 7.128.0 — adapt to simplified warning API ([0f21419](https://github.com/ZaxbyHub/opencode-swarm/commit/0f214197ff8a0f31e1351dd199c11243b46bbaf5))
+* **security:** skip value recovery when guardrails explicitly disabled ([c1ac59f](https://github.com/ZaxbyHub/opencode-swarm/commit/c1ac59fa8aa0891c646735bd80efc02d2248e92f))
+
 ## [7.128.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.127.1...v7.128.0) (2026-07-23)
 
 
