@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.130.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.0...v7.130.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **checkpoint:** address PR review findings for max_retention ([3ca9ef2](https://github.com/ZaxbyHub/opencode-swarm/commit/3ca9ef26cf60cc08d38a4ce2d2a3b706e1fc5623))
+* **checkpoint:** separate auto_checkpoint_threshold from retention ([#1691](https://github.com/ZaxbyHub/opencode-swarm/issues/1691)) ([0373215](https://github.com/ZaxbyHub/opencode-swarm/commit/03732159ce73484649ab4a218e74863b426020a1))
+
 ## [7.130.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.4...v7.130.0) (2026-07-24)
 
 
