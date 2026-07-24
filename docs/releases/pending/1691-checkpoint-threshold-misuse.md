@@ -11,7 +11,7 @@ issue: 1691
 
 - Added `max_retention: z.number().int().min(1).max(100).default(20)` to checkpoint schema
 - Changed `checkpoint.ts` to use `max_retention` for the retention limit
-- `auto_checkpoint_threshold` now only controls the completed-task auto-save trigger (consumed by update_task_status)
+- `auto_checkpoint_threshold` now only controls the completed-task auto-save trigger.
 
 ## Acceptance
 

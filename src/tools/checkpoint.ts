@@ -261,7 +261,7 @@ function isGitRepo(directory: string): GitRepoProbe {
 function handleSave(label: string, directory: string): string {
 	try {
 		// Read checkpoint config
-		let maxCheckpoints = 20; // sensible default
+		let maxCheckpoints = 20; // sensible default (must match max_retention default(20) in CheckpointConfigSchema)
 		let allowEmptyCommits = false;
 		try {
 			const { config } = loadPluginConfigWithMeta(directory);
