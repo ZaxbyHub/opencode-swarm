@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.129.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.2...v7.129.3) (2026-07-23)
+
+
+### Bug Fixes
+
+* **pr-workflow:** resolve Git off the blocking spawn on every bind/verify path ([2c8a51f](https://github.com/ZaxbyHub/opencode-swarm/commit/2c8a51f3fd27c7e7fa46c6572179e02d7406424e))
+* **tests:** route diff-stats resolver through async twin after main merge ([a46d2f0](https://github.com/ZaxbyHub/opencode-swarm/commit/a46d2f0f4578fa8d5da8cd414e8a72129a900440))
+* **tests:** route two more gate seam consumers through async twin delegation ([06b6db2](https://github.com/ZaxbyHub/opencode-swarm/commit/06b6db206118651630e8222d37d7bb52ec625e37))
+
 ## [7.129.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.129.1...v7.129.2) (2026-07-23)
 
 
