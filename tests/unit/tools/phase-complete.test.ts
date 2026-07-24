@@ -2113,6 +2113,169 @@ describe('phase_complete tool', () => {
 		});
 	});
 
+	describe('plan-free warning', () => {
+		test('warns when plan-free and neither reviewer nor test_engineer dispatched', async () => {
+			// Set up permissive config with coder only
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder'],
+						require_docs: false,
+						policy: 'warn',
+					},
+				}),
+			);
+
+			// Do NOT write plan.json — simulate plan-free session
+			// Only dispatch coder (not reviewer or test_engineer)
+			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			// Should still succeed (advisory warning only)
+			expect(parsed.success).toBe(true);
+			// Should include the plan-free warning
+			expect(
+				parsed.warnings.some((w: string) =>
+					w.includes(
+						'Plan-free phase 1: no independent reviewer or test_engineer',
+					),
+				),
+			).toBe(true);
+		});
+
+		test('does NOT warn when plan-free and reviewer was dispatched', async () => {
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder'],
+						require_docs: false,
+						policy: 'warn',
+					},
+				}),
+			);
+
+			// Do NOT write plan.json
+			// Dispatch coder AND reviewer
+			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
+			recordPhaseAgentDispatch('sess1', 'reviewer');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+			// Should NOT include the plan-free warning
+			expect(
+				parsed.warnings.some((w: string) =>
+					w.includes(
+						'Plan-free phase 1: no independent reviewer or test_engineer',
+					),
+				),
+			).toBe(false);
+		});
+
+		test('does NOT warn when plan-free and test_engineer was dispatched', async () => {
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder'],
+						require_docs: false,
+						policy: 'warn',
+					},
+				}),
+			);
+
+			// Do NOT write plan.json
+			// Dispatch coder AND test_engineer
+			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
+			recordPhaseAgentDispatch('sess1', 'test_engineer');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+			// Should NOT include the plan-free warning
+			expect(
+				parsed.warnings.some((w: string) =>
+					w.includes(
+						'Plan-free phase 1: no independent reviewer or test_engineer',
+					),
+				),
+			).toBe(false);
+		});
+
+		test('does NOT warn when plan.json exists even if reviewer/test_engineer are missing', async () => {
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder'],
+						require_docs: false,
+						policy: 'warn',
+					},
+				}),
+			);
+
+			// Write plan.json — simulate plan-based session
+			const swarmDir = path.join(tempDir, '.swarm');
+			fs.mkdirSync(swarmDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(swarmDir, 'plan.json'),
+				JSON.stringify({
+					phases: [{ id: 1, status: 'pending', tasks: [] }],
+				}),
+			);
+			// Verify test fixture is correct — plan.json should exist
+			expect(fs.existsSync(path.join(tempDir, '.swarm', 'plan.json'))).toBe(
+				true,
+			);
+
+			// Only dispatch coder — no reviewer/test_engineer
+			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+			// Should NOT include the plan-free warning because plan.json exists
+			expect(
+				parsed.warnings.some((w: string) =>
+					w.includes(
+						'Plan-free phase 1: no independent reviewer or test_engineer',
+					),
+				),
+			).toBe(false);
+		});
+	});
+
 	describe('bypass behavior validation', () => {
 		/**
 		 * Test 1: Normal mode with spec + drift evidence missing → blocks with DRIFT_VERIFICATION_MISSING

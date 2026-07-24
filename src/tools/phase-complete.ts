@@ -1377,7 +1377,12 @@ export async function executePhaseComplete(
 	// the agent-dispatch fallback can't infer from task gates. If reviewer/
 	// test_engineer weren't dispatched independently, emit a prominent warning
 	// so the gap is visible in phase-complete output and curator reports.
-	const hasPlan = fs.existsSync(path.join(dir, '.swarm', 'plan.json'));
+	let hasPlan = false;
+	try {
+		hasPlan = fs.existsSync(validateSwarmPath(dir, 'plan.json'));
+	} catch {
+		// Non-blocking — treat as plan-free if path validation fails
+	}
 	if (
 		!hasPlan &&
 		!crossSessionResult.agents.has('reviewer') &&
