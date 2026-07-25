@@ -153,6 +153,25 @@ function formatDoctorMarkdown(result: ConfigDoctorResult): string {
 		}
 	}
 
+	// -- Migration Availability Section --
+	if (result.availableMigrations && result.availableMigrations.length > 0) {
+		lines.push('---', '');
+		lines.push('### Migrations Available', '');
+		const version = result.availableMigrations[0]!.currentFormatVersion;
+		lines.push(
+			`\u2139\ufe0f Migrations available since config version ${version}:`,
+		);
+		for (const migration of result.availableMigrations) {
+			lines.push(
+				`  - \`${migration.field}\` \u2192 \`${migration.replacement}\` (deprecated in version ${migration.deprecatedIn})`,
+			);
+		}
+		lines.push('');
+		lines.push(
+			'Run `/swarm config doctor --fix` to apply available migrations.',
+		);
+	}
+
 	if (result.hasAutoFixableIssues) {
 		lines.push('---');
 		lines.push('');

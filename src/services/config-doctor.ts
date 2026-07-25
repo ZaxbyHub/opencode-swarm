@@ -40,6 +40,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 		message: string;
 		replacement: string;
 		isDefaultValue: (v: unknown) => boolean;
+		deprecatedIn: number;
+		sinceVersion: number;
 	}
 > = new Map([
 	[
@@ -48,6 +50,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.skill_improver.model',
 			isDefaultValue: (v: unknown) => v === null,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -56,6 +60,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.skill_improver.fallback_models',
 			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -64,6 +70,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.spec_writer.model',
 			isDefaultValue: (v: unknown) => v === null,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -72,6 +80,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.spec_writer.fallback_models',
 			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 ]);
@@ -503,6 +513,17 @@ export interface ConfigDoctorResult {
 	timestamp: number;
 	/** The config that was analyzed */
 	configSource: string;
+	/**
+	 * Migration availability metadata. Present when the loaded config's
+	 * config_format_version predates the deprecatedIn version of any
+	 * DEPRECATED_FIELDS entry.
+	 */
+	availableMigrations?: Array<{
+		field: string;
+		replacement: string;
+		deprecatedIn: number;
+		currentFormatVersion: number;
+	}>;
 }
 
 /** Backup artifact for rollback */
@@ -857,6 +878,22 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 						description: 'Remove deprecated agents config - use swarms instead',
 						risk: 'low',
 					},
+				});
+			}
+			break;
+		}
+
+		// Check config_format_version type
+		case 'config_format_version': {
+			if (typeof value !== 'number') {
+				findings.push({
+					id: 'type-mismatch',
+					title: `Config field "${path}" has wrong type`,
+					description: `Expected number, got ${typeof value}`,
+					severity: 'error',
+					path,
+					currentValue: value,
+					autoFixable: false,
 				});
 			}
 			break;
@@ -1681,12 +1718,33 @@ export function runConfigDoctor(
 		configSource = userConfigPath;
 	}
 
+	// -- Migration availability detection --
+	const configVersion = config.config_format_version ?? 1;
+	const availableMigrations: Array<{
+		field: string;
+		replacement: string;
+		deprecatedIn: number;
+		currentFormatVersion: number;
+	}> = [];
+
+	for (const [depPath, depInfo] of DEPRECATED_FIELDS) {
+		if (configVersion < depInfo.deprecatedIn) {
+			availableMigrations.push({
+				field: depPath,
+				replacement: depInfo.replacement,
+				deprecatedIn: depInfo.deprecatedIn,
+				currentFormatVersion: configVersion,
+			});
+		}
+	}
+
 	return {
 		findings,
 		summary,
 		hasAutoFixableIssues,
 		timestamp: Date.now(),
 		configSource,
+		...(availableMigrations.length > 0 ? { availableMigrations } : {}),
 	};
 }
 
