@@ -43,6 +43,28 @@ A lesson that fails the floor is **blocked**, not silently promoted. `--force --
 overrides and records a durable audited override naming the failed gate. Set
 `knowledge.promotion_require_actionable = false` to restore the previous behavior.
 
+### Lessons are now admitted mid-session, not only at phase boundaries
+
+Previously the only in-session learning signal was a prompt nudge asking the architect to call
+`knowledge_add`. Nothing validated or admitted anything until the phase boundary. Now a session-keyed queue
+validates and admits (or rejects) candidates while the session is still running, so a lesson captured early
+can be retrieved by a later delegation in the same session.
+
+- Every budget is explicit and configurable under `learning.realtime_admission`: queue size, LLM calls,
+  tokens, concurrency, retries, per-candidate timeout, and total drain wall time.
+- The durable `.swarm/insight-candidates.jsonl` queue is unchanged and remains the backstop. If the
+  real-time loop is disabled or the process crashes, phase-boundary curation still picks everything up —
+  nothing is lost.
+- Repeated PRM patterns are persisted only after they recur across genuinely distinct occurrences, with a
+  cooldown, and they store **evidence pointers rather than reasoning text**.
+- When real-time admission is active it supersedes the prompt-only nudge (`supersede_nudge`, default true).
+  This supersedes the behavior described in the pending `hermes-style-realtime-learning-nudge` fragment.
+
+Double-counting is prevented by identity rather than timing: an admitted candidate is marked in the entry's
+`source_knowledge_ids`, and the phase-boundary fold-in skips anything already admitted. This matters because
+re-confirming an entry is not a no-op — it raises confidence and counts toward automatic hive promotion, so a
+duplicate would have silently inflated both.
+
 ### New `consensus_mine` tool (proposals only)
 
 A new `consensus_mine` tool mines the evidence you already have — evaluation runs, gate audits, trajectories,

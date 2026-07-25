@@ -42,6 +42,9 @@ export type {
 	TrajectoryEntry,
 } from './types';
 
+import { appendInsightCandidates } from '../hooks/micro-reflector.js';
+import { enqueueCandidate } from '../learning/candidate-queue.js';
+import { recordPatternObservation } from '../learning/prm-pattern-support.js';
 import { getAgentSession } from '../state';
 import { telemetry } from '../telemetry';
 import * as logger from '../utils/logger.js';
@@ -80,6 +83,9 @@ export const _internals: {
 	recordReplayEntry: typeof recordReplayEntry;
 	startReplayRecording: typeof startReplayRecording;
 	telemetry: typeof telemetry;
+	recordPatternObservation: typeof recordPatternObservation;
+	enqueueCandidate: typeof enqueueCandidate;
+	appendInsightCandidates: typeof appendInsightCandidates;
 } = {
 	getAgentSession,
 	readTrajectory,
@@ -92,6 +98,9 @@ export const _internals: {
 	recordReplayEntry,
 	startReplayRecording,
 	telemetry,
+	recordPatternObservation,
+	enqueueCandidate,
+	appendInsightCandidates,
 };
 
 /**
@@ -175,7 +184,24 @@ export function resetPrmSessionState(
  * // Wire prmHook.toolAfter into your tool.execute.after hook
  * ```
  */
-export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
+/**
+ * Knobs the PRM hook needs to hand supported patterns to the real-time
+ * admission queue (issue #1821, AC10). Optional so existing callers and tests
+ * keep working unchanged; when absent, pattern persistence is simply off.
+ */
+export interface PrmPatternPersistenceOptions {
+	enabled: boolean;
+	min_support: number;
+	cooldown_ms: number;
+	/** `learning.realtime_admission.max_queue_size` — bounds the shared queue. */
+	max_queue_size: number;
+}
+
+export function createPrmHook(
+	config: PrmConfig,
+	directory: string,
+	patternPersistence?: PrmPatternPersistenceOptions,
+): PrmHook {
 	/**
 	 * Async handler called after each tool execution.
 	 * Non-blocking - errors are caught and logged.
@@ -211,6 +237,39 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 
 			if (detectionResult.matches.length === 0) {
 				return;
+			}
+
+			// #1821 AC10: record pattern support for durable persistence.
+			// PLACEMENT IS LOAD-BEARING — this sits AFTER the no-match early return
+			// above, so the overwhelmingly common "tool call produced no pattern"
+			// path (every tool call in a healthy session) costs nothing. It is
+			// in-memory only: no I/O, no lock, no knowledge-store access.
+			if (patternPersistence?.enabled) {
+				for (const match of detectionResult.matches) {
+					const observation = _internals.recordPatternObservation(
+						sessionID,
+						match,
+						{
+							minSupport: patternPersistence.min_support,
+							cooldownMs: patternPersistence.cooldown_ms,
+						},
+					);
+					if (observation.persistable && observation.candidate) {
+						// Durable backstop FIRST, mirroring `micro-reflector.ts`. Support
+						// and cooldown gating make this rare (default: 3 distinct
+						// occurrences, then once per 15 min per identity), so the write
+						// stays off the common path. Without it a PRM candidate lost to a
+						// drain failure, queue overflow, or process death is gone for good
+						// AND suppressed for the whole cooldown, because
+						// `recordPatternObservation` starts the cooldown at hand-over.
+						await _internals.appendInsightCandidates(directory, [
+							observation.candidate,
+						]);
+						_internals.enqueueCandidate(sessionID, observation.candidate, {
+							maxQueueSize: patternPersistence.max_queue_size,
+						});
+					}
+				}
 			}
 
 			// Get or create escalation tracker for this session
