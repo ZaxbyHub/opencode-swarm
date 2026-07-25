@@ -79,6 +79,44 @@ export function finding(sentence: string): string {
 	return `FINDING: ${sentence}`;
 }
 
+/**
+ * The attribute id both the proposal builder below and `contracts.test.ts`'s
+ * `attribute()` builder use, so a default proposal is internally consistent with
+ * a default report. `ConsensusReportV1Schema` rejects a proposal naming an
+ * attribute the report does not contain, so drift here fails loudly rather than
+ * silently weakening a test.
+ */
+export const FIXTURE_ATTRIBUTE_ID = 'cattr_0123456789abcdef';
+
+/**
+ * A schema-valid `ProposedSkillChange` record, as a plain object so a test can
+ * override any field with an invalid value and assert the rejection.
+ */
+export function proposalRecord(overrides: Record<string, unknown> = {}) {
+	return {
+		sourceAttributeId: FIXTURE_ATTRIBUTE_ID,
+		target: 'tooling',
+		intent: 'try the smallest change',
+		evidenceRefs: ['evidence:a'],
+		counterexampleRefs: [],
+		confidence: 0.5,
+		expectedMetric: 'evaluation.scored_outcome_rate',
+		validationSelector: 'scope=full-corpus',
+		fingerprint: 'lrec_0123456789abcdef',
+		provenance: {
+			v: 1,
+			mechanism: 'consensus_mine',
+			sourceKnowledgeIds: [],
+			sourceTaskIds: [],
+			sourceEvidenceRefs: [],
+			sourceRunIds: [],
+			sourceModelIds: [],
+			writeOrigin: { producedAt: '2026-07-24T00:00:00.000Z' },
+		},
+		...overrides,
+	};
+}
+
 /** A dispatcher returning a fixed result; records every request it received. */
 export function recordingDispatcher(
 	result: Partial<EvaluationModelDispatchResult> = {},

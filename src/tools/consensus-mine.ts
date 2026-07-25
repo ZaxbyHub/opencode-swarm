@@ -381,8 +381,14 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 							// The deterministic rendering is always authoritative. The
 							// optional model restatement is echoed beside it, never in
 							// place of it, and is absent unless it passed the miner's
-							// `FINDING:` whitelist — one sentence, no bracket markup, no
-							// reasoning marker, and no trimming to fit the length bound.
+							// `FINDING:` whitelist — one envelope line, no bracket markup,
+							// no forged redaction marker, no reasoning marker, and — after
+							// decimal points and one lower-case-continued abbreviation are
+							// masked — at most one sentence-terminator run (so the stored
+							// text may still hold several literal periods), and no
+							// trimming to fit the length
+							// bound. That bounds its shape and size, not whether it reads
+							// as narration: a chained single sentence still can.
 							statement: attribute.statement,
 							...(attribute.llmSummary
 								? { llm_summary: attribute.llmSummary }

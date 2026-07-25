@@ -13,7 +13,8 @@
  * under the DEFAULT configuration. Two mining runs over an identical corpus
  * produce reports that differ in `generatedAt` (a wall clock), in each
  * proposal's `provenance.writeOrigin` (the `producedAt` clock plus the
- * `sessionId` / `agentRole` / `agentId` of whoever ran the mine), and — because
+ * `sessionId` / `agentRole` of whoever ran the mine — the shared schema's
+ * `agentId` is never populated on this path), and — because
  * `llm_summarization_enabled` defaults to `true` — in each attribute's
  * `llmSummary`, which is model prose and is not reproducible. All three are
  * excluded from `integrityHash`, so an `isEquivalent` escape hatch comparing

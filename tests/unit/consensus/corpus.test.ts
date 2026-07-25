@@ -22,7 +22,6 @@ import {
 	listEvaluationRunIds,
 	listTrajectorySessions,
 	loadConsensusCorpus,
-	sanitizeExcerpt,
 } from '../../../src/consensus/corpus';
 
 const roots: string[] = [];
@@ -57,25 +56,6 @@ function emptyReaders(): CorpusReaders {
 		loadEvidence: async () => ({ status: 'not_found' }),
 	};
 }
-
-describe('sanitizeExcerpt', () => {
-	test('redacts a planted secret before applying the length bound', async () => {
-		// Redaction must run FIRST: a secret straddling the truncation point
-		// would otherwise be half-copied into the report in the clear.
-		const raw = `prefix ${'x'.repeat(20)} AKIAIOSFODNN7EXAMPLE tail`;
-		const bounded = sanitizeExcerpt(raw, 40);
-		expect(bounded).not.toContain('AKIAIOSFODNN7EXAMPLE');
-		expect(bounded.length).toBeLessThanOrEqual(40);
-	});
-
-	test('collapses newlines so one finding cannot split into two signals', () => {
-		expect(sanitizeExcerpt('a\n\n  b\tc  ', 100)).toBe('a b c');
-	});
-
-	test('truncates to the configured bound', () => {
-		expect(sanitizeExcerpt('y'.repeat(500), 10)).toHaveLength(10);
-	});
-});
 
 describe('corpus — secret redaction end to end', () => {
 	test('a secret planted in a knowledge lesson never reaches an observation', async () => {

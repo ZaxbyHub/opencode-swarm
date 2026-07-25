@@ -15,11 +15,12 @@ import {
 	MAX_CONSENSUS_ATTRIBUTES,
 	MAX_CONSENSUS_PROPOSALS,
 } from '../../../src/consensus/contracts';
+import { FIXTURE_ATTRIBUTE_ID, proposalRecord as proposal } from './fixtures';
 
 function attribute(overrides: Record<string, unknown> = {}) {
 	return {
 		v: 1,
-		id: 'cattr_0123456789abcdef',
+		id: FIXTURE_ATTRIBUTE_ID,
 		statement: 'a finding',
 		support: 3,
 		successSupport: 2,
@@ -94,33 +95,6 @@ describe('ConsensusAttributeV1 — negative evidence cannot be silently dropped'
 		).toBe(false);
 	});
 });
-
-function proposal(overrides: Record<string, unknown> = {}) {
-	return {
-		// Matches `attribute()`'s id, so the default report is internally
-		// consistent and a test only has to break the link it is asserting on.
-		sourceAttributeId: 'cattr_0123456789abcdef',
-		target: 'tooling',
-		intent: 'try the smallest change',
-		evidenceRefs: ['evidence:a'],
-		counterexampleRefs: [],
-		confidence: 0.5,
-		expectedMetric: 'evaluation.scored_outcome_rate',
-		validationSelector: 'scope=full-corpus',
-		fingerprint: 'lrec_0123456789abcdef',
-		provenance: {
-			v: 1,
-			mechanism: 'consensus_mine',
-			sourceKnowledgeIds: [],
-			sourceTaskIds: [],
-			sourceEvidenceRefs: [],
-			sourceRunIds: [],
-			sourceModelIds: [],
-			writeOrigin: { producedAt: '2026-07-24T00:00:00.000Z' },
-		},
-		...overrides,
-	};
-}
 
 function report(overrides: Record<string, unknown> = {}) {
 	return {

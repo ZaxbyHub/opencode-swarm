@@ -142,8 +142,15 @@ export interface ConsensusAttributeV1 {
 	statement: string;
 	/**
 	 * Optional LLM restatement of `statement`, admitted only through the miner's
-	 * `FINDING:` whitelist: one sentence, no bracket markup, no reasoning marker,
-	 * and within `MAX_CONSENSUS_STATEMENT_CHARS` without being trimmed to fit.
+	 * `FINDING:` whitelist: the first `FINDING:` line of one dispatch, carrying no
+	 * bracket markup, no forged `[REDACTED:…]` marker, no listed reasoning marker
+	 * and — once decimal points and at most one lower-case-continued
+	 * abbreviation are masked — at most one sentence-terminator run, within
+	 * `MAX_CONSENSUS_STATEMENT_CHARS` and never trimmed to fit. That bounds the
+	 * SHAPE and SIZE of what a model can put here; it is not a claim that the
+	 * admitted text cannot read as a multi-step narration — a semicolon- or
+	 * dash-chained sentence can, and the guard does not stop it. See
+	 * `extractRestatement` in `./miner.ts`.
 	 *
 	 * Separate from `statement`, and **excluded from `integrityHash`**, for one
 	 * reason: `llm_summarization_enabled` defaults to `true`, and a model's
@@ -407,7 +414,9 @@ const ConsensusTruncationV1Schema = z
  *
  * `integrityHash` covers every field EXCEPT `integrityHash`, `reportId`,
  * `generatedAt`, each proposal's ENTIRE `provenance.writeOrigin` — `producedAt`
- * *and* `sessionId` / `agentRole` / `agentId` — and each attribute's
+ * *and* the `sessionId` / `agentRole` the consensus path populates, plus the
+ * `agentId` the shared write-origin schema allows and this path never sets —
+ * and each attribute's
  * `llmSummary`. Each exclusion has its own reason: `integrityHash` cannot cover
  * itself and `reportId` is derived from it, so both would be circular;
  * `generatedAt` and `producedAt` are wall clocks; the `writeOrigin` identity
@@ -518,8 +527,19 @@ export const ConsensusReportV1Schema = z
  *
  * ## Declared export carve-out for the whole subsystem
  *
- * Those four are not the only exports in `src/consensus/` with no by-name
- * importer. Eight more have none either:
+ * The carve-out covers TYPES ONLY, and that boundary is the whole point. Every
+ * runtime VALUE `src/consensus/` exports — every schema, constant, function,
+ * and error class — has a by-name importer, in a sibling module or a test.
+ * `ProposedSkillChangeSchema` was the one exception and is no longer one:
+ * `tests/unit/consensus/contracts-proposal.test.ts` exercises the bounds the
+ * miner mirrors (the `lrec_<16hex>` fingerprint shape and the 1024-character
+ * `validationSelector` cap), which is coverage the embedding
+ * `ConsensusReportV1Schema` tests did not provide. A value export with no
+ * importer is unwired code, not a carve-out candidate — that is exactly why the
+ * `consensusV1` namespace and the `index.ts` barrel were deleted.
+ *
+ * Those four assertions are, however, not the only exported TYPES with no
+ * by-name importer. Eight more have none either:
  *
  * - `KnowledgeLike` and `LoadCorpusOptions` (`./corpus.ts`)
  * - `MineConsensusResult` and `ConsensusReportIntegrityInput` (`./miner.ts`)
@@ -527,16 +547,15 @@ export const ConsensusReportV1Schema = z
  *   (`./public-api.ts`)
  * - `ConsensusListSummary` and `ConsensusPruneResult` (`./store.ts`)
  *
- * They stay exported, and the distinction from the deleted `consensusV1`
- * namespace and `index.ts` barrel is deliberate rather than convenient: those
- * were dead RUNTIME VALUES — a public API surface nothing wired — whereas every
- * type above is the declared parameter or return shape of an exported function
- * (`loadConsensusCorpus`, `mineConsensus`, `computeConsensusIntegrityHash`,
- * `mineAndStoreConsensusV1`, `listConsensusReports`, `pruneConsensusReports`) or
- * a field type of an exported interface (`CorpusReaders`). A caller cannot
- * annotate a variable holding one of those results without them, and hiding them
- * would break `declaration`-emitting builds. Deleting a type that an exported
- * signature already hands out removes a name, not a surface.
+ * They stay exported because every one is the declared parameter or return
+ * shape of an exported function (`loadConsensusCorpus`, `mineConsensus`,
+ * `computeConsensusIntegrityHash`, `mineAndStoreConsensusV1`,
+ * `listConsensusReports`, `pruneConsensusReports`) or a field type of an
+ * exported interface (`CorpusReaders`). A caller cannot annotate a variable
+ * holding one of those results without them, and hiding them would break
+ * `declaration`-emitting builds. Deleting a type that an exported signature
+ * already hands out removes a name, not a surface — and unlike a value, it is
+ * erased at build time, so it ships nothing.
  */
 type AssertAssignable<Actual extends Expected, Expected> = Actual;
 

@@ -1,19 +1,33 @@
 /**
  * The restatement guard — what model prose may reach disk (#1821 AC18).
  *
- * The property is not "a model can never narrate": one admitted sentence can
- * read as narration, and pretending otherwise is how the previous version of
- * this file passed while a four-sentence chain of thought was being persisted.
- * The property is that model output reaches disk ONLY through a `FINDING:`
- * envelope whose captured sentence carries no bracket markup, no reasoning
- * marker, no interior sentence terminator, and no truncation — so a reasoning
- * TRACE cannot be persisted, and what can is one bounded sentence per attribute.
+ * The property under test is a BOUND, not a classifier, and the difference has
+ * cost this file two revisions. It is NOT "a reasoning trace can never be
+ * persisted": a chained single sentence
+ * (`first i list the runs; then i count the passes; then i divide`) carries no
+ * sentence terminator, is admitted, and reads as three steps. The
+ * `a single sentence chained with %s IS admitted` table below asserts exactly
+ * that for semicolons, a colon-and-dash, the one permitted abbreviation, commas,
+ * and a Tibetan shad — so the limitation cannot be quietly re-claimed away, and
+ * the reason it is irreducible (the comma has to stay admitted) is visible.
+ *
+ * What IS enforced, and what every test here pins:
+ * - only the FIRST `FINDING:` line of one dispatch is considered, and nothing
+ *   else in the response can ride along with it;
+ * - the captured text is rejected on bracket markup, on a forged `[REDACTED:…]`
+ *   marker, on any listed reasoning marker, on a sentence terminator anywhere
+ *   but a single trailing run once decimal points and at most one
+ *   lower-case-continued abbreviation are masked (the terminator class is
+ *   Unicode's `Sentence_Terminal` plus the ellipsis and leader family, sampled
+ *   in `miner-restatement-terminators.test.ts`), and on exceeding
+ *   `MAX_CONSENSUS_STATEMENT_CHARS` rather than being clipped to fit.
  *
  * That has to be a whitelist. `SUMMARIZATION_SYSTEM` asks for one sentence; a
  * model is free to ignore it. `sanitizeExcerpt` only redacts secrets, collapses
- * control characters, and truncates — none of which removes reasoning. Before
- * the guard existed, a dispatcher returning `"Reasoning: the model thought hard.
- * Answer: ..."` was persisted verbatim into `attributes[].statement`.
+ * control and format characters, and truncates — none of which removes
+ * reasoning. Before the guard existed, a dispatcher returning
+ * `"Reasoning: the model thought hard. Answer: ..."` was persisted verbatim into
+ * `attributes[].statement`.
  *
  * Every test below drives the REAL miner with an adversarial dispatcher and
  * asserts on the REAL report, not on a helper — a guard tested through its own
@@ -255,16 +269,67 @@ describe('restatement guard — the single-sentence bound is a whitelist', () =>
 		expect(result.summarizedCount).toBe(0);
 		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
 	});
+
+	test.each([
+		['etc.', 'Scoring succeeded etc. The tallies were compared afterwards.'],
+		['e.g.', 'Scoring succeeded e.g. The tallies were compared afterwards.'],
+		['i.e.', 'Scoring succeeded i.e. The tallies were compared afterwards.'],
+	])('a real boundary after "%s" is still a boundary', async (_label, sentence) => {
+		// The regression the abbreviation mask itself introduced: blanking the
+		// whole token INCLUDING its trailing period deleted the genuine sentence
+		// break, so each of these was persisted as "one sentence". The suite
+		// covered only the bare `. Capital` shape above, which is why it slipped.
+		// The mask now requires a lower-case continuation, which a new sentence
+		// does not have.
+		const result = await mineWith(finding(sentence));
+		expect(result.summarizedCount).toBe(0);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
+	});
+
+	test('a chain of abbreviations cannot reassemble the narration', async () => {
+		// The four-sentence reproduction above with `.` swapped for `etc.`. Every
+		// `etc.` here IS followed by a lower-case word, so the lower-case rule alone
+		// would mask all three and admit the whole chain; bounding how many
+		// abbreviations may be masked is what rejects it.
+		const result = await mineWith(
+			finding(
+				'first i enumerate the runs that carried the signal etc. then i count ' +
+					'how many of them passed etc. then i divide to get the rate etc. so ' +
+					'the scoring signal holds',
+			),
+		);
+		expect(result.summarizedCount).toBe(0);
+		const persisted = persistedText(result.report);
+		expect(persisted).not.toContain('i enumerate');
+		expect(persisted).not.toContain('i divide');
+	});
 });
 
 describe('restatement guard — structural bounds', () => {
-	test('an abbreviation does not count as a sentence break', async () => {
-		const result = await mineWith(
-			finding('Scoring succeeded on both tasks, e.g. the refactor pair.'),
-		);
-		expect(result.report.attributes[0]?.llmSummary).toBe(
+	test.each([
+		// Every legitimate shape the abbreviation allowlist exists to keep. The
+		// lower-case continuation is what distinguishes these from the rejected
+		// `etc. The …` above; the last one needs no masking at all, because a
+		// trailing terminator run is already allowed.
+		[
+			'mid-sentence with no trailing period',
+			'Runs using e.g. the strict gate profile scored higher',
+		],
+		[
+			'mid-sentence before a trailing period',
 			'Scoring succeeded on both tasks, e.g. the refactor pair.',
-		);
+		],
+		[
+			'in its comma form',
+			'Scoring succeeded on both tasks, e.g., the refactor pair.',
+		],
+		[
+			'closing the sentence',
+			'Scoring succeeded on the refactor and lint tasks etc.',
+		],
+	])('an abbreviation %s does not count as a sentence break', async (_l, s) => {
+		const result = await mineWith(finding(s));
+		expect(result.report.attributes[0]?.llmSummary).toBe(s);
 	});
 
 	test('a decimal point does not count as a sentence break', async () => {
@@ -331,6 +396,77 @@ describe('restatement guard — structural bounds', () => {
 		const result = await mineWith(undefined as unknown as string);
 		expect(result.summarizedCount).toBe(0);
 		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
+	});
+
+	test('a FORGED redaction marker is rejected, not persisted', async () => {
+		// `[REDACTED:<type>]` is masked before the bracket test because it is the
+		// miner's own output. Without rejecting a marker the MODEL wrote, that mask
+		// is a forgery surface: this payload would persist a claim that the miner
+		// removed an AWS key it never saw.
+		const result = await mineWith(
+			finding('Scoring succeeded [REDACTED:aws_key] across both tasks.'),
+		);
+		expect(result.summarizedCount).toBe(0);
+		expect(persistedText(result.report)).not.toContain('REDACTED:aws_key');
+	});
+
+	test('a GENUINE redaction still passes the bracket test', async () => {
+		// The other half: rejecting forged markers must not make the guard reject
+		// its own handiwork. The secret is planted in the clear and only the
+		// sanitizer's placeholder reaches the report.
+		const result = await mineWith(
+			finding('Scoring succeeded for AKIAIOSFODNN7EXAMPLE across both tasks.'),
+		);
+		expect(result.report.attributes[0]?.llmSummary).toBe(
+			'Scoring succeeded for [REDACTED:aws_access_key_id] across both tasks.',
+		);
+		expect(persistedText(result.report)).not.toContain('AKIAIOSFODNN7EXAMPLE');
+	});
+});
+
+describe('restatement guard — the limitation, asserted not claimed away', () => {
+	// Not bug reports — the property this guard does NOT deliver, pinned so a
+	// later revision cannot re-assert "a reasoning trace can never be persisted"
+	// without a test failing. None of these joiners is a sentence terminator,
+	// none trips a reasoning marker, and all are inside the length bound, so all
+	// are admitted. Two earlier revisions claimed otherwise; both claims were
+	// false, and more terminator rules cannot make them true.
+	test.each([
+		[
+			'semicolons',
+			'first i list the runs; then i count the passes; then i divide to get the rate',
+		],
+		[
+			'a colon and a dash',
+			'the method: i list the runs, count the passes — and divide to get the rate',
+		],
+		[
+			'the one permitted abbreviation',
+			// Bounding the exemption at one is what stops a CHAIN of these (see
+			// "a chain of abbreviations cannot reassemble the narration"); it does
+			// not stop a single join, and this asserts that it does not.
+			'first i list the runs etc. then i count how many of them passed',
+		],
+		[
+			'commas',
+			// The reason the terminator class stops at `Sentence_Terminal` and does
+			// not reach for `Terminal_Punctuation`: that property contains the
+			// comma, which appears in nearly every legitimate restatement. Since
+			// this payload has to stay admitted, clause chaining stays open however
+			// the other 120 clause marks are treated.
+			'first i list the runs, then i count the passes, then i divide to get the rate',
+		],
+		[
+			'a Tibetan shad (U+0F0D)',
+			// The same channel in another script, and the reason the class cannot
+			// be described as "every character that ends a sentence". U+0F0D is
+			// `Terminal_Punctuation` but NOT `Sentence_Terminal`, so it is not
+			// counted \u2014 exactly like the comma above.
+			'first i enumerate the runs\u0F0D then i count how many of them passed',
+		],
+	])('a single sentence chained with %s IS admitted', async (_l, narration) => {
+		const result = await mineWith(finding(narration));
+		expect(result.report.attributes[0]?.llmSummary).toBe(narration);
 	});
 });
 

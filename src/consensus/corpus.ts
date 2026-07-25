@@ -29,16 +29,24 @@
  *   Three upstream readers do populate PROCESS-LOCAL caches, which is worth
  *   stating rather than hiding behind the word "read-only": `readTrajectory`
  *   fills the PRM in-memory trajectory cache (`src/prm/trajectory-store.ts`),
- *   `readKnowledge` fills the parsed-artifact cache, and `loadEvidence` fills
- *   the shared text cache (`src/utils/swarm-artifact-cache.ts`). All are bounded
- *   and FIFO-evicting, so mining a large `.swarm/` tree CAN evict another
- *   subsystem's cached entries and change what that subsystem sees next. The PRM
- *   one goes further: it is a plain `Map` with no revalidation, and
+ *   while `readKnowledge` and `loadEvidence` fill the two SEPARATE maps in
+ *   `src/utils/swarm-artifact-cache.ts` — the parsed-artifact cache and the text
+ *   cache, each independently bounded at `MAX_CACHE_ENTRIES` = 128 entries. All
+ *   are bounded and FIFO-evicting, so mining a large `.swarm/` tree CAN evict
+ *   another subsystem's cached entries and change what that subsystem sees next.
+ *   The PRM one goes further: it is a plain `Map` with no revalidation, and
  *   `readTrajectory` REPLACES the entry for the session it read, re-bounded by
- *   its own default (the newest 500 once a session exceeds 1000) rather than by
- *   whatever bound the live writer was using. None touches the filesystem and
- *   none survives the process — but "nothing here writes" is a disk claim, not a
- *   claim about process memory.
+ *   its own `maxLines` default rather than by whatever bound the live writer was
+ *   using — a session whose list exceeds 1000 entries is cut to the newest
+ *   `floor(maxLines / 2)` = 500 ENTRIES. That 500 is unrelated to
+ *   `MAX_TRACKED_TRAJECTORY_SESSIONS` = 500, which bounds how many SESSIONS the
+ *   cache holds at once; the two constants merely happen to share a value.
+ *   None of these caches is on disk: nothing about them writes a file, and none
+ *   survives the process. (The readers themselves obviously do read files — the
+ *   claim above is that nothing here WRITES, not that nothing here touches the
+ *   filesystem. The artifact cache in particular `stat`s the file on every
+ *   lookup to check freshness, and on a miss invokes the caller's own read
+ *   function and `stat`s again before storing.)
  * - Every free-text fragment that survives into a signal, a statement, or an
  *   evidence reference passes through `redactSecrets` and a hard length bound
  *   before it is retained. Prompts and reasoning traces are never read into an
@@ -180,7 +188,7 @@ export interface LoadCorpusOptions {
 	 * source contained", independent of any one request; `truncation.observations`
 	 * on the report is what declares how many were actually tallied.
 	 *
-	 * Omitted ⇒ every observation is retained, which is the pre-existing behaviour.
+	 * Omitted \u21D2 every observation is retained, which is the pre-existing behaviour.
 	 */
 	filter?: (observation: CorpusObservation) => boolean;
 	/** Reader overrides for tests. Unspecified readers use the real store. */
@@ -227,13 +235,35 @@ export function compareRefs(left: string, right: string): number {
  * Newlines and control characters collapse to single spaces because signals are
  * compared for equality — a fragment that differs only by line wrapping must
  * not split one consensus attribute into two.
+ *
+ * Format characters (`\p{Cf}`) are collapsed alongside control characters — to a
+ * SPACE, like everything else here, not deleted — and that is a correctness rule
+ * rather than tidiness. U+202E (RIGHT-TO-LEFT OVERRIDE), U+2066–U+2069 (the
+ * isolates) and U+200E/U+200F reorder how the text RENDERS without changing the
+ * bytes stored, so a persisted signal, statement, evidence ref, or `llmSummary`
+ * could read as something other than the bytes the report actually holds.
+ * U+200B–U+200D and U+FEFF are the same class of invisible, and they also hide
+ * INSIDE a token: `[REDACTED\u200B:x]` is not the placeholder it renders as, and
+ * `sk\u200B-…` is not the secret shape `redactSecrets` matches.
+ *
+ * Replacing rather than deleting is a real choice, in both directions. What it
+ * BUYS: deletion would let `[REDACTED\u200B:x]` close up into a well-formed
+ * `[REDACTED:x]` after the forged-marker check in `extractRestatement` has
+ * already run on the raw text — manufacturing exactly the forged redaction
+ * marker that check exists to reject. A space breaks the token instead, and
+ * `MARKUP_RE` then rejects it on the bare `[`. What it does NOT buy: `a\u200Db`
+ * becomes `a b`, not `ab`, so a fragment differing from another only by a
+ * zero-width joiner still differs afterwards. Equality is canonicalized (every
+ * such fragment collapses the same way), not made to agree with the joiner-free
+ * spelling.
  */
 export function sanitizeExcerpt(value: string, maxChars: number): string {
 	const normalized = redactSecrets(value)
-		// Unicode control characters first: a pasted terminal dump carries
-		// NUL/BEL/ESC, which the `\s` class does NOT match. Whitespace runs
-		// second, so every fragment collapses to one canonical spacing.
-		.replace(/\p{Cc}+/gu, ' ')
+		// Unicode control AND format characters first: a pasted terminal dump
+		// carries NUL/BEL/ESC and a hostile one carries bidi overrides, neither of
+		// which the `\s` class matches. Whitespace runs second, so every fragment
+		// collapses to one canonical spacing.
+		.replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
 		.replace(/\s+/g, ' ')
 		.trim();
 	return normalized.length > maxChars
@@ -250,7 +280,7 @@ export function sanitizeExcerpt(value: string, maxChars: number): string {
  * miner's need, not the PRM subsystem's, and because adding it there would put a
  * second writer-adjacent surface in a module another lane owns. It performs a
  * single `readdir`, filters to `<sessionId>.jsonl` names that match the shared
- * identifier shape, sorts, bounds, and returns. Missing directory ⇒ `[]`.
+ * identifier shape, sorts, bounds, and returns. Missing directory \u21D2 `[]`.
  */
 export async function listTrajectorySessions(
 	directory: string,
@@ -314,7 +344,7 @@ function defaultReaders(): CorpusReaders {
 		// `loadEvidence` lazily rewrites a legacy flat retrospective in place —
 		// taking an `evidence-loader` lock, creating a lock sentinel under
 		// `.swarm/locks/`, renaming a temp file over `evidence.json`, and remapping
-		// legacy `task_complexity` values (`medium` → `moderate`). Mining is a read.
+		// legacy `task_complexity` values (`medium` \u2192 `moderate`). Mining is a read.
 		loadEvidence: (directory, taskId) =>
 			loadEvidence(directory, taskId, { migrate: false }),
 	};

@@ -99,17 +99,31 @@ Guarantees worth knowing:
   change the report id, by design: a report declares the configuration it was produced under.
 - **The deterministic statement is never overwritten.** A model restatement is stored beside it as
   `llmSummary`, never in place of it.
-- **Model output is confined to one validated sentence.** Corpus assembly never reads prompts or reasoning
-  traces at all, and a restatement is accepted only from a `FINDING:` line — everything else in the response
-  is discarded — and only if it carries no bracket markup (`<think>`, `[think]`, `{think}`, `【think】`), no
-  reasoning markers, no second sentence, and fits the length bound without being trimmed to fit. The
-  single-sentence test is a whitelist: apart from `e.g.`/`i.e.`/`etc.` and decimal points, any interior `.`,
-  `!`, or `?` rejects the restatement outright. A reasoning block sharing the envelope line is rejected rather
-  than carried along. What can reach disk is therefore at most one bounded, marker-free sentence per
-  attribute; the sentences are independent restatements, so no multi-step trace can be assembled from them,
-  and none of them displaces the deterministic statement. (What this does *not* claim is that one admitted
-  sentence can never read as narration — the guard bounds it rather than pretending otherwise.)
-- **Excerpts are bounded and secret-redacted**, with redaction applied before the length bound.
+- **Model output reaches disk only through a bounded whitelist.** Corpus assembly never reads prompts or
+  reasoning traces at all. A restatement is accepted only from the first `FINDING:` line of one dispatch —
+  everything else in the response is discarded — and only if it carries no bracket markup (`<think>`,
+  `[think]`, `{think}`, `【think】`), no forged `[REDACTED:…]` marker, no reasoning markers, and — once decimal
+  points and at most one lower-case-continued `e.g.`/`i.e.`/`etc.` are masked — no sentence terminator except
+  a single trailing run, and fits the 600-character bound without being trimmed to fit. The
+  terminator test is a whitelist and is not ASCII-only: it counts every character in Unicode's
+  `Sentence_Terminal` property plus a hand-added ellipsis and leader family, so the CJK, fullwidth, Arabic,
+  Indic, Armenian, Ethiopic, Khmer, Myanmar and Mongolian stops all count. What can reach disk is therefore at
+  most one length-bounded, markup-free, marker-free sentence-shaped fragment per attribute, in a field
+  excluded from the integrity hash that never displaces the deterministic statement.
+
+  **The honest limitation, stated plainly:** a single grammatical sentence chained with commas, semicolons,
+  colons, dashes, tabs, or the one permitted abbreviation can still read as a multi-step narration, and this
+  guard does not stop that. Clause-final marks — which Unicode files under `Terminal_Punctuation`, a set that
+  includes the comma — are deliberately not counted, because rejecting every restatement containing a comma
+  is not a trade worth making; that leaves the chaining channel open by construction. Earlier drafts of this
+  fragment said a multi-step trace could not be assembled; that was false, and no amount of extra terminator
+  rules can make it true. What is guaranteed is the bound — one envelope line, one unmasked terminator run,
+  600 characters, per attribute — not a judgement about what the admitted text means.
+- **Excerpts are bounded and secret-redacted**, with redaction applied before the length bound. Unicode
+  control *and* format characters are now collapsed to a space, so a bidi override (U+202E) cannot make a
+  stored excerpt render as something other than the bytes actually stored, and a zero-width character cannot
+  hide inside a token to disguise it. (Collapsed to a space rather than deleted, deliberately: deleting would
+  let `[REDACTED<zero-width>:x]` close up into a forged redaction marker.)
 - **The cuts that change a conclusion are declared on the report.** A persisted `truncation` block records
   whether the corpus was capped, how many observations were tallied, whether the `inputIds` list was cut, and
   how many attributes the 1000-attribute cap dropped — so a truncated report is no longer mistakable for a

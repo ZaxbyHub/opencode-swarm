@@ -36,16 +36,31 @@
  *   sessions mining the same corpus forked the artifact too; the hash now
  *   excludes the whole `writeOrigin`. `statement` is always the deterministic
  *   rendering, and who ran the mine cannot change what the mine found.
- * - **Model prose reaches disk only as one bounded sentence.**
+ * - **Model prose reaches disk only through a bounded whitelist.**
  *   `SUMMARIZATION_SYSTEM` is a request, not a filter, and `sanitizeExcerpt`
- *   only redacts secrets, collapses control characters, and truncates.
- *   `extractRestatement` is the actual guard: model output can only reach disk
- *   through a `FINDING:` envelope whose captured sentence carries no bracket or
- *   angle-bracket markup, no reasoning marker, no interior sentence terminator,
- *   and no truncation (issue #1821 AC18). That keeps a reasoning *trace* out of
- *   the artifact. It is not a claim that the single admitted sentence can never
- *   read as narration — one sentence can, and the guard bounds it rather than
- *   pretending otherwise.
+ *   only redacts secrets, collapses control and format characters, and
+ *   truncates. `extractRestatement` is the actual guard, and what it enforces is
+ *   precisely this: one `FINDING:` line per dispatch survives (the first),
+ *   everything else in the response is discarded, and the captured text is
+ *   admitted only if it carries no forged `[REDACTED:…]` marker, no bracket or
+ *   angle-bracket markup, no listed reasoning marker, and — once decimal points
+ *   and at most one lower-case-continued `e.g.`/`i.e.`/`etc.` are MASKED — no
+ *   sentence terminator other than a single trailing run, and fits
+ *   `MAX_CONSENSUS_STATEMENT_CHARS` without truncation (issue #1821 AC18). Note
+ *   the masking clause: the persisted text can hold several literal `.`
+ *   characters (`… on 0.8 of the runs, e.g. the refactor pair.` is admitted and
+ *   contains four: the decimal, the two in `e.g.`, and the trailing one. Three
+ *   of them are masked, leaving the single trailing run the rule allows). The
+ *   bound is on UNMASKED terminators, not on periods.
+ *
+ *   The limitation belongs in the same breath, because the absolute version was
+ *   claimed here twice and is false: **a single grammatical sentence chained
+ *   with semicolons, colons, dashes, tabs, or the one permitted abbreviation can
+ *   still read as a multi-step narration, and this guard does not stop that.**
+ *   It bounds how much model text, in what shape, can reach an attribute — one
+ *   sentence-shaped fragment of at most `MAX_CONSENSUS_STATEMENT_CHARS`, in a
+ *   field excluded from the integrity hash that never displaces `statement`. It
+ *   does not classify meaning.
  */
 
 import type { ConsensusConfig } from '../config/schema.js';
@@ -717,26 +732,144 @@ const MARKUP_RE =
  * `[REDACTED:<type>]` is OUR output, not the model's, and `sanitizeExcerpt` runs
  * before the bracket test — so without masking it, redacting a secret out of an
  * otherwise-valid restatement would make the guard reject its own handiwork.
+ *
+ * Masking is only safe because a placeholder the MODEL wrote is rejected first:
+ * `extractRestatement` refuses any capture containing
+ * `REDACTION_PLACEHOLDER_PREFIX` BEFORE sanitization, when no genuine
+ * placeholder can exist yet. Without that check the mask is a forgery surface —
+ * `FINDING: Scoring succeeded [REDACTED:aws_key] across both tasks.` would be
+ * persisted, asserting a redaction the miner never performed.
  */
 const REDACTION_PLACEHOLDER_RE = /\[REDACTED:[A-Za-z0-9_]+\]/g;
 
+/** The literal prefix only `sanitizeExcerpt` is allowed to introduce. */
+const REDACTION_PLACEHOLDER_PREFIX = '[REDACTED:';
+
 /**
- * The only periods that legitimately sit INSIDE one sentence: a closed
- * abbreviation list, and the decimal point of a number.
+ * The characters this guard counts as ending a sentence.
+ *
+ * `[.!?]` was an ASCII-only bound, and the property enforced here is a COUNT of
+ * sentence terminators — so a terminator the class cannot see is a terminator
+ * that does not count. Multi-clause narration was persisted verbatim through
+ * U+3002 `。`, U+FF01 `！`, U+FF1F `？`, U+06D4 `۔` and U+0964 `।`, none of
+ * which `[.!?]` matches.
+ *
+ * Rather than enumerate scripts by hand, this delegates to Unicode's own
+ * `Sentence_Terminal` property, which covers the ASCII three, the CJK and
+ * fullwidth stops (including the halfwidth U+FF61), Arabic and Urdu, Devanagari
+ * danda and double danda, Armenian, Ethiopic, Khmer, Myanmar, Mongolian, the
+ * small and vertical presentation forms, and the compound marks `‼` `⁇` `⁈` `⁉`.
+ * It is a Unicode property escape, so it needs the `u` flag; the two runtimes
+ * this bundle must load under resolve it identically (every codepoint compared
+ * under V8 and JavaScriptCore).
+ *
+ * `Sentence_Terminal` is NOT "definitionally every character that ends a
+ * sentence" — an earlier draft of this comment said that and it is false. It is
+ * the set UAX #29 uses to detect SENTENCE boundaries, and Unicode files
+ * clause-final marks separately under `Terminal_Punctuation`. That second set
+ * (121 characters this one does not contain) holds the comma, the semicolon and
+ * the colon — and also the Tibetan shad U+0F0D `།`, the Mongolian four dots
+ * U+1805, and the Ethiopic clause marks, which read as sentence ends in their
+ * scripts.
+ *
+ * None of `Terminal_Punctuation` is counted here, and that is a decision, not an
+ * oversight: it contains the COMMA. `first i list the runs, then i count the
+ * passes, then i divide` is admitted today and would have to stay admitted —
+ * rejecting every restatement containing a comma is not a trade worth making —
+ * so the clause-chaining channel stays open no matter where a line is drawn
+ * among the other 120. Adding the shad would close no channel that the comma
+ * does not already leave open; it would only move the paraphrase cost around.
+ * The limitation is therefore stated in `extractRestatement` and PINNED BY TEST
+ * (`miner-restatement-guard.test.ts`, including the Tibetan case) rather than
+ * papered over. `-` and `—` are in neither property, so a dash chain is the same
+ * story.
+ *
+ * The ellipsis/leader family IS added by hand, and the asymmetry is a judgement
+ * call worth naming: Unicode classifies it as neither `Sentence_Terminal` nor
+ * `Terminal_Punctuation` — ranking it below the shad — but in English-language
+ * model output `…` substitutes for a full stop rather than for a comma, and
+ * `runs…then i count` is the shape a model actually emits. Adding only U+2026
+ * would leave the siblings open, so the whole family goes in: U+2025 `‥`,
+ * U+2026 `…`, U+22EF `⋯`, U+FE19 and U+FE30 (the vertical presentation forms).
+ * U+2024 `․` and U+FE52 `﹒` need no entry — the property already covers them.
  */
-const NON_TERMINAL_ABBREVIATION_RE = /\b(?:e\.g\.|i\.e\.|etc\.)/gi;
-const DECIMAL_POINT_RE = /(\d)\.(?=\d)/g;
+const SENTENCE_TERMINATOR_CLASS =
+	'\\p{Sentence_Terminal}\\u2025\\u2026\\u22EF\\uFE19\\uFE30';
 
 /**
  * A single sentence: no interior terminator at all, and at most one trailing
  * terminator run, optionally closed by a quote or parenthesis.
+ *
+ * Composed from `SENTENCE_TERMINATOR_CLASS` rather than spelled out twice, so
+ * the negated half and the positive half cannot drift apart.
  */
-const SINGLE_SENTENCE_RE = /^[^.!?]*(?:[.!?]+["')]?)?$/;
+const SINGLE_SENTENCE_RE = new RegExp(
+	`^[^${SENTENCE_TERMINATOR_CLASS}]*(?:[${SENTENCE_TERMINATOR_CLASS}]+["')]?)?$`,
+	'u',
+);
 
 /**
- * True when `value` is one sentence.
+ * The abbreviations whose trailing period may be treated as non-terminal, and
+ * the only continuation shape under which it may be.
  *
- * A POSITIVE whitelist, and it has to be. The previous version detected a
+ * This is NOT the set of "the only periods that can legitimately sit inside one
+ * sentence" — an earlier version of this comment said exactly that and it was
+ * false, and the true statement has to be split in two.
+ *
+ * A token carrying a period with more characters after it INSIDE the token —
+ * `U.S.`, a file path (`src/consensus/miner.ts`), a URL
+ * (`https://example.com/report`) — is masked by nothing here, so a restatement
+ * containing one is REJECTED wherever it sits, including at the very end
+ * (verified: all three are rejected sentence-finally). A token whose only period
+ * is its last character — `Dr.`, an unmasked `etc.`, `...`, `…` — is rejected
+ * only when more text follows it; standing at the end of the restatement it IS
+ * the single trailing terminator run the rule allows, and is admitted.
+ *
+ * That is the deliberate cost of a rule that never has to enumerate how a second
+ * sentence can begin: a rejection loses a paraphrase, a missed terminator loses
+ * the bound.
+ *
+ * The lower-case lookahead is load-bearing. The previous version blanked the
+ * whole token INCLUDING its trailing period, unconditionally, so
+ * `Scoring succeeded etc. The tallies were compared afterwards.` had its real
+ * boundary erased and was persisted as "one sentence". A new sentence does not
+ * begin with a lower-case letter, so requiring one is what separates
+ * `e.g. the refactor pair` from `etc. The tallies`. An optional comma is allowed
+ * before it because `e.g., the refactor pair` is the same mid-sentence use and a
+ * comma cannot start a sentence either.
+ *
+ * Case is matched by explicit character classes rather than the `i` flag, and
+ * that is not style. `\p{Ll}` under a plain `u` flag means the same thing on
+ * every engine (it does not match `A`), but under `iu` the engines disagree:
+ * V8 — the Node sidecar this bundle must also run under, AGENTS.md invariant 2 —
+ * matches upper-case letters, while JavaScriptCore (Bun) does not. Adding `i`
+ * here would therefore reopen the `etc. The` hole on one runtime and not the
+ * other, which is worse than reopening it on both. No regex in this guard
+ * combines `i` with a Unicode property escape; `REASONING_MARKER_RE` is `i` but
+ * uses none, so it is unaffected.
+ */
+const NON_TERMINAL_ABBREVIATION_RE =
+	/\b(?:[eE]\.[gG]\.|[iI]\.[eE]\.|[eE][tT][cC]\.)(?=,?\s+\p{Ll})/gu;
+
+/**
+ * How many abbreviations one restatement may have masked.
+ *
+ * One parenthetical `e.g.` is ordinary in a restated finding. A chain of them is
+ * how the lower-case exemption is turned straight back into multi-clause
+ * narration — `… carried the signal etc. then i count … etc. then i divide …`
+ * masks three boundaries and reads as four steps. Bounding the exemption is
+ * what keeps it an exemption.
+ */
+const MAX_MASKED_ABBREVIATIONS = 1;
+
+/** The decimal point of a number: `0.8` is one token, never two sentences. */
+const DECIMAL_POINT_RE = /(\d)\.(?=\d)/g;
+
+/**
+ * True when `value`, once masked, carries no sentence terminator except a single
+ * trailing run.
+ *
+ * A POSITIVE whitelist, and it has to be. An earlier version detected a
  * sentence boundary only as `[.!?]` followed by whitespace and an ASCII capital
  * or `(`, which let a whole four-sentence lower-case narration through verbatim
  * — as did a continuation starting with a digit, a quote, a non-ASCII capital,
@@ -744,16 +877,25 @@ const SINGLE_SENTENCE_RE = /^[^.!?]*(?:[.!?]+["')]?)?$/;
  * unbounded; requiring that there be no interior terminator is not.
  *
  * So the two constructs whose period genuinely sits mid-sentence are masked
- * first — `e.g.` / `i.e.` / `etc.` and decimal numbers — and everything else
- * containing a `.`, `!`, or `?` anywhere but a single trailing run is rejected.
- * A legitimate restatement that quotes a terminator mid-sentence is rejected
- * too; that costs only the paraphrase, which is the direction this guard errs in
- * everywhere else.
+ * first — a bounded number of lower-case-continued `e.g.` / `i.e.` / `etc.`, and
+ * decimal numbers — and everything else containing a terminator anywhere but a
+ * single trailing run is rejected.
+ *
+ * What this does NOT decide is whether the admitted text reads as one thought.
+ * A semicolon, a colon, a dash or the one permitted abbreviation can join
+ * clauses inside a single grammatical sentence, and none of them is a
+ * terminator. See `extractRestatement` for the property that is actually
+ * delivered.
  */
 function isSingleSentence(value: string): boolean {
+	let maskedAbbreviations = 0;
 	const masked = value
-		.replace(NON_TERMINAL_ABBREVIATION_RE, (match) => '_'.repeat(match.length))
+		.replace(NON_TERMINAL_ABBREVIATION_RE, (match) => {
+			maskedAbbreviations += 1;
+			return '_'.repeat(match.length);
+		})
 		.replace(DECIMAL_POINT_RE, '$1_');
+	if (maskedAbbreviations > MAX_MASKED_ABBREVIATIONS) return false;
 	return SINGLE_SENTENCE_RE.test(masked);
 }
 
@@ -762,22 +904,45 @@ function isSingleSentence(value: string): boolean {
  *
  * This is a WHITELIST, and it has to be. `SUMMARIZATION_SYSTEM` is a request,
  * not a filter, and `sanitizeExcerpt` only redacts secrets, collapses control
- * characters, and truncates — so a dispatcher returning
+ * and format characters, and truncates — so a dispatcher returning
  * `"Reasoning: the model thought hard. Answer: X"` passes all three and lands
- * verbatim in the report. Issue #1821 AC18 says chain-of-thought is NEVER
- * persisted, and "never" cannot be delivered by a prompt.
+ * verbatim in the report.
  *
- * So nothing outside a `FINDING:` line can survive at all, and the extracted
- * sentence must additionally:
- * - carry no bracket or angle-bracket markup — the envelope is line-scoped, so a
- *   `<think>…</think>` or `[think]…` block sharing the line would otherwise ride
- *   along inside the captured group;
- * - carry no reasoning markers;
- * - be a single sentence, decided by whitelist: no interior `.`/`!`/`?` outside
- *   the `e.g.`/`i.e.`/`etc.` allowlist and decimal points;
- * - fit `MAX_CONSENSUS_STATEMENT_CHARS` **without truncation**. Clipping model
+ * ## What is actually enforced
+ *
+ * Exactly one `FINDING:` line — the first — is considered per dispatch, and
+ * everything else in the response is discarded. The captured text is admitted
+ * only if it:
+ * - contains no `[REDACTED:…]` marker of its own. Only `sanitizeExcerpt` may
+ *   introduce one, and it has not run yet, so a marker here is forged: it would
+ *   assert a redaction that never happened AND survive the bracket test below,
+ *   which masks the miner's own placeholders;
+ * - carries no bracket or angle-bracket markup — the envelope is line-scoped, so
+ *   a `<think>…</think>` or `[think]…` block sharing the line would otherwise
+ *   ride along inside the captured group;
+ * - carries none of the listed reasoning markers;
+ * - carries, AFTER masking, no sentence terminator except a single trailing run
+ *   — decided by whitelist over `SENTENCE_TERMINATOR_CLASS` (Unicode's
+ *   `Sentence_Terminal` property plus the ellipsis and leader family). The
+ *   masked constructs are decimal points and at most
+ *   `MAX_MASKED_ABBREVIATIONS` lower-case-continued `e.g.`/`i.e.`/`etc.`, so the
+ *   PERSISTED text may still contain several literal `.` characters — the bound
+ *   counts unmasked terminators, not periods;
+ * - fits `MAX_CONSENSUS_STATEMENT_CHARS` **without truncation**. Clipping model
  *   output to length is precisely how a trailing fragment of reasoning survives a
  *   length bound, so an over-long restatement is rejected outright.
+ *
+ * ## What is NOT enforced
+ *
+ * That the admitted text does not read as a multi-step narration. **A single
+ * grammatical sentence chained with semicolons, colons, dashes, tabs, or the one
+ * permitted abbreviation can still narrate several steps, and this guard does
+ * not stop that.** Two earlier
+ * revisions of this file claimed it did — first through a boundary detector,
+ * then through a terminator count — and both claims were false, because a
+ * chained clause carries no terminator to count. The guard is a bound on how
+ * much text, in what shape, may be persisted per attribute (issue #1821 AC18's
+ * enforceable core); it does not classify meaning, and no regex here will.
  *
  * Rejection is silent and non-fatal: the attribute keeps its deterministic
  * `statement` and simply carries no `llmSummary`.
@@ -793,6 +958,10 @@ function extractRestatement(raw: unknown): string | undefined {
 		}
 	}
 	if (captured === undefined) return undefined;
+	// Checked on the RAW capture, before `sanitizeExcerpt` can introduce a real
+	// one: a `[REDACTED:` here was written by the model, and masking it for the
+	// bracket test below would let a forged redaction marker reach disk.
+	if (captured.includes(REDACTION_PLACEHOLDER_PREFIX)) return undefined;
 	// Redact and collapse BEFORE measuring, so the bound is applied to exactly
 	// the text that would be persisted. The `+ 1` bound lets an over-long
 	// restatement be detected rather than silently clipped to the limit.
@@ -913,9 +1082,12 @@ export type ConsensusReportIntegrityInput = Omit<
  * 1. **Who and when, as opposed to what.** The report's own `generatedAt` (plus
  *    `reportId`, which is *derived* from this hash and would otherwise be
  *    circular), and every proposal's ENTIRE `provenance.writeOrigin` — the
- *    `producedAt` clock and the `sessionId` / `agentRole` / `agentId` that
- *    identify whoever physically ran the mine. All are real provenance and stay
- *    in the artifact; none of them is content.
+ *    `producedAt` clock and the `sessionId` / `agentRole` that identify whoever
+ *    physically ran the mine. (The shared `LearningWriteOriginSchema` also
+ *    admits an `agentId`; `buildProposals` never populates it on the consensus
+ *    path, and the exclusion is of the whole object, so it would be covered if
+ *    it ever did.) All are real provenance and stay in the artifact; none of
+ *    them is content.
  *
  *    Excluding the identity fields is not cosmetic. `sessionId` comes from
  *    `ctx.sessionID`, so with only `producedAt` excluded, two sessions mining a
