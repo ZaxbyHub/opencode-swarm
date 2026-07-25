@@ -443,10 +443,12 @@ const WRITE_NORMALIZED_ARRAY_FIELDS = [
  *     `appendUnactionable` DOES go through `transactKnowledge` and IS
  *     normalized.)
  *   - `knowledge/family-migration.ts` — outside this module, and it DOES author
- *     a new `tags` value (`mergeEntryFields` unions two entries' tags,
- *     case-sensitively, src last). Its output is normalized only on the next
- *     transaction through this module, at which point tags past the cap are
- *     dropped. Closing that is out of scope for Lane 0b; see issue #1821.
+ *     a new `tags` value. `mergeEntryFields` now caps and de-duplicates it
+ *     itself (case-INsensitively, winner first) via `unionArrayField`, so this
+ *     path no longer emits an over-cap list for a later transaction to trim
+ *     silently. It remains listed here because it still writes through
+ *     `atomicWriteFile` without passing through this module's normalizer — the
+ *     guarantee now rests on that call site, not on this boundary.
  * A NEW producer of `tags` or an actionability array must still call
  * `dedupeCapped` at its own call site. CI Check 5 is a recurrence tripwire for
  * the literal `.slice(0, 20)` spelling inside four path globs — it is NOT a

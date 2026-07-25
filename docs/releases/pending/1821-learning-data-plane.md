@@ -13,8 +13,9 @@
   bypass it**, and the exclusions are deliberate rather than accidental. `applyConfidenceDeltas` re-persists
   exactly what the (intentionally un-normalized) read path returned, rewriting the whole file with raw
   `JSON.stringify`; `knowledge-validator.ts`'s quarantine/restore/unarchive and `hive-transaction.ts` relocate
-  existing records rather than authoring new field values; and `knowledge/family-migration.ts` *does* author a
-  new `tags` value on the cohort merge path. All four are listed under Known limitations below rather than
+  existing records rather than authoring new field values; and `knowledge/family-migration.ts` authors a new
+  `tags` value on the cohort merge path, but caps and de-duplicates it **before** the write, so it no longer
+  emits an over-cap list for the boundary to trim. All are listed under Known limitations below rather than
   glossed by a "regardless of which code path" claim.
 - New `learning` and `consensus` configuration blocks, and a new
   `knowledge.promotion_require_actionable` setting.
@@ -63,10 +64,16 @@ Phase boundaries and `curator_analyze` are the reliable triggers.
 
 What it does to your store:
 
-- The surviving entry **unions** the losers' tags, actionability fields, and `source_knowledge_ids`, and
-  **sums** their usage counters, so evidence is combined rather than discarded.
+- The surviving entry **unions** the losers' actionability fields and `source_knowledge_ids` and **sums**
+  their usage counters, so that evidence is combined rather than discarded.
+- **Tags are unioned under the store's 20-tag cap**: the winner's tags are kept first, the losers' tags fill
+  whatever slots remain, and duplicates are collapsed case-insensitively. **A winner already holding 20 tags
+  therefore absorbs none of the losers' tags.** This is the same cap that has always applied to every
+  knowledge write — the merge now applies it up front rather than emitting an over-cap list for the write
+  boundary to trim silently. Because the losing entry is archived in the same transaction, tags that do not
+  fit are not recoverable from the active store.
 - Losers are **archived, not deleted** — each keeps its history and receives a tombstone through the shared
-  invalidator, which also retires any generated skill that referenced it. Nothing silently disappears.
+  invalidator, which also retires any generated skill that referenced it.
 - The winner is chosen by actionability first, then confidence, then evidence weight, then age.
 - Clustering is transitive: if A matches B and B matches C, all three collapse in a single pass rather than
   leaving C to be merged on the next sweep.
@@ -248,8 +255,9 @@ upgrading:
 - Normalization runs on write, not on read, so an over-cap legacy record keeps its full tail until something
   next writes it.
 - `src/knowledge/family-migration.ts` authors merged tag values and writes them through a path that bypasses
-  the store-level normalizer, so a cohort merge can transiently exceed the cap until the next transaction
-  normalizes it.
+  the store-level normalizer. It now caps and de-duplicates them itself before writing, so a cohort merge no
+  longer persists an over-cap tag list — but the corollary is that tags past the cap are dropped at merge
+  time on the `/swarm link` path rather than surviving until a later transaction trims them.
 - Three further writers bypass the store-level normalizer, deliberately. `applyConfidenceDeltas` — reached on
   every `phase_complete` via the skill-usage and knowledge-verdict feedback paths — rewrites the whole
   knowledge file with raw `JSON.stringify`, re-persisting exactly what the intentionally un-normalized read

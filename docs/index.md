@@ -47,6 +47,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 | [Generated Skills](skills.md) | How knowledge becomes draft or active generated skills, and how to review them |
 | [Swarm Memory](memory.md) | SQLite-default memory, legacy JSONL migration, scoped recall, proposal-only writes, redaction policy |
 | [Evidence and Telemetry](evidence-and-telemetry.md) | Evidence bundle schema, JSONL event stream, how to analyze results |
+| [Consensus Mining](consensus-mining.md) | Mining existing evidence into proposals-only consensus reports, thresholds, truncation, reproducibility |
 | [Work Complete Council](council/README.md) | Optional consensus gate for verifying phase completion |
 | [Troubleshooting](troubleshooting/recovery-guide.md) | Session recovery, common error scenarios |
 

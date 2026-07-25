@@ -293,8 +293,11 @@ export interface ProposedSkillChangeProvenance {
 	sourceRunIds: string[];
 	sourceModelIds: string[];
 	/**
-	 * Deliberately NARROWER than the shared `LearningWriteOriginSchema`, which
-	 * also admits an `agentId`. Nothing on the consensus path can produce one:
+	 * Structurally identical to the shared `LearningWriteOriginSchema`; neither
+	 * admits an `agentId`. (This comment previously said this shape was
+	 * "narrower", which was true only until the same phantom field was removed
+	 * from the shared schema — the two were fixed in separate passes of the same
+	 * change.) Nothing on the consensus path can produce one:
 	 * `MineConsensusDeps` has no `agentId` field, `buildProposals`'s options bag
 	 * has no slot for it, and its `stampLearningProvenance` call passes exactly
 	 * `producedAt` / `sessionId` / `agentRole`. Declaring a field no code path can
