@@ -265,10 +265,23 @@ interface SignalTally {
 	taskCategories: Set<string>;
 	/** Distinct model ids. Empty ⇒ not measurable, not "none". */
 	modelIds: Set<string>;
-	/** Evidence refs from succeeding observations, insertion-ordered. */
-	evidenceRefs: string[];
-	/** Evidence refs from FAILING observations. Never discarded. */
-	counterexampleRefs: string[];
+	/**
+	 * DISTINCT evidence refs from succeeding observations, insertion-ordered.
+	 *
+	 * A `Set`, like every sibling above, and for the same reason: the cap below
+	 * is positional, so with a plain array a run of repeated refs would evict
+	 * distinct ones off the end (issue #1821 F2 — truncate-then-dedupe).
+	 */
+	evidenceRefs: Set<string>;
+	/**
+	 * DISTINCT evidence refs from FAILING observations. Never discarded.
+	 *
+	 * Distinctness is load-bearing here, not tidiness: `contracts.ts` enforces
+	 * "non-zero `failureSupport` ⇒ non-empty `counterexampleRefs`" as the
+	 * negative-evidence guarantee, and 200 copies of a single ref would satisfy
+	 * that check while carrying the evidence of exactly one failing run.
+	 */
+	counterexampleRefs: Set<string>;
 }
 
 /** A gated attribute paired with the tally it was computed from. */
@@ -302,21 +315,24 @@ function tallySignals(
 					taskIds: new Set(),
 					taskCategories: new Set(),
 					modelIds: new Set(),
-					evidenceRefs: [],
-					counterexampleRefs: [],
+					evidenceRefs: new Set(),
+					counterexampleRefs: new Set(),
 				};
 				tallies.set(signal, tally);
 			}
 			tally.runIds.add(observation.runId);
 			if (observation.success) {
 				tally.successRunIds.add(observation.runId);
-				if (tally.evidenceRefs.length < MAX_CONSENSUS_REFS) {
-					tally.evidenceRefs.push(observation.evidenceRef);
+				// `Set.add` of an already-present ref is a no-op, so the cap is
+				// reached only by DISTINCT refs. A repeated ref can no longer consume
+				// a slot a distinct one needed (issue #1821 F2).
+				if (tally.evidenceRefs.size < MAX_CONSENSUS_REFS) {
+					tally.evidenceRefs.add(observation.evidenceRef);
 				}
 			} else {
 				tally.failureRunIds.add(observation.runId);
-				if (tally.counterexampleRefs.length < MAX_CONSENSUS_REFS) {
-					tally.counterexampleRefs.push(observation.evidenceRef);
+				if (tally.counterexampleRefs.size < MAX_CONSENSUS_REFS) {
+					tally.counterexampleRefs.add(observation.evidenceRef);
 				}
 			}
 			if (taskKey !== undefined) tally.taskKeys.add(taskKey);

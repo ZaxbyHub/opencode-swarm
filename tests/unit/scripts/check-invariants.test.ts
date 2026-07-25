@@ -85,6 +85,37 @@ function setupFixtureDir(fixtureName: string): string {
 	return fixtureDir;
 }
 
+/**
+ * Every path Check 5's `KNOWLEDGE_DEDUP_SCOPE` resolves, one representative file
+ * per glob. The scope is ASSERTED by the script — a glob that resolves to
+ * nothing is itself a hard error — so a fixture that seeds none of them would
+ * fail for that reason and prove nothing about detection.
+ */
+const CHECK5_SCOPE_FILES = [
+	'src/tools/knowledge-add.ts',
+	'src/hooks/knowledge-store.ts',
+	'src/hooks/curator.ts',
+	'src/hooks/micro-reflector.ts',
+	'src/knowledge/entry-merge.ts',
+	'src/learning/provenance.ts',
+	'src/services/recommendation-ledger.ts',
+	'src/consensus/miner.ts',
+];
+
+/**
+ * A fixture whose Check 5 scope is fully populated with clean files, so the
+ * baseline exit code is 0 and any failure a test observes is the injected one.
+ */
+function setupCheck5FixtureDir(fixtureName: string): string {
+	const fixtureDir = setupFixtureDir(fixtureName);
+	for (const relative of CHECK5_SCOPE_FILES) {
+		const target = path.join(fixtureDir, ...relative.split('/'));
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		fs.writeFileSync(target, 'export const ok = 1;\n');
+	}
+	return fixtureDir;
+}
+
 describe('check-invariants.sh', () => {
 	test('should pass when run on the repo', () => {
 		if (isWindows) return;
@@ -175,6 +206,121 @@ describe('check-invariants.sh', () => {
 		// reports a non-zero count, a call site regressed to a bare
 		// `.slice(0, 20)` instead of `dedupeCapped`.
 		expect(result.stdout).toContain('Unguarded positional caps: 0');
+	}, 30000);
+
+	// #1821 F6 — the clean-repo assertion above proves only that Check 5 reports
+	// zero, which a check that stopped matching entirely would also do. `08a §6`
+	// sets the bar: "verified in both directions — a guardrail fix that stops
+	// detecting is worse than the false positive it removes." These inject the
+	// banned shapes into a fixture copy (the real repo is never mutated) and
+	// require a hard failure, plus negative controls for the correct spellings so
+	// the detector cannot be satisfied by matching everything.
+	test('issue #1821 F6: Check 5 DETECTS a bare positional cap in the widened scope', () => {
+		if (isWindows) return;
+		const fixtureDir = setupCheck5FixtureDir('detect-slice');
+		// src/knowledge/ is exactly where this diff moved the tag/actionability
+		// merge logic, and exactly what the pre-F4 scope was blind to.
+		fs.writeFileSync(
+			path.join(fixtureDir, 'src', 'knowledge', 'entry-merge.ts'),
+			'export function mergeTags(a: string[], b: string[]): string[] {\n' +
+				'\treturn [...a, ...b].slice(0, 20);\n}\n',
+		);
+
+		const result = runCheckInvariants(fixtureDir);
+		expect(result.stdout).toContain('src/knowledge/entry-merge.ts');
+		expect(result.stdout).toContain(
+			'Positional .slice(0, 20) with no dedup on a knowledge array field',
+		);
+		expect(result.stdout).toContain('Unguarded positional caps: 1');
+		expect(result.exitCode).not.toBe(0);
+
+		fs.rmSync(fixtureDir, { recursive: true, force: true });
+	}, 30000);
+
+	test('issue #1821 F6: Check 5 DETECTS a capped string[] accumulator with no dedup', () => {
+		if (isWindows) return;
+		const fixtureDir = setupCheck5FixtureDir('detect-accumulator');
+		// The `>= N … break` spelling both #1821 F2 defects were written in, which
+		// the literal `.slice(0, 20)` pattern is blind to.
+		fs.writeFileSync(
+			path.join(fixtureDir, 'src', 'services', 'recommendation-ledger.ts'),
+			'export function sanitizeRefs(refs: string[]): string[] {\n' +
+				'\tconst cleaned: string[] = [];\n' +
+				'\tfor (const ref of refs) {\n' +
+				'\t\tconst trimmed = ref.trim();\n' +
+				'\t\tif (trimmed.length === 0) continue;\n' +
+				'\t\tcleaned.push(trimmed);\n' +
+				'\t\tif (cleaned.length >= MAX_REFS) break;\n' +
+				'\t}\n\treturn cleaned;\n}\n',
+		);
+
+		const result = runCheckInvariants(fixtureDir);
+		expect(result.stdout).toContain('src/services/recommendation-ledger.ts');
+		expect(result.stdout).toContain(
+			'Capped string[] accumulator with no dedup',
+		);
+		expect(result.stdout).toContain('Unguarded positional caps: 1');
+		expect(result.exitCode).not.toBe(0);
+
+		fs.rmSync(fixtureDir, { recursive: true, force: true });
+	}, 30000);
+
+	test('issue #1821 F6: Check 5 passes the CORRECT spellings of both patterns', () => {
+		if (isWindows) return;
+		// Negative controls in the same harness: dedupe-then-truncate and a
+		// seen-Set-guarded accumulator are correct code, and a detector that
+		// flagged them would be traded for a false-positive treadmill.
+		const fixtureDir = setupCheck5FixtureDir('detect-negative-control');
+		fs.writeFileSync(
+			path.join(fixtureDir, 'src', 'knowledge', 'entry-merge.ts'),
+			'export function mergeTags(a: string[], b: string[]): string[] {\n' +
+				'\treturn [\n\t\t...new Set(\n\t\t\t[...a, ...b].map((t) => t.trim()),\n' +
+				'\t\t),\n\t].slice(0, 20);\n}\n',
+		);
+		fs.writeFileSync(
+			path.join(fixtureDir, 'src', 'services', 'recommendation-ledger.ts'),
+			'export function sanitizeRefs(refs: string[]): string[] {\n' +
+				'\tconst seen = new Set<string>();\n' +
+				'\tconst cleaned: string[] = [];\n' +
+				'\tfor (const ref of refs) {\n' +
+				'\t\tif (cleaned.length >= MAX_REFS) break;\n' +
+				'\t\tconst trimmed = ref.trim();\n' +
+				'\t\tif (seen.has(trimmed)) continue;\n' +
+				'\t\tseen.add(trimmed);\n' +
+				'\t\tcleaned.push(trimmed);\n' +
+				'\t}\n\treturn cleaned;\n}\n',
+		);
+
+		const result = runCheckInvariants(fixtureDir);
+		expect(result.stdout).toContain('Unguarded positional caps: 0');
+		expect(result.stdout, result.stdout).toContain(
+			'All engineering invariant checks passed',
+		);
+		expect(result.exitCode).toBe(0);
+
+		fs.rmSync(fixtureDir, { recursive: true, force: true });
+	}, 30000);
+
+	test('issue #1821 F4: Check 5 skips a tree where NO scope entry resolves', () => {
+		if (isWindows) return;
+		// The Check 4 ratchet fixtures build a temp git repo with only `scripts/`
+		// and an empty `src/`. Reporting eight "scope entry resolved to no file"
+		// errors there failed every one of those tests for a repository that has
+		// no knowledge surface at all. A tree where NOTHING resolves is skipped
+		// non-blockingly; a PARTIAL resolution is still a hard error (covered by
+		// the detection tests above, whose fixtures resolve the full scope).
+		const fixtureDir = setupFixtureDir('check5-no-scope');
+
+		const result = runCheckInvariants(fixtureDir);
+		expect(result.stdout).toContain('no Check 5 scope entry resolved');
+		expect(result.stdout).toContain('Files scanned: 0');
+		expect(result.stdout).not.toContain('resolved to no file');
+		expect(result.stdout, result.stdout).toContain(
+			'All engineering invariant checks passed',
+		);
+		expect(result.exitCode).toBe(0);
+
+		fs.rmSync(fixtureDir, { recursive: true, force: true });
 	}, 30000);
 
 	test('issue #1666: Check 4 growth ratchet header is present', () => {

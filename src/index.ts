@@ -138,7 +138,7 @@ import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import { loadPlan } from './plan/manager.js';
-import { createPrmHook } from './prm';
+import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
@@ -884,14 +884,16 @@ async function initializeOpenCodeSwarm(
 	const prmHook = createPrmHook(
 		config.prm ?? PrmConfigSchema.parse({}),
 		ctx.directory,
-		{
-			enabled:
-				learningConfig.prm_persistence.enabled &&
-				learningConfig.realtime_admission.enabled,
-			min_support: learningConfig.prm_persistence.min_support,
-			cooldown_ms: learningConfig.prm_persistence.cooldown_ms,
-			max_queue_size: learningConfig.realtime_admission.max_queue_size,
-		},
+		// #1821 F3: this mapping used to be an inline literal that ANDed
+		// `realtime_admission.enabled` into the producer's `enabled` flag, which
+		// also disabled the hook's durable `appendInsightCandidates` backstop — so
+		// a deployment with real-time admission off wrote no PRM candidate to
+		// `.swarm/insight-candidates.jsonl` and the phase-boundary drain never saw
+		// one, the exact loss AC8 forbids. `resolvePrmPatternPersistenceOptions`
+		// owns the coupling now (durable ← `prm_persistence.enabled`, enqueue ←
+		// `realtime_admission.enabled`) and is asserted directly by
+		// tests/unit/learning/wiring.test.ts.
+		resolvePrmPatternPersistenceOptions(learningConfig),
 	);
 	const trajectoryLoggerHook = createTrajectoryLoggerHook(
 		{

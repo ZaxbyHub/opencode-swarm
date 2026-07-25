@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { MAX_CONSENSUS_REFS } from '../../../src/consensus/contracts';
 import { mineConsensus } from '../../../src/consensus/miner';
 import {
 	config,
@@ -256,6 +257,76 @@ describe('consensus miner — negative evidence is never dropped', () => {
 		// supporting half of the evidence.
 		expect(result.report.proposals[0]?.counterexampleRefs).toEqual([
 			'evaluation-run:r3:t3:0',
+		]);
+	});
+
+	// #1821 F2 — the tally's ref collections are `Set`s, like every sibling
+	// field, so the positional `MAX_CONSENSUS_REFS` cap is reached only by
+	// DISTINCT refs. As plain arrays they were truncate-then-dedupe: a run of
+	// repeats consumed every slot and evicted the distinct refs behind it.
+	test('a repeated evidence ref cannot evict a distinct one at the cap', async () => {
+		const chatty = Array.from({ length: MAX_CONSENSUS_REFS }, () =>
+			observation({
+				runId: 'evaluation-run:r1',
+				taskId: 't1',
+				signals: ['tooling:evaluation-outcome:scored'],
+				evidenceRef: 'evaluation-run:r1:t1:0',
+			}),
+		);
+		const result = await mine(
+			[
+				...chatty,
+				observation({
+					runId: 'evaluation-run:r2',
+					taskId: 't2',
+					signals: ['tooling:evaluation-outcome:scored'],
+					evidenceRef: 'evaluation-run:r2:t2:0',
+				}),
+			],
+			{ minSupport: 2 },
+		);
+		const attribute = result.report.attributes[0];
+		expect(attribute?.support).toBe(2);
+		expect(attribute?.evidenceRefs).toEqual([
+			'evaluation-run:r1:t1:0',
+			'evaluation-run:r2:t2:0',
+		]);
+	});
+
+	test('repeats of one counterexample ref cannot stand in for a second failing run', async () => {
+		// `contracts.ts` enforces "non-zero failureSupport ⇒ non-empty
+		// counterexampleRefs" as the negative-evidence guarantee. With a positional
+		// cap over a plain array, MAX_CONSENSUS_REFS copies of a SINGLE ref
+		// satisfied that check while the second failing run's evidence — the
+		// evidence a reader would actually need — was dropped.
+		const chattyFailure = Array.from({ length: MAX_CONSENSUS_REFS }, () =>
+			observation({
+				runId: 'evaluation-run:r3',
+				taskId: 't3',
+				success: false,
+				signals: ['tooling:evaluation-outcome:scored'],
+				evidenceRef: 'evaluation-run:r3:t3:0',
+			}),
+		);
+		const result = await mine(
+			[
+				...twoRunAgreement(),
+				...chattyFailure,
+				observation({
+					runId: 'evaluation-run:r4',
+					taskId: 't4',
+					success: false,
+					signals: ['tooling:evaluation-outcome:scored'],
+					evidenceRef: 'evaluation-run:r4:t4:0',
+				}),
+			],
+			{ minSupport: 2 },
+		);
+		const attribute = result.report.attributes[0];
+		expect(attribute?.failureSupport).toBe(2);
+		expect(attribute?.counterexampleRefs).toEqual([
+			'evaluation-run:r3:t3:0',
+			'evaluation-run:r4:t4:0',
 		]);
 	});
 

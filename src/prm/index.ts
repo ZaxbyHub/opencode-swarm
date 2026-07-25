@@ -42,6 +42,7 @@ export type {
 	TrajectoryEntry,
 } from './types';
 
+import type { LearningConfig } from '../config/schema.js';
 import { appendInsightCandidates } from '../hooks/micro-reflector.js';
 import { enqueueCandidate } from '../learning/candidate-queue.js';
 import { recordPatternObservation } from '../learning/prm-pattern-support.js';
@@ -190,11 +191,49 @@ export function resetPrmSessionState(
  * keep working unchanged; when absent, pattern persistence is simply off.
  */
 export interface PrmPatternPersistenceOptions {
+	/**
+	 * `learning.prm_persistence.enabled`. Governs the WHOLE producer, durable
+	 * append included.
+	 */
 	enabled: boolean;
 	min_support: number;
 	cooldown_ms: number;
+	/**
+	 * `learning.realtime_admission.enabled`. Governs ONLY the in-memory enqueue.
+	 *
+	 * It must never gate the durable append (issue #1821 F3): AC8 says disabled
+	 * or crashed real-time work loses nothing, and the phase-boundary backstop
+	 * can only see candidates that reached `.swarm/insight-candidates.jsonl`.
+	 * ANDing the two flags at the call site made `realtime_admission.enabled=false`
+	 * silently discard every PRM candidate. Mirrors `micro-reflector.ts`, which
+	 * appends unconditionally and gates only its enqueue.
+	 */
+	admission_enabled: boolean;
 	/** `learning.realtime_admission.max_queue_size` — bounds the shared queue. */
 	max_queue_size: number;
+}
+
+/**
+ * Map a parsed `learning` config onto the PRM producer's knobs (issue #1821 F3).
+ *
+ * The mapping lives here, beside the interface that documents which flag governs
+ * what, and `src/index.ts` is its only production caller — so the AC8 coupling
+ * ("durable persistence is gated by `prm_persistence.enabled` ALONE") is
+ * expressed once and can be asserted directly by a test instead of being
+ * re-derived from an object literal at the plugin's wiring site, where the two
+ * flags were previously ANDed together.
+ */
+export function resolvePrmPatternPersistenceOptions(
+	learning: LearningConfig,
+): PrmPatternPersistenceOptions {
+	return {
+		// NOT ANDed with `realtime_admission.enabled`. See `admission_enabled`.
+		enabled: learning.prm_persistence.enabled,
+		min_support: learning.prm_persistence.min_support,
+		cooldown_ms: learning.prm_persistence.cooldown_ms,
+		admission_enabled: learning.realtime_admission.enabled,
+		max_queue_size: learning.realtime_admission.max_queue_size,
+	};
 }
 
 export function createPrmHook(
@@ -242,8 +281,11 @@ export function createPrmHook(
 			// #1821 AC10: record pattern support for durable persistence.
 			// PLACEMENT IS LOAD-BEARING — this sits AFTER the no-match early return
 			// above, so the overwhelmingly common "tool call produced no pattern"
-			// path (every tool call in a healthy session) costs nothing. It is
-			// in-memory only: no I/O, no lock, no knowledge-store access.
+			// path (every tool call in a healthy session) costs nothing.
+			//
+			// Tallying is in-memory (no I/O, no lock, no knowledge-store access),
+			// but the persistable branch below DOES do a locked append. Support and
+			// cooldown gating keep that rare — see the comment on the append itself.
 			if (patternPersistence?.enabled) {
 				for (const match of detectionResult.matches) {
 					const observation = _internals.recordPatternObservation(
@@ -262,12 +304,37 @@ export function createPrmHook(
 						// drain failure, queue overflow, or process death is gone for good
 						// AND suppressed for the whole cooldown, because
 						// `recordPatternObservation` starts the cooldown at hand-over.
-						await _internals.appendInsightCandidates(directory, [
-							observation.candidate,
-						]);
-						_internals.enqueueCandidate(sessionID, observation.candidate, {
-							maxQueueSize: patternPersistence.max_queue_size,
-						});
+						//
+						// UNCONDITIONAL on `admission_enabled` by design (issue #1821 F3):
+						// this IS the AC8 backstop, so turning real-time admission off must
+						// not turn durable persistence off with it.
+						//
+						// Its own try/catch, NOT the shared outer one (issue #1821 F3):
+						// `appendInsightCandidates` deliberately rethrows a non-ENOENT
+						// failure under its `transactFile` lock, and the outer catch is the
+						// last statement's — an EACCES/ELOCKED there would skip the course
+						// correction push, the hard-stop recording, and the trajectory-cursor
+						// advance below, all while `recordPatternObservation` has already
+						// started the 15-minute cooldown. Warn and continue instead, exactly
+						// as `micro-reflector.ts` does around its own append.
+						try {
+							await _internals.appendInsightCandidates(directory, [
+								observation.candidate,
+							]);
+						} catch (err) {
+							logger.warn(
+								`[prm] insight-candidate append failed (non-fatal): ${
+									err instanceof Error ? err.message : String(err)
+								}`,
+							);
+						}
+						// In-memory enqueue only — the one thing `realtime_admission`
+						// legitimately gates.
+						if (patternPersistence.admission_enabled) {
+							_internals.enqueueCandidate(sessionID, observation.candidate, {
+								maxQueueSize: patternPersistence.max_queue_size,
+							});
+						}
 					}
 				}
 			}

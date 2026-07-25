@@ -22,6 +22,9 @@ import {
 	recordEmittedRecommendations,
 	resolveRecommendationLedgerPath,
 } from '../../../src/services/recommendation-ledger.js';
+import { _test_exports as consensusMineInternals } from '../../../src/tools/consensus-mine.js';
+
+const { buildMinerRecommendationCandidates } = consensusMineInternals;
 
 const PRODUCED_AT = '2026-07-25T12:00:00.000Z';
 
@@ -145,6 +148,80 @@ describe('ledger bounds', () => {
 		expect(entries).toHaveLength(2);
 		// The over-long ref is dropped; the stamp itself still lands.
 		expect(entries[0]?.provenance?.sourceEvidenceRefs).toEqual([]);
+	});
+
+	it('dedupes provenance refs BEFORE capping them (issue #1821 F2)', async () => {
+		// The exact reproduced shape. The miner emits `[...evidenceRefs].sort()`,
+		// so duplicates arrive ADJACENT and FIRST, and `consensus-mine.ts` passes
+		// them straight through to the ledger. With a positional cap and no dedup,
+		// 20 copies of one ref consumed every input slot and the five distinct refs
+		// behind them were dropped — one ref persisted out of six, with 49 of the
+		// schema's 50 slots free.
+		const refs = [
+			...Array.from({ length: 20 }, () => 'evaluation-run:r1:t1:0'),
+			'evaluation-run:r2:t1:0',
+			'evaluation-run:r3:t1:0',
+			'evaluation-run:r4:t1:0',
+			'evaluation-run:r5:t1:0',
+			'evaluation-run:r6:t1:0',
+		].sort();
+		const [minerCandidate] = buildMinerRecommendationCandidates({
+			generatedAt: PRODUCED_AT,
+			proposals: [
+				{
+					target: 'skill',
+					intent: 'Adopt the mined consensus attribute for skill authoring.',
+					evidenceRefs: refs,
+					provenance: {
+						sourceRunIds: ['r1', 'r1', 'r1', 'r2'],
+						sourceModelIds: [],
+						sourceTaskIds: ['t1'],
+					},
+				},
+			],
+		} as never);
+
+		await recordEmittedRecommendations(dir, [minerCandidate]);
+
+		const [entry] = await readRecommendationLedger(dir);
+		expect(entry?.provenance?.sourceEvidenceRefs).toEqual([
+			'evaluation-run:r1:t1:0',
+			'evaluation-run:r2:t1:0',
+			'evaluation-run:r3:t1:0',
+			'evaluation-run:r4:t1:0',
+			'evaluation-run:r5:t1:0',
+			'evaluation-run:r6:t1:0',
+		]);
+		// Duplicates must not consume cap slots on any class.
+		expect(entry?.provenance?.sourceRunIds).toEqual(['r1', 'r2']);
+	});
+
+	it('caps at 20 DISTINCT refs, dropping only the 21st distinct value', async () => {
+		// The cap itself still binds — dedup moved in front of it, it did not
+		// disappear. 30 distinct refs preceded by a run of duplicates must yield
+		// exactly the first 20 distinct values.
+		const refs = [
+			...Array.from({ length: 50 }, () => 'ref:aaa'),
+			...Array.from(
+				{ length: 30 },
+				(_unused, index) => `ref:b${String(index).padStart(3, '0')}`,
+			),
+		];
+		await recordEmittedRecommendations(dir, [
+			candidate({
+				statement: 'A lesson carrying more distinct refs than the cap allows',
+				provenance: { mechanism: 'curator_sweep', sourceRunIds: refs },
+			}),
+		]);
+		const [entry] = await readRecommendationLedger(dir);
+		const persisted = entry?.provenance?.sourceRunIds ?? [];
+		expect(persisted).toHaveLength(20);
+		expect(new Set(persisted).size).toBe(20);
+		// First-wins ordering: the duplicate run's value keeps slot 1, and the
+		// 20th distinct value onward is what the cap drops.
+		expect(persisted[0]).toBe('ref:aaa');
+		expect(persisted).toContain('ref:b018');
+		expect(persisted).not.toContain('ref:b019');
 	});
 
 	it('truncates an over-long target', async () => {

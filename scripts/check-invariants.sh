@@ -376,18 +376,79 @@ echo "=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ==="
 # text filter, so a violating line whose own text mentions ".test.ts:" is still
 # reported.
 #
+# SCOPE (issue #1821 F4). The original four globs covered only the knowledge
+# parse/write surface, so injection testing showed a bare `.slice(0, 20)` EVADED
+# this check in `src/knowledge/entry-merge.ts` — the very file the tag and
+# actionability merge logic was moved into — and in `src/services/`,
+# `src/learning/`, and `src/consensus/`. Those paths are now in scope.
+#
+# PATTERN A is dedup-AWARE as of F4. `[...new Set(xs)].slice(0, 20)` is
+# dedupe-then-truncate, i.e. correct, and the widened scope contains one
+# (`buildPrmPatternCandidate` in src/learning/prm-pattern-support.ts). The
+# receiver — the anchor line joined with up to 6 preceding CODE lines, because
+# Biome wraps a long receiver — is checked for a dedup marker and the hit is
+# skipped when one is present. A bare `xs.slice(0, 20)` is still reported.
+#
+# PATTERN B (issue #1821 F5) catches the accumulator spelling of the same class:
+#
+#     const out: string[] = [];
+#     for (const x of xs) { ...; out.push(x); if (out.length >= 20) break; }
+#
+# which is how BOTH of the F2 defects were written and which Pattern A is blind
+# to. It is deliberately anchored on a `string[]` accumulator: the four other
+# `.length >= N ... break` loops in scope accumulate parsed OBJECTS
+# (`CorpusObservation`, `KnowledgeEvent`, a knowledge entry `T`,
+# `InsightCandidate`) where per-item dedup is meaningless, so an un-anchored
+# version of this rule would report four false positives. A window carrying any
+# dedup marker (`new Set`, `.has(`, `dedupeCapped`) is exempt, which is what
+# clears `dedupeCapped` itself and `sanitizeRefs` — both correct by
+# construction.
+#
+# NOT IMPLEMENTED, deliberately: a NON-LITERAL cap (`.slice(0, CAP)`). The
+# widened scope contains ~20 legitimate `.slice(0, <identifier>)` calls —
+# `normalized.slice(0, maxChars)` (string truncation),
+# `.slice(0, MAX_ENUMERATED_ENTRIES)` / `.slice(0, MAX_LISTED_REPORTS)` /
+# `.slice(0, maxAttributes)` / `allInputIds.slice(0, MAX_CONSENSUS_REFS)` (all
+# over already-deduplicated or non-string lists) — so that variant is a false
+# positive generator on this repo and is left out rather than weakened. Same for
+# `.splice` and `xs.length = 20`, which have no instance here to anchor on.
+#
 # Known residual blind spots (accepted; this is a recurrence tripwire, not a
-# type system): a cap written as a named constant (`.slice(0, TAG_CAP)`), a
-# different constant (`.slice(0, 50)`), a receiver split so wide that `20,`
-# falls outside the 3-code-line window, and files outside the four globs.
+# type system): a literal cap other than 20 (`.slice(0, 50)`), a named-constant
+# cap, a receiver split so wide that `20,` falls outside the 3-code-line window,
+# a capped `push` written as `if (xs.length < CAP) xs.push(...)` rather than an
+# early `break`, an accumulator that is a struct field instead of a local
+# `string[]`, an unrelated `.has(` inside an offending window, and files outside
+# the globs.
 #
 # The scope is also ASSERTED: if a glob or literal path resolves to nothing
 # (file renamed or deleted), that is a hard error rather than a silent drop to
 # zero coverage while still printing "expected 0".
-KNOWLEDGE_DEDUP_SCOPE="src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts"
+#
+# The one exception is a tree where NOT ONE scope entry resolves. That is not a
+# rename — it is the script running outside an opencode-swarm source checkout,
+# which the Check 4 ratchet fixtures (tests/unit/scripts/*.test.ts) do on
+# purpose: they build a temp git repo containing only `scripts/` and an empty
+# `src/`. Failing those runs would report a Check 5 violation for a repository
+# that has no knowledge surface at all. A PARTIAL resolution — some entries
+# present, some missing — is still a hard error, so a real rename or deletion in
+# this repo cannot hide behind the exemption.
+KNOWLEDGE_DEDUP_SCOPE="src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts src/knowledge/*.ts src/learning/*.ts src/services/recommendation-ledger.ts src/consensus/*.ts"
 slice_violations=0
 slice_scanned=0
+slice_resolvable=0
 for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
+  case "$scoped_file" in
+    *.test.ts) continue ;;
+  esac
+  [ -f "$scoped_file" ] && slice_resolvable=$((slice_resolvable + 1))
+done
+if [ "$slice_resolvable" -eq 0 ]; then
+  echo "NOTE: no Check 5 scope entry resolved — not an opencode-swarm source"
+  echo "      checkout (no knowledge surface present). Skipping (non-blocking)."
+fi
+for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
+  [ "$slice_resolvable" -gt 0 ] || break
   case "$scoped_file" in
     *.test.ts) continue ;;
   esac
@@ -410,6 +471,11 @@ for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
   done < <(awk '
     function code_of(s) { sub(/\/\/.*$/, "", s); return s }
     function is_comment(s) { return (s ~ /^[ \t]*(\/\/|\*|\/\*)/) }
+    function squash(s) { gsub(/[ \t]/, "", s); return s }
+    function has_dedup(s) {
+      return (index(s, "newSet") > 0 || index(s, ".has(") > 0 \
+        || index(s, "dedupeCapped") > 0)
+    }
     { line[NR] = $0 }
     END {
       for (i = 1; i <= NR; i++) {
@@ -428,8 +494,95 @@ for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
         }
         gsub(/[ \t]/, "", joined)
         gsub(/,\)/, ")", joined)
-        if (index(joined, ".slice(0,20)") > 0) {
-          printf "%s:%d:%s\n", FILENAME, i, line[i]
+        if (index(joined, ".slice(0,20)") == 0) continue
+        # The RECEIVER decides whether this is the defect. `[...new Set(xs)]
+        # .slice(0, 20)` is dedupe-then-truncate — correct, and the widened F4
+        # scope contains one. Join up to 6 preceding CODE lines (Biome wraps a
+        # long receiver across several) and skip when the expression already
+        # deduplicates.
+        recv = joined
+        taken = 0
+        for (k = i - 1; k >= 1 && taken < 6; k--) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          recv = piece recv
+        }
+        if (has_dedup(recv)) continue
+        printf "%s:%d:%s\n", FILENAME, i, line[i]
+      }
+    }
+  ' "$scoped_file" || true)
+  # --- Pattern B: capped `string[]` accumulator with no dedup (issue #1821 F5)
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    echo "ERROR: $hit"
+    echo "       Capped string[] accumulator with no dedup — a run of duplicates"
+    echo "       evicts distinct values off the end (truncate-then-dedupe)."
+    echo "       Dedupe BEFORE the cap: use dedupeCapped() from"
+    echo "       src/hooks/knowledge-store.ts, or guard the push with a seen Set."
+    slice_violations=$((slice_violations + 1))
+    violations=$((violations + 1))
+  done < <(awk '
+    function code_of(s) { sub(/\/\/.*$/, "", s); return s }
+    function is_comment(s) { return (s ~ /^[ \t]*(\/\/|\*|\/\*)/) }
+    function squash(s) { gsub(/[ \t]/, "", s); return s }
+    function has_dedup(s) {
+      return (index(s, "newSet") > 0 || index(s, ".has(") > 0 \
+        || index(s, "dedupeCapped") > 0)
+    }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (is_comment(line[i])) continue
+        decl = code_of(line[i])
+        # Anchor: a local string[] accumulator initialized empty.
+        if (decl !~ /(^|[^A-Za-z0-9_$])(const|let)[ \t]/) continue
+        if (decl !~ /:[ \t]*string\[\][ \t]*=[ \t]*\[\]/) continue
+        name = decl
+        sub(/^[ \t]*/, "", name)
+        sub(/^(const|let)[ \t]+/, "", name)
+        sub(/[ \t]*:.*$/, "", name)
+        if (name == "") continue
+
+        # Five CODE lines back: the `const seen = new Set(...)` idiom is
+        # conventionally declared just above its accumulator.
+        dedup = 0
+        taken = 0
+        for (k = i - 1; k >= 1 && taken < 5; k--) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          if (has_dedup(piece)) dedup = 1
+        }
+
+        # Forward window: 30 CODE lines. Look for `<name>.length >= …` joined
+        # with a `break` within 2 further code lines, and for any dedup marker.
+        capped = 0
+        taken = 0
+        for (k = i + 1; k <= NR && taken < 30; k++) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          if (has_dedup(piece)) dedup = 1
+          if (capped == 0 && index(piece, name ".length>=") > 0) {
+            joined = piece
+            inner = 0
+            for (m = k + 1; m <= NR && inner < 2; m++) {
+              if (is_comment(line[m])) continue
+              nxt = squash(code_of(line[m]))
+              if (nxt == "") continue
+              joined = joined nxt
+              inner++
+            }
+            if (index(joined, "break") > 0) { capped = k }
+          }
+        }
+        if (capped > 0 && dedup == 0) {
+          printf "%s:%d:%s\n", FILENAME, capped, line[capped]
         }
       }
     }

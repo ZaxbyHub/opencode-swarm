@@ -395,20 +395,42 @@ function serializeLedger(entries: RecommendationLedgerEntry[]): string {
 }
 
 /**
- * Trim, drop empty / NUL-bearing / over-long refs, and cap the count *before*
- * `stampLearningProvenance` sees them. Its Zod schema rejects an over-long ref
- * by throwing, and that throw would otherwise take the whole batch's dedup down
- * with it.
+ * Trim, drop empty / NUL-bearing / over-long refs, DEDUPLICATE, and only then
+ * cap — the same truncate → dedupe → cap order `dedupeCapped`
+ * (`src/hooks/knowledge-store.ts`) enforces, and for the same reason.
+ *
+ * The cap runs before `stampLearningProvenance` sees the list because its Zod
+ * schema rejects an over-long ref by throwing, and that throw would otherwise
+ * take the whole batch's dedup down with it.
+ *
+ * DEDUP MUST PRECEDE THE CAP (issue #1821 F2). `stampLearningProvenance`
+ * dedupes too, but only *after* this function has already cut the list, so a
+ * positional cap here is truncate-then-dedupe: a run of duplicates evicts every
+ * distinct ref behind it. That is not theoretical — the miner emits
+ * `[...tally.evidenceRefs].sort()` (`src/consensus/miner.ts`), so duplicates
+ * arrive adjacent and first, and 25 refs carrying 6 distinct values persisted
+ * exactly ONE with 49 of the schema's 50 slots free.
+ *
+ * `dedupeCapped` is deliberately NOT reused: it dedupes on a case-INSENSITIVE
+ * key and TRUNCATES over-long items, both wrong for opaque provenance
+ * references (`run-A` and `run-a` are different runs; a 600-char ref is
+ * malformed, not shortenable). Only its ordering is mirrored.
+ *
+ * Dedup preserves input order, so the early exit at the top of the loop is
+ * identical to filter → dedupe → `slice(0, MAX_REFS_PER_CLASS_INPUT)`.
  */
 function sanitizeRefs(refs: string[] | undefined): string[] | undefined {
 	if (refs === undefined) return undefined;
+	const seen = new Set<string>();
 	const cleaned: string[] = [];
 	for (const ref of refs) {
+		if (cleaned.length >= MAX_REFS_PER_CLASS_INPUT) break;
 		const trimmed = ref.trim();
 		if (trimmed.length === 0 || trimmed.length > MAX_REF_CHARS) continue;
 		if (trimmed.includes('\0')) continue;
+		if (seen.has(trimmed)) continue;
+		seen.add(trimmed);
 		cleaned.push(trimmed);
-		if (cleaned.length >= MAX_REFS_PER_CLASS_INPUT) break;
 	}
 	return cleaned;
 }

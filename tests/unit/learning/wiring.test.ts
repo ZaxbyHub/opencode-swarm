@@ -212,6 +212,10 @@ describe('createPrmHook — pattern persistence placement', () => {
 		enabled: true,
 		min_support: 1,
 		cooldown_ms: 0,
+		// #1821 F3: real-time admission gates ONLY the enqueue. The durable
+		// backstop's independence from it is covered in
+		// `prm-durable-backstop.test.ts`.
+		admission_enabled: true,
 		max_queue_size: 50,
 	};
 
