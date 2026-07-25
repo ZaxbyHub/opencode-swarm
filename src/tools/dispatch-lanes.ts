@@ -1311,7 +1311,8 @@ async function launchAsyncLane(args: {
 			jobId: null,
 			subagentSessionId: sessionId,
 			parentSessionId:
-				args.context.sessionID ?? `dispatch_lanes_async:${args.batchId}`,
+				args.context.sessionID?.trim() ||
+				`dispatch_lanes_async:${args.batchId}`,
 			callID: args.batchId,
 			normalizedAgent: role,
 			swarmPrefixedAgent: args.lane.agent,
