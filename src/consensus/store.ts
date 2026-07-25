@@ -9,11 +9,17 @@
  * three parameters that pipeline deliberately leaves to its callers: the lock
  * actor, the canonical serializer, and the conflict-error factory.
  *
- * Idempotence has one wrinkle a report has and a run does not: `generatedAt` is
- * a wall clock. Two mining runs over an identical corpus produce byte-identical
- * reports except for that timestamp, so an `isEquivalent` escape hatch treats
- * them as the same artifact — exactly how `savePromotionDecision` handles
- * `decidedAt`. A report that differs in any *content* field still conflicts.
+ * Idempotence has three wrinkles a report has and a run does not, all reachable
+ * under the DEFAULT configuration. Two mining runs over an identical corpus
+ * produce reports that differ in `generatedAt` (a wall clock), in each
+ * proposal's `provenance.writeOrigin` (the `producedAt` clock plus the
+ * `sessionId` / `agentRole` / `agentId` of whoever ran the mine), and — because
+ * `llm_summarization_enabled` defaults to `true` — in each attribute's
+ * `llmSummary`, which is model prose and is not reproducible. All three are
+ * excluded from `integrityHash`, so an `isEquivalent` escape hatch comparing
+ * recomputed hashes treats such reports as the same artifact, exactly how
+ * `savePromotionDecision` handles `decidedAt`. A report that differs in any
+ * *content* field still conflicts.
  */
 
 import { readdir, unlink } from 'node:fs/promises';

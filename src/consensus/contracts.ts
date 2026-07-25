@@ -141,7 +141,9 @@ export interface ConsensusAttributeV1 {
 	id: string;
 	statement: string;
 	/**
-	 * Optional single-sentence LLM restatement of `statement`.
+	 * Optional LLM restatement of `statement`, admitted only through the miner's
+	 * `FINDING:` whitelist: one sentence, no bracket markup, no reasoning marker,
+	 * and within `MAX_CONSENSUS_STATEMENT_CHARS` without being trimmed to fit.
 	 *
 	 * Separate from `statement`, and **excluded from `integrityHash`**, for one
 	 * reason: `llm_summarization_enabled` defaults to `true`, and a model's
@@ -404,12 +406,17 @@ const ConsensusTruncationV1Schema = z
  * One immutable mining report under `.swarm/evolution/consensus/<reportId>.json`.
  *
  * `integrityHash` covers every field EXCEPT `integrityHash`, `reportId`,
- * `generatedAt`, each proposal's `provenance.writeOrigin.producedAt`, and each
- * attribute's `llmSummary`. The first four are wall clocks or derived from the
- * hash itself; `llmSummary` is excluded because it is non-reproducible model
- * prose and `llm_summarization_enabled` defaults to `true` — hashing it would
- * make "same inputs ⇒ identical hash" false in the default configuration. See
- * `computeConsensusIntegrityHash`.
+ * `generatedAt`, each proposal's ENTIRE `provenance.writeOrigin` — `producedAt`
+ * *and* `sessionId` / `agentRole` / `agentId` — and each attribute's
+ * `llmSummary`. Each exclusion has its own reason: `integrityHash` cannot cover
+ * itself and `reportId` is derived from it, so both would be circular;
+ * `generatedAt` and `producedAt` are wall clocks; the `writeOrigin` identity
+ * fields say *who* ran the mine, which must not be able to change what the mine
+ * found (`sessionId` comes from `ctx.sessionID`, so while it was hashed two
+ * sessions mining a byte-identical corpus produced two different reports); and
+ * `llmSummary` is non-reproducible model prose that `llm_summarization_enabled`
+ * turns on by default, so hashing it would make "same inputs ⇒ identical hash"
+ * false in the default configuration. See `computeConsensusIntegrityHash`.
  */
 export interface ConsensusReportV1 {
 	v: 1;
@@ -505,12 +512,31 @@ export const ConsensusReportV1Schema = z
  * a widened type on either side becomes a type error here rather than a runtime
  * surprise at the store boundary.
  *
- * These four are `export`ed with no importer ON PURPOSE, and are the only such
- * exports left in this subsystem. They are type-level assertions, not API: the
- * `export` is what keeps them from reading as unused locals, and they are erased
- * entirely at build time. Every other export here has a real consumer in `src/`
- * or `tests/` — the dead barrel and the unreferenced sub-schemas that used to
- * feed it were removed rather than left standing.
+ * These four are `export`ed with no importer ON PURPOSE. They are type-level
+ * assertions, not API: the `export` is what keeps them from reading as unused
+ * locals, and they are erased entirely at build time.
+ *
+ * ## Declared export carve-out for the whole subsystem
+ *
+ * Those four are not the only exports in `src/consensus/` with no by-name
+ * importer. Eight more have none either:
+ *
+ * - `KnowledgeLike` and `LoadCorpusOptions` (`./corpus.ts`)
+ * - `MineConsensusResult` and `ConsensusReportIntegrityInput` (`./miner.ts`)
+ * - `MineAndStoreConsensusOptions` / `MineAndStoreConsensusResult`
+ *   (`./public-api.ts`)
+ * - `ConsensusListSummary` and `ConsensusPruneResult` (`./store.ts`)
+ *
+ * They stay exported, and the distinction from the deleted `consensusV1`
+ * namespace and `index.ts` barrel is deliberate rather than convenient: those
+ * were dead RUNTIME VALUES — a public API surface nothing wired — whereas every
+ * type above is the declared parameter or return shape of an exported function
+ * (`loadConsensusCorpus`, `mineConsensus`, `computeConsensusIntegrityHash`,
+ * `mineAndStoreConsensusV1`, `listConsensusReports`, `pruneConsensusReports`) or
+ * a field type of an exported interface (`CorpusReaders`). A caller cannot
+ * annotate a variable holding one of those results without them, and hiding them
+ * would break `declaration`-emitting builds. Deleting a type that an exported
+ * signature already hands out removes a name, not a surface.
  */
 type AssertAssignable<Actual extends Expected, Expected> = Actual;
 

@@ -1,18 +1,23 @@
 /**
- * The restatement guard — "chain-of-thought is NEVER persisted" (#1821 AC18).
+ * The restatement guard — what model prose may reach disk (#1821 AC18).
  *
- * The claim under test is absolute, so the implementation cannot be a soft
- * prompt plus a scrub. `SUMMARIZATION_SYSTEM` asks for one sentence; a model is
- * free to ignore it. `sanitizeExcerpt` only redacts secrets, collapses control
- * characters, and truncates — none of which removes reasoning. Before the guard
- * existed, a dispatcher returning `"Reasoning: the model thought hard. Answer:
- * ..."` was persisted verbatim into `attributes[].statement`.
+ * The property is not "a model can never narrate": one admitted sentence can
+ * read as narration, and pretending otherwise is how the previous version of
+ * this file passed while a four-sentence chain of thought was being persisted.
+ * The property is that model output reaches disk ONLY through a `FINDING:`
+ * envelope whose captured sentence carries no bracket markup, no reasoning
+ * marker, no interior sentence terminator, and no truncation — so a reasoning
+ * TRACE cannot be persisted, and what can is one bounded sentence per attribute.
  *
- * So the guard is a WHITELIST: model output reaches disk only through a
- * validated single-sentence `FINDING:` envelope. Every test below drives the
- * REAL miner with an adversarial dispatcher and asserts on the REAL report, not
- * on a helper — a guard tested through its own extractor could pass while the
- * miner called something else.
+ * That has to be a whitelist. `SUMMARIZATION_SYSTEM` asks for one sentence; a
+ * model is free to ignore it. `sanitizeExcerpt` only redacts secrets, collapses
+ * control characters, and truncates — none of which removes reasoning. Before
+ * the guard existed, a dispatcher returning `"Reasoning: the model thought hard.
+ * Answer: ..."` was persisted verbatim into `attributes[].statement`.
+ *
+ * Every test below drives the REAL miner with an adversarial dispatcher and
+ * asserts on the REAL report, not on a helper — a guard tested through its own
+ * extractor could pass while the miner called something else.
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -94,11 +99,26 @@ describe('restatement guard — reasoning is rejected outright', () => {
 			'FINDING: <scratchpad>step 1, step 2</scratchpad> Scoring succeeded.',
 		],
 		['a stray closing tag', 'FINDING: Scoring succeeded.</think>'],
+		[
+			'a square-bracket scratchpad',
+			'FINDING: [think] I counted them one by one [/think] Scoring succeeded.',
+		],
+		[
+			'a CJK-bracket scratchpad',
+			// U+3010/U+3011 are the CJK bracket form of `[think]`. Escaped
+			// rather than embedded literally so this file stays plain text.
+			'FINDING: \u3010think\u3011 I counted them one by one Scoring succeeded.',
+		],
+		[
+			'a brace scratchpad',
+			'FINDING: {think} I counted them one by one {/think} Scoring succeeded.',
+		],
 	])('rejects %s — the envelope is line-scoped, so markup must be', async (_label, text) => {
 		// The bypass this closes: the envelope matches a LINE, so a reasoning block
 		// on the same line lands inside the captured group and would be persisted
 		// verbatim. Rejecting outright beats stripping tags — a restatement of a
-		// statistical finding has no legitimate need for markup.
+		// statistical finding has no legitimate need for markup. Angle brackets
+		// alone left `[think]`, `{think}`, and the CJK bracket form wide open.
 		const result = await mineWith(text);
 		expect(result.summarizedCount).toBe(0);
 		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
@@ -169,24 +189,92 @@ describe('restatement guard — the envelope is a whitelist, not a filter', () =
 	});
 });
 
-describe('restatement guard — structural bounds', () => {
-	test('rejects a multi-sentence restatement rather than keeping the first', async () => {
-		// Keeping only sentence one would be a scrub. The contract is one sentence;
-		// anything else is non-compliant output and the deterministic statement
-		// stands.
+describe('restatement guard — the single-sentence bound is a whitelist', () => {
+	// Every case in this describe is isolated to `isSingleSentence`: none carries
+	// markup, none trips a reasoning marker, and none exceeds the length bound. If
+	// the guard is reverted to the old "terminator + whitespace + ASCII capital"
+	// boundary detector, every test here fails — which is the point. The previous
+	// version of this file used
+	// `'Scoring succeeded. My reasoning follows from the counts.'`, rejected by
+	// BOTH the capital-`M` branch and the word `reasoning`, so it passed while the
+	// property it named was false.
+
+	test('the four-sentence reproduction is rejected, not persisted', async () => {
+		// Verbatim from the adversarial re-review. No angle bracket;
+		// REASONING_MARKER_RE matches `step-by-step` (not `step one`) and
+		// `i will` / `i need to` (not `i enumerate` / `i count` / `i divide`). The
+		// single-sentence bound is the only thing between this chain of thought and
+		// the report file, and the old bound let all four sentences through.
 		const result = await mineWith(
-			finding('Scoring succeeded. My reasoning follows from the counts.'),
+			finding(
+				'first i enumerate the runs that carried the signal. then i count how many ' +
+					'of them passed. then i divide to get the rate and round it. so the ' +
+					'conclusion is that the scoring signal holds.',
+			),
 		);
+		expect(result.summarizedCount).toBe(0);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
+		const persisted = persistedText(result.report);
+		expect(persisted).not.toContain('i enumerate');
+		expect(persisted).not.toContain('i divide');
+	});
+
+	test.each([
+		[
+			'a lower-case word',
+			'Scoring succeeded. the tallies were compared afterwards.',
+		],
+		[
+			'no space at all after the period',
+			'Scoring succeeded.Then the tallies were compared.',
+		],
+		['a digit', 'Scoring succeeded. 42 runs were tallied afterwards.'],
+		[
+			'a quotation mark',
+			'Scoring succeeded. "the tallies" were compared afterwards.',
+		],
+		// Escaped rather than embedded literally so this file stays plain text.
+		[
+			'a non-ASCII capital',
+			'Scoring succeeded. \u00c9tape deux compte les runs.',
+		],
+		['a lower-case word after "?"', 'Did scoring succeed? both runs say yes.'],
+		['a lower-case word after "!"', 'Scoring succeeded! both runs agree.'],
+	])('rejects a second sentence beginning with %s', async (_label, sentence) => {
+		const result = await mineWith(finding(sentence));
 		expect(result.summarizedCount).toBe(0);
 		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
 	});
 
+	test('the case the OLD bound caught stays caught', async () => {
+		// A regression guard on the other side: replacing the boundary detector
+		// with a whitelist must not lose the one shape it did handle.
+		const result = await mineWith(
+			finding('Scoring succeeded. Both runs were compared afterwards.'),
+		);
+		expect(result.summarizedCount).toBe(0);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
+	});
+});
+
+describe('restatement guard — structural bounds', () => {
 	test('an abbreviation does not count as a sentence break', async () => {
 		const result = await mineWith(
 			finding('Scoring succeeded on both tasks, e.g. the refactor pair.'),
 		);
 		expect(result.report.attributes[0]?.llmSummary).toBe(
 			'Scoring succeeded on both tasks, e.g. the refactor pair.',
+		);
+	});
+
+	test('a decimal point does not count as a sentence break', async () => {
+		// The whitelist masks exactly two constructs. Both need a test, or the
+		// allowlist is one regex edit away from silently disappearing.
+		const result = await mineWith(
+			finding('Scoring succeeded on 0.8 of the observed runs.'),
+		);
+		expect(result.report.attributes[0]?.llmSummary).toBe(
+			'Scoring succeeded on 0.8 of the observed runs.',
 		);
 	});
 
@@ -219,14 +307,18 @@ describe('restatement guard — structural bounds', () => {
 
 	test.each([
 		['a lone carriage return', '\r'],
+		['a CRLF pair', '\r\n'],
 		['a vertical tab', '\v'],
 		['a form feed', '\f'],
+		['a next line (U+0085)', '\u0085'],
 		['a Unicode line separator', '\u2028'],
 		['a Unicode paragraph separator', '\u2029'],
 	])('content after %s cannot ride along inside the envelope', async (_label, separator) => {
 		// JavaScript's `.` excludes only `\n`, so splitting on `/\r?\n/` alone
 		// would leave everything after one of these INSIDE the captured group,
 		// and `sanitizeExcerpt` would flatten it into the retained sentence.
+		// U+0085 is the one JavaScript's `\s` does not match either, so it cannot
+		// be covered incidentally \u2014 the split set names it explicitly.
 		const result = await mineWith(
 			`FINDING: Scoring succeeded.${separator}I counted them one by one and then compared.`,
 		);

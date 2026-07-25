@@ -5,13 +5,18 @@
  * exactly one caller exists: `src/tools/consensus-mine.ts`. It previously also
  * exported a frozen callable `consensusV1` namespace mirroring
  * `src/evaluation/public-api.ts`, together with a `src/consensus/index.ts`
- * barrel. Neither had a single importer anywhere in `src/`, `tests/`, or
- * `scripts/`, and the evaluation precedent did not apply: that barrel IS
- * consumed (`src/index.ts` re-exports `evaluationV1`), whereas nothing ever
- * wired consensus into the plugin entry. Both were removed rather than left as
- * dead exports (see the "never ship unwired code" directive in `CLAUDE.md`).
- * If a future consumer needs a versioned namespace, reintroduce it together with
- * that consumer.
+ * barrel. Both were dead RUNTIME VALUES — a public API surface with no importer
+ * anywhere in `src/`, `tests/`, or `scripts/` — and the evaluation precedent did
+ * not apply: that barrel IS consumed (`src/index.ts` re-exports `evaluationV1`),
+ * whereas nothing ever wired consensus into the plugin entry. Both were removed
+ * rather than left standing (see the "never ship unwired code" directive in
+ * `CLAUDE.md`). If a future consumer needs a versioned namespace, reintroduce it
+ * together with that consumer.
+ *
+ * The two type aliases below have no by-name importer either, and are kept for a
+ * different and declared reason: they are the parameter and return shapes of
+ * `mineAndStoreConsensusV1` itself, so they are already handed out by its
+ * signature. See the export carve-out note at the bottom of `./contracts.ts`.
  */
 
 import type { ConsensusMineRequest, ConsensusReportV1 } from './contracts.js';

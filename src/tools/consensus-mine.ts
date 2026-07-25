@@ -9,9 +9,9 @@
  *
  * It writes two artifacts. The first is the report under
  * `.swarm/evolution/consensus/<reportId>.json`, plus retention deletions of
- * *its own* prior reports. The second is the shared cross-producer dedup ledger
- * (issue #1821 AC21), which gains one entry per emitted proposal EXCEPT where
- * another producer already claimed the same recommendation — those are counted
+ * *its own* prior reports. The second is the shared dedup ledger (issue #1821
+ * AC21), which gains one entry per emitted proposal EXCEPT where the ledger
+ * already carries that recommendation's cross-producer key — those are counted
  * as `cross_producer_duplicate_count` instead — and which is rewritten whole,
  * with FIFO eviction, on each append. The ledger normally lives at
  * `.swarm/learning/recommendation-ledger.jsonl`, but its root is
@@ -19,9 +19,15 @@
  * shared cohort root rather than this project's `.swarm/`.
  *
  * Incidental filesystem effects come with those two writes — the consensus
- * directory itself, and lock sentinels under `.swarm/locks/` for the immutable
- * write and the ledger transaction. What the tool does NOT do is mutate any of
- * the evidence it reads. That is a chosen property, not a free one:
+ * directory itself, and one lock per write. Those two locks live in DIFFERENT
+ * places: the report goes through `withEvidenceLock`, whose sentinel is under
+ * this project's `.swarm/locks/`, while the ledger goes through `transactFile`,
+ * which locks the ledger's own containing directory and therefore produces
+ * `<resolveKnowledgeStoreDir(directory)>/learning.lock` — outside this project's
+ * `.swarm/` entirely whenever a knowledge link is active.
+ *
+ * What the tool does NOT do is mutate any of the evidence it reads. That is a
+ * chosen property, not a free one:
  * `loadEvidence` upgrades a legacy flat retrospective in place by default, so
  * `src/consensus/corpus.ts` binds it with `{ migrate: false }`. Without that, a
  * mining run would rewrite evidence bundles — and remap their legacy
@@ -43,6 +49,7 @@ import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { ConsensusConfigSchema } from '../config/schema';
 import type {
+	ConsensusAttributeV1,
 	ConsensusMineRequest,
 	ConsensusReportV1,
 } from '../consensus/contracts';
@@ -66,6 +73,32 @@ const FilterListSchema = z
 
 /** Attributes echoed back inline. The full set always lives in the report. */
 const MAX_INLINE_ATTRIBUTES = 25;
+
+/**
+ * Reconcile the summary counters with what the inline echo actually shows.
+ *
+ * These are two different orderings and they do not line up. Restatements are
+ * spent on the top `MAX_LLM_SUMMARIES` attributes by CONFIDENCE
+ * (`src/consensus/miner.ts`), while the echo below is the first
+ * `MAX_INLINE_ATTRIBUTES` in canonical SIGNAL order. With confidence inverted
+ * relative to signal order, a report can print `summarized_count: 20` while zero
+ * `llm_summary` values are visible — which is exactly what "the count always
+ * agrees with the values echoed alongside it" used to claim was impossible.
+ * `hidden` is what makes the discrepancy legible instead of mysterious.
+ */
+function countSummaries(
+	attributes: readonly ConsensusAttributeV1[],
+	inlineLimit: number,
+): { total: number; hidden: number } {
+	let total = 0;
+	let shown = 0;
+	for (const [index, attribute] of attributes.entries()) {
+		if (attribute.llmSummary === undefined) continue;
+		total += 1;
+		if (index < inlineLimit) shown += 1;
+	}
+	return { total, hidden: total - shown };
+}
 
 /**
  * Describe the miner's emissions to the cross-producer dedup ledger
@@ -106,9 +139,16 @@ function buildMinerRecommendationCandidates(
 /**
  * Pure-function seam for tests (writing-tests SKILL.md, Tier 0). Exported so a
  * cross-producer dedup test can build the miner's ledger candidates through the
- * same code the tool runs instead of restating the mapping.
+ * same code the tool runs instead of restating the mapping, and so the
+ * summary-counter reconciliation can be asserted at the ordering that produces
+ * it — 20 summarized attributes with none visible — rather than only at the
+ * degenerate all-zero case a dispatcher-less run reaches.
  */
-export const _test_exports = { buildMinerRecommendationCandidates };
+export const _test_exports = {
+	buildMinerRecommendationCandidates,
+	countSummaries,
+	MAX_INLINE_ATTRIBUTES,
+};
 
 export const consensus_mine: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -117,8 +157,8 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 			'trajectories, skill usage, knowledge outcomes, evidence bundles) and persist an immutable ' +
 			'report of agreed-upon attributes plus proposals-only recommendations. Reads and proposes; ' +
 			'never activates a skill, writes knowledge, edits a project file, or mutates any evidence it ' +
-			'reads. Its only writes are its own immutable report and an entry per proposal in the shared ' +
-			'recommendation dedup ledger.',
+			'reads. Its only writes are its own immutable report and one entry in the shared recommendation ' +
+			'dedup ledger per proposal the ledger does not already carry.',
 		args: {
 			run_ids: FilterListSchema.optional().describe(
 				'Restrict mining to these run ids (raw or namespaced). Omit for all runs.',
@@ -240,8 +280,15 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 			// by the time proposals exist the report is already written; the miner
 			// therefore keeps its own report-derived `priorFingerprints` for
 			// within-producer dedup and cannot itself be suppressed by a
-			// curator/improver emission. `cross_producer_duplicate_count` below makes
-			// that overlap visible rather than silent.
+			// curator/improver emission.
+			//
+			// `cross_producer_duplicate_count` below counts ledger-key collisions, and
+			// the ledger key is deliberately producer-agnostic (it drops `kind`), so
+			// "another producer" is NOT what it measures. The miner's own earlier
+			// emissions collide with it too: report retention defaults to 50 while the
+			// ledger keeps 500, and `priorFingerprints` only reads reports that still
+			// exist, so once a report is pruned its proposals are re-derived, re-emitted
+			// — and then matched against the miner's own surviving ledger entries.
 			const ledger = await recordEmittedRecommendations(
 				directory,
 				buildMinerRecommendationCandidates(report, ctx?.sessionID),
@@ -251,6 +298,18 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 			const pruned = await pruneConsensusReports(
 				directory,
 				config.report_retention,
+			);
+			// `report_retention: 0` DISABLES pruning, so `pruneConsensusReports`
+			// returns early with three empty arrays: nothing was deleted, and nothing
+			// was enumerated either. Printing `retained: 0` there would tell the model
+			// every report had been discarded, which is the exact opposite of what
+			// happened. There is no retained count to print in that mode, so the field
+			// is omitted and the mode is declared instead.
+			const pruningEnabled = config.report_retention > 0;
+
+			const summaries = countSummaries(
+				report.attributes,
+				MAX_INLINE_ATTRIBUTES,
 			);
 
 			return JSON.stringify(
@@ -293,17 +352,22 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 					proposal_count: report.proposals.length,
 					deduped_proposal_count: result.dedupedProposalCount,
 					cross_producer_duplicate_count: ledger.suppressed,
-					// Derived from the PERSISTED report, so it always agrees with the
-					// `llm_summary` values echoed below. `result.summarizedCount` counts
-					// restatements THIS run accepted, which can differ: an immutable
-					// re-mine returns the already-stored artifact (`llmSummary` sits
-					// outside the integrity hash, so a differing restatement is not a
-					// conflict) and this run's restatements are discarded. Reporting the
-					// run's count beside the stored report's text would show a number
-					// that matches nothing the caller can see.
-					summarized_count: report.attributes.filter(
-						(attribute) => attribute.llmSummary !== undefined,
-					).length,
+					// Derived from the PERSISTED report, not from this run.
+					// `result.summarizedCount` counts restatements THIS run accepted,
+					// which can differ: an immutable re-mine returns the already-stored
+					// artifact (`llmSummary` sits outside the integrity hash, so a
+					// differing restatement is not a conflict) and this run's restatements
+					// are discarded. Reporting the run's count beside the stored report's
+					// text would show a number that matches nothing the caller can see.
+					summarized_count: summaries.total,
+					// How many of those sit OUTSIDE the inline echo below. Zero whenever
+					// the report has `MAX_INLINE_ATTRIBUTES` attributes or fewer; above
+					// that it can reach `summarized_count` in full, because restatements
+					// go to the highest-confidence attributes while the echo is the first
+					// slice in signal order and the two orderings are independent. Read a
+					// `summarized_count` with no visible `llm_summary` as "they are in the
+					// report file", not as a contradiction.
+					summarized_but_not_shown: summaries.hidden,
 					restatements_accepted_this_run: result.summarizedCount,
 					...(result.summarizationSkippedReason
 						? {
@@ -317,7 +381,8 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 							// The deterministic rendering is always authoritative. The
 							// optional model restatement is echoed beside it, never in
 							// place of it, and is absent unless it passed the miner's
-							// single-sentence `FINDING:` guard.
+							// `FINDING:` whitelist — one sentence, no bracket markup, no
+							// reasoning marker, and no trimming to fit the length bound.
 							statement: attribute.statement,
 							...(attribute.llmSummary
 								? { llm_summary: attribute.llmSummary }
@@ -333,12 +398,20 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 						})),
 					attributes_truncated:
 						report.attributes.length > MAX_INLINE_ATTRIBUTES,
-					retention: {
-						configured: config.report_retention,
-						deleted: pruned.deleted.length,
-						retained: pruned.retained.length,
-						failed: pruned.failed.length,
-					},
+					retention: pruningEnabled
+						? {
+								configured: config.report_retention,
+								pruning_enabled: true,
+								deleted: pruned.deleted.length,
+								retained: pruned.retained.length,
+								failed: pruned.failed.length,
+							}
+						: {
+								configured: config.report_retention,
+								pruning_enabled: false,
+								deleted: 0,
+								failed: 0,
+							},
 					// Every string here is asserted by a test, because these are printed
 					// into the model's context and are read as facts. A guarantee the
 					// code does not actually deliver is worse than no guarantee at all.

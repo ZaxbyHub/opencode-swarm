@@ -36,11 +36,16 @@
  *   sessions mining the same corpus forked the artifact too; the hash now
  *   excludes the whole `writeOrigin`. `statement` is always the deterministic
  *   rendering, and who ran the mine cannot change what the mine found.
- * - **No persisted chain-of-thought.** `SUMMARIZATION_SYSTEM` is a request, not a
- *   filter, and `sanitizeExcerpt` only redacts secrets, collapses control
- *   characters, and truncates. `extractRestatement` is the actual guard: model
- *   output can only reach disk through a validated single-sentence `FINDING:`
- *   envelope (issue #1821 AC18).
+ * - **Model prose reaches disk only as one bounded sentence.**
+ *   `SUMMARIZATION_SYSTEM` is a request, not a filter, and `sanitizeExcerpt`
+ *   only redacts secrets, collapses control characters, and truncates.
+ *   `extractRestatement` is the actual guard: model output can only reach disk
+ *   through a `FINDING:` envelope whose captured sentence carries no bracket or
+ *   angle-bracket markup, no reasoning marker, no interior sentence terminator,
+ *   and no truncation (issue #1821 AC18). That keeps a reasoning *trace* out of
+ *   the artifact. It is not a claim that the single admitted sentence can never
+ *   read as narration — one sentence can, and the guard bounds it rather than
+ *   pretending otherwise.
  */
 
 import type { ConsensusConfig } from '../config/schema.js';
@@ -101,7 +106,11 @@ export interface MineConsensusDeps {
 	/** Corpus loader override. Defaults to the real read-only loader. */
 	loadCorpus?: (
 		directory: string,
-		options: { maxEvidenceItems: number; maxExcerptChars: number },
+		options: {
+			maxEvidenceItems: number;
+			maxExcerptChars: number;
+			filter?: (observation: CorpusObservation) => boolean;
+		},
 	) => Promise<ConsensusCorpus>;
 	/**
 	 * Optional LLM dispatcher. Absent ⇒ deterministic statements are kept.
@@ -151,18 +160,25 @@ export interface MineConsensusResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Apply the request's filters.
+ * Build the request's filter predicate once.
  *
  * Each filter is an intersection over a *declared* field: an observation whose
  * `modelId` is absent is excluded by a `modelIds` filter rather than passed
  * through, because "no model recorded" is not evidence that the requested model
  * was involved. `runIds` matches either the raw id or the namespaced corpus id
  * (`evaluation-run:<id>`), so a caller can pass the run id it already knows.
+ *
+ * Returned as a predicate rather than applied in place because it is needed
+ * TWICE, from one definition: `loadConsensusCorpus` applies it per source so the
+ * `maxEvidenceItems` budget is spent on observations that can actually survive
+ * (narrowing a request therefore widens the budget instead of shrinking an
+ * already-truncated corpus), and `mineConsensus` applies it again to whatever
+ * `deps.loadCorpus` returned, because an injected loader is under no obligation
+ * to honour the option.
  */
-function filterObservations(
-	observations: readonly CorpusObservation[],
+function buildObservationFilter(
 	request: ConsensusMineRequest,
-): CorpusObservation[] {
+): (observation: CorpusObservation) => boolean {
 	const runIds = request.runIds ? new Set(request.runIds) : undefined;
 	const categories = request.taskCategories
 		? new Set(request.taskCategories)
@@ -170,7 +186,7 @@ function filterObservations(
 	const roles = request.agentRoles ? new Set(request.agentRoles) : undefined;
 	const models = request.modelIds ? new Set(request.modelIds) : undefined;
 
-	return observations.filter((observation) => {
+	return (observation) => {
 		if (runIds) {
 			const bare = observation.runId.slice(observation.runId.indexOf(':') + 1);
 			if (!runIds.has(observation.runId) && !runIds.has(bare)) return false;
@@ -200,7 +216,7 @@ function filterObservations(
 			}
 		}
 		return true;
-	});
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -657,14 +673,18 @@ const RESTATEMENT_ENVELOPE_RE = /^\s*FINDING:\s*(\S.*)$/;
 /**
  * Every character a renderer may treat as a line break — not just `\n`.
  *
- * Splitting on `\r?\n` alone leaves a lone `\r`, a vertical tab, a form feed, or
- * a Unicode line/paragraph separator INSIDE what the envelope regex sees as one
- * line (JavaScript's `.` excludes only `\n`). Content after such a separator
- * would then ride along inside the captured group, and `sanitizeExcerpt` would
- * quietly flatten it into the retained sentence — defeating the whole point of
- * accepting only one line.
+ * Splitting on `\r?\n` alone leaves a lone `\r`, a vertical tab, a form feed, a
+ * next line (U+0085), or a Unicode line/paragraph separator INSIDE what the
+ * envelope regex sees as one line (JavaScript's `.` excludes only `\n`). Content
+ * after such a separator would then ride along inside the captured group, and
+ * `sanitizeExcerpt` would quietly flatten it into the retained sentence —
+ * defeating the whole point of accepting only one line.
+ *
+ * The set is every character Unicode UAX #14 treats as a mandatory break, which
+ * is what "every line terminator" has to mean here. U+0085 in particular is not
+ * matched by JavaScript's `\s`, so it cannot be covered incidentally.
  */
-const LINE_TERMINATOR_RE = /[\r\n\v\f\u2028\u2029]+/;
+const LINE_TERMINATOR_RE = /[\r\n\v\f\u0085\u2028\u2029]+/;
 
 /**
  * Phrases that mark a model narrating its own process rather than restating a
@@ -675,23 +695,66 @@ const REASONING_MARKER_RE =
 	/\b(?:reasoning|rationale|chain[-\s]?of[-\s]?thought|thought process|scratchpad|deliberation|let(?:'s| us| me) think|step[-\s]by[-\s]step|i(?:'ll| will| need to| should| must| think| considered| analyzed)|my analysis|analysis|thinking)\b\s*[:,]?/i;
 
 /**
- * Any angle bracket. Reasoning models delimit their scratchpad with tags —
- * `<think>`, `<scratchpad>`, `<answer>` — and the envelope is LINE-scoped, so a
- * response of `FINDING: <think>I counted them</think> Scoring succeeded.` puts
- * the whole scratchpad inside the captured group. Rejecting outright rather than
- * stripping tags is the safer direction: a restatement of a statistical finding
- * has no legitimate need for markup, and rejection costs only the paraphrase.
+ * Any bracket a model delimits a scratchpad with.
+ *
+ * Reasoning models tag their scratchpad several ways — `<think>`, `[think]`,
+ * `【think】`, `{think}` — and the envelope is LINE-scoped, so a response of
+ * `FINDING: <think>I counted them</think> Scoring succeeded.` puts the whole
+ * scratchpad inside the captured group. Angle brackets alone left the square and
+ * CJK forms open. Rejecting outright rather than stripping tags is the safer
+ * direction: a restatement of a statistical finding has no legitimate need for
+ * markup, and rejection costs only the paraphrase.
+ *
+ * The CJK range covers U+3008–U+3011 (〈〉《》「」『』【】) plus U+3014/U+3015
+ * (〔〕) and the fullwidth ASCII forms.
  */
-const MARKUP_RE = /[<>]/;
+const MARKUP_RE =
+	/[<>[\]{}\u3008-\u3011\u3014\u3015\uFF08\uFF09\uFF3B\uFF3D\uFF5B\uFF5D]/;
 
 /**
- * True when `value` reads as a single sentence.
+ * `sanitizeExcerpt`'s own redaction placeholder.
  *
- * A terminator followed by whitespace and a capital letter starts a new one;
- * `e.g.`-style abbreviations continue in lower case and are not counted.
+ * `[REDACTED:<type>]` is OUR output, not the model's, and `sanitizeExcerpt` runs
+ * before the bracket test — so without masking it, redacting a secret out of an
+ * otherwise-valid restatement would make the guard reject its own handiwork.
+ */
+const REDACTION_PLACEHOLDER_RE = /\[REDACTED:[A-Za-z0-9_]+\]/g;
+
+/**
+ * The only periods that legitimately sit INSIDE one sentence: a closed
+ * abbreviation list, and the decimal point of a number.
+ */
+const NON_TERMINAL_ABBREVIATION_RE = /\b(?:e\.g\.|i\.e\.|etc\.)/gi;
+const DECIMAL_POINT_RE = /(\d)\.(?=\d)/g;
+
+/**
+ * A single sentence: no interior terminator at all, and at most one trailing
+ * terminator run, optionally closed by a quote or parenthesis.
+ */
+const SINGLE_SENTENCE_RE = /^[^.!?]*(?:[.!?]+["')]?)?$/;
+
+/**
+ * True when `value` is one sentence.
+ *
+ * A POSITIVE whitelist, and it has to be. The previous version detected a
+ * sentence boundary only as `[.!?]` followed by whitespace and an ASCII capital
+ * or `(`, which let a whole four-sentence lower-case narration through verbatim
+ * — as did a continuation starting with a digit, a quote, a non-ASCII capital,
+ * or no space at all. Enumerating the ways a second sentence can begin is
+ * unbounded; requiring that there be no interior terminator is not.
+ *
+ * So the two constructs whose period genuinely sits mid-sentence are masked
+ * first — `e.g.` / `i.e.` / `etc.` and decimal numbers — and everything else
+ * containing a `.`, `!`, or `?` anywhere but a single trailing run is rejected.
+ * A legitimate restatement that quotes a terminator mid-sentence is rejected
+ * too; that costs only the paraphrase, which is the direction this guard errs in
+ * everywhere else.
  */
 function isSingleSentence(value: string): boolean {
-	return !/[.!?]["')\]]?\s+(?=[A-Z(])/.test(value);
+	const masked = value
+		.replace(NON_TERMINAL_ABBREVIATION_RE, (match) => '_'.repeat(match.length))
+		.replace(DECIMAL_POINT_RE, '$1_');
+	return SINGLE_SENTENCE_RE.test(masked);
 }
 
 /**
@@ -706,11 +769,12 @@ function isSingleSentence(value: string): boolean {
  *
  * So nothing outside a `FINDING:` line can survive at all, and the extracted
  * sentence must additionally:
- * - carry no angle-bracket markup — the envelope is line-scoped, so a
- *   `<think>…</think>` block sharing the line would otherwise ride along inside
- *   the captured group;
+ * - carry no bracket or angle-bracket markup — the envelope is line-scoped, so a
+ *   `<think>…</think>` or `[think]…` block sharing the line would otherwise ride
+ *   along inside the captured group;
  * - carry no reasoning markers;
- * - be a single sentence;
+ * - be a single sentence, decided by whitelist: no interior `.`/`!`/`?` outside
+ *   the `e.g.`/`i.e.`/`etc.` allowlist and decimal points;
  * - fit `MAX_CONSENSUS_STATEMENT_CHARS` **without truncation**. Clipping model
  *   output to length is precisely how a trailing fragment of reasoning survives a
  *   length bound, so an over-long restatement is rejected outright.
@@ -735,7 +799,11 @@ function extractRestatement(raw: unknown): string | undefined {
 	const cleaned = sanitizeExcerpt(captured, MAX_CONSENSUS_STATEMENT_CHARS + 1);
 	if (cleaned.length === 0) return undefined;
 	if (cleaned.length > MAX_CONSENSUS_STATEMENT_CHARS) return undefined;
-	if (MARKUP_RE.test(cleaned)) return undefined;
+	// Only the bracket test needs the placeholder mask — a `[REDACTED:<type>]`
+	// token carries no sentence terminator and no reasoning marker.
+	if (MARKUP_RE.test(cleaned.replace(REDACTION_PLACEHOLDER_RE, ' '))) {
+		return undefined;
+	}
 	if (REASONING_MARKER_RE.test(cleaned)) return undefined;
 	if (!isSingleSentence(cleaned)) return undefined;
 	return cleaned;
@@ -901,13 +969,21 @@ export async function mineConsensus(
 ): Promise<MineConsensusResult> {
 	const loadCorpus = deps.loadCorpus ?? loadConsensusCorpus;
 	const maxExcerptChars = deps.config.max_excerpt_chars;
+	const matchesRequest = buildObservationFilter(request);
+	// The predicate is handed to the loader so the `maxEvidenceItems` budget is
+	// spent on observations the request can actually keep. Without it the corpus
+	// was cut FIRST and filtered second, so narrowing to the one category that
+	// mattered took a 50-observation corpus to 0 instead of filling those 50 slots
+	// with matching evidence.
 	const corpus = await loadCorpus(directory, {
 		maxEvidenceItems: request.maxEvidenceItems,
 		maxExcerptChars,
+		filter: matchesRequest,
 	});
 
-	// 1 — filter
-	const filtered = filterObservations(corpus.observations, request);
+	// 1 — filter. Re-applied here rather than trusted: `deps.loadCorpus` is an
+	// injection seam, and an injected loader is free to ignore `filter`.
+	const filtered = corpus.observations.filter(matchesRequest);
 	// 2 — count
 	const tallies = tallySignals(filtered);
 	// 3 + 4 — gate, retaining negative evidence, bounded by the producer cap

@@ -32,9 +32,13 @@
  *   `readKnowledge` fills the parsed-artifact cache, and `loadEvidence` fills
  *   the shared text cache (`src/utils/swarm-artifact-cache.ts`). All are bounded
  *   and FIFO-evicting, so mining a large `.swarm/` tree CAN evict another
- *   subsystem's cached entries and change what that subsystem sees next. None
- *   touches the filesystem and none survives the process — but "nothing here
- *   writes" is a disk claim, not a claim about process memory.
+ *   subsystem's cached entries and change what that subsystem sees next. The PRM
+ *   one goes further: it is a plain `Map` with no revalidation, and
+ *   `readTrajectory` REPLACES the entry for the session it read, re-bounded by
+ *   its own default (the newest 500 once a session exceeds 1000) rather than by
+ *   whatever bound the live writer was using. None touches the filesystem and
+ *   none survives the process — but "nothing here writes" is a disk claim, not a
+ *   claim about process memory.
  * - Every free-text fragment that survives into a signal, a statement, or an
  *   evidence reference passes through `redactSecrets` and a hard length bound
  *   before it is retained. Prompts and reasoning traces are never read into an
@@ -160,6 +164,25 @@ export interface LoadCorpusOptions {
 	maxEvidenceItems: number;
 	/** Hard cap on any single retained free-text fragment. */
 	maxExcerptChars: number;
+	/**
+	 * Caller-supplied retention predicate, applied per source AFTER that source's
+	 * hash and observation count are recorded and BEFORE the `maxEvidenceItems`
+	 * budget is spent.
+	 *
+	 * That position is the whole point. The consensus miner's request filters used
+	 * to run only on the already-truncated stream, so narrowing a request to the
+	 * one task category that mattered removed observations from a corpus the cap
+	 * had already shaped — 50 observations in, 0 out. Applying the predicate here
+	 * spends the budget on observations that can survive the request instead, so
+	 * narrowing genuinely widens what is available to it.
+	 *
+	 * Applied after the per-source hash so `corpusHashes` keeps meaning "what this
+	 * source contained", independent of any one request; `truncation.observations`
+	 * on the report is what declares how many were actually tallied.
+	 *
+	 * Omitted ⇒ every observation is retained, which is the pre-existing behaviour.
+	 */
+	filter?: (observation: CorpusObservation) => boolean;
 	/** Reader overrides for tests. Unspecified readers use the real store. */
 	readers?: Partial<CorpusReaders>;
 }
@@ -695,7 +718,9 @@ function balancedSlice(
  * Failure of any single source is non-fatal and recorded in `unreadableSources`:
  * a corrupt trajectory file must not make the whole mining run unavailable, and
  * a silently-empty corpus would be worse than a declared partial one. The
- * returned observations are stable-sorted and truncated to `maxEvidenceItems`.
+ * returned observations are stable-sorted, reduced by the optional
+ * `options.filter`, and then truncated to `maxEvidenceItems` — filter first, so
+ * the budget is spent on observations the caller can actually use.
  */
 export async function loadConsensusCorpus(
 	directory: string,
@@ -740,21 +765,24 @@ export async function loadConsensusCorpus(
 		loaded.sort((left, right) =>
 			compareRefs(left.evidenceRef, right.evidenceRef),
 		);
+		// Hashed and counted BEFORE the caller's predicate: `corpusHashes` declares
+		// what the source contained, which must not depend on one request's filters.
 		hashes.push({
 			source,
 			hash: canonicalHash(loaded),
 			observations: loaded.length,
 		});
+		const eligible = options.filter ? loaded.filter(options.filter) : loaded;
 		const remaining = options.maxEvidenceItems - observations.length;
 		if (remaining <= 0) {
-			if (loaded.length > 0) truncated = true;
+			if (eligible.length > 0) truncated = true;
 			continue;
 		}
-		if (loaded.length > remaining) {
+		if (eligible.length > remaining) {
 			truncated = true;
-			observations.push(...balancedSlice(loaded, remaining));
+			observations.push(...balancedSlice(eligible, remaining));
 		} else {
-			observations.push(...loaded);
+			observations.push(...eligible);
 		}
 	}
 

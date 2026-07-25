@@ -74,7 +74,9 @@ and deduplicated improvement proposals.
 It **mutates none of the evidence it reads**. It activates no skills, edits no knowledge, promotes nothing,
 touches no project file, and runs no optimization rounds. It writes exactly two things: a versioned, immutable
 report under `.swarm/evolution/consensus/`, and an entry per emitted proposal in the shared recommendation
-dedup ledger (a proposal another producer already claimed is counted rather than re-recorded).
+dedup ledger (a proposal whose text the ledger already holds is counted as `cross_producer_duplicate_count`
+rather than re-recorded — the ledger key is producer-agnostic, so that count includes the miner's own earlier
+emissions, not only other producers').
 
 Guarantees worth knowing:
 
@@ -99,10 +101,14 @@ Guarantees worth knowing:
   `llmSummary`, never in place of it.
 - **Model output is confined to one validated sentence.** Corpus assembly never reads prompts or reasoning
   traces at all, and a restatement is accepted only from a `FINDING:` line — everything else in the response
-  is discarded — and only if it carries no markup, no reasoning markers, no second sentence, and fits the
-  length bound without being trimmed to fit. A reasoning block sharing the envelope line is rejected rather
-  than carried along. One bounded sentence per attribute cannot hold a chain of thought, and it never
-  displaces the deterministic statement.
+  is discarded — and only if it carries no bracket markup (`<think>`, `[think]`, `{think}`, `【think】`), no
+  reasoning markers, no second sentence, and fits the length bound without being trimmed to fit. The
+  single-sentence test is a whitelist: apart from `e.g.`/`i.e.`/`etc.` and decimal points, any interior `.`,
+  `!`, or `?` rejects the restatement outright. A reasoning block sharing the envelope line is rejected rather
+  than carried along. What can reach disk is therefore at most one bounded, marker-free sentence per
+  attribute; the sentences are independent restatements, so no multi-step trace can be assembled from them,
+  and none of them displaces the deterministic statement. (What this does *not* claim is that one admitted
+  sentence can never read as narration — the guard bounds it rather than pretending otherwise.)
 - **Excerpts are bounded and secret-redacted**, with redaction applied before the length bound.
 - **The cuts that change a conclusion are declared on the report.** A persisted `truncation` block records
   whether the corpus was capped, how many observations were tallied, whether the `inputIds` list was cut, and
