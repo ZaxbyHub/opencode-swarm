@@ -118,6 +118,79 @@ beforeEach(() => {
 	resetTelemetryForTesting();
 });
 
+// ---------------------------------------------------------------------------
+// Concurrent-observation harness (atomicity tests)
+// ---------------------------------------------------------------------------
+
+/** What a concurrent reader saw at one instant. */
+type Observation = { kind: 'absent' } | { kind: 'bytes'; raw: string };
+
+/**
+ * Yield a real MACROTASK turn.
+ *
+ * `await Promise.resolve()` only drains the microtask queue, which cannot
+ * advance an in-flight `writeImmutableArtifact`: its `mkdir`, lock acquisition,
+ * `readFile` and `rename` are all libuv operations whose completions are
+ * macrotasks. An observer built on microtasks therefore spins without the writer
+ * ever making progress — the defect this harness exists to prevent.
+ */
+function macrotask(): Promise<void> {
+	return new Promise<void>((resolve) => {
+		setTimeout(resolve, 0);
+	});
+}
+
+/**
+ * Run `start()` and poll the artifact path on every macrotask turn until it
+ * settles, returning every distinct state a concurrent reader could have seen.
+ * The final post-settle read is always included.
+ */
+async function observeDuring(
+	start: () => Promise<unknown>,
+): Promise<Observation[]> {
+	const observations: Observation[] = [];
+	let settled = false;
+	const pending = start().finally(() => {
+		settled = true;
+	});
+
+	// Bounded: the loop can never outlive the write by more than one turn, and
+	// the cap keeps a hung writer from spinning forever.
+	for (let i = 0; i < 500 && !settled; i++) {
+		try {
+			observations.push({
+				kind: 'bytes',
+				raw: readFileSync(artifactPath(), 'utf-8'),
+			});
+		} catch {
+			observations.push({ kind: 'absent' });
+		}
+		await macrotask();
+	}
+	await pending;
+	observations.push({
+		kind: 'bytes',
+		raw: readFileSync(artifactPath(), 'utf-8'),
+	});
+	return observations;
+}
+
+/**
+ * True when an observation is one a reader may legitimately see: the file is
+ * either absent, or holds the COMPLETE artifact. Anything else — truncated
+ * bytes, unparseable JSON, a partial object — is a torn write.
+ */
+function isCompleteArtifact(observed: Observation, expected: Report): boolean {
+	if (observed.kind === 'absent') return true;
+	try {
+		return (
+			serialize(parseReport(JSON.parse(observed.raw))) === serialize(expected)
+		);
+	} catch {
+		return false;
+	}
+}
+
 afterEach(() => {
 	resetTelemetryForTesting();
 	rmSync(tempDir, { recursive: true, force: true });
@@ -346,27 +419,42 @@ describe('writeImmutableArtifact — atomicity', () => {
 	test('a reader only ever observes complete, parseable content', async () => {
 		// The atomic temp+rename write means the target either does not exist or
 		// holds the full payload; it is never observed half-written.
-		const value: Report = {
-			id: 'r1',
-			score: 7,
-		};
-		const write = writeReport({ value });
+		const value: Report = { id: 'r1', score: 7 };
 
-		const observations: string[] = [];
-		for (let i = 0; i < 25; i++) {
-			try {
-				observations.push(readFileSync(artifactPath(), 'utf-8'));
-			} catch {
-				// Not yet created — an acceptable observation.
-			}
-			await Promise.resolve();
-		}
-		await write;
-		observations.push(readFileSync(artifactPath(), 'utf-8'));
+		const observations = await observeDuring(() => writeReport({ value }));
 
-		for (const observed of observations) {
-			expect(parseReport(JSON.parse(observed))).toEqual(value);
-		}
+		// GUARD AGAINST A VACUOUS PASS. Draining microtasks (`await
+		// Promise.resolve()`) never lets `writeImmutableArtifact` progress — its
+		// mkdir, lock acquisition, read and rename each need a macrotask turn — so
+		// the previous version of this test collected ZERO in-flight observations
+		// and asserted only over a single post-`await` read, which a plain
+		// non-atomic `writeFile` would also have satisfied. Requiring real
+		// mid-write bytes is what makes the assertion below mean anything.
+		expect(
+			observations.filter((o) => o.kind === 'bytes').length,
+		).toBeGreaterThan(0);
+		expect(observations.every((o) => isCompleteArtifact(o, value))).toBe(true);
+	});
+
+	test('the same observer DOES catch a deliberately non-atomic writer', async () => {
+		// Detection-power control for the test above. Without it, "every
+		// observation was complete" is equally true of a harness that cannot see a
+		// torn file at all. This writer publishes a truncated payload at the real
+		// target path and leaves it there across many macrotask turns before
+		// completing — exactly what temp+rename exists to prevent.
+		const value: Report = { id: 'r1', score: 7 };
+		const desired = serialize(value);
+
+		const observations = await observeDuring(async () => {
+			mkdirSync(join(tempDir, '.swarm', 'evolution', 'consensus'), {
+				recursive: true,
+			});
+			writeFileSync(artifactPath(), desired.slice(0, 8), 'utf-8');
+			for (let i = 0; i < 20; i++) await macrotask();
+			writeFileSync(artifactPath(), desired, 'utf-8');
+		});
+
+		expect(observations.some((o) => !isCompleteArtifact(o, value))).toBe(true);
 	});
 });
 

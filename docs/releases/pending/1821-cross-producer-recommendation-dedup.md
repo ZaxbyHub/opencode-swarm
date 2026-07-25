@@ -39,7 +39,11 @@ Wired at three emission sites:
   `recommendation_fingerprint`. `/swarm consolidate` reports how many duplicates
   were suppressed.
 - **Consensus miner** — the `consensus_mine` tool registers each mined proposal
-  in the ledger and reports `cross_producer_duplicate_count`.
+  in the ledger and returns a `recommendation_ledger` block reporting what it
+  recorded, how many were suppressed as
+  `duplicate_recommendation_count`, how many entries the append evicted, and —
+  because the ledger write is fail-open — whether it was `degraded`, meaning
+  nothing was recorded and nothing was compared.
 
 Emitted recommendations are stamped with `LearningProvenanceV1` (mechanism plus
 source knowledge/task/evidence/run/model refs and the write origin) on their
@@ -98,8 +102,11 @@ No configuration changes and no breaking API changes.
   persists its report in a single call, so by the time proposals exist the report
   is already written; the miner therefore keeps its own report-derived
   within-producer dedup and cannot itself be suppressed by a curator or improver
-  emission. The `cross_producer_duplicate_count` field makes that overlap visible
-  rather than silent.
+  emission. The `recommendation_ledger.duplicate_recommendation_count` field makes
+  that overlap visible rather than silent. It is named for what it counts: the
+  ledger key drops both the producing mechanism and the target, so the miner's own
+  re-derived proposals land in it too, which is why it is no longer called
+  `cross_producer_duplicate_count`.
 - A generated **motif or workflow** proposal that is removed from
   `.swarm/skills/proposals/` is no longer regenerated on the next improver run —
   the ledger has already recorded it. The dominant remover is automated, not a

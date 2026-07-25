@@ -74,18 +74,16 @@ describe('stampLearningProvenance — defaults', () => {
 			{ mechanism: 'micro_reflection' },
 			{
 				sessionId: '  ',
-				agentRole: '',
-				agentId: '  agent-7 ',
+				agentRole: '  architect ',
 				producedAt: PRODUCED_AT,
 			},
 		);
 
 		expect(stamped.writeOrigin).toEqual({
-			agentId: 'agent-7',
+			agentRole: 'architect',
 			producedAt: PRODUCED_AT,
 		});
 		expect('sessionId' in stamped.writeOrigin).toBe(false);
-		expect('agentRole' in stamped.writeOrigin).toBe(false);
 	});
 
 	it('retains supplied write-origin identity fields', () => {
@@ -94,7 +92,6 @@ describe('stampLearningProvenance — defaults', () => {
 			{
 				sessionId: 'ses_abc',
 				agentRole: 'architect',
-				agentId: 'agent-1',
 				producedAt: PRODUCED_AT,
 			},
 		);
@@ -102,9 +99,63 @@ describe('stampLearningProvenance — defaults', () => {
 		expect(stamped.writeOrigin).toEqual({
 			sessionId: 'ses_abc',
 			agentRole: 'architect',
-			agentId: 'agent-1',
 			producedAt: PRODUCED_AT,
 		});
+	});
+});
+
+/**
+ * `writeOrigin.agentId` was declared but unreachable (issue #1821 F-E): no
+ * production caller of `stampLearningProvenance` can supply one —
+ * `src/consensus/miner.ts`, `src/services/recommendation-ledger.ts`, and
+ * `src/learning/admission.ts` all pass exactly `producedAt` / `sessionId` /
+ * `agentRole`. It has been removed, matching what `src/consensus/contracts.ts`
+ * did to its structural mirror of the same shape. These tests pin the decision
+ * so a future edit has to delete an explicit assertion to bring it back.
+ */
+describe('writeOrigin has no agentId', () => {
+	it('the strict schema REJECTS an agentId rather than reserving room for it', () => {
+		const result = LearningProvenanceV1Schema.safeParse({
+			v: 1,
+			mechanism: 'consensus_mine',
+			sourceKnowledgeIds: [],
+			sourceTaskIds: [],
+			sourceEvidenceRefs: [],
+			sourceRunIds: [],
+			sourceModelIds: [],
+			writeOrigin: { producedAt: PRODUCED_AT, agentId: 'agent-1' },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('stampLearningProvenance drops an agentId smuggled past the type', () => {
+		// The compiler already rejects this; the cast proves the RUNTIME does too,
+		// so a JS consumer cannot persist a field nothing produces.
+		const stamped = stampLearningProvenance({ mechanism: 'curator_sweep' }, {
+			agentRole: 'architect',
+			agentId: 'agent-1',
+			producedAt: PRODUCED_AT,
+		} as unknown as Parameters<typeof stampLearningProvenance>[1]);
+
+		expect(stamped.writeOrigin).toEqual({
+			agentRole: 'architect',
+			producedAt: PRODUCED_AT,
+		});
+		expect('agentId' in stamped.writeOrigin).toBe(false);
+	});
+
+	it('every production caller passes only producedAt / sessionId / agentRole', () => {
+		// The property that makes removal safe, asserted as a shape rather than
+		// left to a grep in a review comment.
+		const stamped = stampLearningProvenance(
+			{ mechanism: 'consensus_mine' },
+			{ sessionId: 'ses_1', agentRole: 'critic', producedAt: PRODUCED_AT },
+		);
+		expect(Object.keys(stamped.writeOrigin).sort()).toEqual([
+			'agentRole',
+			'producedAt',
+			'sessionId',
+		]);
 	});
 });
 

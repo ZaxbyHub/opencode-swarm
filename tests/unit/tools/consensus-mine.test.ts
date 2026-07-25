@@ -256,7 +256,12 @@ describe('consensus_mine — execution', () => {
 		// asserted that the mapping never executed.
 		const root = seedCorpus(project());
 		const result = await run(root, MINE_ARGS);
-		expect(result.cross_producer_duplicate_count).toBe(0);
+		expect(result.recommendation_ledger).toEqual({
+			recorded: 1,
+			duplicate_recommendation_count: 0,
+			evicted: 0,
+			degraded: false,
+		});
 		expect(existsSync(ledgerPath(root))).toBe(true);
 		const entries = readFileSync(ledgerPath(root), 'utf-8')
 			.split('\n')
@@ -300,9 +305,14 @@ describe('consensus_mine — execution', () => {
 	test('an empty project claims nothing, so it leaves no ledger behind', async () => {
 		const root = project();
 		const result = await run(root);
-		// The field must still exist, or a caller cannot distinguish "no overlap"
+		// The block must still exist, or a caller cannot distinguish "no overlap"
 		// from "the ledger was never consulted".
-		expect(result.cross_producer_duplicate_count).toBe(0);
+		expect(result.recommendation_ledger).toEqual({
+			recorded: 0,
+			duplicate_recommendation_count: 0,
+			evicted: 0,
+			degraded: false,
+		});
 		expect(existsSync(ledgerPath(root))).toBe(false);
 	});
 
@@ -330,6 +340,7 @@ describe('consensus_mine — execution', () => {
 			min_successful_runs: 3,
 			max_evidence_items: 11,
 			min_task_diversity: 2,
+			min_support_for_proposal: 2,
 		});
 	});
 

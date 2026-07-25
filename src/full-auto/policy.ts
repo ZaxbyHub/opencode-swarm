@@ -820,9 +820,26 @@ export function classifyFullAutoToolAction(
 				'knowledge_add',
 				'knowledge_remove',
 				'curator_analyze',
-				// Pathless by construction: its only write target is
-				// `.swarm/evolution/consensus/<reportId>.json`, derived from mined
-				// content rather than any caller-supplied path.
+				// Pathless by construction — which is the property this set is
+				// actually about. It takes no path argument, and every target it
+				// touches is derived from mined content or from configuration, never
+				// from caller input. That set is NOT a single file, and an earlier
+				// version of this comment claiming it was made this auto-allow rest on
+				// a false premise: `consensus_mine` writes its own
+				// `.swarm/evolution/consensus/<reportId>.json`, DELETES its own older
+				// reports past `consensus.report_retention`, rewrites the shared
+				// recommendation dedup ledger whole (with FIFO eviction), leaves a lock
+				// sentinel under `.swarm/locks/`, and — when `memory.enabled` — creates
+				// a pending memory proposal. Under a knowledge or memory link the
+				// ledger and memory store resolve to the shared cohort root rather than
+				// this project's `.swarm/`.
+				//
+				// The classification still holds, for the same reason `knowledge_add`
+				// and `knowledge_remove` sit in this set with the identical
+				// cohort-redirection behaviour: none of those targets is a project
+				// file, none is caller-supplied, and the redirection is operator
+				// configuration. See `src/tools/consensus-mine.ts`'s module header for
+				// the full enumerated effect list.
 				'consensus_mine',
 			]);
 			if (SAFE_PATHLESS_WRITES.has(tool)) {

@@ -884,10 +884,10 @@ behaviour).
 | Property | Value |
 |----------|-------|
 | Location | `learning/recommendation-ledger.jsonl` under the resolved knowledge store — `<project>/.swarm/` normally, the shared cohort store when the worktree is linked. Survives `/swarm close` and `/swarm reset`, like `knowledge.jsonl` |
-| Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it |
-| Retention | 500 entries, oldest-first eviction; each entry capped at 4 KB |
+| Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it, and of the target it names |
+| Retention | 500 entries, oldest-first eviction, applied on a whole-file rewrite at every append; each entry capped at 4 KB. Eviction is by position, not by producer, so one mechanism's append can evict another's oldest entries |
 | Provenance | Each entry carries a `LearningProvenanceV1` record (mechanism, source knowledge/task/evidence/run/model refs, write origin) |
-| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns `cross_producer_duplicate_count` — which counts keys the ledger had already seen, including this miner's own earlier emissions, not only other producers' (see [Reading `cross_producer_duplicate_count`](./consensus-mining.md#reading-cross_producer_duplicate_count), and [Response shape](./consensus-mining.md#response-shape) for every field it returns); curator suppressions land in its `skipped` tally and the debug log |
+| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns a `recommendation_ledger` block whose `duplicate_recommendation_count` counts keys the ledger had already seen — including this miner's own earlier emissions, not only other producers' (see [Reading `duplicate_recommendation_count`](./consensus-mining.md#reading-duplicate_recommendation_count), and [Response shape](./consensus-mining.md#response-shape) for every field it returns) — and whose `degraded: true` says the fail-open path was taken and **nothing** was recorded; curator suppressions land in its `skipped` tally and the debug log |
 
 Matching is **exact** over normalized text, so two mechanisms suppress each other only when they emit
 the same sentence. The improver and the miner build statements from fixed templates while the curator
@@ -905,9 +905,12 @@ out. Knowledge-derived skill drafts are not routed through the ledger and are un
 
 ### `consensus`
 
-Governs the `consensus_mine` tool. It writes immutable reports under `.swarm/evolution/consensus/` and
-one dedup-ledger entry per emitted proposal the ledger does not already carry; it mutates nothing else.
-See [consensus-mining.md](./consensus-mining.md), and
+Governs the `consensus_mine` tool. It mutates none of the evidence it reads, writes no knowledge entry,
+and admits no durable memory record — but it is not write-minimal: besides its own immutable report it
+prunes its own older reports, rewrites the shared dedup ledger, leaves a lock sentinel per report id,
+and (when `memory.enabled`) mirrors each proposal into a pending memory proposal. See
+[What a mining run writes](./consensus-mining.md#what-a-mining-run-writes) for the complete list,
+[Finding the reports](./consensus-mining.md#finding-the-reports) for how to read what it produced, and
 [Response shape](./consensus-mining.md#response-shape) for what the tool returns.
 
 | Field | Type | Default | Description |
@@ -917,9 +920,9 @@ See [consensus-mining.md](./consensus-mining.md), and
 | `default_min_successful_runs` | number | `2` | Minimum successful runs. |
 | `default_max_evidence_items` | number | `50` | Cap on evidence items loaded per mine. |
 | `max_excerpt_chars` | number | `500` | Per-excerpt length bound (excerpts are also secret-redacted). |
-| `llm_summarization_enabled` | boolean | `true` | Allow optional statement summarization after the deterministic pass. |
+| `llm_summarization_enabled` | boolean | `true` | Allow optional statement summarization after the deterministic pass. When on and an OpenCode client is wired, a mine issues up to **20** `session.create` + `session.prompt` calls. |
 | `llm_timeout_ms` | number | `60000` | Bound on summarization calls. |
-| `report_retention` | number | `50` | Reports retained under `.swarm/evolution/consensus/`. `0` **disables** pruning (retain everything) rather than deleting everything; the tool then reports `retention.pruning_enabled: false` and omits `retention.retained`. |
+| `report_retention` | number | `50` | Reports retained under `.swarm/evolution/consensus/`. Pruning runs after **every** mine, so at the default the steady state of a long-lived project is that each run deletes the oldest report. `0` **disables** pruning (retain everything) rather than deleting everything; the tool then reports `retention.pruning_enabled: false` and omits `retention.retained` and `retention.corrupt`. |
 
 ## Skill Improver Consolidation
 

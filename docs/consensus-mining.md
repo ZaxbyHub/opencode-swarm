@@ -1,10 +1,34 @@
 # Consensus mining
 
-The consensus miner reads evidence that already exists under `.swarm/` and reports what several independent runs agree on. It is a **proposals-only boundary**: it activates no skill, writes no knowledge entry, promotes nothing, edits no project file, and mutates none of the evidence it reads. Every recommendation it produces is a suggestion a human or a separately-gated workflow may act on; nothing downstream is triggered by mining.
+The consensus miner reads evidence that already exists under `.swarm/` and reports what several independent runs agree on. It is a **proposals-only boundary**: it activates no skill, writes no knowledge entry, admits no durable memory record, promotes nothing, edits no project file, and mutates none of the evidence it reads. Every recommendation it produces is a suggestion a human or a separately-gated workflow may act on; nothing downstream is triggered by mining.
 
-Two artifacts are written. `src/consensus/` itself writes exactly one — the immutable report under `.swarm/evolution/consensus/` (plus retention deletions of its own prior reports). The `consensus_mine` tool additionally records the run's proposals in the shared recommendation dedup ledger, so a recommendation the miner already made is not re-proposed by the curator sweep or the skill improver. Two details about that ledger are easy to get wrong. First, a proposal whose recommendation text is already in the ledger gets **no** entry and is counted as `cross_producer_duplicate_count` instead — and the ledger key deliberately drops the producing mechanism, so that count is *not* a count of other producers (see [Reading `cross_producer_duplicate_count`](#reading-cross_producer_duplicate_count)). Second, the ledger's root is `resolveKnowledgeStoreDir`, so it normally sits at `.swarm/learning/recommendation-ledger.jsonl` but lands in the shared cohort root when a knowledge-link pointer is configured.
+"Proposals only" is a statement about *authority*, not about volume. A mining run touches several files — see the next section for the complete list.
 
-Both writes create their containing directory and take a lock, but **not in the same place**. The report goes through `withEvidenceLock`, whose sentinel is under this project's `.swarm/locks/`. The ledger goes through `transactFile`, which locks the ledger file's own containing directory — producing `<resolveKnowledgeStoreDir(directory)>/learning.lock`, which under a knowledge link is not in this project's `.swarm/` at all.
+## What a mining run writes
+
+It is a proposals-only boundary, not a write-minimal one, and the difference matters when you read the tool's own description. `src/consensus/` itself writes one artifact — the immutable report under `.swarm/evolution/consensus/`. Everything below comes with it:
+
+| Effect | When | Where |
+| --- | --- | --- |
+| The immutable report | every run | `.swarm/evolution/consensus/<reportId>.json` |
+| **Deletion** of its own older reports | every run, unless `report_retention: 0` | same directory; default keeps the newest 50 |
+| One dedup-ledger entry per emitted proposal | every run with proposals | `<resolveKnowledgeStoreDir>/learning/recommendation-ledger.jsonl` |
+| An empty, **never-removed** lock sentinel | one per distinct report id | this project's `.swarm/locks/<sha256>.lock` |
+| A directory lock on the ledger | every ledger write | `<resolveKnowledgeStoreDir(directory)>/learning.lock` |
+| A **pending** memory proposal per emitted proposal | only when `memory.enabled` | the memory proposal store (`MemoryGateway.propose`) |
+| Up to 20 `session.create` + `session.prompt` calls | when `llm_summarization_enabled` (default `true`) and a client is wired | the OpenCode runtime, not the filesystem |
+
+Four of those deserve a sentence each.
+
+**The ledger append is a whole-file rewrite with FIFO eviction.** Once the ledger reaches `MAX_RECOMMENDATION_LEDGER_ENTRIES` every append drops the oldest entries, and eviction is by position, not by producer — a miner append can evict the *curator's* or the *skill improver's* oldest entries. A proposal whose recommendation text is already in the ledger gets **no** entry and is counted as `recommendation_ledger.duplicate_recommendation_count` instead; the ledger key deliberately drops both the producing mechanism and the target, so that count is *not* a count of other producers (see [Reading `duplicate_recommendation_count`](#reading-duplicate_recommendation_count)).
+
+**The two locks live in different places.** The report goes through `withEvidenceLock`, whose sentinel is under this project's `.swarm/locks/`. The ledger goes through `transactFile`, which locks the ledger file's own containing directory — producing `<resolveKnowledgeStoreDir(directory)>/learning.lock`, which under a knowledge link is not in this project's `.swarm/` at all. `proper-lockfile` removes its own lock directory on release, but nothing removes the empty `<sha256>.lock` sentinel `tryAcquireLock` creates, so those accumulate one per distinct report id.
+
+**Neither the ledger nor the memory store is necessarily inside this project.** Both roots are link-aware, so under a configured knowledge or memory link they resolve to the shared cohort root. That is the same redirection `knowledge_add` and `knowledge_remove` already have, and it comes from operator configuration rather than from anything the caller passed — which is why `consensus_mine` keeps its pathless-write-like Full-Auto classification.
+
+**The memory mirror is issue #1821 AC22.** The AC requires miner proposals to use existing proposal/`MemoryRecord` paths rather than a new inbox, so when `memory.enabled` is `true` each proposal is additionally proposed through `MemoryGateway.propose` — the same entry point `swarm_memory_propose` uses, with the same `dispose()` in a `finally`. It creates a **pending** proposal of kind `todo`: curator review is still required and no durable memory record is admitted, so the proposals-only guarantee survives the mirror. `todo` is chosen because it is the only kind in neither `DURABLE_MEMORY_KINDS` nor `EVIDENCE_REQUIRED_KINDS`, so a proposal whose corpus refs are namespaced ids rather than file paths cannot be rejected for lacking source evidence. The mirror is fail-open and per-proposal — the report is already durable when it runs — and every outcome is reported back in `memory_mirror`.
+
+Memory defaults to **off**, so the mirror alone would leave the report store unreachable in the default configuration. `/swarm status` therefore also counts stored reports (see [Finding the reports](#finding-the-reports)).
 
 ## Corpus
 
@@ -63,7 +87,7 @@ Narrowing helps because the request's filters are applied **inside** the corpus 
 
 Support is **distinct runs**, never observations: one chatty run emitting the same signal fifty times contributes exactly one. `successSupport` and `failureSupport` are likewise distinct-run counts, and a single run may appear in both when it carries the signal on a succeeding and a failing observation — they do not have to sum to `support`.
 
-An attribute is emitted when `support >= minSupport` and `successSupport >= minSuccessfulRuns`, defaulting to `consensus.default_min_support` and `consensus.default_min_successful_runs`. It becomes **proposal-eligible** only when it additionally clears `taskDiversity >= 2` and draws support from more than one run. `taskDiversity` counts distinct task identities (`taskId`, else `taskCategory`) among the contributing observations. Below that bar the attribute is still emitted, with `proposedTarget: 'none'`, as an **investigation note**: one anecdote can only create an investigation note, and suppressing it entirely would hide the evidence a human needs in order to go looking for a second task. Knowledge-derived attributes carry no task attribution and therefore surface as investigation notes by construction.
+An attribute is emitted when `support >= minSupport` and `successSupport >= minSuccessfulRuns`, defaulting to `consensus.default_min_support` and `consensus.default_min_successful_runs`. It becomes **proposal-eligible** only when it additionally clears `taskDiversity >= MIN_TASK_DIVERSITY_FOR_PROPOSAL` (2) **and** `support >= MIN_SUPPORT_FOR_PROPOSAL` (2). That second gate is not implied by the request: `min_support: 1` is an accepted argument, so an attribute can clear every threshold you asked for and still be forced to `proposedTarget: 'none'`. Both gates are printed in the tool's `thresholds` block, sourced from the miner rather than restated, so the numbers you are shown are the numbers applied. `taskDiversity` counts distinct task identities (`taskId`, else `taskCategory`) among the contributing observations. Below that bar the attribute is still emitted, with `proposedTarget: 'none'`, as an **investigation note**: one anecdote can only create an investigation note, and suppressing it entirely would hide the evidence a human needs in order to go looking for a second task. Knowledge-derived attributes carry no task attribution and therefore surface as investigation notes by construction.
 
 `modelDiversity` counts distinct model ids among the contributing observations and is **0 when no contributing observation carries a model id at all** — the normal case for trajectory-, usage-, and knowledge-derived attributes. Zero means *"not measurable from this corpus"*, **not** *"measured as none"*, and it never gates emission or proposal eligibility on its own. Reading a zero as evidence of single-model agreement is the misinterpretation this rule exists to prevent.
 
@@ -149,11 +173,22 @@ Four bounds are *not* counted in that block, and are worth knowing when reading 
 - `MAX_ENUMERATED_ENTRIES` = 2000, bounding how many evaluation runs and PRM sessions are enumerated per source;
 - `unreadableSources`, which is returned to the caller but not persisted — a source that threw shows up on the stored report only as a missing `corpusHashes` entry.
 
-`consensus.report_retention` bounds how many reports are kept. Pruning keeps the newest N by `generatedAt`, is a total order (ties broken by id), never deletes a corrupt report — an unparseable artifact is data-quality evidence — and treats a configured `0` as *retention disabled* rather than *delete everything*, so it can never remove the report just written.
+`consensus.report_retention` bounds how many reports are kept. Pruning keeps the newest N by `generatedAt`, is a total order (ties broken by id), never deletes a corrupt report — an unparseable artifact is data-quality evidence — and treats a configured `0` as *retention disabled* rather than *delete everything*, so it can never remove the report just written. Because a corrupt report is excluded from `retained` as well as from `deleted`, the prune result reports it separately as `corrupt`; without that, `deleted + retained` describes a directory smaller than the one on disk.
+
+Pruning is not an occasional cleanup. It runs after **every** mine, so at the default `report_retention: 50` the steady state of a long-lived project is that each run deletes the oldest report. If you want a mining run to add without removing, set `report_retention: 0`.
+
+### Finding the reports
+
+The store is content-addressed, not chronological, so the filenames tell you nothing about age. Two surfaces make it reachable:
+
+- **`/swarm status`** prints `Consensus reports: <n>` under **Learning Queues** whenever the store is non-empty, together with the directory to open. It is a file count — one `readdir`, no parsing and no integrity recomputation — so it costs the same whether the store holds one report or fifty, and it therefore includes any corrupt report, because what it counts is files whose name is a well-formed report id.
+- **The memory proposal store**, when `memory.enabled` is `true`: each proposal is mirrored there and shows up wherever memory proposals are already listed (`/swarm memory export`, the consolidation sweep).
+
+There is deliberately no `/swarm consensus list` command. Adding one is the natural next step if the file count proves too coarse; naming a command that does not exist would be worse than naming the directory.
 
 ## Tool surface
 
-`consensus_mine` (`src/tools/consensus-mine.ts`) is the entry point, available to `architect`, `curator_phase`, and `curator_postmortem`. It accepts optional `run_ids`, `task_categories`, `agent_roles`, and `model_ids` filters plus `min_support`, `min_successful_runs`, and `max_evidence_items` overrides, all defaulting from the `consensus` config block. When `consensus.enabled` is false it returns a disabled result and writes nothing. Because its only write targets are its own report and the shared dedup ledger — never a project file — it is classified as a pathless write-like tool in `src/full-auto/policy.ts` alongside `write_retro` and `knowledge_add`, and it is denied in read-only dispatch lanes. It is deliberately absent from `WRITE_TOOL_NAMES`, whose members are the tools that write project file contents, and it deliberately declares no `prWorkflow` capability so it stays fail-closed in PR review and feedback modes.
+`consensus_mine` (`src/tools/consensus-mine.ts`) is the entry point, available to `architect`, `curator_phase`, and `curator_postmortem`. It accepts optional `run_ids`, `task_categories`, `agent_roles`, and `model_ids` filters plus `min_support`, `min_successful_runs`, and `max_evidence_items` overrides, all defaulting from the `consensus` config block. When `consensus.enabled` is false it returns a disabled result and writes nothing. Because **none** of its write targets is a project file and none is caller-supplied — see [What a mining run writes](#what-a-mining-run-writes) for the full list, which is longer than the report — it is classified as a pathless write-like tool in `src/full-auto/policy.ts` alongside `write_retro` and `knowledge_add`, and it is denied in read-only dispatch lanes. It is deliberately absent from `WRITE_TOOL_NAMES`, whose members are the tools that write project file contents, and it deliberately declares no `prWorkflow` capability so it stays fail-closed in PR review and feedback modes.
 
 ### Response shape
 
@@ -164,7 +199,7 @@ The tool returns pretty-printed JSON. When `consensus.enabled` is false the resp
 | `success` | Always `true` on this branch — the report was written. |
 | `report_id`, `report_path` | The content-addressed id, and its path relative to the project root (`.swarm/evolution/consensus/<report_id>.json`). |
 | `generated_at`, `integrity_hash`, `config_hash`, `redaction_policy_version` | Copied from the persisted report. |
-| `thresholds` | `min_support`, `min_successful_runs`, `max_evidence_items` as actually applied, plus `min_task_diversity` sourced from the miner rather than restated. |
+| `thresholds` | `min_support`, `min_successful_runs`, `max_evidence_items` as actually applied, plus **both** proposal gates — `min_task_diversity` and `min_support_for_proposal` — sourced from the miner rather than restated. |
 | `input_run_count` | Size of the report's `inputIds` list — distinct run ids, after the 200-entry cut. `truncation.total_input_ids` is the pre-cut count. |
 | `corpus` | One `{ source, observations }` row per readable source, from `corpusHashes`. Counts what the SOURCE held, before the request filters and before the budget. |
 | `corpus_truncated` | Whether `max_evidence_items` cut the corpus. |
@@ -172,18 +207,19 @@ The tool returns pretty-printed JSON. When `consensus.enabled` is false the resp
 | `unreadable_sources` | Sources that threw. Returned only — the stored report shows them as a missing `corpusHashes` row. |
 | `attribute_count`, `investigation_note_count`, `proposal_count` | Totals over the persisted report. Investigation notes are attributes with `proposedTarget: 'none'`. |
 | `deduped_proposal_count` | Proposals suppressed because an earlier **consensus report still on disk** already carried the fingerprint. |
-| `cross_producer_duplicate_count` | Proposals that got no ledger entry because the recommendation's cross key was already there. See below — this is not a count of other producers. |
+| `recommendation_ledger` | `{ recorded, duplicate_recommendation_count, evicted, degraded }`. `duplicate_recommendation_count` is proposals that got no entry because the recommendation's cross key was already there — see below, this is not a count of other producers. `degraded: true` means the ledger write **failed and was swallowed**: nothing was recorded and nothing was compared, so the other three numbers describe nothing. |
+| `memory_mirror` | `{ enabled, attempted, proposed, rejected, failed, error? }` for the AC22 mirror. `enabled: false` (the default, since `memory.enabled` defaults `false`) means the mirror did not run — distinct from running and mirroring nothing. `rejected` counts proposals the memory gateway stored with a policy rejection; `failed` counts ones that threw. |
 | `summarized_count`, `summarized_but_not_shown`, `restatements_accepted_this_run` | See [Optional LLM restatement](#optional-llm-restatement). |
 | `summarization_skipped_reason` | Present only when summarization never ran: `no_attributes`, `disabled_by_config`, or `no_dispatcher`. |
 | `attributes` | The first 25 attributes in canonical signal order, each as `{ id, statement, llm_summary?, support, success_support, failure_support, task_diversity, model_diversity, confidence, proposed_target, counterexample_count }`. |
 | `attributes_truncated` | Whether the report holds more attributes than the inline echo shows. |
-| `retention` | `{ configured, pruning_enabled, deleted, failed }`, plus `retained` **only when `pruning_enabled` is true**. Under `report_retention: 0` pruning is disabled, so nothing is deleted and nothing is enumerated — there is no retained count to report, and printing `retained: 0` would say every report had been discarded. |
+| `retention` | `{ configured, pruning_enabled, deleted, failed }`, plus `retained` and `corrupt` **only when `pruning_enabled` is true**. `corrupt` counts reports that failed to parse or verify; they are deliberately never deleted **and** are excluded from `retained`, so without it `deleted + retained` under-counts the directory. Under `report_retention: 0` pruning is disabled, so nothing is deleted and nothing is enumerated — there is no retained or corrupt count to report, and printing `retained: 0` would say every report had been discarded. |
 | `guarantees` | Fixed strings describing properties the code enforces. Each is covered by a test. |
 
-### Reading `cross_producer_duplicate_count`
+### Reading `duplicate_recommendation_count`
 
-The name is narrower than the behaviour, so read it as **"recommendations the shared ledger had already seen"**, not as "recommendations another producer made".
+It used to be called `cross_producer_duplicate_count`, and that name was wrong: read it as **"recommendations the shared ledger had already seen"**, not as "recommendations another producer made".
 
-The ledger's dedup key (`crossKey`, `src/services/recommendation-ledger.ts`) deliberately drops the producing mechanism — that is the whole point of a cross-producer ledger — so the miner's own earlier emissions collide with it exactly like the curator's or the improver's. Two bounds make that routine rather than theoretical: `consensus.report_retention` defaults to 50 while the ledger keeps 500, and the miner's within-producer dedup (`deduped_proposal_count`) only reads reports that still exist. Once a report is pruned, its proposals are re-derived and re-emitted, and then match the miner's own surviving ledger entry — counted here.
+The ledger's dedup key (`crossKey`, `src/services/recommendation-ledger.ts`) deliberately drops both the producing mechanism and the target — dropping the mechanism is the whole point of a cross-producer ledger — so the miner's own earlier emissions collide with it exactly like the curator's or the improver's, and so do repeats within a single batch. Two bounds make that routine rather than theoretical: `consensus.report_retention` defaults to 50 while the ledger keeps 500, and the miner's within-producer dedup (`deduped_proposal_count`) only reads reports that still exist. Once a report is pruned, its proposals are re-derived and re-emitted, and then match the miner's own surviving ledger entry — counted here.
 
 Matching is also exact over normalized text, so genuine cross-mechanism suppression stays uncommon: the miner and the improver build statements from fixed templates while the curator emits free-form lessons.

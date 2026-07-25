@@ -88,7 +88,12 @@ describe('consensus_mine emission site', () => {
 		const result = await runConsensusMine();
 
 		expect(result.proposal_count).toBe(1);
-		expect(result.cross_producer_duplicate_count).toBe(0);
+		expect(result.recommendation_ledger).toEqual({
+			recorded: 1,
+			duplicate_recommendation_count: 0,
+			evicted: 0,
+			degraded: false,
+		});
 
 		const ledger = await readRecommendationLedger(dir);
 		expect(ledger).toHaveLength(1);
@@ -104,7 +109,7 @@ describe('consensus_mine emission site', () => {
 		]);
 	});
 
-	it('reports a non-zero cross-producer duplicate count when another producer got there first', async () => {
+	it('reports a non-zero duplicate count when another producer got there first', async () => {
 		seedMineableCorpus();
 
 		// Mine once to learn the intent this corpus produces, then wipe both the
@@ -144,7 +149,12 @@ describe('consensus_mine emission site', () => {
 
 		const second = await runConsensusMine();
 		expect(second.proposal_count).toBe(1);
-		expect(second.cross_producer_duplicate_count).toBe(1);
+		expect(second.recommendation_ledger).toEqual({
+			recorded: 0,
+			duplicate_recommendation_count: 1,
+			evicted: 0,
+			degraded: false,
+		});
 		// The curator's entry stands; the miner added nothing.
 		const ledger = await readRecommendationLedger(dir);
 		expect(ledger).toHaveLength(1);
@@ -154,7 +164,12 @@ describe('consensus_mine emission site', () => {
 	it('reports zero and writes no ledger when nothing was mined', async () => {
 		const result = await runConsensusMine();
 		expect(result.proposal_count).toBe(0);
-		expect(result.cross_producer_duplicate_count).toBe(0);
+		expect(result.recommendation_ledger).toEqual({
+			recorded: 0,
+			duplicate_recommendation_count: 0,
+			evicted: 0,
+			degraded: false,
+		});
 		expect(
 			fs.existsSync(
 				path.join(dir, '.swarm', 'learning', 'recommendation-ledger.jsonl'),

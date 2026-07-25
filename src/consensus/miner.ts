@@ -99,18 +99,40 @@ import { compareRefs, loadConsensusCorpus, sanitizeExcerpt } from './corpus.js';
  */
 export const MIN_TASK_DIVERSITY_FOR_PROPOSAL = 2;
 
+/**
+ * Minimum distinct RUNS before an attribute may become a proposal.
+ *
+ * A second, independent gate from `MIN_TASK_DIVERSITY_FOR_PROPOSAL`, and it is
+ * NOT implied by the request's `minSupport`: `min_support: 1` is an accepted
+ * argument, so without this an attribute supported by a single run could clear
+ * every threshold the caller asked for and still be a one-run recommendation.
+ * Exported so `consensus_mine` can print the gate it actually applies rather
+ * than restating it — the printed `thresholds` block used to omit this one, and
+ * an attribute that cleared every printed number could still be forced to
+ * `proposedTarget: 'none'` with nothing in the output explaining why.
+ */
+export const MIN_SUPPORT_FOR_PROPOSAL = 2;
+
+/**
+ * Hard cap on LLM restatement dispatches per report.
+ *
+ * Exported so `consensus_mine` can state the real ceiling in the description the
+ * model reads. Each unit is one `session.create` + one `session.prompt`
+ * (`src/evaluation/model-dispatcher.ts`), so this is 20 sessions and 20 prompts
+ * in the worst case, not 20 cheap local calls.
+ */
+export const MAX_LLM_SUMMARIES = 20;
+
 /** Laplace-style smoothing on the support term of `confidence`. */
 const CONFIDENCE_SUPPORT_SMOOTHING = 3;
 
 /** Confidence multiplier applied while an attribute is below the task gate. */
 const UNDIVERSE_CONFIDENCE_FACTOR = 0.5;
 
-/**
- * Hard cap on LLM restatement calls per report. Summarization is a cosmetic
- * pass over an already-final result, so it gets a small fixed budget rather
- * than scaling with corpus size (AGENTS.md invariant 1: bounded is not free).
- */
-const MAX_LLM_SUMMARIES = 20;
+// `MAX_LLM_SUMMARIES` is declared above, beside the proposal gates, because it
+// is exported for the tool description. Summarization is a cosmetic pass over an
+// already-final result, so it gets a small fixed budget rather than scaling with
+// corpus size (AGENTS.md invariant 1: bounded is not free).
 
 /** Logical agent the summarization dispatch targets. */
 const SUMMARIZATION_AGENT = 'curator_postmortem';
@@ -474,7 +496,8 @@ function buildAttributes(
 
 		const taskDiversity = tally.taskKeys.size;
 		const qualifies =
-			taskDiversity >= MIN_TASK_DIVERSITY_FOR_PROPOSAL && support > 1;
+			taskDiversity >= MIN_TASK_DIVERSITY_FOR_PROPOSAL &&
+			support >= MIN_SUPPORT_FOR_PROPOSAL;
 		qualifying.push({
 			tally,
 			attribute: {

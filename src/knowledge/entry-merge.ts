@@ -33,6 +33,40 @@
  *    sides to be populated before merging, so a sweep over mixed
  *    legacy/enriched entries silently dropped the loser's refs and counters.
  *    The one-sided cases are handled.
+ * 5. **Tags are unioned under the SAME bounded rule as their five siblings.**
+ *    See `TAG_UNION_RULE` below.
+ *
+ * ## TAG_UNION_RULE — the one place tags can still be lost, stated explicitly
+ *
+ * `tags` is a bounded field: the store's write boundary
+ * (`normalizeEntryArraysForWrite` in `knowledge-store.ts`) runs `dedupeCapped`
+ * over it at `WRITE_FIELD_CAP` = 20 on every transaction, and `knowledge_add`
+ * caps its producer at 20 as well. A merge therefore CANNOT promise to preserve
+ * every tag from both sides — two entries at the cap carry up to 40 distinct
+ * tags and only 20 can survive. Pretending otherwise is what the pre-fix code
+ * did: it unioned with a bare, uncapped, case-SENSITIVE `new Set(...)`, and the
+ * write boundary then silently truncated the result to the first 20 — which are
+ * the WINNER's, because the winner's tags come first in the union. The loser was
+ * archived in the same transaction, so the discarded tags were unrecoverable.
+ *
+ * The rule this module now implements and pins is:
+ *
+ *   1. Winner tags are retained FIRST, in their existing order.
+ *   2. Loser tags fill the remaining slots, in their existing order.
+ *   3. Dedup is CASE-INSENSITIVE and first-spelling-wins (`dedupeCapped`), the
+ *      same comparison the write boundary uses — so a merge no longer emits a
+ *      list the very next write would rewrite.
+ *   4. Anything past `MERGE_FIELD_CAP` (20) is DROPPED at merge time, visibly,
+ *      instead of being handed to the write boundary to drop invisibly.
+ *
+ * Consequence, stated so nobody has to rediscover it: a winner already holding
+ * 20 tags absorbs ZERO tags from the loser. That is not new data loss — it is
+ * the pre-existing store cap, now applied where it can be reasoned about and
+ * asserted. Order is the whole lever: if tag retention priority ever needs to
+ * change (e.g. prefer a rarer loser tag over a generic winner tag), it changes
+ * HERE, in the argument order of the union, not at the write boundary.
+ *
+ * Pinned by `tests/unit/hooks/knowledge-dedup-sweep-tag-cap.test.ts`.
  *
  * ## What this module deliberately does NOT change
  *
@@ -122,10 +156,17 @@ export function mergeEntryFields(
 	// winner must never share a mutable array with the entry we are about to
 	// archive.
 	target.confirmed_by = unionConfirmedBy(target.confirmed_by, src.confirmed_by);
-	// tags: array union (case-sensitive, ordered).
-	target.tags = Array.from(
-		new Set([...(target.tags ?? []), ...(src.tags ?? [])]),
-	);
+	// tags: same bounded union as every other evidence array (see
+	// TAG_UNION_RULE above). A bare `new Set(...)` here produced an UNCAPPED,
+	// case-SENSITIVE list that the store's write boundary then silently trimmed
+	// to 20 — winner-first, so the loser's tags were the ones discarded and the
+	// loser was archived in the same transaction, making the loss permanent.
+	unionArrayField(tAny, sAny, 'tags', MERGE_FIELD_CAP);
+	// `tags` is REQUIRED on the entry shape (the actionability arrays are
+	// optional), and the pre-#1821 union always materialized it. `unionArrayField`
+	// deliberately leaves a key untouched when NEITHER side carries an array, so
+	// restore that one guarantee for this field only.
+	if (!Array.isArray(target.tags)) target.tags = [];
 	// source_refs is optional on some shapes; union whichever side has it. A
 	// one-sided union is still a union: the loser's refs are evidence the winner
 	// inherits, and requiring both sides silently dropped them on mixed

@@ -1359,7 +1359,16 @@ export const LearningConfigSchema = z.object({
 			per_candidate_llm_timeout_ms: z.number().int().min(0).default(60_000),
 			/** Wall-clock ceiling for a single drain cycle, in milliseconds. */
 			max_drain_wall_time_ms: z.number().int().min(0).default(10_000),
-			/** Nudge the architect to supersede an existing lesson instead of adding a near-duplicate. */
+			/** SUPPRESS the prompt-only "supersede an existing lesson instead of
+			 * adding a near-duplicate" nudge to the architect while real-time
+			 * admission is enabled, since this loop already admits those lessons
+			 * automatically and the nudge would only ask the architect to redo it by
+			 * hand. Its sole consumer is
+			 * `shouldInjectRealtimeLearningNudge` (`src/hooks/realtime-learning-nudge.ts`),
+			 * which returns false — i.e. no nudge — when `realtime_admission.enabled`
+			 * is true AND this is not `false`. Set it to `false` to keep the nudge
+			 * even with admission on. The default `true` therefore means "suppress",
+			 * not "nudge"; `docs/configuration.md` has always described it correctly. */
 			supersede_nudge: z.boolean().default(true),
 		})
 		.prefault({}),

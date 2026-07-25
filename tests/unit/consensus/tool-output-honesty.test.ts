@@ -30,6 +30,10 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ConsensusAttributeV1 } from '../../../src/consensus/contracts';
+import {
+	MIN_SUPPORT_FOR_PROPOSAL,
+	MIN_TASK_DIVERSITY_FOR_PROPOSAL,
+} from '../../../src/consensus/miner';
 import { _test_exports } from '../../../src/tools/consensus-mine';
 import { TOOL_MANIFEST } from '../../../src/tools/manifest';
 
@@ -176,6 +180,31 @@ describe('consensus_mine — the truncation guarantee is real', () => {
 	});
 });
 
+describe('consensus_mine — the printed thresholds are every proposal gate', () => {
+	test('prints the support gate, sourced from the miner rather than restated', async () => {
+		// `min_support: 1` is an accepted argument, so the request thresholds alone
+		// do not describe proposal eligibility: `buildAttributes` also requires
+		// `support >= MIN_SUPPORT_FOR_PROPOSAL`. While that gate was unprinted, an
+		// attribute could clear every number in this block and still be forced to
+		// `proposed_target: 'none'` with nothing in the output explaining why. The
+		// BEHAVIOUR is pinned in `miner-gating.test.ts` ("support from a single run
+		// is a note even when diverse tasks appear"); what is pinned here is that
+		// the number the model is told is the number the miner applies.
+		const result = await run(project(), { min_support: 1 });
+		const thresholds = result.thresholds as Record<string, unknown>;
+		expect(thresholds.min_support).toBe(1);
+		expect(thresholds.min_support_for_proposal).toBe(MIN_SUPPORT_FOR_PROPOSAL);
+		expect(thresholds.min_task_diversity).toBe(MIN_TASK_DIVERSITY_FOR_PROPOSAL);
+	});
+
+	test('the investigation-note guarantee names both gates', async () => {
+		const result = await run(project());
+		expect((result.guarantees as string[]).join(' | ')).toContain(
+			`attributes below task diversity ${MIN_TASK_DIVERSITY_FOR_PROPOSAL} or below support ${MIN_SUPPORT_FOR_PROPOSAL} are investigation notes, never proposals`,
+		);
+	});
+});
+
 describe('consensus_mine — summarized_count does not overclaim', () => {
 	function attribute(id: string, llmSummary?: string): ConsensusAttributeV1 {
 		return {
@@ -271,6 +300,10 @@ describe('consensus_mine — retention reporting under a disabled retention', ()
 			failed: 0,
 		});
 		expect(retention.retained).toBeUndefined();
+		// `corrupt` is omitted for the same reason as `retained`: this mode
+		// enumerates nothing, so printing `corrupt: 0` would assert a clean store
+		// that was never inspected.
+		expect(retention.corrupt).toBeUndefined();
 		// Both reports really are still on disk, which is what `retained: 0` denied.
 		expect(
 			readdirSync(path.join(root, '.swarm', 'evolution', 'consensus')),
@@ -287,6 +320,7 @@ describe('consensus_mine — retention reporting under a disabled retention', ()
 			deleted: 1,
 			retained: 1,
 			failed: 0,
+			corrupt: 0,
 		});
 		expect(
 			readdirSync(path.join(root, '.swarm', 'evolution', 'consensus')),

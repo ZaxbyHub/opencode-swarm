@@ -9,9 +9,13 @@
   duplicates could push distinct values off the end and silently lose them.
 - Deduplication is also enforced on the knowledge **store write path** (`appendKnowledge`,
   `rewriteKnowledge`, and the `transactKnowledge` commit), so a call site that forgets to dedupe is corrected
-  by the store rather than silently persisting duplicates. One path is not covered — the cohort merge in
-  `family-migration.ts` writes through `atomicWriteFile` directly — and that gap is listed under Known
-  limitations below rather than glossed by a "regardless of which code path" claim.
+  by the store rather than silently persisting duplicates. That is not a whole-repo guarantee: **four writers
+  bypass it**, and the exclusions are deliberate rather than accidental. `applyConfidenceDeltas` re-persists
+  exactly what the (intentionally un-normalized) read path returned, rewriting the whole file with raw
+  `JSON.stringify`; `knowledge-validator.ts`'s quarantine/restore/unarchive and `hive-transaction.ts` relocate
+  existing records rather than authoring new field values; and `knowledge/family-migration.ts` *does* author a
+  new `tags` value on the cohort merge path. All four are listed under Known limitations below rather than
+  glossed by a "regardless of which code path" claim.
 - New `learning` and `consensus` configuration blocks, and a new
   `knowledge.promotion_require_actionable` setting.
 
@@ -49,8 +53,13 @@ overrides and records a durable audited override naming the failed gate. Set
 ### Near-duplicate knowledge entries are merged automatically
 
 A bounded curator sweep (`learning.dedup_sweep.enabled`, default **true**) now collapses active
-near-duplicate knowledge entries into one. It runs at each phase boundary, and also under `curator_analyze`
-and `/swarm curate`.
+near-duplicate knowledge entries into one. It runs at each phase boundary and under `curator_analyze`.
+
+It also runs under `/swarm curate`, but **not unconditionally** — the sweep is the last step of
+`runCuratorPhase`, and `/swarm curate` reaches that only when it has a session id, when the next uncovered
+phase is still within the plan's phase count, and when that phase has not already been digested. On a plan
+whose phases are all covered, `/swarm curate` reports `knowledge_applied: 0` and returns without sweeping.
+Phase boundaries and `curator_analyze` are the reliable triggers.
 
 What it does to your store:
 
@@ -112,20 +121,42 @@ dropped whole. That is deliberate — a rejected lesson carries its own run id a
 `min_support`, so reading them first would burn the budget on observations that produce no finding. Raise
 `max_evidence_items` or narrow the request when you want this arm to contribute.
 
-It **mutates none of the evidence it reads**. It activates no skills, edits no knowledge, promotes nothing,
-touches no project file, and runs no optimization rounds. It writes exactly two things: a versioned, immutable
-report under `.swarm/evolution/consensus/`, and an entry per emitted proposal in the shared recommendation
-dedup ledger (a proposal whose text the ledger already holds is counted as `cross_producer_duplicate_count`
-rather than re-recorded — the ledger key is producer-agnostic, so that count includes the miner's own earlier
-emissions, not only other producers').
+It **mutates none of the evidence it reads**. It activates no skills, edits no knowledge, admits no durable
+memory record, promotes nothing, touches no project file, and runs no optimization rounds.
+
+It is not otherwise write-minimal, and the description the model reads now says so rather than claiming "two
+things". A single run: writes its versioned immutable report under `.swarm/evolution/consensus/`; **deletes**
+its own older reports past `consensus.report_retention` (default 50 — pruning runs after every mine, so on a
+long-lived project the steady state is one deletion per run); rewrites the shared recommendation dedup ledger
+whole, with FIFO eviction that can drop another producer's oldest entries; leaves one never-removed lock
+sentinel per report id under `.swarm/locks/`; and, with `llm_summarization_enabled` (default `true`) and a
+wired client, issues up to **20** `session.create` plus `session.prompt` calls. Under a knowledge link the
+ledger lands in the shared cohort root, outside this project. A proposal whose text the ledger already holds
+is counted as `recommendation_ledger.duplicate_recommendation_count` rather than re-recorded — the ledger key
+is producer-agnostic, so that count includes the miner's own earlier emissions, not only other producers'.
+
+**Where proposals land.** Reports are immutable artifacts, not an inbox to poll, so two surfaces make them
+reachable. `/swarm status` prints `Consensus reports: <n>` under **Learning Queues** whenever the store is
+non-empty, with the directory to open. And when `memory.enabled` is `true`, each proposal is additionally
+mirrored into a **pending** swarm-memory proposal through the same `MemoryGateway.propose` path
+`swarm_memory_propose` uses — curator review is still required, and no durable memory record is created — so
+it shows up wherever memory proposals already do. The mirror is fail-open; whether it ran, and what it
+produced, is reported back in the tool's `memory_mirror` block.
+
+**When the ledger write fails, the tool says so.** The shared-ledger append is deliberately fail-open, so a
+broken ledger path never costs you a mining run. It used to cost you the *information*: the result printed a
+duplicate count of `0` beside `success: true`, indistinguishable from a clean run. The response now carries
+`recommendation_ledger.degraded`, which is `true` exactly when nothing was recorded and nothing was compared.
 
 Guarantees worth knowing:
 
 - **Deterministic first.** All filtering, co-occurrence, support counting, and diversity math run before any
   model call. Summarization is optional; when it is unavailable or its output is rejected, the deterministic
   statement simply stands.
-- **One anecdote is never a proposal.** An attribute supported by a single task (`taskDiversity < 2`) is
-  emitted as an investigation note with `proposedTarget: 'none'`.
+- **One anecdote is never a proposal.** An attribute supported by a single task (`taskDiversity < 2`) *or* by
+  a single run (`support < 2`) is emitted as an investigation note with `proposedTarget: 'none'`. That second
+  gate is independent of the `min_support` you request — `min_support: 1` is accepted — so both gates are now
+  printed in the tool's `thresholds` block, sourced from the miner rather than restated.
 - **Negative evidence is never silently dropped.** An attribute that counts failing runs is *rejected by the
   schema* unless it also carries counterexample references, so a finding can never be published with its
   counterexamples stripped. And when `max_evidence_items` truncates a source, the cut now alternates between
@@ -184,7 +215,7 @@ See `docs/consensus-mining.md`.
 ## Migration notes
 
 No configuration change is *required* — the new `learning` and `consensus` blocks have working defaults, and
-existing knowledge records load unchanged. But three behaviors change by default, so read these before
+existing knowledge records load unchanged. But four behaviors change by default, so read these before
 upgrading:
 
 1. **Hive promotion is stricter.** `knowledge.promotion_require_actionable` defaults to `true`, so a lesson
@@ -192,11 +223,20 @@ upgrading:
    previously promoted automatically. `--force --reason "<why>"` still overrides and records an audited
    override; set the key to `false` to restore the old behavior.
 2. **Near-duplicate knowledge entries are now merged and archived automatically.** The curator sweep
-   (`learning.dedup_sweep.enabled`, default `true`) runs at every phase boundary and also under
-   `curator_analyze` and `/swarm curate`. Losing entries are **archived**, not deleted: each gets a tombstone
-   through the shared invalidator, which also retires any generated skill referencing it. Set
-   `learning.dedup_sweep.enabled = false` to opt out.
-3. **`/swarm link` and `/swarm unlink` merge entries differently.** The shared merge helper now unions
+   (`learning.dedup_sweep.enabled`, default `true`) runs at every phase boundary and under `curator_analyze`;
+   under `/swarm curate` it runs only when that command actually reaches `runCuratorPhase` (see the caveat
+   above). Losing entries are **archived**, not deleted: each gets a tombstone through the shared invalidator,
+   which also retires any generated skill referencing it. Set `learning.dedup_sweep.enabled = false` to opt
+   out.
+3. **Lessons are now validated and admitted mid-session, and that costs model calls.**
+   `learning.realtime_admission.enabled` defaults to `true` and is wired into the `Task` tool's after-hook
+   with a live LLM delegate, so upgrading turns on a per-session budget of up to **20 LLM calls** and
+   **50,000 tokens** (`max_llm_calls_per_session`, `max_tokens_per_session`) plus mid-session writes to
+   `knowledge.jsonl`. The budget is a ceiling, not a floor — the drain only does work when the in-session
+   candidate queue is non-empty — but on a busy session it is real spend that did not exist before. Set
+   `learning.realtime_admission.enabled = false` to keep the previous phase-boundary-only behaviour; the
+   durable `.swarm/insight-candidates.jsonl` queue remains the backstop either way.
+4. **`/swarm link` and `/swarm unlink` merge entries differently.** The shared merge helper now unions
    actionability fields and `source_knowledge_ids`, recomputes `content_hash`, and bumps `revision` when a
    merge swaps in a longer lesson. The `revision` bump is deliberate — the old behavior left `content_hash`
    describing text the entry no longer held, which silently broke the compare-and-swap on every later
@@ -210,6 +250,16 @@ upgrading:
 - `src/knowledge/family-migration.ts` authors merged tag values and writes them through a path that bypasses
   the store-level normalizer, so a cohort merge can transiently exceed the cap until the next transaction
   normalizes it.
+- Three further writers bypass the store-level normalizer, deliberately. `applyConfidenceDeltas` — reached on
+  every `phase_complete` via the skill-usage and knowledge-verdict feedback paths — rewrites the whole
+  knowledge file with raw `JSON.stringify`, re-persisting exactly what the intentionally un-normalized read
+  path returned; normalizing there would silently rewrite untouched historical records on a path whose only
+  job is to bump a number. `knowledge-validator.ts`'s quarantine/restore/unarchive and `hive-transaction.ts`
+  relocate existing records without authoring new field values.
+- Each consensus mining run leaves an empty lock sentinel under `.swarm/locks/`, one per distinct report id,
+  and nothing removes it. `proper-lockfile` cleans up its own lock directory; the sentinel file it needs in
+  order to lock is created by `tryAcquireLock` and never deleted. It is a few bytes per report, but on a
+  long-lived project the count grows without bound and is not covered by `consensus.report_retention`.
 - One further instance of the same positional-cap pattern remains at `src/hooks/curator.ts` on
   `source_knowledge_ids` (cap 50). It is deliberately excluded: that field is used to carry
   deduplication markers, and capping or reordering it would break that mechanism.

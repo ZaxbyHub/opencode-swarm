@@ -69,12 +69,23 @@ const ReferenceListSchema = z.array(ReferenceSchema).max(MAX_REFS_PER_CLASS);
  * ever reached as `LearningProvenanceV1Schema.shape.writeOrigin`. The public
  * shapes are `LearningProvenanceV1['writeOrigin']` and
  * `LearningWriteOriginInput`.
+ *
+ * NO `agentId` (issue #1821). It was declared here and no code path could ever
+ * produce one: all three production callers of `stampLearningProvenance` —
+ * `src/consensus/miner.ts`, `src/services/recommendation-ledger.ts`, and
+ * `src/learning/admission.ts` — pass exactly `producedAt` / `sessionId` /
+ * `agentRole`, and none of their options bags has a slot to carry an agent id.
+ * Declaring a field nothing can reach documented a value that never exists and
+ * invited a reader to filter or join on it. `src/consensus/contracts.ts` got the
+ * same treatment for its structural mirror of this shape; because this object is
+ * `.strict()`, removing the key means an `agentId` is now REJECTED rather than
+ * silently reserved. If an agent id ever becomes real, add it here together with
+ * the producer that supplies it — not before.
  */
 const LearningWriteOriginSchema = z
 	.object({
 		sessionId: ReferenceSchema.optional(),
 		agentRole: ReferenceSchema.optional(),
-		agentId: ReferenceSchema.optional(),
 		producedAt: IsoDateSchema,
 	})
 	.strict();
@@ -100,10 +111,10 @@ export interface LearningProvenanceV1 {
 	sourceEvidenceRefs: string[];
 	sourceRunIds: string[];
 	sourceModelIds: string[];
+	/** See `LearningWriteOriginSchema` for why there is no `agentId` here. */
 	writeOrigin: {
 		sessionId?: string;
 		agentRole?: string;
-		agentId?: string;
 		producedAt: string;
 	};
 }
@@ -122,7 +133,6 @@ export interface LearningProvenanceInput {
 export interface LearningWriteOriginInput {
 	sessionId?: string;
 	agentRole?: string;
-	agentId?: string;
 	producedAt?: string;
 }
 
@@ -169,8 +179,6 @@ export function stampLearningProvenance(
 	if (sessionId !== undefined) writeOrigin.sessionId = sessionId;
 	const agentRole = normalizeOriginField(origin.agentRole);
 	if (agentRole !== undefined) writeOrigin.agentRole = agentRole;
-	const agentId = normalizeOriginField(origin.agentId);
-	if (agentId !== undefined) writeOrigin.agentId = agentId;
 
 	return LearningProvenanceV1Schema.parse({
 		v: 1,

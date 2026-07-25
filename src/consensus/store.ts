@@ -226,7 +226,44 @@ export type ConsensusPruneResult = {
 	retained: string[];
 	/** Ids that failed to delete, with the reason. Never fatal. */
 	failed: Array<{ reportId: string; error: string }>;
+	/**
+	 * Report ids on disk that failed to parse or verify.
+	 *
+	 * These are neither deleted nor counted in `retained`, so without this field
+	 * `deleted + retained` silently under-counts what is actually stored and a
+	 * caller printing those two numbers describes a store it cannot see all of.
+	 * Empty when pruning is disabled, because that mode enumerates nothing.
+	 */
+	corrupt: string[];
 };
+
+/**
+ * Count the report files present, without parsing or verifying any of them.
+ *
+ * This is the cheap listing primitive `/swarm status` needs: `readdir` plus a
+ * name filter, no JSON parse and no hash recomputation, so surfacing the store
+ * in an interactive command costs one syscall rather than a full re-verification
+ * of every stored report. It therefore counts CORRUPT reports too — it counts
+ * files whose name is a well-formed report id, which is exactly the claim the
+ * status line makes. Use `listConsensusReports` when you need content.
+ */
+export async function countConsensusReportFiles(
+	directory: string,
+): Promise<number> {
+	const root = swarmPath(directory, CONSENSUS_RELATIVE_DIR);
+	try {
+		const entries = await readdir(root, { withFileTypes: true });
+		return entries.filter(
+			(entry) =>
+				entry.isFile() &&
+				entry.name.endsWith('.json') &&
+				REPORT_ID_RE.test(entry.name.slice(0, -'.json'.length)),
+		).length;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+		throw error;
+	}
+}
 
 /**
  * Enforce `consensus.report_retention`.
@@ -238,7 +275,10 @@ export type ConsensusPruneResult = {
  *   "keep zero reports" would delete the report the caller just wrote.
  * - Corrupt reports are **never** deleted. An unparseable artifact is data-
  *   quality evidence; silently discarding it destroys the only trace of the bug
- *   that produced it.
+ *   that produced it. They are reported as `corrupt` rather than dropped
+ *   silently: they are excluded from `retained` as well as from `deleted`, so a
+ *   caller that printed only those two numbers would describe a store smaller
+ *   than the one on disk.
  * - Newest-first by `generatedAt`, ties broken by id, so pruning is a total
  *   order and two runs over the same store delete the same files.
  * - Only files directly under `.swarm/evolution/consensus/` with a validated
@@ -249,9 +289,11 @@ export async function pruneConsensusReports(
 	retain: number,
 ): Promise<ConsensusPruneResult> {
 	if (!Number.isInteger(retain) || retain <= 0) {
-		return { deleted: [], retained: [], failed: [] };
+		// Nothing is enumerated in this mode, so `corrupt` is empty because the
+		// question was never asked — not because the store is known to be clean.
+		return { deleted: [], retained: [], failed: [], corrupt: [] };
 	}
-	const { reports } = await listConsensusReports(directory);
+	const { reports, corruptReportIds } = await listConsensusReports(directory);
 	// `listConsensusReports` already returns newest-first.
 	const keep = reports.slice(0, retain);
 	const drop = reports.slice(retain);
@@ -272,6 +314,7 @@ export async function pruneConsensusReports(
 		deleted,
 		retained: keep.map((report) => report.reportId),
 		failed,
+		corrupt: corruptReportIds,
 	};
 }
 
