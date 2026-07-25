@@ -31,7 +31,7 @@ import {
 	takeDrainBatch,
 } from '../../../src/learning/candidate-queue.js';
 import {
-	getTrackedPrmSessionCount,
+	_test_exports as prmSeam,
 	resetPrmPatternSupport,
 } from '../../../src/learning/prm-pattern-support.js';
 import { _internals, createPrmHook } from '../../../src/prm/index.js';
@@ -241,7 +241,7 @@ describe('createPrmHook — pattern persistence placement', () => {
 		// rather than by the loop happening to be empty.
 		expect(observed).toBe(0);
 		expect(getQueueDepth('s1')).toBe(0);
-		expect(getTrackedPrmSessionCount()).toBe(0);
+		expect(prmSeam.getTrackedPrmSessionCount()).toBe(0);
 	});
 
 	it('records an observation and enqueues once support is met', async () => {

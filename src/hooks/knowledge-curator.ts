@@ -963,8 +963,15 @@ export async function consumeInsightCandidates(
  * `findActiveSwarmNearDuplicate`, and a marker scan that skipped it would treat
  * an archived entry's stale marker as proof of admission and silently drop a
  * legitimate candidate.
+ *
+ * Module-private. It was exported when D1 landed on this branch and never
+ * acquired an importer; its three callers are all in this file, and the
+ * behaviour above is asserted end-to-end through `curateAndStoreSwarm` in
+ * `tests/unit/learning/admission-idempotency-checks.test.ts`. It is deliberately
+ * NOT added to this module's `_internals` seam either — that seam exists so
+ * tests can SUBSTITUTE a dependency, and nothing needs to substitute this.
  */
-export function findActiveEntryWithInsightMarker(
+function findActiveEntryWithInsightMarker(
 	entries: SwarmKnowledgeEntry[],
 	marker: string,
 ): SwarmKnowledgeEntry | undefined {

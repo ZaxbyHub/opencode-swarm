@@ -86,8 +86,7 @@ describe('ProposedSkillChangeSchema — the proposal boundary itself', () => {
 	});
 
 	test('accepts a writeOrigin carrying only producedAt', () => {
-		// `sessionId`, `agentRole` and `agentId` are all optional, and the consensus
-		// path never populates `agentId` at all.
+		// `sessionId` and `agentRole` are both optional; `producedAt` is not.
 		expect(
 			ProposedSkillChangeSchema.safeParse(
 				proposal({
@@ -98,5 +97,27 @@ describe('ProposedSkillChangeSchema — the proposal boundary itself', () => {
 				}),
 			).success,
 		).toBe(true);
+	});
+
+	test('REJECTS an agentId — the consensus path can never produce one', () => {
+		// The shared `LearningWriteOriginSchema` admits `agentId`, but nothing on
+		// this path can set it: `MineConsensusDeps` has no such field and
+		// `buildProposals` passes exactly producedAt/sessionId/agentRole. Reserving
+		// room for it documented a value that never exists, so the strict schema
+		// now rejects it. If a future change makes the miner able to stamp an
+		// agent id, this test is the one that must be updated first.
+		expect(
+			ProposedSkillChangeSchema.safeParse(
+				proposal({
+					provenance: {
+						...proposal().provenance,
+						writeOrigin: {
+							producedAt: '2026-07-24T00:00:00.000Z',
+							agentId: 'agent-7',
+						},
+					},
+				}),
+			).success,
+		).toBe(false);
 	});
 });

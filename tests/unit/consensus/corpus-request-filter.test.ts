@@ -39,12 +39,14 @@ function emptyReaders(): CorpusReaders {
 		readSkillUsageEntries: () => [],
 		readKnowledgeEntries: async () => [],
 		loadEvidence: async () => ({ status: 'not_found' }),
+		readRejectedLessons: async () => [],
+		readRejectedSkillEdits: async () => [],
 	};
 }
 
 /**
- * One knowledge entry per id. Knowledge is the last source in `SOURCE_ORDER`,
- * so a test can starve it by filling the budget from an earlier source.
+ * One knowledge entry per id. Knowledge sits LATE in `SOURCE_ORDER` (seventh of
+ * nine), so a test can starve it by filling the budget from an earlier source.
  */
 function knowledgeEntries(count: number, prefix: string) {
 	return Array.from({ length: count }, (_, index) => ({

@@ -2702,7 +2702,7 @@ async function initializeOpenCodeSwarm(
 				// The adapter's first check is `isTaskTool`, and its second is an O(1)
 				// queue-depth probe, so the non-Task path does no I/O and takes no lock.
 				await safeHook(async () => {
-					await realtimeAdmissionAfter(
+					const summary = await realtimeAdmissionAfter(
 						ctx.directory,
 						{ tool: input.tool, sessionID: input.sessionID },
 						learningConfig.realtime_admission,
@@ -2722,6 +2722,19 @@ async function initializeOpenCodeSwarm(
 							};
 						},
 					);
+					// `DrainSummary`'s counters were computed and discarded here, which
+					// made `deferred` and `failed` — the two that say the drain did NOT
+					// finish its work — unobservable in production (issue #1821).
+					// `log` is gated on OPENCODE_SWARM_DEBUG and writes to stderr, never
+					// to a chat-visible stream (AGENTS.md invariant 10). `undefined`
+					// means a gate short-circuited before any drain ran, which is the
+					// overwhelmingly common case on the hot path and must stay silent.
+					if (summary) {
+						log('realtime admission drain', {
+							sessionID: input.sessionID,
+							...summary,
+						});
+					}
 				})(input, output);
 				// Reviewer receipt collection: persist a returning reviewer Task's
 				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;

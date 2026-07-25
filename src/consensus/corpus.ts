@@ -8,7 +8,10 @@
  * `readdir` over `.swarm/trajectories`) and `listEvaluationRunIds` (a `readdir`
  * over `.swarm/evolution/runs`), because both underlying stores read one
  * artifact at a time and never needed a listing of their own. An enumerator is
- * not a store: it writes nothing, caches nothing, and owns no schema.
+ * not a store: it writes nothing, caches nothing, and owns no schema. One
+ * source composes rather than enumerates: `.swarm/skills/rejected-edits.jsonl`
+ * has no bulk reader, so `defaultReaders` pairs that module's already-exported
+ * `rejectedEditsPath` with the shared JSONL `readKnowledge`.
  *
  * Hard rules this module upholds (AGENTS.md invariants 4 and 8):
  * - Every reader receives an injected `directory`. There is no `process.cwd()`
@@ -84,6 +87,7 @@ import {
 import {
 	computeOutcomeSignal,
 	readKnowledge,
+	readRejectedLessons,
 	resolveSwarmKnowledgePath,
 } from '../hooks/knowledge-store.js';
 import type { RetrievalOutcome } from '../hooks/knowledge-types.js';
@@ -92,6 +96,7 @@ import { readSkillUsageEntries } from '../hooks/skill-usage-log.js';
 import { redactSecrets } from '../memory/redaction.js';
 import { readTrajectory } from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
+import { rejectedEditsPath } from '../services/skill-evaluator.js';
 import type { ConsensusCorpusHash, ConsensusSourceKind } from './contracts.js';
 
 /**
@@ -153,6 +158,10 @@ export interface CorpusReaders {
 		directory: string,
 		taskId: string,
 	) => Promise<LoadEvidenceResult>;
+	readRejectedLessons: (directory: string) => Promise<RejectedLessonLike[]>;
+	readRejectedSkillEdits: (
+		directory: string,
+	) => Promise<RejectedSkillEditLike[]>;
 }
 
 /**
@@ -165,6 +174,41 @@ export interface KnowledgeLike {
 	lesson?: unknown;
 	category?: unknown;
 	retrieval_outcomes?: RetrievalOutcome;
+}
+
+/**
+ * Structural view of a `RejectedLesson` (`src/hooks/knowledge-types.ts`). Same
+ * reason as `KnowledgeLike`: the corpus reads four fields and must not couple
+ * itself to a schema another lane edits.
+ */
+export interface RejectedLessonLike {
+	id?: unknown;
+	lesson?: unknown;
+	rejection_reason?: unknown;
+	rejection_layer?: unknown;
+}
+
+/**
+ * Structural view of a `RejectedSkillEditRecord`
+ * (`src/services/skill-evaluator.ts`). `candidatePreview` is deliberately NOT
+ * read: it is up to 800 bytes of the rejected skill BODY, which is closer to a
+ * prompt than to an outcome, and the corpus reads outcomes only.
+ */
+export interface RejectedSkillEditLike {
+	slug?: unknown;
+	operation?: unknown;
+	reason?: unknown;
+	candidateHash?: unknown;
+}
+
+/**
+ * Structural view of the two curated-failure fields on a `RetrospectiveEvidence`
+ * entry (`src/config/evidence-schema.ts`).
+ */
+interface RetrospectiveFailureLike {
+	type?: unknown;
+	error_taxonomy?: unknown;
+	top_rejection_reasons?: unknown;
 }
 
 export interface LoadCorpusOptions {
@@ -205,10 +249,31 @@ const SOURCE_ORDER: readonly ConsensusSourceKind[] = [
 	'skill-usage',
 	'knowledge',
 	'evidence-bundle',
+	// LAST, deliberately, and the trade-off is worth stating rather than hiding.
+	// Placing an all-failure source EARLY would be worse, not better: every
+	// rejected lesson and every rejected skill edit carries its own run id, so
+	// they almost never aggregate past `minSupport`, and a store holding 200 of
+	// them would spend the entire default `max_evidence_items` budget of 50 on
+	// observations that produce no attribute while starving the sources that do.
+	// The cost of LAST is the documented one — once the budget is spent a source
+	// is dropped WHOLE — and `truncation.corpus` is what declares that happened.
+	// Narrow the request or raise `max_evidence_items` to reach this arm.
+	'curated-failure',
 ] as const;
 
 /** Bounds a single enumeration so a pathological `.swarm/` cannot stall mining. */
 const MAX_ENUMERATED_ENTRIES = 2000;
+
+/**
+ * Bounds one curated-failure list.
+ *
+ * Both JSONL stores are FIFO-capped at 200 by their own writers, but the corpus
+ * must not depend on another module's cap holding — and `top_rejection_reasons`
+ * on a retrospective has NO schema maximum at all (`z.array(z.string())`), so a
+ * single hand-written retro could otherwise expand into unbounded observations
+ * before `maxEvidenceItems` ever gets to apply.
+ */
+const MAX_CURATED_FAILURE_ENTRIES = 500;
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 
@@ -347,6 +412,20 @@ function defaultReaders(): CorpusReaders {
 		// legacy `task_complexity` values (`medium` \u2192 `moderate`). Mining is a read.
 		loadEvidence: (directory, taskId) =>
 			loadEvidence(directory, taskId, { migrate: false }),
+		readRejectedLessons,
+		// `.swarm/skills/rejected-edits.jsonl` has no bulk reader of its own — its
+		// only consumer is `isRejectedSkillContent`, a hash-membership probe that
+		// returns a boolean and never yields records. Rather than add a reader to
+		// a module this lane does not own, the corpus composes the two symbols
+		// that module already exports: its path resolver and the shared JSONL
+		// reader. The `maxEntries` argument is load-bearing beyond the bound — a
+		// capped `readKnowledge` BYPASSES the shared artifact cache entirely, so
+		// mining this store cannot evict another subsystem's cached entries.
+		readRejectedSkillEdits: (directory) =>
+			readKnowledge<RejectedSkillEditLike>(
+				rejectedEditsPath(directory),
+				MAX_CURATED_FAILURE_ENTRIES,
+			),
 	};
 }
 
@@ -688,6 +767,165 @@ async function loadEvidenceBundles(
 	return observations;
 }
 
+/**
+ * Curated failures — the fifth corpus arm the issue's Workstream C names
+ * ("PRM trajectories, usage/compliance, knowledge outcomes, gate evidence, and
+ * curated failures"). Recovered late as AC28; see
+ * `.agents/issue-traces/1821-learning-data-plane/01-issue-summary.md`.
+ *
+ * A curated failure is an **adjudicated negative outcome**: something a curator,
+ * a validator, an eval gate, or a retrospective already ruled against. That is a
+ * narrower thing than "a record in a store with the word rejected in its name",
+ * and the narrowing is what keeps this arm evidence rather than volume. Three
+ * stores qualify; one candidate was examined and deliberately EXCLUDED:
+ *
+ * - `.swarm/knowledge-rejected.jsonl` (`readRejectedLessons`) — a lesson refused
+ *   admission to the store, carrying the layer that refused it and why.
+ * - `.swarm/skills/rejected-edits.jsonl` — a generated skill edit that lost its
+ *   eval comparison against the incumbent and was never activated.
+ * - A retrospective's own `error_taxonomy` and `top_rejection_reasons` — the
+ *   phase's adjudicated statement of what went wrong. These reach the corpus
+ *   ONLY here. `loadEvidenceBundles` reads a retro's `verdict`, and
+ *   `src/tools/write-retro.ts` hardcodes that verdict to `'pass'`, so a phase
+ *   reporting `error_taxonomy: ['gate_evasion']` entered the corpus as one clean
+ *   passing observation and its failure content was invisible to the miner.
+ *   Both views are kept, and they share `task:<taskId>`: the retro was written
+ *   (a success) and it names failures (counterexamples on the same run), which
+ *   is exactly the "one run in both success and failure support" case the
+ *   thresholds section of `docs/consensus-mining.md` already describes.
+ *
+ * EXCLUDED — `.swarm/knowledge-unactionable.jsonl`. Despite living beside the
+ * rejected store and being written by the same curator, it is a filter artifact
+ * and a retry queue, not an adjudication. Its entries failed the Layer-5
+ * *actionability* check, meaning they are structurally incomplete (no predicate,
+ * or no scope), not judged wrong; `hardenUnactionableEntries`
+ * (`src/services/unactionable-hardening.ts`) enriches them and promotes them
+ * back into the active store. Counting a pending-hardening entry as a failed
+ * outcome would score the queue's own throughput as evidence about agents.
+ *
+ * Every observation here is `success: false`. That is the truth of the source,
+ * not a convenience: a record exists only because something was ruled against.
+ */
+async function loadCuratedFailures(
+	directory: string,
+	readers: CorpusReaders,
+	maxExcerptChars: number,
+): Promise<CorpusObservation[]> {
+	const observations: CorpusObservation[] = [];
+
+	const lessons = (await readers.readRejectedLessons(directory)).slice(
+		0,
+		MAX_CURATED_FAILURE_ENTRIES,
+	);
+	for (const [index, lesson] of lessons.entries()) {
+		// The lesson TEXT is deliberately not a signal. Two rejections agreeing on
+		// a reason is evidence; two rejections of unrelated prose is not, and the
+		// prose is the largest free-text surface this store has.
+		const id =
+			typeof lesson.id === 'string' && lesson.id.length > 0
+				? lesson.id
+				: String(index);
+		const reason =
+			typeof lesson.rejection_reason === 'string'
+				? lesson.rejection_reason
+				: 'unknown';
+		const layer =
+			typeof lesson.rejection_layer === 'number'
+				? String(lesson.rejection_layer)
+				: 'unknown';
+		observations.push({
+			runId: `rejected-lesson:${sanitizeExcerpt(id, maxExcerptChars)}`,
+			success: false,
+			signals: [
+				signal('skill', ['rejected-lesson', layer, reason], maxExcerptChars),
+			],
+			evidenceRef: sanitizeExcerpt(
+				`curated-failure:rejected-lesson:${id}`,
+				maxExcerptChars,
+			),
+		});
+	}
+
+	const edits = (await readers.readRejectedSkillEdits(directory)).slice(
+		0,
+		MAX_CURATED_FAILURE_ENTRIES,
+	);
+	for (const [index, edit] of edits.entries()) {
+		// `candidateHash` is the trial identity: it is what the eval gate actually
+		// judged, so two rejections of the SAME candidate content are one trial.
+		// The slug is not the unit — a slug rejected five times over five distinct
+		// candidates is five independent adjudications.
+		const hash =
+			typeof edit.candidateHash === 'string' && edit.candidateHash.length > 0
+				? edit.candidateHash
+				: String(index);
+		const slug = typeof edit.slug === 'string' ? edit.slug : 'unknown';
+		const reason = typeof edit.reason === 'string' ? edit.reason : 'unknown';
+		observations.push({
+			runId: `rejected-skill-edit:${sanitizeExcerpt(hash, maxExcerptChars)}`,
+			success: false,
+			signals: [
+				signal('skill', ['rejected-edit', slug, reason], maxExcerptChars),
+			],
+			evidenceRef: sanitizeExcerpt(
+				`curated-failure:rejected-skill-edit:${hash}`,
+				maxExcerptChars,
+			),
+		});
+	}
+
+	for (const taskId of await readers.listEvidenceTaskIds(directory)) {
+		const result = await readers.loadEvidence(directory, taskId);
+		if (result.status !== 'found') continue;
+		for (const [index, raw] of result.bundle.entries.entries()) {
+			const entry = raw as unknown as RetrospectiveFailureLike;
+			if (entry.type !== 'retrospective') continue;
+			const codes = Array.isArray(entry.error_taxonomy)
+				? entry.error_taxonomy.slice(0, MAX_CURATED_FAILURE_ENTRIES)
+				: [];
+			const reasons = Array.isArray(entry.top_rejection_reasons)
+				? entry.top_rejection_reasons.slice(0, MAX_CURATED_FAILURE_ENTRIES)
+				: [];
+			for (const [position, code] of codes.entries()) {
+				if (typeof code !== 'string' || code.length === 0) continue;
+				observations.push({
+					runId: `task:${taskId}`,
+					taskId,
+					success: false,
+					signals: [
+						signal('orchestration', ['retro-error', code], maxExcerptChars),
+					],
+					evidenceRef: sanitizeExcerpt(
+						`curated-failure:retro-error:${taskId}:${index}:${position}`,
+						maxExcerptChars,
+					),
+				});
+			}
+			for (const [position, reason] of reasons.entries()) {
+				if (typeof reason !== 'string' || reason.trim().length === 0) continue;
+				observations.push({
+					runId: `task:${taskId}`,
+					taskId,
+					success: false,
+					signals: [
+						signal(
+							'orchestration',
+							['retro-rejection', reason],
+							maxExcerptChars,
+						),
+					],
+					evidenceRef: sanitizeExcerpt(
+						`curated-failure:retro-rejection:${taskId}:${index}:${position}`,
+						maxExcerptChars,
+					),
+				});
+			}
+		}
+	}
+
+	return observations;
+}
+
 // ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
@@ -775,6 +1013,8 @@ export async function loadConsensusCorpus(
 		knowledge: () => loadKnowledge(directory, readers, maxExcerptChars),
 		'evidence-bundle': () =>
 			loadEvidenceBundles(directory, readers, maxExcerptChars),
+		'curated-failure': () =>
+			loadCuratedFailures(directory, readers, maxExcerptChars),
 	};
 
 	const observations: CorpusObservation[] = [];

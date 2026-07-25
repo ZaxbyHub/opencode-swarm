@@ -11,6 +11,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { computeInsightCandidateId } from '../../../src/hooks/micro-reflector.js';
 import {
 	_internals,
+	_test_exports,
+	recordPatternObservation,
+	resetPrmPatternSupport,
+} from '../../../src/learning/prm-pattern-support.js';
+import type { PatternMatch } from '../../../src/prm/types.js';
+
+// Caps, pure builders, and read-only probes now live behind the module's
+// `_test_exports` seam (issue #1821 dead-export pass) — none had a production
+// importer, so as bare exports they read as public API.
+const {
 	buildPrmEvidenceRef,
 	buildPrmPatternCandidate,
 	computePatternIdentity,
@@ -20,10 +30,7 @@ import {
 	MAX_IDENTITIES_PER_SESSION,
 	MAX_OCCURRENCES_PER_IDENTITY,
 	MAX_TRACKED_SESSIONS,
-	recordPatternObservation,
-	resetPrmPatternSupport,
-} from '../../../src/learning/prm-pattern-support.js';
-import type { PatternMatch } from '../../../src/prm/types.js';
+} = _test_exports;
 
 function match(overrides: Partial<PatternMatch> = {}): PatternMatch {
 	return {

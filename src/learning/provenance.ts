@@ -33,7 +33,12 @@ export type LearningMechanism =
 	| 'consensus_mine'
 	| 'skill_improver';
 
-export const LearningMechanismSchema = z.enum([
+/**
+ * NOT exported: it exists only as the `mechanism` field of
+ * `LearningProvenanceV1Schema`, and every consumer validates through that. The
+ * public name for this set is the `LearningMechanism` union above.
+ */
+const LearningMechanismSchema = z.enum([
 	'curator_sweep',
 	'micro_reflection',
 	'prm_pattern',
@@ -59,7 +64,13 @@ const IsoDateSchema = z.iso.datetime({ offset: true });
 
 const ReferenceListSchema = z.array(ReferenceSchema).max(MAX_REFS_PER_CLASS);
 
-export const LearningWriteOriginSchema = z
+/**
+ * NOT exported, for the same reason as `LearningMechanismSchema`: it is only
+ * ever reached as `LearningProvenanceV1Schema.shape.writeOrigin`. The public
+ * shapes are `LearningProvenanceV1['writeOrigin']` and
+ * `LearningWriteOriginInput`.
+ */
+const LearningWriteOriginSchema = z
 	.object({
 		sessionId: ReferenceSchema.optional(),
 		agentRole: ReferenceSchema.optional(),

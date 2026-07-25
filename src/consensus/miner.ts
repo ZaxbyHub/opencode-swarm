@@ -1099,11 +1099,9 @@ export type ConsensusReportIntegrityInput = Omit<
  *    `reportId`, which is *derived* from this hash and would otherwise be
  *    circular), and every proposal's ENTIRE `provenance.writeOrigin` — the
  *    `producedAt` clock and the `sessionId` / `agentRole` that identify whoever
- *    physically ran the mine. (The shared `LearningWriteOriginSchema` also
- *    admits an `agentId`; `buildProposals` never populates it on the consensus
- *    path, and the exclusion is of the whole object, so it would be covered if
- *    it ever did.) All are real provenance and stay in the artifact; none of
- *    them is content.
+ *    physically ran the mine — which, since `ProposedSkillChangeProvenance`
+ *    dropped the unreachable `agentId`, is the whole of that object. All are
+ *    real provenance and stay in the artifact; none of them is content.
  *
  *    Excluding the identity fields is not cosmetic. `sessionId` comes from
  *    `ctx.sessionID`, so with only `producedAt` excluded, two sessions mining a

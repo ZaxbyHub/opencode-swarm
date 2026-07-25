@@ -67,6 +67,8 @@ function emptyReaders(): CorpusReaders {
 		readSkillUsageEntries: () => [],
 		readKnowledgeEntries: async () => [],
 		loadEvidence: async () => ({ status: 'not_found' }),
+		readRejectedLessons: async () => [],
+		readRejectedSkillEdits: async () => [],
 	};
 }
 

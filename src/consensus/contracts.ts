@@ -292,10 +292,18 @@ export interface ProposedSkillChangeProvenance {
 	sourceEvidenceRefs: string[];
 	sourceRunIds: string[];
 	sourceModelIds: string[];
+	/**
+	 * Deliberately NARROWER than the shared `LearningWriteOriginSchema`, which
+	 * also admits an `agentId`. Nothing on the consensus path can produce one:
+	 * `MineConsensusDeps` has no `agentId` field, `buildProposals`'s options bag
+	 * has no slot for it, and its `stampLearningProvenance` call passes exactly
+	 * `producedAt` / `sessionId` / `agentRole`. Declaring a field no code path can
+	 * reach documented a value that never exists, so the schema below — which is
+	 * `.strict()` — now rejects it rather than reserving room for it (issue #1821).
+	 */
 	writeOrigin: {
 		sessionId?: string;
 		agentRole?: string;
-		agentId?: string;
 		producedAt: string;
 	};
 }
@@ -313,7 +321,6 @@ const ProposedSkillChangeProvenanceSchema = z
 			.object({
 				sessionId: ReferenceSchema.optional(),
 				agentRole: ReferenceSchema.optional(),
-				agentId: ReferenceSchema.optional(),
 				producedAt: IsoDateSchema,
 			})
 			.strict(),
@@ -349,6 +356,10 @@ const ConsensusSourceKindSchema = z.enum([
 	'skill-usage',
 	'knowledge',
 	'evidence-bundle',
+	// The issue's Workstream C names five corpus arms, the fifth being "curated
+	// failures". It was missed at intake (recovered as AC28) and is the only
+	// source whose every observation is a FAILURE — see `loadCuratedFailures`.
+	'curated-failure',
 ]);
 export type ConsensusSourceKind = z.infer<typeof ConsensusSourceKindSchema>;
 
@@ -414,9 +425,8 @@ const ConsensusTruncationV1Schema = z
  *
  * `integrityHash` covers every field EXCEPT `integrityHash`, `reportId`,
  * `generatedAt`, each proposal's ENTIRE `provenance.writeOrigin` — `producedAt`
- * *and* the `sessionId` / `agentRole` the consensus path populates, plus the
- * `agentId` the shared write-origin schema allows and this path never sets —
- * and each attribute's
+ * *and* the `sessionId` / `agentRole`, which are the only three fields this
+ * path can populate — and each attribute's
  * `llmSummary`. Each exclusion has its own reason: `integrityHash` cannot cover
  * itself and `reportId` is derived from it, so both would be circular;
  * `generatedAt` and `producedAt` are wall clocks; the `writeOrigin` identity

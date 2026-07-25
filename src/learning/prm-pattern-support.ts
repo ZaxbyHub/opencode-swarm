@@ -34,13 +34,13 @@ import type { InsightCandidate } from '../hooks/micro-reflector.js';
 import type { PatternMatch } from '../prm/types.js';
 
 /** Mirrors `candidate-queue.ts` / `adversarial-detector.ts`. */
-export const MAX_TRACKED_SESSIONS = 500;
+const MAX_TRACKED_SESSIONS = 500;
 
 /** Distinct pattern identities retained per session before FIFO eviction. */
-export const MAX_IDENTITIES_PER_SESSION = 64;
+const MAX_IDENTITIES_PER_SESSION = 64;
 
 /** Distinct occurrences retained per identity. Support saturates here. */
-export const MAX_OCCURRENCES_PER_IDENTITY = 20;
+const MAX_OCCURRENCES_PER_IDENTITY = 20;
 
 /** Tuning knobs, mirroring `learning.prm_persistence`. */
 export interface PrmSupportLimits {
@@ -109,7 +109,7 @@ function normalizeAgentName(raw: string): string | undefined {
  * Agents and targets are sorted so detection order cannot mint a second
  * identity for the same underlying situation.
  */
-export function computePatternIdentity(
+function computePatternIdentity(
 	match: Pick<PatternMatch, 'pattern' | 'affectedAgents' | 'affectedTargets'>,
 ): string {
 	const agents = [...(match.affectedAgents ?? [])].sort().join(',');
@@ -122,7 +122,7 @@ export function computePatternIdentity(
  * pattern name, and the step window — enough to re-derive the evidence from
  * that session's own trajectory, and nothing that leaks its content.
  */
-export function buildPrmEvidenceRef(
+function buildPrmEvidenceRef(
 	sessionID: string,
 	pattern: string,
 	stepRange: [number, number],
@@ -173,7 +173,7 @@ function getOrCreateIdentity(
  * `applies_to_agents` / `applies_to_tools` fails the Layer-5 actionability gate
  * and would only be quarantined, so it is better not to emit it at all.
  */
-export function buildPrmPatternCandidate(
+function buildPrmPatternCandidate(
 	match: PatternMatch,
 	evidenceRefs: string[],
 	createdAt: string,
@@ -324,7 +324,7 @@ export function recordPatternObservation(
 }
 
 /** Read-only support view for one identity. Test/observability seam. */
-export function getPatternSupport(
+function getPatternSupport(
 	sessionID: string,
 	identity: string,
 ): { support: number; lastPersistedAt: number; occurrenceStarts: number[] } {
@@ -347,11 +347,37 @@ export function resetPrmPatternSupport(sessionID?: string): void {
 }
 
 /** Number of distinct sessions tracked. Bound-eviction test seam. */
-export function getTrackedPrmSessionCount(): number {
+function getTrackedPrmSessionCount(): number {
 	return supportBySession.size;
 }
 
 /** Number of distinct identities tracked for a session. */
-export function getTrackedPrmIdentityCount(sessionID: string): number {
+function getTrackedPrmIdentityCount(sessionID: string): number {
 	return supportBySession.get(sessionID)?.size ?? 0;
 }
+
+/**
+ * Tier-0 pure-function and observability seam (see the writing-tests skill, and
+ * the sibling seam in `candidate-queue.ts`).
+ *
+ * Everything here was a bare `export` with no importer outside the tests — the
+ * three caps, the three pure builders, and the three read-only probes. The issue
+ * #1821 dead-export pass moved them behind this seam rather than deleting them:
+ * each is genuinely needed to assert a bound or a pure mapping that the public
+ * `recordPatternObservation` path only exercises indirectly, but as bare exports
+ * they were indistinguishable from public API and read as unwired code.
+ *
+ * `_internals` stays separate and stays small: it is the DI seam tests
+ * SUBSTITUTE (the clock). Nothing below is substitutable.
+ */
+export const _test_exports = {
+	buildPrmEvidenceRef,
+	buildPrmPatternCandidate,
+	computePatternIdentity,
+	getPatternSupport,
+	getTrackedPrmIdentityCount,
+	getTrackedPrmSessionCount,
+	MAX_IDENTITIES_PER_SESSION,
+	MAX_OCCURRENCES_PER_IDENTITY,
+	MAX_TRACKED_SESSIONS,
+};

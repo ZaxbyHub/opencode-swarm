@@ -91,8 +91,26 @@ duplicate would have silently inflated both.
 ### New `consensus_mine` tool (proposals only)
 
 A new `consensus_mine` tool mines the evidence you already have — evaluation runs, gate audits, trajectories,
-skill-usage/compliance records, knowledge outcomes, and retros — into evidence-backed *consensus attributes*
-and deduplicated improvement proposals.
+skill-usage/compliance records, knowledge outcomes, retros, and curated failures — into evidence-backed
+*consensus attributes* and deduplicated improvement proposals.
+
+**Curated failures** are the ninth source and the only one where every observation is a failure: lessons your
+curator refused (`.swarm/knowledge-rejected.jsonl`), generated skill edits that lost their eval comparison
+and were never activated (`.swarm/skills/rejected-edits.jsonl`), and each retrospective's own
+`error_taxonomy` and `top_rejection_reasons`. That last one closes a real blind spot: retro entries are
+written with `verdict: "pass"`, so a phase that reported `gate_evasion` used to enter the corpus as a single
+clean passing observation and the miner never saw what the phase said went wrong. Both views are now kept —
+the retro is still the passing artifact it is, and what it says failed now counts as counterexample evidence
+on the same run.
+
+`.swarm/knowledge-unactionable.jsonl` is deliberately **not** read. Its entries are structurally incomplete
+lessons awaiting LLM hardening, not lessons judged wrong, and most of them are later promoted into the active
+store — counting them as failures would score the queue's throughput rather than your agents' behavior.
+
+Curated failures are read **last**, so under the default `max_evidence_items` of 50 they are frequently
+dropped whole. That is deliberate — a rejected lesson carries its own run id and almost never aggregates past
+`min_support`, so reading them first would burn the budget on observations that produce no finding. Raise
+`max_evidence_items` or narrow the request when you want this arm to contribute.
 
 It **mutates none of the evidence it reads**. It activates no skills, edits no knowledge, promotes nothing,
 touches no project file, and runs no optimization rounds. It writes exactly two things: a versioned, immutable
@@ -195,3 +213,7 @@ upgrading:
 - One further instance of the same positional-cap pattern remains at `src/hooks/curator.ts` on
   `source_knowledge_ids` (cap 50). It is deliberately excluded: that field is used to carry
   deduplication markers, and capping or reordering it would break that mechanism.
+- The curated-failure arm reads `.swarm/skills/rejected-edits.jsonl` at a fixed
+  `<project>/.swarm/skills/` path. Unlike the knowledge stores it is not knowledge-link aware, so under a
+  configured knowledge link this one source still reads the local project's file rather than the shared
+  cohort root.

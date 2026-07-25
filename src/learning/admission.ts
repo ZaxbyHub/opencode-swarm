@@ -138,8 +138,13 @@ function unionSourceKnowledgeIds(
 	entry.source_knowledge_ids = next ?? [];
 }
 
-/** True when an ACTIVE entry in `entries` already carries `marker`. */
-export function findActiveEntryWithMarker(
+/**
+ * True when an ACTIVE entry in `entries` already carries `marker`.
+ *
+ * Module-private: `admitCandidate` is the only caller, and it is what the
+ * idempotency suites assert through. An export with no importer is unwired code.
+ */
+function findActiveEntryWithMarker(
 	entries: SwarmKnowledgeEntry[],
 	marker: string,
 ): SwarmKnowledgeEntry | undefined {
@@ -153,8 +158,12 @@ export function findActiveEntryWithMarker(
 	);
 }
 
-/** Build the bounded ADMIT/REJECT screening prompt. */
-export function buildScreeningPrompt(candidate: InsightCandidate): string {
+/**
+ * Build the bounded ADMIT/REJECT screening prompt. Module-private: its only
+ * caller is `screenCandidate`, and the prompt bound is asserted through the
+ * injected `llmDelegate` rather than by calling this directly.
+ */
+function buildScreeningPrompt(candidate: InsightCandidate): string {
 	return [
 		'A subagent proposed this durable procedural lesson for the shared knowledge store.',
 		'Answer with exactly one word: ADMIT or REJECT.',

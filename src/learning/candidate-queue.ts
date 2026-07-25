@@ -29,7 +29,7 @@ import type { InsightCandidate } from '../hooks/micro-reflector.js';
  * `adversarial-detector.ts` so every module-level session map in the plugin
  * evicts on the same rule.
  */
-export const MAX_TRACKED_SESSIONS = 500;
+const MAX_TRACKED_SESSIONS = 500;
 
 /**
  * Hard ceiling on how many drain cycles a single candidate may be claimed by.
@@ -99,9 +99,16 @@ export interface QueueStats {
 export interface EnqueueResult {
 	/** False only when the candidate was rejected outright (invalid session id). */
 	enqueued: boolean;
-	/** Queue depth AFTER the enqueue (and after any drop-oldest eviction). */
-	depth: number;
-	/** Cumulative drop count for the session. */
+	/**
+	 * Cumulative drop count for the session.
+	 *
+	 * There is deliberately no `depth` here. It was returned and read by nobody —
+	 * not by `micro-reflector.ts`, not by `prm/index.ts` (both discard this whole
+	 * value), and not by a test. The drain path that genuinely needs a depth
+	 * already asks for it at the moment it drains, via `getQueueStats(...).depth`;
+	 * a depth captured at enqueue time is stale by then. Reporting a number
+	 * nothing consumes is unwired code (issue #1821).
+	 */
 	dropped: number;
 	/** True when this enqueue evicted the oldest pending candidate. */
 	evictedOldest: boolean;
@@ -166,7 +173,7 @@ export function enqueueCandidate(
 	limits: Pick<CandidateQueueLimits, 'maxQueueSize'>,
 ): EnqueueResult {
 	if (typeof sessionID !== 'string' || sessionID.length === 0) {
-		return { enqueued: false, depth: 0, dropped: 0, evictedOldest: false };
+		return { enqueued: false, dropped: 0, evictedOldest: false };
 	}
 	const queue = getOrCreateQueue(sessionID);
 	const maxQueueSize = positiveIntOr(limits.maxQueueSize, 50);
@@ -182,12 +189,7 @@ export function enqueueCandidate(
 		queue.dropped++;
 		evictedOldest = true;
 	}
-	return {
-		enqueued: true,
-		depth: queue.items.length,
-		dropped: queue.dropped,
-		evictedOldest,
-	};
+	return { enqueued: true, dropped: queue.dropped, evictedOldest };
 }
 
 /**
@@ -368,7 +370,7 @@ export function resetSessionQueue(sessionID?: string): void {
 }
 
 /** Number of distinct sessions currently tracked. Bound-eviction test seam. */
-export function getTrackedSessionCount(): number {
+function getTrackedSessionCount(): number {
 	return queuesBySession.size;
 }
 
@@ -379,5 +381,14 @@ export function getTrackedSessionCount(): number {
  * depth, so an un-clamped factor is not observable through the public function
  * and could be deleted with the whole suite green. Exporting it here lets the
  * clamp be asserted directly instead of being untestable dead defence.
+ *
+ * `MAX_TRACKED_SESSIONS` and `getTrackedSessionCount` live here for the same
+ * reason and were moved behind the seam by the issue #1821 dead-export pass: the
+ * eviction bound has no production reader and the count probe has no production
+ * caller, so as bare exports they were indistinguishable from public API.
  */
-export const _test_exports = { clampUnit };
+export const _test_exports = {
+	clampUnit,
+	getTrackedSessionCount,
+	MAX_TRACKED_SESSIONS,
+};

@@ -191,8 +191,15 @@ export interface RecommendationLedgerEntry extends RecommendationIdentity {
 	provenance?: LearningProvenanceV1;
 }
 
-/** Why a candidate was not accepted for emission. */
-export type RecommendationSuppressionSource = 'ledger' | 'batch';
+/**
+ * Why a candidate was not accepted for emission.
+ *
+ * Module-private: consumers reach this set through
+ * `RecommendationDecision['suppressedBy']`, which is exported and narrows to the
+ * same two literals. Exporting the alias as well gave it a name no importer ever
+ * used.
+ */
+type RecommendationSuppressionSource = 'ledger' | 'batch';
 
 /** Per-candidate outcome, in input order. */
 export interface RecommendationDecision extends RecommendationIdentity {

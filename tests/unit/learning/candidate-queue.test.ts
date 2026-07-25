@@ -14,18 +14,20 @@ import {
 } from '../../../src/hooks/micro-reflector.js';
 import {
 	_internals,
+	_test_exports,
 	computeArrivalVelocity,
 	enqueueCandidate,
 	getQueueDepth,
 	getQueueStats,
-	getTrackedSessionCount,
-	MAX_TRACKED_SESSIONS,
 	recordRetry,
 	requeueCandidate,
 	reserveLlmBudget,
 	resetSessionQueue,
 	takeDrainBatch,
 } from '../../../src/learning/candidate-queue.js';
+
+// Behind the `_test_exports` seam since the issue #1821 dead-export pass.
+const { getTrackedSessionCount, MAX_TRACKED_SESSIONS } = _test_exports;
 
 function candidate(lesson: string): InsightCandidate {
 	return {
