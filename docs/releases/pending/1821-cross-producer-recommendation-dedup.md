@@ -12,8 +12,14 @@ producer one memory of what has already been emitted:
 
 - Every emission is keyed by a **cross-producer key** derived from the
   normalized recommendation text plus its scope keys. Because the key excludes
-  the producing mechanism, a lesson the miner already proposed suppresses the
-  curator's identical proposal, and vice versa.
+  the producing mechanism, a recommendation one producer already emitted
+  suppresses another producer's identical one.
+  **One asymmetry worth knowing:** only the curator and the skill improver
+  *consult* the ledger before emitting. The consensus miner currently
+  **records** into it but does not read from it — it dedupes against its own
+  prior reports instead — so the miner is a ledger producer, not yet a
+  consumer. A miner proposal therefore suppresses a later curator one, but not
+  the reverse.
 - The producer-scoped `lrec_…` fingerprint from `computeRecommendationFingerprint`
   is still recorded on each entry for audit.
 - The ledger has two halves: a read-only `check` before a producer emits, and a

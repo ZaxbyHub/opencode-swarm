@@ -7,8 +7,11 @@
 - Knowledge array fields (tags and the five actionability arrays) are now **deduplicated** before the 20-item
   cap is applied, at every site that builds them. Previously the cap was purely positional, so a run of
   duplicates could push distinct values off the end and silently lose them.
-- Deduplication is also enforced on the knowledge **store write path**, so an entry with duplicate or
-  over-cap arrays cannot be persisted regardless of which code path produced it.
+- Deduplication is also enforced on the knowledge **store write path** (`appendKnowledge`,
+  `rewriteKnowledge`, and the `transactKnowledge` commit), so a call site that forgets to dedupe is corrected
+  by the store rather than silently persisting duplicates. One path is not covered — the cohort merge in
+  `family-migration.ts` writes through `atomicWriteFile` directly — and that gap is listed under Known
+  limitations below rather than glossed by a "regardless of which code path" claim.
 - New `learning` and `consensus` configuration blocks, and a new
   `knowledge.promotion_require_actionable` setting.
 
@@ -42,6 +45,26 @@ through, so even correctly-supplied predicates were dropped on write.
 A lesson that fails the floor is **blocked**, not silently promoted. `--force --reason "<why>"` still
 overrides and records a durable audited override naming the failed gate. Set
 `knowledge.promotion_require_actionable = false` to restore the previous behavior.
+
+### Near-duplicate knowledge entries are merged automatically
+
+A bounded curator sweep (`learning.dedup_sweep.enabled`, default **true**) now collapses active
+near-duplicate knowledge entries into one. It runs at each phase boundary, and also under `curator_analyze`
+and `/swarm curate`.
+
+What it does to your store:
+
+- The surviving entry **unions** the losers' tags, actionability fields, and `source_knowledge_ids`, and
+  **sums** their usage counters, so evidence is combined rather than discarded.
+- Losers are **archived, not deleted** — each keeps its history and receives a tombstone through the shared
+  invalidator, which also retires any generated skill that referenced it. Nothing silently disappears.
+- The winner is chosen by actionability first, then confidence, then evidence weight, then age.
+- Clustering is transitive: if A matches B and B matches C, all three collapse in a single pass rather than
+  leaving C to be merged on the next sweep.
+- It is bounded (`max_comparisons`, `max_merges_per_sweep`) and idempotent — a second sweep over an unchanged
+  store is a byte-for-byte no-op.
+
+Set `learning.dedup_sweep.enabled = false` to opt out.
 
 ### Lessons are now admitted mid-session, not only at phase boundaries
 
@@ -142,9 +165,25 @@ See `docs/consensus-mining.md`.
 
 ## Migration notes
 
-None required. All changes are backward compatible: existing knowledge records load unchanged, and
-normalization applies only when a record is written. No configuration change is needed — the new `learning`
-and `consensus` blocks have working defaults, and `knowledge.promotion_require_actionable` is additive.
+No configuration change is *required* — the new `learning` and `consensus` blocks have working defaults, and
+existing knowledge records load unchanged. But three behaviors change by default, so read these before
+upgrading:
+
+1. **Hive promotion is stricter.** `knowledge.promotion_require_actionable` defaults to `true`, so a lesson
+   without a predicate and a scope is now **blocked** rather than promoted — including entries that
+   previously promoted automatically. `--force --reason "<why>"` still overrides and records an audited
+   override; set the key to `false` to restore the old behavior.
+2. **Near-duplicate knowledge entries are now merged and archived automatically.** The curator sweep
+   (`learning.dedup_sweep.enabled`, default `true`) runs at every phase boundary and also under
+   `curator_analyze` and `/swarm curate`. Losing entries are **archived**, not deleted: each gets a tombstone
+   through the shared invalidator, which also retires any generated skill referencing it. Set
+   `learning.dedup_sweep.enabled = false` to opt out.
+3. **`/swarm link` and `/swarm unlink` merge entries differently.** The shared merge helper now unions
+   actionability fields and `source_knowledge_ids`, recomputes `content_hash`, and bumps `revision` when a
+   merge swaps in a longer lesson. The `revision` bump is deliberate — the old behavior left `content_hash`
+   describing text the entry no longer held, which silently broke the compare-and-swap on every later
+   curation of a merged entry. A CAS plan built against a pre-link snapshot will now correctly skip rather
+   than apply against changed content.
 
 ## Known limitations
 
