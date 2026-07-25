@@ -46,7 +46,29 @@ import type {
 } from '../../../src/hooks/knowledge-types.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
+
+/**
+ * Promotion eligibility route 3 is age-based — `hive-policy.ts` compares
+ * `Date.now() - Date.parse(entry.created_at)` against `auto_promote_days` — so
+ * on a live clock the route a fixture takes drifts as the calendar moves, and
+ * the "recent"/"old" `created_at` values below were all relative to whenever
+ * the suite happened to run. Pinning `Date.now()` file-wide fixes every
+ * fixture's age; the instant sits ~6 months after the `2026-01-01` fixture
+ * dates, preserving the route each existing test takes today (issue #1782
+ * root-cause class 1). The describe-scoped `afterEach` below also calls
+ * `mock.restore()`; it runs BEFORE this file-level restore, which is safe
+ * because the test body has already finished by then.
+ */
+const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
+const FROZEN_ISO = new Date(FROZEN_NOW).toISOString();
+
+let restoreClock: Restore | null = null;
+beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
+});
+afterEach(() => restoreClock?.());
 
 const realReadKnowledge = _internals.readSwarmEntries;
 
@@ -222,7 +244,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 						project_name: 'projectA',
 					},
 				],
-				created_at: new Date().toISOString(),
+				created_at: FROZEN_ISO,
 			});
 			const summary = await checkHivePromotions(
 				[entry],
@@ -244,7 +266,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 		});
 
 		it('route 3: entry older than auto_promote_days promotes', async () => {
-			const old = new Date(Date.now() - 100 * 86_400_000).toISOString();
+			const old = new Date(FROZEN_NOW - 100 * 86_400_000).toISOString();
 			const entry = makeSwarmEntry({
 				hive_eligible: false,
 				confirmed_by: [],
@@ -259,7 +281,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 		});
 
 		it('route 3 negative: entry not old enough is not promoted', async () => {
-			const recent = new Date(Date.now() - 10 * 86_400_000).toISOString();
+			const recent = new Date(FROZEN_NOW - 10 * 86_400_000).toISOString();
 			const entry = makeSwarmEntry({
 				hive_eligible: false,
 				confirmed_by: [],
@@ -476,7 +498,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 				project_name: 'p3',
 				hive_eligible: false,
 				confirmed_by: [],
-				created_at: new Date().toISOString(),
+				created_at: FROZEN_ISO,
 			});
 			const summary = await checkHivePromotions(
 				[swarm],
@@ -731,7 +753,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 				hive_eligible: false,
 				tags: [],
 				confirmed_by: [],
-				created_at: new Date().toISOString(), // too young for route 3
+				created_at: FROZEN_ISO, // too young for route 3
 			});
 			await writeSwarmEntries(swarmDir, [swarm]);
 			const msg = await promoteFromSwarm(swarmDir, 'swarm-1');
@@ -743,7 +765,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 			// An old entry that passes eligibility route 3 (age) but has NO
 			// validated terminal evidence. With a non-zero evidence threshold in
 			// the REAL config, manual promotion must be blocked (no silent bypass).
-			const old = new Date(Date.now() - 200 * 86_400_000).toISOString();
+			const old = new Date(FROZEN_NOW - 200 * 86_400_000).toISOString();
 			const swarm = makeSwarmEntry({
 				hive_eligible: false,
 				tags: [],
@@ -770,7 +792,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 				hive_eligible: false,
 				tags: [],
 				confirmed_by: [],
-				created_at: new Date().toISOString(),
+				created_at: FROZEN_ISO,
 			});
 			await writeSwarmEntries(swarmDir, [swarm]);
 			const msg = await promoteFromSwarm(swarmDir, 'swarm-1', {

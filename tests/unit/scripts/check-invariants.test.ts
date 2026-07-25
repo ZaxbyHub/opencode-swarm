@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Test suite for scripts/check-invariants.sh
@@ -56,14 +56,14 @@ function runCheckInvariants(cwd: string): {
  * Set up a temp fixture dir with a copy of the scripts and controlled src/tests
  */
 function setupFixtureDir(fixtureName: string): string {
-	// Wrap os.tmpdir() in realpathSync so the canonical path matches what
-	// production code compares against. On macOS, os.tmpdir() returns
-	// /var/folders/... (symlinked to /private/var/folders/...); without
-	// realpath, the fixture cwd would mismatch containment guards. Issue #1729.
-	const fixtureDir = path.join(
-		fs.realpathSync(os.tmpdir()),
-		`check-invariants-${fixtureName}-${Date.now()}`,
-	);
+	// `canonicalMkdtemp` realpath-resolves the system temp root so the fixture
+	// cwd matches what production code compares against — on macOS that root is
+	// /var/folders/... (symlinked to /private/var/folders/...) and a raw path
+	// would mismatch containment guards (issue #1729). It also supplies the
+	// uniqueness suffix that a wall-clock millisecond stamp used to provide —
+	// collision-free even within one millisecond, and with no clock read at all
+	// (docs/testing/test-stability.md).
+	const fixtureDir = canonicalMkdtemp(`check-invariants-${fixtureName}-`);
 	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'lib'), { recursive: true });
 	fs.mkdirSync(path.join(fixtureDir, 'src', 'tools'), { recursive: true });
 	fs.mkdirSync(path.join(fixtureDir, 'src', 'hooks'), { recursive: true });
@@ -122,14 +122,11 @@ describe('check-invariants.sh', () => {
 		const result = runCheckInvariants(REPO_ROOT);
 		expect(result.stdout).toContain('All engineering invariant checks passed');
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
-	});
+	}, 30000);
 
 	test('should detect missing mock allowlist file', () => {
 		if (isWindows) return;
-		const fixtureDir = path.join(
-			fs.realpathSync(os.tmpdir()),
-			'check-invariants-missing-allowlist-' + Date.now(),
-		);
+		const fixtureDir = canonicalMkdtemp('check-invariants-missing-allowlist-');
 		fs.mkdirSync(path.join(fixtureDir, 'scripts', 'lib'), { recursive: true });
 		fs.mkdirSync(path.join(fixtureDir, 'src', 'tools'), { recursive: true });
 		fs.mkdirSync(path.join(fixtureDir, 'src', 'hooks'), { recursive: true });
@@ -160,7 +157,7 @@ describe('check-invariants.sh', () => {
 		expect(result.stdout).toContain(
 			'Check 2: process.cwd() ban in tools/hooks',
 		);
-	});
+	}, 30000);
 
 	test('should validate mock.module targets against allowlist', () => {
 		if (isWindows) return;
@@ -171,21 +168,24 @@ describe('check-invariants.sh', () => {
 				'All engineering invariant checks passed',
 			);
 		}
-	});
+	}, 30000);
 
 	test('should handle file-level timeout check correctly', () => {
 		if (isWindows) return;
 		const result = runCheckInvariants(REPO_ROOT);
 		expect(result.stdout).toContain('Check 1: Subprocess timeout required');
-	});
+	}, 30000);
 
-	// NOTE on the explicit timeouts below: `runCheckInvariants` spawns the real
-	// script and already allows it 30s, but bun:test's own per-test default is
-	// 5s. On a cold/slow filesystem the script exceeds that, so every test in
-	// this file that shells out is timing-sensitive (6 of them already fail this
-	// way at b0284ca, before issue #1821 touched anything). The two tests below
-	// are the ones #1821 owns, so they carry an explicit budget matching the
-	// spawn allowance instead of inheriting the 5s default.
+	// NOTE on the explicit timeouts in this file: `runCheckInvariants` spawns the
+	// real script and already allows it 30s, but bun:test's own per-test default
+	// is 5s. On a cold/slow filesystem — and on any run against REPO_ROOT, where
+	// the script takes ~28s — that default is exceeded, so every test here that
+	// shells out is timing-sensitive (6 of them already failed this way at
+	// b0284ca, before issue #1821 touched anything). Every such test now carries
+	// an explicit budget matching the spawn allowance instead of inheriting the
+	// 5s default, so the file passes under a plain `bun test` with no `--timeout`
+	// override. Keep the two in lockstep: raising the spawn `timeout` in
+	// `runCheckInvariants` without raising these budgets reintroduces the flake.
 	test('should run all five checks', () => {
 		if (isWindows) return;
 		const result = runCheckInvariants(REPO_ROOT);
@@ -334,7 +334,7 @@ describe('check-invariants.sh', () => {
 			'Check 4: mock.module allowlist growth ratchet',
 		);
 		expect(result.stdout).toContain('issue #1666');
-	});
+	}, 30000);
 
 	test('regression: bun-compat.ts is exempt from timeout warning by basename', () => {
 		if (isWindows) return;

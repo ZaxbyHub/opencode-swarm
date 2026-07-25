@@ -13,6 +13,7 @@ import {
 	MAX_REFS_PER_CLASS,
 	stampLearningProvenance,
 } from '../../../src/learning/provenance.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const PRODUCED_AT = '2026-07-24T12:00:00.000Z';
 
@@ -43,15 +44,29 @@ describe('stampLearningProvenance — defaults', () => {
 		});
 	});
 
-	it('defaults producedAt to a parseable ISO timestamp when omitted', () => {
-		const before = Date.now();
-		const stamped = stampLearningProvenance({ mechanism: 'prm_pattern' });
-		const after = Date.now();
+	it('defaults producedAt to the current instant when omitted', () => {
+		// `stampLearningProvenance` fills the default from `new Date().toISOString()`,
+		// so the deterministic seam is `freezeClock`'s `isoNow` (the `toISOString`
+		// spy) — `fixedNow` alone does not reach a no-arg `new Date()`.
+		// Two SEQUENTIAL freezes (never nested — `freezeClock` throws on nesting)
+		// keep the "tracks the clock, is not a hardcoded constant" property that
+		// the previous ±1s real-clock window checked, without the live clock.
+		const first = '2026-06-01T00:00:00.000Z';
+		const second = '2026-06-02T03:04:05.000Z';
+		const stampAt = (isoNow: string) =>
+			withFrozenClock(
+				() => stampLearningProvenance({ mechanism: 'prm_pattern' }),
+				{ fixedNow: Date.parse(isoNow), isoNow },
+			);
 
-		const producedAtMs = Date.parse(stamped.writeOrigin.producedAt);
-		expect(Number.isNaN(producedAtMs)).toBe(false);
-		expect(producedAtMs).toBeGreaterThanOrEqual(before - 1000);
-		expect(producedAtMs).toBeLessThanOrEqual(after + 1000);
+		const a = stampAt(first);
+		const b = stampAt(second);
+
+		expect(a.writeOrigin.producedAt).toBe(first);
+		expect(b.writeOrigin.producedAt).toBe(second);
+		expect(Number.isNaN(Date.parse(a.writeOrigin.producedAt))).toBe(false);
+		expect(Number.isNaN(Date.parse(b.writeOrigin.producedAt))).toBe(false);
+		expect(a.writeOrigin.producedAt).not.toBe(b.writeOrigin.producedAt);
 	});
 
 	it('omits blank write-origin fields rather than storing empty strings', () => {

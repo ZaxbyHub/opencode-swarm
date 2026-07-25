@@ -29,7 +29,28 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
+
+/**
+ * Eligibility route 3 is age-based — `hive-policy.ts` compares
+ * `Date.now() - Date.parse(entry.created_at)` against `auto_promote_days` — so
+ * the two scenarios below that hinge on an entry being *brand new* were
+ * measuring against whatever instant the suite happened to run at. Pinning
+ * `Date.now()` file-wide makes "new" and "old" exact (issue #1782 class 1); the
+ * instant is well after this file's `2024-01-01` fixture dates, so the route
+ * every other test takes is unchanged. The describe-scoped `afterEach` also
+ * calls `mock.restore()` — it runs BEFORE this file-level restore, which is
+ * safe because the test body has already finished by then.
+ */
+const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
+const FROZEN_ISO = new Date(FROZEN_NOW).toISOString();
+
+let restoreClock: Restore | null = null;
+beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
+});
+afterEach(() => restoreClock?.());
 
 const FIXED_COHORT = {
 	cohortId: 'cohort-adv-aaa111',
@@ -153,7 +174,7 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 				hive_eligible: false,
 				tags: [],
 				confirmed_by: [],
-				created_at: new Date().toISOString(),
+				created_at: FROZEN_ISO,
 			});
 			await checkHivePromotions(
 				[entry],
@@ -243,7 +264,7 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 					},
 				],
 				// Recent so route 3 (age) does not fire.
-				created_at: new Date().toISOString(),
+				created_at: FROZEN_ISO,
 				tags: [],
 			});
 			await checkHivePromotions([entry], makeConfig(), swarmDir);

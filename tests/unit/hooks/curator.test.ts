@@ -28,20 +28,20 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types';
 
+const FIXTURE_ISO = '2026-01-01T00:00:00.000Z'; // stamp; never asserted on
 /**
  * FB-008: poll-until-condition-or-deadline helper replacing fixed
  * `setTimeout(resolve, 150)` waits for the fire-and-forget skill-invalidation
- * microtask (src/hooks/skill-invalidator.ts). Mirrors the backoff pattern in
- * tests/unit/hooks/guardrail-capture.test.ts and the sibling helper in
- * tests/unit/hooks/skill-invalidator.test.ts.
+ * microtask (src/hooks/skill-invalidator.ts). Mirrors guardrail-capture.test.ts
+ * / skill-invalidator.test.ts; deadline reads MONOTONIC `performance.now()`.
  */
 async function waitForFileToExist(
 	filePath: string,
 	timeoutMs = 2000,
 ): Promise<void> {
-	const start = Date.now();
+	const start = performance.now();
 	let delayMs = 10;
-	while (Date.now() - start < timeoutMs) {
+	while (performance.now() - start < timeoutMs) {
 		if (fs.existsSync(filePath)) return;
 		await Bun.sleep(delayMs);
 		delayMs = Math.min(delayMs * 2, 100);
@@ -90,7 +90,7 @@ describe('curator', () => {
 				JSON.stringify({
 					schema_version: 2, // Invalid: must be 1
 					session_id: 'test-session',
-					last_updated: new Date().toISOString(),
+					last_updated: FIXTURE_ISO,
 					last_phase_covered: 1,
 					digest: 'test-digest',
 					phase_digests: [],
@@ -1546,8 +1546,8 @@ invalid json here
 					failed_after_count: 0,
 				},
 				schema_version: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				created_at: FIXTURE_ISO,
+				updated_at: FIXTURE_ISO,
 				auto_generated: false,
 				project_name: 'test',
 			};
@@ -2898,8 +2898,8 @@ invalid json here
 					failed_after_count: 0,
 				},
 				schema_version: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				created_at: FIXTURE_ISO,
+				updated_at: FIXTURE_ISO,
 				auto_generated: false,
 				project_name: 'test',
 			};

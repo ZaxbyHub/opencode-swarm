@@ -11,7 +11,7 @@
  *    not qualify; only validated terminal receipts count.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	describeEligibilityRoute,
 	evaluatePromotionPolicy,
@@ -24,7 +24,17 @@ import type {
 	PromotionEvidenceRecord,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { ACTIONABLE_FIELDS } from './hive-fixtures.js';
+
+// Route 3 is age-based (`Date.now() - created_at` vs `auto_promote_days`), so a
+// live clock drifts each fixture's route. Pinned past the fixtures (#1782 c1).
+const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
+let restoreClock: Restore | null = null;
+beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
+});
+afterEach(() => restoreClock?.());
 
 /**
  * A policy-evaluation fixture. Carries `ACTIONABLE_FIELDS` so it clears the
@@ -237,11 +247,12 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 	});
 
 	it('diagnostics explain each failed condition', () => {
+		// created_at === the frozen now, so route 3 (age) fails by 0-day age.
 		const entry = makeEntry({
 			hive_eligible: false,
 			tags: [],
 			confirmed_by: [],
-			created_at: new Date().toISOString(),
+			created_at: new Date(FROZEN_NOW).toISOString(),
 		});
 		const decision = evaluatePromotionPolicy({
 			entry,
@@ -476,7 +487,7 @@ describe('describeEligibilityRoute — preserved 3 routes (#1847 M1)', () => {
 	});
 
 	it('route 3: age', () => {
-		const old = new Date(Date.now() - 100 * 86_400_000).toISOString();
+		const old = new Date(FROZEN_NOW - 100 * 86_400_000).toISOString();
 		const r = describeEligibilityRoute(
 			makeEntry({ hive_eligible: false, tags: [], created_at: old }),
 			90,
