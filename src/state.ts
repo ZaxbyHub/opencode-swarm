@@ -37,9 +37,9 @@ import {
 	clearRealtimeLearningNudgeSession,
 	resetRealtimeLearningNudgeState,
 } from './hooks/realtime-learning-nudge.js';
+import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { resetSessionQueue } from './learning/candidate-queue.js';
 import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
-import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import {
 	isTaskSettled,
 	loadPlanJsonOnly,

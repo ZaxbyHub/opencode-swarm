@@ -15,6 +15,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
@@ -109,7 +110,11 @@ function writeReport(options: {
 }
 
 beforeEach(() => {
-	tempDir = mkdtempSync(join(tmpdir(), 'immutable-store-'));
+	// realpathSync wrap is required (AGENTS.md invariant 7): on macOS
+	// os.tmpdir() returns /var/folders/... which is a symlink to
+	// /private/var/folders/..., and the containment guards these tests exercise
+	// compare canonical paths. Enforced by scripts/check-test-tmpdir.sh.
+	tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'immutable-store-')));
 	resetTelemetryForTesting();
 });
 

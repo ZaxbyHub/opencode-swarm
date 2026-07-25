@@ -803,6 +803,13 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.enabled` | boolean | `true` | Enables the architect-only in-session learning nudge when knowledge is enabled. |
 | `knowledge.realtime_learning_nudge.first_after_tool_calls` | number | `10` | First total session tool-call count that can trigger the nudge. |
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
+| `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+
+> **`knowledge.promotion_require_actionable` is default-ON and is a behavior change (issue #1821).** Before
+> this, a lesson could reach hive knowledge as un-actionable prose that no agent could act on. Now such a
+> lesson is **blocked** rather than silently promoted, and that applies to entries which previously
+> auto-promoted. `--force --reason "<why>"` still overrides and records a durable audited override naming the
+> failed gate; set this key to `false` to restore the previous behavior wholesale.
 
 > **Superseded by real-time admission (issue #1821).** When
 > `learning.realtime_admission.enabled` is `true` (the default) the nudge is suppressed, because the
