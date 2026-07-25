@@ -193,6 +193,112 @@ describe('corpus — evidence cap', () => {
 	});
 });
 
+describe('corpus — truncation must not erase negative evidence', () => {
+	/**
+	 * Ten gate-audit cells whose refs sort t0…t9, where the FAILING half (t5–t9)
+	 * sorts last. A lexicographic `slice(0, limit)` keeps only the succeeding
+	 * half, which is the failure mode: `failureSupport` and `counterexampleRefs`
+	 * fall to zero while `confidence` rises, on evidence that was silently
+	 * discarded (issue #1821 AC17).
+	 */
+	function gateAuditReaders() {
+		return {
+			listGateAuditResults: async () => ({
+				results: [
+					{
+						runId: 'ga1',
+						cells: Array.from({ length: 10 }, (_, index) => ({
+							taskId: `t${index}`,
+							gate: 'review',
+							model: 'anthropic/model-a',
+							outcome: index < 5 ? 'caught' : 'missed',
+						})),
+					},
+				],
+				corruptRunIds: [],
+			}),
+		} as unknown as Partial<CorpusReaders>;
+	}
+
+	async function truncatedTo(limit: number) {
+		const corpus = await loadConsensusCorpus('/virtual/project', {
+			maxEvidenceItems: limit,
+			maxExcerptChars: 500,
+			readers: { ...emptyReaders(), ...gateAuditReaders() },
+		});
+		return corpus;
+	}
+
+	test('a cut keeps failing observations even when they sort last', async () => {
+		const corpus = await truncatedTo(5);
+		expect(corpus.observations).toHaveLength(5);
+		expect(corpus.truncated).toBe(true);
+		const failures = corpus.observations.filter(
+			(observation) => !observation.success,
+		);
+		// The whole point: not zero.
+		expect(failures.length).toBeGreaterThan(0);
+		// Failures round up on an odd budget — under-reporting a counterexample is
+		// the costlier error.
+		expect(failures).toHaveLength(3);
+	});
+
+	test('an even budget splits evenly between outcomes', async () => {
+		const corpus = await truncatedTo(4);
+		expect(
+			corpus.observations.filter((observation) => !observation.success),
+		).toHaveLength(2);
+		expect(
+			corpus.observations.filter((observation) => observation.success),
+		).toHaveLength(2);
+	});
+
+	test('a source with no failures still fills the whole budget', async () => {
+		// The balancing must not reserve capacity that nothing can use.
+		const corpus = await loadConsensusCorpus('/virtual/project', {
+			maxEvidenceItems: 4,
+			maxExcerptChars: 500,
+			readers: {
+				...emptyReaders(),
+				listGateAuditResults: async () => ({
+					results: [
+						{
+							runId: 'ga1',
+							cells: Array.from({ length: 10 }, (_, index) => ({
+								taskId: `t${index}`,
+								gate: 'review',
+								model: 'anthropic/model-a',
+								outcome: 'caught',
+							})),
+						},
+					],
+					corruptRunIds: [],
+				}),
+			} as unknown as Partial<CorpusReaders>,
+		});
+		expect(corpus.observations).toHaveLength(4);
+		expect(corpus.observations.every((entry) => entry.success)).toBe(true);
+	});
+
+	test('a budget larger than the source is not a cut, and preserves order', async () => {
+		const corpus = await truncatedTo(50);
+		expect(corpus.observations).toHaveLength(10);
+		expect(corpus.truncated).toBe(false);
+		expect(corpus.observations.map((entry) => entry.evidenceRef)).toEqual(
+			[...corpus.observations.map((entry) => entry.evidenceRef)].sort(),
+		);
+	});
+
+	test('the retained subset is still sorted, and still deterministic', async () => {
+		const first = await truncatedTo(5);
+		const second = await truncatedTo(5);
+		expect(second.observations).toEqual(first.observations);
+		expect(first.observations.map((entry) => entry.evidenceRef)).toEqual(
+			[...first.observations.map((entry) => entry.evidenceRef)].sort(),
+		);
+	});
+});
+
 describe('corpus — injected directory, never process.cwd()', () => {
 	test('every reader receives the directory the caller supplied', async () => {
 		const seen: string[] = [];

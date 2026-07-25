@@ -880,7 +880,7 @@ behaviour).
 | Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it |
 | Retention | 500 entries, oldest-first eviction; each entry capped at 4 KB |
 | Provenance | Each entry carries a `LearningProvenanceV1` record (mechanism, source knowledge/task/evidence/run/model refs, write origin) |
-| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns `cross_producer_duplicate_count`; curator suppressions land in its `skipped` tally and the debug log |
+| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns `cross_producer_duplicate_count` (alongside `truncation`, `summarized_count`, and `restatements_accepted_this_run` — see [consensus-mining.md](./consensus-mining.md) for the full response shape); curator suppressions land in its `skipped` tally and the debug log |
 
 Matching is **exact** over normalized text, so two mechanisms suppress each other only when they emit
 the same sentence. The improver and the miner build statements from fixed templates while the curator

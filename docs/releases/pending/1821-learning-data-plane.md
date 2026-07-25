@@ -71,24 +71,52 @@ A new `consensus_mine` tool mines the evidence you already have — evaluation r
 skill-usage/compliance records, knowledge outcomes, and retros — into evidence-backed *consensus attributes*
 and deduplicated improvement proposals.
 
-It **changes no active artifact**. It activates no skills, edits no knowledge, and runs no optimization
-rounds; it only writes a versioned, immutable report under `.swarm/evolution/consensus/`.
+It **mutates none of the evidence it reads**. It activates no skills, edits no knowledge, promotes nothing,
+touches no project file, and runs no optimization rounds. It writes exactly two things: a versioned, immutable
+report under `.swarm/evolution/consensus/`, and an entry per emitted proposal in the shared recommendation
+dedup ledger (a proposal another producer already claimed is counted rather than re-recorded).
 
 Guarantees worth knowing:
 
 - **Deterministic first.** All filtering, co-occurrence, support counting, and diversity math run before any
-  model call. Summarization is optional and, when no dispatcher is available, falls back to the deterministic
-  statement rather than failing.
+  model call. Summarization is optional; when it is unavailable or its output is rejected, the deterministic
+  statement simply stands.
 - **One anecdote is never a proposal.** An attribute supported by a single task (`taskDiversity < 2`) is
   emitted as an investigation note with `proposedTarget: 'none'`.
-- **Negative evidence is preserved.** `failureSupport` and `counterexampleRefs` are always retained; an
-  attribute is never published with its counterexamples dropped.
-- **Reports are reproducible.** The same inputs produce an identical `integrityHash`. Wall-clock fields are
-  excluded from the hash so re-running does not fabricate a difference.
-- **Excerpts are bounded and secret-redacted**, and no prompt or reasoning text is ever persisted.
+- **Negative evidence is never silently dropped.** An attribute that counts failing runs is *rejected by the
+  schema* unless it also carries counterexample references, so a finding can never be published with its
+  counterexamples stripped. And when `max_evidence_items` truncates a source, the cut now alternates between
+  failing and succeeding observations instead of taking a lexicographic prefix, which used to delete failures
+  preferentially. Note the limit of that: the balance is struck per source, and once the budget is spent later
+  sources are dropped whole, so a truncated report is a partial view — which is exactly why it now says so.
+- **Reports are reproducible under the default configuration.** At a fixed `consensus` config and fixed
+  thresholds, the same corpus and the same set of already-proposed fingerprints produce an identical
+  `integrityHash` and therefore an identical `reportId`. Wall-clock fields are excluded from the hash, and so
+  is the optional LLM restatement — `llm_summarization_enabled` defaults to `true`, so hashing a model's
+  wording would have made re-running fabricate a difference every time. Changing any `consensus` setting does
+  change the report id, by design: a report declares the configuration it was produced under.
+- **The deterministic statement is never overwritten.** A model restatement is stored beside it as
+  `llmSummary`, never in place of it.
+- **Model output is confined to one validated sentence.** Corpus assembly never reads prompts or reasoning
+  traces at all, and a restatement is accepted only from a `FINDING:` line — everything else in the response
+  is discarded — and only if it carries no markup, no reasoning markers, no second sentence, and fits the
+  length bound without being trimmed to fit. A reasoning block sharing the envelope line is rejected rather
+  than carried along. One bounded sentence per attribute cannot hold a chain of thought, and it never
+  displaces the deterministic statement.
+- **Excerpts are bounded and secret-redacted**, with redaction applied before the length bound.
+- **The cuts that change a conclusion are declared on the report.** A persisted `truncation` block records
+  whether the corpus was capped, how many observations were tallied, whether the `inputIds` list was cut, and
+  how many attributes the 1000-attribute cap dropped — so a truncated report is no longer mistakable for a
+  complete one. (Fixed per-attribute reference caps and per-source enumeration bounds are not counted there;
+  see `docs/consensus-mining.md`.)
 
 `modelDiversity` is `0` when no contributing observation carries a model id — that means "not measurable from
 this corpus", not "measured as none", and never blocks emission on its own.
+
+Note on re-running: mining twice over an unchanged corpus does **not** produce one report. The second run
+dedupes its proposals against the first, so it legitimately has different content — zero proposals — and is
+stored as a second report recording that nothing new was found. Once proposals are exhausted, further runs
+converge on a single stable report id.
 
 See `docs/consensus-mining.md`.
 

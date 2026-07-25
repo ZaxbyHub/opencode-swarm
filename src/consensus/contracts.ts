@@ -34,11 +34,33 @@ const IsoDateSchema = z.iso.datetime({ offset: true });
 /** Upper bound on any single reference list. Keeps a report bounded on disk. */
 export const MAX_CONSENSUS_REFS = 200;
 
-/** Upper bound on a rendered statement. Also the LLM-summary truncation bound. */
+/**
+ * Upper bound on a rendered statement, and the hard REJECTION bound on an LLM
+ * restatement. Model output is never truncated to fit — a half-sentence is
+ * exactly how a fragment of reasoning survives a length cut — so an
+ * over-long restatement is discarded and the deterministic statement stands.
+ */
 export const MAX_CONSENSUS_STATEMENT_CHARS = 600;
 
-export { ReferenceSchema as ConsensusReferenceSchema };
-export { Sha256Schema as ConsensusSha256Schema };
+/**
+ * Upper bound on the attribute and proposal arrays of a single report.
+ *
+ * `MAX_CONSENSUS_ATTRIBUTES` is exported because the PRODUCER must enforce it
+ * too: a schema-only cap turns a large `maxEvidenceItems` into a hard
+ * `ConsensusReportV1Schema.parse` throw at the end of mining, which means NO
+ * report is written at all — the caller loses every finding rather than the tail
+ * of a ranked list. `src/consensus/miner.ts` therefore caps first, ranked, and
+ * records how many it dropped in `report.truncation`.
+ *
+ * `MAX_CONSENSUS_PROPOSALS` has no producer-side counterpart, by design: the
+ * miner emits at most one proposal per attribute and deduplication only removes,
+ * so `proposals.length <= attributes.length <= MAX_CONSENSUS_ATTRIBUTES` holds
+ * structurally while the two constants are equal. It is exported so that
+ * equality — which the argument depends on — is asserted by a test rather than
+ * assumed.
+ */
+export const MAX_CONSENSUS_ATTRIBUTES = 1000;
+export const MAX_CONSENSUS_PROPOSALS = 1000;
 
 const ReferenceListSchema = z.array(ReferenceSchema).max(MAX_CONSENSUS_REFS);
 
@@ -79,7 +101,7 @@ export const ConsensusMineRequestSchema = z
 // ---------------------------------------------------------------------------
 
 /** Where a mined attribute would be actioned, if it qualifies as a proposal. */
-export const ConsensusProposedTargetSchema = z.enum([
+const ConsensusProposedTargetSchema = z.enum([
 	'skill',
 	'prompt',
 	'tooling',
@@ -110,11 +132,29 @@ export type ConsensusProposedTarget = z.infer<
  *   model attribution in the corpus. Zero therefore means "not measurable from
  *   this corpus", NOT "measured as none", and it must never gate emission on its
  *   own. See `docs/consensus-mining.md`.
+ * - `statement` is ALWAYS the deterministic rendering of the arithmetic. A model
+ *   never replaces it. An optional model restatement lives in `llmSummary`,
+ *   which is excluded from the report's integrity hash — see below.
  */
 export interface ConsensusAttributeV1 {
 	v: 1;
 	id: string;
 	statement: string;
+	/**
+	 * Optional single-sentence LLM restatement of `statement`.
+	 *
+	 * Separate from `statement`, and **excluded from `integrityHash`**, for one
+	 * reason: `llm_summarization_enabled` defaults to `true`, and a model's
+	 * wording is not reproducible. Folding it into the hashed content made "same
+	 * inputs ⇒ identical hash" false by default, which in turn made `reportId`
+	 * non-deterministic and defeated the point of a content-addressed immutable
+	 * report. Cosmetic output does not get to move a content address.
+	 *
+	 * Absent whenever summarization is disabled, unavailable, or rejected by the
+	 * restatement guard. Readers should render it as a convenience and treat
+	 * `statement` as the authoritative text.
+	 */
+	llmSummary?: string;
 	support: number;
 	successSupport: number;
 	failureSupport: number;
@@ -131,6 +171,7 @@ export const ConsensusAttributeV1Schema = z
 		v: z.literal(1),
 		id: ReferenceSchema,
 		statement: z.string().min(1).max(MAX_CONSENSUS_STATEMENT_CHARS),
+		llmSummary: z.string().min(1).max(MAX_CONSENSUS_STATEMENT_CHARS).optional(),
 		support: z.number().int().nonnegative(),
 		successSupport: z.number().int().nonnegative(),
 		failureSupport: z.number().int().nonnegative(),
@@ -187,6 +228,19 @@ export const ConsensusAttributeV1Schema = z
  * treat a mined correlation as a specification.
  */
 export interface ProposedSkillChange {
+	/**
+	 * The `ConsensusAttributeV1.id` this proposal was derived from.
+	 *
+	 * Load-bearing, not decorative. It is what makes a report provenance-auditable
+	 * — a reader can point at the exact attribute whose arithmetic produced the
+	 * recommendation — and it is what
+	 * `ConsensusReportV1Schema`'s investigation-note guard compares against. That
+	 * guard previously tested `provenance.sourceEvidenceRefs` (corpus refs, e.g.
+	 * `evaluation-run:r1:t1:0`) for membership in the set of attribute ids
+	 * (`cattr_<16hex>`). Those namespaces are disjoint, so the check could never
+	 * fire on real miner output: it was a guard in name only.
+	 */
+	sourceAttributeId: string;
 	/** Where the change would land, e.g. a skill slug or subsystem name. */
 	target: string;
 	/** Minimal, one-sentence statement of the smallest change worth trying. */
@@ -210,6 +264,12 @@ export interface ProposedSkillChange {
 /**
  * Structural mirror of `LearningProvenanceV1` (`src/learning/provenance.ts`).
  *
+ * Every `source*` list here is **scoped to the attribute that produced this
+ * proposal** (issue #1821 AC23), not to the whole filtered corpus. A proposal
+ * that claimed the run, model, and task ids of every observation the miner
+ * looked at would be asserting provenance it does not have — and would be
+ * indistinguishable from every other proposal in the same report.
+ *
  * Restated here rather than imported so the consensus store's on-disk contract
  * is self-describing and this module keeps zero non-Zod dependencies; the miner
  * still *produces* the value via `stampLearningProvenance`, so the two shapes
@@ -231,7 +291,7 @@ export interface ProposedSkillChangeProvenance {
 	};
 }
 
-export const ProposedSkillChangeProvenanceSchema = z
+const ProposedSkillChangeProvenanceSchema = z
 	.object({
 		v: z.literal(1),
 		mechanism: z.literal('consensus_mine'),
@@ -253,6 +313,7 @@ export const ProposedSkillChangeProvenanceSchema = z
 
 export const ProposedSkillChangeSchema = z
 	.object({
+		sourceAttributeId: ReferenceSchema,
 		target: ReferenceSchema,
 		intent: z.string().min(1).max(MAX_CONSENSUS_STATEMENT_CHARS),
 		evidenceRefs: ReferenceListSchema,
@@ -270,7 +331,7 @@ export const ProposedSkillChangeSchema = z
 // ---------------------------------------------------------------------------
 
 /** The corpus readers the miner is allowed to draw from. */
-export const ConsensusSourceKindSchema = z.enum([
+const ConsensusSourceKindSchema = z.enum([
 	'evaluation-run',
 	'gate-audit',
 	'gate-ground-truth',
@@ -289,7 +350,7 @@ export interface ConsensusCorpusHash {
 	observations: number;
 }
 
-export const ConsensusCorpusHashSchema = z
+const ConsensusCorpusHashSchema = z
 	.object({
 		source: ConsensusSourceKindSchema,
 		hash: Sha256Schema,
@@ -298,12 +359,57 @@ export const ConsensusCorpusHashSchema = z
 	.strict();
 
 /**
+ * Everything this report dropped, and why.
+ *
+ * Persisted rather than returned-only, because every one of these cuts changes
+ * what the report *means*. A reader who cannot tell that the corpus was capped
+ * cannot tell whether `failureSupport: 0` means "nothing failed" or "the
+ * failures were truncated away", and a reader who cannot see that the attribute
+ * array was capped will read a partial list as a complete one. Silence here is
+ * the difference between an incomplete report and a misleading one.
+ */
+export interface ConsensusTruncationV1 {
+	/** `maxEvidenceItems` cut the corpus before tallying. */
+	corpus: boolean;
+	/** Observations actually tallied, after filtering and after the corpus cut. */
+	observations: number;
+	/** `inputIds` was cut at `MAX_CONSENSUS_REFS`. */
+	inputIds: boolean;
+	/** Distinct run ids in the filtered corpus, before the `inputIds` cut. */
+	totalInputIds: number;
+	/**
+	 * Attributes dropped by the producer-side `MAX_CONSENSUS_ATTRIBUTES` cap.
+	 *
+	 * There is deliberately no `proposalsDropped` counterpart. The miner emits at
+	 * most one proposal per attribute and deduplication only removes, so
+	 * `proposals.length <= attributes.length <= MAX_CONSENSUS_ATTRIBUTES`, and
+	 * `MAX_CONSENSUS_PROPOSALS` equals `MAX_CONSENSUS_ATTRIBUTES`. A producer-side
+	 * proposal cap would therefore be an unreachable branch reporting a
+	 * permanently-zero count, which is worse than not having one.
+	 */
+	attributesDropped: number;
+}
+
+const ConsensusTruncationV1Schema = z
+	.object({
+		corpus: z.boolean(),
+		observations: z.number().int().nonnegative(),
+		inputIds: z.boolean(),
+		totalInputIds: z.number().int().nonnegative(),
+		attributesDropped: z.number().int().nonnegative(),
+	})
+	.strict();
+
+/**
  * One immutable mining report under `.swarm/evolution/consensus/<reportId>.json`.
  *
- * `integrityHash` covers every field EXCEPT `integrityHash`, `reportId`, and
- * `generatedAt`. Excluding the wall clock is what makes "same inputs ⇒ identical
- * hash" true; excluding `reportId` lets the id be *derived* from the hash
- * without a circular definition.
+ * `integrityHash` covers every field EXCEPT `integrityHash`, `reportId`,
+ * `generatedAt`, each proposal's `provenance.writeOrigin.producedAt`, and each
+ * attribute's `llmSummary`. The first four are wall clocks or derived from the
+ * hash itself; `llmSummary` is excluded because it is non-reproducible model
+ * prose and `llm_summarization_enabled` defaults to `true` — hashing it would
+ * make "same inputs ⇒ identical hash" false in the default configuration. See
+ * `computeConsensusIntegrityHash`.
  */
 export interface ConsensusReportV1 {
 	v: 1;
@@ -316,6 +422,7 @@ export interface ConsensusReportV1 {
 	integrityHash: string;
 	attributes: ConsensusAttributeV1[];
 	proposals: ProposedSkillChange[];
+	truncation: ConsensusTruncationV1;
 	redactionPolicyVersion: number;
 }
 
@@ -329,8 +436,11 @@ export const ConsensusReportV1Schema = z
 		corpusHashes: z.array(ConsensusCorpusHashSchema).max(64),
 		configHash: Sha256Schema,
 		integrityHash: Sha256Schema,
-		attributes: z.array(ConsensusAttributeV1Schema).max(1000),
-		proposals: z.array(ProposedSkillChangeSchema).max(1000),
+		attributes: z
+			.array(ConsensusAttributeV1Schema)
+			.max(MAX_CONSENSUS_ATTRIBUTES),
+		proposals: z.array(ProposedSkillChangeSchema).max(MAX_CONSENSUS_PROPOSALS),
+		truncation: ConsensusTruncationV1Schema,
 		redactionPolicyVersion: z.number().int().nonnegative(),
 	})
 	.strict()
@@ -351,24 +461,36 @@ export const ConsensusReportV1Schema = z
 				message: 'report contains duplicate proposal fingerprints',
 			});
 		}
-		// An investigation note (`proposedTarget: 'none'`) must never have
-		// produced a proposal. Enforced structurally so a miner regression that
-		// promotes an anecdote cannot be persisted.
-		const noteAttributeIds = new Set(
-			report.attributes
-				.filter((attribute) => attribute.proposedTarget === 'none')
-				.map((attribute) => attribute.id),
+		// Every proposal must name an attribute that is actually in this report,
+		// and that attribute must not be an investigation note.
+		//
+		// The membership half is what makes the report auditable at all: a
+		// `sourceAttributeId` pointing at nothing is a recommendation with no
+		// derivation. The note half is the structural guarantee that a miner
+		// regression promoting an anecdote (`proposedTarget: 'none'`) into a
+		// proposal cannot be persisted. Both compare attribute id to attribute id —
+		// the previous version compared corpus evidence refs against attribute ids,
+		// two disjoint namespaces, so it could never fire.
+		const attributesById = new Map(
+			report.attributes.map((attribute) => [attribute.id, attribute]),
 		);
 		for (const proposal of report.proposals) {
-			for (const sourceId of proposal.provenance.sourceEvidenceRefs) {
-				if (noteAttributeIds.has(sourceId)) {
-					ctx.addIssue({
-						code: 'custom',
-						path: ['proposals'],
-						message:
-							'an investigation-note attribute must not produce a proposal',
-					});
-				}
+			const source = attributesById.get(proposal.sourceAttributeId);
+			if (!source) {
+				ctx.addIssue({
+					code: 'custom',
+					path: ['proposals'],
+					message: `proposal references attribute ${proposal.sourceAttributeId}, which is not in this report`,
+				});
+				continue;
+			}
+			if (source.proposedTarget === 'none') {
+				ctx.addIssue({
+					code: 'custom',
+					path: ['proposals'],
+					message:
+						'an investigation-note attribute must not produce a proposal',
+				});
 			}
 		}
 	});
@@ -382,6 +504,13 @@ export const ConsensusReportV1Schema = z
  * to the hand-written interface the issue specified verbatim. A renamed field or
  * a widened type on either side becomes a type error here rather than a runtime
  * surprise at the store boundary.
+ *
+ * These four are `export`ed with no importer ON PURPOSE, and are the only such
+ * exports left in this subsystem. They are type-level assertions, not API: the
+ * `export` is what keeps them from reading as unused locals, and they are erased
+ * entirely at build time. Every other export here has a real consumer in `src/`
+ * or `tests/` — the dead barrel and the unreferenced sub-schemas that used to
+ * feed it were removed rather than left standing.
  */
 type AssertAssignable<Actual extends Expected, Expected> = Actual;
 

@@ -4,17 +4,37 @@
  * This module owns exactly one job: turn every already-existing evidence store
  * in `.swarm/` into a single flat stream of `CorpusObservation` records. It
  * introduces **no new store**. Every reader below is an existing exported
- * function; the only enumerator added here is `listTrajectorySessions`, a
- * `readdir` over `.swarm/trajectories` that the PRM trajectory store never
- * needed for its own single-session reads. An enumerator is not a store: it
- * writes nothing, caches nothing, and owns no schema.
+ * function; the two enumerators added here are `listTrajectorySessions` (a
+ * `readdir` over `.swarm/trajectories`) and `listEvaluationRunIds` (a `readdir`
+ * over `.swarm/evolution/runs`), because both underlying stores read one
+ * artifact at a time and never needed a listing of their own. An enumerator is
+ * not a store: it writes nothing, caches nothing, and owns no schema.
  *
  * Hard rules this module upholds (AGENTS.md invariants 4 and 8):
  * - Every reader receives an injected `directory`. There is no `process.cwd()`
  *   fallback anywhere in this file, and none may be added: a consensus report
  *   mined against the wrong root would silently attribute one project's
  *   evidence to another.
- * - Nothing here writes. Not a lock, not a cache file, not a marker.
+ * - Nothing here writes to disk: no artifact, no lock, no cache file, no marker.
+ *   That is not a property of *reading* — it has to be chosen. `loadEvidence`
+ *   performs a lazy in-place upgrade of a legacy flat retrospective by default
+ *   (rewriting the bundle under an `evidence-loader` lock and creating a lock
+ *   sentinel under `.swarm/locks/`), so `defaultReaders` binds it with
+ *   `{ migrate: false }`. A mining run must never mutate the evidence it is
+ *   merely counting. Note that `migrate: false` skips only the PERSISTENCE: the
+ *   returned bundle is still the wrapped, normalized view — including the
+ *   `task_complexity` remap, which happens in `wrapFlatRetrospective` before the
+ *   write branch — so the corpus reads normalized values while the file on disk
+ *   keeps its legacy ones.
+ *   Three upstream readers do populate PROCESS-LOCAL caches, which is worth
+ *   stating rather than hiding behind the word "read-only": `readTrajectory`
+ *   fills the PRM in-memory trajectory cache (`src/prm/trajectory-store.ts`),
+ *   `readKnowledge` fills the parsed-artifact cache, and `loadEvidence` fills
+ *   the shared text cache (`src/utils/swarm-artifact-cache.ts`). All are bounded
+ *   and FIFO-evicting, so mining a large `.swarm/` tree CAN evict another
+ *   subsystem's cached entries and change what that subsystem sees next. None
+ *   touches the filesystem and none survives the process — but "nothing here
+ *   writes" is a disk claim, not a claim about process memory.
  * - Every free-text fragment that survives into a signal, a statement, or an
  *   evidence reference passes through `redactSecrets` and a hard length bound
  *   before it is retained. Prompts and reasoning traces are never read into an
@@ -23,6 +43,15 @@
  * - The whole corpus is capped at `maxEvidenceItems` observations. The cap is
  *   applied against a deterministic source order and a deterministic per-source
  *   sort, so the same `.swarm/` tree always yields the same truncated corpus.
+ *   Within a source the cut is *balanced between failing and succeeding
+ *   observations* rather than lexicographic, because a lexicographic cut
+ *   systematically drops whichever class sorts late and would let truncation
+ *   erase counterexamples while confidence rose. That removes the systematic
+ *   bias; it does not make truncation lossless. The balance is struck PER
+ *   SOURCE, so one signal can still lose every counterexample it had, and once
+ *   the budget is spent every later source is dropped WHOLE. `report.truncation`
+ *   exists so a reader can tell a partial view from a complete one — see
+ *   `docs/consensus-mining.md`.
  */
 
 import { readdir } from 'node:fs/promises';
@@ -153,6 +182,21 @@ const MAX_ENUMERATED_ENTRIES = 2000;
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 
 /**
+ * Total, locale-INDEPENDENT string order.
+ *
+ * `String.prototype.localeCompare` without an explicit locale is ICU- and
+ * environment-sensitive: it orders `a-b, a:b, ab, aB` differently from code-unit
+ * order, and the collation can differ between hosts. That is fine for display
+ * and fatal here — this ordering decides which observations survive truncation
+ * and the order of the attribute array, both of which are hashed into
+ * `integrityHash`. A report whose id depends on the host's collation is not
+ * reproducible. Code-unit comparison is the same everywhere.
+ */
+export function compareRefs(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
  * Redact, collapse, and bound a free-text fragment before it is retained.
  *
  * Order matters: redaction runs BEFORE truncation, so a secret that straddles
@@ -243,7 +287,13 @@ function defaultReaders(): CorpusReaders {
 		readSkillUsageEntries,
 		readKnowledgeEntries: (directory) =>
 			readKnowledge<KnowledgeLike>(resolveSwarmKnowledgePath(directory)),
-		loadEvidence,
+		// `{ migrate: false }` is load-bearing, not defensive. The default
+		// `loadEvidence` lazily rewrites a legacy flat retrospective in place —
+		// taking an `evidence-loader` lock, creating a lock sentinel under
+		// `.swarm/locks/`, renaming a temp file over `evidence.json`, and remapping
+		// legacy `task_complexity` values (`medium` → `moderate`). Mining is a read.
+		loadEvidence: (directory, taskId) =>
+			loadEvidence(directory, taskId, { migrate: false }),
 	};
 }
 
@@ -590,6 +640,56 @@ async function loadEvidenceBundles(
 // ---------------------------------------------------------------------------
 
 /**
+ * Retain `limit` observations from a deterministically-sorted source without
+ * systematically dropping either outcome class.
+ *
+ * A plain `slice(0, limit)` cuts lexicographically by `evidenceRef`. Those refs
+ * are structured (`gate-audit:<runId>:<taskId>:<index>`), so the cut correlates
+ * with run and task identity — and therefore, whenever failures cluster in one
+ * run or one task, with OUTCOME. The effect of that is exactly backwards:
+ * failing observations vanish while succeeding ones survive, so `failureSupport`
+ * and `counterexampleRefs` fall to zero and `confidence` *rises* as evidence is
+ * discarded. Truncation must never be able to launder a contested finding into a
+ * clean one (issue #1821 AC17).
+ *
+ * The cut therefore alternates between the failing and the succeeding sublist,
+ * each kept in its own deterministic order, until the budget is spent; whichever
+ * list runs out first yields its remaining share to the other, so a source with
+ * no failures still fills the budget. The retained subset is re-sorted on the way
+ * out, so the returned stream still obeys the documented per-source ordering and
+ * the result is a pure function of the input.
+ */
+function balancedSlice(
+	sorted: readonly CorpusObservation[],
+	limit: number,
+): CorpusObservation[] {
+	if (limit >= sorted.length) return [...sorted];
+	const failures = sorted.filter((observation) => !observation.success);
+	const successes = sorted.filter((observation) => observation.success);
+	const retained: CorpusObservation[] = [];
+	let failureIndex = 0;
+	let successIndex = 0;
+	// Failures are taken first within each pair, so an odd budget rounds toward
+	// negative evidence: under-reporting a counterexample is the costlier error.
+	while (retained.length < limit) {
+		if (failureIndex < failures.length) {
+			retained.push(failures[failureIndex] as CorpusObservation);
+			failureIndex += 1;
+			if (retained.length >= limit) break;
+		}
+		if (successIndex < successes.length) {
+			retained.push(successes[successIndex] as CorpusObservation);
+			successIndex += 1;
+		} else if (failureIndex >= failures.length) {
+			break;
+		}
+	}
+	return retained.sort((left, right) =>
+		compareRefs(left.evidenceRef, right.evidenceRef),
+	);
+}
+
+/**
  * Load and normalize every corpus source.
  *
  * Failure of any single source is non-fatal and recorded in `unreadableSources`:
@@ -638,7 +738,7 @@ export async function loadConsensusCorpus(
 		// Deterministic per-source order so truncation never depends on
 		// filesystem enumeration order.
 		loaded.sort((left, right) =>
-			left.evidenceRef.localeCompare(right.evidenceRef),
+			compareRefs(left.evidenceRef, right.evidenceRef),
 		);
 		hashes.push({
 			source,
@@ -652,7 +752,7 @@ export async function loadConsensusCorpus(
 		}
 		if (loaded.length > remaining) {
 			truncated = true;
-			observations.push(...loaded.slice(0, remaining));
+			observations.push(...balancedSlice(loaded, remaining));
 		} else {
 			observations.push(...loaded);
 		}
@@ -660,17 +760,3 @@ export async function loadConsensusCorpus(
 
 	return { observations, hashes, truncated, unreadableSources };
 }
-
-/**
- * Test/DI seam. Restore in `afterEach` when overridden — see
- * `src/hooks/diff-scope.ts:_internals` for the convention.
- */
-export const _internals: {
-	defaultReaders: typeof defaultReaders;
-	SOURCE_ORDER: readonly ConsensusSourceKind[];
-	MAX_ENUMERATED_ENTRIES: number;
-} = {
-	defaultReaders,
-	SOURCE_ORDER,
-	MAX_ENUMERATED_ENTRIES,
-};

@@ -67,6 +67,18 @@ export function fixedCorpusLoader(corpus: ConsensusCorpus) {
 	return async () => corpus;
 }
 
+/**
+ * A well-formed restatement, in the envelope the miner's guard requires.
+ *
+ * The miner accepts model output ONLY through a single-sentence `FINDING:` line
+ * (issue #1821 AC18), so a fixture that returns bare prose is testing rejection,
+ * not summarization. Tests that want a successful restatement must go through
+ * this shape.
+ */
+export function finding(sentence: string): string {
+	return `FINDING: ${sentence}`;
+}
+
 /** A dispatcher returning a fixed result; records every request it received. */
 export function recordingDispatcher(
 	result: Partial<EvaluationModelDispatchResult> = {},
@@ -88,7 +100,7 @@ export function recordingDispatcher(
 		return {
 			status: 'completed',
 			modelId: input.modelId,
-			text: 'restated finding',
+			text: finding('Restated finding.'),
 			durationMs: 1,
 			...result,
 		};

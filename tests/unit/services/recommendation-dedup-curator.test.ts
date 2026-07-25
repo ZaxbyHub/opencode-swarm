@@ -129,6 +129,13 @@ describe('curator emission site — cross-producer dedup', () => {
 				{
 					target: 'tooling',
 					intent: NEW_LESSON,
+					// `sourceAttributeId` back-references the attribute whose arithmetic
+					// produced this proposal (#1821 review finding 5). The dedup path
+					// under test never reads it, and tsconfig excludes tests/, so a
+					// literal missing it still compiles and passes — which is exactly
+					// why it is set here rather than left to rot into a fixture that no
+					// longer resembles what the miner emits.
+					sourceAttributeId: 'cattr_0123456789abcdef',
 					evidenceRefs: ['.swarm/evidence/run-1.json'],
 					counterexampleRefs: [],
 					confidence: 0.8,

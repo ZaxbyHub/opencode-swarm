@@ -1,20 +1,23 @@
 /**
  * Stable package-level boundary for the consensus miner (issue #1821).
  *
- * Mirrors `src/evaluation/public-api.ts`: OpenCode's legacy plugin loader
- * permits named FUNCTION exports but rejects plain-object named exports, so a
- * cohesive versioned API has to be a callable whose methods are attached to it
- * rather than a bare namespace object. Exporting `{ mine, read, ... }` here
- * would make the plugin undiscoverable at load time with no error surfaced —
- * the failure mode AGENTS.md invariant 1 exists to prevent.
+ * This module exports exactly one thing — `mineAndStoreConsensusV1` — because
+ * exactly one caller exists: `src/tools/consensus-mine.ts`. It previously also
+ * exported a frozen callable `consensusV1` namespace mirroring
+ * `src/evaluation/public-api.ts`, together with a `src/consensus/index.ts`
+ * barrel. Neither had a single importer anywhere in `src/`, `tests/`, or
+ * `scripts/`, and the evaluation precedent did not apply: that barrel IS
+ * consumed (`src/index.ts` re-exports `evaluationV1`), whereas nothing ever
+ * wired consensus into the plugin entry. Both were removed rather than left as
+ * dead exports (see the "never ship unwired code" directive in `CLAUDE.md`).
+ * If a future consumer needs a versioned namespace, reintroduce it together with
+ * that consumer.
  */
 
 import type { ConsensusMineRequest, ConsensusReportV1 } from './contracts.js';
 import { type MineConsensusDeps, mineConsensus } from './miner.js';
 import {
 	listConsensusProposalFingerprints,
-	listConsensusReports,
-	readConsensusReport,
 	writeConsensusReport,
 } from './store.js';
 
@@ -52,28 +55,3 @@ export async function mineAndStoreConsensusV1(
 	const report = await writeConsensusReport(options.directory, result.report);
 	return { ...result, report };
 }
-
-/**
- * Callable function namespace — see the module doc for why this is not a plain
- * object. Frozen so a consumer cannot monkey-patch the boundary at runtime.
- */
-export const consensusV1: ((
-	options: MineAndStoreConsensusOptions,
-) => Promise<MineAndStoreConsensusResult>) & {
-	mineAndStore: typeof mineAndStoreConsensusV1;
-	mine: typeof mineConsensus;
-	readReport: typeof readConsensusReport;
-	listReports: typeof listConsensusReports;
-	listProposalFingerprints: typeof listConsensusProposalFingerprints;
-} = Object.freeze(
-	Object.assign(
-		(options: MineAndStoreConsensusOptions) => mineAndStoreConsensusV1(options),
-		{
-			mineAndStore: mineAndStoreConsensusV1,
-			mine: mineConsensus,
-			readReport: readConsensusReport,
-			listReports: listConsensusReports,
-			listProposalFingerprints: listConsensusProposalFingerprints,
-		},
-	),
-);

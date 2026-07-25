@@ -37,8 +37,10 @@ import {
 import {
 	config,
 	corpusOf,
+	finding,
 	fixedCorpusLoader,
 	observation,
+	recordingDispatcher,
 	request,
 	twoRunAgreement,
 } from './fixtures';
@@ -63,6 +65,8 @@ async function report(
 	overrides: {
 		at?: string;
 		observations?: ReturnType<typeof observation>[];
+		/** Model restatement to inject, as the raw dispatcher payload. */
+		restatement?: string;
 	} = {},
 ): Promise<ConsensusReportV1> {
 	const result = await mineConsensus(
@@ -74,6 +78,13 @@ async function report(
 				corpusOf(overrides.observations ?? twoRunAgreement()),
 			),
 			now: () => new Date(overrides.at ?? '2026-07-24T00:00:00.000Z'),
+			...(overrides.restatement === undefined
+				? {}
+				: {
+						dispatcher: recordingDispatcher({
+							text: finding(overrides.restatement),
+						}).dispatcher,
+					}),
 		},
 	);
 	return result.report;
@@ -118,6 +129,29 @@ describe('consensus store — reproducibility', () => {
 		const value = await report();
 		expect(value.reportId).toBe(deriveReportId(value.integrityHash));
 	});
+
+	// `llm_summarization_enabled` defaults to TRUE. Testing reproducibility only
+	// on the dispatcher-free path would exercise the one configuration where the
+	// property holds for free, and would have missed the model's wording landing
+	// in the hashed content.
+	test('a varying model restatement does not move the hash or the id', async () => {
+		expect(config().llm_summarization_enabled).toBe(true);
+		const first = await report({ restatement: 'One phrasing of the finding.' });
+		const second = await report({ restatement: 'A quite different phrasing.' });
+		expect(second.attributes[0]?.llmSummary).not.toBe(
+			first.attributes[0]?.llmSummary as string,
+		);
+		expect(second.integrityHash).toBe(first.integrityHash);
+		expect(second.reportId).toBe(first.reportId);
+	});
+
+	test('whether summarization ran at all is invisible to the content address', async () => {
+		const bare = await report();
+		const summarized = await report({ restatement: 'Model prose.' });
+		expect(bare.attributes[0]?.llmSummary).toBeUndefined();
+		expect(summarized.attributes[0]?.llmSummary).toBe('Model prose.');
+		expect(summarized.integrityHash).toBe(bare.integrityHash);
+	});
 });
 
 describe('consensus store — round trip', () => {
@@ -132,6 +166,48 @@ describe('consensus store — round trip', () => {
 
 		const read = await readConsensusReport(root, value.reportId);
 		expect(read).toEqual(value);
+	});
+
+	test('a report carrying an llmSummary round-trips and re-verifies on read', async () => {
+		// The read path RE-COMPUTES the integrity hash and refuses a mismatch. If
+		// that recomputation did not exclude `llmSummary` the same way the write
+		// path does, every summarized report would fail verification on read —
+		// i.e. would be unreadable the moment an LLM was wired up.
+		const root = project();
+		const value = await report({ restatement: 'A stored restatement.' });
+		expect(value.attributes[0]?.llmSummary).toBe('A stored restatement.');
+		await writeConsensusReport(root, value);
+
+		const read = await readConsensusReport(root, value.reportId);
+		expect(read).toEqual(value);
+		expect(read?.attributes[0]?.llmSummary).toBe('A stored restatement.');
+		// The restatement really is on disk, not merely in memory.
+		const onDisk = JSON.parse(
+			readFileSync(
+				path.join(reportDir(root), `${value.reportId}.json`),
+				'utf8',
+			),
+		);
+		expect(onDisk.attributes[0].llmSummary).toBe('A stored restatement.');
+	});
+
+	test('editing only the stored llmSummary is NOT treated as tampering', async () => {
+		// It is outside the hash by design, so it cannot be a tamper signal.
+		// Asserting this pins the trade-off deliberately rather than by accident.
+		const root = project();
+		const value = await report({ restatement: 'Original restatement.' });
+		await writeConsensusReport(root, value);
+		const file = path.join(reportDir(root), `${value.reportId}.json`);
+		const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+		onDisk.attributes[0].llmSummary = 'Swapped restatement.';
+		writeFileSync(file, JSON.stringify(onDisk));
+
+		const read = await readConsensusReport(root, value.reportId);
+		expect(read?.attributes[0]?.llmSummary).toBe('Swapped restatement.');
+		// Every hashed field is still protected.
+		expect(read?.attributes[0]?.statement).toBe(
+			value.attributes[0]?.statement as string,
+		);
 	});
 
 	test('reading an absent report returns undefined', async () => {
@@ -209,6 +285,20 @@ describe('consensus store — immutability', () => {
 		const returned = await writeConsensusReport(root, late);
 		// The already-stored artifact wins; the timestamp is not rewritten.
 		expect(returned.generatedAt).toBe(early.generatedAt);
+	});
+
+	test('a differing model restatement alone is treated as the same artifact', async () => {
+		// The store-level consequence of excluding `llmSummary` from the hash:
+		// re-mining with a different model wording is idempotent, and the stored
+		// artifact wins rather than conflicting.
+		const root = project();
+		const first = await report({ restatement: 'First phrasing.' });
+		await writeConsensusReport(root, first);
+		const second = await report({ restatement: 'Second phrasing.' });
+		expect(second.reportId).toBe(first.reportId);
+		const returned = await writeConsensusReport(root, second);
+		expect(returned.attributes[0]?.llmSummary).toBe('First phrasing.');
+		expect(readdirSync(reportDir(root))).toHaveLength(1);
 	});
 
 	test('a divergent rewrite of the same report id is rejected', async () => {

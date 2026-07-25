@@ -16,6 +16,7 @@ import { computeRecommendationFingerprint } from '../../../src/learning/fingerpr
 import {
 	config,
 	corpusOf,
+	finding,
 	fixedCorpusLoader,
 	recordingDispatcher,
 	request,
@@ -83,20 +84,24 @@ describe('consensus miner — graceful degradation without a dispatcher', () => 
 	});
 });
 
-describe('consensus miner — summarization replaces only the statement', () => {
-	test('a completed dispatch restates the statement and nothing else', async () => {
+describe('consensus miner — summarization is additive, never a replacement', () => {
+	test('a completed dispatch adds llmSummary and leaves statement alone', async () => {
 		const baseline = await mine();
 		const { dispatcher } = recordingDispatcher({
-			text: 'Scoring succeeds consistently across both refactor tasks.',
+			text: finding(
+				'Scoring succeeds consistently across both refactor tasks.',
+			),
 		});
 		const summarized = await mine({ dispatcher });
 
 		expect(summarized.summarizedCount).toBe(1);
-		expect(summarized.report.attributes[0]?.statement).toBe(
+		expect(summarized.report.attributes[0]?.llmSummary).toBe(
 			'Scoring succeeds consistently across both refactor tasks.',
 		);
-		expect(summarized.report.attributes[0]?.statement).not.toBe(
-			baseline.report.attributes[0]?.statement,
+		// The deterministic statement is NOT displaced. This is what keeps the
+		// report reproducible: `statement` is hashed, `llmSummary` is not.
+		expect(summarized.report.attributes[0]?.statement).toBe(
+			baseline.report.attributes[0]?.statement as string,
 		);
 
 		// Every deterministic field is byte-identical to the un-summarized run.
@@ -132,7 +137,7 @@ describe('consensus miner — summarization replaces only the statement', () => 
 		const deterministicStatement = baseline.report.attributes[0]
 			?.statement as string;
 		const { dispatcher } = recordingDispatcher({
-			text: 'A completely different wording of the same finding.',
+			text: finding('A completely different wording of the same finding.'),
 		});
 		const summarized = await mine({ dispatcher });
 
@@ -158,7 +163,7 @@ describe('consensus miner — summarization replaces only the statement', () => 
 });
 
 describe('consensus miner — dispatcher failures never fail the run', () => {
-	test('a thrown dispatcher leaves the deterministic statement intact', async () => {
+	test('a thrown dispatcher leaves the attribute untouched', async () => {
 		const throwing: EvaluationModelDispatcher = async () => {
 			throw new Error('provider exploded');
 		};
@@ -168,13 +173,14 @@ describe('consensus miner — dispatcher failures never fail the run', () => {
 		expect(result.report.attributes[0]?.statement).toBe(
 			baseline.report.attributes[0]?.statement as string,
 		);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
 		expect(result.report.proposals).toHaveLength(1);
 	});
 
-	test('a timeout status leaves the deterministic statement intact', async () => {
+	test('a timeout status retains no restatement, not even a partial one', async () => {
 		const { dispatcher } = recordingDispatcher({
 			status: 'timeout',
-			text: 'partial output that must not be used',
+			text: finding('partial output that must not be used'),
 		});
 		const baseline = await mine();
 		const result = await mine({ dispatcher });
@@ -182,9 +188,10 @@ describe('consensus miner — dispatcher failures never fail the run', () => {
 		expect(result.report.attributes[0]?.statement).toBe(
 			baseline.report.attributes[0]?.statement as string,
 		);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
 	});
 
-	test('an empty completed response leaves the deterministic statement intact', async () => {
+	test('an empty completed response leaves the attribute untouched', async () => {
 		const { dispatcher } = recordingDispatcher({ text: '   \n  ' });
 		const baseline = await mine();
 		const result = await mine({ dispatcher });
@@ -192,15 +199,121 @@ describe('consensus miner — dispatcher failures never fail the run', () => {
 		expect(result.report.attributes[0]?.statement).toBe(
 			baseline.report.attributes[0]?.statement as string,
 		);
+		expect(result.report.attributes[0]?.llmSummary).toBeUndefined();
 	});
 
 	test('a secret in the model response is redacted before it is retained', async () => {
 		const { dispatcher } = recordingDispatcher({
-			text: 'Use the key AKIAIOSFODNN7EXAMPLE to reproduce.',
+			text: finding('Use the key AKIAIOSFODNN7EXAMPLE to reproduce.'),
 		});
 		const result = await mine({ dispatcher });
-		const statement = result.report.attributes[0]?.statement as string;
-		expect(statement).not.toContain('AKIAIOSFODNN7EXAMPLE');
-		expect(statement).toContain('[REDACTED:aws_access_key_id]');
+		const summary = result.report.attributes[0]?.llmSummary as string;
+		expect(summary).not.toContain('AKIAIOSFODNN7EXAMPLE');
+		expect(summary).toContain('[REDACTED:aws_access_key_id]');
+	});
+});
+
+describe('consensus miner — reproducible under the DEFAULT config', () => {
+	// `llm_summarization_enabled` defaults to TRUE, so these run on the same path
+	// a real invocation takes. Testing reproducibility only without a dispatcher
+	// would test the one path where the property is trivially true.
+	const varying = (text: string) => recordingDispatcher({ text }).dispatcher;
+
+	test('a varying dispatcher does not move integrityHash or reportId', async () => {
+		expect(config().llm_summarization_enabled).toBe(true);
+		const first = await mine({
+			dispatcher: varying(finding('One phrasing of the finding.')),
+		});
+		const second = await mine({
+			dispatcher: varying(finding('A completely different phrasing.')),
+		});
+
+		// The restatements really did differ...
+		expect(second.report.attributes[0]?.llmSummary).not.toBe(
+			first.report.attributes[0]?.llmSummary as string,
+		);
+		// ...and the report's identity did not move.
+		expect(second.report.integrityHash).toBe(first.report.integrityHash);
+		expect(second.report.reportId).toBe(first.report.reportId);
+	});
+
+	test('a summarized run hashes identically to an un-summarized one', async () => {
+		// The strongest form: whether summarization ran at all is invisible to the
+		// content address, so enabling an LLM cannot fork the report history.
+		const withoutModel = await mine();
+		const withModel = await mine({
+			dispatcher: varying(finding('Model prose that is not hashed.')),
+		});
+		expect(withModel.report.attributes[0]?.llmSummary).toBeDefined();
+		expect(withoutModel.report.attributes[0]?.llmSummary).toBeUndefined();
+		expect(withModel.report.integrityHash).toBe(
+			withoutModel.report.integrityHash,
+		);
+		expect(withModel.report.reportId).toBe(withoutModel.report.reportId);
+	});
+
+	test('the identity of whoever ran the mine does not move the hash', async () => {
+		// `sessionId` reaches `provenance.writeOrigin` from `ctx.sessionID`. While
+		// only `producedAt` was excluded from the hash, two sessions mining a
+		// byte-identical corpus produced different reportIds — the same symptom as
+		// hashing the model's wording, from a different field. Who ran the mine
+		// cannot change what the mine found.
+		const first = await mine({ sessionId: 'ses_AAAA', agentRole: 'architect' });
+		const second = await mine({
+			sessionId: 'ses_BBBB',
+			agentRole: 'curator_phase',
+		});
+		// The identities really did differ and really are recorded...
+		expect(second.report.proposals[0]?.provenance.writeOrigin.sessionId).toBe(
+			'ses_BBBB',
+		);
+		expect(first.report.proposals[0]?.provenance.writeOrigin.sessionId).toBe(
+			'ses_AAAA',
+		);
+		expect(second.report.proposals[0]?.provenance.writeOrigin.agentRole).toBe(
+			'curator_phase',
+		);
+		// ...and the report's identity did not move.
+		expect(second.report.integrityHash).toBe(first.report.integrityHash);
+		expect(second.report.reportId).toBe(first.report.reportId);
+	});
+
+	test('every hashed input still moves the hash when it changes', async () => {
+		// The exclusions must stay surgical. Guard against over-excluding by
+		// pinning that request, config, and corpus each still matter.
+		const baseline = await mine();
+		const tighterRequest = await mineConsensus(
+			DIRECTORY,
+			request({ minSupport: 1 }),
+			{
+				config: config(),
+				loadCorpus: fixedCorpusLoader(corpusOf(twoRunAgreement())),
+				now: AT,
+			},
+		);
+		const otherConfig = await mine({
+			config: config({ report_retention: 7 }),
+		});
+		expect(tighterRequest.report.integrityHash).not.toBe(
+			baseline.report.integrityHash,
+		);
+		expect(otherConfig.report.integrityHash).not.toBe(
+			baseline.report.integrityHash,
+		);
+	});
+
+	test('a changed deterministic statement DOES move the hash', async () => {
+		// The exclusion must be surgical: only the paraphrase escapes coverage.
+		const baseline = await mine();
+		const changed = await mineConsensus(DIRECTORY, request({ minSupport: 2 }), {
+			config: config(),
+			loadCorpus: fixedCorpusLoader(
+				corpusOf(twoRunAgreement('tooling:evaluation-outcome:errored')),
+			),
+			now: AT,
+		});
+		expect(changed.report.integrityHash).not.toBe(
+			baseline.report.integrityHash,
+		);
 	});
 });
