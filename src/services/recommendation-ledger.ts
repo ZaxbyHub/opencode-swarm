@@ -109,6 +109,7 @@ import { resolveKnowledgeStoreDir } from '../hooks/knowledge-link.js';
 import { transactFile } from '../hooks/knowledge-store.js';
 import {
 	computeRecommendationFingerprint,
+	isRecommendationFingerprint,
 	normalizeRecommendationStatement,
 	normalizeScopeKeys,
 	type RecommendationKind,
@@ -298,8 +299,14 @@ function hasIdentity(candidate: RecommendationCandidate): boolean {
 function isLedgerEntry(value: unknown): value is RecommendationLedgerEntry {
 	if (typeof value !== 'object' || value === null) return false;
 	const entry = value as Partial<RecommendationLedgerEntry>;
+	// Both identity fields get a SHAPE check, not just a typeof. The crossKey
+	// half was already validated; the fingerprint half was not, so a corrupt
+	// `fingerprint` survived and could be written back out as if it were a real
+	// `lrec_` id. Symmetric validation also gives
+	// `isRecommendationFingerprint` its production caller (#1821 review).
 	return (
 		typeof entry.fingerprint === 'string' &&
+		isRecommendationFingerprint(entry.fingerprint) &&
 		typeof entry.crossKey === 'string' &&
 		isRecommendationCrossKey(entry.crossKey)
 	);

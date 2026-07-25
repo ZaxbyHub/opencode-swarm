@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realKnowledgeStore from '../../../src/hooks/knowledge-store.js';
 import type { CoChangeEntry } from '../../../src/tools/co-change-analyzer.js';
 
 // Mock the co-change-analyzer module
@@ -34,15 +35,15 @@ mock.module('../../../src/tools/co-change-analyzer.js', () => ({
 }));
 
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
-	// #1848 review PRR-001a: curator.ts (transitively loaded) imports
-	// computeContentHash; expose the named export so this non-spreading mock
-	// doesn't SyntaxError at load. Deterministic content-derived stub.
-	computeContentHash: (lesson: string) => String(lesson).slice(0, 12),
-	// #1821: same recurrence class as computeContentHash above — curator.ts
-	// (transitively loaded) now imports dedupeCapped, so this non-spreading mock
-	// must expose it or Bun SyntaxErrors at load. Behaviour-faithful stub:
-	// non-array -> [], otherwise pass through (dedupe/cap are irrelevant here).
-	dedupeCapped: (values: unknown) => (Array.isArray(values) ? values : []),
+	// Spread the REAL module first (AGENTS.md invariant 7). This factory used to
+	// enumerate every export by hand, which made it fail closed in a way that had
+	// nothing to do with this test: any new import added anywhere in curator.ts's
+	// transitive graph made Bun throw `SyntaxError: Export named 'X' not found`
+	// at load time. That happened three times in a row — computeContentHash
+	// (#1848 PRR-001a), then dedupeCapped, then appendRewriteHistory (#1821) —
+	// each fixed by hand-adding one more stub. Spreading eradicates the class
+	// instead of waiting for the fourth. The overrides below still win.
+	...realKnowledgeStore,
 	getPlatformConfigDir: mock(() => ''),
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
 	resolveSwarmRejectedPath: mock(
