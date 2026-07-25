@@ -2869,3 +2869,50 @@ describe('Range-bounded test inventory (AC-3 SC-003) — self-updating', () => {
 		});
 	});
 });
+
+describe('Migration availability detection (availableMigrations)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = createTempDir();
+	});
+
+	afterEach(() => {
+		cleanupDir(tempDir);
+	});
+
+	it('should show migrations when config_format_version is 1 (default), since all deprecatedIn=2', () => {
+		const config = createTestConfigObj({
+			config_format_version: 1,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+		expect(result.availableMigrations!.length).toBeGreaterThan(0);
+		expect(result.availableMigrations![0]!.deprecatedIn).toBe(2);
+		expect(result.availableMigrations![0]!.currentFormatVersion).toBe(1);
+	});
+
+	it('should show NO migrations when config_format_version is 99 (current)', () => {
+		const config = createTestConfigObj({
+			config_format_version: 99,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeUndefined();
+	});
+
+	it('should show ALL migrations when config_format_version is 0 (SC-005)', () => {
+		const config = createTestConfigObj({
+			config_format_version: 0,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+		expect(result.availableMigrations!.length).toBeGreaterThan(0);
+	});
+
+	it('should default to 1 when config_format_version is absent (SC-006)', () => {
+		// createTestConfigObj without setting config_format_version
+		const config = createTestConfigObj({});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+	});
+});
