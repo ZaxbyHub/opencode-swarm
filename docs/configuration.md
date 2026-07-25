@@ -866,10 +866,41 @@ disabling this loses nothing but timeliness.
 | `max_comparisons` | number | `2000` | Upper bound on pairwise comparisons per sweep. |
 | `max_merges_per_sweep` | number | `10` | Upper bound on merges applied per sweep. |
 
+### Cross-producer recommendation dedup
+
+Three mechanisms propose learning recommendations — the curator sweep, the skill improver's
+macro-reflector, and the consensus miner. They share one dedup memory so a lesson one of them has
+already emitted is not emitted again. There is nothing to configure; the behaviour is always on and
+always fails open (an unreadable or unwritable ledger emits everything, which is the pre-dedup
+behaviour).
+
+| Property | Value |
+|----------|-------|
+| Location | `learning/recommendation-ledger.jsonl` under the resolved knowledge store — `<project>/.swarm/` normally, the shared cohort store when the worktree is linked. Survives `/swarm close` and `/swarm reset`, like `knowledge.jsonl` |
+| Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it |
+| Retention | 500 entries, oldest-first eviction; each entry capped at 4 KB |
+| Provenance | Each entry carries a `LearningProvenanceV1` record (mechanism, source knowledge/task/evidence/run/model refs, write origin) |
+| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns `cross_producer_duplicate_count`; curator suppressions land in its `skipped` tally and the debug log |
+
+Matching is **exact** over normalized text, so two mechanisms suppress each other only when they emit
+the same sentence. The improver and the miner build statements from fixed templates while the curator
+emits free-form lessons, so in practice this mostly deduplicates each mechanism against its own
+earlier runs; treat cross-mechanism suppression as a bonus rather than the common case.
+
+Because retention is bounded, a recommendation older than the most recent 500 emissions can surface
+again. Retention is also independent of `knowledge.swarm_max_entries` (default 100), so a lesson the
+knowledge store has already evicted can still be suppressed until its ledger entry ages out.
+
+A generated motif or workflow proposal removed from `.swarm/skills/proposals/` is **not** regenerated
+— the ledger has already recorded it. This matters most on the automated path: a full-auto or
+post-mortem `REJECT` deletes the proposal, which now retires that motif until its ledger entry ages
+out. Knowledge-derived skill drafts are not routed through the ledger and are unaffected.
+
 ### `consensus`
 
 Governs the `consensus_mine` tool. It writes immutable reports under `.swarm/evolution/consensus/` and
-mutates nothing else. See [consensus-mining.md](./consensus-mining.md).
+one dedup-ledger entry per emitted proposal; it mutates nothing else. See
+[consensus-mining.md](./consensus-mining.md).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

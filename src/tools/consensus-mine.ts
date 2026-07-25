@@ -7,14 +7,16 @@
  * `mineAndStoreConsensusV1`, applies report retention, and renders a bounded
  * summary.
  *
- * It writes exactly one thing: the report under
+ * It writes two `.swarm/` artifacts: the report under
  * `.swarm/evolution/consensus/<reportId>.json` (plus retention deletions of
- * *its own* prior reports). It activates no skill, writes no knowledge, and
- * touches no project file — which is why it is classified as a **pathless
- * write-like** tool in `src/full-auto/policy.ts` alongside `write_retro` and
- * `knowledge_add`, and why it is absent from `WRITE_TOOL_NAMES`
- * (`src/config/constants.ts`), whose members are the tools that write PROJECT
- * FILE CONTENTS and are therefore subject to the scope guard.
+ * *its own* prior reports), and one dedup-ledger entry per emitted proposal
+ * under `.swarm/learning/recommendation-ledger.jsonl` (issue #1821 AC21). It
+ * activates no skill, writes no knowledge, and touches no project file — which
+ * is why it is classified as a **pathless write-like** tool in
+ * `src/full-auto/policy.ts` alongside `write_retro` and `knowledge_add`, and why
+ * it is absent from `WRITE_TOOL_NAMES` (`src/config/constants.ts`), whose
+ * members are the tools that write PROJECT FILE CONTENTS and are therefore
+ * subject to the scope guard.
  *
  * `ctx.directory` is injected by `createSwarmTool`; there is no `process.cwd()`
  * anywhere in this file (AGENTS.md invariant 4).
@@ -24,10 +26,17 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { ConsensusConfigSchema } from '../config/schema';
-import type { ConsensusMineRequest } from '../consensus/contracts';
+import type {
+	ConsensusMineRequest,
+	ConsensusReportV1,
+} from '../consensus/contracts';
 import { mineAndStoreConsensusV1 } from '../consensus/public-api';
 import { pruneConsensusReports } from '../consensus/store';
 import { createEvaluationModelDispatcher } from '../evaluation/model-dispatcher';
+import {
+	type RecommendationCandidate,
+	recordEmittedRecommendations,
+} from '../services/recommendation-ledger';
 import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
 
@@ -40,6 +49,49 @@ const FilterListSchema = z
 
 /** Attributes echoed back inline. The full set always lives in the report. */
 const MAX_INLINE_ATTRIBUTES = 25;
+
+/**
+ * Describe the miner's emissions to the cross-producer dedup ledger
+ * (issue #1821 AC21).
+ *
+ * The statement is the proposal's `intent` — the sentence the miner actually
+ * emits — not the internal attribute statement its own `lrec_` fingerprint is
+ * built from: only the intent survives onto the persisted report, and it is the
+ * text a human reads as "the recommendation". `scopeKeys` stays empty for the
+ * same reason the curator's new-knowledge recommendations carry none: content
+ * alone is the identity of a freshly-minted lesson, and that is exactly where
+ * another producer can legitimately be proposing the same thing.
+ */
+function buildMinerRecommendationCandidates(
+	report: Pick<ConsensusReportV1, 'proposals' | 'generatedAt'>,
+	sessionId?: string,
+): RecommendationCandidate[] {
+	return report.proposals.map((proposal) => ({
+		kind: 'miner' as const,
+		target: proposal.target,
+		statement: proposal.intent,
+		scopeKeys: [],
+		provenance: {
+			mechanism: 'consensus_mine' as const,
+			sourceEvidenceRefs: proposal.evidenceRefs,
+			sourceRunIds: proposal.provenance.sourceRunIds,
+			sourceModelIds: proposal.provenance.sourceModelIds,
+			sourceTaskIds: proposal.provenance.sourceTaskIds,
+		},
+		origin: {
+			agentRole: 'consensus_mine',
+			...(sessionId ? { sessionId } : {}),
+			producedAt: report.generatedAt,
+		},
+	}));
+}
+
+/**
+ * Pure-function seam for tests (writing-tests SKILL.md, Tier 0). Exported so a
+ * cross-producer dedup test can build the miner's ledger candidates through the
+ * same code the tool runs instead of restating the mapping.
+ */
+export const _test_exports = { buildMinerRecommendationCandidates };
 
 export const consensus_mine: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -157,12 +209,31 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 				},
 			});
 
+			const report = result.report;
+
+			// #1821 AC21: register the miner's emissions in the shared dedup ledger
+			// so a lesson the miner already proposed is not re-proposed by the
+			// curator sweep or the skill improver. The report is already persisted at
+			// this point, so these proposals are emitted by definition — this is the
+			// record half of the ledger contract, never a speculative claim.
+			//
+			// Producer-side only. `src/consensus/` mines and persists in one call, so
+			// by the time proposals exist the report is already written; the miner
+			// therefore keeps its own report-derived `priorFingerprints` for
+			// within-producer dedup and cannot itself be suppressed by a
+			// curator/improver emission. `cross_producer_duplicate_count` below makes
+			// that overlap visible rather than silent.
+			const ledger = await recordEmittedRecommendations(
+				directory,
+				buildMinerRecommendationCandidates(report, ctx?.sessionID),
+				{ producedAt: report.generatedAt },
+			);
+
 			const pruned = await pruneConsensusReports(
 				directory,
 				config.report_retention,
 			);
 
-			const report = result.report;
 			return JSON.stringify(
 				{
 					success: true,
@@ -189,6 +260,7 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 					investigation_note_count: result.investigationNoteCount,
 					proposal_count: report.proposals.length,
 					deduped_proposal_count: result.dedupedProposalCount,
+					cross_producer_duplicate_count: ledger.suppressed,
 					summarized_count: result.summarizedCount,
 					...(result.summarizationSkippedReason
 						? {

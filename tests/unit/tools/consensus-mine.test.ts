@@ -8,7 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
@@ -180,6 +180,20 @@ describe('consensus_mine — execution', () => {
 		);
 		expect(result.attribute_count).toBe(0);
 		expect(result.proposal_count).toBe(0);
+	});
+
+	test('reports cross-producer duplicates from the shared dedup ledger (#1821 AC21)', async () => {
+		const root = project();
+		const result = await run(root);
+		// The field must exist even when nothing was mined, otherwise a caller
+		// cannot distinguish "no overlap" from "the ledger was never consulted".
+		expect(result.cross_producer_duplicate_count).toBe(0);
+		// Nothing to claim → the tool leaves no ledger behind.
+		expect(
+			existsSync(
+				path.join(root, '.swarm', 'learning', 'recommendation-ledger.jsonl'),
+			),
+		).toBe(false);
 	});
 
 	test('degrades gracefully with no LLM client wired', async () => {

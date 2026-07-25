@@ -2546,7 +2546,7 @@ invalid json here
 			);
 		});
 
-		it('duplicate recommendations for same entry: first applied, second NOT counted as skipped (both target same entry_id)', async () => {
+		it('duplicate recommendations for same entry: first applied, second suppressed by the cross-producer dedup ledger (#1821 AC21)', async () => {
 			const entries: SwarmKnowledgeEntry[] = [
 				{
 					id: 'E1',
@@ -2593,12 +2593,12 @@ invalid json here
 				defaultKnowledgeConfig,
 			);
 
-			// The function tracks applied entry_ids, not individual recommendations
-			// Since both recs target the same entry_id, only 1 is "applied" (the entry was modified)
-			// and 0 are "skipped" (because the entry_id is in appliedIds after first application)
-			// Note: applied + skipped != recommendations.length in this case (1+0 != 2)
+			// Before #1821 AC21 the duplicate vanished from BOTH tallies (1 + 0 != 2):
+			// `entries.map` resolves one rec per entry id. The dedup ledger now claims
+			// the cross-producer key on the first rec and suppresses the second.
 			expect(result.applied).toBe(1);
-			expect(result.skipped).toBe(0);
+			expect(result.skipped).toBe(1);
+			expect(result.applied + result.skipped).toBe(recommendations.length);
 		});
 
 		it('does NOT call rewriteKnowledge when no entries matched (no write when modified=false)', async () => {
