@@ -14,15 +14,22 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => {
 	let tempDir: string;
 	const largeOutput = 'x'.repeat(2000);
 
 	beforeEach(() => {
+		// This Date.now() is a unique-directory suffix, not a time-sensitive
+		// assertion, so it is wrapped per the repo's test-clock convention
+		// (issue #1782). The elapsed-time measurements below (startTime/duration
+		// pairs) are genuine wall-clock performance assertions and are
+		// intentionally left unwrapped — freezing the clock would defeat their
+		// purpose of measuring real async execution time.
 		tempDir = join(
 			tmpdir(),
-			`.swarm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			`.swarm-test-${withFrozenClock(() => Date.now())}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });

@@ -7,13 +7,21 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('tool-summarizer exempt_tools feature', () => {
 	let tempDir: string;
 	let hook: (input: any, output: any) => Promise<void>;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `tool-summarizer-test-${Date.now()}`);
+		// Date.now() here is a unique-directory suffix, not a time-sensitive
+		// assertion; withFrozenClock still wraps it per the repo's test-clock
+		// convention (issue #1782) so the check-test-clock ratchet is satisfied
+		// honestly rather than by a decorative unused import.
+		tempDir = join(
+			tmpdir(),
+			`tool-summarizer-test-${withFrozenClock(() => Date.now())}`,
+		);
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 		resetSummaryIdCounter();
 	});

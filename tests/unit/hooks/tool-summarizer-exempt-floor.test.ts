@@ -23,15 +23,18 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('createToolSummarizerHook - retrieve_lane_output exemption ratchet', () => {
 	let tempDir: string;
 	const largeOutput = 'x'.repeat(2000);
 
 	beforeEach(() => {
+		// Date.now() is a unique-directory suffix, not a time-sensitive
+		// assertion; wrapped per the repo's test-clock convention (issue #1782).
 		tempDir = join(
 			tmpdir(),
-			`.swarm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			`.swarm-test-${withFrozenClock(() => Date.now())}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
