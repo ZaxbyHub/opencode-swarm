@@ -231,7 +231,7 @@ function failReproductionWithLargeOutput(): void {
 }
 
 describe('run_pr_feedback_stage_a payload bounding', () => {
-	test('success path: per-check summaries with no inline stdout/stderr, plus full_output_ref', async () => {
+	test('success path: per-check summaries with no inline stdout/stderr, and nothing persisted (FINDING C2)', async () => {
 		const result = JSON.parse(
 			await executeRunPrFeedbackStageA(
 				{ pr_head_sha: HEAD, checks: baseChecks },
@@ -247,7 +247,14 @@ describe('run_pr_feedback_stage_a payload bounding', () => {
 			expect(check.stdout_tail).toBeUndefined();
 			expect(check.stderr_tail).toBeUndefined();
 		}
-		expect(typeof result.full_output_ref).toBe('string');
+		// A successful run has no failure evidence worth preserving, and
+		// `.swarm/summaries/` has no directory-level cap or reclaiming
+		// eviction path (cleanupSummaries has no caller) — persisting full
+		// stdout/stderr on every passing Stage A iteration was unbounded
+		// growth with no recovery value. The success payload must not
+		// reference a persisted entry at all.
+		expect(result.full_output_ref).toBeUndefined();
+		expect(result.full_output_retrieval).toBeUndefined();
 		expect(result.full_output_storage_error).toBeUndefined();
 	});
 

@@ -40,6 +40,14 @@ Fixes compaction loops and re-dispatch cycles during `/swarm pr-review` and `/sw
   retrievable by reference; the response carries per-check summaries plus a bounded
   tail of the failing check only.
 
+- **Argument-validation errors bounded.** `dispatch_lanes`, `dispatch_lanes_async`,
+  and `collect_lane_results` now cap validation-error lists at 20 entries followed
+  by `"... and N more"`, preventing uncapped error bloat from malformed payloads.
+
+- **Freed-token accounting clamped non-negative.** Context-budget masking now
+  clamps per-message freed-token deltas to zero, so a placeholder that ends up
+  longer than the text it replaced can no longer incorrectly inflate the freed count.
+
 - **Two read-only git commands admitted.** `git stash list` and `git worktree list`
   are now allowed during PR workflows. Mutating stash/worktree forms remain
   refused. This closes a real gap: the checkout-preparation tool hands back a

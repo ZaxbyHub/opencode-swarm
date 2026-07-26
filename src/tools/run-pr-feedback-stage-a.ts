@@ -253,10 +253,17 @@ async function persistFullOutput(
 
 /**
  * Build the bounded checks payload: a compact per-check summary (no
- * stdout/stderr) for every check, plus evidence for the LAST check only
- * (the one that triggered this failure() call, when one ran). Also
- * persists the full per-check output (see persistFullOutput) and attaches
- * its retrieval id, unless there is nothing to persist.
+ * stdout/stderr) for every check, plus evidence for the LAST entry in
+ * `checks`, when one is present. That last entry is only the check that
+ * triggered this failure() call on the exit-code / post-execution paths
+ * (`results.push` happens before those failure() calls). On the pre-check
+ * state-change paths and the execution-throw paths, the failing check has
+ * NOT been pushed to `results` yet, so the last entry is actually the
+ * previous *passing* check — nothing is lost (the full run history is
+ * still in `checks`), but callers should not assume the last entry is
+ * always the failing one. Also persists the full per-check output (see
+ * persistFullOutput) and attaches its retrieval id, unless there is
+ * nothing to persist.
  *
  * Fail-open contract for the failing check's evidence:
  *   - persistence succeeds -> a bounded 4096-byte stdout/stderr tail is
@@ -2329,28 +2336,24 @@ export async function executeRunPrFeedbackStageA(
 			receipts,
 			{ applicableCategories, applicableObligations },
 		);
-		// Success: persist the full per-check stdout/stderr set for retrieval,
-		// but never inline stdout/stderr in the response, even if persistence
-		// fails here — nothing failed, so there is no failure evidence that
-		// needs to survive a storage error; full_output_storage_error alone is
-		// sufficient to surface the problem on this path.
-		const persistedOnSuccess =
-			results.length > 0 && context.sessionID
-				? await persistFullOutput(directory, context.sessionID, results)
-				: undefined;
+		// Success: do NOT persist full output. A successful Stage A run has no
+		// failure evidence worth preserving — the useful record is the
+		// per-check summary (category, command, exit code, duration), which is
+		// already returned inline via summarizeCheckEntry below. Persisting
+		// megabytes of passing build/lint stdout on every iteration is pure
+		// unbounded `.swarm/summaries/` growth (Stage A re-runs on every
+		// feedback iteration; any content change invalidates the prior run)
+		// with no recovery value, since `cleanupSummaries` has no caller and
+		// nothing reclaims that space (see FINDING C2). The failure path below
+		// (via `failure()` -> `buildBoundedChecksPayload` -> `persistFullOutput`)
+		// keeps its persist-first-then-bound behavior unchanged, including the
+		// fail-open inline-full-output guard when persistence throws.
 		const successPayload: Record<string, unknown> = {
 			success: true,
 			pr_head_sha: parsed.data.pr_head_sha,
 			revision_digest: afterDigest,
 			checks: results.map(summarizeCheckEntry),
 		};
-		if (persistedOnSuccess?.ref) {
-			successPayload.full_output_ref = persistedOnSuccess.ref;
-			successPayload.full_output_retrieval = `Full stdout/stderr for all ${results.length} check(s) in this successful run was persisted. Use retrieve_summary with id "${persistedOnSuccess.ref}" to read it if needed.`;
-		}
-		if (persistedOnSuccess?.error) {
-			successPayload.full_output_storage_error = persistedOnSuccess.error;
-		}
 		return JSON.stringify(successPayload, null, 2);
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));

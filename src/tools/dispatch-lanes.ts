@@ -81,6 +81,13 @@ const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
  * artifact write failed (disk full, permission error) or the text was too
  * large to store — this falls open and keeps delivering `output` inline on
  * every poll, since there would otherwise be no way to recover the text.
+ *
+ * Cross-session caveat: When two sessions in different directories reuse the
+ * same `batch_id`, `laneId`, and produce byte-identical output (identical
+ * digest), the second session's first inline delivery may be suppressed as
+ * though already delivered; subsequent polls correctly return metadata and
+ * `output_ref`. This is degraded-not-broken because `output_ref` is always
+ * returned and `retrieve_lane_output` recovers the full text.
  */
 const MAX_TRACKED_DELIVERED_LANE_OUTPUTS = 1024;
 const deliveredLaneOutputs = new Set<string>();
