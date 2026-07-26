@@ -17,8 +17,13 @@
  *
  * - the `transactKnowledge` call is NEVER raced or timed out;
  * - only genuinely cancellable work (the optional LLM screening call) is
- *   bounded, via `AbortSignal.timeout(...)` + `isAbortError`, mirroring
- *   `micro-reflector.ts`;
+ *   bounded, via a manual `AbortController` + `setTimeout` (see
+ *   `timeoutSignal` below) + `isAbortError`. This deliberately does NOT use
+ *   `AbortSignal.timeout(...)` (unlike `micro-reflector.ts`): Bun on Windows
+ *   has a native bug where that signal's `abort` event never fires when
+ *   awaited by a plain JS Promise (oven-sh/bun#29546) — exactly the shape
+ *   `screenCandidate`'s caller uses — which hung this file's own tests for
+ *   the full CI wall-clock kill on Windows;
  * - `max_drain_wall_time_ms` is enforced BETWEEN candidates — it stops the
  *   drain from STARTING new work, and never interrupts work in flight.
  *
@@ -111,6 +116,24 @@ export interface AdmissionDeps {
 	/** Injectable clock/path seams for tests. */
 	now?: () => number;
 	resolveKnowledgePath?: (directory: string) => string;
+}
+
+/**
+ * Cross-platform substitute for `AbortSignal.timeout(ms)` (oven-sh/bun#29546 —
+ * see the module header). The timer is always cleared by the caller so a
+ * candidate that resolves before the deadline cannot leak it.
+ */
+function timeoutSignal(ms: number): {
+	signal: AbortSignal;
+	clear: () => void;
+} {
+	const controller = new AbortController();
+	const timer = setTimeout(() => {
+		controller.abort(
+			new DOMException('The operation timed out.', 'TimeoutError'),
+		);
+	}, ms);
+	return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
 /** Bounded estimate of the tokens one screening call costs. */
@@ -211,14 +234,19 @@ async function screenCandidate(
 		// Budget exhausted → admit without screening rather than dropping a lesson.
 		return true;
 	}
-	// Only cancellable work is bounded. AbortSignal.timeout genuinely aborts the
+	// Only cancellable work is bounded. The signal genuinely aborts the
 	// underlying request, unlike a Promise.race wrapper.
-	const response = await deps.llmDelegate(
-		'',
-		buildScreeningPrompt(candidate),
-		AbortSignal.timeout(timeoutMs),
-	);
-	return !/\bREJECT\b/i.test(response ?? '');
+	const { signal, clear } = timeoutSignal(timeoutMs);
+	try {
+		const response = await deps.llmDelegate(
+			'',
+			buildScreeningPrompt(candidate),
+			signal,
+		);
+		return !/\bREJECT\b/i.test(response ?? '');
+	} finally {
+		clear();
+	}
 }
 
 /**
