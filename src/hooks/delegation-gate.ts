@@ -84,6 +84,7 @@ import {
 	standardWorktreeSerializationSessions,
 } from './delegation-gate/worktree-isolation';
 import { consumePrFeedbackScopeDeclaration } from './pr-workflow-gate.js';
+import { classifyTaskResult } from './task-result-classifier.js';
 export { resetStandardWorktreeIsolationState };
 
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
@@ -391,15 +392,7 @@ export function isBackgroundTrue(value: unknown): boolean {
  * suspenders for `toolAfter`; never throws.
  */
 export function outputLooksLikeBackgroundRunning(output: unknown): boolean {
-	if (typeof output !== 'object' || output === null) return false;
-	const o = output as Record<string, unknown>;
-	if (o.state === 'running') return true;
-	const metadata = o.metadata;
-	return (
-		typeof metadata === 'object' &&
-		metadata !== null &&
-		(metadata as Record<string, unknown>).background === true
-	);
+	return classifyTaskResult(output) === 'running';
 }
 
 /**
@@ -1299,7 +1292,7 @@ function getPlanTaskDeclaredFiles(
 	return null;
 }
 
-function resolveDelegatedPlanTaskId(
+export function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
 	knownPlanTaskIds?: ReadonlySet<string>,
 ): string | null {
@@ -1956,6 +1949,7 @@ export function createDelegationGateHook(
 		(((config.hooks as Record<string, unknown> | undefined)
 			?.background_pending_timeout_minutes as number | undefined) ?? 30) *
 		60_000;
+	const autoReviewEnabled = config.auto_review?.enabled === true;
 	const MAX_PENDING_CODER_CHANGE_CONTEXTS = 128;
 	const coderTaskChangeContextByCallID = new Map<
 		string,
@@ -2136,7 +2130,7 @@ export function createDelegationGateHook(
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
 	): void => {
-		if (!isMarkdownOnlyDeclaredScope(declaredFiles)) {
+		if (!isMarkdownOnlyDeclaredScope(declaredFiles) && !autoReviewEnabled) {
 			clearCoderTaskChangeContext(callID);
 			return;
 		}
@@ -2937,6 +2931,7 @@ export function createDelegationGateHook(
 				directArgs?.subagent_type ?? storedArgs?.subagent_type;
 			const backgroundResultIsRunning =
 				outputLooksLikeBackgroundRunning(_output);
+			const taskResultClassification = classifyTaskResult(_output);
 
 			// Issue #1151: background swarm Task handling.
 			// A background swarm Task returns a "running" placeholder; it must NEVER advance
@@ -2953,7 +2948,10 @@ export function createDelegationGateHook(
 					isBackgroundTrue(storedArgs?.background) ||
 					backgroundResultIsRunning)
 			) {
-				if (backgroundSubagentsEnabled) {
+				if (
+					backgroundSubagentsEnabled &&
+					taskResultClassification === 'running'
+				) {
 					try {
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
@@ -3038,7 +3036,10 @@ export function createDelegationGateHook(
 			// A non-background Task result is terminal for this exact dispatch.
 			clearPublishedScopeBindings(input.callID);
 
-			if (typeof subagentType === 'string') {
+			if (
+				taskResultClassification === 'success' &&
+				typeof subagentType === 'string'
+			) {
 				try {
 					const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
 					await recordPlanCriticApprovalSnapshotIfApplicable(
@@ -3063,7 +3064,10 @@ export function createDelegationGateHook(
 			// never advised; validAgents covers the canonical role set so a genuinely
 			// unknown target agent (or a populated-but-malformed specCriteria field)
 			// is surfaced.
-			if (typeof subagentType === 'string') {
+			if (
+				taskResultClassification === 'success' &&
+				typeof subagentType === 'string'
+			) {
 				const advisoryArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
 				const advisoryPrompt = advisoryArgs.prompt;
 				if (typeof advisoryPrompt === 'string' && advisoryPrompt.length > 0) {
@@ -3074,7 +3078,46 @@ export function createDelegationGateHook(
 				}
 			}
 
-			if (standardDispatch) {
+			if (standardDispatch && taskResultClassification === 'non_success') {
+				const reason =
+					'delegated Task returned a terminal non-success result; merge-back was skipped';
+				recordWorktreeMergeFailure(
+					standardDispatch.planTaskId ?? standardDispatch.taskId,
+					{
+						outcome: 'failed',
+						stage: 'task-result',
+						message: reason,
+						worktreePath: standardDispatch.handle.worktreePath,
+						branch: standardDispatch.handle.branchName,
+						completedAt: Date.now(),
+					},
+				);
+				const dispatchSession = ensureAgentSession(
+					standardDispatch.parentSessionID,
+				);
+				dispatchSession.pendingAdvisoryMessages ??= [];
+				dispatchSession.pendingAdvisoryMessages.push(
+					`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} returned a terminal non-success result. Normal merge-back was skipped; child work will be preserved before cancellation cleanup. Worktree=${standardDispatch.handle.worktreePath}; branch=${standardDispatch.handle.branchName}.`,
+				);
+				clearCoderTaskChangeContext(input.callID);
+				await cleanupStandardWorktreeForCallId(
+					input.callID,
+					'cancelled',
+					directory,
+					standardDispatch.worktree_dir,
+				).catch((err) => {
+					const cleanupReason =
+						err instanceof Error ? err.message : String(err);
+					logger.warn(
+						`[delegation-gate] standard worktree cancellation cleanup failed for ${standardDispatch.taskId}: ${cleanupReason}`,
+					);
+					dispatchSession.pendingAdvisoryMessages?.push(
+						`STANDARD_WORKTREE_TASK_FAILURE_CLEANUP_FAILED: task ${standardDispatch.taskId} remains at ${standardDispatch.handle.worktreePath}; reason: ${cleanupReason}.`,
+					);
+				});
+			}
+
+			if (standardDispatch && taskResultClassification === 'success') {
 				const taskChangeContext = coderTaskChangeContextByCallID.get(
 					input.callID,
 				);
@@ -3146,7 +3189,10 @@ export function createDelegationGateHook(
 			let hasTestEngineer = false;
 
 			// Primary path: use stored input args if available
-			if (typeof subagentType === 'string') {
+			if (
+				taskResultClassification === 'success' &&
+				typeof subagentType === 'string'
+			) {
 				const targetAgent = stripKnownSwarmPrefix(subagentType);
 
 				// Track which agents have been delegated to
@@ -3397,7 +3443,10 @@ export function createDelegationGateHook(
 			// v6.33.7: Entire block wrapped in try-catch — getEvidenceTaskId can
 			// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
 			// escaped outside the evidence try-catch and propagated to safeHook.
-			if (typeof subagentType === 'string') {
+			if (
+				taskResultClassification === 'success' &&
+				typeof subagentType === 'string'
+			) {
 				try {
 					const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
 					const evidenceTaskId = await resolveEvidenceTaskId(
@@ -3476,7 +3525,10 @@ export function createDelegationGateHook(
 			// Also runs when councilActive so the chain scan can reset qaSkipCount
 			// after council members (reviewer + test_engineer) complete — the primary
 			// path sets hasReviewer=true which would otherwise suppress this scan.
-			if (!subagentType || !hasReviewer || councilActive) {
+			if (
+				taskResultClassification === 'success' &&
+				(!subagentType || !hasReviewer || councilActive)
+			) {
 				const delegationChain = swarmState.delegationChains.get(
 					input.sessionID,
 				);

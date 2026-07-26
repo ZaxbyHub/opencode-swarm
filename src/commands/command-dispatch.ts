@@ -1,5 +1,8 @@
 import type { AgentDefinition } from '../agents/index.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { _internals, type CommandEntry, resolveCommand } from './registry.js';
 
 export type ResolvedSwarmCommand = NonNullable<
@@ -73,6 +76,10 @@ export async function executeSwarmCommand(args: {
 	buildHelpText?: () => string;
 	policy?: SwarmCommandPolicy;
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	autoReviewConfig?: AutoReviewConfig;
+	activeAgentName?: string;
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 }): Promise<SwarmCommandExecutionResult> {
 	const {
 		directory,
@@ -83,6 +90,10 @@ export async function executeSwarmCommand(args: {
 		buildHelpText,
 		policy,
 		evaluationModelDispatcher,
+		reviewModelDispatcher,
+		autoReviewConfig,
+		activeAgentName,
+		reviewAgentModelRegistry,
 	} = args;
 
 	let text: string;
@@ -107,6 +118,10 @@ export async function executeSwarmCommand(args: {
 					packageRoot,
 					source: 'chat',
 					evaluationModelDispatcher,
+					reviewModelDispatcher,
+					autoReviewConfig,
+					activeAgentName,
+					reviewAgentModelRegistry,
 				});
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';

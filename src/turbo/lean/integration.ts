@@ -20,8 +20,13 @@
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
-import { stripKnownSwarmPrefix } from '../../config/schema';
+import type { ReviewModelDispatcher } from '../../review/contracts';
+import {
+	type ReviewAgentModelRegistry,
+	resolveAgentForActiveSwarm,
+	reviewFallbackModelStrings,
+	reviewPrimaryModel,
+} from '../../review/runtime';
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
 import {
@@ -57,9 +62,35 @@ export interface LeanTurboPhaseCriticConfig {
 	 * Default: no timeout (critic is awaited indefinitely).
 	 */
 	timeoutMs?: number;
+
+	/**
+	 * Instance-local dispatcher bound to the active plugin client.
+	 * New runtime call paths inject this instead of reading global client state.
+	 */
+	dispatcher?: ReviewModelDispatcher;
+
+	/**
+	 * Immutable agent-name registry captured by the plugin instance.
+	 * Direct callers may omit this only when a single/default critic suffices.
+	 */
+	generatedAgentNames?: readonly string[];
+
+	/** Exact active agent identity used to select this session's swarm. */
+	activeAgentName?: string;
+
+	/** Immutable plugin-instance model configuration for fallback ownership. */
+	agentModelRegistry?: ReviewAgentModelRegistry;
 }
 
-const DEFAULT_CONFIG: Required<LeanTurboPhaseCriticConfig> = {
+const DEFAULT_CONFIG: Required<
+	Omit<
+		LeanTurboPhaseCriticConfig,
+		| 'dispatcher'
+		| 'generatedAgentNames'
+		| 'activeAgentName'
+		| 'agentModelRegistry'
+	>
+> = {
 	criticAgent: '', // empty → resolve from generatedAgentNames
 	timeoutMs: 0, // 0/undefined → no timeout
 };
@@ -99,26 +130,14 @@ interface ReviewerEvidence {
  * for the default swarm. Follows the same suffix-based resolution used by
  * `getCanonicalAgentRole` so that arbitrary swarm prefixes are handled correctly.
  */
-function resolveDefaultCriticAgent(generatedAgentNames: string[]): string {
-	if (generatedAgentNames.length === 0) {
-		return 'critic';
-	}
-
-	// Find the longest agent name that ends with "_critic" or "-critic"
-	let best: string | null = null;
-	for (const name of generatedAgentNames) {
-		const lower = name.toLowerCase();
-		if (
-			(lower.endsWith('_critic') || lower.endsWith('-critic')) &&
-			(!best || name.length > best.length)
-		) {
-			best = name;
-		}
-	}
-
-	return (
-		best ??
-		(generatedAgentNames.includes('critic') ? 'critic' : generatedAgentNames[0])
+function resolveDefaultCriticAgent(
+	generatedAgentNames: readonly string[],
+	activeAgentName?: string,
+): string {
+	return resolveAgentForActiveSwarm(
+		generatedAgentNames,
+		'critic',
+		activeAgentName,
 	);
 }
 
@@ -390,18 +409,42 @@ async function writeCriticEvidence(
 	return evidencePath;
 }
 
+async function dispatchCriticWithReviewDispatcher(
+	dispatcher: ReviewModelDispatcher,
+	directory: string,
+	criticPackage: CriticPackage,
+	agentName: string,
+	timeoutMs: number,
+	parentSessionId?: string,
+	model?: ModelOverride,
+): Promise<string> {
+	const result = await dispatcher.dispatch({
+		directory,
+		parentSessionId,
+		agentName,
+		model,
+		system:
+			'You are a read-only phase critic for Lean Turbo execution. Evaluate phase-boundary safety, lane integrity, degraded tasks, and the reviewer verdict. Conclude with exactly one verdict marker and a REASON line.',
+		prompt: `Review this boundary evidence and conclude with VERDICT: APPROVED, NEEDS_REVISION, REJECTED, or ESCALATE_TO_HUMAN plus a REASON line.\n\n${JSON.stringify(criticPackage, null, 2)}`,
+		title: parentSessionId ? 'lean_turbo_critic background' : undefined,
+		timeoutMs,
+	});
+	if (result.status === 'completed') return result.text;
+	if (result.status === 'timeout') {
+		const timeoutDescription =
+			timeoutMs > 0 ? `${timeoutMs}ms` : 'the bounded default';
+		throw new Error(`Critic dispatch timed out after ${timeoutDescription}`);
+	}
+	throw new Error(
+		result.error ??
+			`Critic dispatch ${result.status === 'cancelled' ? 'cancelled' : 'failed'}`,
+	);
+}
+
 /**
- * Default implementation: uses the OpencodeClient session API to dispatch a
- * read-only critic agent and await its response.
- *
- * Returns the raw response text from the agent.
- * Throws if the dispatch fails or times out.
- *
- * @param directory - Project root directory for the critic session
- * @param criticPackage - Compiled boundary review package
- * @param agentName - Name of the critic agent to dispatch
- * @param timeoutMs - Timeout in milliseconds (0 for no timeout)
- * @param parentSessionId - Parent session ID to attach as child session
+ * Default implementation uses the injected shared dispatcher for plugin
+ * runtime calls. The direct-client branch remains as a compatibility fence for
+ * older integrations and direct tests.
  */
 async function defaultDispatchCriticAgent(
 	directory: string,
@@ -412,7 +455,19 @@ async function defaultDispatchCriticAgent(
 	// #1905: per-call model override on a fallback attempt; omitted (undefined)
 	// means the registered critic agent model.
 	model?: ModelOverride,
+	dispatcher?: ReviewModelDispatcher,
 ): Promise<string> {
+	if (dispatcher) {
+		return dispatchCriticWithReviewDispatcher(
+			dispatcher,
+			directory,
+			criticPackage,
+			agentName,
+			timeoutMs,
+			parentSessionId,
+			model,
+		);
+	}
 	const client = swarmState.opencodeClient;
 	if (!client) {
 		throw new Error('OpencodeClient not available');
@@ -560,6 +615,7 @@ export const _internals: {
 		timeoutMs: number,
 		parentSessionId?: string,
 		model?: ModelOverride,
+		dispatcher?: ReviewModelDispatcher,
 	) => Promise<string>;
 	resolveDefaultCriticAgent: typeof resolveDefaultCriticAgent;
 	readReviewerEvidence: typeof readReviewerEvidence;
@@ -603,15 +659,25 @@ export async function dispatchPhaseCritic(
 	sessionID: string,
 	config?: LeanTurboPhaseCriticConfig,
 ): Promise<PhaseCriticResult> {
-	const mergedConfig: Required<LeanTurboPhaseCriticConfig> = {
+	const mergedConfig: Required<
+		Omit<
+			LeanTurboPhaseCriticConfig,
+			| 'dispatcher'
+			| 'generatedAgentNames'
+			| 'activeAgentName'
+			| 'agentModelRegistry'
+		>
+	> = {
 		...DEFAULT_CONFIG,
 		...config,
 	};
 
 	// Resolve critic agent
-	const generatedAgentNames = swarmState.generatedAgentNames;
+	const generatedAgentNames =
+		config?.generatedAgentNames ?? swarmState.generatedAgentNames;
 	const agentName =
-		mergedConfig.criticAgent || resolveDefaultCriticAgent(generatedAgentNames);
+		mergedConfig.criticAgent ||
+		resolveDefaultCriticAgent(generatedAgentNames, config?.activeAgentName);
 
 	// Compile the boundary review package
 	const pkg = await _internals.compileCriticPackage(
@@ -626,12 +692,10 @@ export async function dispatchPhaseCritic(
 	// verdict (a quota blip previously cascaded into a false phase rejection).
 	// Only after the primary + all fallbacks are exhausted does the fail-closed
 	// REJECTED path run.
-	const criticBase = stripKnownSwarmPrefix(agentName);
-	const criticSwarmId =
-		criticBase !== agentName
-			? agentName.slice(0, agentName.length - criticBase.length - 1)
-			: undefined;
-	const criticSwarmAgents = getSwarmAgents(criticSwarmId);
+	const fallbackModels = reviewFallbackModelStrings(
+		agentName,
+		config?.agentModelRegistry,
+	);
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({
@@ -643,9 +707,9 @@ export async function dispatchPhaseCritic(
 					mergedConfig.timeoutMs,
 					sessionID,
 					model,
+					config?.dispatcher,
 				),
-			resolveFallback: (index) =>
-				resolveFallbackModel(criticBase, index, criticSwarmAgents),
+			resolveFallback: (index) => fallbackModels[index - 1] ?? null,
 			// Advance to the next model immediately on a transient/quota error — an
 			// instant same-model retry cannot clear an exhausted quota.
 			maxTransientRetriesPerModel: 0,
@@ -662,7 +726,8 @@ export async function dispatchPhaseCritic(
 				telemetry.modelFallback(
 					sessionID,
 					agentName,
-					criticSwarmAgents?.[criticBase]?.model ?? 'default',
+					reviewPrimaryModel(agentName, config?.agentModelRegistry) ??
+						'default',
 					toModel,
 					'transient_model_error',
 				);

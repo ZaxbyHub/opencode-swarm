@@ -100,6 +100,20 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('mergeBackFailures propagation', () => {
+	test('passes the injected instance registry to the runner', async () => {
+		const names = Object.freeze(['alpha_coder', 'alpha_reviewer']);
+		await executeLeanTurboRunPhase(
+			{
+				directory: tmpDir,
+				phase: 1,
+				sessionID: 'alpha-session',
+			},
+			names,
+		);
+
+		expect(leanTurboRunnerCapture.options?.generatedAgentNames).toBe(names);
+	});
+
 	test('executeLeanTurboRunPhase propagates mergeBackFailures from runner result', async () => {
 		// Configure mock to return mergeBackFailures
 		const mockFailures = [

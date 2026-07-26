@@ -416,6 +416,43 @@ function collectRawValueConstraintFindings(directory: string): ConfigFinding[] {
 	return findings;
 }
 
+function collectRawAutoReviewCompatibilityFindings(
+	directory: string,
+): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as unknown;
+			if (!isPlainObject(raw) || !isPlainObject(raw.auto_review)) continue;
+			const autoReview = raw.auto_review;
+			if (
+				autoReview.structured_findings === false &&
+				isPlainObject(autoReview.final_review) &&
+				autoReview.final_review.mode === 'gate'
+			) {
+				findings.push({
+					id: 'invalid-auto-review-gate-compatibility',
+					title: 'Invalid auto-review gate configuration',
+					description:
+						'auto_review.final_review.mode="gate" requires auto_review.structured_findings=true so gate evidence is machine-verifiable.',
+					severity: 'error',
+					path: 'auto_review.structured_findings',
+					currentValue: false,
+					autoFixable: false,
+				});
+				break;
+			}
+		} catch {
+			// Raw compatibility diagnostics are best-effort and non-blocking.
+		}
+	}
+	return findings;
+}
+
 function emitWorktreeIsolationLayeringAdvisory(
 	config: PluginConfig,
 	findings: ConfigFinding[],
@@ -1668,6 +1705,7 @@ export function runConfigDoctor(
 	findings.push(...collectRawGatesConfigFindings(directory));
 	findings.push(...collectRawStrictSectionFindings(directory));
 	findings.push(...collectRawValueConstraintFindings(directory));
+	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));
 	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity

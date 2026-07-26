@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { findByCorrelationId } from '../../../src/background/pending-delegations';
 import type { Plan } from '../../../src/config/plan-schema';
+import { resolveAutoReviewConfig } from '../../../src/config/schema';
 import { getPendingCoderScope } from '../../../src/hooks/delegation-gate';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard';
 import {
@@ -359,10 +361,9 @@ describe('coder scope preflight', () => {
 
 	test('background running retains child authority until idle teardown', async () => {
 		await writePlan(['src/index.ts']);
-		const hook = createDelegationGateHook(
-			makeConfig({ hooks: { background_subagents: true } }),
-			directory,
-		);
+		const config = makeConfig({ hooks: { background_subagents: true } });
+		config.auto_review = resolveAutoReviewConfig({ enabled: true });
+		const hook = createDelegationGateHook(config, directory);
 		const input = {
 			tool: 'Task',
 			sessionID: 'parent',
@@ -379,7 +380,18 @@ describe('coder scope preflight', () => {
 			parentSessionID: input.sessionID,
 			childSessionID: 'background-child',
 		});
-		await hook.toolAfter({ ...input, args }, { state: 'running' });
+		await hook.toolAfter(
+			{ ...input, args },
+			{
+				state: 'running',
+				output: '<task id="background-child" state="running">started</task>',
+				metadata: { background: true, jobId: 'job-background-child' },
+			},
+		);
+		expect(
+			findByCorrelationId(directory, 'background-child')?.taskChangeContext
+				?.declaredFiles,
+		).toEqual(['src/index.ts']);
 		// The parent goes idle immediately after a background Task returns. Only
 		// child terminal lifecycle may revoke the still-running child.
 		hook.sessionEnded('parent');

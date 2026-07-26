@@ -4,8 +4,11 @@ import {
 	type AgentName,
 	ORCHESTRATOR_NAME,
 } from '../config/constants.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import {
 	canonicalCommandKey,
 	executeSwarmCommand,
@@ -105,6 +108,7 @@ export {
 export { handleResetCommand } from './reset';
 export { handleResetSessionCommand } from './reset-session';
 export { handleRetrieveCommand } from './retrieve';
+export { handleReviewCommand } from './review';
 export { handleRollbackCommand } from './rollback';
 export {
 	handleSddCommand,
@@ -289,6 +293,9 @@ export function createSwarmCommandHandler(
 		packageRoot?: string;
 		registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 		evaluationModelDispatcher?: EvaluationModelDispatcher;
+		reviewModelDispatcher?: ReviewModelDispatcher;
+		autoReviewConfig?: AutoReviewConfig;
+		reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 	} = {},
 ): (
 	input: { command: string; sessionID: string; arguments: string },
@@ -313,6 +320,9 @@ export function createSwarmCommandHandler(
 				packageRoot: options.packageRoot,
 				registeredAgents: options.registeredAgents,
 				evaluationModelDispatcher: options.evaluationModelDispatcher,
+				reviewModelDispatcher: options.reviewModelDispatcher,
+				autoReviewConfig: options.autoReviewConfig,
+				reviewAgentModelRegistry: options.reviewAgentModelRegistry,
 			}),
 		} as unknown as (typeof output.parts)[number]);
 		return;
@@ -328,6 +338,9 @@ async function buildSwarmCommandPrompt(args: {
 	packageRoot?: string;
 	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	autoReviewConfig?: AutoReviewConfig;
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 }): Promise<string> {
 	const {
 		directory,
@@ -338,6 +351,9 @@ async function buildSwarmCommandPrompt(args: {
 		packageRoot,
 		registeredAgents,
 		evaluationModelDispatcher,
+		reviewModelDispatcher,
+		autoReviewConfig,
+		reviewAgentModelRegistry,
 	} = args;
 	const resolved = _internals.resolveCommand(tokens);
 	if (!resolved) {
@@ -388,6 +404,10 @@ async function buildSwarmCommandPrompt(args: {
 		tokens,
 		packageRoot,
 		evaluationModelDispatcher,
+		reviewModelDispatcher,
+		autoReviewConfig,
+		activeAgentName,
+		reviewAgentModelRegistry,
 	});
 
 	return formatCanonicalPromptFallback({

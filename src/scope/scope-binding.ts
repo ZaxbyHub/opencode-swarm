@@ -172,6 +172,37 @@ export function registerScopeBinding(binding: ScopeBinding): void {
 	}
 }
 
+/**
+ * Resolve the binding created for one fully-approved parent Task dispatch.
+ * An already-claimed child binding wins over its pending parent precursor;
+ * multiple candidates at either specificity fail closed.
+ */
+export function getScopeBindingForParentDispatch(input: {
+	parentSessionId: string;
+	dispatchCallId: string;
+}): ScopeBinding | null {
+	sweepExpired();
+	if (!input.parentSessionId.trim() || !input.dispatchCallId.trim())
+		return null;
+	const active = [...pendingScopeBindings.values()].filter(
+		(binding) =>
+			binding.activation === 'active' &&
+			binding.parentOwnerSessionId === input.parentSessionId &&
+			binding.parentCallId === input.dispatchCallId &&
+			binding.dispatchCallId === input.dispatchCallId,
+	);
+	if (active.length > 1) return null;
+	if (active.length === 1) return active[0];
+	const pending = [...pendingScopeBindings.values()].filter(
+		(binding) =>
+			binding.activation === 'pending_child' &&
+			binding.ownerSessionId === input.parentSessionId &&
+			binding.ownerMessageId === input.dispatchCallId &&
+			binding.dispatchCallId === input.dispatchCallId,
+	);
+	return pending.length === 1 ? pending[0] : null;
+}
+
 export function getScopeBinding(input: {
 	directory: string;
 	plan: Plan;

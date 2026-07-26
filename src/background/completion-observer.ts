@@ -8,10 +8,17 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { ReviewerReceiptValidationOptions } from '../hooks/review-receipt-collector.js';
+import {
+	discardReviewerScopeGenerationClaim,
+	discardReviewerScopeGenerationForCoderCall,
+} from '../state.js';
 import * as logger from '../utils/logger.js';
 import {
 	appendDelegationTransition,
+	claimDelegationIngestion,
 	findByCorrelationId,
+	settleDelegationIngestion,
 } from './pending-delegations.js';
 import {
 	ingestBackgroundStageBCompletion,
@@ -39,10 +46,11 @@ interface MaybeEvent {
 export function createBackgroundCompletionObserver(opts: {
 	config: ObserverConfig;
 	directory: string;
+	reviewerReceiptOptions?: ReviewerReceiptValidationOptions;
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
 } {
-	const { config, directory } = opts;
+	const { config, directory, reviewerReceiptOptions } = opts;
 
 	const event = async (input: { event: unknown }): Promise<void> => {
 		if (!config.enabled) return;
@@ -78,7 +86,8 @@ export function createBackgroundCompletionObserver(opts: {
 			if (
 				pending.status !== 'pending' &&
 				pending.status !== 'running' &&
-				pending.status !== 'ingestion_error'
+				pending.status !== 'ingestion_error' &&
+				pending.status !== 'ingesting'
 			) {
 				logger.log(
 					`[background] observed duplicate/late completion for ${envelope.sessionId}; current status=${pending.status}; ignored`,
@@ -96,6 +105,23 @@ export function createBackgroundCompletionObserver(opts: {
 				truncated: envelope.resultTruncated ?? false,
 				digest: digest(text),
 			};
+			const taskId = pending.evidenceTaskId ?? pending.planTaskId;
+			const discardTerminalScope = (): void => {
+				if (!taskId) return;
+				if (pending.normalizedAgent === 'reviewer') {
+					discardReviewerScopeGenerationClaim({
+						parentSessionID: pending.parentSessionId,
+						taskId,
+						reviewerCallID: pending.callID,
+					});
+				} else if (pending.normalizedAgent === 'coder') {
+					discardReviewerScopeGenerationForCoderCall({
+						parentSessionID: pending.parentSessionId,
+						taskId,
+						coderCallID: pending.callID,
+					});
+				}
+			};
 			if (
 				envelope.state === 'completed' &&
 				isBackgroundGateBearingRecord(pending)
@@ -105,50 +131,83 @@ export function createBackgroundCompletionObserver(opts: {
 					const reason =
 						freshness.reason ??
 						'workspace changed before background Stage B completion';
-					await appendDelegationTransition(directory, envelope.sessionId, {
-						status: 'stale',
-						result: {
-							error: reason,
-							chars: reason.length,
-							truncated: false,
-							digest: digest(reason),
+					const stale = await appendDelegationTransition(
+						directory,
+						envelope.sessionId,
+						{
+							status: 'stale',
+							result: {
+								error: reason,
+								chars: reason.length,
+								truncated: false,
+								digest: digest(reason),
+							},
 						},
-					});
+					);
+					if (stale?.status === 'stale') discardTerminalScope();
 					logger.warn(
 						`[background] stale Stage B completion ignored: agent=${pending.normalizedAgent} task=${pending.evidenceTaskId ?? pending.planTaskId ?? 'unknown'} reason=${reason}`,
 					);
 					return;
 				}
 			}
-			const terminal = await appendDelegationTransition(
-				directory,
-				envelope.sessionId,
-				{
-					status: envelope.state === 'error' ? 'error' : 'completed',
-					result,
-				},
-			);
+			const terminal =
+				pending.status === 'ingesting'
+					? pending
+					: await appendDelegationTransition(directory, envelope.sessionId, {
+							status: envelope.state === 'error' ? 'error' : 'completed',
+							result,
+						});
 
-			if (envelope.state === 'completed' && terminal) {
+			const hasEvidenceTask =
+				typeof (pending.evidenceTaskId ?? pending.planTaskId) === 'string';
+			const requiresIngestion =
+				hasEvidenceTask &&
+				(pending.normalizedAgent === 'coder' ||
+					isBackgroundGateBearingRecord(pending));
+			if (envelope.state === 'completed' && terminal && requiresIngestion) {
+				const claim = await claimDelegationIngestion(
+					directory,
+					envelope.sessionId,
+					result.digest,
+				);
+				if (claim.outcome !== 'claimed') {
+					logger.log(
+						`[background] completion ingestion not claimed for ${envelope.sessionId}; outcome=${claim.outcome}`,
+					);
+					return;
+				}
 				const ingested = await ingestBackgroundStageBCompletion({
 					directory,
-					record: terminal,
-					result: terminal.result ?? result,
+					record: claim.record,
+					result: claim.record.result ?? result,
+					reviewerReceiptOptions,
 				});
 				if (ingested.consumed) {
-					await appendDelegationTransition(directory, envelope.sessionId, {
-						status: 'consumed',
-					});
-				}
-				if (!ingested.ok) {
-					await appendDelegationTransition(directory, envelope.sessionId, {
-						status: 'ingestion_error',
-						result: terminal.result ?? result,
-					});
-					logger.warn(
-						`[background] Stage B completion was not applied: agent=${terminal.normalizedAgent} task=${terminal.evidenceTaskId ?? terminal.planTaskId ?? 'unknown'} reason=${ingested.reason ?? 'unknown'}`,
+					await settleDelegationIngestion(
+						directory,
+						envelope.sessionId,
+						claim.ingestionId,
+						{ status: 'consumed' },
 					);
 				}
+				if (!ingested.ok) {
+					await settleDelegationIngestion(
+						directory,
+						envelope.sessionId,
+						claim.ingestionId,
+						{
+							status: 'ingestion_error',
+							result: claim.record.result ?? result,
+						},
+					);
+					logger.warn(
+						`[background] Stage B completion was not applied: agent=${claim.record.normalizedAgent} task=${claim.record.evidenceTaskId ?? claim.record.planTaskId ?? 'unknown'} reason=${ingested.reason ?? 'unknown'}`,
+					);
+				}
+			}
+			if (envelope.state === 'error' && terminal?.status === 'error') {
+				discardTerminalScope();
 			}
 
 			logger.log(

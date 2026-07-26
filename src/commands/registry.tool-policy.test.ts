@@ -79,6 +79,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 	]);
 
 	const EXPECTED_HUMAN_ONLY = new Set<string>([
+		'review',
 		'memory compact',
 		'memory import',
 		'memory migrate',
@@ -145,14 +146,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 3 commands", () => {
+	test("'human-only' bucket contains exactly the expected 4 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(3);
+		expect(actual.size).toBe(4);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -420,7 +421,6 @@ describe('cost command argument policies', () => {
 	test('costs allows only empty args or --json through swarm_command', () => {
 		const jsonResolved = _internals.resolveCommand(['costs', '--json']);
 		const badResolved = _internals.resolveCommand(['costs', '--verbose']);
-
 		expect(jsonResolved).not.toBeNull();
 		expect(badResolved).not.toBeNull();
 		expect(classifySwarmCommandToolUse(jsonResolved!)).toEqual({
@@ -546,14 +546,14 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 	});
 
 	test('classifySwarmCommandToolUse: human-only commands (not restricted) return human-only refusal message', () => {
-		// These are human-only but NOT restricted — they are in SWARM_COMMAND_TOOL_ALLOWLIST
-		// so classifySwarmCommandToolUse falls through to them via the SWARM_COMMAND_TOOL_ALLOWLIST check
-		// and they are NOT in the allowlist but ARE in HUMAN_ONLY_SWARM_COMMANDS
-		// Actually: human-only commands (memory compact, memory import, memory migrate)
-		// are in SWARM_COMMAND_TOOL_COMMANDS but NOT in SWARM_COMMAND_TOOL_ALLOWLIST
-		// They should return allowed: false with the human-only message.
+		// Human-only commands are schema-visible but never agent-callable.
 		// FR-004: sdd project is now agent-invocable (removed from this list)
-		const humanOnly = ['memory compact', 'memory import', 'memory migrate'];
+		const humanOnly = [
+			'review',
+			'memory compact',
+			'memory import',
+			'memory migrate',
+		];
 		for (const name of humanOnly) {
 			const tokens = name.includes(' ') ? name.split(' ') : [name];
 			const resolved = _internals.resolveCommand(tokens);

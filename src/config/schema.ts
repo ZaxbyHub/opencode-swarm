@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import packageJson from '../../package.json' with { type: 'json' };
 import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
 import {
 	type AgentName,
@@ -521,22 +522,170 @@ export const ReviewPassesConfigSchema = z.object({
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 
-// Auto-review configuration (opt-in): automatic review of the execution diff
-// by the reviewer agent (its own configured model) in a fresh ephemeral
-// session at task/phase boundaries. Advisory-only: verdicts are persisted as
-// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
-export const AutoReviewConfigSchema = z.object({
-	/** Enable automatic execution-diff review. Default: false (opt-in). */
-	enabled: z.boolean().default(false),
+export interface AutoReviewBurnInDecision {
+	approved: boolean;
+	artifact_path: string;
+	artifact_sha256: string;
+}
+
+/**
+ * Source-controlled release decision for the v8 default flip.
+ *
+ * Keep this side-effect free: plugin initialization must never synchronously read or
+ * hash the benchmark artifact. The committed decision pins the independently
+ * generated artifact by path and SHA-256; release-major alone cannot activate the
+ * default.
+ */
+export const AUTO_REVIEW_V8_BURN_IN_DECISION: AutoReviewBurnInDecision = {
+	approved: true,
+	artifact_path: 'docs/benchmarks/auto-review-v8-cost-baseline.json',
+	artifact_sha256:
+		'b4e981d4d87e3de80f6d7dd4ae782b08159d385019c4d8b0d300c0443f1984ce',
+};
+
+export interface AutoReviewReleaseContext {
+	packageVersion?: string;
+	burnInDecision?: AutoReviewBurnInDecision;
+}
+
+function hasApprovedAutoReviewBurnIn(
+	decision: AutoReviewBurnInDecision | undefined,
+): boolean {
+	return Boolean(
+		decision?.approved === true &&
+			decision.artifact_path ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_path &&
+			decision.artifact_sha256 ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_sha256,
+	);
+}
+
+function autoReviewEnabledByRelease(
+	context: AutoReviewReleaseContext = {},
+): boolean {
+	const version = context.packageVersion ?? packageJson.version;
+	const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+	return (
+		Number.isInteger(major) &&
+		major >= 8 &&
+		hasApprovedAutoReviewBurnIn(
+			context.burnInDecision ?? AUTO_REVIEW_V8_BURN_IN_DECISION,
+		)
+	);
+}
+
+const AutoReviewFinalConfigSchema = z.object({
+	on_phase_complete: z.boolean().default(true),
+	on_plan_complete: z.boolean().default(true),
+	model: z.string().min(1).nullable().default(null),
+	mode: z.enum(['advisory', 'gate']).default('advisory'),
+	max_diff_bytes: z
+		.number()
+		.int()
+		.min(16 * 1024)
+		.max(2 * 1024 * 1024)
+		.default(262_144),
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+});
+
+const AutoReviewConfigObjectSchema = z.object({
+	/** Enable automatic execution-diff review. V7 is opt-in; v8 is burn-in gated. */
+	enabled: z.boolean(),
 	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
 	trigger: z
 		.enum(['task_completion', 'phase_boundary', 'both'])
 		.default('phase_boundary'),
-	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	/** Legacy task-review dispatch timeout. */
 	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
-	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	/** Legacy task-review maximum diff size (KiB). */
 	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+	/** Minimum confidence for a finding to retain its declared severity. */
+	min_confidence: z.number().min(0).max(1).default(0.7),
+	/** Request the bounded structured findings block from reviewers. */
+	structured_findings: z.boolean().default(true),
+	/** Independently validate anchored HIGH/CRITICAL findings. */
+	validate_findings: z.boolean().default(false),
+	/** Optional validator model override; null resolves the critic model. */
+	validation_model: z.string().min(1).nullable().default(null),
+	/** Bound for the fresh-context validator dispatch. */
+	validation_timeout_ms: z
+		.number()
+		.int()
+		.min(10_000)
+		.max(1_800_000)
+		.default(120_000),
+	final_review: AutoReviewFinalConfigSchema.default({
+		on_phase_complete: true,
+		on_plan_complete: true,
+		model: null,
+		mode: 'advisory',
+		max_diff_bytes: 262_144,
+		timeout_ms: 300_000,
+	}),
 });
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeAutoReviewInput(
+	value: unknown,
+	context: AutoReviewReleaseContext = {},
+): unknown {
+	if (!isPlainRecord(value)) return value;
+	const normalized: Record<string, unknown> = { ...value };
+	if (!Object.hasOwn(value, 'enabled')) {
+		normalized.enabled = autoReviewEnabledByRelease(context);
+	}
+
+	if (
+		Object.hasOwn(value, 'final_review') &&
+		!isPlainRecord(value.final_review)
+	) {
+		return normalized;
+	}
+	const nested = isPlainRecord(value.final_review)
+		? { ...value.final_review }
+		: {};
+	if (!Object.hasOwn(nested, 'max_diff_bytes')) {
+		nested.max_diff_bytes =
+			typeof value.max_diff_kb === 'number'
+				? value.max_diff_kb * 1024
+				: 262_144;
+	}
+	if (!Object.hasOwn(nested, 'timeout_ms')) {
+		nested.timeout_ms =
+			typeof value.timeout_ms === 'number' ? value.timeout_ms : 300_000;
+	}
+	normalized.final_review = nested;
+	return normalized;
+}
+
+// Auto-review configuration: automatic review of the execution diff by a
+// separately configured model in a fresh ephemeral session. The preprocessor
+// preserves presence-sensitive legacy inheritance before Zod applies defaults.
+export const AutoReviewConfigSchema = z.preprocess(
+	(value) => normalizeAutoReviewInput(value),
+	AutoReviewConfigObjectSchema,
+);
+
+export function resolveAutoReviewConfig(
+	raw: unknown = {},
+	context: AutoReviewReleaseContext = {},
+): AutoReviewConfig {
+	const parsed = AutoReviewConfigObjectSchema.parse(
+		normalizeAutoReviewInput(raw, context),
+	);
+	if (
+		parsed.final_review.mode === 'gate' &&
+		parsed.structured_findings === false
+	) {
+		throw new Error(
+			'auto_review.final_review.mode="gate" requires auto_review.structured_findings=true',
+		);
+	}
+	return parsed;
+}
 
 export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 

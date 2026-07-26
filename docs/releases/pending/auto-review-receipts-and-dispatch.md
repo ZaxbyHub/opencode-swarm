@@ -1,18 +1,18 @@
-# Automatic review of execution by the review model (opt-in) + durable reviewer receipts
+# Automatic review triggers and durable reviewer receipts
 
 ## What changed
 
-- **New `auto_review` config block (opt-in, default off).** When enabled, completing a task (`update_task_status` → `completed`) and/or a phase (`phase_complete`) automatically dispatches the registered reviewer agent — its own configured model, in a fresh ephemeral session, read-only — to review the current execution diff (`git diff HEAD` plus untracked-file summary, bounded by `max_diff_kb`). This mirrors the auto-review pattern from Claude Code and Codex: a second model checks the work in a clean context without the orchestrator having to ask for it.
-  - Advisory and fire-and-forget: tool calls are never delayed; per-session 60s cooldown and in-flight guard prevent dispatch storms.
-  - Verdicts are persisted as durable review receipts (`.swarm/review-receipts/`, scope-fingerprinted over the diff) plus an `auto_review` event in `.swarm/events.jsonl`.
-  - REJECTED verdicts inject an `[AUTO-REVIEW]` advisory with the top findings and required fixes into the architect's next prompt; unparseable responses inject an UNVERIFIED advisory; APPROVED stays silent.
-  - Fields: `enabled` (false), `trigger` (`task_completion` | `phase_boundary` (default) | `both`), `timeout_ms` (300000), `max_diff_kb` (256).
-- **Reviewer verdicts are now machine-parsed and persisted.** Every returning reviewer Task delegation has its mandated `VERDICT`/`RISK`/`ISSUES`/`FIXES` output block parsed and stored as an approved/rejected review receipt (fingerprinted over the delegation prompt). Previously verdicts existed only as free text in the architect's context; re-reviews and critic drift verification now have a durable machine-readable record.
+- **Expanded `auto_review` into a shared bounded review policy.** When automatic review is enabled, task completion and phase/plan boundaries use the registered reviewer in a fresh read-only ephemeral session; `/swarm review` invokes that same engine on demand. Version 7 remains opt-in. Version 8 derives an advisory `phase_boundary` default only when the approved, source-controlled cost decision remains pinned; an explicit `enabled: false` still wins.
+  - Task-completion review is background/fire-and-forget with a per-session cooldown and in-flight guard. Phase and plan review are awaited with configured bounds inside `phase_complete` so evidence exists before the evidence-check-only gate runs. Manual `/swarm review` is synchronous.
+  - Automatic and manual engine runs use the canonical diff collector: default/base scopes use a merge base plus current tracked and safe untracked text, exact ranges are committed-only, and `--working-tree` compares `HEAD` with the current tree. Task review uses `max_diff_kb`; phase/plan review uses `final_review.max_diff_bytes`.
+  - Automatic completed, empty, incomplete, and failed review outcomes inject bounded `[AUTO-REVIEW]` advisories, and task-trigger events remain in `.swarm/events.jsonl`. Findings, validation dispositions, scope completeness, receipts, evidence, telemetry, and cost data come from the same engine.
+  - Core fields are `enabled`, `trigger`, `timeout_ms`, `max_diff_kb`, `min_confidence`, `structured_findings`, `validate_findings`, `validation_model`, and `validation_timeout_ms`, plus nested `final_review` phase/plan policy.
+- **Reviewer Task verdicts are machine-parsed and persisted when auto-review is enabled.** A returning reviewer delegation has its mandated verdict and structured-finding output stored under `.swarm/review-receipts/`. Its scope fingerprints repository HEAD plus the parent session's guardrails-observed modified-file paths and current bytes, never architect-authored prompt prose. Below-threshold findings remain durable with effective severity `info`; eligible HIGH/CRITICAL findings can be checked by the independent validator in a separate fresh context. Disabled version-7 sessions preserve the legacy reviewer contract and create no structured Stage-B receipt or validator work.
 
 ## Why
 
-Outside full-auto mode, review depended entirely on the architect issuing reviewer delegations and interpreting free-text verdicts. This adds the missing independent leg: a hook-driven review pass by a separately configurable review model, with durable evidence, that runs whether or not the orchestrator remembers to ask.
+Outside full-auto mode, review depended on the architect issuing reviewer delegations and interpreting free-text verdicts. The shared policy adds an independent, separately configurable review leg with durable scope-bound evidence while retaining bounded advisory behavior by default.
 
 ## Migration
 
-None. Both features are additive; `auto_review` is off by default and the receipt collector only adds durable artifacts under `.swarm/`.
+Version-7 installations remain unchanged unless `auto_review.enabled` is explicitly set to `true`. For version 8+, users can pin `enabled: false` to override the approved advisory default. Existing `timeout_ms` and `max_diff_kb` values continue to populate the corresponding nested final-review fields when those nested values are absent.

@@ -1,3 +1,4 @@
+import { parseReviewDiffSelector } from '../review/diff-source.js';
 import type {
 	ResolvedSwarmCommand,
 	SwarmCommandPolicyResult,
@@ -329,6 +330,18 @@ export function classifySwarmCommandToolUse(
 			message:
 				'Usage through swarm_command: `/swarm costs` or `/swarm costs --json`.',
 		};
+	}
+
+	if (canonicalKey === 'review') {
+		const parsed = parseReviewDiffSelector(args);
+		if (!parsed.ok) {
+			return {
+				allowed: false,
+				message:
+					`Review argument error [${parsed.code}]: ${parsed.reason}\n` +
+					'Usage through swarm_command: `/swarm review [--base <ref> | --range <from..to|from...to> | --working-tree] [--json]`.',
+			};
+		}
 	}
 
 	if (canonicalKey === 'show-plan') {

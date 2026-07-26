@@ -22,7 +22,13 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
-import { advanceTaskState, getActiveWindow, swarmState } from '../../state';
+import {
+	advanceTaskState,
+	getActiveWindow,
+	getReviewerScopeGenerationForCoderCall,
+	recordReviewerScopeGenerationFileFingerprint,
+	swarmState,
+} from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import * as logger from '../../utils/logger';
@@ -35,6 +41,11 @@ import { computeSpecDiff } from '../../utils/spec-hash';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
+import {
+	captureReviewerScopeFileFingerprint,
+	MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES,
+} from '../reviewer-scope-file-fingerprint';
+import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
 import { buildEffectiveRules } from './file-authority';
 import {
@@ -537,6 +548,46 @@ export function createGuardrailsHooks(
 
 	// Shared consecutiveNoToolTurns Map (shared between toolBefore and messagesTransform)
 	const consecutiveNoToolTurns = new Map<string, number>();
+	const pendingReviewerScopeWrites = new Map<
+		string,
+		Array<{
+			parentSessionID: string;
+			taskId: string;
+			coderCallID: string;
+			file: string;
+		}>
+	>();
+	const rememberReviewerScopeWrite = (input: {
+		callID: string;
+		parentSessionID: string;
+		taskId: string;
+		coderCallID: string;
+		file: string;
+	}): void => {
+		if (
+			!pendingReviewerScopeWrites.has(input.callID) &&
+			pendingReviewerScopeWrites.size >= 256
+		) {
+			const oldest = pendingReviewerScopeWrites.keys().next().value;
+			if (oldest !== undefined) pendingReviewerScopeWrites.delete(oldest);
+		}
+		const pending = pendingReviewerScopeWrites.get(input.callID) ?? [];
+		const candidate = {
+			parentSessionID: input.parentSessionID,
+			taskId: input.taskId,
+			coderCallID: input.coderCallID,
+			file: input.file,
+		};
+		const duplicate = pending.some(
+			(entry) =>
+				entry.parentSessionID === candidate.parentSessionID &&
+				entry.taskId === candidate.taskId &&
+				entry.coderCallID === candidate.coderCallID &&
+				entry.file === candidate.file,
+		);
+		if (!duplicate && pending.length < 256) pending.push(candidate);
+		pendingReviewerScopeWrites.set(input.callID, pending);
+	};
 
 	// Create toolBefore handler via factory
 	const toolBefore = createToolBeforeHandler({
@@ -550,6 +601,7 @@ export function createGuardrailsHooks(
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		rememberReviewerScopeWrite,
 	});
 
 	// Create messagesTransform handler via factory
@@ -564,6 +616,10 @@ export function createGuardrailsHooks(
 	return {
 		toolBefore,
 		toolAfter: async (input, output) => {
+			const pendingReviewerScopeWrite = pendingReviewerScopeWrites.get(
+				input.callID,
+			);
+			pendingReviewerScopeWrites.delete(input.callID);
 			const correlatedExecution = takeToolExecution(
 				input.sessionID,
 				input.callID,
@@ -691,82 +747,93 @@ export function createGuardrailsHooks(
 				}
 
 				// v6.17 Task 9.3: Track currentTaskId when coder delegation completes
-				if (
-					delegation.isDelegation &&
-					delegation.targetAgent === 'coder' &&
-					session.lastCoderDelegationTaskId
-				) {
-					session.currentTaskId = session.lastCoderDelegationTaskId;
-					if (!session.revisionLimitHit) {
-						session.coderRevisions++;
-						if (session.coderRevisions > 1 && session.qaSkipCount === 0) {
-							let conflictPhase = 1;
-							try {
-								const plan = await loadPlan(effectiveDirectory);
-								if (plan) {
-									conflictPhase = extractPhaseNumber(
-										extractCurrentPhaseFromPlan(plan),
-									);
+				if (delegation.isDelegation && delegation.targetAgent === 'coder') {
+					const exactGeneration = getReviewerScopeGenerationForCoderCall({
+						parentSessionID: input.sessionID,
+						coderCallID: input.callID,
+					});
+					const completedTaskId =
+						exactGeneration?.taskId ?? session.lastCoderDelegationTaskId;
+					if (completedTaskId) {
+						session.currentTaskId = completedTaskId;
+						const exactGenerationFiles =
+							exactGeneration?.modifiedFiles ??
+							session.modifiedFilesThisCoderTask;
+						if (!session.revisionLimitHit) {
+							session.coderRevisions++;
+							if (session.coderRevisions > 1 && session.qaSkipCount === 0) {
+								let conflictPhase = 1;
+								try {
+									const plan = await loadPlan(effectiveDirectory);
+									if (plan) {
+										conflictPhase = extractPhaseNumber(
+											extractCurrentPhaseFromPlan(plan),
+										);
+									}
+								} catch {
+									// Non-fatal: default to phase 1
 								}
-							} catch {
-								// Non-fatal: default to phase 1
+								resolveAgentConflict({
+									sessionID: input.sessionID,
+									phase: conflictPhase,
+									taskId: session.currentTaskId ?? undefined,
+									sourceAgent: 'reviewer',
+									targetAgent: 'coder',
+									conflictType: 'feedback_rejection',
+									rejectionCount: session.coderRevisions - 1,
+									summary: `Coder revision ${session.coderRevisions} for task ${session.currentTaskId ?? 'unknown'}`,
+								});
+								session.lastDelegationReason = 'review_rejected';
 							}
-							resolveAgentConflict({
-								sessionID: input.sessionID,
-								phase: conflictPhase,
-								taskId: session.currentTaskId ?? undefined,
-								sourceAgent: 'reviewer',
-								targetAgent: 'coder',
-								conflictType: 'feedback_rejection',
-								rejectionCount: session.coderRevisions - 1,
-								summary: `Coder revision ${session.coderRevisions} for task ${session.currentTaskId ?? 'unknown'}`,
-							});
-							session.lastDelegationReason = 'review_rejected';
+							const maxRevisions = cfg.max_coder_revisions ?? 5;
+							if (session.coderRevisions >= maxRevisions) {
+								session.revisionLimitHit = true;
+								telemetry.revisionLimitHit(input.sessionID, session.agentName);
+								session.pendingAdvisoryMessages ??= [];
+								session.pendingAdvisoryMessages.push(
+									`CODER REVISION LIMIT: Agent has been revised ${session.coderRevisions} times ` +
+										`(max: ${maxRevisions}) for task ${session.currentTaskId ?? 'unknown'}. ` +
+										`Escalate to user or consider a fundamentally different approach.`,
+								);
+								swarmState.pendingEvents++;
+							}
 						}
-						const maxRevisions = cfg.max_coder_revisions ?? 5;
-						if (session.coderRevisions >= maxRevisions) {
-							session.revisionLimitHit = true;
-							telemetry.revisionLimitHit(input.sessionID, session.agentName);
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(
-								`CODER REVISION LIMIT: Agent has been revised ${session.coderRevisions} times ` +
-									`(max: ${maxRevisions}) for task ${session.currentTaskId ?? 'unknown'}. ` +
-									`Escalate to user or consider a fundamentally different approach.`,
-							);
-							swarmState.pendingEvents++;
-						}
-					}
-					session.partialGateWarningsIssuedForTask?.delete(
-						session.currentTaskId,
-					);
+						session.partialGateWarningsIssuedForTask?.delete(
+							session.currentTaskId,
+						);
 
-					// v6.21 Task 5.4: Scope containment check
-					if (session.declaredCoderScope !== null) {
-						const undeclaredFiles = session.modifiedFilesThisCoderTask
-							.map((f) => f.replace(/[\r\n\t]/g, '_'))
-							.filter(
-								(f) =>
-									!isInDeclaredScope(f, session.declaredCoderScope!, directory),
-							);
-						if (undeclaredFiles.length >= 1) {
-							const safeTaskId = String(session.currentTaskId ?? '').replace(
-								/[\r\n\t]/g,
-								'_',
-							);
-							session.lastScopeViolation =
-								`Scope violation for task ${safeTaskId}: ` +
-								`${undeclaredFiles.length} undeclared files modified: ` +
-								undeclaredFiles.join(', ');
-							session.scopeViolationDetected = true;
-							telemetry.scopeViolation(
-								input.sessionID,
-								session.agentName,
-								session.currentTaskId ?? 'unknown',
-								'undeclared files modified',
-							);
+						// v6.21 Task 5.4: Scope containment check
+						if (session.declaredCoderScope !== null) {
+							const undeclaredFiles = exactGenerationFiles
+								.map((f) => f.replace(/[\r\n\t]/g, '_'))
+								.filter(
+									(f) =>
+										!isInDeclaredScope(
+											f,
+											session.declaredCoderScope!,
+											directory,
+										),
+								);
+							if (undeclaredFiles.length >= 1) {
+								const safeTaskId = String(session.currentTaskId ?? '').replace(
+									/[\r\n\t]/g,
+									'_',
+								);
+								session.lastScopeViolation =
+									`Scope violation for task ${safeTaskId}: ` +
+									`${undeclaredFiles.length} undeclared files modified: ` +
+									undeclaredFiles.join(', ');
+								session.scopeViolationDetected = true;
+								telemetry.scopeViolation(
+									input.sessionID,
+									session.agentName,
+									session.currentTaskId ?? 'unknown',
+									'undeclared files modified',
+								);
+							}
 						}
+						session.modifiedFilesThisCoderTask = [];
 					}
-					session.modifiedFilesThisCoderTask = [];
 				}
 			}
 
@@ -836,6 +903,48 @@ export function createGuardrailsHooks(
 						safeOutput as typeof output & Record<string, unknown>,
 						correlatedExecution,
 					);
+			if (
+				pendingReviewerScopeWrite &&
+				classifyTaskResult(safeOutput) === 'success'
+			) {
+				const completedFingerprints: Array<{
+					pendingWrite: (typeof pendingReviewerScopeWrite)[number];
+					fingerprint: NonNullable<
+						ReturnType<typeof captureReviewerScopeFileFingerprint>
+					>;
+				}> = [];
+				let aggregateBytes = 0;
+				let captureFailed = false;
+				for (const pendingWrite of pendingReviewerScopeWrite) {
+					const fingerprint = captureReviewerScopeFileFingerprint(
+						effectiveDirectory,
+						pendingWrite.file,
+						MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES - aggregateBytes,
+					);
+					if (!fingerprint) {
+						captureFailed = true;
+						break;
+					}
+					if (fingerprint.kind === 'file') {
+						aggregateBytes += fingerprint.size;
+					}
+					completedFingerprints.push({ pendingWrite, fingerprint });
+				}
+				if (
+					!captureFailed &&
+					completedFingerprints.length === pendingReviewerScopeWrite.length &&
+					aggregateBytes <= MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES
+				) {
+					for (const { pendingWrite, fingerprint } of completedFingerprints) {
+						recordReviewerScopeGenerationFileFingerprint({
+							parentSessionID: pendingWrite.parentSessionID,
+							taskId: pendingWrite.taskId,
+							coderCallID: pendingWrite.coderCallID,
+							fingerprint,
+						});
+					}
+				}
+			}
 			if (outcome.kind === 'fatal') {
 				recordNonTransientFailure(
 					input.sessionID,

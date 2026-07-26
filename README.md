@@ -32,8 +32,9 @@ Most AI coding tools let one model write code and ask that same model whether th
 
 ### Key Features
 
-- 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
+- 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, critic_finding_validator, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
 - 🔒 **Gated pipeline** — code never ships without reviewer + test engineer approval
+- 🔎 **Independent auto-review engine** — bounded whole-diff review in a fresh read-only model session, structured diff-anchored findings, optional independent validation, advisory-by-default phase review, and an evidence-backed opt-in completion gate. v7 remains opt-in; v8's default is pinned to a committed 30-diff cost burn-in.
 - 🔍 **DEEP_DIVE Protocol** — High-rigor, on-demand read-only codebase audit via specialized skills
 - 🔬 **External Skill Curation Pipeline** — Opt-in discovery, quarantine, evaluation, and promotion of external skill candidates from configured sources (disabled by default; enable via `external_skills.curation_enabled: true` in config). Includes 7 tools: `external_skill_discover`, `external_skill_list`, `external_skill_inspect`, `external_skill_promote`, `external_skill_reject`, `external_skill_delete`, `external_skill_revoke`. Candidates pass through a 3-gate validation pipeline before evaluation: **prompt injection scan** (12 regex patterns), **unsafe instruction scan** (25 patterns), and **provenance integrity check** (SHA-256, timestamp, URL, publisher, and hash verification).
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
@@ -311,6 +312,7 @@ Swarm registers a roster of specialized core, optional, and conditional agents. 
 | **reviewer** | Checks correctness and security | Core |
 | **test_engineer** | Writes and runs tests, adversarial testing | Core |
 | **critic** | Reviews plans before implementation begins | Core |
+| **critic_finding_validator** | Independently confirms, disproves, or leaves reviewer findings unverified | Core |
 | **critic_oversight** | Sole quality gate in full-auto autonomous mode | Core |
 | **sme** | Provides domain expertise guidance | Core |
 | **docs** | Updates documentation to match implementation | Core |
@@ -1111,6 +1113,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm benchmark` | Performance benchmarks; optionally consume a stored gate audit with `--gate-audit-run <id>` |
 | `/swarm gate-audit` | Run the bounded 12-fixture reviewer/test/SAST/mutation/quality evaluation matrix |
 | `/swarm gate-stats` | Aggregate offline catch, false-reject, retry, cost, and reviewer-fallback statistics |
+| `/swarm review [--base <ref> \| --range <from..to\|from...to> \| --working-tree] [--json]` | Run the bounded local whole-diff review engine with structured findings, optional independent validation when configured or required by gate mode, and durable evidence |
 | `/swarm costs [--json]` | Per-agent, per-task, per-gate, and per-retry token/cost totals from telemetry |
 | `/swarm retrieve [id]` | Retrieve auto-summarized tool outputs (supports offset/limit pagination) |
 | `/swarm reset --confirm` | Clear swarm state files |

@@ -1,0 +1,358 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-25T00:00:00.000Z",
+  "generation_command": "bun run scripts/measure-auto-review-cost.ts",
+  "sample_method": "30 fixed consecutive first-parent canonical-main commit diffs",
+  "sample_count": 30,
+  "review_policy": {
+    "trigger": "phase_boundary",
+    "mode": "advisory",
+    "min_confidence": 0.7,
+    "validate_findings": false,
+    "max_diff_bytes": 262144,
+    "reviewer_output_token_budget": 800
+  },
+  "model_assumptions": {
+    "reviewer": "opencode/big-pickle",
+    "optional_validator": "opencode/big-pickle"
+  },
+  "call_formula": {
+    "v8_default_per_phase": "1 reviewer + 0 validator",
+    "validation_opt_in_per_phase": "1 reviewer + 0 or 1 batched validator when eligible findings exist"
+  },
+  "diff_bytes": {
+    "min": 1192,
+    "p50": 4493,
+    "p95": 150192,
+    "max": 262125
+  },
+  "reviewer_prompt_token_estimate": {
+    "min": 1380,
+    "p50": 2438,
+    "p95": 50480,
+    "max": 88121
+  },
+  "scope_completeness": {
+    "complete_samples": 29,
+    "truncated_samples": 1
+  },
+  "expected_default_token_delta": {
+    "input_tokens": {
+      "min": 1380,
+      "p50": 2438,
+      "p95": 50480,
+      "max": 88121
+    },
+    "output_tokens_upper_bound": 800,
+    "usd": null,
+    "usd_reason": "Provider-reported usage and pricing are unavailable in a deterministic source-only benchmark."
+  },
+  "samples": [
+    {
+      "base_sha": "42b42b881a47f7732beaa4208e083d8240045f8c",
+      "head_sha": "b0284ca370c13919578164921e896b35eecf9b25",
+      "scope_hash": "6b3cbe21c751af004e1b78f2493cf9ffc919ee29aad347fdd54b632ff458e278",
+      "diff_bytes": 7734,
+      "prompt_bytes": 10723,
+      "prompt_token_estimate": 3531,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "95a60e775be28b61c9d07efc96b5314d0458b296",
+      "head_sha": "42b42b881a47f7732beaa4208e083d8240045f8c",
+      "scope_hash": "2adfd2bf41b565eab89de4c2d8e98f35622a462ff77cc86e704381356f39f451",
+      "diff_bytes": 1211,
+      "prompt_bytes": 4201,
+      "prompt_token_estimate": 1386,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "47e98a094dc33f3ffd9c236ce262411cacd82eeb",
+      "head_sha": "95a60e775be28b61c9d07efc96b5314d0458b296",
+      "scope_hash": "273c39a54f0b2e587040993b1a52e9eee0d58d42af866378d6199afb44ac4f87",
+      "diff_bytes": 7010,
+      "prompt_bytes": 10000,
+      "prompt_token_estimate": 3300,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "2d64460068a44038dea7b46615ce3ea8ee3d9ea0",
+      "head_sha": "47e98a094dc33f3ffd9c236ce262411cacd82eeb",
+      "scope_hash": "afe7ca060cb4ea9f7c35cf237802e84221b1bedacfea2a22827e6112376efbca",
+      "diff_bytes": 1431,
+      "prompt_bytes": 4421,
+      "prompt_token_estimate": 1459,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "03732159ce73484649ab4a218e74863b426020a1",
+      "head_sha": "2d64460068a44038dea7b46615ce3ea8ee3d9ea0",
+      "scope_hash": "a38521570257c9fa601aae01b48afe25bcec943121d52df8028a0a3057953d4b",
+      "diff_bytes": 150192,
+      "prompt_bytes": 153182,
+      "prompt_token_estimate": 50480,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "b6a737beb340baa963d99d8a4609c03671261f81",
+      "head_sha": "03732159ce73484649ab4a218e74863b426020a1",
+      "scope_hash": "180cef1a12e963912b35de36521fa73643935af51c201d9ee38e5dc0be0e5816",
+      "diff_bytes": 14044,
+      "prompt_bytes": 17034,
+      "prompt_token_estimate": 5620,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "e442151267d9b1d1f41aa810e38315c30c37b1c3",
+      "head_sha": "b6a737beb340baa963d99d8a4609c03671261f81",
+      "scope_hash": "bdc0a037ff5d24686d8cddc2cd7898bab66717f03fe674ce97072c1a56f9ca82",
+      "diff_bytes": 1247,
+      "prompt_bytes": 4237,
+      "prompt_token_estimate": 1398,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "f28343dc876a22c6cfe5b5a40773ae23f0047c6d",
+      "head_sha": "e442151267d9b1d1f41aa810e38315c30c37b1c3",
+      "scope_hash": "1bac4b5206732657e7a1079eb0ab443dee4ddb9dabbdd8ce230a4b2e5a5a60cc",
+      "diff_bytes": 2928,
+      "prompt_bytes": 5918,
+      "prompt_token_estimate": 1951,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "1be3a8429191252d900e430fe843be6e602f765f",
+      "head_sha": "f28343dc876a22c6cfe5b5a40773ae23f0047c6d",
+      "scope_hash": "ecd9bf3ee030c2c2d75283ba50da94449741f9d37dc03b3badd65a503ff153e3",
+      "diff_bytes": 4493,
+      "prompt_bytes": 7483,
+      "prompt_token_estimate": 2438,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "2413eabc37b5f42546236ca0f53a6cc2a34f1d2d",
+      "head_sha": "1be3a8429191252d900e430fe843be6e602f765f",
+      "scope_hash": "76ce2b1885df8a10280bc430413a67b9cef96e9e12d08ab713fb0db737ef92a3",
+      "diff_bytes": 1244,
+      "prompt_bytes": 4234,
+      "prompt_token_estimate": 1397,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "c770a720574c714e1f25b747f0c16914eed519f8",
+      "head_sha": "2413eabc37b5f42546236ca0f53a6cc2a34f1d2d",
+      "scope_hash": "d3c01b2feb0fc5bb1de048b2244ed519aab4d4ecb5d7c5a078719192c9c4ea79",
+      "diff_bytes": 21852,
+      "prompt_bytes": 24842,
+      "prompt_token_estimate": 7980,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "2c8a51f3fd27c7e7fa46c6572179e02d7406424e",
+      "head_sha": "c770a720574c714e1f25b747f0c16914eed519f8",
+      "scope_hash": "7e7ff0d892d62542696e2fa62ecea1b85705456096feb613d5e93ff9b346f6d9",
+      "diff_bytes": 1572,
+      "prompt_bytes": 4562,
+      "prompt_token_estimate": 1505,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "9b67d48fc25963be184239629ff28a88c872e05d",
+      "head_sha": "2c8a51f3fd27c7e7fa46c6572179e02d7406424e",
+      "scope_hash": "f6838278f06081d51d730aad9dd421c542694bb2962611a2f81ca0aa64b29646",
+      "diff_bytes": 99715,
+      "prompt_bytes": 102705,
+      "prompt_token_estimate": 33885,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "0bc6a8b53b4462091ed4af8c2a1d39e2403d859e",
+      "head_sha": "9b67d48fc25963be184239629ff28a88c872e05d",
+      "scope_hash": "26a96055e5546fb37dcf46396b743d131e0043dce089bd10db6b0243f0e3704a",
+      "diff_bytes": 1192,
+      "prompt_bytes": 4182,
+      "prompt_token_estimate": 1380,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "f8eb17fcd36323b790234c704f603d51e80ef250",
+      "head_sha": "0bc6a8b53b4462091ed4af8c2a1d39e2403d859e",
+      "scope_hash": "a6851f820796b3e1e80095b1306a3fdac43bc621682acbec2c03c5a922fb91e9",
+      "diff_bytes": 19825,
+      "prompt_bytes": 22815,
+      "prompt_token_estimate": 7515,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "c717988039f8a210937de152f1bbcfbb7912017c",
+      "head_sha": "f8eb17fcd36323b790234c704f603d51e80ef250",
+      "scope_hash": "002e3e44f092a549aa508150863300fd82cc2d86934ff14e8160f564e3e0a229",
+      "diff_bytes": 1484,
+      "prompt_bytes": 4474,
+      "prompt_token_estimate": 1476,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "ca502494f90017d6061114ff9d8c9d5662207cf3",
+      "head_sha": "c717988039f8a210937de152f1bbcfbb7912017c",
+      "scope_hash": "941743a8c196f0e1f54aa182f02f36cb3add7026dd6478a3f699b223e04e8527",
+      "diff_bytes": 45406,
+      "prompt_bytes": 48396,
+      "prompt_token_estimate": 15934,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "07bef196dab2fd72da38335d47400965e2a743ce",
+      "head_sha": "ca502494f90017d6061114ff9d8c9d5662207cf3",
+      "scope_hash": "3087bd979f6683b5b398b07a13d18d37a59ab9f3965aeb7471c517093f471b0f",
+      "diff_bytes": 55834,
+      "prompt_bytes": 58824,
+      "prompt_token_estimate": 19369,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "96674c740691be387044bf97e92e6a1bcfb3a9fc",
+      "head_sha": "07bef196dab2fd72da38335d47400965e2a743ce",
+      "scope_hash": "bcc8b0de7e374be168cf8be5b51258d334b7458be2929dd06a01a46023af7a3f",
+      "diff_bytes": 1843,
+      "prompt_bytes": 4833,
+      "prompt_token_estimate": 1594,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "d99b8ed351cbb61a2fd8e18e47cb9406f26d1394",
+      "head_sha": "96674c740691be387044bf97e92e6a1bcfb3a9fc",
+      "scope_hash": "5d6ed36839f96414fb5213ba7f1bbab92175456f7aa045e76840e2c77a6a59bf",
+      "diff_bytes": 110601,
+      "prompt_bytes": 113591,
+      "prompt_token_estimate": 36345,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "41c739960c3740dee2ee66fb8d6c4a8b62b466c9",
+      "head_sha": "d99b8ed351cbb61a2fd8e18e47cb9406f26d1394",
+      "scope_hash": "ef4e63d7ab70f7febe8d2a37876bbfe283625c8f4e9acef1e22ae28bcb104c62",
+      "diff_bytes": 1271,
+      "prompt_bytes": 4261,
+      "prompt_token_estimate": 1406,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "0a884e9813923bd38c5496f2057f7f2a2b09de58",
+      "head_sha": "41c739960c3740dee2ee66fb8d6c4a8b62b466c9",
+      "scope_hash": "6688bd320746335a6bf7e68e15481480823053dd24272dab7f85b64730586cc1",
+      "diff_bytes": 78779,
+      "prompt_bytes": 81769,
+      "prompt_token_estimate": 26907,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "8ef6aca08c901ba93249515f22a06e0cb54dba51",
+      "head_sha": "0a884e9813923bd38c5496f2057f7f2a2b09de58",
+      "scope_hash": "9ab804d82ca5fe81670246c4aff079c0068b63c9735839cc5b6037917a0ca338",
+      "diff_bytes": 1564,
+      "prompt_bytes": 4554,
+      "prompt_token_estimate": 1503,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "bcff2be020e47dcb2e6f87ea2e00a70f63b0d66a",
+      "head_sha": "8ef6aca08c901ba93249515f22a06e0cb54dba51",
+      "scope_hash": "37bec49b149cbd09af68629eae8a10e0f2ea6ca4f80cfd3025bec641fc47878a",
+      "diff_bytes": 22712,
+      "prompt_bytes": 25702,
+      "prompt_token_estimate": 8470,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "123ad1dbc548dbec4d92c82fb511d90b20fcbe33",
+      "head_sha": "bcff2be020e47dcb2e6f87ea2e00a70f63b0d66a",
+      "scope_hash": "73a673eda3d7d63d0224501d970927bfa4a2364425c0fed7cb92378629ab65a5",
+      "diff_bytes": 2279,
+      "prompt_bytes": 5269,
+      "prompt_token_estimate": 1739,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "ffc405ae977294ccce0800a8a72bd26f92c054ae",
+      "head_sha": "123ad1dbc548dbec4d92c82fb511d90b20fcbe33",
+      "scope_hash": "47243578b25b78e8415ce7bbeb12d03afc3dbebdd29d5530dc2bc1b828af05b0",
+      "diff_bytes": 262125,
+      "prompt_bytes": 267452,
+      "prompt_token_estimate": 88121,
+      "scope_complete": false,
+      "scope_truncated": true
+    },
+    {
+      "base_sha": "27180d290bda69de078d9b9dff5145c75a98032d",
+      "head_sha": "ffc405ae977294ccce0800a8a72bd26f92c054ae",
+      "scope_hash": "ba239332052d370480874b660b795dc48eb7d8ec5ff6936fe3041a1fc04cd6ce",
+      "diff_bytes": 1544,
+      "prompt_bytes": 4534,
+      "prompt_token_estimate": 1496,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "f2c832f9066a74ebd93acf171487060fe6e1cfcb",
+      "head_sha": "27180d290bda69de078d9b9dff5145c75a98032d",
+      "scope_hash": "4cb10fc9cefd62e5cacdaa0ecf46c777350e5f7a40d31f601b0580acbb995160",
+      "diff_bytes": 19278,
+      "prompt_bytes": 22268,
+      "prompt_token_estimate": 7346,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "1e4761ef7a02b3351a8225e7e223e6a74b2870db",
+      "head_sha": "f2c832f9066a74ebd93acf171487060fe6e1cfcb",
+      "scope_hash": "84bf12422976472d40ce46e630de8d4270312e62f5fbe3b9e217f28bc2c0872b",
+      "diff_bytes": 1400,
+      "prompt_bytes": 4390,
+      "prompt_token_estimate": 1449,
+      "scope_complete": true,
+      "scope_truncated": false
+    },
+    {
+      "base_sha": "8d1d8bfe6ae7b0c69fefd5bc0f80677366201722",
+      "head_sha": "1e4761ef7a02b3351a8225e7e223e6a74b2870db",
+      "scope_hash": "17b42bdc71b859fb1bc45268124c7fea8d53313aa5f1d3a4ecfafbfea22b684a",
+      "diff_bytes": 14912,
+      "prompt_bytes": 17902,
+      "prompt_token_estimate": 5892,
+      "scope_complete": true,
+      "scope_truncated": false
+    }
+  ],
+  "limitations": [
+    "Token estimates use the repository estimateTokens utility, not provider tokenizers.",
+    "This source-only baseline excludes cache behavior, retries, and provider-specific pricing.",
+    "Runtime delegation_end telemetry and /swarm costs are authoritative for observed provider usage."
+  ],
+  "artifact_sha256": "b4e981d4d87e3de80f6d7dd4ae782b08159d385019c4d8b0d300c0443f1984ce"
+}
