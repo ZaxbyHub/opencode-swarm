@@ -59,8 +59,54 @@ const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
+const MAX_ZOD_ISSUES_LISTED = 20;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
+
+/**
+ * Bound on how many "already delivered lane output" keys we remember
+ * (invariant 8: module-level state must have an explicit eviction strategy).
+ * `collect_lane_results` is polled repeatedly by the PR-review protocol; once
+ * a settled lane's output has been delivered once, re-delivering the same
+ * bounded preview on every subsequent poll is the dominant controller-context
+ * driver behind PR-review compaction loops (see S1.1). This Set tracks which
+ * `${batchId}\0${laneId}\0${digest}` keys have already been sent so later
+ * polls can omit the `output` field (setting `output_omitted_repeat: true`
+ * instead) while still returning every other metadata field unchanged.
+ *
+ * This is in-memory by design: a process restart re-delivers each preview
+ * once more, which is harmless because the durable recovery path
+ * (`retrieve_lane_output` via `output_ref`) is always present in the payload
+ * regardless of whether `output` was omitted.
+ */
+const MAX_TRACKED_DELIVERED_LANE_OUTPUTS = 1024;
+const deliveredLaneOutputs = new Set<string>();
+
+/** FIFO-evict the oldest delivered-output key when the set exceeds the bound. */
+function evictDeliveredLaneOutputsIfOverBound(): void {
+	while (deliveredLaneOutputs.size > MAX_TRACKED_DELIVERED_LANE_OUTPUTS) {
+		const oldestKey = deliveredLaneOutputs.values().next().value;
+		if (oldestKey === undefined) break;
+		deliveredLaneOutputs.delete(oldestKey);
+	}
+}
+
+/**
+ * Formats a Zod issue list for error output, bounded to the first
+ * {@link MAX_ZOD_ISSUES_LISTED} entries with a trailing "... and N more"
+ * marker when truncated. A badly-malformed multi-lane payload can otherwise
+ * produce dozens of issue lines, uncapped unlike every other error path in
+ * this file (see MAX_ERROR_CHARS).
+ */
+function boundZodIssues(issues: readonly z.ZodIssue[]): string[] {
+	const formatted = issues.map(
+		(issue) => `${issue.path.join('.')}: ${issue.message}`,
+	);
+	if (formatted.length <= MAX_ZOD_ISSUES_LISTED) return formatted;
+	const shown = formatted.slice(0, MAX_ZOD_ISSUES_LISTED);
+	shown.push(`... and ${formatted.length - MAX_ZOD_ISSUES_LISTED} more`);
+	return shown;
+}
 
 const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
 	'intent-architecture':
@@ -464,6 +510,15 @@ export interface DispatchLaneResult {
 	output_artifact_error?: string;
 	transcript_incomplete?: boolean;
 	message_count?: number;
+	/**
+	 * Set to true when this lane's `output` preview was withheld because an
+	 * identical preview (same batch, lane, and result digest) was already
+	 * delivered on an earlier `collect_lane_results` poll. All other result
+	 * metadata (`output_ref`, `output_digest`, `output_chars`, etc.) is still
+	 * present, so callers who need the full text again should retrieve it via
+	 * `retrieve_lane_output` using `output_ref` rather than re-polling for it.
+	 */
+	output_omitted_repeat?: boolean;
 	error?: string;
 }
 
@@ -597,6 +652,19 @@ export const _test_exports = {
 	DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS,
 	DEFAULT_ASYNC_STALE_TIMEOUT_MS,
 	DEFAULT_COLLECT_TIMEOUT_MS,
+	/**
+	 * Clears the module-level `deliveredLaneOutputs` de-dupe set (see
+	 * S1.1) so tests can assert first-poll vs. repeat-poll behavior without
+	 * cross-test bleed-through.
+	 */
+	resetDeliveredLaneOutputs: () => {
+		deliveredLaneOutputs.clear();
+	},
+	// Test-only export seam: lets tests exercise the S1.1 output-delivery
+	// de-duplication logic directly against in-memory record literals,
+	// without round-tripping through the durable delegation store or a
+	// SessionOps mock.
+	recordToLaneResult,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
@@ -620,9 +688,7 @@ export async function executeDispatchLanes(
 		return failureResult({
 			failure_class: 'invalid_args',
 			message: 'Invalid dispatch_lanes arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
 
@@ -710,9 +776,7 @@ export async function executeDispatchLanesAsync(
 		return asyncFailureResult({
 			failure_class: 'invalid_args',
 			message: 'Invalid dispatch_lanes_async arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
 
@@ -1165,9 +1229,7 @@ export async function executeCollectLaneResults(
 			failure_class: 'invalid_args',
 			batch_id: '',
 			message: 'Invalid collect_lane_results arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
 	const session = _internals.getSessionOps();
@@ -1791,7 +1853,7 @@ function buildCollectResult(
 				includePending ||
 				(record.status !== 'pending' && record.status !== 'running'),
 		)
-		.map(recordToLaneResult);
+		.map((record) => recordToLaneResult(record, batchId));
 	const completed = records.filter((record) => record.status === 'completed');
 	const failed = records.filter(
 		(record) =>
@@ -1824,6 +1886,7 @@ function buildCollectResult(
 
 function recordToLaneResult(
 	record: BackgroundDelegationRecord,
+	batchId: string,
 ): DispatchLaneResult {
 	const status =
 		record.status === 'error'
@@ -1833,8 +1896,22 @@ function recordToLaneResult(
 				: record.status === 'running'
 					? 'pending'
 					: record.status;
+	const laneId = record.laneId ?? record.correlationId;
+	// Only settled lanes have a result worth de-duplicating; a pending/running
+	// record has no result text anyway. If the digest is missing we fail open
+	// (always deliver) rather than risk silently withholding output forever.
+	const digest = record.result?.digest;
+	let alreadyDelivered = false;
+	if (record.result?.text !== undefined && status !== 'pending' && digest) {
+		const key = `${batchId}\0${laneId}\0${digest}`;
+		alreadyDelivered = deliveredLaneOutputs.has(key);
+		if (!alreadyDelivered) {
+			deliveredLaneOutputs.add(key);
+			evictDeliveredLaneOutputsIfOverBound();
+		}
+	}
 	return {
-		id: record.laneId ?? record.correlationId,
+		id: laneId,
 		agent: record.swarmPrefixedAgent,
 		role: record.normalizedAgent,
 		status,
@@ -1845,7 +1922,9 @@ function recordToLaneResult(
 		).toISOString(),
 		...(record.result?.text !== undefined
 			? {
-					output: record.result.text,
+					...(alreadyDelivered
+						? { output_omitted_repeat: true }
+						: { output: record.result.text }),
 					output_chars: record.result.chars,
 					output_truncated: record.result.truncated,
 					output_digest: record.result.digest,

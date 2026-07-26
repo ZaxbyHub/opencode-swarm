@@ -7,6 +7,7 @@
  */
 
 import type { PluginConfig } from '../config';
+import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { log, warn } from '../utils';
 import {
@@ -377,7 +378,7 @@ function applyObservationMasking(
 			for (const part of msg.parts) {
 				if (part.type === 'text' && part.text) {
 					const originalTokens = estimateTokens(part.text);
-					const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. Use retrieve_summary if needed.]`;
+					const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(part.text)}]`;
 					const maskedTokens = estimateTokens(placeholder);
 					part.text = placeholder;
 					actualFreedTokens += originalTokens - maskedTokens;
@@ -387,6 +388,32 @@ function applyObservationMasking(
 	}
 
 	return actualFreedTokens;
+}
+
+/** Matches lane-output store refs, e.g. `L1:<sha256>:<sha256>:<sha256>`. */
+const LANE_OUTPUT_REF_PATTERN = /L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}/g;
+
+/**
+ * Choose the correct recovery pointer for a placeholder that replaces
+ * pruned/masked text. Lane artifacts and general tool/summary output live in
+ * two different subsystems with two different retrieval tools:
+ *   - Generic oversized tool output is stored by tool-summarizer.ts and
+ *     retrieved with `retrieve_summary`.
+ *   - Lane batch output (dispatch_lanes / collect_lane_results) is stored in
+ *     the lane-output store and retrieved with `retrieve_lane_output <ref>`.
+ * Pointing a lane-artifact placeholder at `retrieve_summary` is a dead end —
+ * that store never held the content. This scans the original text (before
+ * truncation) for lane-output refs and, if found, names the correct tool and
+ * refs directly, since the truncated excerpt kept in the placeholder does
+ * not reliably preserve the ref.
+ */
+function recoveryHint(originalText: string): string {
+	const matches = originalText.match(LANE_OUTPUT_REF_PATTERN);
+	if (matches && matches.length > 0) {
+		const uniqueRefs = [...new Set(matches)].slice(0, 3);
+		return `Use retrieve_lane_output with ref ${uniqueRefs.join(', ')} if needed.`;
+	}
+	return 'Use retrieve_summary if needed.';
 }
 
 /**
@@ -435,19 +462,18 @@ function shouldMaskToolOutput(
 		return false;
 	}
 
-	// Exempt retrieval tools and small read/task outputs.
+	// Exempt retrieval tools, small read/task outputs, and ref-carrying lane tools.
 	// - retrieve_lane_output / retrieve_summary: paged artifacts must stay visible so the
 	//   architect can page through them; masking defeats the delivery mechanism.
 	// - task: results are already summarized by the agent that created the task call
+	// - dispatch_lanes / dispatch_lanes_async / collect_lane_results / parse_lane_candidates:
+	//   these carry output_ref/structured rows the PR-workflow gate needs to settle
+	//   lanes; masking destroys the refs and the gate can never settle (same floor
+	//   as SUMMARIZER_EXEMPT_TOOL_NAMES in tool-summarizer.ts).
 	// Check structured tool name first (reliable); fall back to text heuristic for
 	// legacy tool result formats that may not carry toolName in msg.info.
 	const structuredToolName = msg.info.toolName as string | undefined;
-	const exemptList = [
-		'retrieve_summary',
-		'retrieve_lane_output',
-		'task',
-		'read',
-	];
+	const exemptList = SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[];
 	if (
 		structuredToolName &&
 		exemptList.includes(structuredToolName.toLowerCase())
@@ -489,7 +515,7 @@ function maskToolOutput(msg: MessageWithParts, _threshold: number): number {
 			const toolName = extractToolName(part.text) || 'unknown';
 			const excerpt = part.text.substring(0, 200).replace(/\n/g, ' ');
 
-			const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." Use retrieve_summary if needed.]`;
+			const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." ${recoveryHint(part.text)}]`;
 			const maskedTokens = estimateTokens(placeholder);
 			part.text = placeholder;
 			freedTokens += originalTokens - maskedTokens;

@@ -686,6 +686,10 @@ controller snapshots the content revision plus HEAD, index, refs, upstream, and
 Git config before and after every command (including failures/timeouts); any
 mutation invalidates Stage A and prevents later commands from becoming proof.
 
+The Stage A response carries per-check summaries plus a `full_output_ref`, with
+a bounded tail of the failing check only; full output is persisted and retrieved
+by reference.
+
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 
 Two independent agents on the Stage-A-green diff, run in order: **reviewer

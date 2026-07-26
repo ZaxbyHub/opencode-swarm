@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
-import { type AgentName, ALL_AGENT_NAMES } from './constants';
+import {
+	type AgentName,
+	ALL_AGENT_NAMES,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
+} from './constants';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
@@ -494,9 +498,7 @@ export const SummaryConfigSchema = z.object({
 	max_summary_chars: z.number().min(100).max(5000).default(1000),
 	max_stored_bytes: z.number().min(10240).max(104857600).default(10485760),
 	retention_days: z.number().min(1).max(365).default(7),
-	exempt_tools: z
-		.array(z.string())
-		.default(['retrieve_summary', 'retrieve_lane_output', 'task', 'read']),
+	exempt_tools: z.array(z.string()).default([...SUMMARIZER_EXEMPT_TOOL_NAMES]),
 });
 
 export type SummaryConfig = z.infer<typeof SummaryConfigSchema>;

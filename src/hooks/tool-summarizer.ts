@@ -6,6 +6,7 @@
  * the output with a compact summary containing a retrieval ID.
  */
 
+import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import type { SummaryConfig } from '../config/schema';
 import { storeSummary } from '../summaries/manager';
 import { createSummary, shouldSummarize } from '../summaries/summarizer';
@@ -46,15 +47,21 @@ export function createToolSummarizerHook(
 			return;
 		}
 
-		// Skip exempt tools (e.g. retrieve_summary, task) — summarizing their output
-		// creates a retrieval loop where the summary itself gets summarized.
-		const exemptTools = config.exempt_tools ?? [
-			'retrieve_summary',
-			'retrieve_lane_output',
-			'task',
-			'read',
-		];
-		if (exemptTools.includes(input.tool)) {
+		// Skip exempt tools. SUMMARIZER_EXEMPT_TOOL_NAMES is a FLOOR that always
+		// applies — retrieval tools (retrieve_summary, retrieve_lane_output, task,
+		// read) create a retrieval loop if their own output is summarized, and
+		// ref-carrying lane tools (dispatch_lanes*, collect_lane_results,
+		// parse_lane_candidates) carry output_ref/structured rows that the
+		// PR-workflow gate requires — rewriting them to a summary destroys the
+		// refs and the gate can never settle. Operator-configured `exempt_tools`
+		// is additive on top of the floor, never a replacement for it.
+		const exemptTools = config.exempt_tools ?? [];
+		if (
+			(SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[]).includes(
+				input.tool,
+			) ||
+			exemptTools.includes(input.tool)
+		) {
 			return;
 		}
 

@@ -359,6 +359,13 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+		// Safe to gate-allow: read-only retrieval of a stored summary artifact.
+		// Necessary: the summarizer advertises this tool as the recovery path for
+		// truncated outputs, so it must remain reachable during PR workflows.
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	retrieve_lane_output: {
 		description:

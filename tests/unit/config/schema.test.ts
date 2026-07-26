@@ -1588,6 +1588,10 @@ describe('SummaryConfigSchema', () => {
 				'retrieve_lane_output',
 				'task',
 				'read',
+				'dispatch_lanes',
+				'dispatch_lanes_async',
+				'collect_lane_results',
+				'parse_lane_candidates',
 			]);
 		}
 	});
@@ -1678,6 +1682,10 @@ describe('SummaryConfigSchema', () => {
 				'retrieve_lane_output',
 				'task',
 				'read',
+				'dispatch_lanes',
+				'dispatch_lanes_async',
+				'collect_lane_results',
+				'parse_lane_candidates',
 			]); // Default
 		}
 	});

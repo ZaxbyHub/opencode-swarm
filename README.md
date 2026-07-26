@@ -1057,13 +1057,22 @@ Control how tool outputs are summarized for LLM context.
 {
   "summaries": {
     "threshold_bytes": 102400,
-    "exempt_tools": ["retrieve_summary", "task", "read"]
+    "exempt_tools": [
+      "retrieve_summary",
+      "retrieve_lane_output",
+      "task",
+      "read",
+      "dispatch_lanes",
+      "dispatch_lanes_async",
+      "collect_lane_results",
+      "parse_lane_candidates"
+    ]
   }
 }
 ```
 
 - **threshold_bytes** – Output size threshold in bytes before summarization is triggered (default 102400 = 100KB).
-- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "task", "read"]` to prevent re-summarization loops.
+- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "retrieve_lane_output", "task", "read", "dispatch_lanes", "dispatch_lanes_async", "collect_lane_results", "parse_lane_candidates"]`. Retrieval and lane tools are always exempt—summarizing them would destroy the references needed to recover their full outputs.
 
 > **Note:** The `retrieve_summary` tool supports paginated retrieval via `offset` and `limit` parameters to fetch large summarized outputs in chunks.
 

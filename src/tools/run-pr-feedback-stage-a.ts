@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -17,6 +18,7 @@ import {
 	assertPrFeedbackVerificationSettled,
 	recordPrFeedbackStageA,
 } from '../hooks/pr-workflow-gate.js';
+import { storeSummary } from '../summaries/manager.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -47,6 +49,10 @@ const ALWAYS_REQUIRED_CATEGORIES: readonly StageACategory[] = [
 	'reproduction',
 ];
 const MAX_OUTPUT_BYTES = 64 * 1024;
+// Bounded tail of stdout/stderr surfaced inline for the failing check only.
+const FAILING_CHECK_TAIL_BYTES = 4096;
+// Cap on the persisted full-output artifact; matches retrieve_summary's read cap.
+const FULL_OUTPUT_MAX_STORED_BYTES = 10 * 1024 * 1024;
 const BLOCKED_EXECUTABLES = new Set([
 	'aws',
 	'az',
@@ -184,8 +190,128 @@ const RepositoryValidationContractSchema = z
 		}
 	});
 
-function failure(message: string, checks: unknown[] = []): string {
-	return JSON.stringify({ success: false, message, checks }, null, 2);
+/**
+ * Generate a collision-resistant summary ID matching sanitizeSummaryId's
+ * `^S\d+$` contract: a millisecond timestamp (monotonically increasing
+ * across calls) concatenated with a 6-digit random suffix. Two Stage A
+ * runs would need to land in the same millisecond AND roll the same
+ * 6-digit suffix to collide.
+ */
+function generateFullOutputId(): string {
+	return `S${Date.now()}${randomInt(100000, 999999)}`;
+}
+
+/**
+ * Strip full stdout/stderr from a check result entry, keeping every other
+ * field (category, working_directory, obligation_id, command, status,
+ * exit_code, duration_ms, stdout_truncated, stderr_truncated, message).
+ */
+function summarizeCheckEntry(
+	entry: Record<string, unknown>,
+): Record<string, unknown> {
+	const { stdout: _stdout, stderr: _stderr, ...rest } = entry;
+	return rest;
+}
+
+/** Return the last maxBytes bytes (UTF-8) of text, or the whole text if shorter. */
+function tailBytes(text: string, maxBytes: number): string {
+	const buf = Buffer.from(text, 'utf8');
+	if (buf.length <= maxBytes) return text;
+	return buf.subarray(buf.length - maxBytes).toString('utf8');
+}
+
+/**
+ * Persist the full (untruncated-by-this-tool) per-check stdout/stderr set to
+ * the existing summary store so it stays retrievable via retrieve_summary
+ * even after the response payload has been bounded. Non-fatal: storage
+ * failure is reported back on the `error` field rather than thrown, so the
+ * caller can fail open toward keeping the rest of the response intact.
+ */
+async function persistFullOutput(
+	directory: string,
+	sessionID: string,
+	checks: ReadonlyArray<Record<string, unknown>>,
+): Promise<{ ref?: string; error?: string }> {
+	const id = generateFullOutputId();
+	const fullOutput = JSON.stringify(checks, null, 2);
+	const summaryText = `Stage A run (session ${sessionID}): full stdout/stderr for ${checks.length} check(s).`;
+	try {
+		await storeSummary(
+			directory,
+			id,
+			fullOutput,
+			summaryText,
+			FULL_OUTPUT_MAX_STORED_BYTES,
+		);
+		return { ref: id };
+	} catch (error) {
+		return {
+			error: `Failed to persist full Stage A output: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
+/**
+ * Build the bounded checks payload: a compact per-check summary (no
+ * stdout/stderr) for every check, plus a bounded stdout/stderr tail on the
+ * LAST check only (the one that triggered this failure() call, when one
+ * ran). Also persists the full per-check output (see persistFullOutput)
+ * and attaches its retrieval id, unless there is nothing to persist.
+ */
+async function buildBoundedChecksPayload(
+	checks: Array<Record<string, unknown>>,
+	directory?: string,
+	sessionID?: string,
+): Promise<{
+	checks: Record<string, unknown>[];
+	fullOutputRef?: string;
+	fullOutputStorageError?: string;
+}> {
+	const persisted =
+		checks.length > 0 && directory && sessionID
+			? await persistFullOutput(directory, sessionID, checks)
+			: undefined;
+	const summaries = checks.map((entry, index) => {
+		const summary = summarizeCheckEntry(entry);
+		if (index === checks.length - 1) {
+			summary.stdout_tail = tailBytes(
+				typeof entry.stdout === 'string' ? entry.stdout : '',
+				FAILING_CHECK_TAIL_BYTES,
+			);
+			summary.stderr_tail = tailBytes(
+				typeof entry.stderr === 'string' ? entry.stderr : '',
+				FAILING_CHECK_TAIL_BYTES,
+			);
+		}
+		return summary;
+	});
+	return {
+		checks: summaries,
+		fullOutputRef: persisted?.ref,
+		fullOutputStorageError: persisted?.error,
+	};
+}
+
+async function failure(
+	message: string,
+	checks: Array<Record<string, unknown>> = [],
+	directory?: string,
+	sessionID?: string,
+): Promise<string> {
+	const bounded = await buildBoundedChecksPayload(checks, directory, sessionID);
+	const payload: Record<string, unknown> = {
+		success: false,
+		message,
+		checks: bounded.checks,
+	};
+	if (bounded.fullOutputRef) {
+		payload.full_output_ref = bounded.fullOutputRef;
+		payload.full_output_retrieval = `Full stdout/stderr for all ${checks.length} check(s) in this run was persisted. Use retrieve_summary with id "${bounded.fullOutputRef}" to read it.`;
+	}
+	if (bounded.fullOutputStorageError) {
+		payload.full_output_storage_error = bounded.fullOutputStorageError;
+	}
+	return JSON.stringify(payload, null, 2);
 }
 
 function isExactDiffCheck(command: readonly string[]): boolean {
@@ -1994,6 +2120,8 @@ export async function executeRunPrFeedbackStageA(
 				return failure(
 					`Stage A Git or content state changed before ${check.category}; restart the complete sequence`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			const started = Date.now();
@@ -2006,6 +2134,8 @@ export async function executeRunPrFeedbackStageA(
 				return failure(
 					`Stage A ${check.category} workspace disappeared before execution`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			let result: Awaited<ReturnType<typeof runExternalTool>>;
@@ -2035,11 +2165,15 @@ export async function executeRunPrFeedbackStageA(
 					return failure(
 						`Stage A ${check.category} threw after mutating content, HEAD, refs, Git config, or index state`,
 						results,
+						directory,
+						context.sessionID,
 					);
 				}
 				return failure(
 					`Stage A ${check.category} execution threw: ${error instanceof Error ? error.message : String(error)}`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			const durationMs = Date.now() - started;
@@ -2073,12 +2207,16 @@ export async function executeRunPrFeedbackStageA(
 				return failure(
 					`Stage A ${check.category} mutated content, HEAD, refs, Git config, or index state`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			if (result.status !== 'completed' || result.exitCode !== 0) {
 				return failure(
 					`Stage A ${check.category} failed (${result.status}, exit ${result.exitCode ?? 'unknown'})`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			if (
@@ -2088,12 +2226,16 @@ export async function executeRunPrFeedbackStageA(
 				return failure(
 					`Stage A repository-contract validator ${check.validator_contract.id} produced no machine-observable evidence`,
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			if (check.category === 'reproduction' && outputReportsZeroTests(result)) {
 				return failure(
 					'Stage A reproduction produced truncated proof or reported that zero tests executed',
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			if (
@@ -2103,6 +2245,8 @@ export async function executeRunPrFeedbackStageA(
 				return failure(
 					'Stage A reproduction produced no machine-observable execution evidence',
 					results,
+					directory,
+					context.sessionID,
 				);
 			}
 			receipts.push({
@@ -2140,6 +2284,8 @@ export async function executeRunPrFeedbackStageA(
 			return failure(
 				'Stage A changed the working-tree revision; rerun all Stage A checks on the resulting diff',
 				results,
+				directory,
+				context.sessionID,
 			);
 		}
 		if (
@@ -2151,6 +2297,8 @@ export async function executeRunPrFeedbackStageA(
 			return failure(
 				'Stage A changed HEAD, refs, Git config, or index state; rerun the complete sequence',
 				results,
+				directory,
+				context.sessionID,
 			);
 		}
 		await recordPrFeedbackStageA(
@@ -2160,16 +2308,27 @@ export async function executeRunPrFeedbackStageA(
 			receipts,
 			{ applicableCategories, applicableObligations },
 		);
-		return JSON.stringify(
-			{
-				success: true,
-				pr_head_sha: parsed.data.pr_head_sha,
-				revision_digest: afterDigest,
-				checks: results,
-			},
-			null,
-			2,
-		);
+		// Success: persist the full per-check stdout/stderr set for retrieval,
+		// but never inline stdout/stderr in the response — nothing failed, so
+		// there is no failure evidence that needs to travel inline.
+		const persistedOnSuccess =
+			results.length > 0 && context.sessionID
+				? await persistFullOutput(directory, context.sessionID, results)
+				: undefined;
+		const successPayload: Record<string, unknown> = {
+			success: true,
+			pr_head_sha: parsed.data.pr_head_sha,
+			revision_digest: afterDigest,
+			checks: results.map(summarizeCheckEntry),
+		};
+		if (persistedOnSuccess?.ref) {
+			successPayload.full_output_ref = persistedOnSuccess.ref;
+			successPayload.full_output_retrieval = `Full stdout/stderr for all ${results.length} check(s) in this successful run was persisted. Use retrieve_summary with id "${persistedOnSuccess.ref}" to read it if needed.`;
+		}
+		if (persistedOnSuccess?.error) {
+			successPayload.full_output_storage_error = persistedOnSuccess.error;
+		}
+		return JSON.stringify(successPayload, null, 2);
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
 	}

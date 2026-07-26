@@ -2445,6 +2445,7 @@ export async function enforcePrWorkflowToolBefore(
 			}
 			throw new Error(
 				'BLOCKED: PR_REVIEW is read-only and fail-closed; only controller tools and positively classified observation tools are allowed, and every agent lane requires structured dispatch_lanes_async' +
+					describePrWorkflowControllerToolNames(state.mode) +
 					blockedShellDiagnosis,
 			);
 		}
@@ -2988,6 +2989,26 @@ function isPrWorkflowControllerTool(
 		: PR_FEEDBACK_CONTROLLER_TOOLS.has(toolName);
 }
 
+/**
+ * Bounded, append-only recovery pointer (S1.5) naming the allowed controller
+ * tools for the active mode, so a blocked agent finds the allowlist directly
+ * instead of discovering it by retry-and-fail churn. Sourced from the same
+ * `PR_WORKFLOW_SHARED_CONTROLLER_TOOLS` / `PR_REVIEW_CONTROLLER_TOOLS` /
+ * `PR_FEEDBACK_CONTROLLER_TOOLS` sets the classifier itself checks — never a
+ * duplicated list — and sorted for deterministic output. Pure string builder;
+ * it never authorizes anything.
+ */
+function describePrWorkflowControllerToolNames(mode: PrWorkflowMode): string {
+	const modeTools =
+		mode === 'PR_REVIEW'
+			? PR_REVIEW_CONTROLLER_TOOLS
+			: PR_FEEDBACK_CONTROLLER_TOOLS;
+	const names = [...PR_WORKFLOW_SHARED_CONTROLLER_TOOLS, ...modeTools].sort(
+		(a, b) => a.localeCompare(b),
+	);
+	return ` Allowed controller tools for ${mode}: ${names.join(', ')}. Observe current state read-only with the pr_workflow_status tool.`;
+}
+
 const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
 	'ast_grep_search',
 	'codesearch',
@@ -3370,6 +3391,18 @@ function isAllowedPrWorkflowGitIntake(
 	// still admit its own narrow shape.
 	if (isAllowedReadOnlyGitBranchListing(gitArgs)) return true;
 
+	// `git stash list` is a pure read (issue S1.6): the recovery instruction in
+	// prepare-pr-workflow-checkout.ts hands the model `git stash apply --index
+	// <oid>` but gives it no allowed way to enumerate or confirm that OID first.
+	// Every mutating stash subcommand (push/pop/apply/drop/clear/save/create/
+	// store/branch) and the bare `git stash` (which implicitly pushes) fall
+	// through to reject.
+	if (isAllowedReadOnlyGitStashListing(gitArgs)) return true;
+
+	// `git worktree list` is a pure read. add/remove/move/prune/lock/unlock/
+	// repair all fall through to reject.
+	if (isAllowedReadOnlyGitWorktreeListing(gitArgs)) return true;
+
 	if (options.allowFetch && /^fetch(?:\s|$)/i.test(gitArgs)) return true;
 	if (
 		options.allowTrackingFetch &&
@@ -3478,6 +3511,46 @@ function isAllowedReadOnlyGitBranchListing(gitArgs: string): boolean {
 		// closed. A bare positional is only ever the selector's argument.
 		if (token.startsWith('-')) return false;
 		if (!listingSelectorInEffect) return false;
+	}
+	return true;
+}
+
+/**
+ * Admit `git stash list` ONLY. Fail-closed: the bare verb `stash` (which
+ * implicitly runs `stash push`) is rejected, every mutating subcommand
+ * (`push`, `pop`, `apply`, `drop`, `clear`, `save`, `create`, `store`,
+ * `branch`) is rejected, and any token after `list` must be a recognized
+ * read-only log/format flag — an unrecognized flag or any positional
+ * (e.g. a stash ref for `apply`/`show`) falls through to a reject.
+ */
+function isAllowedReadOnlyGitStashListing(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length < 2 || tokens[0].toLowerCase() !== 'stash') return false;
+	if (tokens[1].toLowerCase() !== 'list') return false;
+	for (let index = 2; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (/^(?:-v|--oneline|--patch|-p|--stat|--color|--no-color)$/i.test(token))
+			continue;
+		if (/^--(?:format|pretty)=/i.test(token)) continue;
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Admit `git worktree list` ONLY. Fail-closed: the bare verb `worktree` and
+ * every mutating subcommand (`add`, `remove`, `move`, `prune`, `lock`,
+ * `unlock`, `repair`) are rejected, and any token after `list` must be a
+ * recognized read-only listing flag.
+ */
+function isAllowedReadOnlyGitWorktreeListing(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length < 2 || tokens[0].toLowerCase() !== 'worktree') return false;
+	if (tokens[1].toLowerCase() !== 'list') return false;
+	for (let index = 2; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (/^(?:-v|--verbose|--porcelain|-z)$/i.test(token)) continue;
+		return false;
 	}
 	return true;
 }
