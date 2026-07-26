@@ -31,6 +31,7 @@ import {
 	takeSnapshotEvent,
 } from '../plan/ledger';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
+import { computeParallelVerdict } from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
 import {
 	canonicalWorkspaceIdentity,
@@ -1614,6 +1615,15 @@ async function buildParallelExecutionGuidance(
 	const tasks = currentPhase.tasks;
 	if (tasks.length === 0) return null;
 
+	// #1674 v8 AUTOMATIC FALLBACK message: when parallelization is enabled but
+	// the active phase's pending tasks are NOT provably file-disjoint, the gate
+	// forces serial. Tell the architect exactly what happened and how to
+	// inspect the conflict matrix, so it is never left guessing why parallel
+	// dispatch was blocked.
+	if (!scopeVerdictAllowsParallel(directory, plan)) {
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; the active phase's pending tasks are NOT provably file-disjoint (overlapping or unknown declared scopes) — SERIAL fallback active (v8 automatic safety). Run plan_conflict_check on the pending tasks to inspect the conflict matrix and a suggested serialization order, or proceed serially (one coder at a time).`;
+	}
+
 	const completed = new Set<string>();
 	for (const task of allTasks) {
 		const taskId = task.id;
@@ -1664,6 +1674,48 @@ function isParallelGuidancePhaseComplete(phase: Phase): boolean {
 		phase.status === 'completed' ||
 		phase.status === 'closed'
 	);
+}
+
+/**
+ * #1674 v8: collect the pending-task ids of the active phase, mirroring
+ * `buildParallelExecutionGuidance`'s `currentPhase` selection EXACTLY
+ * (`plan.current_phase` first, else the first non-complete phase). The
+ * execution gate uses this to compute the parallel/serial verdict over the
+ * same task set the advisory guidance references, so the two never disagree.
+ *
+ * Returns `[]` when there is no active phase or no pending tasks in it.
+ */
+function collectPendingTaskIdsForActivePhase(plan: Plan): string[] {
+	const currentPhase =
+		plan.current_phase !== undefined
+			? plan.phases.find((phase) => phase.id === plan.current_phase)
+			: plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+	if (!currentPhase) return [];
+	return currentPhase.tasks
+		.filter((t) => t.status === 'pending')
+		.map((t) => t.id);
+}
+
+/**
+ * #1674 v8: compute whether the active phase's pending tasks are provably
+ * file-disjoint. This is the AUTOMATIC fallback that enforces acceptance
+ * criterion 4 (overlapping/unknown scopes → serial by default). Fail-safe:
+ * any error → false (serial). Pure + bounded — the gate calls this inline
+ * in `toolBefore` on every coder dispatch.
+ */
+function scopeVerdictAllowsParallel(directory: string, plan: Plan): boolean {
+	try {
+		const pendingTaskIds = collectPendingTaskIdsForActivePhase(plan);
+		if (pendingTaskIds.length < 2) return false; // nothing to parallelize
+		return (
+			computeParallelVerdict(directory, pendingTaskIds).verdict ===
+			'all_disjoint'
+		);
+	} catch {
+		// Fail-safe serial: a verdict-computation failure must never permit
+		// parallel dispatch on potentially-overlapping scopes.
+		return false;
+	}
 }
 
 /**
@@ -2393,12 +2445,20 @@ export function createDelegationGateHook(
 		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =
 			session.maxConcurrencyOverride ?? maxConcurrent;
+		// #1674 v8 AUTOMATIC FALLBACK (acceptance criterion 4): parallel mode
+		// additionally requires the active phase's pending tasks to be PROVABLY
+		// file-disjoint. The gate computes the verdict inline via the same pure
+		// helper the architect's `plan_conflict_check` tool uses; conflicts or
+		// unknown scopes → serial by default, with no architect discretion.
+		const scopeAllowsParallel = scopeVerdictAllowsParallel(directory, plan);
 		// Parallel mode is active only when the plan enables it, allows >1 concurrent
-		// task, and Lean Turbo is not driving its own lane execution.
+		// task, Lean Turbo is not driving its own lane execution, AND the pending
+		// tasks are provably disjoint.
 		const parallelModeActive =
 			parallelEnabled &&
 			effectiveMaxConcurrent > 1 &&
-			!hasActiveLeanTurbo(input.sessionID);
+			!hasActiveLeanTurbo(input.sessionID) &&
+			scopeAllowsParallel;
 		await assertPlanCriticApprovedForExecution(directory, plan);
 		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
 		const correlatedBinding = preparedScope.binding;

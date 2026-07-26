@@ -679,6 +679,27 @@ export async function executeSavePlan(
 		resolvedProfile = parsed.data;
 	}
 
+	// Step 3.1 (v8 / #1674): new-plan-only parallelization default.
+	// When the resolved profile is still undefined at this point — i.e. this is
+	// a NEW plan (no existing profile preserved, no explicit incoming profile) —
+	// apply the v8 default: `parallelization_enabled: true`. This is the ONLY
+	// place the v8 default is injected. Existing plans are loaded via
+	// `PlanSchema.parse` (parsePlanJsonCached), whose schema default STAYS
+	// `false`, so upgrading opencode-swarm never flips an existing plan's
+	// behavior. A revision of a profile-less existing plan also reaches this
+	// branch (effectively-new; documented in the release fragment).
+	//
+	// The default applies only to `parallelization_enabled`; the other profile
+	// fields keep their schema defaults (max_concurrent_tasks: 10, etc.). The
+	// execution gate independently enforces serial when the plan's pending tasks
+	// are not provably file-disjoint (see delegation-gate.ts).
+	if (resolvedProfile === undefined) {
+		resolvedProfile = {
+			...ExecutionProfileSchema.parse({}),
+			parallelization_enabled: true,
+		};
+	}
+
 	// Step 3.5: Task-removal acknowledgement (issue #853).
 	// Detect tasks present in the prior plan but absent from the new args.phases.
 	// Reject the save unless the caller explicitly acknowledged each missing id

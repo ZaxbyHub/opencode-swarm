@@ -1466,6 +1466,8 @@ Wait for the user to answer all four in a single reply. Then apply:
 \`\`\`
 If the user accepts the default (1), skip writing this section entirely — serial execution is the default and needs no config.
 
+NOTE (v8 / #1674): new plans now default to \`parallelization_enabled: true\` at save_plan time, but the execution gate ENFORCES serial automatically whenever the active phase's pending tasks are not provably file-disjoint (overlapping or unknown declared scopes). Run \`plan_conflict_check\` on the pending tasks to inspect the conflict matrix and confirm disjointness before relying on parallel dispatch; the gate independently recomputes the same verdict inline at dispatch time.
+
 - For commit frequency: if the user chooses per-task commits, write this section to \`.swarm/context.md\`:
 \`\`\`
 ## Task Completion Commit Policy

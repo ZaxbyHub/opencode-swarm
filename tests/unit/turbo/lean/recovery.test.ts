@@ -1,0 +1,196 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { RecoveryRecord } from '../../../../src/turbo/lean/recovery.js';
+import {
+	clearRecoveryRecord,
+	hasRecoveryRecordForBranch,
+	listRecoveryRecords,
+	recoveryReadErrored,
+	writeRecoveryRecord,
+} from '../../../../src/turbo/lean/recovery.js';
+
+let tempDir: string;
+let swarmDir: string;
+
+beforeEach(() => {
+	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recovery-test-'));
+	swarmDir = path.join(tempDir, '.swarm');
+	fs.mkdirSync(swarmDir, { recursive: true });
+});
+
+afterEach(() => {
+	try {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	} catch {
+		// Ignore cleanup errors
+	}
+});
+
+function baseRecord(
+	overrides: Partial<RecoveryRecord> = {},
+): Omit<RecoveryRecord, 'recordedAt'> {
+	return {
+		laneId: 'lane-1',
+		sessionId: 'sess-abc',
+		branchName: 'swarm-lane/sess-abc/lane-1',
+		worktreePath: path.join(tempDir, 'wt-lane-1'),
+		status: 'conflict',
+		reason: 'merge conflict on src/shared.ts',
+		conflictFiles: ['src/shared.ts'],
+		replayHint: `cd ${path.join(tempDir, 'wt-lane-1')} && git status`,
+		...overrides,
+	};
+}
+
+describe('writeRecoveryRecord', () => {
+	test('writes a record atomically and reads it back', () => {
+		writeRecoveryRecord(tempDir, baseRecord());
+
+		const records = listRecoveryRecords(tempDir);
+		expect(records).toHaveLength(1);
+		expect(records[0].laneId).toBe('lane-1');
+		expect(records[0].sessionId).toBe('sess-abc');
+		expect(records[0].branchName).toBe('swarm-lane/sess-abc/lane-1');
+		expect(records[0].status).toBe('conflict');
+		expect(records[0].conflictFiles).toEqual(['src/shared.ts']);
+		expect(typeof records[0].recordedAt).toBe('number');
+		expect(records[0].recordedAt).toBeLessThanOrEqual(Date.now());
+	});
+
+	test('overwrites (not accumulates) when same session+lane written twice', () => {
+		writeRecoveryRecord(tempDir, baseRecord({ reason: 'first failure' }));
+		writeRecoveryRecord(tempDir, baseRecord({ reason: 'second failure' }));
+
+		const records = listRecoveryRecords(tempDir);
+		expect(records).toHaveLength(1);
+		expect(records[0].reason).toBe('second failure');
+	});
+
+	test('records for different sessions/lanes coexist', () => {
+		writeRecoveryRecord(tempDir, baseRecord({ laneId: 'lane-1' }));
+		writeRecoveryRecord(
+			tempDir,
+			baseRecord({ laneId: 'lane-2', sessionId: 'sess-xyz' }),
+		);
+
+		const records = listRecoveryRecords(tempDir);
+		expect(records).toHaveLength(2);
+	});
+
+	test('never throws on write failure (best-effort, non-fatal)', () => {
+		// Point directory at a path that cannot be created (file in the way).
+		fs.writeFileSync(path.join(swarmDir, 'recovery'), 'blocker', 'utf-8');
+		expect(() => writeRecoveryRecord(tempDir, baseRecord())).not.toThrow();
+	});
+});
+
+describe('listRecoveryRecords — tolerance', () => {
+	test('returns [] when recovery dir absent', () => {
+		fs.rmSync(path.join(swarmDir), { recursive: true, force: true });
+		expect(listRecoveryRecords(tempDir)).toEqual([]);
+	});
+
+	test('skips malformed record files (continues, returns valid ones)', () => {
+		writeRecoveryRecord(tempDir, baseRecord({ laneId: 'good' }));
+		// Write a malformed record alongside the good one.
+		fs.writeFileSync(
+			path.join(swarmDir, 'recovery', 'sess-bad-bad.json'),
+			'not valid json {',
+			'utf-8',
+		);
+		// And a record with valid JSON but missing required fields.
+		fs.writeFileSync(
+			path.join(swarmDir, 'recovery', 'sess-shape-shape.json'),
+			JSON.stringify({ foo: 'bar' }),
+			'utf-8',
+		);
+		// And a non-json file that should be ignored entirely.
+		fs.writeFileSync(
+			path.join(swarmDir, 'recovery', 'notes.txt'),
+			'ignore me',
+			'utf-8',
+		);
+
+		const records = listRecoveryRecords(tempDir);
+		expect(records).toHaveLength(1);
+		expect(records[0].laneId).toBe('good');
+	});
+});
+
+describe('hasRecoveryRecordForBranch', () => {
+	test('true when a record references the branch', () => {
+		writeRecoveryRecord(tempDir, baseRecord());
+		expect(
+			hasRecoveryRecordForBranch(tempDir, 'swarm-lane/sess-abc/lane-1'),
+		).toBe(true);
+	});
+
+	test('false when no record references the branch', () => {
+		writeRecoveryRecord(tempDir, baseRecord());
+		expect(
+			hasRecoveryRecordForBranch(tempDir, 'swarm-lane/sess-abc/lane-9'),
+		).toBe(false);
+	});
+
+	test('false when recovery dir absent', () => {
+		fs.rmSync(path.join(swarmDir), { recursive: true, force: true });
+		expect(hasRecoveryRecordForBranch(tempDir, 'any')).toBe(false);
+	});
+});
+
+describe('clearRecoveryRecord', () => {
+	test('removes the record for the given session+lane', () => {
+		writeRecoveryRecord(tempDir, baseRecord({ laneId: 'lane-1' }));
+		writeRecoveryRecord(
+			tempDir,
+			baseRecord({ laneId: 'lane-2', sessionId: 'sess-xyz' }),
+		);
+
+		clearRecoveryRecord(tempDir, 'lane-1', 'sess-abc');
+
+		const records = listRecoveryRecords(tempDir);
+		expect(records).toHaveLength(1);
+		expect(records[0].laneId).toBe('lane-2');
+	});
+
+	test('no-op when record absent (never throws)', () => {
+		expect(() =>
+			clearRecoveryRecord(tempDir, 'nonexistent', 'sess-none'),
+		).not.toThrow();
+	});
+});
+
+describe('recoveryReadErrored', () => {
+	test('false when recovery dir absent (no error — just empty)', () => {
+		fs.rmSync(path.join(swarmDir), { recursive: true, force: true });
+		expect(recoveryReadErrored(tempDir)).toBe(false);
+	});
+
+	test('false when dir present and all records parse', () => {
+		writeRecoveryRecord(tempDir, baseRecord());
+		expect(recoveryReadErrored(tempDir)).toBe(false);
+	});
+
+	test('true when a record file is unreadable/corrupt', () => {
+		writeRecoveryRecord(tempDir, baseRecord());
+		fs.writeFileSync(
+			path.join(swarmDir, 'recovery', 'corrupt.json'),
+			'not valid json {',
+			'utf-8',
+		);
+		expect(recoveryReadErrored(tempDir)).toBe(true);
+	});
+});
+
+describe('auto-clear contract (used by runner on successful merge-back)', () => {
+	test('a record exists only until clearRecoveryRecord is called for its lane', () => {
+		// Simulate the runner lifecycle: failure → record; recovery → clear.
+		writeRecoveryRecord(tempDir, baseRecord({ laneId: 'lane-1' }));
+		expect(listRecoveryRecords(tempDir)).toHaveLength(1);
+
+		clearRecoveryRecord(tempDir, 'lane-1', 'sess-abc');
+		expect(listRecoveryRecords(tempDir)).toEqual([]);
+	});
+});

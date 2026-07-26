@@ -82,6 +82,10 @@ async function writeAdvisoryFile(
 	cleanupResult: {
 		removed: string[];
 		skipped: string[];
+		/** #1657: lane branches skipped due to an unresolved recovery record. */
+		skippedRecoveryBranches?: string[];
+		/** #1657: set when recovery-dir read errored and all deletions were skipped. */
+		recoveryReadError?: boolean;
 		errors: Array<{ branch: string; error: string }>;
 	},
 	warnings: string[],
@@ -103,6 +107,20 @@ async function writeAdvisoryFile(
 			removedWorktrees,
 			prunedWorktrees: attempted,
 		},
+		// #1657: surface preserved recovery branches + fail-safe state so a
+		// human reading the advisory knows why cleanup skipped them.
+		...(cleanupResult.skippedRecoveryBranches &&
+		cleanupResult.skippedRecoveryBranches.length > 0
+			? {
+					preservedRecoveryBranches: cleanupResult.skippedRecoveryBranches,
+				}
+			: {}),
+		...(cleanupResult.recoveryReadError
+			? {
+					recoveryReadError: true,
+					note: 'skipped all lane-branch deletions this pass because .swarm/recovery/ was unreadable (fail-safe)',
+				}
+			: {}),
 	};
 	try {
 		await fsPromises.mkdir(path.dirname(advisoryPath), { recursive: true });
@@ -298,7 +316,12 @@ export async function runInitOrphanRecovery(
 			// Write advisory file (best-effort)
 			await writeAdvisoryFile(
 				directory,
-				{ removed: [], skipped: orphanedBranches, errors: [] },
+				{
+					removed: [],
+					skipped: orphanedBranches,
+					skippedRecoveryBranches: [],
+					errors: [],
+				},
 				result.warnings,
 				false,
 				[],
@@ -342,7 +365,7 @@ export async function runInitOrphanRecovery(
 
 			await writeAdvisoryFile(
 				directory,
-				{ removed: [], skipped: [], errors: [] },
+				{ removed: [], skipped: [], skippedRecoveryBranches: [], errors: [] },
 				result.warnings,
 				false,
 				[],
@@ -433,7 +456,7 @@ export async function runInitOrphanRecovery(
 		// On error, write advisory with empty state so session-start still gets a notification
 		await writeAdvisoryFile(
 			directory,
-			{ removed: [], skipped: [], errors: [] },
+			{ removed: [], skipped: [], skippedRecoveryBranches: [], errors: [] },
 			result.warnings,
 			false,
 			[],

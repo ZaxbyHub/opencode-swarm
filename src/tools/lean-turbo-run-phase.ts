@@ -9,6 +9,7 @@ import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../
 import { swarmState } from '../state';
 import type { LaneResult, MergeBackFailureInfo } from '../turbo/lean/runner';
 import { LeanTurboRunner as LeanTurboRunner_import } from '../turbo/lean/runner';
+import type { LeanTurboDegradedTask } from '../turbo/lean/state';
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
@@ -28,6 +29,12 @@ export interface LeanTurboRunPhaseResult {
 	success: boolean;
 	lanes?: LaneResult[];
 	degradedTasks?: string[];
+	/**
+	 * #1657: full degraded-task details (reason/files/requiredMode), additive
+	 * alongside `degradedTasks`. Lets the architect see per-task degradation
+	 * reasons in the tool result without reading /swarm status separately.
+	 */
+	degradedDetails?: LeanTurboDegradedTask[];
 	serializedTasks?: string[];
 	mergeBackFailures?: MergeBackFailureInfo[];
 	reason?: string;
@@ -57,6 +64,7 @@ export async function executeLeanTurboRunPhase(
 		ok: boolean;
 		lanes?: LaneResult[];
 		degradedTasks?: string[];
+		degradedDetails?: LeanTurboDegradedTask[];
 		serializedTasks?: string[];
 		mergeBackFailures?: MergeBackFailureInfo[];
 		reason?: string;
@@ -112,6 +120,8 @@ export async function executeLeanTurboRunPhase(
 		success: runResult!.ok,
 		lanes: runResult!.lanes,
 		degradedTasks: runResult!.degradedTasks,
+		// #1657: pass through full degraded-task details (reason/files/requiredMode).
+		degradedDetails: runResult!.degradedDetails,
 		serializedTasks: runResult!.serializedTasks,
 		mergeBackFailures: runResult!.mergeBackFailures,
 		reason: runResult!.reason,

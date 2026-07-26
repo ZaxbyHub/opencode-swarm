@@ -12,7 +12,11 @@ import {
 	ensureAgentSession,
 	resetSwarmState,
 } from '../../../src/state';
-import { makeConfig, makeMessages } from './_delegation-gate-helpers';
+import {
+	makeConfig,
+	makeMessages,
+	writeDisjointScopes,
+} from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -32,6 +36,13 @@ function writePlanJson(
 			phase?: number;
 		}>;
 		currentPhase?: number;
+		/**
+		 * #1674 v8: when true (default), write disjoint declared scope files
+		 * for every task so the parallel-execution gate's inline verdict
+		 * computes `all_disjoint` and permits parallel dispatch. Set false for
+		 * tests that intentionally exercise overlapping/unknown scopes.
+		 */
+		writeDisjointScopes?: boolean;
 	},
 ): void {
 	const phase = options.currentPhase ?? 1;
@@ -68,6 +79,15 @@ function writePlanJson(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify(plan, null, 2),
 	);
+	// v8: by default, give every task a disjoint declared scope so the gate's
+	// inline disjointness verdict permits parallel dispatch for these fixtures.
+	// Tests that want overlapping/unknown scopes pass `writeDisjointScopes: false`.
+	if (options.writeDisjointScopes !== false) {
+		writeDisjointScopes(
+			dir,
+			tasks.map((t) => t.id),
+		);
+	}
 }
 
 describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance', () => {
@@ -304,6 +324,9 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(plan, null, 2),
 		);
+		// v8: give phase-2 pending tasks disjoint scopes so the gate permits
+		// parallel dispatch for this cross-phase-occupancy fixture.
+		writeDisjointScopes(tempDir, ['2.1', '2.2']);
 
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const messages = makeMessages('TASK: Continue work', 'architect');
@@ -380,6 +403,9 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(plan, null, 2),
 		);
+		// v8: give phase-2 pending tasks disjoint scopes so the gate permits
+		// parallel dispatch for this completed-dependency-eligibility fixture.
+		writeDisjointScopes(tempDir, ['2.1', '2.2']);
 
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const messages = makeMessages('TASK: Continue work', 'architect');

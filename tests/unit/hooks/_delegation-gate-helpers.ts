@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -124,4 +126,36 @@ export function getPrimaryText(messages: {
 	}
 	// Fallback to first message if no user message found
 	return messages.messages[0]?.parts?.[0]?.text ?? '';
+}
+
+/**
+ * #1674 v8: write disjoint declared scope files (`.swarm/scopes/scope-<id>.json`)
+ * for the given task ids so the parallel-execution gate's inline verdict
+ * computes `all_disjoint` and permits parallel dispatch.
+ *
+ * Before v8 the gate enabled parallel mode purely on `parallelization_enabled
+ * === true && max_concurrent_tasks > 1`. v8 adds an inline `computeParallelVerdict`
+ * check that requires pending tasks to be PROVABLY file-disjoint (overlapping or
+ * unknown scopes → SERIAL fallback, automatically). Tests that assert parallel
+ * guidance/`parallelModeActive === true` must therefore provide disjoint scopes
+ * — this helper makes that intent explicit and keeps the gate logic intact.
+ *
+ * Each task gets a single unique file (`src/<id-sanitized>.ts`) so any two tasks
+ * are path-disjoint by construction.
+ */
+export function writeDisjointScopes(dir: string, taskIds: string[]): void {
+	const scopesDir = path.join(dir, '.swarm', 'scopes');
+	fs.mkdirSync(scopesDir, { recursive: true });
+	for (const id of taskIds) {
+		const safe = id.replace(/[^a-zA-Z0-9._-]/g, '_');
+		fs.writeFileSync(
+			path.join(scopesDir, `scope-${id}.json`),
+			JSON.stringify({
+				taskId: id,
+				files: [`src/${safe}.ts`],
+				declaredAt: '2024-01-01T00:00:00.000Z',
+			}),
+			'utf-8',
+		);
+	}
 }

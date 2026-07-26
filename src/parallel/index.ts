@@ -5,15 +5,6 @@ export {
 } from '../evidence/lock.js';
 
 export {
-	type DependencyGraph,
-	getDependencyChain,
-	getExecutionOrder,
-	getRunnableTasks,
-	isTaskBlocked,
-	parseDependencyGraph,
-	type TaskNode,
-} from './dependency-graph.js';
-export {
 	cleanupExpiredLocks,
 	type FileLock,
 	isLocked,
@@ -21,13 +12,6 @@ export {
 	releaseLock,
 	tryAcquireLock,
 } from './file-locks.js';
-export {
-	extractMetaSummaries,
-	getLatestTaskSummary,
-	indexMetaSummaries,
-	type MetaSummaryEntry,
-	querySummaries,
-} from './meta-indexer.js';
 export {
 	type ComplexityMetrics,
 	computeComplexity,

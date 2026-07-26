@@ -11,6 +11,10 @@
  */
 
 import { advisoryWarn } from '../services/warning-buffer';
+import {
+	hasRecoveryRecordForBranch,
+	recoveryReadErrored,
+} from '../turbo/lean/recovery';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
@@ -192,6 +196,11 @@ export interface OrphanCleanupResult {
 	removed: string[];
 	skipped: string[];
 	errors: Array<{ branch: string; error: string }>;
+	/** #1657: lane branches skipped because a recovery record references them. */
+	skippedRecoveryBranches: string[];
+	/** #1657: set when the recovery-directory read errored and ALL lane-branch
+	 * deletions were skipped this pass (fail-safe). */
+	recoveryReadError?: boolean;
 }
 
 export interface StartupRecoveryResult {
@@ -574,7 +583,29 @@ export async function cleanupOrphanedBranches(
 ): Promise<OrphanCleanupResult> {
 	const removed: string[] = [];
 	const skipped: string[] = [];
+	const skippedRecoveryBranches: string[] = [];
 	const errors: Array<{ branch: string; error: string }> = [];
+
+	// #1657 fail-safe: if the recovery directory exists but is unreadable, we
+	// cannot tell which branches are preserved for manual recovery. Skip ALL
+	// lane-branch deletions this pass (recovery safety trumps orphan
+	// cleanliness). The caller's advisory surfaces this; repairing
+	// `.swarm/recovery/` (clearing corrupt records) restores normal cleanup.
+	const recoveryReadError = recoveryReadErrored(directory);
+	if (recoveryReadError) {
+		log(
+			'[worktree] cleanupOrphanedBranches: .swarm/recovery/ read error — skipping all ' +
+				'lane-branch deletions this pass (fail-safe for preserved recovery branches).',
+		);
+		const branches = await listLaneBranches(directory);
+		return {
+			removed,
+			skipped: branches,
+			skippedRecoveryBranches,
+			errors,
+			recoveryReadError: true,
+		};
+	}
 
 	const branches = await listLaneBranches(directory);
 
@@ -583,6 +614,15 @@ export async function cleanupOrphanedBranches(
 
 		if (sessionId !== null && activeSessionIds.includes(sessionId)) {
 			skipped.push(branch);
+			continue;
+		}
+
+		// #1657: exempt branches with an unresolved recovery record — these are
+		// preserved for manual recovery and must not be force-deleted by routine
+		// orphan cleanup. (A record is auto-cleared on successful merge-back, so
+		// this exemption ends when the lane recovers.)
+		if (hasRecoveryRecordForBranch(directory, branch)) {
+			skippedRecoveryBranches.push(branch);
 			continue;
 		}
 
@@ -602,7 +642,12 @@ export async function cleanupOrphanedBranches(
 	// Prune stale worktree metadata after cleanup
 	await runGit(['worktree', 'prune'], directory);
 
-	return { removed, skipped, errors };
+	return {
+		removed,
+		skipped,
+		skippedRecoveryBranches,
+		errors,
+	};
 }
 
 /**
