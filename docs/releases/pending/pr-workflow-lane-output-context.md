@@ -36,17 +36,26 @@ Fixes compaction loops and re-dispatch cycles during `/swarm pr-review` and `/sw
 
 - **Stage A payloads bounded in both directions.** `run_pr_feedback_stage_a`
   returned every executed check's full stdout and stderr (up to 64 KB each, up to
-  258 checks) on BOTH success and failure. Full output is now persisted first and
-  retrievable by reference; the response carries per-check summaries plus a bounded
-  tail of the failing check only.
+  258 checks) on BOTH success and failure. Both responses now carry per-check
+  summaries (category, command, exit code, duration) instead of inline output.
+  On failure, the full output is persisted first and the response adds a bounded
+  tail of the failing check plus a `full_output_ref` for retrieval via
+  `retrieve_summary`; if that write fails, the failing check's complete
+  stdout/stderr is inlined instead so evidence is never lost. A successful run
+  persists nothing and returns no reference — there is no failure evidence to
+  recover, and `.swarm/summaries/` has no directory-level eviction, so writing
+  passing build and lint output on every feedback iteration would grow it
+  without bound.
 
 - **Argument-validation errors bounded.** `dispatch_lanes`, `dispatch_lanes_async`,
   and `collect_lane_results` now cap validation-error lists at 20 entries followed
   by `"... and N more"`, preventing uncapped error bloat from malformed payloads.
 
 - **Freed-token accounting clamped non-negative.** Context-budget masking now
-  clamps per-message freed-token deltas to zero, so a placeholder that ends up
-  longer than the text it replaced can no longer incorrectly inflate the freed count.
+  clamps per-message freed-token deltas to zero. Previously a placeholder longer
+  than the text it replaced produced a negative delta, and because the caller
+  subtracts the freed total from the running count, that negative silently
+  *increased* the tracked context usage.
 
 - **Two read-only git commands admitted.** `git stash list` and `git worktree list`
   are now allowed during PR workflows. Mutating stash/worktree forms remain
@@ -74,11 +83,10 @@ what the gate DELIVERS to the model, not what it permits.
 
 No migration required. The changes are transparent to existing lane-dispatch and
 feedback workflows; lane output recovery now works without re-dispatch loops,
-and Stage A responses stay bounded regardless of how many checks run, with
-full output still preserved and retrievable by reference. Stage A does not run
-faster — it now also persists a summary per run and awaits that write before
-returning, which is a small added cost in exchange for bounded, recoverable
-output.
+and Stage A responses stay bounded regardless of how many checks run. Stage A is
+not made faster by this change: a failing run now persists the full output and
+awaits that write before returning, a small added cost in exchange for bounded,
+recoverable evidence. A successful run performs no such write.
 
 ## Related issues
 
