@@ -124,7 +124,7 @@ describe('review diff source - regression: canonical root aliases', () => {
 		let rootResolutions = 0;
 		diffSourceInternals.realpathSync = ((candidate, ...rest) => {
 			const canonical = originalRealpathSync(candidate, ...rest);
-			if (path.resolve(String(candidate)) === path.resolve(directory)) {
+			if (canonical === directory) {
 				rootResolutions++;
 				if (rootResolutions === 2) return alias;
 			}
