@@ -134,7 +134,14 @@ describe('recoveryHint via tool-output masking', () => {
 		expect(masked).not.toContain('retrieve_lane_output');
 	});
 
-	test('multiple distinct lane refs are capped at 3 in the hint', async () => {
+	// R7 fix (src/hooks/context-budget.ts, finding R7): recoveryHint now caps
+	// to ONE ref, not three. Each `L1:` ref is ~197 chars; including up to
+	// three could add ~600 chars to a placeholder replacing a short tool
+	// result, driving the computed freedTokens negative. One ref is enough
+	// for the model to recover the lane payload. Test name and expectations
+	// updated from "capped at 3" to "capped at 1" to match; no other
+	// assertion in this file changed or weakened.
+	test('multiple distinct lane refs are capped at 1 in the hint', async () => {
 		const handler = createContextBudgetHandler(makeMaskingConfig());
 		const refA = laneRef('a');
 		const refB = laneRef('b');
@@ -177,7 +184,9 @@ describe('recoveryHint via tool-output masking', () => {
 		);
 		expect(hintMatch).toBeDefined();
 		const refsListed = hintMatch![1].split(', ');
-		expect(refsListed).toEqual([refA, refB, refC]);
+		expect(refsListed).toEqual([refA]);
+		expect(refsListed).not.toContain(refB);
+		expect(refsListed).not.toContain(refC);
 		expect(refsListed).not.toContain(refD);
 	});
 });

@@ -66,7 +66,11 @@ what the gate DELIVERS to the model, not what it permits.
 
 No migration required. The changes are transparent to existing lane-dispatch and
 feedback workflows; lane output recovery now works without re-dispatch loops,
-and Stage A runs complete faster.
+and Stage A responses stay bounded regardless of how many checks run, with
+full output still preserved and retrievable by reference. Stage A does not run
+faster — it now also persists a summary per run and awaits that write before
+returning, which is a small added cost in exchange for bounded, recoverable
+output.
 
 ## Related issues
 

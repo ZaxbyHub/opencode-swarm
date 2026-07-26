@@ -28,7 +28,11 @@ import {
 	loadPluginConfigWithMetaAsync,
 } from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
-import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
+import {
+	DEFAULT_MODELS,
+	ORCHESTRATOR_NAME,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
+} from './config/constants';
 import { resolveWorktreeIsolationConfig } from './config/index.js';
 import {
 	writeProjectConfigIfNew,
@@ -334,6 +338,32 @@ export function schedulePostResolutionTasksForTest(
 	tasks: readonly PostResolutionTask[],
 ): void {
 	schedulePostResolutionTasks(tasks);
+}
+
+/**
+ * Compute the effective set of tools eligible for line-based truncation.
+ *
+ * SUMMARIZER_EXEMPT_TOOL_NAMES is applied as an unconditional floor
+ * subtraction against BOTH the default allowlist and any operator-configured
+ * `tool_output.truncation_tools` override (finding R6). Line-truncating a
+ * lane/retrieval tool's payload destroys the `output_ref` rows a caller needs
+ * to recover the full content — the same unrecoverable-payload defect class
+ * the summarizer/context-budget floor already guards against — so operator
+ * config must never be able to reintroduce it via this separate rewriting
+ * layer.
+ */
+export function computeEffectiveTruncatableTools(
+	defaultTools: ReadonlySet<string>,
+	configuredTools: readonly string[] | undefined,
+): Set<string> {
+	const effective =
+		configuredTools && configuredTools.length > 0
+			? new Set(configuredTools)
+			: new Set(defaultTools);
+	for (const exempt of SUMMARIZER_EXEMPT_TOOL_NAMES) {
+		effective.delete(exempt);
+	}
+	return effective;
 }
 
 const OpenCodeSwarm: Plugin = async (ctx) => {
@@ -2875,10 +2905,10 @@ async function initializeOpenCodeSwarm(
 						'schema_drift',
 					]);
 					const configuredTools = toolOutputConfig.truncation_tools;
-					const truncatableTools =
-						configuredTools && configuredTools.length > 0
-							? new Set(configuredTools)
-							: defaultTruncatableTools;
+					const truncatableTools = computeEffectiveTruncatableTools(
+						defaultTruncatableTools,
+						configuredTools,
+					);
 					const maxLines =
 						toolOutputConfig.per_tool?.[input.tool] ??
 						toolOutputConfig.max_lines ??

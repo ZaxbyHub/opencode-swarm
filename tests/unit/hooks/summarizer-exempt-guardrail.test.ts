@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../../../src/config/constants';
 import type { SummaryConfig } from '../../../src/config/schema';
 import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
+import { computeEffectiveTruncatableTools } from '../../../src/index';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
@@ -69,6 +70,28 @@ function stripComments(source: string): string {
 	return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 }
 
+/**
+ * Detect a reintroduced hardcoded copy of the exempt-name list: an array
+ * literal containing two or more of `names` together. This targets the
+ * actual defect class — a second local *definition* of the exempt list — and
+ * is deliberately narrower than a raw substring search, which would also
+ * fail on any incidental, unrelated future use of a single member string
+ * (e.g. a config key or mode literally named `'read'`).
+ */
+function findArrayLiteralsWithMultipleExemptNames(
+	source: string,
+	names: readonly string[],
+): string[] {
+	const arrayLiteralRegex = /\[[^[\]]*\]/g;
+	const matches = source.match(arrayLiteralRegex) ?? [];
+	return matches.filter((literal) => {
+		const hits = names.filter(
+			(name) => literal.includes(`'${name}'`) || literal.includes(`"${name}"`),
+		);
+		return hits.length >= 2;
+	});
+}
+
 describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 	describe('1. Ref-carrying tools are exempt', () => {
 		it('every documented ref-carrying tool is present in the exempt floor', () => {
@@ -94,7 +117,7 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 	});
 
 	describe('2. Single definition — no consumer re-declares its own copy', () => {
-		it('tool-summarizer.ts imports the constant and does not hardcode the original four names', () => {
+		it('tool-summarizer.ts imports the constant and does not re-declare a hardcoded exempt array', () => {
 			const source = fs.readFileSync(
 				path.join(REPO_ROOT, 'src/hooks/tool-summarizer.ts'),
 				'utf-8',
@@ -103,18 +126,19 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 				"import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants'",
 			);
 			const stripped = stripComments(source);
-			for (const name of ORIGINAL_FOUR_EXEMPT_NAMES) {
-				// After stripping comments, the tool name string literals should
-				// appear nowhere in code — the only runtime reference is the
-				// imported constant. A reintroduced hardcoded array (e.g.
-				// `['retrieve_summary', 'retrieve_lane_output', 'task', 'read']`)
-				// would leave these quoted literals in the stripped source.
-				expect(stripped).not.toContain(`'${name}'`);
-				expect(stripped).not.toContain(`"${name}"`);
-			}
+			// A reintroduced hardcoded array (e.g.
+			// `['retrieve_summary', 'retrieve_lane_output', 'task', 'read']`)
+			// is an array literal containing 2+ of the original four names.
+			// An incidental single-name occurrence (e.g. a config key called
+			// 'read') is NOT a second definition and must not fail this test.
+			const offendingArrays = findArrayLiteralsWithMultipleExemptNames(
+				stripped,
+				ORIGINAL_FOUR_EXEMPT_NAMES,
+			);
+			expect(offendingArrays).toEqual([]);
 		});
 
-		it('context-budget.ts imports the constant and does not hardcode the original four names', () => {
+		it('context-budget.ts imports the constant and does not re-declare a hardcoded exempt array', () => {
 			const source = fs.readFileSync(
 				path.join(REPO_ROOT, 'src/hooks/context-budget.ts'),
 				'utf-8',
@@ -123,10 +147,11 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 				"import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants'",
 			);
 			const stripped = stripComments(source);
-			for (const name of ORIGINAL_FOUR_EXEMPT_NAMES) {
-				expect(stripped).not.toContain(`'${name}'`);
-				expect(stripped).not.toContain(`"${name}"`);
-			}
+			const offendingArrays = findArrayLiteralsWithMultipleExemptNames(
+				stripped,
+				ORIGINAL_FOUR_EXEMPT_NAMES,
+			);
+			expect(offendingArrays).toEqual([]);
 		});
 	});
 
@@ -208,6 +233,51 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 			// not a hook that never runs.
 			expect(output.output).not.toBe(oversizedOutput);
 			expect(output.output).toContain('[SUMMARY');
+		});
+	});
+
+	describe('6. R6 — the configured line-truncation path cannot remove the floor', () => {
+		// This exercises `computeEffectiveTruncatableTools`, the exact function
+		// `src/index.ts` calls at the tool-output-truncation site for BOTH the
+		// default allowlist and an operator-configured
+		// `tool_output.truncation_tools` override. It is imported directly from
+		// `src/index.ts` (not re-implemented here), so this is the real
+		// computation, not a stand-in.
+		it('an operator-configured truncation_tools list including a lane tool still excludes it', () => {
+			const defaultTools = new Set(['bash', 'diff']);
+			const configuredTools = ['collect_lane_results', 'bash'];
+
+			const effective = computeEffectiveTruncatableTools(
+				defaultTools,
+				configuredTools,
+			);
+
+			expect(effective.has('collect_lane_results')).toBe(false);
+			expect(effective.has('bash')).toBe(true);
+		});
+
+		it('the default allowlist also has the floor subtracted (defense in depth)', () => {
+			const defaultTools = new Set(['bash', 'collect_lane_results']);
+
+			const effective = computeEffectiveTruncatableTools(
+				defaultTools,
+				undefined,
+			);
+
+			expect(effective.has('collect_lane_results')).toBe(false);
+			expect(effective.has('bash')).toBe(true);
+		});
+
+		it('every SUMMARIZER_EXEMPT_TOOL_NAMES member is excluded even if an operator explicitly configures all of them', () => {
+			const effective = computeEffectiveTruncatableTools(new Set(), [
+				...SUMMARIZER_EXEMPT_TOOL_NAMES,
+				'bash',
+			]);
+
+			for (const name of SUMMARIZER_EXEMPT_TOOL_NAMES) {
+				expect(effective.has(name)).toBe(false);
+			}
+			expect(effective.has('bash')).toBe(true);
 		});
 	});
 });

@@ -3158,6 +3158,22 @@ const PR_WORKFLOW_TRAILING_STDERR_MERGE_PATTERN = /\s+2>&1\s*$/;
 const PR_WORKFLOW_MAX_CD_PREFIX_STRIPS = 3;
 
 /**
+ * Matches `git [-C <dir>]... <rest>`, capturing `<rest>` in group 1.
+ *
+ * Deliberately NOT fully case-insensitive: the `-C` directory-override flag
+ * is matched with an explicit `[Cc]`-free literal `-C` so that lowercase
+ * `-c` (git's arbitrary per-invocation config flag, e.g. `-c
+ * core.pager=touch`) never satisfies this branch. `-c` therefore falls
+ * through to the fail-closed reject instead of being silently treated as a
+ * (misidentified) directory override. Only the leading `git` keyword itself
+ * is matched case-insensitively via the `[Gg][Ii][Tt]` character classes.
+ */
+const PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN =
+	/^[Gg][Ii][Tt](?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/;
+/** Detects a `git -C <dir>` prefix specifically (see pattern note above). */
+const PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN = /^[Gg][Ii][Tt] -C /;
+
+/**
  * Strip the tolerated read-only wrappers (leading `cd <path> &&` segments and one
  * trailing `2>&1`), reporting whether a cd prefix was removed so state-transition
  * verbs can keep requiring the bare form (see the git `-C` ban those verbs carry).
@@ -3218,11 +3234,10 @@ function isAllowedPrWorkflowReadOnlyShell(
 	)
 		return false;
 
-	const gitMatch = normalized.match(
-		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
-	);
+	const gitMatch = normalized.match(PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN);
 	if (gitMatch?.[1]) {
-		const hasDirectoryOverride = /^git -C /i.test(normalized);
+		const hasDirectoryOverride =
+			PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN.test(normalized);
 		if (
 			hasDirectoryOverride &&
 			/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
@@ -3266,9 +3281,7 @@ function describeBlockedPrReviewShellCommand(
 	const { normalized: inner, strippedCdPrefix } =
 		normalizePrWorkflowShellCommand(command);
 	const normalized = inner.replace(/\s+/g, ' ');
-	const gitMatch = normalized.match(
-		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
-	);
+	const gitMatch = normalized.match(PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN);
 	const pointer =
 		' Observe HEAD/branch/dirty/remotes/gate state read-only with the pr_workflow_status tool.';
 	let detail: string;
@@ -3283,7 +3296,7 @@ function describeBlockedPrReviewShellCommand(
 		detail =
 			'Reason: cd-prefix-on-checkout-verb. Run fetch/checkout/switch/branch or `gh pr checkout` bare, with no `cd <dir> &&` prefix.';
 	} else if (
-		/^git -C /i.test(normalized) &&
+		PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN.test(normalized) &&
 		gitMatch?.[1] &&
 		/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
 	) {

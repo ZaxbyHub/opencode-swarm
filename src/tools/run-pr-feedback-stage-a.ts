@@ -236,7 +236,7 @@ async function persistFullOutput(
 	const fullOutput = JSON.stringify(checks, null, 2);
 	const summaryText = `Stage A run (session ${sessionID}): full stdout/stderr for ${checks.length} check(s).`;
 	try {
-		await storeSummary(
+		await _internals.storeSummary(
 			directory,
 			id,
 			fullOutput,
@@ -253,10 +253,23 @@ async function persistFullOutput(
 
 /**
  * Build the bounded checks payload: a compact per-check summary (no
- * stdout/stderr) for every check, plus a bounded stdout/stderr tail on the
- * LAST check only (the one that triggered this failure() call, when one
- * ran). Also persists the full per-check output (see persistFullOutput)
- * and attaches its retrieval id, unless there is nothing to persist.
+ * stdout/stderr) for every check, plus evidence for the LAST check only
+ * (the one that triggered this failure() call, when one ran). Also
+ * persists the full per-check output (see persistFullOutput) and attaches
+ * its retrieval id, unless there is nothing to persist.
+ *
+ * Fail-open contract for the failing check's evidence:
+ *   - persistence succeeds -> a bounded 4096-byte stdout/stderr tail is
+ *     enough, because the full output is durably retrievable via
+ *     retrieve_summary using full_output_ref.
+ *   - persistence fails -> there is nowhere else the full output lives, so
+ *     the failing check's *complete*, untruncated stdout/stderr travel
+ *     inline instead of a tail. This is a regression guard: before the
+ *     summary-store integration, full output always travelled inline, and
+ *     persistence failure must never silently downgrade that below the
+ *     bounded tail.
+ * Non-failing checks are never inlined in either case: they were never the
+ * evidence anyone needs, only the check that actually failed is.
  */
 async function buildBoundedChecksPayload(
 	checks: Array<Record<string, unknown>>,
@@ -274,14 +287,22 @@ async function buildBoundedChecksPayload(
 	const summaries = checks.map((entry, index) => {
 		const summary = summarizeCheckEntry(entry);
 		if (index === checks.length - 1) {
-			summary.stdout_tail = tailBytes(
-				typeof entry.stdout === 'string' ? entry.stdout : '',
-				FAILING_CHECK_TAIL_BYTES,
-			);
-			summary.stderr_tail = tailBytes(
-				typeof entry.stderr === 'string' ? entry.stderr : '',
-				FAILING_CHECK_TAIL_BYTES,
-			);
+			if (persisted?.error) {
+				// Persistence failed: fail OPEN toward evidence availability by
+				// keeping the failing check's full stdout/stderr inline, rather
+				// than the bounded tail that assumes retrieve_summary works.
+				summary.stdout = typeof entry.stdout === 'string' ? entry.stdout : '';
+				summary.stderr = typeof entry.stderr === 'string' ? entry.stderr : '';
+			} else {
+				summary.stdout_tail = tailBytes(
+					typeof entry.stdout === 'string' ? entry.stdout : '',
+					FAILING_CHECK_TAIL_BYTES,
+				);
+				summary.stderr_tail = tailBytes(
+					typeof entry.stderr === 'string' ? entry.stderr : '',
+					FAILING_CHECK_TAIL_BYTES,
+				);
+			}
 		}
 		return summary;
 	});
@@ -2309,8 +2330,10 @@ export async function executeRunPrFeedbackStageA(
 			{ applicableCategories, applicableObligations },
 		);
 		// Success: persist the full per-check stdout/stderr set for retrieval,
-		// but never inline stdout/stderr in the response — nothing failed, so
-		// there is no failure evidence that needs to travel inline.
+		// but never inline stdout/stderr in the response, even if persistence
+		// fails here — nothing failed, so there is no failure evidence that
+		// needs to survive a storage error; full_output_storage_error alone is
+		// sufficient to surface the problem on this path.
 		const persistedOnSuccess =
 			results.length > 0 && context.sessionID
 				? await persistFullOutput(directory, context.sessionID, results)
@@ -2336,6 +2359,7 @@ export async function executeRunPrFeedbackStageA(
 
 export const _internals = {
 	runExternalTool,
+	storeSummary,
 	readGitTextAtRevision,
 	resolveExactMergeBase,
 	resolveExactMergeBaseAsync,

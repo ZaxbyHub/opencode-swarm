@@ -158,6 +158,26 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 		}
 	});
 
+	test('a record with a digest but missing outputRef fails open — inline output delivered every time, never output_omitted_repeat (R1)', () => {
+		const record = makeRecord({
+			result: {
+				text: 'output with digest but no ref',
+				chars: 30,
+				truncated: false,
+				digest: 'digest-no-ref',
+				// outputRef intentionally omitted: simulates storeLaneOutput
+				// failing to persist a durable ref (oversized text, ref
+				// collision, or an fs error) while the digest still computed.
+			},
+		});
+		for (let i = 0; i < 3; i++) {
+			const result = recordToLaneResult(record, 'batch-no-ref');
+			expect(result.output).toBe('output with digest but no ref');
+			expect(result.output_omitted_repeat).toBeUndefined();
+			expect(result.output_ref).toBeUndefined();
+		}
+	});
+
 	test('pending/running records are unaffected by de-duplication', () => {
 		const record = makeRecord({
 			status: 'pending',
@@ -183,6 +203,7 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 				chars: 13,
 				truncated: false,
 				digest: 'digest-shared',
+				outputRef: 'L1:aa:aa:aa',
 			},
 		});
 		const laneB = makeRecord({
@@ -193,6 +214,7 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 				chars: 13,
 				truncated: false,
 				digest: 'digest-shared',
+				outputRef: 'L1:bb:bb:bb',
 			},
 		});
 

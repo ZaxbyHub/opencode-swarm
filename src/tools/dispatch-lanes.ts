@@ -75,9 +75,12 @@ const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
  * instead) while still returning every other metadata field unchanged.
  *
  * This is in-memory by design: a process restart re-delivers each preview
- * once more, which is harmless because the durable recovery path
- * (`retrieve_lane_output` via `output_ref`) is always present in the payload
- * regardless of whether `output` was omitted.
+ * once more, which is harmless because `output` is only ever suppressed
+ * when BOTH a digest AND a durable ref (`output_ref`, recoverable via
+ * `retrieve_lane_output`) are present. If either is missing — e.g. the
+ * artifact write failed (disk full, permission error) or the text was too
+ * large to store — this falls open and keeps delivering `output` inline on
+ * every poll, since there would otherwise be no way to recover the text.
  */
 const MAX_TRACKED_DELIVERED_LANE_OUTPUTS = 1024;
 const deliveredLaneOutputs = new Set<string>();
@@ -1901,8 +1904,14 @@ function recordToLaneResult(
 	// record has no result text anyway. If the digest is missing we fail open
 	// (always deliver) rather than risk silently withholding output forever.
 	const digest = record.result?.digest;
+	const outputRef = record.result?.outputRef?.trim();
 	let alreadyDelivered = false;
-	if (record.result?.text !== undefined && status !== 'pending' && digest) {
+	if (
+		record.result?.text !== undefined &&
+		status !== 'pending' &&
+		digest &&
+		outputRef
+	) {
 		const key = `${batchId}\0${laneId}\0${digest}`;
 		alreadyDelivered = deliveredLaneOutputs.has(key);
 		if (!alreadyDelivered) {

@@ -1165,7 +1165,15 @@ describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => 
 			expect(output.output).not.toBe(largeOutput);
 		});
 
-		it('should NOT exempt retrieve_lane_output when missing from exempt list', async () => {
+		// Contract change: SUMMARIZER_EXEMPT_TOOL_NAMES (src/config/constants.ts)
+		// is now an unconditional FLOOR, not a default operator config can
+		// replace. `retrieve_lane_output` is a floor member — summarizing a lane
+		// payload would destroy the `output_ref` that is its only recovery path,
+		// so it must stay exempt even when the operator's exempt_tools list
+		// omits it entirely. This test previously asserted the OLD replacement
+		// semantics (missing from the list => summarized); it now asserts the
+		// floor holds. See docs/releases/pending/pr-workflow-lane-output-context.md.
+		it('should still exempt retrieve_lane_output (floor) even when missing from exempt list', async () => {
 			const config: SummaryConfig = {
 				enabled: true,
 				threshold_bytes: 1024,
@@ -1188,7 +1196,8 @@ describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => 
 				output,
 			);
 
-			expect(output.output).not.toBe(largeOutput);
+			// Floor exemption applies regardless of operator exempt_tools content.
+			expect(output.output).toBe(largeOutput);
 		});
 	});
 });
