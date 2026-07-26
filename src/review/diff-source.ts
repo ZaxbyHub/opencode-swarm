@@ -590,21 +590,29 @@ function samePath(left: string, right: string): boolean {
 		: a === b;
 }
 
-function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
+function sameFileIdentity(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
+	return (
+		(left.dev !== 0n || left.ino !== 0n) &&
+		(right.dev !== 0n || right.ino !== 0n) &&
+		left.dev === right.dev &&
+		left.ino === right.ino
+	);
 }
 
 function sameCanonicalDirectory(left: string, right: string): boolean {
 	if (samePath(left, right)) return true;
 	try {
-		const leftStat = _internals.lstatSync(left);
-		const rightStat = _internals.lstatSync(right);
+		const leftStat = _internals.lstatBigIntSync(left);
+		const rightStat = _internals.lstatBigIntSync(right);
 		return (
 			leftStat.isDirectory() &&
 			rightStat.isDirectory() &&
 			!leftStat.isSymbolicLink() &&
 			!rightStat.isSymbolicLink() &&
-			(leftStat.dev !== 0 || leftStat.ino !== 0) &&
+			(leftStat.dev !== 0n || leftStat.ino !== 0n) &&
 			sameFileIdentity(leftStat, rightStat)
 		);
 	} catch {
@@ -612,12 +620,15 @@ function sameCanonicalDirectory(left: string, right: string): boolean {
 	}
 }
 
-function sameFileSnapshot(left: fs.Stats, right: fs.Stats): boolean {
+function sameFileSnapshot(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
 	return (
 		sameFileIdentity(left, right) &&
 		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
 	);
 }
 
@@ -743,7 +754,7 @@ function readSafeUntracked(
 	}
 	let handle: number | undefined;
 	try {
-		const pathStat = _internals.lstatSync(candidate);
+		const pathStat = _internals.lstatBigIntSync(candidate);
 		if (pathStat.isSymbolicLink()) {
 			return {
 				truncated: false,
@@ -776,7 +787,7 @@ function readSafeUntracked(
 			};
 		}
 		handle = _internals.openSync(canonicalBeforeOpen, 'r');
-		const openedBeforeRead = _internals.fstatSync(handle);
+		const openedBeforeRead = _internals.fstatBigIntSync(handle);
 		const canonicalAfterOpen = _internals.realpathSync(candidate);
 		if (
 			!openedBeforeRead.isFile() ||
@@ -808,13 +819,14 @@ function readSafeUntracked(
 			if (read === 0) break;
 			count += read;
 		}
-		const openedAfterRead = _internals.fstatSync(handle);
+		const openedAfterRead = _internals.fstatBigIntSync(handle);
 		const canonicalAfterRead = _internals.realpathSync(candidate);
 		if (
 			!sameFileSnapshot(openedBeforeRead, openedAfterRead) ||
 			!samePath(canonicalBeforeOpen, canonicalAfterRead) ||
 			!isContained(root, canonicalAfterRead) ||
-			(openedBeforeRead.size <= maxFileBytes && count !== openedBeforeRead.size)
+			(openedBeforeRead.size <= BigInt(maxFileBytes) &&
+				BigInt(count) !== openedBeforeRead.size)
 		) {
 			return {
 				truncated: false,
@@ -852,7 +864,8 @@ function readSafeUntracked(
 		}
 		return {
 			text,
-			truncated: openedBeforeRead.size > maxFileBytes || count > maxFileBytes,
+			truncated:
+				openedBeforeRead.size > BigInt(maxFileBytes) || count > maxFileBytes,
 		};
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException)?.code;
@@ -1286,17 +1299,17 @@ export async function collectReviewDiff(
 export const _internals: {
 	bunSpawn: typeof bunSpawn;
 	realpathSync: typeof fs.realpathSync;
-	lstatSync: typeof fs.lstatSync;
+	lstatBigIntSync: (path: fs.PathLike) => fs.BigIntStats;
 	openSync: typeof fs.openSync;
-	fstatSync: typeof fs.fstatSync;
+	fstatBigIntSync: (fd: number) => fs.BigIntStats;
 	readSync: typeof fs.readSync;
 	closeSync: typeof fs.closeSync;
 } = {
 	bunSpawn,
 	realpathSync: fs.realpathSync,
-	lstatSync: fs.lstatSync,
+	lstatBigIntSync: (path) => fs.lstatSync(path, { bigint: true }),
 	openSync: fs.openSync,
-	fstatSync: fs.fstatSync,
+	fstatBigIntSync: (fd) => fs.fstatSync(fd, { bigint: true }),
 	readSync: fs.readSync,
 	closeSync: fs.closeSync,
 };

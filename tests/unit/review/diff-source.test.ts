@@ -53,7 +53,7 @@ function proc(
 }
 
 const realSpawn = _internals.bunSpawn;
-const realLstat = _internals.lstatSync;
+const realLstatBigInt = _internals.lstatBigIntSync;
 const realOpen = _internals.openSync;
 
 function fixtureGit(directory: string, args: string[]): string {
@@ -73,7 +73,7 @@ function fixtureGit(directory: string, args: string[]): string {
 
 afterEach(() => {
 	_internals.bunSpawn = realSpawn;
-	_internals.lstatSync = realLstat;
+	_internals.lstatBigIntSync = realLstatBigInt;
 	_internals.openSync = realOpen;
 });
 
@@ -462,13 +462,13 @@ describe('collectReviewDiff', () => {
 			}
 			if (!linked) {
 				fs.writeFileSync(path.join(fixture.dir, 'linked.txt'), 'fallback');
-				const original = _internals.lstatSync;
-				_internals.lstatSync = ((candidate) => {
+				const original = _internals.lstatBigIntSync;
+				_internals.lstatBigIntSync = ((candidate) => {
 					if (String(candidate).endsWith('linked.txt')) {
 						return {
 							isSymbolicLink: () => true,
 							isFile: () => false,
-						} as fs.Stats;
+						} as fs.BigIntStats;
 					}
 					return original(candidate);
 				}) as typeof original;

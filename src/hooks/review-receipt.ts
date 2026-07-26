@@ -204,8 +204,8 @@ export function resolveReceiptIndexPath(directory: string): string {
 
 interface DirectoryIdentity {
 	path: string;
-	dev: number;
-	ino: number;
+	dev: bigint;
+	ino: bigint;
 }
 
 interface ReceiptPersistenceContext {
@@ -216,8 +216,12 @@ interface ReceiptPersistenceContext {
 
 export const _internals: {
 	openSync: typeof fs.openSync;
+	lstatBigIntSync: (path: fs.PathLike) => fs.BigIntStats;
+	fstatBigIntSync: (fd: number) => fs.BigIntStats;
 } = {
 	openSync: fs.openSync,
+	lstatBigIntSync: (path) => fs.lstatSync(path, { bigint: true }),
+	fstatBigIntSync: (fd) => fs.fstatSync(fd, { bigint: true }),
 };
 
 function pathsEqual(left: string, right: string): boolean {
@@ -234,9 +238,12 @@ function captureCanonicalDirectory(
 	expected?: DirectoryIdentity,
 ): DirectoryIdentity {
 	const resolved = path.resolve(directory);
-	const stat = fs.lstatSync(resolved);
+	const stat = _internals.lstatBigIntSync(resolved);
 	if (!stat.isDirectory() || stat.isSymbolicLink()) {
 		throw new Error(`${label} must be a real directory`);
+	}
+	if (stat.dev === 0n && stat.ino === 0n) {
+		throw new Error(`${label} has no stable filesystem identity`);
 	}
 	const canonical = fs.realpathSync(resolved);
 	if (!pathsEqual(canonical, resolved)) {
@@ -365,7 +372,7 @@ function assertDirectReceiptFile(
 		throw new Error('review receipt file escapes its expected directory');
 	}
 	try {
-		const stat = fs.lstatSync(resolved);
+		const stat = _internals.lstatBigIntSync(resolved);
 		if (!stat.isFile() || stat.isSymbolicLink()) {
 			throw new Error('review receipt path must be a real file');
 		}
@@ -378,13 +385,18 @@ function assertDirectReceiptFile(
 	return resolved;
 }
 
-function sameFileSnapshot(left: fs.Stats, right: fs.Stats): boolean {
+function sameFileSnapshot(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
 	return (
+		(left.dev !== 0n || left.ino !== 0n) &&
+		(right.dev !== 0n || right.ino !== 0n) &&
 		left.dev === right.dev &&
 		left.ino === right.ino &&
 		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
 	);
 }
 
@@ -409,11 +421,12 @@ export function readReviewReceiptText(
 		const resolved = assertDirectReceiptFile(context, receiptPath, true);
 		if (path.extname(resolved) !== '.json') return null;
 
-		const pathBeforeOpen = fs.lstatSync(resolved);
+		const pathBeforeOpen = _internals.lstatBigIntSync(resolved);
 		if (
 			!pathBeforeOpen.isFile() ||
 			pathBeforeOpen.isSymbolicLink() ||
-			pathBeforeOpen.size > maxBytes
+			pathBeforeOpen.size < 0n ||
+			pathBeforeOpen.size > BigInt(maxBytes)
 		) {
 			return null;
 		}
@@ -422,13 +435,14 @@ export function readReviewReceiptText(
 
 		assertReceiptContextCurrent(context);
 		descriptor = _internals.openSync(canonicalBeforeOpen, 'r');
-		const openedBeforeRead = fs.fstatSync(descriptor);
+		const openedBeforeRead = _internals.fstatBigIntSync(descriptor);
 		assertReceiptContextCurrent(context);
-		const pathAfterOpen = fs.lstatSync(resolved);
+		const pathAfterOpen = _internals.lstatBigIntSync(resolved);
 		const canonicalAfterOpen = fs.realpathSync(resolved);
 		if (
 			!openedBeforeRead.isFile() ||
-			openedBeforeRead.size > maxBytes ||
+			openedBeforeRead.size < 0n ||
+			openedBeforeRead.size > BigInt(maxBytes) ||
 			!sameFileSnapshot(pathBeforeOpen, openedBeforeRead) ||
 			!sameFileSnapshot(openedBeforeRead, pathAfterOpen) ||
 			!pathsEqual(canonicalBeforeOpen, canonicalAfterOpen)
@@ -436,7 +450,9 @@ export function readReviewReceiptText(
 			return null;
 		}
 
-		const buffer = Buffer.alloc(openedBeforeRead.size);
+		// `openedBeforeRead.size` is bounded by the safe-integer `maxBytes`
+		// immediately above, so this conversion cannot lose precision.
+		const buffer = Buffer.alloc(Number(openedBeforeRead.size));
 		let bytesRead = 0;
 		while (bytesRead < buffer.length) {
 			const count = fs.readSync(
@@ -450,9 +466,9 @@ export function readReviewReceiptText(
 			bytesRead += count;
 		}
 
-		const openedAfterRead = fs.fstatSync(descriptor);
+		const openedAfterRead = _internals.fstatBigIntSync(descriptor);
 		assertReceiptContextCurrent(context);
-		const pathAfterRead = fs.lstatSync(resolved);
+		const pathAfterRead = _internals.lstatBigIntSync(resolved);
 		const canonicalAfterRead = fs.realpathSync(resolved);
 		if (
 			bytesRead !== buffer.length ||

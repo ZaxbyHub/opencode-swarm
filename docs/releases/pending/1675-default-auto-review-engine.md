@@ -21,7 +21,7 @@
 - Lean Turbo direct-call compatibility retains the established role fallback chain, while injected plugin dispatchers use only their immutable instance-local registry and fail closed when that registry is absent.
 - Phase completion preflights the release/trigger policy without I/O and only loads plan context when a phase or final-plan review can actually run, preserving the version-7 disabled-path latency contract.
 - Final receipt, index, and evidence commits recheck the exact reviewed scope and reject symlink, junction, reparse, or ancestor-swap containment changes. Terminal gates also bind the independent receipt fingerprint to the current canonical diff and read it through descriptor/path identity checks that reject redirected ancestors.
-- Canonical-root validation accepts platform aliases only when both paths are real directories with the same non-zero filesystem identity. Test-impact recursion uses canonical realpath identities rather than Windows/Bun inode values, avoiding false cycle detection without relaxing junction-cycle protection.
+- Canonical-root validation accepts platform aliases only when both paths are real directories with the same non-zero exact BigInt filesystem identity, avoiding lossy Windows/Bun numeric inode collisions. Test-impact recursion uses canonical realpath identities rather than inode values, avoiding false cycle detection without relaxing junction-cycle protection.
 - Trusted background completions use digest-bound ingestion leases and bounded ownership history so duplicates are idempotent, delayed parallel siblings retain exact attribution, and non-owner stale/error events cannot discard active ingestion scope or regress consumed evidence.
 
 ## Migration

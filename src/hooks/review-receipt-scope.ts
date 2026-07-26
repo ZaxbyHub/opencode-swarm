@@ -96,13 +96,17 @@ export async function resolveReviewerScopeTaskId(
 export const _internals: {
 	spawn: typeof child_process.spawn;
 	realpath: typeof fs.promises.realpath;
-	lstat: typeof fs.promises.lstat;
+	lstatBigInt: (path: fs.PathLike) => Promise<fs.BigIntStats>;
 	open: typeof fs.promises.open;
+	fileHandleStatBigInt: (
+		handle: fs.promises.FileHandle,
+	) => Promise<fs.BigIntStats>;
 } = {
 	spawn: child_process.spawn,
 	realpath: fs.promises.realpath,
-	lstat: fs.promises.lstat,
+	lstatBigInt: (path) => fs.promises.lstat(path, { bigint: true }),
 	open: fs.promises.open,
+	fileHandleStatBigInt: (handle) => handle.stat({ bigint: true }),
 };
 
 function hasControlCharacter(value: string): boolean {
@@ -141,16 +145,27 @@ function samePath(left: string, right: string): boolean {
 		: a === b;
 }
 
-function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
+function sameFileIdentity(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
+	return (
+		(left.dev !== 0n || left.ino !== 0n) &&
+		(right.dev !== 0n || right.ino !== 0n) &&
+		left.dev === right.dev &&
+		left.ino === right.ino
+	);
 }
 
-function sameFileSnapshot(left: fs.Stats, right: fs.Stats): boolean {
+function sameFileSnapshot(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
 	return (
 		sameFileIdentity(left, right) &&
 		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
 	);
 }
 
@@ -314,7 +329,7 @@ export async function buildReviewerTaskScope(
 	const stableFiles: Array<{
 		absolutePath: string;
 		canonicalPath: string;
-		stat: fs.Stats;
+		stat: fs.BigIntStats;
 	}> = [];
 	const deletedPaths: string[] = [];
 	const records: string[] = [
@@ -332,9 +347,9 @@ export async function buildReviewerTaskScope(
 		);
 	}
 	for (const candidate of ordered) {
-		let before: fs.Stats;
+		let before: fs.BigIntStats;
 		try {
-			before = await _internals.lstat(candidate.absolutePath);
+			before = await _internals.lstatBigInt(candidate.absolutePath);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
 				if (
@@ -365,14 +380,14 @@ export async function buildReviewerTaskScope(
 			return null;
 		}
 		if (!isContained(realRoot, realCandidate)) return null;
-		if (before.size > maxBytes - totalBytes) return null;
+		if (before.size > BigInt(maxBytes - totalBytes)) return null;
 
 		let handle: fs.promises.FileHandle | undefined;
 		let bytes: Buffer;
-		let openedBefore: fs.Stats;
+		let openedBefore: fs.BigIntStats;
 		try {
 			handle = await _internals.open(realCandidate, 'r');
-			openedBefore = await handle.stat();
+			openedBefore = await _internals.fileHandleStatBigInt(handle);
 			const canonicalAfterOpen = await _internals.realpath(
 				candidate.absolutePath,
 			);
@@ -385,7 +400,7 @@ export async function buildReviewerTaskScope(
 				return null;
 			}
 			bytes = await readBoundedHandle(handle, maxBytes - totalBytes);
-			const openedAfter = await handle.stat();
+			const openedAfter = await _internals.fileHandleStatBigInt(handle);
 			const canonicalAfterRead = await _internals.realpath(
 				candidate.absolutePath,
 			);
@@ -393,7 +408,7 @@ export async function buildReviewerTaskScope(
 				!sameFileSnapshot(openedBefore, openedAfter) ||
 				!samePath(realCandidate, canonicalAfterRead) ||
 				!isContained(realRoot, canonicalAfterRead) ||
-				bytes.byteLength !== openedBefore.size
+				BigInt(bytes.byteLength) !== openedBefore.size
 			) {
 				return null;
 			}
@@ -420,7 +435,7 @@ export async function buildReviewerTaskScope(
 
 	for (const stable of stableFiles) {
 		try {
-			const current = await _internals.lstat(stable.absolutePath);
+			const current = await _internals.lstatBigInt(stable.absolutePath);
 			const canonical = await _internals.realpath(stable.absolutePath);
 			if (
 				!current.isFile() ||
@@ -437,7 +452,7 @@ export async function buildReviewerTaskScope(
 	}
 	for (const deletedPath of deletedPaths) {
 		try {
-			await _internals.lstat(deletedPath);
+			await _internals.lstatBigInt(deletedPath);
 			return null;
 		} catch (error) {
 			if (

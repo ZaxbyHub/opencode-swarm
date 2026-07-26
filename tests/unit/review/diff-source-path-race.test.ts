@@ -9,7 +9,8 @@ import {
 } from '../../../src/review/diff-source';
 
 const originalRealpathSync = diffSourceInternals.realpathSync;
-const originalLstatSync = diffSourceInternals.lstatSync;
+const originalLstatBigIntSync = diffSourceInternals.lstatBigIntSync;
+const originalFstatBigIntSync = diffSourceInternals.fstatBigIntSync;
 const cleanupPaths: string[] = [];
 
 function temporaryDirectory(prefix: string): string {
@@ -37,7 +38,8 @@ function git(directory: string, args: string[]): string {
 
 afterEach(() => {
 	diffSourceInternals.realpathSync = originalRealpathSync;
-	diffSourceInternals.lstatSync = originalLstatSync;
+	diffSourceInternals.lstatBigIntSync = originalLstatBigIntSync;
+	diffSourceInternals.fstatBigIntSync = originalFstatBigIntSync;
 	for (const target of cleanupPaths.splice(0).reverse()) {
 		fs.rmSync(target, { recursive: true, force: true });
 	}
@@ -121,21 +123,20 @@ describe('review diff source - regression: canonical root aliases', () => {
 		git(directory, ['commit', '-m', 'baseline']);
 
 		const alias = `${directory}-textual-alias`;
-		let rootResolutions = 0;
+		let realpathCalls = 0;
+		let aliasIdentityReads = 0;
 		diffSourceInternals.realpathSync = ((candidate, ...rest) => {
 			const canonical = originalRealpathSync(candidate, ...rest);
-			if (canonical === directory) {
-				rootResolutions++;
-				if (rootResolutions === 2) return alias;
-			}
-			return canonical;
+			realpathCalls++;
+			return realpathCalls === 2 ? alias : canonical;
 		}) as typeof originalRealpathSync;
-		diffSourceInternals.lstatSync = ((candidate, ...rest) => {
+		diffSourceInternals.lstatBigIntSync = ((candidate) => {
 			if (path.resolve(String(candidate)) === path.resolve(alias)) {
-				return originalLstatSync(directory, ...rest);
+				aliasIdentityReads++;
+				return originalLstatBigIntSync(directory);
 			}
-			return originalLstatSync(candidate, ...rest);
-		}) as typeof originalLstatSync;
+			return originalLstatBigIntSync(candidate);
+		}) as typeof originalLstatBigIntSync;
 
 		// Previous code compared only path text, so Windows runner aliases for the
 		// same directory failed before any review diff could be collected.
@@ -144,7 +145,102 @@ describe('review diff source - regression: canonical root aliases', () => {
 			selector: { kind: 'working-tree' },
 		});
 
-		expect(rootResolutions).toBeGreaterThanOrEqual(2);
+		expect(realpathCalls).toBe(2);
+		expect(aliasIdentityReads).toBe(1);
 		expect(result.status).toBe('clean');
+	});
+
+	test('rejects distinct directories whose numeric inode values collide', async () => {
+		const directory = temporaryDirectory('review-diff-root-collision-');
+		git(directory, ['init', '-b', 'main']);
+		git(directory, ['config', 'user.name', 'Review Root Collision']);
+		git(directory, ['config', 'user.email', 'collision@example.invalid']);
+		fs.writeFileSync(path.join(directory, 'tracked.txt'), 'baseline\n');
+		git(directory, ['add', 'tracked.txt']);
+		git(directory, ['commit', '-m', 'baseline']);
+
+		const alias = `${directory}-colliding-root`;
+		const leftInode = 9_007_199_254_740_992n;
+		const rightInode = leftInode + 1n;
+		expect(Number(leftInode)).toBe(Number(rightInode));
+
+		let realpathCalls = 0;
+		diffSourceInternals.realpathSync = ((candidate, ...rest) => {
+			const canonical = originalRealpathSync(candidate, ...rest);
+			realpathCalls++;
+			return realpathCalls === 2 ? alias : canonical;
+		}) as typeof originalRealpathSync;
+
+		const baseStats = originalLstatBigIntSync(directory);
+		const statsWithInode = (ino: bigint): fs.BigIntStats =>
+			({
+				...baseStats,
+				dev: 1n,
+				ino,
+				isDirectory: () => true,
+				isSymbolicLink: () => false,
+			}) as fs.BigIntStats;
+		diffSourceInternals.lstatBigIntSync = ((candidate) =>
+			path.resolve(String(candidate)) === path.resolve(alias)
+				? statsWithInode(rightInode)
+				: statsWithInode(leftInode)) as typeof originalLstatBigIntSync;
+
+		const result = await collectReviewDiff({
+			directory,
+			selector: { kind: 'working-tree' },
+		});
+
+		expect(realpathCalls).toBe(2);
+		expect(result.status).toBe('error');
+		if (result.status === 'error') {
+			expect(result.code).toBe('NOT_REPOSITORY_ROOT');
+		}
+	});
+
+	test('rejects an untracked path and descriptor whose numeric inodes collide', async () => {
+		const directory = temporaryDirectory('review-diff-file-collision-');
+		git(directory, ['init', '-b', 'main']);
+		git(directory, ['config', 'user.name', 'Review File Collision']);
+		git(directory, ['config', 'user.email', 'file-collision@example.invalid']);
+		fs.writeFileSync(path.join(directory, 'tracked.txt'), 'baseline\n');
+		git(directory, ['add', 'tracked.txt']);
+		git(directory, ['commit', '-m', 'baseline']);
+
+		const untrackedPath = path.join(directory, 'untracked.txt');
+		fs.writeFileSync(untrackedPath, 'COLLIDING_FILE_SENTINEL\n');
+		const leftInode = 9_007_199_254_740_992n;
+		const rightInode = leftInode + 1n;
+		expect(Number(leftInode)).toBe(Number(rightInode));
+
+		const baseStats = originalLstatBigIntSync(untrackedPath);
+		const statsWithInode = (ino: bigint): fs.BigIntStats =>
+			({
+				...baseStats,
+				dev: 1n,
+				ino,
+				isFile: () => true,
+				isSymbolicLink: () => false,
+			}) as fs.BigIntStats;
+		diffSourceInternals.lstatBigIntSync = ((candidate) =>
+			path.resolve(String(candidate)) === path.resolve(untrackedPath)
+				? statsWithInode(leftInode)
+				: originalLstatBigIntSync(candidate)) as typeof originalLstatBigIntSync;
+		diffSourceInternals.fstatBigIntSync = (() =>
+			statsWithInode(rightInode)) as typeof originalFstatBigIntSync;
+
+		const result = await collectReviewDiff({
+			directory,
+			selector: { kind: 'working-tree' },
+		});
+
+		expect(result.status).toBe('ok');
+		if (result.status === 'error') return;
+		expect(result.canonicalText).not.toContain('COLLIDING_FILE_SENTINEL');
+		expect(result.completeness.skipReasons).toContainEqual(
+			expect.objectContaining({
+				code: 'CONCURRENT_PATH_MUTATION',
+				path: 'untracked.txt',
+			}),
+		);
 	});
 });

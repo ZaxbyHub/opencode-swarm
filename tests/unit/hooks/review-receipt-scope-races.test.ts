@@ -12,8 +12,32 @@ let directory: string;
 let outsideDirectory: string | undefined;
 const originalSpawn = receiptScopeInternals.spawn;
 const originalRealpath = receiptScopeInternals.realpath;
-const originalLstat = receiptScopeInternals.lstat;
+const originalLstatBigInt = receiptScopeInternals.lstatBigInt;
 const originalOpen = receiptScopeInternals.open;
+const originalFileHandleStatBigInt = receiptScopeInternals.fileHandleStatBigInt;
+const COLLIDING_INODE_A = 9_007_199_254_740_992n;
+const COLLIDING_INODE_B = COLLIDING_INODE_A + 1n;
+
+function withIdentity(stat: fs.BigIntStats, ino: bigint): fs.BigIntStats {
+	return Object.assign(
+		Object.create(Object.getPrototypeOf(stat)) as fs.BigIntStats,
+		stat,
+		{ dev: 1n, ino },
+	);
+}
+
+function sameSnapshotAfterNumberCoercion(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
+	return (
+		Number(left.dev) === Number(right.dev) &&
+		Number(left.ino) === Number(right.ino) &&
+		Number(left.size) === Number(right.size) &&
+		Number(left.mtimeNs) === Number(right.mtimeNs) &&
+		Number(left.ctimeNs) === Number(right.ctimeNs)
+	);
+}
 
 function git(args: string[]): string {
 	const result = spawnSync('git', args, {
@@ -46,8 +70,9 @@ beforeEach(() => {
 afterEach(() => {
 	receiptScopeInternals.spawn = originalSpawn;
 	receiptScopeInternals.realpath = originalRealpath;
-	receiptScopeInternals.lstat = originalLstat;
+	receiptScopeInternals.lstatBigInt = originalLstatBigInt;
 	receiptScopeInternals.open = originalOpen;
+	receiptScopeInternals.fileHandleStatBigInt = originalFileHandleStatBigInt;
 	fs.rmSync(directory, { recursive: true, force: true });
 	if (outsideDirectory) {
 		fs.rmSync(outsideDirectory, { recursive: true, force: true });
@@ -135,6 +160,82 @@ describe('reviewer receipt scope - regression: coherent snapshots (F6.3)', () =>
 		}
 		// Previous pathname-based read accepted the outside file when its size and
 		// mtime matched, binding a receipt to bytes outside the project root.
+		expect(scope).toBeNull();
+	});
+});
+
+describe('reviewer receipt scope - regression: exact BigInt snapshots (#1675)', () => {
+	test('rejects pathname and descriptor identities that collide as Numbers', async () => {
+		let pathnameStat: fs.BigIntStats | undefined;
+		let descriptorStat: fs.BigIntStats | undefined;
+
+		// These seams alter only a regular file's identity. ENOENT, non-file, and
+		// filesystem-error branches remain covered by review-receipt-scope.test.ts.
+		receiptScopeInternals.lstatBigInt = async (candidate) => {
+			const actual = await originalLstatBigInt(candidate);
+			if (path.basename(String(candidate)) !== 'actual.ts') return actual;
+			pathnameStat = withIdentity(actual, COLLIDING_INODE_A);
+			return pathnameStat;
+		};
+		receiptScopeInternals.fileHandleStatBigInt = async (handle) => {
+			const actual = await originalFileHandleStatBigInt(handle);
+			descriptorStat = withIdentity(actual, COLLIDING_INODE_B);
+			return descriptorStat;
+		};
+
+		// Previous Number-valued stats rounded these distinct inode values to the
+		// same identity, so a replaced pathname could match the opened descriptor.
+		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
+		expect(pathnameStat).toBeDefined();
+		expect(descriptorStat).toBeDefined();
+		expect(COLLIDING_INODE_A).not.toBe(COLLIDING_INODE_B);
+		expect(Number(COLLIDING_INODE_A)).toBe(Number(COLLIDING_INODE_B));
+		expect(
+			sameSnapshotAfterNumberCoercion(
+				pathnameStat as fs.BigIntStats,
+				descriptorStat as fs.BigIntStats,
+			),
+		).toBe(true);
+		expect(scope).toBeNull();
+	});
+
+	test('rejects a final pathname identity change hidden by Number rounding', async () => {
+		let sourceLstatCalls = 0;
+		let initialStat: fs.BigIntStats | undefined;
+		let finalStat: fs.BigIntStats | undefined;
+
+		// These seams alter only a regular file's identity. ENOENT, non-file, and
+		// filesystem-error branches remain covered by review-receipt-scope.test.ts.
+		receiptScopeInternals.lstatBigInt = async (candidate) => {
+			const actual = await originalLstatBigInt(candidate);
+			if (path.basename(String(candidate)) !== 'actual.ts') return actual;
+			sourceLstatCalls += 1;
+			const observed = withIdentity(
+				actual,
+				sourceLstatCalls === 1 ? COLLIDING_INODE_A : COLLIDING_INODE_B,
+			);
+			if (sourceLstatCalls === 1) initialStat = observed;
+			else finalStat = observed;
+			return observed;
+		};
+		receiptScopeInternals.fileHandleStatBigInt = async (handle) =>
+			withIdentity(
+				await originalFileHandleStatBigInt(handle),
+				COLLIDING_INODE_A,
+			);
+
+		// Previous Number-valued final revalidation treated the second inode as
+		// unchanged and could issue a receipt for a pathname that had been swapped.
+		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
+		expect(sourceLstatCalls).toBe(2);
+		expect(initialStat).toBeDefined();
+		expect(finalStat).toBeDefined();
+		expect(
+			sameSnapshotAfterNumberCoercion(
+				initialStat as fs.BigIntStats,
+				finalStat as fs.BigIntStats,
+			),
+		).toBe(true);
 		expect(scope).toBeNull();
 	});
 });
