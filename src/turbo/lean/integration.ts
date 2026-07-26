@@ -20,6 +20,8 @@
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { stripKnownSwarmPrefix } from '../../config/schema';
 import type { ReviewModelDispatcher } from '../../review/contracts';
 import {
 	type ReviewAgentModelRegistry,
@@ -139,6 +141,32 @@ function resolveDefaultCriticAgent(
 		'critic',
 		activeAgentName,
 	);
+}
+
+function resolveLegacyCriticModelConfig(
+	agentName: string,
+	config: LeanTurboPhaseCriticConfig | undefined,
+):
+	| {
+			agentBaseName: string;
+			swarmAgents: ReturnType<typeof getSwarmAgents>;
+	  }
+	| undefined {
+	// Plugin-owned paths inject both the dispatcher and immutable registry.
+	// Never consult process-global agent state for an injected runtime: doing so
+	// would reintroduce cross-instance fallback leakage. This compatibility
+	// fence exists only for older direct callers that still rely on getAgentConfigs.
+	if (config?.dispatcher || config?.agentModelRegistry) return undefined;
+
+	const agentBaseName = stripKnownSwarmPrefix(agentName);
+	const swarmId =
+		agentBaseName !== agentName
+			? agentName.slice(0, agentName.length - agentBaseName.length - 1)
+			: undefined;
+	return {
+		agentBaseName,
+		swarmAgents: getSwarmAgents(swarmId),
+	};
 }
 
 /**
@@ -696,6 +724,7 @@ export async function dispatchPhaseCritic(
 		agentName,
 		config?.agentModelRegistry,
 	);
+	const legacyModelConfig = resolveLegacyCriticModelConfig(agentName, config);
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({
@@ -709,7 +738,16 @@ export async function dispatchPhaseCritic(
 					model,
 					config?.dispatcher,
 				),
-			resolveFallback: (index) => fallbackModels[index - 1] ?? null,
+			resolveFallback: (index) =>
+				config?.agentModelRegistry
+					? (fallbackModels[index - 1] ?? null)
+					: legacyModelConfig
+						? resolveFallbackModel(
+								legacyModelConfig.agentBaseName,
+								index,
+								legacyModelConfig.swarmAgents,
+							)
+						: null,
 			// Advance to the next model immediately on a transient/quota error — an
 			// instant same-model retry cannot clear an exhausted quota.
 			maxTransientRetriesPerModel: 0,
@@ -727,6 +765,8 @@ export async function dispatchPhaseCritic(
 					sessionID,
 					agentName,
 					reviewPrimaryModel(agentName, config?.agentModelRegistry) ??
+						legacyModelConfig?.swarmAgents?.[legacyModelConfig.agentBaseName]
+							?.model ??
 						'default',
 					toModel,
 					'transient_model_error',

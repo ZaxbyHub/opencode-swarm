@@ -9,6 +9,7 @@ import {
 } from '../../../src/review/diff-source';
 
 const originalRealpathSync = diffSourceInternals.realpathSync;
+const originalLstatSync = diffSourceInternals.lstatSync;
 const cleanupPaths: string[] = [];
 
 function temporaryDirectory(prefix: string): string {
@@ -36,6 +37,7 @@ function git(directory: string, args: string[]): string {
 
 afterEach(() => {
 	diffSourceInternals.realpathSync = originalRealpathSync;
+	diffSourceInternals.lstatSync = originalLstatSync;
 	for (const target of cleanupPaths.splice(0).reverse()) {
 		fs.rmSync(target, { recursive: true, force: true });
 	}
@@ -105,5 +107,44 @@ describe('review diff source - regression: parent reparse swap (F6.2)', () => {
 				path: 'victim/file.txt',
 			}),
 		);
+	});
+});
+
+describe('review diff source - regression: canonical root aliases', () => {
+	test('accepts distinct path spellings that identify the same real directory', async () => {
+		const directory = temporaryDirectory('review-diff-root-alias-');
+		git(directory, ['init', '-b', 'main']);
+		git(directory, ['config', 'user.name', 'Review Root Alias']);
+		git(directory, ['config', 'user.email', 'alias@example.invalid']);
+		fs.writeFileSync(path.join(directory, 'tracked.txt'), 'baseline\n');
+		git(directory, ['add', 'tracked.txt']);
+		git(directory, ['commit', '-m', 'baseline']);
+
+		const alias = `${directory}-textual-alias`;
+		let rootResolutions = 0;
+		diffSourceInternals.realpathSync = ((candidate, ...rest) => {
+			const canonical = originalRealpathSync(candidate, ...rest);
+			if (path.resolve(String(candidate)) === path.resolve(directory)) {
+				rootResolutions++;
+				if (rootResolutions === 2) return alias;
+			}
+			return canonical;
+		}) as typeof originalRealpathSync;
+		diffSourceInternals.lstatSync = ((candidate, ...rest) => {
+			if (path.resolve(String(candidate)) === path.resolve(alias)) {
+				return originalLstatSync(directory, ...rest);
+			}
+			return originalLstatSync(candidate, ...rest);
+		}) as typeof originalLstatSync;
+
+		// Previous code compared only path text, so Windows runner aliases for the
+		// same directory failed before any review diff could be collected.
+		const result = await collectReviewDiff({
+			directory,
+			selector: { kind: 'working-tree' },
+		});
+
+		expect(rootResolutions).toBeGreaterThanOrEqual(2);
+		expect(result.status).toBe('clean');
 	});
 });

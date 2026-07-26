@@ -73,6 +73,7 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			'critic_hallucination_verifier',
 			'critic_architecture_supervisor',
 			'critic_oversight',
+			'critic_finding_validator',
 			'curator_init',
 			'curator_phase',
 			'curator_postmortem',

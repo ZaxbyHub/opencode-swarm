@@ -594,6 +594,24 @@ function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
+function sameCanonicalDirectory(left: string, right: string): boolean {
+	if (samePath(left, right)) return true;
+	try {
+		const leftStat = _internals.lstatSync(left);
+		const rightStat = _internals.lstatSync(right);
+		return (
+			leftStat.isDirectory() &&
+			rightStat.isDirectory() &&
+			!leftStat.isSymbolicLink() &&
+			!rightStat.isSymbolicLink() &&
+			(leftStat.dev !== 0 || leftStat.ino !== 0) &&
+			sameFileIdentity(leftStat, rightStat)
+		);
+	} catch {
+		return false;
+	}
+}
+
 function sameFileSnapshot(left: fs.Stats, right: fs.Stats): boolean {
 	return (
 		sameFileIdentity(left, right) &&
@@ -961,7 +979,7 @@ export async function collectReviewDiff(
 			reason: 'Git top-level path is not a readable directory',
 		};
 	}
-	if (!samePath(root, gitRoot)) {
+	if (!sameCanonicalDirectory(root, gitRoot)) {
 		return {
 			status: 'error',
 			code: 'NOT_REPOSITORY_ROOT',
