@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.132.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.131.0...v7.132.0) (2026-07-27)
+
+
+### Features
+
+* **v8:** parallel-first execution by default for provably disjoint work ([#1674](https://github.com/ZaxbyHub/opencode-swarm/issues/1674)) ([7f02ee2](https://github.com/ZaxbyHub/opencode-swarm/commit/7f02ee2a4341625243083754050bb0165ae4b56a))
+
+
+### Bug Fixes
+
+* **parallel:** address pr review findings ([46b435e](https://github.com/ZaxbyHub/opencode-swarm/commit/46b435e06937cb25519a43b0382ebefd97c365d9))
+
 ## [7.131.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.2...v7.131.0) (2026-07-27)
 
 
