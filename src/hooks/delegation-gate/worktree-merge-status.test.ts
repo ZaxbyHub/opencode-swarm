@@ -112,12 +112,13 @@ describe('worktree-merge-status registry — durability (restart survival)', () 
 		initDurableStatusPath(dir);
 		recordWorktreeMergeFailure('task-B', FAILURE_STUB);
 
-		// Simulate plugin restart: clear in-memory state
-		_internals.resetForTest();
+		// Simulate plugin restart: clear in-memory state but keep disk file
+		_internals.failuresByTask.clear();
 		expect(_internals.failuresByTask.size).toBe(0);
 
-		// Re-init as plugin startup would do
-		initDurableStatusPath(dir);
+		// Force re-read from disk (initDurableStatusPath short-circuits if
+		// the same path is already loaded).
+		_internals.loadDurableStatus(_internals.getDurableStatusPath(dir));
 
 		// Failure should be restored from disk
 		expect(getWorktreeMergeFailure('task-B')).toEqual(FAILURE_STUB);
@@ -129,9 +130,9 @@ describe('worktree-merge-status registry — durability (restart survival)', () 
 		recordWorktreeMergeFailure('task-C', FAILURE_STUB);
 		clearWorktreeMergeStatus('task-C');
 
-		// Simulate restart
-		_internals.resetForTest();
-		initDurableStatusPath(dir);
+		// Simulate restart: clear in-memory map, keep disk file
+		_internals.failuresByTask.clear();
+		_internals.loadDurableStatus(_internals.getDurableStatusPath(dir));
 
 		// Cleared entry must not come back
 		expect(getWorktreeMergeFailure('task-C')).toBeUndefined();
@@ -148,8 +149,9 @@ describe('worktree-merge-status registry — durability (restart survival)', () 
 			message: 'retry fail',
 		});
 
-		_internals.resetForTest();
-		initDurableStatusPath(dir);
+		// Simulate restart: clear in-memory map, keep disk file
+		_internals.failuresByTask.clear();
+		_internals.loadDurableStatus(_internals.getDurableStatusPath(dir));
 
 		expect(getWorktreeMergeFailure('task-D')).toEqual({
 			outcome: 'partial',
@@ -195,8 +197,9 @@ describe('worktree-merge-status registry — durability (restart survival)', () 
 		recordWorktreeMergeFailure('x.3', FAILURE_STUB);
 		clearWorktreeMergeStatus('x.2'); // cleared mid-session
 
-		_internals.resetForTest();
-		initDurableStatusPath(dir);
+		// Simulate restart: clear in-memory map, keep disk file
+		_internals.failuresByTask.clear();
+		_internals.loadDurableStatus(_internals.getDurableStatusPath(dir));
 
 		expect(getWorktreeMergeFailure('x.1')).toEqual(FAILURE_STUB);
 		expect(getWorktreeMergeFailure('x.2')).toBeUndefined(); // was cleared
