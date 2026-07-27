@@ -895,7 +895,7 @@ async function initializeOpenCodeSwarm(
 		},
 		directory: ctx.directory,
 		onTerminalClaimed: (record) =>
-			delegationGateHooks.backgroundCompletionClaimed(record.callID),
+			delegationGateHooks.backgroundCompletionClaimed(record),
 	});
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
@@ -997,6 +997,22 @@ async function initializeOpenCodeSwarm(
 		const pendingBefore = session
 			? [...(session.pendingAdvisoryMessages ?? [])]
 			: undefined;
+		// Snapshot guardrails-affected session flags so a failed advisory
+		// injection can fully undo guardrails' one-shot side effects (e.g.
+		// resumeModelAdvisoryDone, configModelAdvisoryDone). Without this,
+		// a rollback leaves those flags permanently set, and guardrails
+		// skips the corresponding advisories on the next turn.
+		const guardrailsSnapshot = session
+			? {
+					resumeModelAdvisoryDone: session.resumeModelAdvisoryDone,
+					configModelAdvisoryDone: session.configModelAdvisoryDone,
+					lastObservedModel: session.lastObservedModel,
+					lastObservedProviderID: session.lastObservedProviderID,
+					lastProviderRecoveryFingerprint:
+						session.lastProviderRecoveryFingerprint,
+					loopWarningPending: session.loopWarningPending,
+				}
+			: undefined;
 		let messagesBefore: typeof output.messages;
 		try {
 			messagesBefore = output.messages
@@ -1027,6 +1043,20 @@ async function initializeOpenCodeSwarm(
 		} catch (error) {
 			if (session && pendingBefore) {
 				session.pendingAdvisoryMessages = pendingBefore;
+			}
+			// Restore guardrails-specific session flags to their pre-guardrails
+			// state so a retry does not skip one-shot advisories (PRR-001).
+			if (session && guardrailsSnapshot) {
+				session.resumeModelAdvisoryDone =
+					guardrailsSnapshot.resumeModelAdvisoryDone;
+				session.configModelAdvisoryDone =
+					guardrailsSnapshot.configModelAdvisoryDone;
+				session.lastObservedModel = guardrailsSnapshot.lastObservedModel;
+				session.lastObservedProviderID =
+					guardrailsSnapshot.lastObservedProviderID;
+				session.lastProviderRecoveryFingerprint =
+					guardrailsSnapshot.lastProviderRecoveryFingerprint;
+				session.loopWarningPending = guardrailsSnapshot.loopWarningPending;
 			}
 			output.messages = messagesBefore;
 			await backgroundCompletionObserver.releaseAdvisories(

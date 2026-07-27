@@ -992,8 +992,16 @@ export async function claimTerminalResult(
 				const current = findByCorrelationId(directory, correlationId);
 				if (!current) return;
 				if (current.terminalResult) {
-					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data))
+					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data)) {
+						logger.warn(
+							`[background] claimTerminalResult: different terminal event for ` +
+								`correlationId=${correlationId}; ` +
+								`existing={status: ${current.terminalResult.status}, eventId: ${current.terminalResult.eventId}} ` +
+								`incoming={status: ${parsedTerminal.data.status}, eventId: ${parsedTerminal.data.eventId}}; ` +
+								`rejected`,
+						);
 						return;
+					}
 					claim = {
 						disposition: terminalDisposition(current),
 						record: current,
@@ -1731,7 +1739,23 @@ export async function acknowledgeObservedBackgroundAdvisories(
 						!advisory ||
 						advisory.parentSessionId !== parentSessionId ||
 						advisory.state !== 'pending' ||
-						!observedTexts.some((text) => text.includes(advisory.message))
+						!observedTexts.some((text) => {
+							// Prefer exact advisory-block parsing when the host
+							// transform wraps advisories in [ADVISORIES] tags.
+							const advisoryBlock = text.match(
+								/\[ADVISORIES\]([\s\S]*?)\[\/ADVISORIES\]/,
+							);
+							if (advisoryBlock) {
+								return advisoryBlock[1]
+									.split('\n---\n')
+									.some((entry) => entry.trim() === advisory.message);
+							}
+							// Fall back to substring match for host-reflected text
+							// that embeds the advisory message naturally (e.g.
+							// "host history: <message>"). Advisory messages are
+							// full sentences, so false-positive collision risk is low.
+							return text.includes(advisory.message);
+						})
 					) {
 						continue;
 					}

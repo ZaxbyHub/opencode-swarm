@@ -42,6 +42,8 @@ describe('init orphan recovery durable background ownership', () => {
 		fs.mkdirSync(worktreePath, { recursive: true });
 		fs.writeFileSync(path.join(worktreePath, 'valuable.txt'), 'keep\n');
 		initDurableStatusPath(project);
+		// Write a merge failure that persists to disk, then simulate a process
+		// restart (clear in-memory map, reload from durable file).
 		recordWorktreeMergeFailure('1.1', {
 			outcome: 'failed',
 			stage: 'background-correlation-persist',
@@ -50,8 +52,12 @@ describe('init orphan recovery durable background ownership', () => {
 			branch: 'swarm/lane/background-child/lane-1',
 		});
 
-		mergeStatusInternals.resetForTest();
-		initDurableStatusPath(project);
+		// Simulate process restart: clear in-memory map but keep the durable
+		// file on disk. We avoid resetForTest() here because it also deletes
+		// the durable file (PRR-016 fix); instead, directly clear only the
+		// in-memory state and re-initialize from disk.
+		mergeStatusInternals.failuresByTask.clear();
+		mergeStatusInternals.initDurableStatusPath(project);
 		resetSwarmState();
 		const result = await runInitOrphanRecovery(project);
 

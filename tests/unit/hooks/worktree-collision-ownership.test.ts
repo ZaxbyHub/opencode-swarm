@@ -227,7 +227,10 @@ describe('durable standard-worktree collision ownership', () => {
 			worktreePath: laneIdentity.worktreePath,
 			branch: laneIdentity.branchName,
 		});
-		mergeStatusInternals.resetForTest();
+		// Clear in-memory map but keep the durable file on disk so the
+		// collision ownership scan reads it (resetForTest also deletes the
+		// file since the PRR-016 fix).
+		mergeStatusInternals.failuresByTask.clear();
 		expect(
 			await inspectStandardWorktreeCollisionOwnership(identity()),
 		).toMatchObject({

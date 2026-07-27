@@ -364,8 +364,19 @@ export async function runInitOrphanRecovery(
 		// Durable background owners survive process restart, when swarmState is
 		// empty. Protect their exact worktree coordinates from orphan cleanup.
 		const activeSessionIds = Array.from(swarmState.agentSessions.keys());
-		const provisioningOwnerScan =
-			_internals.scanWorktreeProvisioningOwnersForRecovery(directory);
+		const provisioningOwnerScan = await withTimeout(
+			// Best-effort: the scan is synchronous (uses fs.*Sync) so the
+			// withTimeout cannot interrupt a stuck call. File-size bounds
+			// (MAX_PROVISIONING_OWNERS, etc.) provide the real protection;
+			// the timeout adds observability for the init-budget invariant.
+			Promise.resolve(
+				_internals.scanWorktreeProvisioningOwnersForRecovery(directory),
+			),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'worktree provisioning ownership scan exceeded its bounded init budget',
+			),
+		);
 		if (provisioningOwnerScan.status === 'uncertain') {
 			throw new Error(
 				`worktree provisioning ownership state is uncertain; destructive orphan cleanup skipped: ${provisioningOwnerScan.reason}`,
@@ -410,7 +421,15 @@ export async function runInitOrphanRecovery(
 				`background fallback ownership state is uncertain; destructive orphan cleanup skipped: ${fallbackOwnerScan.reason}`,
 			);
 		}
-		const primaryOwnerScan = _internals.scanDelegationsForRecovery(directory);
+		const primaryOwnerScan = await withTimeout(
+			// Best-effort: synchronous scan (fs.*Sync), timeout provides
+			// observability rather than interrupt capability.
+			Promise.resolve(_internals.scanDelegationsForRecovery(directory)),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'background primary ownership scan exceeded its bounded init budget',
+			),
+		);
 		if (primaryOwnerScan.status === 'uncertain') {
 			throw new Error(
 				`background primary ownership state is uncertain; destructive orphan cleanup skipped: ${primaryOwnerScan.reason}`,
@@ -429,8 +448,17 @@ export async function runInitOrphanRecovery(
 		const durableWorktreeOwners = primaryOwnerScan.owners.filter(
 			isUnsettledWorktreeOwner,
 		);
-		const mergeOwnerScan =
-			_internals.scanWorktreeMergeFailuresForRecovery(directory);
+		const mergeOwnerScan = await withTimeout(
+			// Best-effort: synchronous scan (fs.*Sync), timeout provides
+			// observability rather than interrupt capability.
+			Promise.resolve(
+				_internals.scanWorktreeMergeFailuresForRecovery(directory),
+			),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'worktree merge ownership scan exceeded its bounded init budget',
+			),
+		);
 		if (mergeOwnerScan.status === 'uncertain') {
 			throw new Error(
 				`worktree merge ownership state is uncertain; destructive orphan cleanup skipped: ${mergeOwnerScan.reason}`,

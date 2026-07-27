@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { ZodError, z } from 'zod';
 import type {
 	BackgroundCoderReservation,
+	BackgroundDelegationRecord,
 	BackgroundTaskChangeContext,
 } from '../background/pending-delegations.js';
 import {
@@ -1928,7 +1929,7 @@ export function createDelegationGateHook(
 		childSessionID: string;
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
-	backgroundCompletionClaimed: (callID: string) => void;
+	backgroundCompletionClaimed: (record: BackgroundDelegationRecord) => void;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -2170,7 +2171,10 @@ export function createDelegationGateHook(
 		background: unknown,
 	): boolean =>
 		isBackgroundTrue(background) || isMarkdownOnlyDeclaredScope(declaredFiles);
-	const backgroundCompletionClaimed = (callID: string): void => {
+	const backgroundCompletionClaimed = (
+		record: BackgroundDelegationRecord,
+	): void => {
+		const callID = record.callID;
 		clearPublishedScopeBindings(callID);
 		clearCoderTaskChangeContext(callID);
 		deleteStoredInputArgs(callID);

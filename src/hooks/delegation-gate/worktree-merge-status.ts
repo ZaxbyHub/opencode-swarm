@@ -322,6 +322,15 @@ export const _internals = {
 	initDurableStatusPath,
 	/** Reset both in-memory and durable state for test isolation. */
 	resetForTest(): void {
+		// Delete the durable file on disk so a subsequent lazy-load in
+		// another test does not re-read stale merge-failure state.
+		if (durableStatusPath !== undefined) {
+			try {
+				fs.unlinkSync(durableStatusPath);
+			} catch {
+				// The file may not exist (ENOENT) — that's fine.
+			}
+		}
 		failuresByTask.clear();
 		durableStatusPath = undefined;
 		hasLoaded = false;
