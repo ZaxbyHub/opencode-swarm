@@ -151,9 +151,11 @@ export function writeDisjointScopes(dir: string, taskIds: string[]): void {
 		fs.writeFileSync(
 			path.join(scopesDir, `scope-${id}.json`),
 			JSON.stringify({
+				version: 1,
 				taskId: id,
 				files: [`src/${safe}.ts`],
-				declaredAt: '2024-01-01T00:00:00.000Z',
+				declaredAt: 1,
+				expiresAt: Number.MAX_SAFE_INTEGER,
 			}),
 			'utf-8',
 		);

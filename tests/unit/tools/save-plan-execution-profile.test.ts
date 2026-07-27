@@ -70,9 +70,8 @@ describe('execution_profile: setting a profile on a new plan', () => {
 	test('accepts partial execution_profile and applies defaults', async () => {
 		const args = makeArgs({
 			working_directory: tmpDir,
-			execution_profile: {
-				parallelization_enabled: true,
-			},
+			// F-003: an explicit empty profile is not an implicit serial opt-out.
+			execution_profile: {},
 		});
 		const result = await executeSavePlan(args);
 		expect(result.success).toBe(true);
@@ -233,7 +232,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		expect(result.execution_profile?.parallelization_enabled).toBe(false);
 	});
 
-	test('reset_statuses: true without execution_profile clears locked profile (fresh start)', async () => {
+	test('reset_statuses without execution_profile applies the fresh v8 default', async () => {
 		// First call: set and lock profile
 		const firstResult = await executeSavePlan(
 			makeArgs({
@@ -257,10 +256,10 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 			}),
 		);
 		expect(result.success).toBe(true);
-		// Profile should be cleared (not in result)
-		expect(result.execution_profile).toBeUndefined();
+		// F-001: reset starts fresh, so the new-plan v8 profile is applied.
+		expect(result.execution_profile?.parallelization_enabled).toBe(true);
 
-		// Verify on disk: plan.json should not have execution_profile
+		// Verify on disk: the new default is durable.
 		const planJson = await readFile(
 			join(tmpDir, '.swarm', 'plan.json'),
 			'utf8',
@@ -268,7 +267,9 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		const planData = JSON.parse(planJson) as {
 			execution_profile?: unknown;
 		};
-		expect(planData.execution_profile).toBeUndefined();
+		expect(planData.execution_profile).toMatchObject({
+			parallelization_enabled: true,
+		});
 	});
 });
 
@@ -282,6 +283,7 @@ describe('execution_profile: auto_proceed field', () => {
 		expect(result.success).toBe(true);
 		expect(result.execution_profile).toBeDefined();
 		expect(result.execution_profile?.auto_proceed).toBe(true);
+		expect(result.execution_profile?.parallelization_enabled).toBe(true);
 	});
 
 	test('accepts auto_proceed: false in execution_profile', async () => {
@@ -358,11 +360,12 @@ describe('execution_profile: schema validation', () => {
 });
 
 describe('execution_profile: not provided', () => {
-	test('plan saved without execution_profile has no profile in result', async () => {
+	test('new plan without execution_profile receives the v8 default', async () => {
 		const args = makeArgs({ working_directory: tmpDir });
 		const result = await executeSavePlan(args);
 		expect(result.success).toBe(true);
-		expect(result.execution_profile).toBeUndefined();
+		// F-001: omission on a new plan enables parallel-first execution.
+		expect(result.execution_profile?.parallelization_enabled).toBe(true);
 	});
 
 	test('second call without profile preserves previously set unlocked profile', async () => {

@@ -2451,14 +2451,18 @@ export function createDelegationGateHook(
 		// helper the architect's `plan_conflict_check` tool uses; conflicts or
 		// unknown scopes → serial by default, with no architect discretion.
 		const scopeAllowsParallel = scopeVerdictAllowsParallel(directory, plan);
-		// Parallel mode is active only when the plan enables it, allows >1 concurrent
-		// task, Lean Turbo is not driving its own lane execution, AND the pending
-		// tasks are provably disjoint.
-		const parallelModeActive =
+		// Standard worktree isolation remains active even when the concurrency
+		// verdict falls back to serial. F-014: coupling isolation to
+		// `scopeAllowsParallel` made overlapping/unknown scopes run in the project
+		// root, defeating the safety boundary that serial fallback is meant to keep.
+		const standardWorktreeIsolationActive =
 			parallelEnabled &&
 			effectiveMaxConcurrent > 1 &&
-			!hasActiveLeanTurbo(input.sessionID) &&
-			scopeAllowsParallel;
+			!hasActiveLeanTurbo(input.sessionID);
+		// Parallel gate exemptions and slot accounting additionally require the
+		// pending tasks to be provably disjoint.
+		const parallelModeActive =
+			standardWorktreeIsolationActive && scopeAllowsParallel;
 		await assertPlanCriticApprovedForExecution(directory, plan);
 		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
 		const correlatedBinding = preparedScope.binding;
@@ -2560,7 +2564,7 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (!parallelModeActive) {
+		if (!standardWorktreeIsolationActive) {
 			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
 			await publishScopeBinding(input.callID, directory, correlatedBinding);
 			return;

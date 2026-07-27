@@ -23,7 +23,10 @@
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPlanJsonOnly } from '../plan/manager.js';
-import { computeParallelVerdict } from '../plan/parallel-verdict.js';
+import {
+	computeParallelVerdict,
+	MAX_PARALLEL_VERDICT_TASKS,
+} from '../plan/parallel-verdict.js';
 import { getCoChangePairs } from '../turbo/epic/cochange-source.js';
 import type { CoChangeEntry } from './co-change-analyzer.js';
 import { createSwarmTool } from './create-tool.js';
@@ -32,6 +35,10 @@ export const plan_conflict_check_args = {
 	task_ids: z
 		.array(z.string().min(1))
 		.min(2, 'plan_conflict_check requires at least 2 task ids to compare')
+		.max(
+			MAX_PARALLEL_VERDICT_TASKS,
+			`plan_conflict_check accepts at most ${MAX_PARALLEL_VERDICT_TASKS} task ids`,
+		)
 		.describe(
 			'The N proposed parallel task group ids (e.g. ["4.1","4.2","4.3"]). ' +
 				'Minimum 2 — fewer than 2 tasks cannot conflict.',
@@ -71,6 +78,8 @@ export interface PlanConflictCheckResult {
 	used_cochange: boolean;
 	/** Diagnostic: did plan.json load successfully? */
 	plan_loaded: boolean;
+	/** Task ids requested by the caller but absent from the loaded plan. */
+	unknown_to_plan?: string[];
 }
 
 /**
@@ -137,7 +146,10 @@ export async function executePlanConflictCheck(
 		pairs: verdict.pairs,
 		suggested_serial_order: verdict.suggestedSerialOrder,
 		unknown_scope_tasks: verdict.unknownScopeTasks,
-		used_cochange: useCochange && cochangePairs !== undefined,
+		// F-010: the source defines [] as signal-absent, so requesting
+		// co-change is not enough to claim that the signal was used.
+		used_cochange:
+			useCochange && cochangePairs !== undefined && cochangePairs.length > 0,
 		plan_loaded: planLoaded,
 		// Surface task ids not found in the plan as evidence lines on the
 		// affected pairs (helps the architect spot a typo). We append to
@@ -147,8 +159,6 @@ export async function executePlanConflictCheck(
 					unknown_to_plan: unknownToPlan,
 				}
 			: {}),
-	} as PlanConflictCheckResult & {
-		unknown_to_plan?: string[];
 	};
 }
 

@@ -82,8 +82,10 @@ detection (#1656) and real merge-back recovery UX (#1657).
 - **Orphan-cleanup fails safe.** If `.swarm/recovery/` exists but is unreadable
   (e.g. a corrupt record file), `cleanupOrphanedBranches` skips ALL lane-branch
   deletions for that pass. Recovery safety trumps orphan cleanliness. To restore
-  normal cleanup, resolve or clear the corrupt recovery record (run
-  `clearRecoveryRecord`, or delete the offending file under `.swarm/recovery/`).
+  normal cleanup, first recover or intentionally abandon the branch/worktree
+  named by the record, then delete only the corresponding JSON file. Use
+  `Remove-Item -LiteralPath .swarm/recovery/<record>.json` in PowerShell or
+  `rm -- .swarm/recovery/<record>.json` in a POSIX shell.
 - **`plan_conflict_check` must be re-run if the plan changes.** The gate
   recomputes the verdict on every dispatch (always fresh), but the architect's
   advisory view is a point-in-time snapshot. If pending tasks change, re-run the

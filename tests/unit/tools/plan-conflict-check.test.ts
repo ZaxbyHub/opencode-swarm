@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { MAX_PARALLEL_VERDICT_TASKS } from '../../../src/plan/parallel-verdict.js';
 import {
 	executePlanConflictCheck,
 	plan_conflict_check,
+	plan_conflict_check_args,
 } from '../../../src/tools/plan-conflict-check.js';
 
 let tempDir: string;
@@ -15,9 +17,11 @@ function writeScope(taskId: string, files: string[]): void {
 	fs.writeFileSync(
 		path.join(scopesDir, `scope-${taskId}.json`),
 		JSON.stringify({
+			version: 1,
 			taskId,
 			files,
-			declaredAt: '2024-01-01T00:00:00.000Z',
+			declaredAt: 1,
+			expiresAt: Number.MAX_SAFE_INTEGER,
 		}),
 		'utf-8',
 	);
@@ -127,12 +131,10 @@ describe('executePlanConflictCheck — task-id validation against plan', () => {
 		writeScope('5.1', ['src/a.ts']);
 		writeScope('5.2', ['src/b.ts']);
 
-		const result = (await executePlanConflictCheck(
+		const result = await executePlanConflictCheck(
 			{ task_ids: ['5.1', '5.9'] }, // 5.9 not in plan
 			tempDir,
-		)) as Awaited<ReturnType<typeof executePlanConflictCheck>> & {
-			unknown_to_plan?: string[];
-		};
+		);
 
 		expect(result.plan_loaded).toBe(true);
 		expect(result.unknown_to_plan).toEqual(['5.9']);
@@ -193,7 +195,17 @@ describe('executePlanConflictCheck — co-change opt-in', () => {
 
 		// Path-only verdict still valid; co-change signal absent in a non-git dir.
 		expect(result.verdict).toBe('all_disjoint');
+		// F-010: an empty pair list is explicitly signal-absent.
+		expect(result.used_cochange).toBe(false);
 	});
+});
+
+test('F-005: tool schema rejects oversized task lists', () => {
+	const ids = Array.from(
+		{ length: MAX_PARALLEL_VERDICT_TASKS + 1 },
+		(_, index) => `task-${index}`,
+	);
+	expect(plan_conflict_check_args.task_ids.safeParse(ids).success).toBe(false);
 });
 
 describe('plan_conflict_check — tool binding', () => {

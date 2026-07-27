@@ -1347,23 +1347,10 @@ export class LeanTurboRunner {
 	}
 
 	/**
-	 * Sequential worktree cleanup for completed and failed worktree lanes.
-	 *
-	 * Runs AFTER all lanes have been dispatched and completed via Promise.all.
-	 * Each worktree lane is processed one at a time, preventing concurrent
-	 * git merge/rebase/cherry-pick from corrupting the shared .git index.
-	 *
-	 * - **Success lanes**: mergeLaneBranch → removeWorktree → postMergeCleanup
-	 * - **Success lanes with merge failure**: log warning, keep worktree, update lane result
-	 * - **Failed lanes**: attemptMergeBackFromDirty → removeWorktree
-	 *
-	 * @returns Array of MergeBackFailureInfo for lanes where merge-back failed
-	 */
-	/**
 	 * Persist a durable recovery record for a merge-back / dispatch failure (#1657).
 	 *
 	 * Wraps `writeRecoveryRecord` (best-effort, non-fatal) with this session's
-	 * id and a human-runnable replay hint. Called from every failure branch of
+	 * id and portable human recovery guidance. Called from every failure branch of
 	 * `_sequentialWorktreeCleanup`. Records are auto-cleared on successful
 	 * merge-back so they exist only while a lane is preserved.
 	 */
@@ -1376,10 +1363,27 @@ export class LeanTurboRunner {
 			status: info.status,
 			reason: info.reason,
 			conflictFiles: info.conflictFiles,
-			replayHint: `cd ${info.worktreePath} && git status`,
+			// F-006: shell quoting is platform-specific. Keep the filesystem path
+			// in the structured worktreePath field and give portable human
+			// guidance instead of synthesizing an executable `cd` command.
+			replayHint:
+				'Open the directory in worktreePath and run git status with that directory as the working directory.',
 		});
 	}
 
+	/**
+	 * Sequential worktree cleanup for completed and failed worktree lanes.
+	 *
+	 * Runs AFTER all lanes have been dispatched and completed via Promise.all.
+	 * Each worktree lane is processed one at a time, preventing concurrent
+	 * git merge/rebase/cherry-pick from corrupting the shared .git index.
+	 *
+	 * - **Success lanes**: mergeLaneBranch → removeWorktree → postMergeCleanup
+	 * - **Success lanes with merge failure**: log warning, keep worktree, update lane result
+	 * - **Failed lanes**: attemptMergeBackFromDirty → removeWorktree
+	 *
+	 * @returns Array of MergeBackFailureInfo for lanes where merge-back failed
+	 */
 	private async _sequentialWorktreeCleanup(
 		laneResults: LaneResult[],
 		leanConfig: LeanTurboConfig,

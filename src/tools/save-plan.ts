@@ -660,8 +660,15 @@ export async function executeSavePlan(
 	// permits idempotent no-op profile repeats so recovery retries can proceed.
 	let resolvedProfile: Plan['execution_profile'] = preservedExecutionProfile;
 	if (args.execution_profile !== undefined) {
-		// Merge incoming profile fields over the preserved base (if any)
-		const base = preservedExecutionProfile ?? {};
+		// Merge incoming profile fields over the preserved base (if any).
+		// F-003: a partial profile on a new/effectively-new plan must inherit the
+		// v8 parallel-first default. Only an explicit false opts out; existing
+		// profiles retain their persisted value through the preserved base.
+		const base =
+			preservedExecutionProfile ??
+			(args.execution_profile.parallelization_enabled === undefined
+				? { parallelization_enabled: true }
+				: {});
 		const merged = { ...base, ...args.execution_profile };
 		const parsed = ExecutionProfileSchema.safeParse(merged);
 		if (!parsed.success) {

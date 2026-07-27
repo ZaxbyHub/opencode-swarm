@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
 	computeParallelVerdict,
 	isProvablyDisjoint,
+	MAX_PARALLEL_VERDICT_TASKS,
 } from '../../../src/plan/parallel-verdict.js';
 import type { CoChangeEntry } from '../../../src/tools/co-change-analyzer.js';
 
@@ -13,9 +14,11 @@ let scopesDir: string;
 
 function writeScope(taskId: string, files: string[]): void {
 	const scopeFile = {
+		version: 1,
 		taskId,
 		files,
-		declaredAt: '2024-01-01T00:00:00.000Z',
+		declaredAt: 1,
+		expiresAt: Number.MAX_SAFE_INTEGER,
 	};
 	fs.writeFileSync(
 		path.join(scopesDir, `scope-${taskId}.json`),
@@ -114,6 +117,34 @@ describe('computeParallelVerdict — verdict classification', () => {
 
 		expect(result.verdict).toBe('unknown_scopes');
 		expect(result.unknownScopeTasks).toEqual(['6.2']);
+	});
+
+	test('F-004/F-007: stale or unsafe scope records fail closed', () => {
+		writeScope('6.3', ['src/a.ts']);
+		fs.writeFileSync(
+			path.join(scopesDir, 'scope-6.4.json'),
+			JSON.stringify({
+				version: 1,
+				taskId: 'wrong',
+				declaredAt: 0,
+				expiresAt: 1,
+				files: ['src/b.ts'],
+			}),
+		);
+		expect(computeParallelVerdict(tempDir, ['6.3', '6.4']).verdict).toBe(
+			'unknown_scopes',
+		);
+		expect(
+			computeParallelVerdict(tempDir, ['6.3', 'x/../../../victim']).verdict,
+		).toBe('unknown_scopes');
+	});
+
+	test('F-005: oversized input is rejected before pairwise work', () => {
+		const ids = Array.from(
+			{ length: MAX_PARALLEL_VERDICT_TASKS + 1 },
+			(_, index) => `oversized-${index}`,
+		);
+		expect(() => computeParallelVerdict(tempDir, ids)).toThrow(RangeError);
 	});
 });
 

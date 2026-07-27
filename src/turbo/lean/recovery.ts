@@ -52,11 +52,16 @@ export interface RecoveryRecord {
 	conflictFiles?: string[];
 	/** Epoch ms when the record was written. */
 	recordedAt: number;
-	/** Shell hint a human can run to inspect the preserved worktree. */
+	/** Portable human guidance for inspecting the preserved worktree. */
 	replayHint: string;
 }
 
 const RECOVERY_DIR_NAME = 'recovery';
+
+interface RecoveryReadResult {
+	records: RecoveryRecord[];
+	errored: boolean;
+}
 
 function recoveryDir(directory: string): string {
 	return path.join(directory, '.swarm', RECOVERY_DIR_NAME);
@@ -72,6 +77,81 @@ function recordPath(
 	const safeSession = sessionId.replace(/[^a-zA-Z0-9._-]/g, '_');
 	const safeLane = laneId.replace(/[^a-zA-Z0-9._-]/g, '_');
 	return path.join(recoveryDir(directory), `${safeSession}-${safeLane}.json`);
+}
+
+/**
+ * Validate the complete on-disk RecoveryRecord contract.
+ *
+ * Recovery records are a deletion-safety boundary: accepting a parseable but
+ * incomplete record can both render `undefined` in status and hide which
+ * worktree/branch must be preserved. Keep this validator shared by listing and
+ * fail-safe detection so those paths cannot disagree.
+ */
+function isRecoveryRecord(value: unknown): value is RecoveryRecord {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		return false;
+	}
+
+	const record = value as Record<string, unknown>;
+	const validStatus =
+		record.status === 'failed' ||
+		record.status === 'partial' ||
+		record.status === 'conflict';
+
+	return (
+		typeof record.laneId === 'string' &&
+		typeof record.sessionId === 'string' &&
+		typeof record.worktreePath === 'string' &&
+		validStatus &&
+		typeof record.reason === 'string' &&
+		typeof record.recordedAt === 'number' &&
+		Number.isFinite(record.recordedAt) &&
+		typeof record.replayHint === 'string' &&
+		(record.branchName === undefined ||
+			typeof record.branchName === 'string') &&
+		(record.conflictFiles === undefined ||
+			(Array.isArray(record.conflictFiles) &&
+				record.conflictFiles.every((file) => typeof file === 'string')))
+	);
+}
+
+/**
+ * Read recovery records once while retaining whether any entry was malformed.
+ * Valid siblings are returned for status visibility, while `errored` lets
+ * destructive cleanup fail safe for the whole pass.
+ */
+function readRecoveryRecords(directory: string): RecoveryReadResult {
+	const dir = recoveryDir(directory);
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return {
+			records: [],
+			// An absent directory means there are no recoveries; a present but
+			// unreadable directory is a safety error.
+			errored: fs.existsSync(dir),
+		};
+	}
+
+	const records: RecoveryRecord[] = [];
+	let errored = false;
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+		const full = path.join(dir, entry.name);
+		try {
+			const parsed: unknown = JSON.parse(fs.readFileSync(full, 'utf-8'));
+			if (isRecoveryRecord(parsed)) {
+				records.push(parsed);
+			} else {
+				errored = true;
+			}
+		} catch {
+			errored = true;
+		}
+	}
+
+	return { records, errored };
 }
 
 /**
@@ -109,36 +189,7 @@ export function writeRecoveryRecord(
  * unreadable.
  */
 export function listRecoveryRecords(directory: string): RecoveryRecord[] {
-	const dir = recoveryDir(directory);
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
-	const out: RecoveryRecord[] = [];
-	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-		const full = path.join(dir, entry.name);
-		try {
-			const raw = fs.readFileSync(full, 'utf-8');
-			const parsed = JSON.parse(raw) as Partial<RecoveryRecord>;
-			// Minimal shape validation — fail-skip on malformed records.
-			if (
-				typeof parsed.laneId === 'string' &&
-				typeof parsed.sessionId === 'string' &&
-				typeof parsed.worktreePath === 'string' &&
-				(parsed.status === 'failed' ||
-					parsed.status === 'partial' ||
-					parsed.status === 'conflict')
-			) {
-				out.push(parsed as RecoveryRecord);
-			}
-		} catch {
-			// Skip malformed record file.
-		}
-	}
-	return out;
+	return readRecoveryRecords(directory).records;
 }
 
 /**
@@ -184,24 +235,5 @@ export function clearRecoveryRecord(
  * is unreadable.
  */
 export function recoveryReadErrored(directory: string): boolean {
-	const dir = recoveryDir(directory);
-	// Directory absent is NOT an error — it just means no recoveries yet.
-	if (!fs.existsSync(dir)) return false;
-	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
-		// A present-but-unreadable record file is also an error signal.
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-			const full = path.join(dir, entry.name);
-			try {
-				const raw = fs.readFileSync(full, 'utf-8');
-				JSON.parse(raw); // validate parseable
-			} catch {
-				return true;
-			}
-		}
-		return false;
-	} catch {
-		return true;
-	}
+	return readRecoveryRecords(directory).errored;
 }

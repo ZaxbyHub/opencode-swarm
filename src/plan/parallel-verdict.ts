@@ -15,7 +15,7 @@
  *
  * Design notes:
  *  - Sync by design: it reads only `.swarm/scopes/scope-<taskId>.json` via
- *    `readTaskScopes` (which is itself sync + fail-closed). The gate runs in
+ *    the hardened persisted-scope reader (sync + fail-closed). The gate runs in
  *    `toolBefore` on every tool call and must stay bounded; an async/gitten
  *    helper would violate the bounded-gate spirit.
  *  - The helper itself NEVER calls `getCoChangePairs` (async + `git log`).
@@ -29,6 +29,7 @@
  *    acceptance criterion.
  */
 
+import { readScopeFromDisk } from '../scope/scope-persistence.js';
 import type { CoChangeEntry } from '../tools/co-change-analyzer.js';
 import {
 	type CoChangeThreshold,
@@ -77,6 +78,9 @@ export const DEFAULT_PARALLEL_COCHANGE_THRESHOLD: CoChangeThreshold = {
 	minCoChanges: 3,
 };
 
+/** Hard cap for the synchronous O(N²) verdict path (F-005). */
+export const MAX_PARALLEL_VERDICT_TASKS = 64;
+
 export interface ComputeParallelVerdictOptions {
 	/** When true AND `cochangePairs` is supplied, fold co-change signal into each pair. Off by default. */
 	useCochange?: boolean;
@@ -97,7 +101,9 @@ function resolveScope(
 	directory: string,
 	taskId: string,
 ): { files: string[]; ok: boolean } {
-	const raw = readTaskScopes(directory, taskId);
+	// F-004/F-007: do not authorize parallelism from the legacy raw reader,
+	// which does not validate containment, schema version, TTL, or task identity.
+	const raw = readScopeFromDisk(directory, taskId);
 	if (raw === null) return { files: [], ok: false };
 	// Treat empty declared scope as unknown (mirrors `runPartitionPreflight`'s
 	// empty-declared → undeclared rule in src/turbo/lean/partition-common.ts).
@@ -122,6 +128,13 @@ export function computeParallelVerdict(
 	taskIds: string[],
 	options?: ComputeParallelVerdictOptions,
 ): ParallelVerdict {
+	// F-005: reject before any filesystem reads or pair construction. The
+	// delegation gate catches this and fails safely to serial execution.
+	if (taskIds.length > MAX_PARALLEL_VERDICT_TASKS) {
+		throw new RangeError(
+			`Parallel verdict supports at most ${MAX_PARALLEL_VERDICT_TASKS} tasks`,
+		);
+	}
 	const useCochange =
 		options?.useCochange === true && Array.isArray(options?.cochangePairs);
 	const threshold =

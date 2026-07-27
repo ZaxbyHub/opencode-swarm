@@ -10,6 +10,10 @@ import {
 	recoveryReadErrored,
 	writeRecoveryRecord,
 } from '../../../../src/turbo/lean/recovery.js';
+import {
+	LeanTurboRunner,
+	type MergeBackFailureInfo,
+} from '../../../../src/turbo/lean/runner.js';
 
 let tempDir: string;
 let swarmDir: string;
@@ -56,7 +60,7 @@ describe('writeRecoveryRecord', () => {
 		expect(records[0].status).toBe('conflict');
 		expect(records[0].conflictFiles).toEqual(['src/shared.ts']);
 		expect(typeof records[0].recordedAt).toBe('number');
-		expect(records[0].recordedAt).toBeLessThanOrEqual(Date.now());
+		expect(Number.isFinite(records[0].recordedAt)).toBe(true);
 	});
 
 	test('overwrites (not accumulates) when same session+lane written twice', () => {
@@ -116,6 +120,61 @@ describe('listRecoveryRecords — tolerance', () => {
 		const records = listRecoveryRecords(tempDir);
 		expect(records).toHaveLength(1);
 		expect(records[0].laneId).toBe('good');
+	});
+
+	test('F-008: rejects parseable records missing required fields and fails safe', () => {
+		const recoveryDir = path.join(swarmDir, 'recovery');
+		fs.mkdirSync(recoveryDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(recoveryDir, 'incomplete.json'),
+			JSON.stringify({
+				laneId: 'lane-incomplete',
+				sessionId: 'sess-incomplete',
+				worktreePath: path.join(tempDir, 'worktree'),
+				status: 'failed',
+			}),
+			'utf-8',
+		);
+
+		expect(listRecoveryRecords(tempDir)).toEqual([]);
+		expect(recoveryReadErrored(tempDir)).toBe(true);
+	});
+
+	test.each([
+		['non-string branchName', { branchName: 42 }],
+		['non-string conflictFiles member', { conflictFiles: ['valid.ts', 42] }],
+	])('F-008: rejects %s', (_label, invalidFields) => {
+		const recoveryDir = path.join(swarmDir, 'recovery');
+		fs.mkdirSync(recoveryDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(recoveryDir, 'invalid-optional.json'),
+			JSON.stringify({
+				...baseRecord(),
+				recordedAt: 1,
+				...invalidFields,
+			}),
+			'utf-8',
+		);
+
+		expect(listRecoveryRecords(tempDir)).toEqual([]);
+		expect(recoveryReadErrored(tempDir)).toBe(true);
+	});
+
+	test('F-008: rejects a non-finite timestamp', () => {
+		const recoveryDir = path.join(swarmDir, 'recovery');
+		fs.mkdirSync(recoveryDir, { recursive: true });
+		const serialized = JSON.stringify({
+			...baseRecord(),
+			recordedAt: 0,
+		}).replace('"recordedAt":0', '"recordedAt":1e400');
+		fs.writeFileSync(
+			path.join(recoveryDir, 'non-finite.json'),
+			serialized,
+			'utf-8',
+		);
+
+		expect(listRecoveryRecords(tempDir)).toEqual([]);
+		expect(recoveryReadErrored(tempDir)).toBe(true);
 	});
 });
 
@@ -192,5 +251,35 @@ describe('auto-clear contract (used by runner on successful merge-back)', () => 
 
 		clearRecoveryRecord(tempDir, 'lane-1', 'sess-abc');
 		expect(listRecoveryRecords(tempDir)).toEqual([]);
+	});
+});
+
+describe('runner recovery guidance', () => {
+	test('F-006: paths with spaces stay structured instead of becoming shell commands', () => {
+		const runner = new LeanTurboRunner({
+			directory: tempDir,
+			sessionID: 'sess-spaced-path',
+		});
+		const worktreePath = path.join(tempDir, 'preserved lane with spaces');
+		const failure: MergeBackFailureInfo = {
+			laneId: 'lane-spaced',
+			branchName: 'swarm-lane/sess-spaced-path/lane-spaced',
+			worktreePath,
+			status: 'conflict',
+			reason: 'merge conflict',
+		};
+
+		(
+			runner as unknown as {
+				_persistRecovery(info: MergeBackFailureInfo): void;
+			}
+		)._persistRecovery(failure);
+
+		const [record] = listRecoveryRecords(tempDir);
+		expect(record.worktreePath).toBe(worktreePath);
+		expect(record.replayHint).toContain('worktreePath');
+		expect(record.replayHint).not.toContain(worktreePath);
+		expect(record.replayHint).not.toContain('cd ');
+		expect(record.replayHint).not.toContain('&&');
 	});
 });

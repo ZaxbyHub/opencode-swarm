@@ -198,7 +198,7 @@ describe('mergeBackFailures propagation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// DEGRAINED-TASK DETAILS PROPAGATION (#1657)
+// DEGRADED-TASK DETAILS PROPAGATION (#1657, F-012)
 // ---------------------------------------------------------------------------
 
 describe('degradedDetails propagation (#1657)', () => {
