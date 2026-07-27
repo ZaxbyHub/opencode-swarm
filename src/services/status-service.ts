@@ -33,6 +33,7 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
+import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
@@ -75,6 +76,20 @@ export interface StatusData {
 	leanDegradedTasks?: number;
 	/** Human-readable degradation summary */
 	leanDegradationSummary?: string;
+	/**
+	 * #1657: merge-back conflict recovery worktrees preserved for manual
+	 * recovery (durable records under `.swarm/recovery/`). Surfaced so the
+	 * architect/operator can see pending recovery work in `/swarm status`
+	 * rather than having to re-read a prior tool result. `undefined`/empty when
+	 * no lanes are preserved.
+	 */
+	leanPreservedRecoveryWorktrees?: Array<{
+		laneId: string;
+		status: string;
+		worktreePath: string;
+		reason: string;
+		replayHint: string;
+	}>;
 	/** Whether Full-Auto mode is currently active */
 	fullAutoActive?: boolean;
 	/**
@@ -432,6 +447,27 @@ function enrichWithLeanTurbo(
 
 	status.turboStrategy = turboStrategy;
 
+	// #1657: surface durable merge-back recovery records (preserved worktrees)
+	// from `.swarm/recovery/`. This runs BEFORE the `!leanActive` early return
+	// because recovery records persist across sessions and are relevant whenever
+	// any lane's merge-back has failed — even if Lean Turbo is not currently
+	// active (e.g. the session ended, or the user is inspecting past recovery).
+	try {
+		const recoveryRecords = listRecoveryRecords(directory);
+		if (recoveryRecords.length > 0) {
+			status.leanPreservedRecoveryWorktrees = recoveryRecords.map((r) => ({
+				laneId: r.laneId,
+				status: r.status,
+				worktreePath: r.worktreePath,
+				reason: r.reason,
+				replayHint: r.replayHint,
+			}));
+		}
+	} catch {
+		// Non-fatal: status is best-effort. Missing the recovery section does
+		// not invalidate the rest of the status output.
+	}
+
 	if (!leanActive) {
 		return status;
 	}
@@ -548,6 +584,24 @@ export function formatStatusMarkdown(status: StatusData): string {
 		// Backward-compatibility: callers that only set turboMode (no turboStrategy) get the old format
 		lines.push('');
 		lines.push('**TURBO MODE**: active');
+	}
+
+	// #1657: preserved merge-back recovery worktrees. Rendered as its own block
+	// because recovery records persist across sessions and are relevant even
+	// when Lean Turbo is not currently active.
+	if (
+		status.leanPreservedRecoveryWorktrees &&
+		status.leanPreservedRecoveryWorktrees.length > 0
+	) {
+		lines.push('');
+		lines.push(
+			`**Preserved recovery worktrees**: ${status.leanPreservedRecoveryWorktrees.length} lane(s) preserved for manual merge-back recovery`,
+		);
+		for (const w of status.leanPreservedRecoveryWorktrees) {
+			lines.push(
+				`  - ${w.laneId} (${w.status}): ${w.reason} — \`${w.replayHint}\``,
+			);
+		}
 	}
 
 	// Issue #1781 E2: Full-Auto status is rendered as its own block, OUTSIDE

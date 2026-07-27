@@ -24,6 +24,10 @@ import {
 	tryAcquireLock,
 } from '../parallel/file-locks';
 import { swarmState } from '../state';
+import {
+	listRecoveryRecords,
+	recoveryReadErrored,
+} from '../turbo/lean/recovery';
 import { log } from '../utils/index.js';
 import { withTimeout } from '../utils/timeout.js';
 import { removeWorktree } from '../worktree/core';
@@ -82,6 +86,10 @@ async function writeAdvisoryFile(
 	cleanupResult: {
 		removed: string[];
 		skipped: string[];
+		/** #1657: lane branches skipped due to an unresolved recovery record. */
+		skippedRecoveryBranches?: string[];
+		/** #1657: set when recovery-dir read errored and all deletions were skipped. */
+		recoveryReadError?: boolean;
 		errors: Array<{ branch: string; error: string }>;
 	},
 	warnings: string[],
@@ -103,6 +111,20 @@ async function writeAdvisoryFile(
 			removedWorktrees,
 			prunedWorktrees: attempted,
 		},
+		// #1657: surface preserved recovery branches + fail-safe state so a
+		// human reading the advisory knows why cleanup skipped them.
+		...(cleanupResult.skippedRecoveryBranches &&
+		cleanupResult.skippedRecoveryBranches.length > 0
+			? {
+					preservedRecoveryBranches: cleanupResult.skippedRecoveryBranches,
+				}
+			: {}),
+		...(cleanupResult.recoveryReadError
+			? {
+					recoveryReadError: true,
+					note: 'skipped all lane-branch deletions this pass because .swarm/recovery/ was unreadable (fail-safe)',
+				}
+			: {}),
 	};
 	try {
 		await fsPromises.mkdir(path.dirname(advisoryPath), { recursive: true });
@@ -239,6 +261,14 @@ async function removeOrphanedWorktreeDir(
 	}
 }
 
+function worktreePathKey(worktreePath: string, directory: string): string {
+	const absolutePath = path.isAbsolute(worktreePath)
+		? worktreePath
+		: path.resolve(directory, worktreePath);
+	const normalized = path.normalize(absolutePath);
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 /**
  * Runs bounded orphan cleanup at plugin init time.
  *
@@ -298,7 +328,12 @@ export async function runInitOrphanRecovery(
 			// Write advisory file (best-effort)
 			await writeAdvisoryFile(
 				directory,
-				{ removed: [], skipped: orphanedBranches, errors: [] },
+				{
+					removed: [],
+					skipped: orphanedBranches,
+					skippedRecoveryBranches: [],
+					errors: [],
+				},
 				result.warnings,
 				false,
 				[],
@@ -342,7 +377,7 @@ export async function runInitOrphanRecovery(
 
 			await writeAdvisoryFile(
 				directory,
-				{ removed: [], skipped: [], errors: [] },
+				{ removed: [], skipped: [], skippedRecoveryBranches: [], errors: [] },
 				result.warnings,
 				false,
 				[],
@@ -363,15 +398,44 @@ export async function runInitOrphanRecovery(
 
 			const removedWorktrees: string[] = [];
 			const worktreeWarnings: string[] = [];
+			// F-002: recovery records preserve worktree directories as well as
+			// branches. Read the valid paths before any deletion, then perform a
+			// second full-schema check. Any malformed/unreadable record makes the
+			// whole worktree cleanup pass fail safe.
+			const recoveryRecords = listRecoveryRecords(directory);
+			const recoveryReadError = recoveryReadErrored(directory);
+			const recoveryWorktreePaths = new Set(
+				recoveryRecords.map((record) =>
+					worktreePathKey(record.worktreePath, directory),
+				),
+			);
 
-			for (const worktreePath of orphanedWorktreeDirs) {
-				const error = await removeOrphanedWorktreeDir(worktreePath, directory);
-				if (error) {
-					worktreeWarnings.push(
-						`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
+			if (recoveryReadError) {
+				worktreeWarnings.push(
+					'Recovery records are unreadable or fail schema validation; skipped all orphaned worktree deletion this pass (fail-safe).',
+				);
+			} else {
+				for (const worktreePath of orphanedWorktreeDirs) {
+					if (
+						recoveryWorktreePaths.has(worktreePathKey(worktreePath, directory))
+					) {
+						worktreeWarnings.push(
+							`Preserved recovery worktree "${worktreePath}"; an unresolved recovery record still references it.`,
+						);
+						continue;
+					}
+
+					const error = await removeOrphanedWorktreeDir(
+						worktreePath,
+						directory,
 					);
-				} else {
-					removedWorktrees.push(worktreePath);
+					if (error) {
+						worktreeWarnings.push(
+							`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
+						);
+					} else {
+						removedWorktrees.push(worktreePath);
+					}
 				}
 			}
 
@@ -396,7 +460,7 @@ export async function runInitOrphanRecovery(
 				warnings: allWarnings,
 				orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
 				removedWorktrees,
-				prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
+				prunedWorktrees: cleanupResult.recoveryReadError !== true,
 			};
 
 			// Write advisory file (best-effort) so session-start can surface warnings
@@ -433,7 +497,7 @@ export async function runInitOrphanRecovery(
 		// On error, write advisory with empty state so session-start still gets a notification
 		await writeAdvisoryFile(
 			directory,
-			{ removed: [], skipped: [], errors: [] },
+			{ removed: [], skipped: [], skippedRecoveryBranches: [], errors: [] },
 			result.warnings,
 			false,
 			[],

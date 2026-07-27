@@ -64,6 +64,7 @@ export {
 	placeholder_scan,
 	placeholderScan,
 } from './placeholder-scan';
+export { plan_conflict_check } from './plan-conflict-check';
 export { pr_workflow_status } from './pr-workflow-status';
 // v6.10
 export {

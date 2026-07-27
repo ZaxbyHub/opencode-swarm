@@ -267,6 +267,11 @@ export const TOOL_METADATA = {
 			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
 		agents: ['architect'],
 	},
+	plan_conflict_check: {
+		description:
+			'read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups using declared scopes and optional git co-change; returns a verdict (all_disjoint / conflicts_present / unknown_scopes), per-pair evidence, and a suggested serialization order. Writes nothing — the execution gate independently recomputes the verdict inline at dispatch time via the same helper. Call BEFORE attempting parallel dispatch to confirm disjointness.',
+		agents: ['architect'],
+	},
 	write_pr_review_trigger_eval: {
 		description:
 			'persist the complete PR-review trigger evaluation with exact-set validation, dispatch provenance, and live merge-base verification',

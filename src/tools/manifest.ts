@@ -90,6 +90,7 @@ import { parse_lane_candidates } from './parse-lane-candidates';
 import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
+import { plan_conflict_check } from './plan-conflict-check';
 import { pr_workflow_status } from './pr-workflow-status';
 import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
@@ -184,6 +185,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	checkpoint: () => checkpoint,
 	pkg_audit: () => pkg_audit,
 	parse_lane_candidates: () => parse_lane_candidates,
+	plan_conflict_check: () => plan_conflict_check,
 	prepare_pr_feedback_scope: () => prepare_pr_feedback_scope,
 	write_pr_review_artifact: () => write_pr_review_artifact,
 	write_pr_review_trigger_eval: () => write_pr_review_trigger_eval,

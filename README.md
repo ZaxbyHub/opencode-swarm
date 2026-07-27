@@ -107,7 +107,7 @@ Swarm then:
 3. Consults domain experts when needed and caches the guidance.
 4. Writes a phased implementation plan.
 5. Sends that plan through a critic gate before coding starts.
-6. Executes one task at a time through the QA pipeline:
+6. Executes tasks through the QA pipeline — one at a time, or concurrently in isolated worktrees for plans with provably file-disjoint task groups (v8 default for new plans, #1674; serial is the automatic fallback when scopes overlap or are unknown):
 
 * coder writes code
 * automated checks run
@@ -307,7 +307,7 @@ Swarm registers a roster of specialized core, optional, and conditional agents. 
 |---|---|---|
 | **architect** | Orchestrates workflow, writes plans, enforces gates | Core |
 | **explorer** | Scans codebase, gathers context, maps facts | Core |
-| **coder** | Implements one task at a time | Core |
+| **coder** | Implements one task at a time (or concurrently in isolated worktrees for provably file-disjoint task groups — v8, #1674) | Core |
 | **reviewer** | Checks correctness and security | Core |
 | **test_engineer** | Writes and runs tests, adversarial testing | Core |
 | **critic** | Reviews plans before implementation begins | Core |

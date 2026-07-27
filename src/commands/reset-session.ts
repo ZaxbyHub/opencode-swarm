@@ -170,6 +170,21 @@ export async function handleResetSessionCommand(
 				`⚠️ Failed to remove ${branchResult.errors.length} branch(es): ${branchResult.errors.map((e) => e.error).join('; ')}`,
 			);
 		}
+		// #1657: surface preserved recovery branches + fail-safe state so the
+		// user running /swarm reset-session knows why some branches were skipped.
+		if (
+			branchResult.skippedRecoveryBranches &&
+			branchResult.skippedRecoveryBranches.length > 0
+		) {
+			results.push(
+				`ℹ️ Preserved ${branchResult.skippedRecoveryBranches.length} branch(es) with unresolved merge-back recovery records (run /swarm status to inspect)`,
+			);
+		}
+		if (branchResult.recoveryReadError) {
+			results.push(
+				`⚠️ Skipped all lane-branch deletions: .swarm/recovery/ was unreadable (fail-safe). Resolve or clear corrupt recovery records and re-run.`,
+			);
+		}
 	} catch (err) {
 		results.push(`⚠️ Failed to cleanup orphan branches: ${errorMessage(err)}`);
 	}

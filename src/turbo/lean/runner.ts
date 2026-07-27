@@ -51,7 +51,8 @@ import {
 } from './merge-back';
 import type { LeanTurboLanePlan } from './planner';
 import { planLeanTurboLanes } from './planner';
-import type { LeanTurboLane } from './state';
+import { clearRecoveryRecord, writeRecoveryRecord } from './recovery';
+import type { LeanTurboDegradedTask, LeanTurboLane } from './state';
 import { loadLeanTurboRunState, saveLeanTurboRunState } from './state';
 import { withTurboStateLock } from './state-lock';
 import {
@@ -167,6 +168,12 @@ export interface LeanTurboPhaseResult {
 	lanes: LaneResult[];
 	/** Task IDs that were degraded (risk conditions) */
 	degradedTasks: string[];
+	/**
+	 * #1657: full degraded-task details (reason/files/requiredMode) so the
+	 * architect sees per-task degradation reasons in the tool result, not
+	 * just task IDs. Additive alongside `degradedTasks` (kept for back-compat).
+	 */
+	degradedDetails?: LeanTurboDegradedTask[];
 	/**
 	 * Task IDs excluded from parallel lanes due to lock conflicts.
 	 * Caller must complete these via standard serial flow before phase can advance.
@@ -548,6 +555,12 @@ export class LeanTurboRunner {
 		}
 
 		const degradedTasks = lanePlan.degradedTasks.map((d) => d.taskId);
+		// #1657: also carry the full degraded-task objects (reason/files/
+		// requiredMode) so the tool result includes per-task degradation
+		// reasons, not just IDs. The full objects are already persisted in
+		// run state and reconstructed by /swarm status; this closes the
+		// tool-boundary thinning point.
+		const degradedDetails: LeanTurboDegradedTask[] = lanePlan.degradedTasks;
 
 		// Return NO_LANES only if planner produced zero lanes AND no fallback tasks
 		if (
@@ -560,6 +573,7 @@ export class LeanTurboRunner {
 				reason: 'NO_LANES',
 				lanes: [],
 				degradedTasks,
+				degradedDetails,
 				serializedTasks: lanePlan.serializedTasks,
 			};
 		}
@@ -581,6 +595,7 @@ export class LeanTurboRunner {
 				ok: true,
 				lanes: [],
 				degradedTasks,
+				degradedDetails,
 				serializedTasks: lanePlan.serializedTasks,
 			};
 		}
@@ -619,6 +634,7 @@ export class LeanTurboRunner {
 					: undefined,
 			lanes: laneResults,
 			degradedTasks,
+			degradedDetails,
 			serializedTasks: lanePlan.serializedTasks,
 			mergeBackFailures:
 				mergeBackFailures.length > 0 ? mergeBackFailures : undefined,
@@ -1331,6 +1347,31 @@ export class LeanTurboRunner {
 	}
 
 	/**
+	 * Persist a durable recovery record for a merge-back / dispatch failure (#1657).
+	 *
+	 * Wraps `writeRecoveryRecord` (best-effort, non-fatal) with this session's
+	 * id and portable human recovery guidance. Called from every failure branch of
+	 * `_sequentialWorktreeCleanup`. Records are auto-cleared on successful
+	 * merge-back so they exist only while a lane is preserved.
+	 */
+	private _persistRecovery(info: MergeBackFailureInfo): void {
+		writeRecoveryRecord(this._directory, {
+			laneId: info.laneId,
+			sessionId: this._sessionID,
+			branchName: info.branchName,
+			worktreePath: info.worktreePath,
+			status: info.status,
+			reason: info.reason,
+			conflictFiles: info.conflictFiles,
+			// F-006: shell quoting is platform-specific. Keep the filesystem path
+			// in the structured worktreePath field and give portable human
+			// guidance instead of synthesizing an executable `cd` command.
+			replayHint:
+				'Open the directory in worktreePath and run git status with that directory as the working directory.',
+		});
+	}
+
+	/**
 	 * Sequential worktree cleanup for completed and failed worktree lanes.
 	 *
 	 * Runs AFTER all lanes have been dispatched and completed via Promise.all.
@@ -1374,6 +1415,11 @@ export class LeanTurboRunner {
 						// Mark for post-merge cleanup AFTER worktree removal (branch delete
 						// fails while the branch is still checked out in an active worktree).
 						needsPostMergeCleanup = true;
+
+						// #1657: clear any prior recovery record for this lane now that it
+						// merged cleanly, so recovery records don't accumulate. (A record
+						// exists only while a lane is preserved; auto-clear on success.)
+						clearRecoveryRecord(this._directory, lr.laneId, this._sessionID);
 
 						// FR-205 SC-134: Remove lane profile at successful merge-back.
 						// Best-effort — non-fatal if removal fails (e.g. file already gone).
@@ -1441,6 +1487,10 @@ export class LeanTurboRunner {
 								mergeBackFailure: failureInfo,
 							},
 						);
+						// #1657: persist a durable recovery record so the preserved
+						// worktree/branch survives session end + orphan cleanup, and
+						// /swarm status can surface it.
+						this._persistRecovery(failureInfo);
 						log(
 							`[lean-turbo] merge-back PARTIAL for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
@@ -1477,6 +1527,9 @@ export class LeanTurboRunner {
 						log(
 							`[lean-turbo] merge-back ERROR for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
+						// #1657: persist durable recovery record (same rationale as the
+						// partial-conflict branch above).
+						this._persistRecovery(failureInfo);
 						continue; // Skip removeWorktree — keep worktree for manual recovery
 					}
 				} catch (err) {
@@ -1513,6 +1566,8 @@ export class LeanTurboRunner {
 					log(
 						`[lean-turbo] merge-back EXCEPTION for lane ${lr.laneId}: ${errMsg} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 					);
+					// #1657: persist durable recovery record.
+					this._persistRecovery(failureInfo);
 					continue; // Skip removeWorktree — keep worktree for manual recovery
 				}
 			} else if (lr.status === 'failed' && laneInState._failureCleanupPending) {
@@ -1530,6 +1585,8 @@ export class LeanTurboRunner {
 				log(
 					`[lean-turbo] failed lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath}; not merging partial work`,
 				);
+				// #1657: persist durable recovery record.
+				this._persistRecovery(failureInfo);
 				continue; // Keep failed lane worktree for manual inspection.
 			}
 

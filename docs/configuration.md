@@ -1161,7 +1161,7 @@ The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `parallelization_enabled` | boolean | `false` | Enable parallel task execution within phases (composes with Lean Turbo) |
+| `parallelization_enabled` | boolean | `false` (schema) / `true` (new plans, v8) | Enable parallel task execution within phases (composes with Lean Turbo). **v8 (#1674):** new plans created via `save_plan` default to `true`; the execution gate enforces serial automatically when the active phase's pending tasks are not provably file-disjoint. Existing plans are unchanged on upgrade. Opt out per-plan with `parallelization_enabled: false`. |
 | `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64) |
 | `council_parallel` | boolean | `true` | Allow council review phases to run council members in parallel |
 | `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
