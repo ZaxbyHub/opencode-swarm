@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
 import {
@@ -18,6 +16,7 @@ import {
 	_internals,
 	executeRunPrFeedbackStageA,
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Regression coverage for FINDING R2: buildBoundedChecksPayload must fail
 // OPEN toward evidence availability when persisting full output fails,
@@ -57,9 +56,7 @@ const LARGE_STDOUT = '0123456789'.repeat(1000); // 10,000 bytes, > 4096 tail cap
 const LARGE_STDERR = 'stderr-line-'.repeat(400); // > 4096 bytes
 
 beforeEach(async () => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'feedback-stage-a-payload-')),
-	);
+	directory = canonicalMkdtemp('feedback-stage-a-payload-');
 	await fs.mkdir(path.join(directory, 'tests'), { recursive: true });
 	await fs.writeFile(
 		path.join(directory, 'tests', 'targeted-regression.test.ts'),

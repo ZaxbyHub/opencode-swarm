@@ -2464,7 +2464,8 @@ export async function enforcePrWorkflowToolBefore(
 		!isNamedReadOnlyTool
 	) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK rejects unclassified plugin/MCP tools; use positively classified observation tools, built-in structured write tools after verification, or the workflow controller',
+			'BLOCKED: PR_FEEDBACK rejects unclassified plugin/MCP tools; use positively classified observation tools, built-in structured write tools after verification, or the workflow controller' +
+				describePrWorkflowControllerToolNames(state.mode),
 		);
 	}
 	if (state.prHeadSha && (isShellCheckout || isRemoteCheckoutTool)) {
@@ -2773,6 +2774,10 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	isProcessAlive,
+	// Exposed for the `-c` config-injection regression test. The publication
+	// path that calls this needs a fully-armed ready-to-publish state, so the
+	// classifier is not otherwise reachable from a focused unit test.
+	isSafeStandaloneGitCommit,
 	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
@@ -2963,8 +2968,6 @@ const PR_WORKFLOW_SHARED_CONTROLLER_TOOLS = new Set([
 	'collect_lane_results',
 	'complete_pr_workflow',
 	'dispatch_lanes_async',
-	'get_async_result',
-	'get_async_status',
 	'prepare_pr_workflow_checkout',
 ]);
 
@@ -3312,7 +3315,7 @@ function describeBlockedPrReviewShellCommand(
 			: 'Reason: bound-fetch-restriction. Fetch is not permitted in this bound state; read remote state via gh_evidence instead.';
 	} else if (gitMatch?.[1] || /^git(?:\s|$)/i.test(normalized)) {
 		detail =
-			'Reason: unlisted git verb. Allowed git reads: status/log/show/diff/rev-parse/merge-base/ls-files/grep/blame/cat-file/for-each-ref, `branch` with listing flags only, `remote -v`, `config --get`.';
+			'Reason: unlisted git verb. Allowed git reads: status/log/show/diff/rev-parse/merge-base/ls-files/grep/blame/cat-file/for-each-ref, `branch` with listing flags only, `stash list`, `worktree list`, `remote -v`, `config --get`.';
 	} else if (/^gh(?:\s|$)/i.test(normalized)) {
 		detail =
 			'Reason: unlisted gh form. Allowed gh reads: pr view/diff/checks/status/list, run view/list/watch, issue view/list, search, api GET. If gh is missing, fetch the api.github.com REST URL with the web fetch tool.';
@@ -3330,7 +3333,16 @@ function hasUnsafeShellControlSyntax(command: string): boolean {
 function isSafeStandaloneGitCommit(command: string): boolean {
 	if (hasUnsafeShellControlSyntax(command)) return false;
 	if (/(?:^|\s)--(?:allow-empty|amend)(?:\s|=|$)/i.test(command)) return false;
-	return /^git(?:\s+-C(?:=|\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>`]+))?\s+commit(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|<>`]+))*\s*$/i.test(
+	// Case-sensitive on `-C`, for the same reason as
+	// PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN: a case-insensitive match let
+	// lowercase `-c` — git's arbitrary per-invocation config flag — satisfy the
+	// directory-override branch, so `git -c core.hooksPath=/tmp/evil commit -m x`
+	// was accepted as a bare standalone commit with the injected config stripped
+	// from what the classifier evaluated. On a mutating verb that means
+	// attacker-chosen hooks execute at commit time. Only the leading `git`
+	// keyword stays case-insensitive; `-c ...` now falls through to the
+	// fail-closed reject.
+	return /^[Gg][Ii][Tt](?:\s+-C(?:=|\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>`]+))?\s+commit(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|<>`]+))*\s*$/.test(
 		command.trim(),
 	);
 }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+	_test_exports,
 	activatePrWorkflow,
 	enforcePrWorkflowToolBefore,
 } from '../../../src/hooks/pr-workflow-gate.js';
@@ -131,6 +132,38 @@ describe('PR_REVIEW read-only shell classifier — git -c vs -C case sensitivity
 		for (const command of ['git -C /tmp stash list', 'git -C /tmp log']) {
 			const outcome = await reviewOutcome(command);
 			expect(outcome, `expected ALLOW for: ${command}`).toBe('ALLOWED');
+		}
+	});
+
+	// The read-intake classifier was hardened for `-c`, but the standalone
+	// COMMIT classifier one function away kept the same case-insensitive `-C`
+	// pattern. That is the more dangerous half: `core.hooksPath` on a mutating
+	// verb executes attacker-chosen hooks at commit time, and the injected
+	// config was stripped from what the classifier evaluated, so the command
+	// read as a bare `git commit`.
+	test('denies -c config injection on the standalone commit classifier', () => {
+		for (const command of [
+			'git -c core.hooksPath=/tmp/evil commit -m x',
+			'git -c protocol.ext.allow=always commit -m x',
+			'git -c x=y -C /repo commit -m x',
+		]) {
+			expect(
+				_test_exports.isSafeStandaloneGitCommit(command),
+				`expected DENY for: ${command}`,
+			).toBe(false);
+		}
+	});
+
+	test('keeps the legitimate standalone commit forms admitted', () => {
+		for (const command of [
+			'git commit -m x',
+			'git commit -m "message with spaces"',
+			'git -C /repo commit -m x',
+		]) {
+			expect(
+				_test_exports.isSafeStandaloneGitCommit(command),
+				`expected ALLOW for: ${command}`,
+			).toBe(true);
 		}
 	});
 });

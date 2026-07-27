@@ -63,10 +63,27 @@ Fixes compaction loops and re-dispatch cycles during `/swarm pr-review` and `/sw
   `git stash apply --index <oid>` recovery instruction, but there was no allowed
   way to list stashes to find that OID.
 
-- **Blocked-tool errors name the allowed surface.** The `PR_REVIEW` fail-closed
-  rejection now lists the controller tools available in the active mode and
-  points at `pr_workflow_status`, instead of only restating that the mode is
-  read-only.
+- **`git -c` config-injection bypass closed, in both classifiers.** The `-C`
+  directory-override match was case-insensitive, so lowercase `-c` — git's
+  arbitrary per-invocation config flag, e.g. `-c core.pager=touch` — also
+  satisfied it. `git -c core.pager=touch status` was captured as bare `status`
+  and admitted, silently stripping the injected config from what the classifier
+  evaluated. Both patterns are now case-sensitive on `-C` (only the leading
+  `git` keyword itself stays case-insensitive), so `-c ...` falls through to the
+  fail-closed reject.
+
+  This applies to the standalone-commit classifier as well as the read-only
+  intake one. That second half is the more dangerous of the two: it guards a
+  *mutating* verb, so `git -c core.hooksPath=/tmp/evil commit -m x` previously
+  classified identically to a bare `git commit -m x` and would have executed
+  attacker-chosen hooks at commit time once a feedback run legitimately reached
+  its publication state.
+
+- **Blocked-tool errors name the allowed surface.** Both the `PR_REVIEW` and
+  `PR_FEEDBACK` fail-closed rejections now list the controller tools available in
+  the active mode and point at `pr_workflow_status`, instead of only restating
+  that the mode is read-only. The blocked-shell diagnosis also now names
+  `stash list` and `worktree list` among the allowed git reads.
 
 ## Why
 
@@ -76,12 +93,34 @@ recover it and forcing re-dispatch loops that bloomed context; Stage A check
 output was sent in full on every poll, inflating token cost and context per
 feedback run; tools that could recover lost output were blocked or
 unreachable. The compaction loop was invisible to the user until the review
-stalled or cost ballooned. Fail-closed behavior is unchanged — this is about
-what the gate DELIVERS to the model, not what it permits.
+stalled or cost ballooned.
+
+Most of this change is about what the gate DELIVERS to the model rather than
+what it permits. The permitted surface does move, in four narrow and
+individually documented ways: `git stash list` and `git worktree list` are newly
+admitted; `retrieve_summary` is newly admitted; the `-c` config-injection forms
+are newly refused, in both the read-intake and standalone-commit classifiers;
+and `get_async_result` / `get_async_status` were dropped from the controller
+allowlist. That last one is a narrowing with no practical effect — neither name
+was ever a registered tool, so nothing could call them either way — but the set
+is the live admission classifier and not merely display text, so it is listed
+here rather than treated as cosmetic. Nothing else moved.
 
 ## Migration
 
-No migration required. The changes are transparent to existing lane-dispatch and
+One operator-visible behavior change, otherwise no migration required.
+
+If you set `tool_output.truncation_tools` explicitly, the floor is now
+subtracted from your configured list as well as from the default. A list
+composed only of floor members (`read` and `task` are both on it) therefore
+resolves to an empty effective set and line-truncation is off, where it
+previously applied. The floor exists so operator config cannot reintroduce the
+unrecoverable-payload defect by re-enabling rewriting of the ref-carrying lane
+tools; it is applied uniformly rather than per-tool, so `read` and `task` are
+subtracted too even though they carry no refs. Audit the setting if you rely on
+it; drop floor members from the list to make the effective set explicit.
+
+Otherwise the changes are transparent to existing lane-dispatch and
 feedback workflows; lane output recovery now works without re-dispatch loops,
 and Stage A responses stay bounded regardless of how many checks run. Stage A is
 not made faster by this change: a failing run now persists the full output and

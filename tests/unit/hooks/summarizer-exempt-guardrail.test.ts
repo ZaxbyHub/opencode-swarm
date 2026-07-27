@@ -18,13 +18,13 @@
  */
 import { describe, expect, it } from 'bun:test';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../../../src/config/constants';
 import type { SummaryConfig } from '../../../src/config/schema';
 import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
 import { computeEffectiveTruncatableTools } from '../../../src/index';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
@@ -175,9 +175,7 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 
 	describe('4. Operator config cannot remove the floor', () => {
 		it('a narrowed exempt_tools config still exempts a ref-carrying tool', async () => {
-			const directory = fs.mkdtempSync(
-				path.join(os.tmpdir(), 'summarizer-guardrail-'),
-			);
+			const directory = canonicalMkdtemp('summarizer-guardrail-');
 			const config: SummaryConfig = {
 				enabled: true,
 				threshold_bytes: 1024,
@@ -207,9 +205,7 @@ describe('SUMMARIZER_EXEMPT_TOOL_NAMES guardrail', () => {
 
 	describe('5. The bug reproduces without the fix — the hook is live', () => {
 		it('a non-exempt tool with an equally oversized output IS summarized', async () => {
-			const directory = fs.mkdtempSync(
-				path.join(os.tmpdir(), 'summarizer-guardrail-'),
-			);
+			const directory = canonicalMkdtemp('summarizer-guardrail-');
 			const config: SummaryConfig = {
 				enabled: true,
 				threshold_bytes: 1024,

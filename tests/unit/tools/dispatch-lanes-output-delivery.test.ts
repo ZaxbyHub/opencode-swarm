@@ -18,7 +18,11 @@
  */
 import { beforeEach, describe, expect, test } from 'bun:test';
 import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations';
-import { _test_exports } from '../../../src/tools/dispatch-lanes';
+import {
+	_test_exports,
+	executeDispatchLanes,
+} from '../../../src/tools/dispatch-lanes';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const { recordToLaneResult, resetDeliveredLaneOutputs } = _test_exports;
 
@@ -230,5 +234,102 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 		const secondA = recordToLaneResult(laneA, 'batch-multi');
 		expect(secondA.output).toBeUndefined();
 		expect(secondA.output_omitted_repeat).toBe(true);
+	});
+});
+
+/**
+ * `evictDeliveredLaneOutputsIfOverBound` (src/tools/dispatch-lanes.ts:96-102)
+ * FIFO-evicts the oldest `deliveredLaneOutputs` key once the module-level Set
+ * exceeds `MAX_TRACKED_DELIVERED_LANE_OUTPUTS` (1024). The Set itself is not
+ * exported, so this test drives the bound through the same public seam the
+ * sibling tests above use (`_test_exports.recordToLaneResult`, which is the
+ * only production call site that adds to the Set — see line 1925-1926) and
+ * observes eviction indirectly: a key that should have been evicted stops
+ * being reported as "already delivered" (inline `output` reappears), while a
+ * key that should have survived keeps being reported as delivered
+ * (`output_omitted_repeat: true`).
+ */
+describe('deliveredLaneOutputs eviction bound (evictDeliveredLaneOutputsIfOverBound)', () => {
+	test('FIFO-evicts the oldest key once the tracked set exceeds the 1024 bound', () => {
+		const batchId = 'batch-evict';
+		const laneId = 'lane-evict';
+		const keyRecord = (index: number) =>
+			makeRecord({
+				correlationId: `corr-evict-${index}`,
+				laneId,
+				batchId,
+				result: {
+					text: `output ${index}`,
+					chars: 8,
+					truncated: false,
+					digest: `digest-evict-${index}`,
+					outputRef: `L1:evict:${index}`,
+				},
+			});
+
+		// Insert one more key than the bound allows (0..1024 inclusive = 1025
+		// distinct keys). The 1025th insert pushes the Set to size 1025, which
+		// triggers exactly one eviction of the oldest key (index 0).
+		for (let i = 0; i <= 1024; i++) {
+			const result = recordToLaneResult(keyRecord(i), batchId);
+			// Every insert here is a first-ever delivery of a brand-new key, so
+			// each call must report inline output, never a repeat.
+			expect(result.output).toBe(`output ${i}`);
+			expect(result.output_omitted_repeat).toBeUndefined();
+		}
+
+		// Index 1 is still within the 1024-entry bound (indices 1..1024
+		// survived) — re-delivering it must be recognized as already
+		// delivered. Check this BEFORE touching index 0, since re-delivering
+		// index 0 below re-inserts it and evicts whatever is currently oldest.
+		const repeatOfSurvivor = recordToLaneResult(keyRecord(1), batchId);
+		expect(repeatOfSurvivor.output).toBeUndefined();
+		expect(repeatOfSurvivor.output_omitted_repeat).toBe(true);
+
+		// Index 0 was the oldest key and must have been evicted by the 1025th
+		// insert. Because it is no longer tracked, delivering it again must be
+		// treated as a first-ever delivery (inline output, not a repeat). If
+		// the eviction bound were removed or raised, index 0 would still be
+		// tracked and this would incorrectly report output_omitted_repeat.
+		const redeliveredEvictee = recordToLaneResult(keyRecord(0), batchId);
+		expect(redeliveredEvictee.output).toBe('output 0');
+		expect(redeliveredEvictee.output_omitted_repeat).toBeUndefined();
+	});
+});
+
+/**
+ * `boundZodIssues` (src/tools/dispatch-lanes.ts:111-118) caps a formatted Zod
+ * issue list at `MAX_ZOD_ISSUES_LISTED` (20) entries and appends a trailing
+ * `... and N more` summary once truncated. It is not exported directly, so
+ * this test drives it through the real public validation call site
+ * (`executeDispatchLanes`, src/tools/dispatch-lanes.ts:701) with a payload
+ * malformed enough to produce more than 20 Zod issues.
+ */
+describe('boundZodIssues via executeDispatchLanes invalid-args path', () => {
+	test('caps the errors array at 20 entries plus a trailing "... and N more" marker', async () => {
+		// Each empty lane object is missing 3 required fields (id, agent,
+		// prompt) -> 3 Zod issues per lane. 8 empty lanes (MAX_LANES) yields
+		// 24 issues, 4 over the 20-entry cap.
+		const invalidArgs = {
+			lanes: Array.from({ length: 8 }, () => ({})),
+		};
+
+		// Validation fails before the directory is touched, so any real path
+		// works; canonicalTmpDir keeps the FR-011 lint satisfied honestly.
+		const result = await executeDispatchLanes(
+			invalidArgs,
+			canonicalTmpDir(),
+			{},
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(result.errors).toBeDefined();
+		const errors = result.errors as string[];
+		expect(errors).toHaveLength(21);
+		expect(errors.slice(0, 20).every((line) => typeof line === 'string')).toBe(
+			true,
+		);
+		expect(errors[20]).toBe('... and 4 more');
 	});
 });

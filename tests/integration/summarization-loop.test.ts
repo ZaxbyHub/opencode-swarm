@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../src/commands/retrieve';
 import type { SummaryConfig } from '../../src/config/schema';
@@ -8,6 +7,7 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 /**
  * Default configuration helper
@@ -31,8 +31,13 @@ describe('summarization loop fix integration', () => {
 		// Reset summary ID counter before each test
 		resetSummaryIdCounter();
 
-		// Create temporary directory for test
-		tempDir = join(tmpdir(), `summarization-loop-test-${Date.now()}`);
+		// Create temporary directory for test. `canonicalMkdtemp` is used rather
+		// than a millisecond-stamp suffix: the clock read it replaced was not a
+		// time-sensitive
+		// assertion (it was only a uniqueness token), and mkdtemp gives stronger
+		// uniqueness than a millisecond stamp while also closing the macOS
+		// /var -> /private/var symlink gap (issues #1737, #1782).
+		tempDir = canonicalMkdtemp('summarization-loop-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 

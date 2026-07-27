@@ -16,27 +16,25 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
 import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
-import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('createToolSummarizerHook - retrieve_lane_output exemption ratchet', () => {
 	let tempDir: string;
 	const largeOutput = 'x'.repeat(2000);
 
 	beforeEach(() => {
-		// Date.now() is a unique-directory suffix, not a time-sensitive
-		// assertion; wrapped per the repo's test-clock convention (issue #1782).
-		tempDir = join(
-			tmpdir(),
-			`.swarm-test-${withFrozenClock(() => Date.now())}-${Math.random().toString(36).slice(2)}`,
-		);
-		mkdirSync(tempDir, { recursive: true });
+		// The old suffix paired a frozen-clock stamp with Math.random(); the
+		// stamp contributed nothing (a frozen clock returns a constant) and the
+		// randomness is what mkdtemp now supplies natively, along with a
+		// canonicalized path for the macOS /var symlink gap
+		// (issues #1782, #1737).
+		tempDir = canonicalMkdtemp('.swarm-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 		resetSummaryIdCounter();
 	});

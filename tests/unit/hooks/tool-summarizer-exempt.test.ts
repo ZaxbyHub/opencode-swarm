@@ -1,27 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
 import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
-import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('tool-summarizer exempt_tools feature', () => {
 	let tempDir: string;
 	let hook: (input: any, output: any) => Promise<void>;
 
 	beforeEach(() => {
-		// Date.now() here is a unique-directory suffix, not a time-sensitive
-		// assertion; withFrozenClock still wraps it per the repo's test-clock
-		// convention (issue #1782) so the check-test-clock ratchet is satisfied
-		// honestly rather than by a decorative unused import.
-		tempDir = join(
-			tmpdir(),
-			`tool-summarizer-test-${withFrozenClock(() => Date.now())}`,
-		);
+		// mkdtemp supplies the uniqueness a clock stamp used to (a frozen clock
+		// returns a constant, so every run reused one directory) and
+		// canonicalizes the path for the macOS /var symlink gap
+		// (issues #1782, #1737).
+		tempDir = canonicalMkdtemp('tool-summarizer-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 		resetSummaryIdCounter();
 	});
