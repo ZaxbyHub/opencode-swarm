@@ -24,6 +24,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { ACTIONABLE_FIELDS } from './hive-fixtures.js';
 
 async function readHiveCount(): Promise<number> {
 	try {
@@ -93,12 +94,14 @@ describe('hive transaction storage gate (#1847)', () => {
 		const promoterPath = path
 			.resolve(process.cwd(), 'src/hooks/hive-promoter.ts')
 			.replace(/\\/g, '/');
+		// #1821 A3: the direct-text path must supply its own predicate + scope or
+		// the default-ON actionability_floor gate blocks the promotion.
 		const loader = (
 			lesson: string,
 			cohortId: string,
 		) => `import { promoteToHive, _internals } from "${promoterPath}";
 _internals.resolveCohortId = async () => ({ cohortId: ${JSON.stringify(cohortId)}, source: 'remote', normalizedRemote: 'github.com/t/r', degraded: false });
-await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)});
+await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, undefined, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
 `;
 
 		await fsPromises.writeFile(scriptA, loader(entryA, 'c-a'), 'utf-8');
@@ -128,7 +131,7 @@ await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)});
 			.replace(/\\/g, '/');
 		const loader = `import { promoteToHive, _internals } from "${promoterPath}";
 _internals.resolveCohortId = async () => ({ cohortId: 'c-same', source: 'remote', normalizedRemote: 'github.com/t/r', degraded: false });
-await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)});
+await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, undefined, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
 `;
 		await fsPromises.writeFile(scriptA, loader, 'utf-8');
 		await fsPromises.writeFile(scriptB, loader, 'utf-8');

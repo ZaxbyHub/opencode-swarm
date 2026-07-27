@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
+import { countConsensusReportFiles } from '../consensus/store';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -112,6 +113,19 @@ export interface StatusData {
 	unactionableQueueDepth?: number;
 	/** #1234 Part 3: pending insight candidates awaiting phase boundary consumption */
 	insightCandidatesPending?: number;
+	/**
+	 * #1821 AC22: consensus report FILES stored under
+	 * `.swarm/evolution/consensus/`.
+	 *
+	 * The reader half of the consensus store. Without it the miner's reports were
+	 * a write-only directory — nothing in the product enumerated them, so a user
+	 * had no way to learn they existed. A file count, deliberately: it is one
+	 * `readdir` with no JSON parse and no integrity recomputation, so it costs the
+	 * same whether the store holds one report or fifty. It therefore includes any
+	 * corrupt report, because what it counts is files whose name is a well-formed
+	 * report id.
+	 */
+	consensusReports?: number;
 	/**
 	 * Cohort/link status (issue #1846). Makes the linked knowledge store and its
 	 * health obvious in `/swarm status`. `undefined` when link state is absent.
@@ -288,6 +302,14 @@ export async function getStatusData(
 	status.insightCandidatesPending = await safeLineCount(
 		validateSwarmPath(directory, 'insight-candidates.jsonl'),
 	);
+	// #1821 AC22: make the consensus store reachable. Best-effort like every
+	// other counter in this block — a status command must never fail because an
+	// optional artifact directory is unreadable.
+	try {
+		status.consensusReports = await countConsensusReportFiles(directory);
+	} catch {
+		status.consensusReports = 0;
+	}
 
 	// Issue #1846: surface cohort/link status so `/swarm status` makes the
 	// linked knowledge store and its health obvious. Best-effort: a missing or
@@ -573,7 +595,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 	const proposals = status.pendingProposals ?? 0;
 	const unactionable = status.unactionableQueueDepth ?? 0;
 	const insights = status.insightCandidatesPending ?? 0;
-	if (proposals > 0 || unactionable > 0 || insights > 0) {
+	const consensusReports = status.consensusReports ?? 0;
+	if (
+		proposals > 0 ||
+		unactionable > 0 ||
+		insights > 0 ||
+		consensusReports > 0
+	) {
 		lines.push('', '**Learning Queues**:');
 		if (proposals > 0)
 			lines.push(
@@ -585,6 +613,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 			);
 		if (insights > 0)
 			lines.push(`  - Insight candidates: ${insights} (consumed at phase end)`);
+		// #1821 AC22. The pointer is the directory, not a command: there is no
+		// list command for consensus reports, and naming one that does not exist
+		// would be worse than naming the path a reader can actually open.
+		if (consensusReports > 0)
+			lines.push(
+				`  - Consensus reports: ${consensusReports} (read under \`.swarm/evolution/consensus/\`; each holds proposals-only recommendations)`,
+			);
 	}
 
 	// Issue #1846: cohort/link status — make the shared knowledge store visible.

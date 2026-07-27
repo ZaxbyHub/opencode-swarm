@@ -129,11 +129,15 @@ export interface SkillImproveResult {
 	macroMotifs?: {
 		motifs: number;
 		proposalsWritten: number;
+		/** #1821 AC21: motifs suppressed by the cross-producer dedup ledger. */
+		duplicatesSuppressed?: number;
 	};
 	/** #1234 Part 4: success workflow-motif proposals written this run. */
 	successMotifs?: {
 		motifs: number;
 		proposalsWritten: number;
+		/** #1821 AC21: motifs suppressed by the cross-producer dedup ledger. */
+		duplicatesSuppressed?: number;
 	};
 	/** Issue #1477: self-healing reconciliation of stale active generated skills
 	 *  (regenerate-or-retire). In proposal-only runs this is a dry run (the
@@ -734,18 +738,26 @@ export async function runSkillImprover(
 	// Macro reflector (Change 6, Task 5.3): cluster recurring failure motifs from
 	// the recent trajectory window and emit skill PROPOSALS (never active skills).
 	// Deterministic + read-only over the store; no LLM call, no quota draw.
-	const motifResult = await writeMotifProposals(req.directory);
+	// #1821 AC21: `sessionId` is threaded so the dedup-ledger entry's
+	// LearningProvenanceV1 write origin records who emitted the proposal.
+	const motifResult = await writeMotifProposals(req.directory, {
+		...(req.sessionId ? { sessionId: req.sessionId } : {}),
+	});
 	const macroMotifs = {
 		motifs: motifResult.motifs,
 		proposalsWritten: motifResult.proposalsWritten.length,
+		duplicatesSuppressed: motifResult.duplicatesSuppressed,
 	};
 
 	// #1234 Part 4: mine recurring successful tool-sequences and emit
 	// workflow-type skill proposals. Same cadence, same proposals dir, no LLM.
-	const successMotifResult = await writeSuccessMotifProposals(req.directory);
+	const successMotifResult = await writeSuccessMotifProposals(req.directory, {
+		...(req.sessionId ? { sessionId: req.sessionId } : {}),
+	});
 	const successMotifs = {
 		motifs: successMotifResult.motifs,
 		proposalsWritten: successMotifResult.proposalsWritten.length,
+		duplicatesSuppressed: successMotifResult.duplicatesSuppressed,
 	};
 
 	// Issue #1477: self-healing reconciliation of stale active generated skills.

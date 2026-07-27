@@ -167,6 +167,9 @@ const READ_ONLY_TOOL_DENYLIST = [
 		'write_mutation_evidence',
 		'knowledge_add',
 		'knowledge_remove',
+		// Issue #1821 Workstream C: mining persists a report under `.swarm/`,
+		// so it must not run inside a read-only lane.
+		'consensus_mine',
 		'summarize_work',
 		'doc_scan',
 		'lint',

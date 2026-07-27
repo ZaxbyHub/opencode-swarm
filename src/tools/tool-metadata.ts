@@ -447,6 +447,22 @@ export const TOOL_METADATA = {
 			'run curator phase analysis and optionally apply knowledge recommendations',
 		agents: ['architect'],
 	},
+	consensus_mine: {
+		// Rendered into the architect system prompt, so it must not imply a single
+		// artifact. Naming only the report was false: the run also prunes its own
+		// older reports and appends to the shared recommendation dedup ledger,
+		// whose root is `resolveKnowledgeStoreDir` — under a knowledge-link pointer
+		// that ledger write lands in the shared cohort root, outside this project.
+		description:
+			'mine cross-run consensus from existing .swarm evidence into an immutable proposals-only report; also deletes its own reports past consensus.report_retention, appends to the shared recommendation dedup ledger (in the shared cohort root, outside this project, when a knowledge link is active), and mirrors proposals into pending swarm-memory proposals when memory is enabled',
+		// The curator phase/postmortem roles are the consumers of cross-run
+		// evidence; `curator` itself is NOT an AgentName (see
+		// src/config/agent-names.ts) and using it here would be a compile error.
+		agents: ['architect', 'curator_phase', 'curator_postmortem'],
+		// `prWorkflow` is deliberately omitted: omitted tools are fail-closed in
+		// PR_REVIEW / PR_FEEDBACK, which is the correct posture for a tool that
+		// writes .swarm state during a review-only workflow.
+	},
 	knowledge_add: {
 		description: 'store a new lesson in the knowledge base',
 		agents: ['architect', 'coder'],

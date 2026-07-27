@@ -9,15 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyCuratorKnowledgeUpdates } from '../../../src/hooks/curator.js';
 import { maybeQuarantineOnContradiction } from '../../../src/hooks/knowledge-escalator.js';
@@ -26,9 +18,40 @@ import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
+import {
+	type IsolatedState,
+	setupIsolatedState,
+} from '../../helpers/test-isolation.js';
 
-function makeTempDir(): string {
-	return mkdtempSync(join(tmpdir(), 'contradiction-test-'));
+/**
+ * Time in this file, and why `freezeClock` is deliberately NOT used.
+ *
+ * `maybeQuarantineOnContradiction` takes its reference instant as a parameter
+ * (`now: Date = new Date()`) and compares `Date.parse(event.timestamp)` against
+ * `now.getTime() - windowDays`. It never calls `Date.now()`, so `freezeClock`'s
+ * `fixedNow` spy cannot reach it, and its `isoNow` spy would corrupt the
+ * `new Date(x).toISOString()` fixtures below. The correct seam is therefore the
+ * injected `now` (AGENTS.md invariant 7, DI over mocking): the four direct
+ * `maybeQuarantineOnContradiction` tests pass `new Date(FROZEN_NOW)` and stamp
+ * their events off `FROZEN_NOW`, which makes them hermetic — no ambient clock
+ * at all, where before "now" and "60 days ago" were both live values.
+ *
+ * The two curator-driven tests have no such seam: `applyCuratorKnowledgeUpdates`
+ * stamps the event it emits with its own `new Date()` and forwards the default
+ * `now`, both read from the real clock. Their seeded events must therefore be
+ * stamped against that same live clock — see `liveNowIso` below.
+ */
+const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
+const FROZEN_ISO = new Date(FROZEN_NOW).toISOString();
+
+/**
+ * A wall-clock stamp, used ONLY by the two curator-driven tests. Their events
+ * have to land inside the real 30-day window that the curator's internal
+ * `new Date()` computes, so a fixed literal would silently age out of the
+ * window and stop exercising the threshold. Every other test uses `FROZEN_ISO`.
+ */
+function liveNowIso(): string {
+	return new Date().toISOString();
 }
 
 function ensureSwarmDir(dir: string): string {
@@ -47,7 +70,7 @@ function makeEvent(o: {
 		event_id: randomUUID(),
 		trace_id: randomUUID(),
 		knowledge_id: o.knowledge_id,
-		timestamp: o.timestamp ?? new Date().toISOString(),
+		timestamp: o.timestamp ?? FROZEN_ISO,
 		session_id: 'test-session',
 		agent: 'test-agent',
 	});
@@ -62,7 +85,10 @@ function writeEvents(
 	writeFileSync(fp, content, 'utf-8');
 }
 
-function writeEntry(dir: string, opts: { id: string; status?: string }): void {
+function writeEntry(
+	dir: string,
+	opts: { id: string; status?: string; tags?: string[] },
+): void {
 	const fp = resolveSwarmKnowledgePath(dir);
 	mkdirSync(join(dir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -72,15 +98,15 @@ function writeEntry(dir: string, opts: { id: string; status?: string }): void {
 			tier: 'swarm',
 			lesson: 'a test lesson long enough to pass validation checks here',
 			category: 'process',
-			tags: [],
+			tags: opts.tags ?? [],
 			scope: 'global',
 			confidence: 0.7,
 			status: opts.status ?? 'established',
 			confirmed_by: [],
 			retrieval_outcomes: {},
 			schema_version: 2,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: FROZEN_ISO,
+			updated_at: FROZEN_ISO,
 		}) + '\n',
 		'utf-8',
 	);
@@ -130,17 +156,18 @@ const defaultConfig = {
 };
 
 describe('G3 contradiction unification (#1715)', () => {
+	// `setupIsolatedState` gives a realpath-canonicalized temp dir — the raw
+	// `mkdtempSync` under the system temp root that this replaced left the macOS
+	// /var -> /private/var symlink gap open — plus an isolated HOME/XDG so a
+	// developer's real config cannot reach the curator. No `clock` option here:
+	// see the note at the top of the file for why freezing would not help.
+	let state: IsolatedState;
 	let dir: string;
 	beforeEach(() => {
-		dir = makeTempDir();
+		state = setupIsolatedState({ prefix: 'contradiction-test-' });
+		dir = state.dir;
 	});
-	afterEach(() => {
-		try {
-			rmSync(dir, { recursive: true, force: true });
-		} catch {
-			/* ignore */
-		}
-	});
+	afterEach(() => state.cleanup());
 
 	test('curator flag_contradiction emits a contradicted event post-transaction', async () => {
 		const id = randomUUID();
@@ -185,6 +212,62 @@ describe('G3 contradiction unification (#1715)', () => {
 		expect(entries[0].tags).toContain('contradiction:spaces vs tabs');
 	});
 
+	async function flagContradiction(
+		id: string,
+		reason: string,
+	): Promise<string[]> {
+		await applyCuratorKnowledgeUpdates(
+			dir,
+			[{ action: 'flag_contradiction', entry_id: id, lesson: 'Test', reason }],
+			defaultConfig,
+		);
+		const entries = await readKnowledge<{ id: string; tags?: string[] }>(
+			resolveSwarmKnowledgePath(dir),
+		);
+		return entries[0].tags ?? [];
+	}
+
+	test('flag_contradiction appends the marker and preserves tag order under the cap (#1821)', async () => {
+		// Under the cap nothing has to be evicted, so historical tag order is
+		// preserved — src/services/skill-generator.ts derives `slugSeed` from
+		// `tags[0]` when an entry has no triggers/required_actions.
+		const id = randomUUID();
+		writeEntry(dir, { id, tags: ['alpha', 'beta'] });
+		const tags = await flagContradiction(id, 'spaces vs tabs');
+		expect(tags).toEqual(['alpha', 'beta', 'contradiction:spaces vs tabs']);
+	});
+
+	test('flag_contradiction marker survives the write-boundary cap on a full tag list (#1821)', async () => {
+		// The #1821 Lane 0b store guardrail caps `tags` at 20 keeping the FIRST N.
+		// While flag_contradiction APPENDED unconditionally, an entry already
+		// carrying 20 tags lost the marker on write: the curator still counted the
+		// update as applied and emitted a `contradicted` event, but
+		// buildCuratorBriefing's `e.tags.some((t) => t.includes('contradiction'))`
+		// never saw it.
+		//
+		// At 21 values something MUST be dropped. This pins the deliberate
+		// tradeoff: the marker moves to the front and survives, and the OLDEST
+		// listed tag (`tag-19`) is what gets evicted — asserted explicitly so the
+		// loss is visible rather than silent.
+		const id = randomUUID();
+		writeEntry(dir, {
+			id,
+			tags: Array.from({ length: 20 }, (_, i) => `tag-${i}`),
+		});
+		const tags = await flagContradiction(
+			id,
+			'conflicting advice about retries',
+		);
+
+		expect(tags).toHaveLength(20);
+		expect(tags[0]).toBe('contradiction:conflicting advice about retries');
+		// Everything except the final tag is retained, in its original order.
+		expect(tags.slice(1)).toEqual(
+			Array.from({ length: 19 }, (_, i) => `tag-${i}`),
+		);
+		expect(tags).not.toContain('tag-19');
+	});
+
 	test('maybeQuarantineOnContradiction quarantines when threshold crossed', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id });
@@ -194,7 +277,13 @@ describe('G3 contradiction unification (#1715)', () => {
 			{ type: 'contradicted', knowledge_id: id },
 			{ type: 'contradicted', knowledge_id: id },
 		]);
-		const result = await maybeQuarantineOnContradiction(dir, id, 3, 30);
+		const result = await maybeQuarantineOnContradiction(
+			dir,
+			id,
+			3,
+			30,
+			new Date(FROZEN_NOW),
+		);
 		expect(result.quarantined).toBe(true);
 		expect(result.contradictionsInWindow).toBe(3);
 		// quarantineEntry MOVES the entry to knowledge-quarantined.jsonl, so it
@@ -214,7 +303,13 @@ describe('G3 contradiction unification (#1715)', () => {
 			{ type: 'contradicted', knowledge_id: id },
 			{ type: 'contradicted', knowledge_id: id },
 		]);
-		const result = await maybeQuarantineOnContradiction(dir, id, 3, 30);
+		const result = await maybeQuarantineOnContradiction(
+			dir,
+			id,
+			3,
+			30,
+			new Date(FROZEN_NOW),
+		);
 		expect(result.quarantined).toBe(false);
 		expect(await readEntryStatus(dir, id)).toBe('established');
 	});
@@ -227,7 +322,13 @@ describe('G3 contradiction unification (#1715)', () => {
 			{ type: 'contradicted', knowledge_id: id },
 			{ type: 'contradicted', knowledge_id: id },
 		]);
-		const result = await maybeQuarantineOnContradiction(dir, id, 3, 30);
+		const result = await maybeQuarantineOnContradiction(
+			dir,
+			id,
+			3,
+			30,
+			new Date(FROZEN_NOW),
+		);
 		expect(result.quarantined).toBe(false);
 		expect(result.alreadyInactive).toBe(true);
 	});
@@ -235,14 +336,21 @@ describe('G3 contradiction unification (#1715)', () => {
 	test('maybeQuarantineOnContradiction respects the window (old events excluded)', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id });
-		const old = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(); // 60d ago
+		// 60 days before the injected reference instant.
+		const old = new Date(FROZEN_NOW - 60 * 24 * 60 * 60 * 1000).toISOString();
 		writeEvents(dir, [
 			{ type: 'contradicted', knowledge_id: id, timestamp: old },
 			{ type: 'contradicted', knowledge_id: id, timestamp: old },
 			{ type: 'contradicted', knowledge_id: id, timestamp: old },
 		]);
 		// 3 events but all >30d old → within 30d window = 0 → no quarantine
-		const result = await maybeQuarantineOnContradiction(dir, id, 3, 30);
+		const result = await maybeQuarantineOnContradiction(
+			dir,
+			id,
+			3,
+			30,
+			new Date(FROZEN_NOW),
+		);
 		expect(result.quarantined).toBe(false);
 	});
 
@@ -252,9 +360,11 @@ describe('G3 contradiction unification (#1715)', () => {
 		// The threshold check should fire and quarantine the entry.
 		const id = randomUUID();
 		writeEntry(dir, { id });
+		// Live stamps: the curator emits its own event with `new Date()` and
+		// evaluates the window against the real clock (see the note at the top).
 		writeEvents(dir, [
-			{ type: 'contradicted', knowledge_id: id },
-			{ type: 'contradicted', knowledge_id: id },
+			{ type: 'contradicted', knowledge_id: id, timestamp: liveNowIso() },
+			{ type: 'contradicted', knowledge_id: id, timestamp: liveNowIso() },
 		]);
 		await applyCuratorKnowledgeUpdates(
 			dir,
@@ -280,9 +390,11 @@ describe('G3 contradiction unification (#1715)', () => {
 	test('curator tag_only config preserves legacy behavior (no quarantine)', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id });
+		// Live stamps: the curator emits its own event with `new Date()` and
+		// evaluates the window against the real clock (see the note at the top).
 		writeEvents(dir, [
-			{ type: 'contradicted', knowledge_id: id },
-			{ type: 'contradicted', knowledge_id: id },
+			{ type: 'contradicted', knowledge_id: id, timestamp: liveNowIso() },
+			{ type: 'contradicted', knowledge_id: id, timestamp: liveNowIso() },
 		]);
 		await applyCuratorKnowledgeUpdates(
 			dir,

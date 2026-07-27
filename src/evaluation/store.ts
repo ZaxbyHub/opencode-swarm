@@ -1,5 +1,10 @@
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import {
+	type ImmutableArtifactConflict,
+	readOptionalFile as readOptional,
+	writeImmutableArtifact,
+} from '../evidence/immutable-store.js';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
@@ -119,16 +124,24 @@ function parseTaskSplitRegistry(
 	return { v: 1, entries };
 }
 
-async function readOptional(filePath: string): Promise<string | undefined> {
-	try {
-		return await readFile(filePath, 'utf8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-		throw error;
-	}
+/** Evaluation-store wording for the shared writer's conflict outcomes. */
+function evaluationConflictError(conflict: ImmutableArtifactConflict): Error {
+	return conflict.kind === 'corrupt'
+		? new EvaluationConflictError(
+				`existing evaluation artifact is corrupt: ${conflict.filePath}: ${String(conflict.cause)}`,
+			)
+		: new EvaluationConflictError(
+				`immutable evaluation artifact conflicts with existing content: ${conflict.filePath}`,
+			);
 }
 
-async function writeImmutable<T>(options: {
+/**
+ * Evaluation-store binding of the shared immutable-artifact writer
+ * (`src/evidence/immutable-store.ts`), which the consensus report store shares.
+ * Fixes this store's lock actor, canonical serializer, and conflict error type
+ * so every call site below stays a plain write-once request.
+ */
+function writeImmutable<T>(options: {
 	directory: string;
 	relativeLockPath: string;
 	filePath: string;
@@ -137,38 +150,12 @@ async function writeImmutable<T>(options: {
 	parse: (value: unknown) => T;
 	isEquivalent?: (existing: T, desired: T) => boolean;
 }): Promise<T> {
-	await mkdir(path.dirname(options.filePath), { recursive: true });
-	return withEvidenceLock(
-		options.directory,
-		options.relativeLockPath,
-		AGENT,
-		options.taskId,
-		async () => {
-			const desired = serialized(options.value);
-			const existing = await readOptional(options.filePath);
-			if (existing !== undefined) {
-				let parsed: T;
-				try {
-					parsed = options.parse(JSON.parse(existing));
-				} catch (error) {
-					throw new EvaluationConflictError(
-						`existing evaluation artifact is corrupt: ${options.filePath}: ${String(error)}`,
-					);
-				}
-				if (
-					serialized(parsed) === desired ||
-					options.isEquivalent?.(parsed, options.value)
-				) {
-					return parsed;
-				}
-				throw new EvaluationConflictError(
-					`immutable evaluation artifact conflicts with existing content: ${options.filePath}`,
-				);
-			}
-			await atomicWriteFile(options.filePath, desired);
-			return options.value;
-		},
-	);
+	return writeImmutableArtifact({
+		...options,
+		agent: AGENT,
+		serialize: serialized,
+		conflictError: evaluationConflictError,
+	});
 }
 
 function validateTaskInputs(directory: string, task: EvaluationTaskV1): void {

@@ -1208,8 +1208,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Manually promote lesson to hive knowledge (policy-gated; --force --reason overrides with audit)',
 		details:
-			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Promotion runs the one policy evaluator inside a single cross-process transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is supplied, which records a durable, audited override. An exact entry id alone is never authorization to bypass policy. Either direct text or --from-swarm ID is required.',
-		args: '--category <category>, --from-swarm <lesson-id>, <lesson-text>',
+			'Promotes a lesson to hive knowledge directly (--category) or via an existing swarm lesson (--from-swarm), in one cross-process policy transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is given (audited); an entry id alone is not authorization. Requires direct text or --from-swarm. An actionability floor (#1821) needs at least one predicate flag and one scope flag (see args), unless knowledge.promotion_require_actionable=false.',
+		args: '--category <category>, --from-swarm <lesson-id>, --applies-to-tools <a,b>, --applies-to-agents <a,b>, --required-actions <a,b>, --forbidden-actions <a,b>, --verification-checks <a,b>, --force --reason <why>, <lesson-text>',
 		category: 'utility',
 		toolPolicy: 'none',
 	},

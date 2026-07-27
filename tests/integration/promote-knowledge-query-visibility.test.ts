@@ -28,6 +28,21 @@ function cleanupDir(dir: string): void {
 	}
 }
 
+/**
+ * #1821 A3: the direct-text promote path must supply its own predicate + scope
+ * or the default-ON `actionability_floor` policy gate blocks the promotion.
+ * Prepends the minimum satisfying flags to a `/swarm promote` argv.
+ */
+function actionableArgs(...args: string[]): string[] {
+	return [
+		'--applies-to-tools',
+		'write',
+		'--required-actions',
+		'run the type checker',
+		...args,
+	];
+}
+
 describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	let tempDir: string;
 	let savedLocalAppData: string | undefined;
@@ -84,7 +99,10 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should make manually promoted lesson visible to knowledge_query', async () => {
 		// Step 1: Promote a lesson manually
 		const lesson = 'Always validate input at system boundaries';
-		const promoteResult = await handlePromoteCommand(tempDir, [lesson]);
+		const promoteResult = await handlePromoteCommand(
+			tempDir,
+			actionableArgs(lesson),
+		);
 
 		expect(promoteResult).toContain('Promoted to hive');
 		expect(promoteResult).toContain('Always validate');
@@ -98,10 +116,31 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 		expect(promotedEntry?.status).toBe('promoted');
 	});
 
+	// Regression: the direct-text write path built its hive entry WITHOUT the
+	// `...carryActionableFields(...)` spread the other two promote paths have, so
+	// predicate/scope fields that satisfied the policy gate were dropped on write
+	// and the promoted entry came back non-actionable (#1821 A3).
+	it('persists the supplied actionability fields onto the hive entry', async () => {
+		const lesson = 'Prefer array-form spawn over shell strings in subprocesses';
+		await handlePromoteCommand(
+			tempDir,
+			actionableArgs('--forbidden-actions', 'shell string spawn', lesson),
+		);
+
+		const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(
+			resolveHiveKnowledgePath(),
+		);
+		const promoted = hiveEntries.find((e) => e.lesson === lesson);
+		expect(promoted).toBeDefined();
+		expect(promoted?.applies_to_tools).toEqual(['write']);
+		expect(promoted?.required_actions).toEqual(['run the type checker']);
+		expect(promoted?.forbidden_actions).toEqual(['shell string spawn']);
+	});
+
 	it('should write promoted lesson to shared-learnings.jsonl', async () => {
 		// Step 1: Promote a lesson
 		const lesson = 'Document API breaking changes in release notes';
-		await handlePromoteCommand(tempDir, [lesson]);
+		await handlePromoteCommand(tempDir, actionableArgs(lesson));
 
 		// Step 2: Read directly from the hive knowledge file
 		const hivePath = resolveHiveKnowledgePath();
@@ -119,11 +158,17 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should deduplicate near-duplicate promotions', async () => {
 		// Step 1: Promote a lesson
 		const lesson = 'Use type hints to improve code clarity';
-		const firstResult = await handlePromoteCommand(tempDir, [lesson]);
+		const firstResult = await handlePromoteCommand(
+			tempDir,
+			actionableArgs(lesson),
+		);
 		expect(firstResult).toContain('Promoted to hive');
 
 		// Step 2: Promote the EXACT same lesson (this will be caught by Jaccard > 0.6)
-		const secondResult = await handlePromoteCommand(tempDir, [lesson]);
+		const secondResult = await handlePromoteCommand(
+			tempDir,
+			actionableArgs(lesson),
+		);
 
 		// Should indicate it already exists
 		expect(secondResult).toContain(
@@ -134,7 +179,10 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should preserve category when promoting with --category flag', async () => {
 		// Step 1: Promote with category
 		const lesson = 'Enable request timeout for all external API calls';
-		await handlePromoteCommand(tempDir, ['--category', 'security', lesson]);
+		await handlePromoteCommand(
+			tempDir,
+			actionableArgs('--category', 'security', lesson),
+		);
 
 		// Step 2: Read from hive and verify category
 		const hivePath = resolveHiveKnowledgePath();
@@ -150,7 +198,7 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should use 1.0 confidence for manual promotions', async () => {
 		// Step 1: Promote a lesson
 		const lesson = 'Never commit secrets to version control';
-		await handlePromoteCommand(tempDir, [lesson]);
+		await handlePromoteCommand(tempDir, actionableArgs(lesson));
 
 		// Step 2: Verify confidence is 1.0
 		const hivePath = resolveHiveKnowledgePath();
@@ -166,7 +214,7 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should mark promoted entry with promoted status', async () => {
 		// Step 1: Promote a lesson
 		const lesson = 'Test error paths as thoroughly as success paths';
-		await handlePromoteCommand(tempDir, [lesson]);
+		await handlePromoteCommand(tempDir, actionableArgs(lesson));
 
 		// Step 2: Verify status is promoted
 		const hivePath = resolveHiveKnowledgePath();
@@ -182,7 +230,7 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 	it('should include proper timestamps on promoted entries', async () => {
 		// Step 1: Promote a lesson
 		const lesson = 'Use const by default, only use let when needed';
-		await handlePromoteCommand(tempDir, [lesson]);
+		await handlePromoteCommand(tempDir, actionableArgs(lesson));
 
 		// Step 2: Verify timestamps exist and are ISO 8601
 		const hivePath = resolveHiveKnowledgePath();
@@ -213,7 +261,10 @@ describe('Regression: /swarm promote visibility to knowledge_query', () => {
 		];
 
 		for (const lesson of lessons) {
-			const result = await handlePromoteCommand(tempDir, [lesson]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs(lesson),
+			);
 			expect(result).toContain('Promoted to hive');
 		}
 

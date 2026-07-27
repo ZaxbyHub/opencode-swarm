@@ -803,6 +803,126 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.enabled` | boolean | `true` | Enables the architect-only in-session learning nudge when knowledge is enabled. |
 | `knowledge.realtime_learning_nudge.first_after_tool_calls` | number | `10` | First total session tool-call count that can trigger the nudge. |
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
+| `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+
+> **`knowledge.promotion_require_actionable` is default-ON and is a behavior change (issue #1821).** Before
+> this, a lesson could reach hive knowledge as un-actionable prose that no agent could act on. Now such a
+> lesson is **blocked** rather than silently promoted, and that applies to entries which previously
+> auto-promoted. `--force --reason "<why>"` still overrides and records a durable audited override naming the
+> failed gate; set this key to `false` to restore the previous behavior wholesale.
+
+> **Superseded by real-time admission (issue #1821).** When
+> `learning.realtime_admission.enabled` is `true` (the default) the nudge is suppressed, because the
+> admission loop below does the same job for real — it validates and admits candidates instead of asking the
+> model to remember to. Set `learning.realtime_admission.supersede_nudge` to `false` to keep both, or disable
+> `learning.realtime_admission` to fall back to the nudge alone.
+
+## Learning Data Plane
+
+The learning data plane turns in-session observations into durable knowledge under explicit budgets, and
+mines accumulated evidence into improvement proposals. It never activates a skill or edits an active
+artifact on its own.
+
+Note this is the **top-level `learning` block**, which is unrelated to `memory.learning` (the memory
+subsystem's Q-learning tuning).
+
+```jsonc
+{
+  "learning": {
+    "realtime_admission": { "enabled": true, "max_queue_size": 50, "max_drain_wall_time_ms": 10000 },
+    "prm_persistence": { "enabled": true, "min_support": 3, "cooldown_ms": 900000 },
+    "dedup_sweep": { "enabled": true, "max_comparisons": 2000, "max_merges_per_sweep": 10 }
+  },
+  "consensus": { "enabled": true, "default_min_support": 3, "default_min_successful_runs": 2 }
+}
+```
+
+### `learning.realtime_admission`
+
+Admits knowledge candidates while the session is still running, so a lesson captured early can be retrieved
+by a later delegation. Every field is a hard cap; the phase-boundary curator remains the durable backstop, so
+disabling this loses nothing but timeliness.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable mid-session admission. |
+| `max_queue_size` | number | `50` | Per-session candidate queue cap (drop-oldest). |
+| `min_drain` / `max_drain` | number | `1` / `10` | Bounds on the adaptive drain batch size. |
+| `drain_depth_factor` / `drain_velocity_factor` | number | `0.5` / `0.25` | How queue depth and arrival velocity scale the batch. |
+| `max_llm_calls_per_session` | number | `20` | Cap on validation model calls per session. |
+| `max_tokens_per_session` | number | `50000` | Token budget per session. |
+| `max_concurrent_admissions` | number | `2` | Concurrency limit. |
+| `max_retries_per_candidate` | number | `1` | Retries before a candidate is requeued. |
+| `per_candidate_llm_timeout_ms` | number | `60000` | Per-candidate bound on cancellable model work. |
+| `max_drain_wall_time_ms` | number | `10000` | Total wall-clock budget for one drain. |
+| `supersede_nudge` | boolean | `true` | Suppress the prompt-only nudge while this loop is active. |
+
+### `learning.prm_persistence`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Persist repeated PRM patterns as knowledge. |
+| `min_support` | number | `3` | Distinct occurrences required before a pattern is persisted. |
+| `cooldown_ms` | number | `900000` | Per-pattern cooldown after a persist. |
+
+### `learning.dedup_sweep`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Merge active near-duplicate knowledge entries at curator phase boundaries. |
+| `max_comparisons` | number | `2000` | Upper bound on pairwise comparisons per sweep. |
+| `max_merges_per_sweep` | number | `10` | Upper bound on merges applied per sweep. |
+
+### Cross-producer recommendation dedup
+
+Three mechanisms propose learning recommendations — the curator sweep, the skill improver's
+macro-reflector, and the consensus miner. They share one dedup memory so a lesson one of them has
+already emitted is not emitted again. There is nothing to configure; the behaviour is always on and
+always fails open (an unreadable or unwritable ledger emits everything, which is the pre-dedup
+behaviour).
+
+| Property | Value |
+|----------|-------|
+| Location | `learning/recommendation-ledger.jsonl` under the resolved knowledge store — `<project>/.swarm/` normally, the shared cohort store when the worktree is linked. Survives `/swarm close` and `/swarm reset`, like `knowledge.jsonl` |
+| Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it, and of the target it names |
+| Retention | 500 entries, oldest-first eviction, applied on a whole-file rewrite at every append; each entry capped at 4 KB. Eviction is by position, not by producer, so one mechanism's append can evict another's oldest entries |
+| Provenance | Each entry carries a `LearningProvenanceV1` record (mechanism, source knowledge/task/evidence/run/model refs, write origin) |
+| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns a `recommendation_ledger` block whose `duplicate_recommendation_count` counts keys the ledger had already seen — including this miner's own earlier emissions, not only other producers' (see [Reading `duplicate_recommendation_count`](./consensus-mining.md#reading-duplicate_recommendation_count), and [Response shape](./consensus-mining.md#response-shape) for every field it returns) — and whose `degraded: true` says the fail-open path was taken and **nothing** was recorded; curator suppressions land in its `skipped` tally and the debug log |
+
+Matching is **exact** over normalized text, so two mechanisms suppress each other only when they emit
+the same sentence. The improver and the miner build statements from fixed templates while the curator
+emits free-form lessons, so in practice this mostly deduplicates each mechanism against its own
+earlier runs; treat cross-mechanism suppression as a bonus rather than the common case.
+
+Because retention is bounded, a recommendation older than the most recent 500 emissions can surface
+again. Retention is also independent of `knowledge.swarm_max_entries` (default 100), so a lesson the
+knowledge store has already evicted can still be suppressed until its ledger entry ages out.
+
+A generated motif or workflow proposal removed from `.swarm/skills/proposals/` is **not** regenerated
+— the ledger has already recorded it. This matters most on the automated path: a full-auto or
+post-mortem `REJECT` deletes the proposal, which now retires that motif until its ledger entry ages
+out. Knowledge-derived skill drafts are not routed through the ledger and are unaffected.
+
+### `consensus`
+
+Governs the `consensus_mine` tool. It mutates none of the evidence it reads, writes no knowledge entry,
+and admits no durable memory record — but it is not write-minimal: besides its own immutable report it
+prunes its own older reports, rewrites the shared dedup ledger, leaves a lock sentinel per report id,
+and (when `memory.enabled`) mirrors each proposal into a pending memory proposal. See
+[What a mining run writes](./consensus-mining.md#what-a-mining-run-writes) for the complete list,
+[Finding the reports](./consensus-mining.md#finding-the-reports) for how to read what it produced, and
+[Response shape](./consensus-mining.md#response-shape) for what the tool returns.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable consensus mining. |
+| `default_min_support` | number | `3` | Minimum distinct supporting runs. |
+| `default_min_successful_runs` | number | `2` | Minimum successful runs. |
+| `default_max_evidence_items` | number | `50` | Cap on evidence items loaded per mine. |
+| `max_excerpt_chars` | number | `500` | Per-excerpt length bound (excerpts are also secret-redacted). |
+| `llm_summarization_enabled` | boolean | `true` | Allow optional statement summarization after the deterministic pass. When on and an OpenCode client is wired, a mine issues up to **20** `session.create` + `session.prompt` calls. |
+| `llm_timeout_ms` | number | `60000` | Bound on summarization calls. |
+| `report_retention` | number | `50` | Reports retained under `.swarm/evolution/consensus/`. Pruning runs after **every** mine, so at the default the steady state of a long-lived project is that each run deletes the oldest report. `0` **disables** pruning (retain everything) rather than deleting everything; the tool then reports `retention.pruning_enabled: false` and omits `retention.retained` and `retention.corrupt`. |
 
 ## Skill Improver Consolidation
 

@@ -35,6 +35,7 @@ import { co_change_analyzer } from './co-change-analyzer';
 import { complete_pr_workflow } from './complete-pr-workflow';
 import { completion_verify } from './completion-verify';
 import { complexity_hotspots } from './complexity-hotspots';
+import { consensus_mine } from './consensus-mine';
 import { context_status } from './context-status';
 import { submit_council_verdicts } from './convene-council';
 import { convene_general_council } from './convene-general-council';
@@ -209,6 +210,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	doc_scan: () => doc_scan,
 	doc_extract: () => doc_extract,
 	curator_analyze: () => curator_analyze,
+	consensus_mine: () => consensus_mine,
 	knowledge_add: () => knowledge_add,
 	knowledge_recall: () => knowledge_recall,
 	knowledge_remove: () => knowledge_remove,

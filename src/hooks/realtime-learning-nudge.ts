@@ -61,12 +61,38 @@ export function getRealtimeLearningToolCallCount(sessionID?: string): number {
 	);
 }
 
+/**
+ * `learning.realtime_admission` fields that govern nudge suppression
+ * (issue #1821, Workstream B).
+ */
+export interface RealtimeAdmissionNudgeContext {
+	/** Whether real-time admission is running for this session. */
+	enabled?: boolean;
+	/** Whether an active admission loop should replace the prompt-only nudge. */
+	supersede_nudge?: boolean;
+}
+
 export function shouldInjectRealtimeLearningNudge(args: {
 	sessionID?: string;
 	config?: RealtimeLearningNudgeConfig;
+	/**
+	 * When real-time admission is active it ALREADY admits lessons from this
+	 * session automatically. The nudge asks the architect to do that work by
+	 * hand, so leaving both on spends architect context telling it to duplicate
+	 * a loop that is already running. Defaults preserve the nudge: suppression
+	 * requires admission to be explicitly enabled AND `supersede_nudge` to not
+	 * be turned off.
+	 */
+	realtimeAdmission?: RealtimeAdmissionNudgeContext;
 }): boolean {
 	if (!args.sessionID) return false;
 	if (args.config?.enabled === false) return false;
+	if (
+		args.realtimeAdmission?.enabled === true &&
+		args.realtimeAdmission?.supersede_nudge !== false
+	) {
+		return false;
+	}
 
 	const state = realtimeLearningNudgeBySession.get(args.sessionID);
 	const toolCallCount = state?.observedToolCallCount ?? 0;

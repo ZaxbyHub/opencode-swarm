@@ -24,6 +24,11 @@ import { readTaskTrajectory } from '../hooks/micro-reflector.js';
 import type { TrajectoryEntry } from '../hooks/trajectory-logger.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { warn } from '../utils/logger.js';
+import {
+	checkRecommendations,
+	type RecommendationCandidate,
+	recordEmittedRecommendations,
+} from './recommendation-ledger.js';
 
 /** Trajectories scanned per macro pass (the plan's N=200 window). */
 export const MACRO_TRAJECTORY_WINDOW = 200;
@@ -162,8 +167,46 @@ function motifPredicate(motif: FailureMotif): string {
 	}
 }
 
+/**
+ * The recommendation a failure motif asserts, in cross-producer form
+ * (issue #1821 AC21).
+ *
+ * The agent role is folded into the *statement* rather than carried as a scope
+ * key so this statement can collide with an equivalent lesson proposed by the
+ * curator or the consensus miner — the whole point of a shared identity. The
+ * motif signature's constituents (tool, failure kind) are what actually vary
+ * between motifs, so two distinct motifs never produce the same statement.
+ */
+function motifStatement(motif: FailureMotif): string {
+	return `Avoid the recurring ${motif.kind} failure in ${motif.tool} observed for the ${motif.agent} role`;
+}
+
+/** Describe a failure motif to the cross-producer dedup ledger. */
+function buildMotifCandidate(
+	motif: FailureMotif,
+	sessionId?: string,
+): RecommendationCandidate {
+	return {
+		kind: 'improver',
+		target: `motif-${slugify(motif.signature)}`,
+		statement: motifStatement(motif),
+		scopeKeys: [],
+		provenance: {
+			mechanism: 'skill_improver',
+			sourceTaskIds: motif.taskIds,
+		},
+		origin: {
+			agentRole: motif.agent,
+			...(sessionId ? { sessionId } : {}),
+		},
+	};
+}
+
 /** Render a draft SKILL.md proposal body for a motif (with full provenance). */
-export function buildMotifProposal(motif: FailureMotif): string {
+export function buildMotifProposal(
+	motif: FailureMotif,
+	options: { fingerprint?: string; producedAt?: string } = {},
+): string {
 	const lines = [
 		'---',
 		`slug: motif-${slugify(motif.signature)}`,
@@ -173,7 +216,18 @@ export function buildMotifProposal(motif: FailureMotif): string {
 		`source_task_ids: [${motif.taskIds.map(slugify).join(', ')}]`,
 		`verification_predicate: "${motifPredicate(motif)}"`,
 		`generated_by: macro_reflector`,
-		`generated_at: ${new Date().toISOString()}`,
+		`generated_at: ${options.producedAt ?? new Date().toISOString()}`,
+		// #1821: learning provenance, stamped only when the emission went through
+		// the dedup ledger (which is what mints the fingerprint). `learning_mechanism`
+		// matches `LearningMechanism` in src/learning/provenance.ts; the full
+		// LearningProvenanceV1 record for this proposal lives on the ledger entry
+		// carrying the same fingerprint.
+		...(options.fingerprint
+			? [
+					`learning_mechanism: skill_improver`,
+					`recommendation_fingerprint: ${options.fingerprint}`,
+				]
+			: []),
 		'---',
 		'',
 		`# Recurring ${motif.kind} failure motif: \`${motif.signature}\``,
@@ -203,6 +257,12 @@ export function buildMotifProposal(motif: FailureMotif): string {
 export interface MotifProposalResult {
 	motifs: number;
 	proposalsWritten: string[];
+	/**
+	 * #1821 AC21: motifs whose recommendation was already emitted — by an earlier
+	 * improver run, the curator sweep, or the consensus miner — and were therefore
+	 * not re-proposed.
+	 */
+	duplicatesSuppressed: number;
 }
 
 /**
@@ -211,9 +271,19 @@ export interface MotifProposalResult {
  */
 export async function writeMotifProposals(
 	directory: string,
-	opts: { window?: number; minTasks?: number; maxProposals?: number } = {},
+	opts: {
+		window?: number;
+		minTasks?: number;
+		maxProposals?: number;
+		/** Recorded in the ledger entry's provenance write origin. */
+		sessionId?: string;
+	} = {},
 ): Promise<MotifProposalResult> {
-	const result: MotifProposalResult = { motifs: 0, proposalsWritten: [] };
+	const result: MotifProposalResult = {
+		motifs: 0,
+		proposalsWritten: [],
+		duplicatesSuppressed: 0,
+	};
 	try {
 		const motifs = await gatherFailureMotifs(directory, opts);
 		result.motifs = motifs.length;
@@ -221,17 +291,49 @@ export async function writeMotifProposals(
 		// assert its absence when no drafts/proposals are produced).
 		if (motifs.length === 0) return result;
 		const max = opts.maxProposals ?? 10;
+		const selected = motifs.slice(0, max);
+		// #1821 AC21: read-only dedup check, then write, then record what was
+		// actually written. One `producedAt` is shared by the ledger entry and the
+		// proposal frontmatter so the two artifacts agree on when the
+		// recommendation was emitted.
+		const producedAt = _internals.now().toISOString();
+		const candidates = selected.map((motif) =>
+			buildMotifCandidate(motif, opts.sessionId),
+		);
+		const dedupCheck = await _internals.checkRecommendations(
+			directory,
+			candidates,
+		);
+		const emitted = dedupCheck.decisions.filter((decision) => decision.emit);
+		result.duplicatesSuppressed = dedupCheck.decisions.length - emitted.length;
+		// Everything was a duplicate → still do not create the proposals directory.
+		if (emitted.length === 0) return result;
 		const proposalsDir = validateSwarmPath(
 			directory,
 			path.join('skills', 'proposals'),
 		);
 		await mkdir(proposalsDir, { recursive: true });
-		for (const motif of motifs.slice(0, max)) {
+		const written: RecommendationCandidate[] = [];
+		for (const decision of emitted) {
+			const motif = selected[decision.index];
+			const candidate = candidates[decision.index];
+			if (motif === undefined || candidate === undefined) continue;
 			const slug = `motif-${slugify(motif.signature)}`;
 			const filePath = path.join(proposalsDir, `${slug}.md`);
-			await writeFile(filePath, buildMotifProposal(motif), 'utf-8');
+			await writeFile(
+				filePath,
+				buildMotifProposal(motif, {
+					fingerprint: decision.fingerprint,
+					producedAt,
+				}),
+				'utf-8',
+			);
 			result.proposalsWritten.push(filePath);
+			written.push(candidate);
 		}
+		await _internals.recordEmittedRecommendations(directory, written, {
+			producedAt,
+		});
 		return result;
 	} catch (err) {
 		warn(
@@ -261,6 +363,8 @@ export interface SuccessMotif {
 export interface SuccessMotifProposalResult {
 	motifs: number;
 	proposalsWritten: string[];
+	/** #1821 AC21: see `MotifProposalResult.duplicatesSuppressed`. */
+	duplicatesSuppressed: number;
 }
 
 /**
@@ -386,7 +490,48 @@ function workflowSlug(signature: string): string {
 	return `workflow-${slugify(signature.slice(0, 48))}`;
 }
 
-export function buildWorkflowProposal(motif: SuccessMotif): string {
+/**
+ * The recommendation a success motif asserts, in cross-producer form
+ * (issue #1821 AC21). Same agent-in-statement rationale as `motifStatement`.
+ *
+ * The rendered sequence MUST mirror `sequenceSignature` (`tool:action` per
+ * step), not just the tool names: two motifs that share a tool chain but differ
+ * in actions have different signatures, different slugs, and different proposal
+ * files, so a tool-only statement would collapse two genuinely different
+ * workflows onto one cross key and suppress the second.
+ */
+function workflowStatement(motif: SuccessMotif): string {
+	const seqStr = motif.sequence
+		.map((step) => `${step.tool}:${step.action}`)
+		.join(' -> ');
+	return `Follow the proven ${seqStr} workflow for the ${motif.agent} role`;
+}
+
+/** Describe a success motif to the cross-producer dedup ledger. */
+function buildWorkflowCandidate(
+	motif: SuccessMotif,
+	sessionId?: string,
+): RecommendationCandidate {
+	return {
+		kind: 'improver',
+		target: workflowSlug(motif.signature),
+		statement: workflowStatement(motif),
+		scopeKeys: [],
+		provenance: {
+			mechanism: 'skill_improver',
+			sourceTaskIds: motif.taskIds,
+		},
+		origin: {
+			agentRole: motif.agent,
+			...(sessionId ? { sessionId } : {}),
+		},
+	};
+}
+
+export function buildWorkflowProposal(
+	motif: SuccessMotif,
+	options: { fingerprint?: string; producedAt?: string } = {},
+): string {
 	const seqStr = motif.sequence.map((s) => s.tool).join(' → ');
 	const slug = workflowSlug(motif.signature);
 	const lines = [
@@ -398,7 +543,14 @@ export function buildWorkflowProposal(motif: SuccessMotif): string {
 		`applies_to_agents: [${slugify(motif.agent)}]`,
 		`source_task_ids: [${motif.taskIds.map(slugify).join(', ')}]`,
 		`generated_by: macro_reflector_success`,
-		`generated_at: ${new Date().toISOString()}`,
+		`generated_at: ${options.producedAt ?? new Date().toISOString()}`,
+		// #1821: see the identical block in `buildMotifProposal`.
+		...(options.fingerprint
+			? [
+					`learning_mechanism: skill_improver`,
+					`recommendation_fingerprint: ${options.fingerprint}`,
+				]
+			: []),
 		'---',
 		'',
 		`# Successful workflow pattern: ${seqStr}`,
@@ -431,28 +583,58 @@ export async function writeSuccessMotifProposals(
 		minTasks?: number;
 		minSteps?: number;
 		maxProposals?: number;
+		/** Recorded in the ledger entry's provenance write origin. */
+		sessionId?: string;
 	} = {},
 ): Promise<SuccessMotifProposalResult> {
 	const result: SuccessMotifProposalResult = {
 		motifs: 0,
 		proposalsWritten: [],
+		duplicatesSuppressed: 0,
 	};
 	try {
 		const motifs = await gatherSuccessMotifs(directory, opts);
 		result.motifs = motifs.length;
 		if (motifs.length === 0) return result;
 		const max = opts.maxProposals ?? 10;
+		const selected = motifs.slice(0, max);
+		const producedAt = _internals.now().toISOString();
+		const candidates = selected.map((motif) =>
+			buildWorkflowCandidate(motif, opts.sessionId),
+		);
+		const dedupCheck = await _internals.checkRecommendations(
+			directory,
+			candidates,
+		);
+		const emitted = dedupCheck.decisions.filter((decision) => decision.emit);
+		result.duplicatesSuppressed = dedupCheck.decisions.length - emitted.length;
+		if (emitted.length === 0) return result;
 		const proposalsDir = validateSwarmPath(
 			directory,
 			path.join('skills', 'proposals'),
 		);
 		await mkdir(proposalsDir, { recursive: true });
-		for (const motif of motifs.slice(0, max)) {
+		const written: RecommendationCandidate[] = [];
+		for (const decision of emitted) {
+			const motif = selected[decision.index];
+			const candidate = candidates[decision.index];
+			if (motif === undefined || candidate === undefined) continue;
 			const slug = workflowSlug(motif.signature);
 			const filePath = path.join(proposalsDir, `${slug}.md`);
-			await writeFile(filePath, buildWorkflowProposal(motif), 'utf-8');
+			await writeFile(
+				filePath,
+				buildWorkflowProposal(motif, {
+					fingerprint: decision.fingerprint,
+					producedAt,
+				}),
+				'utf-8',
+			);
 			result.proposalsWritten.push(filePath);
+			written.push(candidate);
 		}
+		await _internals.recordEmittedRecommendations(directory, written, {
+			producedAt,
+		});
 		return result;
 	} catch (err) {
 		warn(
@@ -463,3 +645,27 @@ export async function writeSuccessMotifProposals(
 		return result;
 	}
 }
+
+/**
+ * DI seam (AGENTS.md invariant 7). `now` pins the shared `producedAt` that the
+ * ledger entry and the proposal frontmatter both carry; the two ledger functions
+ * let a test exercise the suppressed / degraded branches without touching the
+ * real ledger. Restore each entry in `afterEach`.
+ */
+export const _internals: {
+	now: () => Date;
+	checkRecommendations: typeof checkRecommendations;
+	recordEmittedRecommendations: typeof recordEmittedRecommendations;
+} = {
+	now: () => new Date(),
+	checkRecommendations,
+	recordEmittedRecommendations,
+};
+
+/**
+ * Pure-function seam for tests (writing-tests SKILL.md, Tier 0). The two
+ * statement builders define the cross-producer identity of a motif, so a test
+ * asserting cross-producer suppression must derive the competing statement from
+ * them rather than hardcode a copy that can silently drift.
+ */
+export const _test_exports = { motifStatement, workflowStatement };

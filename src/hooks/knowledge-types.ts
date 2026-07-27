@@ -550,6 +550,12 @@ export interface KnowledgeConfig {
 	 * `validated_terminal_applications` gate. Default 0 (conservative; see
 	 * `promotion_min_terminal_applications`). */
 	promotion_min_distinct_cohorts: number;
+	/** #1821: require a promotion candidate to carry an actionable directive
+	 * before it may be promoted. Default true (see `KnowledgeConfigSchema`).
+	 * Declared OPTIONAL here on purpose: this hand-written interface is what the
+	 * hooks layer imports, and hundreds of full config literals in tests would
+	 * otherwise need updating. The Zod inference keeps it required. */
+	promotion_require_actionable?: boolean;
 	/** Change 5: retrieval-upgrade tuning (MMR / cold-start / synonyms). */
 	retrieval?: {
 		mmr_lambda?: number;
