@@ -1,5 +1,35 @@
 # Changelog
 
+## [7.131.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.2...v7.131.0) (2026-07-27)
+
+
+### Features
+
+* **consensus:** add evidence-backed consensus miner and consensus_mine tool ([68e94c7](https://github.com/ZaxbyHub/opencode-swarm/commit/68e94c70cee2da951d0a479d4579a7ca23ef7224))
+* **consensus:** add the curated-failures corpus arm dropped at intake ([a9cfe55](https://github.com/ZaxbyHub/opencode-swarm/commit/a9cfe55d3c3fcbe4dc653e18bc9a13a68eaa2028))
+* **knowledge:** enforce an actionability floor on hive promotion ([8712f35](https://github.com/ZaxbyHub/opencode-swarm/commit/8712f3589abbc0436d4928357da66c8c36adc752))
+* **knowledge:** merge active near-duplicates and fix the merge helpers ([d5e605b](https://github.com/ZaxbyHub/opencode-swarm/commit/d5e605b88101d0d4f73868e187aed744c7e088ed))
+* **learning,consensus:** dedup hygiene, session admission, mining ([70d6376](https://github.com/ZaxbyHub/opencode-swarm/commit/70d637698e5a9fad521c02625fba058631eac2b8))
+* **learning:** add recommendation fingerprints, provenance, and config ([143b953](https://github.com/ZaxbyHub/opencode-swarm/commit/143b95350e76fd13f301e6f732892268136b3fd0))
+* **learning:** admit knowledge candidates mid-session within hard budgets ([ba4e201](https://github.com/ZaxbyHub/opencode-swarm/commit/ba4e201deb21e45e40220009e2f77abc6baae6ac))
+* **learning:** deduplicate recommendations across curator, improver, and miner ([0589c9f](https://github.com/ZaxbyHub/opencode-swarm/commit/0589c9ffea952f1fc229023d623904413d7f4feb))
+
+
+### Bug Fixes
+
+* **ci,docs:** unbreak the biome CI gate and document the promotion floor ([a7e6678](https://github.com/ZaxbyHub/opencode-swarm/commit/a7e667826992edfcbcb96c00b18e30ff563271bd))
+* **consensus:** make the miner's guarantees true instead of just stated ([f056027](https://github.com/ZaxbyHub/opencode-swarm/commit/f05602701f4cbe146c9f0b76e69407ba711b4713))
+* **consensus:** make the single-sentence bound real and correct false claims ([b7164f2](https://github.com/ZaxbyHub/opencode-swarm/commit/b7164f274096c864aded95060a11a37c46fda0cc))
+* **consensus:** repair the abbreviation-mask regression and state the real bound ([b7793c1](https://github.com/ZaxbyHub/opencode-swarm/commit/b7793c19ae27575f339711f181511b4bdd4c745d))
+* **knowledge:** dedupe knowledge array fields and guard the class ([1c3cd18](https://github.com/ZaxbyHub/opencode-swarm/commit/1c3cd18e9704cffd2d2ca661d02648e6291ba410))
+* **knowledge:** preserve contradiction markers and harden the dedup guardrail ([8fde09d](https://github.com/ZaxbyHub/opencode-swarm/commit/8fde09da6af29403e1b04be4d811e440a3e0a68d))
+* **learning,consensus:** close the shipping-SHA review blockers ([26f13ab](https://github.com/ZaxbyHub/opencode-swarm/commit/26f13ab663b97afdb3f4f72f4c19cfa56fb516ea))
+* **learning:** close CI failures on PR [#1962](https://github.com/ZaxbyHub/opencode-swarm/issues/1962) (details cap, Windows AbortSignal hang) ([a31980f](https://github.com/ZaxbyHub/opencode-swarm/commit/a31980fef5193365d6c08ff80ba60a34adbf9fef))
+* **learning:** stop truncating refs before dedup and unbreak the PRM backstop ([686a1a5](https://github.com/ZaxbyHub/opencode-swarm/commit/686a1a559b24a2f09cc8315977edc41e1d845132))
+* **phase-complete:** warn on plan-free phases missing reviewer/test_engineer ([#1744](https://github.com/ZaxbyHub/opencode-swarm/issues/1744)) ([b0284ca](https://github.com/ZaxbyHub/opencode-swarm/commit/b0284ca370c13919578164921e896b35eecf9b25))
+* **scripts:** make the process.cwd() ban comment-blind ([5f96a84](https://github.com/ZaxbyHub/opencode-swarm/commit/5f96a84efecfac6d03f2260ea584432431574b8b))
+* **tests,learning:** unbreak dark-matter CI and validate ledger fingerprints ([5bb492e](https://github.com/ZaxbyHub/opencode-swarm/commit/5bb492ea08854340d2bcb9734f42b3556a133cd5))
+
 ## [7.130.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.130.1...v7.130.2) (2026-07-24)
 
 
