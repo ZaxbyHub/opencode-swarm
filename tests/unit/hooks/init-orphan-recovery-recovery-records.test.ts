@@ -47,8 +47,8 @@ beforeEach(() => {
 			filePath: '.swarm/locks/init-orphan-recovery.lock',
 			agent: 'init-orphan-recovery',
 			taskId: 'init',
-			timestamp: new Date().toISOString(),
-			expiresAt: Date.now() + 300_000,
+			timestamp: '2024-01-01T00:00:00.000Z',
+			expiresAt: Number.MAX_SAFE_INTEGER,
 			_release: async () => {},
 		},
 	}));
