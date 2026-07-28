@@ -7,6 +7,7 @@
  */
 
 import type { PluginConfig } from '../config';
+import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { log, warn } from '../utils';
 import {
@@ -219,6 +220,12 @@ export function createContextBudgetHandler(config: PluginConfig) {
 				// Step 4: Apply observation masking to removed messages
 				const beforeTokens = totalTokens;
 				if (toRemove.size > 0) {
+					// applyObservationMasking clamps each part's contribution to >= 0
+					// (R7 fix), so actualFreedTokens can never be negative here —
+					// unlike the toolMaskFreedTokens branch above, this subtraction
+					// was previously unconditional and would have silently INCREASED
+					// totalTokens had a placeholder ever come out longer than the
+					// text it replaced.
 					const actualFreedTokens = applyObservationMasking(
 						output.messages || [],
 						toRemove,
@@ -377,16 +384,67 @@ function applyObservationMasking(
 			for (const part of msg.parts) {
 				if (part.type === 'text' && part.text) {
 					const originalTokens = estimateTokens(part.text);
-					const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. Use retrieve_summary if needed.]`;
+					const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(part.text)}]`;
 					const maskedTokens = estimateTokens(placeholder);
 					part.text = placeholder;
-					actualFreedTokens += originalTokens - maskedTokens;
+					// Clamp to 0 (R7): a placeholder can still come out longer
+					// than the text it replaces (fixed placeholder overhead
+					// against a very short original is a pre-existing class of
+					// bloat, and even a single ~197-char lane ref can tip a
+					// short original over) — never let that show up as a
+					// negative "freed" contribution in the summed budget
+					// accounting, which would silently INCREASE totalTokens.
+					actualFreedTokens += Math.max(0, originalTokens - maskedTokens);
 				}
 			}
 		}
 	}
 
 	return actualFreedTokens;
+}
+
+/** Matches lane-output store refs, e.g. `L1:<sha256>:<sha256>:<sha256>`. */
+const LANE_OUTPUT_REF_PATTERN = /L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}/g;
+
+/** Generic fallback hint used when no lane ref is present in the text. */
+const GENERIC_RECOVERY_HINT = 'Use retrieve_summary if needed.';
+
+/**
+ * Choose the correct recovery pointer for a placeholder that replaces
+ * pruned/masked text. Lane artifacts and general tool/summary output live in
+ * two different subsystems with two different retrieval tools:
+ *   - Generic oversized tool output is stored by tool-summarizer.ts and
+ *     retrieved with `retrieve_summary`.
+ *   - Lane batch output (dispatch_lanes / collect_lane_results) is stored in
+ *     the lane-output store and retrieved with `retrieve_lane_output <ref>`.
+ * Pointing a lane-artifact placeholder at `retrieve_summary` is a dead end —
+ * that store never held the content. This scans the original text (before
+ * truncation) for lane-output refs and, if found, names the correct tool and
+ * ref directly, since the truncated excerpt kept in the placeholder does not
+ * reliably preserve the ref.
+ *
+ * R7 fix: capped to ONE ref, not the full unique set. Each `L1:` ref is ~197
+ * characters, and the entire purpose of a placeholder is to FREE tokens.
+ * Including up to three refs (the prior behavior) could add ~600 characters
+ * to a placeholder replacing a short tool result — growing it instead of
+ * shrinking it, and driving the computed `freedTokens` negative. One ref is
+ * enough for the model to recover the lane payload; it does not need every
+ * ref that happened to appear in the excerpt. This does not fully guarantee
+ * the placeholder stays shorter than the original (the fixed "First 200
+ * chars" excerpt overhead can already exceed a very short original on its
+ * own — a separate, pre-existing class of bloat this fix does not attempt to
+ * solve), but it removes the ref list as an *additional* multiplier on top
+ * of that. `freedTokens` is separately clamped to non-negative at both call
+ * sites (`applyObservationMasking`, `maskToolOutput`) so a placeholder that
+ * still comes out longer than the original can never corrupt the summed
+ * budget accounting.
+ */
+function recoveryHint(originalText: string): string {
+	const matches = originalText.match(LANE_OUTPUT_REF_PATTERN);
+	if (matches && matches.length > 0) {
+		return `Use retrieve_lane_output with ref ${matches[0]} if needed.`;
+	}
+	return GENERIC_RECOVERY_HINT;
 }
 
 /**
@@ -435,19 +493,18 @@ function shouldMaskToolOutput(
 		return false;
 	}
 
-	// Exempt retrieval tools and small read/task outputs.
+	// Exempt retrieval tools, small read/task outputs, and ref-carrying lane tools.
 	// - retrieve_lane_output / retrieve_summary: paged artifacts must stay visible so the
 	//   architect can page through them; masking defeats the delivery mechanism.
 	// - task: results are already summarized by the agent that created the task call
+	// - dispatch_lanes / dispatch_lanes_async / collect_lane_results / parse_lane_candidates:
+	//   these carry output_ref/structured rows the PR-workflow gate needs to settle
+	//   lanes; masking destroys the refs and the gate can never settle (same floor
+	//   as SUMMARIZER_EXEMPT_TOOL_NAMES in tool-summarizer.ts).
 	// Check structured tool name first (reliable); fall back to text heuristic for
 	// legacy tool result formats that may not carry toolName in msg.info.
 	const structuredToolName = msg.info.toolName as string | undefined;
-	const exemptList = [
-		'retrieve_summary',
-		'retrieve_lane_output',
-		'task',
-		'read',
-	];
+	const exemptList = SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[];
 	if (
 		structuredToolName &&
 		exemptList.includes(structuredToolName.toLowerCase())
@@ -489,10 +546,11 @@ function maskToolOutput(msg: MessageWithParts, _threshold: number): number {
 			const toolName = extractToolName(part.text) || 'unknown';
 			const excerpt = part.text.substring(0, 200).replace(/\n/g, ' ');
 
-			const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." Use retrieve_summary if needed.]`;
+			const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." ${recoveryHint(part.text)}]`;
 			const maskedTokens = estimateTokens(placeholder);
 			part.text = placeholder;
-			freedTokens += originalTokens - maskedTokens;
+			// Clamp to 0 — see the matching comment in applyObservationMasking.
+			freedTokens += Math.max(0, originalTokens - maskedTokens);
 		}
 	}
 

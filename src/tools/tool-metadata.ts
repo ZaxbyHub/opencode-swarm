@@ -364,6 +364,13 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+		// Safe to gate-allow: read-only retrieval of a stored summary artifact.
+		// Necessary: the summarizer advertises this tool as the recovery path for
+		// truncated outputs, so it must remain reachable during PR workflows.
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	retrieve_lane_output: {
 		description:
@@ -778,7 +785,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates.',
+			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

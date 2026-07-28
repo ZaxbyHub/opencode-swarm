@@ -1,19 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
 import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('tool-summarizer exempt_tools feature', () => {
 	let tempDir: string;
 	let hook: (input: any, output: any) => Promise<void>;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `tool-summarizer-test-${Date.now()}`);
+		// mkdtemp supplies the uniqueness a clock stamp used to (a frozen clock
+		// returns a constant, so every run reused one directory) and
+		// canonicalizes the path for the macOS /var symlink gap
+		// (issues #1782, #1737).
+		tempDir = canonicalMkdtemp('tool-summarizer-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 		resetSummaryIdCounter();
 	});
@@ -134,7 +138,16 @@ describe('tool-summarizer exempt_tools feature', () => {
 			expect(output.output).toBe('x'.repeat(2000));
 		});
 
-		it('retrieve_summary is NOT exempt when not in custom list', async () => {
+		// Contract change: SUMMARIZER_EXEMPT_TOOL_NAMES (src/config/constants.ts)
+		// is now an unconditional FLOOR — operator `exempt_tools` can ADD names
+		// but can no longer REMOVE a floor member by simply omitting it from the
+		// list. `retrieve_summary` is a floor member (it is the retrieval tool
+		// itself; summarizing its own output would create a retrieval loop), so
+		// it stays exempt even when a custom `exempt_tools` list doesn't mention
+		// it. Previously operator config REPLACED the default list, so this test
+		// asserted the opposite (summarized). See docs/releases/pending/
+		// pr-workflow-lane-output-context.md for the rationale.
+		it('retrieve_summary stays exempt (floor) even when not in custom list', async () => {
 			const config = defaultConfig({
 				exempt_tools: ['my_custom_tool'],
 			});
@@ -146,14 +159,19 @@ describe('tool-summarizer exempt_tools feature', () => {
 
 			await hook(input, output);
 
-			// Verify output WAS summarized
-			expect(output.output).toContain('[SUMMARY S1]');
-			expect(output.output).not.toBe(originalOutput);
+			// Verify output was NOT modified — floor exemption applies regardless
+			// of the operator's custom exempt_tools list.
+			expect(output.output).toBe(originalOutput);
 		});
 	});
 
 	describe('Empty exempt list', () => {
-		it('no tools are exempt when exempt_tools is empty', async () => {
+		// Contract change (see comment above): the floor applies even when
+		// operator config supplies an EMPTY exempt_tools list. Previously an
+		// empty list meant "no exemptions at all" (replacement semantics); now
+		// the floor members remain exempt regardless, and only non-floor tools
+		// lose exemption when the list is empty.
+		it('retrieve_summary (floor member) stays exempt when exempt_tools is empty', async () => {
 			const config = defaultConfig({
 				exempt_tools: [],
 			});
@@ -165,7 +183,23 @@ describe('tool-summarizer exempt_tools feature', () => {
 
 			await hook(input, output);
 
-			// Verify output WAS summarized (no exemptions)
+			// Floor exemption applies even with an empty operator list.
+			expect(output.output).toBe(originalOutput);
+		});
+
+		it('non-floor tool is NOT exempt when exempt_tools is empty', async () => {
+			const config = defaultConfig({
+				exempt_tools: [],
+			});
+			hook = createToolSummarizerHook(config, tempDir);
+
+			const originalOutput = 'x'.repeat(2000);
+			const output = { output: originalOutput };
+			const input = { tool: 'my_custom_tool' };
+
+			await hook(input, output);
+
+			// A non-floor tool with no operator-added exemption IS summarized.
 			expect(output.output).toContain('[SUMMARY S1]');
 			expect(output.output).not.toBe(originalOutput);
 		});

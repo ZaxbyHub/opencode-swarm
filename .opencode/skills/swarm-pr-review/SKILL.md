@@ -808,6 +808,8 @@ or synthesis begins, whichever layer enforces it.
 
 **Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
 
+Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
+
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
 **COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:

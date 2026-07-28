@@ -2445,6 +2445,7 @@ export async function enforcePrWorkflowToolBefore(
 			}
 			throw new Error(
 				'BLOCKED: PR_REVIEW is read-only and fail-closed; only controller tools and positively classified observation tools are allowed, and every agent lane requires structured dispatch_lanes_async' +
+					describePrWorkflowControllerToolNames(state.mode) +
 					blockedShellDiagnosis,
 			);
 		}
@@ -2463,7 +2464,8 @@ export async function enforcePrWorkflowToolBefore(
 		!isNamedReadOnlyTool
 	) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK rejects unclassified plugin/MCP tools; use positively classified observation tools, built-in structured write tools after verification, or the workflow controller',
+			'BLOCKED: PR_FEEDBACK rejects unclassified plugin/MCP tools; use positively classified observation tools, built-in structured write tools after verification, or the workflow controller' +
+				describePrWorkflowControllerToolNames(state.mode),
 		);
 	}
 	if (state.prHeadSha && (isShellCheckout || isRemoteCheckoutTool)) {
@@ -2772,6 +2774,10 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	isProcessAlive,
+	// Exposed for the `-c` config-injection regression test. The publication
+	// path that calls this needs a fully-armed ready-to-publish state, so the
+	// classifier is not otherwise reachable from a focused unit test.
+	isSafeStandaloneGitCommit,
 	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
@@ -2962,8 +2968,6 @@ const PR_WORKFLOW_SHARED_CONTROLLER_TOOLS = new Set([
 	'collect_lane_results',
 	'complete_pr_workflow',
 	'dispatch_lanes_async',
-	'get_async_result',
-	'get_async_status',
 	'prepare_pr_workflow_checkout',
 ]);
 
@@ -2986,6 +2990,26 @@ function isPrWorkflowControllerTool(
 	return mode === 'PR_REVIEW'
 		? PR_REVIEW_CONTROLLER_TOOLS.has(toolName)
 		: PR_FEEDBACK_CONTROLLER_TOOLS.has(toolName);
+}
+
+/**
+ * Bounded, append-only recovery pointer (S1.5) naming the allowed controller
+ * tools for the active mode, so a blocked agent finds the allowlist directly
+ * instead of discovering it by retry-and-fail churn. Sourced from the same
+ * `PR_WORKFLOW_SHARED_CONTROLLER_TOOLS` / `PR_REVIEW_CONTROLLER_TOOLS` /
+ * `PR_FEEDBACK_CONTROLLER_TOOLS` sets the classifier itself checks — never a
+ * duplicated list — and sorted for deterministic output. Pure string builder;
+ * it never authorizes anything.
+ */
+function describePrWorkflowControllerToolNames(mode: PrWorkflowMode): string {
+	const modeTools =
+		mode === 'PR_REVIEW'
+			? PR_REVIEW_CONTROLLER_TOOLS
+			: PR_FEEDBACK_CONTROLLER_TOOLS;
+	const names = [...PR_WORKFLOW_SHARED_CONTROLLER_TOOLS, ...modeTools].sort(
+		(a, b) => a.localeCompare(b),
+	);
+	return ` Allowed controller tools for ${mode}: ${names.join(', ')}. Observe current state read-only with the pr_workflow_status tool.`;
 }
 
 const PR_REVIEW_READ_ONLY_TOOL_NAMES = new Set([
@@ -3137,6 +3161,22 @@ const PR_WORKFLOW_TRAILING_STDERR_MERGE_PATTERN = /\s+2>&1\s*$/;
 const PR_WORKFLOW_MAX_CD_PREFIX_STRIPS = 3;
 
 /**
+ * Matches `git [-C <dir>]... <rest>`, capturing `<rest>` in group 1.
+ *
+ * Deliberately NOT fully case-insensitive: the `-C` directory-override flag
+ * is matched with an explicit `[Cc]`-free literal `-C` so that lowercase
+ * `-c` (git's arbitrary per-invocation config flag, e.g. `-c
+ * core.pager=touch`) never satisfies this branch. `-c` therefore falls
+ * through to the fail-closed reject instead of being silently treated as a
+ * (misidentified) directory override. Only the leading `git` keyword itself
+ * is matched case-insensitively via the `[Gg][Ii][Tt]` character classes.
+ */
+const PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN =
+	/^[Gg][Ii][Tt](?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/;
+/** Detects a `git -C <dir>` prefix specifically (see pattern note above). */
+const PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN = /^[Gg][Ii][Tt] -C /;
+
+/**
  * Strip the tolerated read-only wrappers (leading `cd <path> &&` segments and one
  * trailing `2>&1`), reporting whether a cd prefix was removed so state-transition
  * verbs can keep requiring the bare form (see the git `-C` ban those verbs carry).
@@ -3197,11 +3237,10 @@ function isAllowedPrWorkflowReadOnlyShell(
 	)
 		return false;
 
-	const gitMatch = normalized.match(
-		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
-	);
+	const gitMatch = normalized.match(PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN);
 	if (gitMatch?.[1]) {
-		const hasDirectoryOverride = /^git -C /i.test(normalized);
+		const hasDirectoryOverride =
+			PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN.test(normalized);
 		if (
 			hasDirectoryOverride &&
 			/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
@@ -3245,9 +3284,7 @@ function describeBlockedPrReviewShellCommand(
 	const { normalized: inner, strippedCdPrefix } =
 		normalizePrWorkflowShellCommand(command);
 	const normalized = inner.replace(/\s+/g, ' ');
-	const gitMatch = normalized.match(
-		/^git(?: -C (?:"[^"]+"|'[^']+'|\S+))* (.+)$/i,
-	);
+	const gitMatch = normalized.match(PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN);
 	const pointer =
 		' Observe HEAD/branch/dirty/remotes/gate state read-only with the pr_workflow_status tool.';
 	let detail: string;
@@ -3262,7 +3299,7 @@ function describeBlockedPrReviewShellCommand(
 		detail =
 			'Reason: cd-prefix-on-checkout-verb. Run fetch/checkout/switch/branch or `gh pr checkout` bare, with no `cd <dir> &&` prefix.';
 	} else if (
-		/^git -C /i.test(normalized) &&
+		PR_WORKFLOW_GIT_HAS_DIR_OVERRIDE_PATTERN.test(normalized) &&
 		gitMatch?.[1] &&
 		/^(?:fetch|checkout|switch|branch)(?:\s|$)/i.test(gitMatch[1])
 	) {
@@ -3278,7 +3315,7 @@ function describeBlockedPrReviewShellCommand(
 			: 'Reason: bound-fetch-restriction. Fetch is not permitted in this bound state; read remote state via gh_evidence instead.';
 	} else if (gitMatch?.[1] || /^git(?:\s|$)/i.test(normalized)) {
 		detail =
-			'Reason: unlisted git verb. Allowed git reads: status/log/show/diff/rev-parse/merge-base/ls-files/grep/blame/cat-file/for-each-ref, `branch` with listing flags only, `remote -v`, `config --get`.';
+			'Reason: unlisted git verb. Allowed git reads: status/log/show/diff/rev-parse/merge-base/ls-files/grep/blame/cat-file/for-each-ref, `branch` with listing flags only, `stash list`, `worktree list`, `remote -v`, `config --get`.';
 	} else if (/^gh(?:\s|$)/i.test(normalized)) {
 		detail =
 			'Reason: unlisted gh form. Allowed gh reads: pr view/diff/checks/status/list, run view/list/watch, issue view/list, search, api GET. If gh is missing, fetch the api.github.com REST URL with the web fetch tool.';
@@ -3296,7 +3333,16 @@ function hasUnsafeShellControlSyntax(command: string): boolean {
 function isSafeStandaloneGitCommit(command: string): boolean {
 	if (hasUnsafeShellControlSyntax(command)) return false;
 	if (/(?:^|\s)--(?:allow-empty|amend)(?:\s|=|$)/i.test(command)) return false;
-	return /^git(?:\s+-C(?:=|\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>`]+))?\s+commit(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|<>`]+))*\s*$/i.test(
+	// Case-sensitive on `-C`, for the same reason as
+	// PR_WORKFLOW_GIT_DIR_OVERRIDE_PATTERN: a case-insensitive match let
+	// lowercase `-c` — git's arbitrary per-invocation config flag — satisfy the
+	// directory-override branch, so `git -c core.hooksPath=/tmp/evil commit -m x`
+	// was accepted as a bare standalone commit with the injected config stripped
+	// from what the classifier evaluated. On a mutating verb that means
+	// attacker-chosen hooks execute at commit time. Only the leading `git`
+	// keyword stays case-insensitive; `-c ...` now falls through to the
+	// fail-closed reject.
+	return /^[Gg][Ii][Tt](?:\s+-C(?:=|\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>`]+))?\s+commit(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|<>`]+))*\s*$/.test(
 		command.trim(),
 	);
 }
@@ -3369,6 +3415,18 @@ function isAllowedPrWorkflowGitIntake(
 	// (returns false) so the `--set-upstream-to=` pre-bind carve-out below can
 	// still admit its own narrow shape.
 	if (isAllowedReadOnlyGitBranchListing(gitArgs)) return true;
+
+	// `git stash list` is a pure read (issue S1.6): the recovery instruction in
+	// prepare-pr-workflow-checkout.ts hands the model `git stash apply --index
+	// <oid>` but gives it no allowed way to enumerate or confirm that OID first.
+	// Every mutating stash subcommand (push/pop/apply/drop/clear/save/create/
+	// store/branch) and the bare `git stash` (which implicitly pushes) fall
+	// through to reject.
+	if (isAllowedReadOnlyGitStashListing(gitArgs)) return true;
+
+	// `git worktree list` is a pure read. add/remove/move/prune/lock/unlock/
+	// repair all fall through to reject.
+	if (isAllowedReadOnlyGitWorktreeListing(gitArgs)) return true;
 
 	if (options.allowFetch && /^fetch(?:\s|$)/i.test(gitArgs)) return true;
 	if (
@@ -3478,6 +3536,46 @@ function isAllowedReadOnlyGitBranchListing(gitArgs: string): boolean {
 		// closed. A bare positional is only ever the selector's argument.
 		if (token.startsWith('-')) return false;
 		if (!listingSelectorInEffect) return false;
+	}
+	return true;
+}
+
+/**
+ * Admit `git stash list` ONLY. Fail-closed: the bare verb `stash` (which
+ * implicitly runs `stash push`) is rejected, every mutating subcommand
+ * (`push`, `pop`, `apply`, `drop`, `clear`, `save`, `create`, `store`,
+ * `branch`) is rejected, and any token after `list` must be a recognized
+ * read-only log/format flag — an unrecognized flag or any positional
+ * (e.g. a stash ref for `apply`/`show`) falls through to a reject.
+ */
+function isAllowedReadOnlyGitStashListing(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length < 2 || tokens[0].toLowerCase() !== 'stash') return false;
+	if (tokens[1].toLowerCase() !== 'list') return false;
+	for (let index = 2; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (/^(?:-v|--oneline|--patch|-p|--stat|--color|--no-color)$/i.test(token))
+			continue;
+		if (/^--(?:format|pretty)=/i.test(token)) continue;
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Admit `git worktree list` ONLY. Fail-closed: the bare verb `worktree` and
+ * every mutating subcommand (`add`, `remove`, `move`, `prune`, `lock`,
+ * `unlock`, `repair`) are rejected, and any token after `list` must be a
+ * recognized read-only listing flag.
+ */
+function isAllowedReadOnlyGitWorktreeListing(gitArgs: string): boolean {
+	const tokens = gitArgs.trim().split(/\s+/);
+	if (tokens.length < 2 || tokens[0].toLowerCase() !== 'worktree') return false;
+	if (tokens[1].toLowerCase() !== 'list') return false;
+	for (let index = 2; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (/^(?:-v|--verbose|--porcelain|-z)$/i.test(token)) continue;
+		return false;
 	}
 	return true;
 }

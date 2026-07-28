@@ -14,15 +14,22 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => {
 	let tempDir: string;
 	const largeOutput = 'x'.repeat(2000);
 
 	beforeEach(() => {
+		// This Date.now() is a unique-directory suffix, not a time-sensitive
+		// assertion, so it is wrapped per the repo's test-clock convention
+		// (issue #1782). The elapsed-time measurements below (startTime/duration
+		// pairs) are genuine wall-clock performance assertions and are
+		// intentionally left unwrapped — freezing the clock would defeat their
+		// purpose of measuring real async execution time.
 		tempDir = join(
 			tmpdir(),
-			`.swarm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			`.swarm-test-${withFrozenClock(() => Date.now())}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
@@ -1093,102 +1100,8 @@ describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => 
 		});
 	});
 
-	/**
-	 * Attack Vector 11: retrieve_lane_output exemption ratchet
-	 * Verify retrieve_lane_output is treated like retrieve_summary — exempt by default,
-	 * not bypassable via suffix/prefix/case variations.
-	 */
-	describe('retrieve_lane_output exemption ratchet', () => {
-		it('should exempt retrieve_lane_output when in exempt list', async () => {
-			const config: SummaryConfig = {
-				enabled: true,
-				threshold_bytes: 1024,
-				max_summary_chars: 500,
-				max_stored_bytes: 1024 * 1024,
-				retention_days: 7,
-				exempt_tools: [
-					'retrieve_summary',
-					'retrieve_lane_output',
-					'task',
-					'read',
-				],
-			};
-
-			const hook = createToolSummarizerHook(config, tempDir);
-
-			const output = {
-				title: 'Test Tool',
-				output: largeOutput,
-				metadata: {},
-			};
-
-			await hook(
-				{ tool: 'retrieve_lane_output', sessionID: 'test', callID: 'test' },
-				output,
-			);
-
-			expect(output.output).toBe(largeOutput);
-		});
-
-		it('should NOT exempt retrieve_lane_output with suffix', async () => {
-			const config: SummaryConfig = {
-				enabled: true,
-				threshold_bytes: 1024,
-				max_summary_chars: 500,
-				max_stored_bytes: 1024 * 1024,
-				retention_days: 7,
-				exempt_tools: [
-					'retrieve_summary',
-					'retrieve_lane_output',
-					'task',
-					'read',
-				],
-			};
-
-			const hook = createToolSummarizerHook(config, tempDir);
-
-			const output = {
-				title: 'Test Tool',
-				output: largeOutput,
-				metadata: {},
-			};
-
-			await hook(
-				{
-					tool: 'retrieve_lane_output_extra',
-					sessionID: 'test',
-					callID: 'test',
-				},
-				output,
-			);
-
-			expect(output.output).not.toBe(largeOutput);
-		});
-
-		it('should NOT exempt retrieve_lane_output when missing from exempt list', async () => {
-			const config: SummaryConfig = {
-				enabled: true,
-				threshold_bytes: 1024,
-				max_summary_chars: 500,
-				max_stored_bytes: 1024 * 1024,
-				retention_days: 7,
-				exempt_tools: ['retrieve_summary', 'task', 'read'],
-			};
-
-			const hook = createToolSummarizerHook(config, tempDir);
-
-			const output = {
-				title: 'Test Tool',
-				output: largeOutput,
-				metadata: {},
-			};
-
-			await hook(
-				{ tool: 'retrieve_lane_output', sessionID: 'test', callID: 'test' },
-				output,
-			);
-
-			expect(output.output).not.toBe(largeOutput);
-		});
-	});
+	// Attack Vector 11 (retrieve_lane_output exemption ratchet, including the
+	// unconditional-floor contract test) moved to
+	// tests/unit/hooks/tool-summarizer-exempt-floor.test.ts — this file is
+	// already over the FR-006 500-line cap and must not grow further.
 });
