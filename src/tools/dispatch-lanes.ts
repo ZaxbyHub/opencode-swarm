@@ -348,16 +348,31 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.min(1)
 		.max(80)
 		.optional()
-		.describe('Advisory workflow mode, such as deep-dive or swarm-pr-review'),
-	pr_head_sha: z.string().min(1).max(80).optional(),
+		.describe(
+			'Advisory workflow mode, such as deep-dive. PR-review stages are COLON-SUFFIXED and the suffix is required. Accepted values: swarm-pr-review:base, swarm-pr-review:micro, swarm-pr-review:council, swarm-pr-review:reviewer, swarm-pr-review:critic, swarm-pr-feedback:verification. A bare "swarm-pr-review" does NOT enter the PR-review path — it skips the merge-base bind and later fails with "exact merge-base scope was not verified".',
+		),
+	pr_head_sha: z
+		.string()
+		.min(1)
+		.max(80)
+		.optional()
+		.describe(
+			'Full 40-char SHA of the PR head commit under review. Required when mode starts with swarm-pr-review: or swarm-pr-feedback:.',
+		),
 	base_sha: z
 		.string()
 		.regex(/^[0-9a-f]{6,64}$/i)
-		.optional(),
+		.optional()
+		.describe(
+			'Exact merge base of base_ref and pr_head_sha — NOT the base branch tip. The controller recomputes `git merge-base -- <base_ref> <pr_head_sha>` and rejects any mismatch. Required when mode starts with swarm-pr-review:.',
+		),
 	base_ref: z
 		.string()
 		.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
-		.optional(),
+		.optional()
+		.describe(
+			'Base branch ref used to recompute the merge base. Use the REMOTE-TRACKING form (origin/main), and compute base_sha against that same ref. A local branch ref (main, refs/heads/main) is only as fresh as the last fetch — the PR-review preflight fetches refs/pull/<N>/head and not the base branch, so a local ref commonly resolves to a different merge base and the dispatch is rejected. Required when mode starts with swarm-pr-review:.',
+		),
 	scope: z.string().min(1).max(500).optional(),
 	trigger_evaluation: z
 		.array(PrReviewTriggerEvaluationRowSchema)
@@ -831,6 +846,24 @@ export async function executeDispatchLanesAsync(
 	let verifiedPrHead: string | undefined;
 	let workflowRevisionDigest: string | undefined;
 	let verifiedReviewBaseSha: string | undefined;
+	// Reject a bare, colon-less PR workflow mode explicitly. Every downstream
+	// check keys on the colon-suffixed prefix, so `mode: "swarm-pr-review"` used
+	// to slip past the merge-base bind entirely and surface much later as
+	// "exact merge-base scope was not verified" — blaming the merge base for what
+	// is actually a mode-string typo, while the caller's base_ref/base_sha were
+	// correct. The old `mode` description advertised exactly that bad value.
+	const bareWorkflowMode = ['swarm-pr-review', 'swarm-pr-feedback'].find(
+		(prefix) => parsed.data.mode?.trim() === prefix,
+	);
+	if (bareWorkflowMode) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message:
+				bareWorkflowMode === 'swarm-pr-review'
+					? 'BLOCKED: mode "swarm-pr-review" is missing its required stage suffix. Use one of: swarm-pr-review:base, swarm-pr-review:micro, swarm-pr-review:council, swarm-pr-review:reviewer, swarm-pr-review:critic.'
+					: 'BLOCKED: mode "swarm-pr-feedback" is missing its required stage suffix. Use swarm-pr-feedback:verification.',
+		});
+	}
 	if (
 		context.sessionID?.trim() &&
 		parsed.data.pr_head_sha &&
@@ -863,12 +896,26 @@ export async function executeDispatchLanesAsync(
 					parsed.data.base_ref,
 					parsed.data.pr_head_sha,
 				);
+				// Split the two structurally different failures and print the
+				// receipt. Collapsing them into one opaque string told a caller
+				// whose ref never resolved that their SHA was wrong, and told a
+				// caller with a genuine mismatch nothing about what was computed —
+				// leaving trial-and-error as the only recovery. The dominant real
+				// cause is ref FORM: a local `main` / `refs/heads/main` is whatever
+				// the clone last fetched, while `origin/main` is current, so the
+				// same base_sha verifies against one and not the other. Mirrors the
+				// diagnostic style already used by write-pr-review-trigger-eval and
+				// assertCurrentCheckoutHead.
+				if (!resolvedBase) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form, then verify with: git -C "${directory}" fetch origin <base-branch> && git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
+					);
+				}
 				if (
-					!resolvedBase ||
 					resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()
 				) {
 					throw new Error(
-						'BLOCKED: PR_REVIEW base_sha is not the exact merge base of base_ref and pr_head_sha',
+						`BLOCKED: PR_REVIEW merge-base mismatch. git merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha} in "${directory}" resolved to ${resolvedBase}, but base_sha=${parsed.data.base_sha} was passed. If you computed base_sha against a remote-tracking ref, pass that SAME ref as base_ref — a local branch of the same name (main, refs/heads/main) may be stale and yields a different merge base. Verify with: git -C "${directory}" merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha}`,
 					);
 				}
 				verifiedReviewBaseSha = resolvedBase;

@@ -156,6 +156,124 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		expect(result.message).toContain('exactly six lanes');
 	});
 
+	// --- actionable merge-base diagnostics -------------------------------
+	//
+	// Field evidence: a capable model burned four `dispatch_lanes_async` calls
+	// brute-forcing the `base_ref` spelling for ONE dispatch. It passed the same
+	// correct merge base every time; `refs/heads/main` and `main` were rejected,
+	// `origin/main` accepted. The old rejection string named neither the value it
+	// computed nor the one it received, and collapsed "ref did not resolve" and
+	// "SHA mismatch" into a single sentence — so trial and error was the only
+	// available recovery. These tests pin the receipt.
+
+	test('a merge-base MISMATCH names the computed value, the received value, and the stale-local-ref cause', async () => {
+		dispatchInternals.resolveExactMergeBase = () => 'def456';
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				// Correct merge base, but named via a LOCAL ref — the exact shape
+				// that produced the field failure.
+				base_sha: 'aaaa11',
+				base_ref: 'refs/heads/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`base-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'mismatch-diagnostic-session' },
+		);
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		// The receipt: what was computed, and what was passed.
+		expect(message).toContain('def456');
+		expect(message).toContain('aaaa11');
+		expect(message).toContain('refs/heads/main');
+		// The actual cause, named rather than left to be guessed.
+		expect(message).toContain('remote-tracking');
+		expect(message).toContain('may be stale');
+		// A command the caller can run to see it for themselves.
+		expect(message).toContain('git -C');
+		expect(message).toContain('merge-base');
+	});
+
+	test('an UNRESOLVABLE base_ref is reported as a ref-resolution failure, not as a wrong base_sha', async () => {
+		// Distinct failure: the ref never resolved at all. Previously this
+		// produced the same "base_sha is not the exact merge base" string, telling
+		// a caller their SHA was wrong when it may have been perfectly correct.
+		dispatchInternals.resolveExactMergeBase = () => null;
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/does-not-exist',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`base-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'unresolvable-ref-session' },
+		);
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		expect(message).toContain('could not resolve a merge base');
+		expect(message).toContain('origin/does-not-exist');
+		// Names the preflight gap that causes it.
+		expect(message).toContain('refs/pull/');
+		// Must NOT blame the caller's base_sha.
+		expect(message).not.toContain('is not the exact merge base');
+	});
+
+	test('a bare colon-less PR workflow mode is rejected by name instead of misrouting into a merge-base error', async () => {
+		const result = await executeDispatchLanesAsync(
+			{
+				// The value the old `mode` description literally advertised.
+				mode: 'swarm-pr-review',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`base-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'bare-mode-session' },
+		);
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		expect(message).toContain('missing its required stage suffix');
+		expect(message).toContain('swarm-pr-review:base');
+		// The old failure mode: blaming the merge base for a mode typo.
+		expect(message).not.toContain('merge-base scope was not verified');
+	});
+
+	test('the PR-gating parameters document the remote-tracking requirement and the colon-suffixed modes', () => {
+		const describe_ = (field: unknown): string =>
+			String((field as { description?: string })?.description ?? '');
+		// base_ref is where the field failure happened — the description must
+		// name the remote-tracking form and why a local ref differs.
+		const baseRef = describe_(dispatch_lanes_async.args.base_ref);
+		expect(baseRef).toContain('origin/main');
+		expect(baseRef.toLowerCase()).toContain('remote-tracking');
+		// base_sha must distinguish merge base from base-branch tip.
+		expect(describe_(dispatch_lanes_async.args.base_sha)).toContain(
+			'merge base',
+		);
+		// pr_head_sha must exist as a documented field at all.
+		expect(describe_(dispatch_lanes_async.args.pr_head_sha).length).toBeGreaterThan(
+			0,
+		);
+		// mode must enumerate the colon-suffixed stages.
+		const mode = describe_(dispatch_lanes_async.args.mode);
+		expect(mode).toContain('swarm-pr-review:base');
+		expect(mode).toContain('swarm-pr-review:reviewer');
+		expect(mode).toContain('swarm-pr-feedback:verification');
+	});
+
 	test('binds the first exact merge base and rejects later scope drift', async () => {
 		let sessionIndex = 0;
 		dispatchInternals.getSessionOps = () => ({
