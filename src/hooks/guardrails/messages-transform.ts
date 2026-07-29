@@ -54,6 +54,15 @@ type ChatMessageLike = {
 
 const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
 
+/**
+ * Shared by the runaway-output advisory's TEXT and its once-per-drain dedupe
+ * predicate, so the two can never drift apart again. They previously did: the
+ * predicate tested for the string 'runaway output', which the pushed message
+ * never contained, making the guard permanently inert.
+ */
+const RUNAWAY_OUTPUT_ADVISORY_MARKER =
+	'Model is generating analysis without taking action';
+
 function getMessageText(message: ChatMessageLike | undefined): string {
 	if (!message?.parts) return '';
 	return message.parts
@@ -317,13 +326,21 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 							// Advisory warning at 3 consecutive
 							if (session) {
 								session.pendingAdvisoryMessages ??= [];
+								// The dedupe predicate must match a substring the pushed
+								// text actually contains. It previously tested for
+								// 'runaway output' — a string no producer anywhere in
+								// src/ ever emits, including this one — so `.some()` was
+								// always false, the guard always passed, and the advisory
+								// re-pushed on every qualifying transform. The drain-level
+								// exact-duplicate dedupe does NOT cover this either,
+								// because `${count}` varies between pushes.
 								if (
 									!session.pendingAdvisoryMessages.some((m: string) =>
-										m.includes('runaway output'),
+										m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 									)
 								) {
 									session.pendingAdvisoryMessages.push(
-										`WARNING: Model is generating analysis without taking action. ` +
+										`WARNING: ${RUNAWAY_OUTPUT_ADVISORY_MARKER}. ` +
 											`${count} consecutive high-output responses without tool calls detected. ` +
 											`Use a tool or report BLOCKED.`,
 									);

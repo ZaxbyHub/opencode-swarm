@@ -62,6 +62,14 @@ export const _internals = {
 	resolveFallbackModel,
 	dcCheckJunctionCreation,
 	extractErrorSignal,
+	/**
+	 * Test/inspection seams for the no-op detector's bounded session state
+	 * (invariant 8). Production code does not call these; they exist so the
+	 * eviction bound can be asserted without exporting the maps themselves.
+	 */
+	noOpStateSize: (): number => toolCallsSinceLastWrite.size,
+	hasNoOpState: (sessionID: string): boolean =>
+		toolCallsSinceLastWrite.has(sessionID),
 };
 
 /**
@@ -244,9 +252,44 @@ const CONTENT_FILTER_PATTERN = /content.?filter/i;
 
 /**
  * v6.33.1: No-op work detector state.
+ *
+ * AGENTS.md invariant 8: module-level, session-keyed state must have an explicit
+ * eviction strategy. Both containers below are keyed by `sessionID` and were
+ * previously unbounded — they grew for the lifetime of the plugin process, since
+ * nothing removed a key when a session ended. `noOpWarningIssued` was only ever
+ * `delete`d on a reset, and `toolCallsSinceLastWrite` never shrank at all.
+ *
+ * Bounded with the same FIFO discipline used by the PR-workflow response gate
+ * (`MAX_TRACKED_WAKE_SESSIONS` / `evictBannerDedupeMapsIfOverBound`). Insertion
+ * order is the eviction order, so the oldest session is dropped first; losing a
+ * stale session's counter is harmless — the detector simply restarts counting
+ * for it, which is the correct behavior for a session that has gone quiet.
  */
+export const MAX_TRACKED_NO_OP_SESSIONS = 200;
 const toolCallsSinceLastWrite = new Map<string, number>();
 const noOpWarningIssued = new Set<string>();
+
+/**
+ * FIFO-evict the oldest entries from the no-op detector's session maps when
+ * either exceeds {@link MAX_TRACKED_NO_OP_SESSIONS}. Called at every insertion
+ * site so the bound is enforced structurally rather than by an argument about
+ * which branches happen to run.
+ */
+function evictNoOpStateIfOverBound(): void {
+	while (toolCallsSinceLastWrite.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const oldestKey = toolCallsSinceLastWrite.keys().next().value;
+		if (oldestKey === undefined) break;
+		toolCallsSinceLastWrite.delete(oldestKey);
+		// Drop the paired warning latch with it, so an evicted session cannot
+		// come back with a stale "already warned" flag and never warn again.
+		noOpWarningIssued.delete(oldestKey);
+	}
+	while (noOpWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const oldestKey = noOpWarningIssued.values().next().value;
+		if (oldestKey === undefined) break;
+		noOpWarningIssued.delete(oldestKey);
+	}
+}
 
 /**
  * Extracts phase number from a phase string like "Phase 3: Implementation".
@@ -737,9 +780,11 @@ export function createGuardrailsHooks(
 			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
 				toolCallsSinceLastWrite.set(sessionId, 0);
 				noOpWarningIssued.delete(sessionId);
+				evictNoOpStateIfOverBound();
 			} else {
 				const count = (toolCallsSinceLastWrite.get(sessionId) ?? 0) + 1;
 				toolCallsSinceLastWrite.set(sessionId, count);
+				evictNoOpStateIfOverBound();
 				const threshold = cfg.no_op_warning_threshold ?? 15;
 				if (
 					count >= threshold &&

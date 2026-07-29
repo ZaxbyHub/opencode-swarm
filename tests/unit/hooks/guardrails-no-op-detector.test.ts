@@ -21,7 +21,11 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	createGuardrailsHooks,
+	_internals as internals,
+	MAX_TRACKED_NO_OP_SESSIONS,
+} from '../../../src/hooks/guardrails';
 import {
 	ensureAgentSession,
 	resetSwarmState,
@@ -168,6 +172,29 @@ describe('no-op work detector: subagent dispatch counts as progress', () => {
 
 		// That call was itself a non-write, so it is the Nth and trips the warning.
 		expect(noOpWarnings(sessionId)).toHaveLength(1);
+	});
+
+	test('the session maps are FIFO-bounded (invariant 8)', async () => {
+		// These maps are module-level and session-keyed. They were unbounded and
+		// grew for the lifetime of the plugin process, since nothing removed a key
+		// when a session ended. The fix-plan declared a bound owed with any change
+		// to this block.
+		const hooks = makeHooks();
+		const overBound = MAX_TRACKED_NO_OP_SESSIONS + 50;
+		for (let s = 0; s < overBound; s++) {
+			const sid = `noop-bound-${s}`;
+			ensureAgentSession(sid, 'architect');
+			swarmState.activeAgent.set(sid, 'architect');
+			await readCall(hooks, sid, 0);
+		}
+		// The oldest sessions were evicted; the map cannot exceed the bound.
+		expect(internals.noOpStateSize()).toBeLessThanOrEqual(
+			MAX_TRACKED_NO_OP_SESSIONS,
+		);
+		// The most recent session survived eviction.
+		expect(internals.hasNoOpState(`noop-bound-${overBound - 1}`)).toBe(true);
+		// The oldest was evicted.
+		expect(internals.hasNoOpState('noop-bound-0')).toBe(false);
 	});
 
 	test('the warning no longer advises /swarm handoff', async () => {
