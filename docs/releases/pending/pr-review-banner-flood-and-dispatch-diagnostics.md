@@ -153,3 +153,43 @@ mechanism: it drives a realistic gated turn (10 messages × 30 parts, every thir
 blank) and asserts total injections scale with messages, never with parts. It is
 verified to bite — neutralizing the three suppression branches fails it, and four
 other behavioral tests, and restoring them returns the suite to green.
+
+## Post-review additions
+
+An independent implementation review returned `NEEDS_REVISION`; both blockers
+are closed here.
+
+- **`mode` is normalized once, at the parse boundary.** The bare-mode guard
+  trimmed its input while roughly twenty downstream `startsWith` / strict-equality
+  branches did not, so `" swarm-pr-review:base"` passed the new guard, failed
+  every `startsWith('swarm-pr-review:')` check, skipped the merge-base bind, and
+  surfaced as *"exact merge-base scope was not verified"* — the same
+  typo-blamed-on-the-merge-base failure this change set out to eliminate.
+  Normalizing in one place closes the whole near-miss family instead of one
+  literal at a time. Covered by a regression test verified to fail without it.
+- **Bound documentation corrected, and eviction moved to the insert site.**
+  `MAX_TRACKED_WAKE_SESSIONS` was documented as shared with one map when three
+  now share it, and `evictBannerStampsIfOverBound` was named for one map while
+  evicting three (renamed `evictBannerDedupeMapsIfOverBound`). `fallbackInjections`
+  was bounded only incidentally — a new key was always followed by the eviction on
+  the full-banner path, but that argument ran three branches deep and any early
+  return added between them would have silently unbounded the map. Invariant 8
+  now holds structurally.
+- **Two test titles rescoped.** Both omit `messageID` and therefore exercise the
+  defensive fallback path; their titles claimed suspended/interrupted sessions
+  banner "every part", which is no longer true under the real host contract. They
+  now state what they actually assert: that `forceFullBanner` prevents a
+  downgrade to the short marker.
+
+Two behavior changes were reviewed and accepted knowingly rather than fixed:
+
+- **A mid-message interruption delays its recovery notice by one turn.** If the
+  user interrupts after the message's first part was already bannered, the
+  per-message dedupe suppresses the notice for the rest of that message; it
+  appears on the next assistant message. The gate is tool-gated
+  (`complete_pr_workflow` / `abort_pr_workflow` in `pr-workflow-gate.ts`), not
+  text-gated, so nothing about enforcement depends on the banner.
+- **The banner lands on the first substantive part, not the terminal-looking
+  one.** A short preamble can carry the banner while the verdict-shaped final
+  part carries nothing. Detecting the "terminal-looking" part is a fragile
+  heuristic; the safety boundary is unaffected for the same reason as above.

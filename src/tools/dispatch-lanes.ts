@@ -807,6 +807,19 @@ export async function executeDispatchLanesAsync(
 			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
+	// Normalize `mode` ONCE, before any consumer reads it. Roughly twenty sites
+	// below branch on `parsed.data.mode` with `startsWith` or strict equality, so
+	// surrounding whitespace on an otherwise correct value silently misroutes:
+	// " swarm-pr-review:base" fails every `startsWith('swarm-pr-review:')` check
+	// and skips the merge-base bind entirely, surfacing much later as "exact
+	// merge-base scope was not verified" — the merge base blamed for a typo.
+	// "swarm-pr-review:base " passes the bind but fails the strict-equality
+	// batch-recording branch. Normalizing in one place is what makes that whole
+	// near-miss family impossible, instead of closing one literal at a time.
+	if (typeof parsed.data.mode === 'string') {
+		const normalizedMode = parsed.data.mode.trim();
+		parsed.data.mode = normalizedMode.length > 0 ? normalizedMode : undefined;
+	}
 
 	const duplicateLaneIds = findDuplicateLaneIds(parsed.data.lanes);
 	if (duplicateLaneIds.length > 0) {

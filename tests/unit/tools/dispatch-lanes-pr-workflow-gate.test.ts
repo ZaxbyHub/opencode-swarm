@@ -251,6 +251,80 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		expect(message).not.toContain('merge-base scope was not verified');
 	});
 
+	test('surrounding whitespace on mode cannot silently skip the merge-base bind', async () => {
+		// Roughly twenty sites branch on `mode` with startsWith/strict equality.
+		// Before normalization, " swarm-pr-review:base" failed every
+		// startsWith('swarm-pr-review:') check, skipped the merge-base bind
+		// entirely, and surfaced much later as "exact merge-base scope was not
+		// verified" — the merge base blamed for a whitespace typo. This is the
+		// same near-miss family as the bare colon-less mode above, so it must be
+		// closed by normalization rather than by one more literal comparison.
+		let sessionIndex = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({
+				data: { id: `ws-lane-session-${sessionIndex++}` },
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+		// Leading whitespace: must behave exactly like the clean value, i.e. bind
+		// the merge base and dispatch successfully.
+		const leading = await executeDispatchLanesAsync(
+			{
+				mode: ' swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`ws-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'whitespace-leading-session' },
+		);
+		expect(leading.success).toBe(true);
+
+		// Trailing whitespace previously passed the bind but failed the strict
+		// equality that records the base batch.
+		const trailing = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base ',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`ws2-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'whitespace-trailing-session' },
+		);
+		expect(trailing.success).toBe(true);
+
+		// A padded BARE mode still hits the named stage-suffix rejection rather
+		// than slipping through as an unrecognized advisory tag.
+		const paddedBare = await executeDispatchLanesAsync(
+			{
+				mode: '  swarm-pr-review  ',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) =>
+					lane(`ws3-${workflowLane}`, workflowLane),
+				),
+			},
+			directory,
+			{ sessionID: 'whitespace-bare-session' },
+		);
+		expect(paddedBare.success).toBe(false);
+		expect(String(paddedBare.message)).toContain(
+			'missing its required stage suffix',
+		);
+	});
+
 	test('the PR-gating parameters document the remote-tracking requirement and the colon-suffixed modes', () => {
 		const describe_ = (field: unknown): string =>
 			String((field as { description?: string })?.description ?? '');

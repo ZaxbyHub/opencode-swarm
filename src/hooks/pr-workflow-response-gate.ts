@@ -81,8 +81,11 @@ const BANNER_PREFIX_PATTERN = /^--- \[(?:PR_REVIEW|PR_FEEDBACK) WORKFLOW ACTIVE/
 
 /**
  * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global
- * state): module-level state must have an explicit eviction strategy. The
- * banner-stamp map (last full-banner instant per session) shares this bound.
+ * state): module-level state must have an explicit eviction strategy. Three
+ * further per-session maps share this same bound and the same FIFO discipline:
+ * `bannerStamps` (instant of the last full banner), `banneredMessages` (the
+ * assistant message already carrying a banner), and `fallbackInjections` (the
+ * injection count on the messageID-less path).
  */
 export const MAX_TRACKED_WAKE_SESSIONS = 200;
 
@@ -256,10 +259,13 @@ export function createPrWorkflowResponseGate(options: {
 	}
 
 	/**
-	 * FIFO-evict the oldest banner-stamp entry when the map exceeds the bound.
-	 * Mirrors {@link evictIfOverBound} for the banner-dedupe map (invariant 8).
+	 * FIFO-evict the oldest entry from each of the three banner-dedupe maps when
+	 * it exceeds the bound. Mirrors {@link evictIfOverBound} (invariant 8).
+	 * Call this at every site that INSERTS into any of them, so the bound is
+	 * enforced by the code rather than by an argument about which branches
+	 * happen to run together.
 	 */
-	function evictBannerStampsIfOverBound(): void {
+	function evictBannerDedupeMapsIfOverBound(): void {
 		while (bannerStamps.size > MAX_TRACKED_WAKE_SESSIONS) {
 			const oldestKey = bannerStamps.keys().next().value;
 			if (oldestKey === undefined) break;
@@ -337,6 +343,13 @@ export function createPrWorkflowResponseGate(options: {
 			const injected = fallbackInjections.get(input.sessionID) ?? 0;
 			if (injected >= MAX_FALLBACK_BANNER_INJECTIONS_PER_SESSION) return;
 			fallbackInjections.set(input.sessionID, injected + 1);
+			// Evict at the INSERT site. The bound was previously satisfied only
+			// incidentally — a new key here was always followed by the eviction on
+			// the full-banner path further down — but that argument runs three
+			// branches deep and any early return added between here and there
+			// would silently unbound the map. Invariant 8 wants a structural
+			// guarantee, not a provable coincidence.
+			evictBannerDedupeMapsIfOverBound();
 		}
 
 		const budget = wakeBudgets.get(input.sessionID);
@@ -360,7 +373,7 @@ export function createPrWorkflowResponseGate(options: {
 			lastBannerAt !== undefined && now - lastBannerAt < bannerCooldownMs;
 		if (messageID) {
 			banneredMessages.set(input.sessionID, messageID);
-			evictBannerStampsIfOverBound();
+			evictBannerDedupeMapsIfOverBound();
 		}
 		if (!forceFullBanner && withinCooldown) {
 			// A full banner was shown for this session within the cooldown
@@ -384,7 +397,7 @@ export function createPrWorkflowResponseGate(options: {
 			maxConsecutive: maxConsecutive,
 		});
 		bannerStamps.set(input.sessionID, now);
-		evictBannerStampsIfOverBound();
+		evictBannerDedupeMapsIfOverBound();
 		output.text = `${banner}\n\n${output.text}`;
 	};
 

@@ -138,7 +138,13 @@ describe('PR workflow response-gate banner dedupe (C7)', () => {
 		expect(third.text).toContain('third');
 	});
 
-	test('a suspended session gets the FULL banner on every part, even within the cooldown (invariant-10 operational notice)', async () => {
+	// NOTE: this test omits `messageID`, so it exercises the DEFENSIVE fallback
+	// path, not the production path. Its subject is narrow: that
+	// `forceFullBanner` prevents a suspension notice from being downgraded to the
+	// short marker. It is NOT a claim that suspended sessions banner every part —
+	// under the real host contract (messageID always supplied) they do not; see
+	// "per-message dedupe also bounds SUSPENDED sessions" below.
+	test('a suspended session is never DOWNGRADED to the short marker within the cooldown, on the messageID-less fallback path', async () => {
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,
@@ -176,7 +182,9 @@ describe('PR workflow response-gate banner dedupe (C7)', () => {
 		expect(second.text).toContain('part two');
 	});
 
-	test('a user-interrupted session gets the FULL banner on every part, even within the cooldown (invariant-10 operational notice)', async () => {
+	// Same scoping as the suspended case above: messageID-less fallback path,
+	// asserting no downgrade to the short marker rather than per-part repetition.
+	test('a user-interrupted session is never DOWNGRADED to the short marker within the cooldown, on the messageID-less fallback path', async () => {
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,
