@@ -77,6 +77,11 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 		mockReadFileSync.mockImplementation(() => 'valid code');
 	});
 
+	// NOTE: these cases supply a file that is then skipped as
+	// `unsupported_language`, so nothing is actually parsed. The verdict is
+	// therefore 'skip', not 'pass' — a file that was skipped was not checked,
+	// and reporting 'pass' recorded a green gate in the evidence store for work
+	// that never happened.
 	describe('ADVERSARIAL 1: Control character injection in filePath', () => {
 		it('should handle filePath with embedded null byte gracefully', async () => {
 			const input: SyntaxCheckInput = {
@@ -92,7 +97,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0].skipped_reason).toBe('unsupported_language');
 			expect(result.files[0].path).toBe('foo\x00.kt');
-			expect(result.verdict).toBe('pass');
+			expect(result.verdict).toBe('skip');
 		});
 
 		it('should handle filePath with newline character', async () => {
@@ -108,7 +113,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0].skipped_reason).toBe('unsupported_language');
 			expect(result.files[0].path).toBe('foo\n.kt');
-			expect(result.verdict).toBe('pass');
+			expect(result.verdict).toBe('skip');
 		});
 
 		it('should handle filePath with multiple control characters', async () => {
@@ -124,7 +129,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0].skipped_reason).toBe('unsupported_language');
 			expect(result.files[0].path).toBe('foo\r\n\t\x00.kt');
-			expect(result.verdict).toBe('pass');
+			expect(result.verdict).toBe('skip');
 		});
 	});
 
@@ -340,7 +345,11 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 
 			// Should complete without crash - but file is filtered out (kotlin not in injection strings)
 			expect(result.files).toHaveLength(0);
-			expect(result.summary).toBe('All 0 files passed syntax check');
+			// Filtering everything out is a SKIP, not a pass, and the summary must
+			// name the filter that emptied the set.
+			expect(result.verdict).toBe('skip');
+			expect(result.summary).toContain('No files were checked');
+			expect(result.summary).toContain('languages filter');
 		});
 
 		it('should filter out files when no language matches injection strings', async () => {
@@ -366,7 +375,9 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 
 			// No files should match the injection strings
 			expect(result.files).toHaveLength(0);
-			expect(result.summary).toBe('All 0 files passed syntax check');
+			expect(result.verdict).toBe('skip');
+			expect(result.summary).toContain('No files were checked');
+			expect(result.summary).toContain('languages filter');
 		});
 	});
 
@@ -380,8 +391,9 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			const result = await syntaxCheck(input, '/test/dir');
 
 			expect(result.files).toHaveLength(0);
-			expect(result.summary).toBe('All 0 files passed syntax check');
-			expect(result.verdict).toBe('pass');
+			expect(result.summary).toContain('No files were checked');
+			expect(result.summary).toContain('no files were supplied in changed_files');
+			expect(result.verdict).toBe('skip');
 
 			// saveEvidence should still be called
 			expect(mockSaveEvidence).toHaveBeenCalledWith(
@@ -456,6 +468,9 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 			expect(result.files).toHaveLength(1);
 			expect(result.files[0].skipped_reason).toBe('unexpected crash');
 			expect(result.files[0].ok).toBe(false);
+			// A throw during processing counts toward filesChecked (see the
+			// per-file outcome semantics in syntax-check.ts), so the file set is
+			// not empty and the new empty-set 'skip' verdict does not apply here.
 			expect(result.verdict).toBe('pass'); // No actual syntax errors, just skipped
 		});
 
