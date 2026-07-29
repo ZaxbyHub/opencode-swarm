@@ -31,6 +31,7 @@ import {
 	claimDelegationIngestion,
 	claimTerminalResult,
 	findDelegationForCompletion,
+	MAX_SETTLEMENT_REASON_CHARS,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
@@ -643,6 +644,9 @@ async function settleCoder(
 			outcome: 'worktree settlement persistence pending retry',
 		};
 	}
+	const settlementReason = mergeResult.message
+		.trim()
+		.slice(0, MAX_SETTLEMENT_REASON_CHARS);
 	const preserved = await updateCoderSettlement(
 		directory,
 		record.correlationId,
@@ -659,7 +663,10 @@ async function settleCoder(
 			outcome: {
 				kind: 'standard-worktree',
 				result: mergeResult.outcome,
-				reason: mergeResult.message,
+				// Omit rather than persist an empty/over-length reason: either one
+				// fails record validation and would silently discard the entire
+				// preserved settlement, stranding the record in `settling`.
+				...(settlementReason ? { reason: settlementReason } : {}),
 				sourceHeadAfterCommit: mergeResult.provenance?.sourceHead ?? null,
 				targetHeadBeforeMerge: mergeResult.provenance?.targetHeadBefore ?? null,
 			},
@@ -668,7 +675,11 @@ async function settleCoder(
 	return {
 		ok: false,
 		record: preserved ?? record,
-		outcome: `worktree settlement preserved: ${mergeResult.message}`,
+		// Reuse the clamped reason: the advisory built from this string is capped
+		// at MAX_BACKGROUND_ADVISORY_CHARS, and an over-length advisory is dropped
+		// to null, which would silently deny the architect any notice that the
+		// worktree was preserved.
+		outcome: `worktree settlement preserved: ${settlementReason}`,
 	};
 }
 

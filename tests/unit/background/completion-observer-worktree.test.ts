@@ -148,4 +148,85 @@ describe('background coder standard-worktree completion', () => {
 		]);
 		expect(fs.existsSync(worktreePath)).toBe(false);
 	});
+
+	// Regression for F-001. `git merge` reports conflicts on stdout and leaves
+	// stderr empty, so the merge result carried `message: ''`. That empty string
+	// reached `SettlementOutcomeSchema.reason` (`z.string().min(1)`), the record
+	// failed validation, and `updateCoderSettlement` silently returned — the
+	// preserved settlement was never persisted and the record stayed `settling`
+	// forever, which also kept the coder reservation pinned. This drives the
+	// preserved branch of `settleCoder` end to end, which no other test reaches.
+	test('persists a preserved settlement when the merge-back conflicts', async () => {
+		const session = ensureAgentSession('parent', 'architect', directory);
+		session.currentTaskId = '4.2';
+		session.lastCoderDelegationTaskId = '4.2';
+		const baseline = captureWorkspaceSnapshot(worktreePath);
+		await recordPendingDelegation(directory, {
+			correlationId: 'worktree-coder-conflict',
+			jobId: 'worktree-job-conflict',
+			subagentSessionId: 'worktree-coder-conflict',
+			parentSessionId: 'parent',
+			callID: 'worktree-call-conflict',
+			normalizedAgent: 'coder',
+			swarmPrefixedAgent: 'coder',
+			planTaskId: '4.2',
+			evidenceTaskId: '4.2',
+			workspace: baseline,
+			taskChangeContext: {
+				declaredFiles: ['base.txt'],
+				baseline,
+			},
+			worktree: {
+				callID: 'worktree-call-conflict',
+				parentSessionId: 'parent',
+				taskId: '4.2',
+				planTaskId: '4.2',
+				worktreePath,
+				branchName: 'swarm/lane/background-coder',
+				worktreeId: 'lane-1',
+				worktreeSessionId: 'worktree-coder-conflict',
+				mergeStrategy: 'merge',
+				laneIndex: 0,
+				worktreeDir: null,
+			},
+		});
+
+		// Divergent edits to the same line on both sides force a real merge
+		// conflict rather than a fast-forward.
+		fs.writeFileSync(path.join(worktreePath, 'base.txt'), 'lane change\n');
+		fs.writeFileSync(path.join(directory, 'base.txt'), 'primary change\n');
+		git(directory, ['add', 'base.txt']);
+		git(directory, ['commit', '-m', 'test: conflicting primary change']);
+
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+		});
+		await observer.event({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						type: 'text',
+						synthetic: true,
+						sessionID: 'parent',
+						text:
+							'<task id="worktree-coder-conflict" state="completed">\n' +
+							'<task_result>done</task_result>\n</task>',
+					},
+				},
+			},
+		});
+
+		const preserved = findByCorrelationId(directory, 'worktree-coder-conflict');
+		// The whole point: the preserved settlement must reach disk. Before the
+		// fix this stayed `settling` because the record failed schema validation.
+		expect(preserved?.coderSettlement?.state).toBe('preserved');
+		expect(preserved?.coderSettlement?.outcome?.result).toBe('partial');
+		expect(preserved?.coderSettlement?.outcome?.reason ?? '').not.toBe('');
+		expect(preserved?.coderSettlement?.outcome?.reason).toMatch(/conflict/i);
+		// A conflicted lane is retained for recovery and never consumed.
+		expect(preserved?.status).not.toBe('consumed');
+		expect(fs.existsSync(worktreePath)).toBe(true);
+	});
 });

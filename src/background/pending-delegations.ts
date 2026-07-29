@@ -41,6 +41,12 @@ export const MAX_LIVE_BACKGROUND_FALLBACKS = 256;
 export const MAX_LIVE_BACKGROUND_CODER_RESERVATIONS = 256;
 export const MAX_BACKGROUND_OBSERVED_FILES = 5_000;
 export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
+/**
+ * Upper bound for a persisted settlement `reason`. Callers must clamp to this
+ * before building a settlement outcome: an over-length reason fails record
+ * validation, which would silently discard the whole durable settlement write.
+ */
+export const MAX_SETTLEMENT_REASON_CHARS = 2_000;
 const MAX_RECOVERY_LEDGER_BYTES = 4 * 1024 * 1024;
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
 
@@ -333,7 +339,7 @@ const SettlementOutcomeSchema = z
 	.object({
 		kind: z.enum(['shared-root', 'standard-worktree']),
 		result: z.enum(['ready', 'merged', 'unchanged', 'partial', 'failed']),
-		reason: z.string().min(1).max(2_000).optional(),
+		reason: z.string().min(1).max(MAX_SETTLEMENT_REASON_CHARS).optional(),
 		sourceHeadAfterCommit: z.string().min(1).max(256).nullable().optional(),
 		targetHeadBeforeMerge: z.string().min(1).max(256).nullable().optional(),
 		targetHeadAfterMerge: z.string().min(1).max(256).nullable().optional(),

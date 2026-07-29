@@ -160,6 +160,25 @@ function allocateStandardLaneIndex(parentSessionID: string): number {
 // window and must switch to handleStandardWorktreeFailure like the other paths.
 export const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
 
+/**
+ * Upper bound for raw Git text embedded in a merge-back architect advisory.
+ * A conflict spanning many files emits roughly two output lines per file, which
+ * would otherwise flood the architect's context unbounded. Matches
+ * `MAX_SETTLEMENT_REASON_CHARS` so the advisory and the durable settlement
+ * reason truncate at the same point rather than disagreeing.
+ */
+const MAX_MERGE_ADVISORY_MESSAGE_CHARS = 2_000;
+
+/**
+ * Truncate raw Git output for an architect advisory, marking the cut so the
+ * operator knows output was elided rather than silently seeing a short message.
+ */
+function boundMergeAdvisoryMessage(message: string): string {
+	return message.length > MAX_MERGE_ADVISORY_MESSAGE_CHARS
+		? `${message.slice(0, MAX_MERGE_ADVISORY_MESSAGE_CHARS)}… (truncated)`
+		: message;
+}
+
 export interface StandardWorktreeDispatch {
 	callID: string;
 	parentSessionID: string;
@@ -1741,7 +1760,7 @@ export async function finishStandardWorktreeDispatch(
 					recordWorktreeMergeFailure(statusKey, {
 						outcome: 'failed',
 						stage: failedSettlement.stage,
-						message: failedSettlement.message,
+						message: boundMergeAdvisoryMessage(failedSettlement.message),
 						worktreePath: dispatch.handle.worktreePath,
 						branch: dispatch.handle.branchName,
 						completedAt: Date.now(),
@@ -1797,7 +1816,7 @@ export async function finishStandardWorktreeDispatch(
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'partial',
 				stage: mergeResult.stage,
-				message: mergeResult.message,
+				message: boundMergeAdvisoryMessage(mergeResult.message),
 				worktreePath: dispatch.handle.worktreePath,
 				branch: dispatch.handle.branchName,
 				completedAt: Date.now(),
@@ -1805,7 +1824,7 @@ export async function finishStandardWorktreeDispatch(
 			const session = ensureAgentSession(dispatch.parentSessionID);
 			session.pendingAdvisoryMessages ??= [];
 			session.pendingAdvisoryMessages.push(
-				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
+				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${boundMergeAdvisoryMessage(mergeResult.message)}`,
 			);
 
 			// F-C004: merge conflicts retain the lane worktree and branch for
@@ -1815,7 +1834,7 @@ export async function finishStandardWorktreeDispatch(
 			return {
 				outcome: 'partial',
 				stage: mergeResult.stage,
-				message: mergeResult.message,
+				message: boundMergeAdvisoryMessage(mergeResult.message),
 				autoCommitted: mergeResult.autoCommitted,
 				cleaned: mergeResult.cleaned,
 				conflictFiles: mergeResult.conflictFiles,
@@ -1827,7 +1846,7 @@ export async function finishStandardWorktreeDispatch(
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'failed',
 				stage: mergeResult.stage,
-				message: mergeResult.message,
+				message: boundMergeAdvisoryMessage(mergeResult.message),
 				worktreePath: dispatch.handle.worktreePath,
 				branch: dispatch.handle.branchName,
 				completedAt: Date.now(),
@@ -1835,7 +1854,7 @@ export async function finishStandardWorktreeDispatch(
 			const session = ensureAgentSession(dispatch.parentSessionID);
 			session.pendingAdvisoryMessages ??= [];
 			session.pendingAdvisoryMessages.push(
-				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
+				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${boundMergeAdvisoryMessage(mergeResult.message)}.`,
 			);
 
 			// F-C004: retain failed merge lanes for recovery. In particular, a

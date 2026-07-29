@@ -29,6 +29,12 @@
 - Standard worktree provisioning now publishes a provisional durable owner
   while holding the same lifecycle lock as init recovery, so cleanup cannot
   snapshot an empty owner set and then race a newly created lane.
+- A conflicted merge-back under the default `merge` strategy now records its
+  preserved settlement durably. Git reports merge conflicts on stdout and
+  leaves stderr empty, so the settlement reason was blank, failed record
+  validation, and was silently discarded — leaving the lane stuck mid-settle
+  across restarts. The reason is now captured from either stream and bounded,
+  and the architect advisory built from it is bounded too.
 
 ## Why
 

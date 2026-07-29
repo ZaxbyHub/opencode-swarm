@@ -336,10 +336,13 @@ export async function mergeLaneBranch(
 					: ['merge', '--abort'];
 		await runGit(abortArgs, primaryDir);
 
+		// `git merge` reports conflicts on stdout and leaves stderr empty, so
+		// fall back to stdout exactly like the non-conflict error path below.
+		// Downstream durable settlement requires a non-empty reason string.
 		return {
 			conflict: true,
 			files,
-			message: result.stderr.trim(),
+			message: result.stderr.trim() || result.stdout.trim(),
 		};
 	}
 

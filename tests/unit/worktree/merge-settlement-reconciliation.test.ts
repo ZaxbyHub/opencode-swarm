@@ -241,6 +241,12 @@ test('conflict returns a structured partial result and preserves recovery coordi
 	}
 	expect(result.stage).toBe('merge');
 	expect(result.conflictFiles).toContain('result.txt');
+	// `git merge` writes conflict text to stdout and leaves stderr empty. A blank
+	// message fails the `reason: z.string().min(1)` settlement schema, which makes
+	// `updateCoderSettlement` discard the whole preserved write and strand the
+	// record in `settling` forever.
+	expect(result.message.trim()).not.toBe('');
+	expect(result.message).toMatch(/conflict/i);
 	expect(result.provenance?.operationId).toBe('operation-conflict');
 	expect(fs.existsSync(worktreePath)).toBe(true);
 	expect(git(root, 'branch', '--list', dispatch.handle.branchName)).not.toBe(
