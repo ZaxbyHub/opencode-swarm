@@ -16,7 +16,14 @@ const mockLoadGrammar = mock();
 const mockSaveEvidence = mock();
 const mockReadFileSync = mock();
 
-// Mock modules using factory functions
+// Mock modules using factory functions.
+//
+// Cleanup pattern: FILE-SCOPED, not afterEach(mock.restore()). These
+// `mock.module` calls are module-level and must stay resident for the whole
+// file — restoring them after the first test would unmock the remaining ones.
+// Per-test isolation comes from `mock.clearAllMocks()` in `beforeEach` below,
+// which resets every mock function's calls and implementations before each
+// case. See AGENTS.md invariant 7.
 mock.module('../../../src/lang/detector', () => ({
 	getProfileForFile: (...args: unknown[]) => mockGetProfileForFile(...args),
 }));

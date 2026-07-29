@@ -32,6 +32,14 @@ import {
 } from '../../../src/hooks/init-orphan-recovery-advisory';
 import { ensureAgentSession, swarmState } from '../../../src/state';
 
+// A fixed literal, replacing what were real-clock reads. No assertion in this
+// file depends on the value — it is filler for a required field — so reading the
+// wall clock bought nothing and made the tests non-deterministic. The repo
+// test-stability gate (#1782) requires any test file touching the real clock to
+// use the freezeClock helper; removing the dependency outright is simpler than
+// freezing it.
+const FIXED_INIT_TIMESTAMP = '2026-01-01T00:00:00.000Z';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -349,7 +357,7 @@ describe('advisory flush: messagesTransform surfaces advisory to architect', () 
 
 		// Write a synthetic advisory file
 		const advisoryContent = {
-			initTimestamp: new Date().toISOString(),
+			initTimestamp: FIXED_INIT_TIMESTAMP,
 			warnings: [
 				'Test warning: could not reclaim orphaned worktree /path/to/locked',
 			],
@@ -421,7 +429,7 @@ describe('advisory flush: messagesTransform surfaces advisory to architect', () 
 		await initGitRepo(freshDir);
 
 		const advisoryContent = {
-			initTimestamp: new Date().toISOString(),
+			initTimestamp: FIXED_INIT_TIMESTAMP,
 			warnings: [],
 			errors: [],
 			reclaimed: {
@@ -530,7 +538,7 @@ describe('emptiness gate: a contentless advisory is never surfaced', () => {
 	test('a clean-repo advisory (prunedWorktrees only) surfaces NOTHING', async () => {
 		const { dir, messages } = await runAdvisory(
 			{
-				initTimestamp: new Date().toISOString(),
+				initTimestamp: FIXED_INIT_TIMESTAMP,
 				warnings: [],
 				errors: [],
 				reclaimed: {
@@ -559,7 +567,7 @@ describe('emptiness gate: a contentless advisory is never surfaced', () => {
 		writeFileSync(
 			advisoryPath,
 			JSON.stringify({
-				initTimestamp: new Date().toISOString(),
+				initTimestamp: FIXED_INIT_TIMESTAMP,
 				warnings: [],
 				errors: [],
 				reclaimed: {
@@ -609,7 +617,7 @@ describe('emptiness gate: a contentless advisory is never surfaced', () => {
 		const o = overrides as Record<string, unknown>;
 		const { dir, messages } = await runAdvisory(
 			{
-				initTimestamp: new Date().toISOString(),
+				initTimestamp: FIXED_INIT_TIMESTAMP,
 				warnings: (o.warnings as string[]) ?? [],
 				errors: (o.errors as unknown[]) ?? [],
 				reclaimed: {
@@ -631,7 +639,7 @@ describe('emptiness gate: a contentless advisory is never surfaced', () => {
 		// with no runtime validation, and the file is deleted before the fields are
 		// read — so a throw here loses the payload with it.
 		const { dir, messages } = await runAdvisory(
-			{ initTimestamp: new Date().toISOString() },
+			{ initTimestamp: FIXED_INIT_TIMESTAMP },
 			'test-arch-adv-malformed',
 		);
 		expect(messages).toEqual([]);
