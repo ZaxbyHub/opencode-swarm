@@ -706,7 +706,32 @@ export function createGuardrailsHooks(
 			// v6.33.1: No-op work detector
 			const sessionId = input.sessionID;
 			const normalizedToolName = normalizeToolName(input.tool);
-			if (isWriteTool(normalizedToolName)) {
+			// Handing work to a subagent IS progress, and it is the ONLY kind of
+			// progress an orchestrating architect makes.
+			//
+			// Before this, the counter reset solely on `isWriteTool`. A subagent's
+			// writes land under a DIFFERENT sessionID, and this counter is keyed by
+			// `input.sessionID`, so those writes could never reset the architect's
+			// count. An architect that delegates and reads therefore climbed toward
+			// the "you may be stuck" warning forever — in every mode, not just PR
+			// review: deep-dive, council, research, consult, discover, issue
+			// tracing, plain planning.
+			//
+			// Both dispatch mechanisms count. `isAgentDelegation` matches only
+			// `Task`/`task` (see its early return), but `/swarm pr-review` dispatches
+			// its lanes through `dispatch_lanes_async` — and the `task` tool is
+			// BLOCKED outright while a PR_REVIEW gate is active
+			// (pr-workflow-gate.ts, "PR_REVIEW is read-only and fail-closed").
+			// Keying on `Task` alone would therefore have left the originally
+			// reported case — a PR review told it was stuck — completely unfixed.
+			const laneDispatchTools = new Set(['dispatch_lanes', 'dispatch_lanes_async']);
+			const isSubagentDispatch =
+				laneDispatchTools.has(normalizedToolName) ||
+				isAgentDelegation(
+					input.tool,
+					input.args ?? getStoredInputArgs(input.callID),
+				).isDelegation;
+			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
 				toolCallsSinceLastWrite.set(sessionId, 0);
 				noOpWarningIssued.delete(sessionId);
 			} else {
@@ -719,8 +744,13 @@ export function createGuardrailsHooks(
 					session?.pendingAdvisoryMessages
 				) {
 					noOpWarningIssued.add(sessionId);
+					// The old text advised `/swarm handoff`, which resets the session —
+					// discarding exactly the context an orchestrating architect has
+					// been assembling. Advice that destroys the user's work is worse
+					// than no advice, so the recovery hint is gone; the observation
+					// remains.
 					session.pendingAdvisoryMessages.push(
-						`WARNING: Agent has made ${count} tool calls with no file modifications. If you are stuck, use /swarm handoff to reset or /swarm turbo to reduce overhead.`,
+						`WARNING: Agent has made ${count} tool calls with no file modifications and no subagent dispatches. If you are stuck, state what is blocking you and report BLOCKED rather than continuing to probe.`,
 					);
 				}
 			}

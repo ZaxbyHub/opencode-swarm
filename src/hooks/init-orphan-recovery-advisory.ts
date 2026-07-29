@@ -153,6 +153,43 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		// Best-effort delete after reading (await to ensure file is deleted before returning)
 		await deleteAdvisoryFile();
 
+		// Emptiness gate: say nothing when there is nothing to report.
+		//
+		// The producer writes this file unconditionally on the happy path of every
+		// plugin init — `writeAdvisoryFile(directory, cleanupResult, allWarnings,
+		// true, removedWorktrees)` (init-orphan-recovery.ts) passes `attempted` as a
+		// literal `true`, and `writeAdvisoryFile` sets `prunedWorktrees: attempted`.
+		// So on a clean repo with zero orphans the advisory carries no warnings, no
+		// errors, nothing reclaimed, and `prunedWorktrees: true` — and the block
+		// below still emitted a header plus "Stale worktree metadata pruned.": two
+		// lines of zero information at the top of the architect's system message,
+		// once per session, on every project.
+		//
+		// `prunedWorktrees` alone is deliberately NOT treated as reportable content.
+		// It is true on every successful init, so gating on it would suppress
+		// nothing. Only warnings, errors, or something actually reclaimed count.
+		// AGENTS.md invariant 10: "Do not emit diagnostic noise into chat-visible
+		// streams." Mirrors the in-repo reference implementation in
+		// council/council-advisory.ts, which returns early when its payload would
+		// be content-free.
+		//
+		// The consume/delete above still runs, so a stale file is cleared either
+		// way — this gate changes what is SAID, never what is CLEANED UP.
+		// Optional chaining throughout: `readAdvisoryFile` does a bare
+		// `JSON.parse(content) as InitOrphanAdvisory` cast with no runtime
+		// validation, so an older or hand-edited file can be missing these fields
+		// even though the type declares them required. Reading them defensively
+		// means a malformed advisory degrades to silence instead of throwing out
+		// of `messagesTransform` — which would be unrecoverable, since the file
+		// has already been deleted above.
+		const reclaimedForGate = advisory.reclaimed;
+		const hasReportableContent =
+			(advisory.warnings?.length ?? 0) > 0 ||
+			(advisory.errors?.length ?? 0) > 0 ||
+			(reclaimedForGate?.removedBranches?.length ?? 0) > 0 ||
+			(reclaimedForGate?.removedWorktrees?.length ?? 0) > 0;
+		if (!hasReportableContent) return;
+
 		// Push warnings to pendingAdvisoryMessages
 		// ensureAgentSession is idempotent — gets existing or creates new
 		const targetSession = ensureAgentSession(sessionId);

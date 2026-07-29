@@ -390,10 +390,41 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					part.type === 'text' && typeof part.text === 'string',
 			);
 			if (textPart) {
-				const joined = advisories.join('\n---\n');
-				textPart.text = `[ADVISORIES]\n${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
+				// Hygiene at the single choke point. All ~67 advisory producers push
+				// onto one bare `string[]` (state.ts) with no push wrapper and no
+				// cap, and only 5 of them dedupe — each with its own ad-hoc key. Two
+				// rules here cover every producer, including ones added later:
+				//   1. drop blank/whitespace-only entries — an advisory with no
+				//      content is pure noise (AGENTS.md invariant 10);
+				//   2. collapse exact duplicates, preserving first-occurrence order,
+				//      so N parallel lanes reporting the identical condition emit it
+				//      once instead of N times.
+				// Only EXACT duplicates are collapsed: near-identical advisories
+				// differing by task id, lane id, or count carry distinct information
+				// and are all kept.
+				const seenAdvisories = new Set<string>();
+				const cleanedAdvisories: string[] = [];
+				for (const advisory of advisories) {
+					if (!advisory.trim()) continue;
+					if (seenAdvisories.has(advisory)) continue;
+					seenAdvisories.add(advisory);
+					cleanedAdvisories.push(advisory);
+				}
+				// Everything may have been blank; emitting an empty [ADVISORIES]
+				// block would itself be the content-free injection this is removing.
+				if (cleanedAdvisories.length > 0) {
+					const joined = cleanedAdvisories.join('\n---\n');
+					textPart.text = `[ADVISORIES]\n${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
+				}
 			}
-			session!.pendingAdvisoryMessages = [];
+			// Clearing sits OUTSIDE the `if (textPart)` above, which silently
+			// discarded the entire queue unread whenever `systemMessages[0]` existed
+			// but carried no string text part. Only drop what was actually emitted.
+			// (The non-architect clear further below is deliberately unconditional —
+			// see the note there. Do not "fix" that one.)
+			if (textPart) {
+				session!.pendingAdvisoryMessages = [];
+			}
 		} else if (
 			!isArchitectSession &&
 			session &&

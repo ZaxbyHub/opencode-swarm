@@ -45,6 +45,201 @@ describe('guardrails advisory injection', () => {
 	});
 
 	// -------------------------------------------------------------------------
+	// Drain hygiene: all ~67 producers feed this one queue. Two rules here cover
+	// every producer, including ones added later.
+	// -------------------------------------------------------------------------
+
+	test('collapses exact duplicate advisories to a single occurrence', async () => {
+		const sessionId = 'session-advisory-dedupe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const session = swarmState.agentSessions.get(sessionId)!;
+		// N parallel lanes reporting the identical condition. Only 5 of 67
+		// producer sites dedupe today, each with its own ad-hoc key.
+		session.pendingAdvisoryMessages = [
+			'DEGRADED: Context-limit error detected. No fallback models available.',
+			'DEGRADED: Context-limit error detected. No fallback models available.',
+			'DEGRADED: Context-limit error detected. No fallback models available.',
+		];
+
+		const systemMessage = {
+			info: { role: 'system', sessionID: sessionId },
+			parts: [{ type: 'text' as const, text: 'You are a helpful assistant.' }],
+		};
+		const output = {
+			messages: [
+				systemMessage,
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'Hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		const occurrences = textPart.text.split('No fallback models available.').length - 1;
+		expect(occurrences).toBe(1);
+	});
+
+	test('keeps near-identical advisories that differ in their details', async () => {
+		// Only EXACT duplicates collapse. Advisories differing by task id, lane id
+		// or count carry distinct information and must all survive.
+		const sessionId = 'session-advisory-near-dupe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const session = swarmState.agentSessions.get(sessionId)!;
+		session.pendingAdvisoryMessages = [
+			'[PIPELINE] reviewer delegation complete for task 1.1',
+			'[PIPELINE] reviewer delegation complete for task 1.2',
+		];
+
+		const systemMessage = {
+			info: { role: 'system', sessionID: sessionId },
+			parts: [{ type: 'text' as const, text: 'base' }],
+		};
+		const output = {
+			messages: [
+				systemMessage,
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'Hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('task 1.1');
+		expect(textPart.text).toContain('task 1.2');
+	});
+
+	test('drops blank advisories, and emits no [ADVISORIES] block when all are blank', async () => {
+		const sessionId = 'session-advisory-blank';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const session = swarmState.agentSessions.get(sessionId)!;
+		session.pendingAdvisoryMessages = ['', '   ', '\n\t '];
+
+		const systemMessage = {
+			info: { role: 'system', sessionID: sessionId },
+			parts: [{ type: 'text' as const, text: 'base text' }],
+		};
+		const output = {
+			messages: [
+				systemMessage,
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'Hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		// An empty [ADVISORIES] wrapper would itself be the content-free injection
+		// this rule exists to remove.
+		expect(textPart.text).not.toContain('[ADVISORIES]');
+		// Deliberately NOT an exact-equality assertion: an unrelated injector
+		// (the PARTIAL GATE VIOLATION detector, which fires on any fresh session
+		// because an empty gateLog reads as "all gates missing") also prepends to
+		// this same text part. That defect is tracked separately in #1976 and is
+		// explicitly out of scope here. Asserting equality would couple this test
+		// to a surface it does not control.
+		expect(textPart.text).toContain('base text');
+		// Still drained, so blanks cannot accumulate.
+		expect(session.pendingAdvisoryMessages).toHaveLength(0);
+	});
+
+	test('a real advisory still survives alongside blanks and duplicates', async () => {
+		// The hygiene rules must narrow, never silence.
+		const sessionId = 'session-advisory-mixed';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const session = swarmState.agentSessions.get(sessionId)!;
+		session.pendingAdvisoryMessages = [
+			'',
+			'NON-TRANSIENT STOP (command_not_found, 1/1): STOP.',
+			'   ',
+			'NON-TRANSIENT STOP (command_not_found, 1/1): STOP.',
+		];
+
+		const systemMessage = {
+			info: { role: 'system', sessionID: sessionId },
+			parts: [{ type: 'text' as const, text: 'base' }],
+		};
+		const output = {
+			messages: [
+				systemMessage,
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'Hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		const occurrences = textPart.text.split('NON-TRANSIENT STOP').length - 1;
+		expect(occurrences).toBe(1);
+	});
+
+	test('the queue is NOT discarded unread when the system message has no text part', async () => {
+		// The clear previously sat outside the `if (textPart)` guard, so a system
+		// message carrying no string text part silently destroyed the whole queue.
+		const sessionId = 'session-advisory-no-textpart';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const session = swarmState.agentSessions.get(sessionId)!;
+		session.pendingAdvisoryMessages = ['DEGRADED: something real happened'];
+
+		const systemMessage = {
+			info: { role: 'system', sessionID: sessionId },
+			// No text part at all.
+			parts: [{ type: 'file' as const, text: undefined }],
+		};
+		const output = {
+			messages: [
+				systemMessage,
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'Hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		// Nothing was emitted, so nothing may be dropped — it must survive to be
+		// delivered on the next transform.
+		expect(session.pendingAdvisoryMessages).toEqual([
+			'DEGRADED: something real happened',
+		]);
+	});
+
+	// -------------------------------------------------------------------------
 	// Test (a): injects queued advisories into architect system message under [ADVISORIES] wrapper
 	// -------------------------------------------------------------------------
 	test('injects queued advisories into architect system message under [ADVISORIES] wrapper', async () => {
