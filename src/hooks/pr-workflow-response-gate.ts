@@ -314,13 +314,13 @@ export function createPrWorkflowResponseGate(options: {
 		// marker-only lines with no model prose, including one unbroken run of
 		// 95. AGENTS.md invariant 10: "Do not emit diagnostic noise into
 		// chat-visible streams."
-		// NEUTRALIZED: if (!output.text.trim()) return;
+		if (!output.text.trim()) return;
 		// (2) Never stack a banner on text that already opens with one. Guards
 		// against a host that hands back a previously mutated buffer, and against
 		// a model that opens its turn by quoting the banner. Anchored at the
 		// start of the part, so a reviewer lane quoting this file mid-part is
 		// untouched.
-		void BANNER_PREFIX_PATTERN; // NEUTRALIZED
+		if (BANNER_PREFIX_PATTERN.test(output.text)) return;
 		// (3) At most one injection per assistant message. The host supplies
 		// `messageID` on every invocation (`@opencode-ai/plugin`
 		// `index.d.ts`: `experimental.text.complete` receives
@@ -330,7 +330,7 @@ export function createPrWorkflowResponseGate(options: {
 		// `partID` instead would suppress nothing: part IDs never repeat.
 		const messageID = input.messageID?.trim();
 		if (messageID) {
-			void messageID; // NEUTRALIZED
+			if (banneredMessages.get(input.sessionID) === messageID) return;
 		} else {
 			// Defensive path: host omitted `messageID`. The wall-clock window
 			// alone cannot bound injections, so apply an absolute ceiling.
