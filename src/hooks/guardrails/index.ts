@@ -724,7 +724,10 @@ export function createGuardrailsHooks(
 			// (pr-workflow-gate.ts, "PR_REVIEW is read-only and fail-closed").
 			// Keying on `Task` alone would therefore have left the originally
 			// reported case — a PR review told it was stuck — completely unfixed.
-			const laneDispatchTools = new Set(['dispatch_lanes', 'dispatch_lanes_async']);
+			const laneDispatchTools = new Set([
+				'dispatch_lanes',
+				'dispatch_lanes_async',
+			]);
 			const isSubagentDispatch =
 				laneDispatchTools.has(normalizedToolName) ||
 				isAgentDelegation(

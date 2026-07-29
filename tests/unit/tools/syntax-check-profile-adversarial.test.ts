@@ -392,7 +392,9 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', ()
 
 			expect(result.files).toHaveLength(0);
 			expect(result.summary).toContain('No files were checked');
-			expect(result.summary).toContain('no files were supplied in changed_files');
+			expect(result.summary).toContain(
+				'no files were supplied in changed_files',
+			);
 			expect(result.verdict).toBe('skip');
 
 			// saveEvidence should still be called

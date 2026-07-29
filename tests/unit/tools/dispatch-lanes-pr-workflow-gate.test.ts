@@ -338,9 +338,9 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 			'merge base',
 		);
 		// pr_head_sha must exist as a documented field at all.
-		expect(describe_(dispatch_lanes_async.args.pr_head_sha).length).toBeGreaterThan(
-			0,
-		);
+		expect(
+			describe_(dispatch_lanes_async.args.pr_head_sha).length,
+		).toBeGreaterThan(0);
 		// mode must enumerate the colon-suffixed stages.
 		const mode = describe_(dispatch_lanes_async.args.mode);
 		expect(mode).toContain('swarm-pr-review:base');

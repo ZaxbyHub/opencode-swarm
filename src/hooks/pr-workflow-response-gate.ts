@@ -77,7 +77,8 @@ export const MAX_FALLBACK_BANNER_INJECTIONS_PER_SESSION = 20;
  * this file's banner literal MID-part is legitimate content and must not be
  * mistaken for an injection.
  */
-const BANNER_PREFIX_PATTERN = /^--- \[(?:PR_REVIEW|PR_FEEDBACK) WORKFLOW ACTIVE/;
+const BANNER_PREFIX_PATTERN =
+	/^--- \[(?:PR_REVIEW|PR_FEEDBACK) WORKFLOW ACTIVE/;
 
 /**
  * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global

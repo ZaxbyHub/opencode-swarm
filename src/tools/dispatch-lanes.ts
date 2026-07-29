@@ -927,9 +927,7 @@ export async function executeDispatchLanesAsync(
 						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form, then verify with: git -C "${directory}" fetch origin <base-branch> && git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
 					);
 				}
-				if (
-					resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()
-				) {
+				if (resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
 					throw new Error(
 						`BLOCKED: PR_REVIEW merge-base mismatch. git merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha} in "${directory}" resolved to ${resolvedBase}, but base_sha=${parsed.data.base_sha} was passed. If you computed base_sha against a remote-tracking ref, pass that SAME ref as base_ref — a local branch of the same name (main, refs/heads/main) may be stale and yields a different merge base. Verify with: git -C "${directory}" merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha}`,
 					);

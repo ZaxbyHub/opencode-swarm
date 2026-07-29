@@ -131,7 +131,9 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			expect(result.verdict).toBe('skip');
 			expect(result.files).toHaveLength(0);
 			expect(result.summary).toContain('No files were checked');
-			expect(result.summary).toContain('no files were supplied in changed_files');
+			expect(result.summary).toContain(
+				'no files were supplied in changed_files',
+			);
 			expect(result.summary).toContain('NOT a passing syntax check');
 			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});

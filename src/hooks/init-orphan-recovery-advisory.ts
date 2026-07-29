@@ -204,12 +204,21 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		);
 
 		// Add warnings
-		for (const warning of advisory.warnings) {
+		//
+		// Every field below is read defensively for the same reason the gate above
+		// is: `readAdvisoryFile` does a bare `JSON.parse(content) as
+		// InitOrphanAdvisory` with NO runtime validation, so an older or
+		// hand-edited file can be missing fields the type declares as required.
+		// Guarding only the gate would not have been enough — an advisory that
+		// PASSES the gate on one field (say `errors`) while missing another (say
+		// `warnings`) would still throw here. The file is already deleted by this
+		// point, so the payload would be lost with it.
+		for (const warning of advisory.warnings ?? []) {
 			targetSession.pendingAdvisoryMessages.push(`  WARNING: ${warning}`);
 		}
 
 		// Add errors (state-unreadable conditions)
-		for (const err of advisory.errors) {
+		for (const err of advisory.errors ?? []) {
 			targetSession.pendingAdvisoryMessages.push(
 				`  ERROR: ${formatError(err)}`,
 			);
@@ -217,17 +226,17 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 
 		// Add summary of what was reclaimed
 		const reclaimed = advisory.reclaimed;
-		if (reclaimed.removedBranches.length > 0) {
+		if ((reclaimed?.removedBranches?.length ?? 0) > 0) {
 			targetSession.pendingAdvisoryMessages.push(
 				`  Reclaimed ${reclaimed.removedBranches.length} orphaned branch(es): ${reclaimed.removedBranches.join(', ')}`,
 			);
 		}
-		if (reclaimed.removedWorktrees && reclaimed.removedWorktrees.length > 0) {
+		if (reclaimed?.removedWorktrees && reclaimed.removedWorktrees.length > 0) {
 			targetSession.pendingAdvisoryMessages.push(
 				`  Reclaimed ${reclaimed.removedWorktrees.length} orphaned worktree directory(ies): ${reclaimed.removedWorktrees.join(', ')}`,
 			);
 		}
-		if (reclaimed.prunedWorktrees) {
+		if (reclaimed?.prunedWorktrees) {
 			targetSession.pendingAdvisoryMessages.push(
 				'  Stale worktree metadata pruned.',
 			);

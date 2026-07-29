@@ -83,7 +83,8 @@ describe('guardrails advisory injection', () => {
 			type: string;
 			text: string;
 		};
-		const occurrences = textPart.text.split('No fallback models available.').length - 1;
+		const occurrences =
+			textPart.text.split('No fallback models available.').length - 1;
 		expect(occurrences).toBe(1);
 	});
 

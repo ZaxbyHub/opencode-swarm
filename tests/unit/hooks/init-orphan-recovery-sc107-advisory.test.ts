@@ -603,41 +603,80 @@ describe('emptiness gate: a contentless advisory is never surfaced', () => {
 			'a reclaimed worktree',
 			{ reclaimed: { removedWorktrees: ['/path/.swarm-worktrees/s/l'] } },
 		],
-	])(
-		'real content is STILL surfaced when the advisory carries %s',
-		async (label, overrides) => {
-			// The gate must narrow, never silence. Each of these is a genuine
-			// operational condition the user needs to see.
-			const o = overrides as Record<string, unknown>;
-			const { dir, messages } = await runAdvisory(
-				{
-					initTimestamp: new Date().toISOString(),
-					warnings: (o.warnings as string[]) ?? [],
-					errors: (o.errors as unknown[]) ?? [],
-					reclaimed: {
-						removedBranches: [],
-						removedWorktrees: [],
-						prunedWorktrees: true,
-						...((o.reclaimed as Record<string, unknown>) ?? {}),
-					},
+	])('real content is STILL surfaced when the advisory carries %s', async (label, overrides) => {
+		// The gate must narrow, never silence. Each of these is a genuine
+		// operational condition the user needs to see.
+		const o = overrides as Record<string, unknown>;
+		const { dir, messages } = await runAdvisory(
+			{
+				initTimestamp: new Date().toISOString(),
+				warnings: (o.warnings as string[]) ?? [],
+				errors: (o.errors as unknown[]) ?? [],
+				reclaimed: {
+					removedBranches: [],
+					removedWorktrees: [],
+					prunedWorktrees: true,
+					...((o.reclaimed as Record<string, unknown>) ?? {}),
 				},
-				`test-arch-adv-content-${label.replace(/\s+/g, '-')}`,
-			);
-			expect(messages.length).toBeGreaterThan(0);
-			expect(messages.join('\n')).toContain('INIT ORPHAN RECOVERY');
-			rmSync(dir, { recursive: true, force: true });
-		},
-	);
+			},
+			`test-arch-adv-content-${label.replace(/\s+/g, '-')}`,
+		);
+		expect(messages.length).toBeGreaterThan(0);
+		expect(messages.join('\n')).toContain('INIT ORPHAN RECOVERY');
+		rmSync(dir, { recursive: true, force: true });
+	});
 
-	test('a malformed advisory degrades to silence instead of throwing', async () => {
+	test('an entirely empty advisory degrades to silence', async () => {
 		// readAdvisoryFile does a bare `JSON.parse(content) as InitOrphanAdvisory`
 		// with no runtime validation, and the file is deleted before the fields are
-		// read — so a throw here would be unrecoverable.
+		// read — so a throw here loses the payload with it.
 		const { dir, messages } = await runAdvisory(
 			{ initTimestamp: new Date().toISOString() },
 			'test-arch-adv-malformed',
 		);
 		expect(messages).toEqual([]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test.each([
+		[
+			'errors present, warnings field missing',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				errors: [{ branch: 'swarm-lane/s/l', error: 'missing worktree' }],
+			},
+			'ORPHAN_RECOVERY_ERROR',
+		],
+		[
+			'warnings present, errors field missing',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				warnings: ['could not reclaim /path/to/locked'],
+			},
+			'could not reclaim',
+		],
+		[
+			'reclaimed branches present, reclaimed sub-fields partial',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				warnings: [],
+				errors: [],
+				reclaimed: { removedBranches: ['swarm-lane/s/l'] },
+			},
+			'Reclaimed 1 orphaned branch(es)',
+		],
+	])('a PARTIALLY-shaped advisory renders without throwing: %s', async (label, advisoryContent, expectedFragment) => {
+		// These are the dangerous shapes: they PASS the emptiness gate on one
+		// field while another field the renderer dereferences is absent. Guarding
+		// only the gate would still have thrown here — and the advisory file is
+		// already deleted by that point, so the payload would be lost.
+		const { dir, messages } = await runAdvisory(
+			advisoryContent,
+			`test-arch-adv-partial-${label.replace(/[^a-z0-9]+/gi, '-')}`,
+		);
+		const joined = messages.join('\n');
+		expect(joined).toContain('INIT ORPHAN RECOVERY');
+		expect(joined).toContain(expectedFragment);
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

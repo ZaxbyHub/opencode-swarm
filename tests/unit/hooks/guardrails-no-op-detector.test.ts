@@ -19,7 +19,7 @@
  * mechanisms must count as progress.
  */
 
-import { beforeEach, afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
@@ -110,7 +110,11 @@ describe('no-op work detector: subagent dispatch counts as progress', () => {
 				callID: 'lanes-1',
 				args: { lanes: [{ id: 'l1', agent: 'explorer', prompt: 'review' }] },
 			} as never,
-			{ title: 'dispatch_lanes_async', output: '{"pending":1}', metadata: {} } as never,
+			{
+				title: 'dispatch_lanes_async',
+				output: '{"pending":1}',
+				metadata: {},
+			} as never,
 		);
 
 		// The counter restarted, so another near-full run of reads stays silent.
