@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Engineering invariant checks for opencode-swarm.
-# Runs four grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7
-# (Checks 1-3) plus the mock.module allowlist growth ratchet from issue #1666
-# (Check 4). Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
+# Runs five static checks corresponding to AGENTS.md invariants 3, 4, and 7
+# (Checks 1-3, grep-based), the mock.module allowlist growth ratchet from issue
+# #1666 (Check 4, grep-based), and the knowledge-array dedup guardrail from
+# issue #1821 Lane 0b (Check 5, a small POSIX awk pass — it must see across
+# lines, which grep cannot do portably).
+# Compatible with GitHub Actions (ubuntu-latest AND macos-latest, bash).
 # Portability constraints (issue #1729 merge_group macOS failures):
 #   - macOS ships bash 3.2 as /bin/bash: NO associative arrays (`declare -A`),
 #     NO `[[ ${arr["x"]} ]]` subscript syntax. Use plain files + grep -Fxf.
@@ -73,6 +76,15 @@ while IFS= read -r file; do
     fi
   done
   if $exempt; then
+    continue
+  fi
+  # Comment-blind matching would fail CI on CORRECT code: a file documenting
+  # "ctx.directory is injected; there is no process.cwd() here" is exactly the
+  # kind of file that mentions the banned call in prose. Strip line comments and
+  # block-comment bodies before deciding, then re-check for a real call. Same
+  # false-positive class Check 5 handles (issue #1821).
+  if ! sed -e 's://.*::' -e 's:^[[:space:]]*\*.*::' -e 's:/\*.*\*/::' "$file" \
+    | grep -q 'process\.cwd()'; then
     continue
   fi
   echo "ERROR: $file uses process.cwd() — tools must use ctx.directory via resolveWorkingDirectory"
@@ -321,7 +333,270 @@ else
 fi
 
 echo ""
+echo "=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ==="
+# A positional `.slice(0, 20)` on a knowledge array field keeps the FIRST 20
+# items without deduplicating: duplicates survive AND, because the cap is
+# positional, a run of duplicates evicts distinct values off the end. The class
+# recurred at six call sites (knowledge-add tags + actionability arrays,
+# knowledge-curator insight tags, micro-reflector candidate fields, curator
+# arrayOfStrings + evidence_refs). All six now route through `dedupeCapped()`
+# in src/hooks/knowledge-store.ts, which orders truncate -> dedupe -> cap.
+#
+# The expected match count is ZERO and there is deliberately NO exempt list: a
+# new match is a new instance of the defect, not pre-existing debt. Scope is
+# limited to the knowledge parse/write surface where the class lives.
+#
+# MULTI-LINE AWARE, deliberately. A line-anchored grep would be blind to the
+# form Biome actually emits once the receiver expression is long enough:
+#
+#     ).slice(
+#         0,
+#         20,
+#     )
+#
+# Eight such wrapped `.slice(` calls already exist inside the scanned files, so
+# reintroducing the defect on any long expression would defeat a grep-only
+# check. Instead a small awk pass anchors on each line containing `.slice(`,
+# joins it with the next three lines of CODE, strips whitespace and a trailing
+# comma before `)`, and matches the literal `.slice(0,20)`. `index()` is used
+# rather than a regex so no metacharacter escaping is involved. awk is POSIX
+# and present on every supported runner; no bash-4 or GNU-only construct is
+# used.
+#
+# COMMENTS ARE STRIPPED FROM THE WHOLE WINDOW, not just the anchor line. These
+# files necessarily discuss the banned pattern in prose, so a naive window join
+# both false-POSITIVES (a `.slice(` wrapped over two lines followed by a comment
+# that mentions `.slice(0, 20)`) and false-NEGATIVES (a genuine violation with a
+# comment or blank line between its arguments). Comment-only and blank lines are
+# skipped when filling the window and trailing `// …` text is dropped, which
+# closes both.
+#
+# Colocated *.test.ts files matching the globs (e.g.
+# src/tools/knowledge-tools.integration.test.ts) are skipped by path, not by a
+# text filter, so a violating line whose own text mentions ".test.ts:" is still
+# reported.
+#
+# SCOPE (issue #1821 F4). The original four globs covered only the knowledge
+# parse/write surface, so injection testing showed a bare `.slice(0, 20)` EVADED
+# this check in `src/knowledge/entry-merge.ts` — the very file the tag and
+# actionability merge logic was moved into — and in `src/services/`,
+# `src/learning/`, and `src/consensus/`. Those paths are now in scope.
+#
+# PATTERN A is dedup-AWARE as of F4. `[...new Set(xs)].slice(0, 20)` is
+# dedupe-then-truncate, i.e. correct, and the widened scope contains one
+# (`buildPrmPatternCandidate` in src/learning/prm-pattern-support.ts). The
+# receiver — the anchor line joined with up to 6 preceding CODE lines, because
+# Biome wraps a long receiver — is checked for a dedup marker and the hit is
+# skipped when one is present. A bare `xs.slice(0, 20)` is still reported.
+#
+# PATTERN B (issue #1821 F5) catches the accumulator spelling of the same class:
+#
+#     const out: string[] = [];
+#     for (const x of xs) { ...; out.push(x); if (out.length >= 20) break; }
+#
+# which is how BOTH of the F2 defects were written and which Pattern A is blind
+# to. It is deliberately anchored on a `string[]` accumulator: the four other
+# `.length >= N ... break` loops in scope accumulate parsed OBJECTS
+# (`CorpusObservation`, `KnowledgeEvent`, a knowledge entry `T`,
+# `InsightCandidate`) where per-item dedup is meaningless, so an un-anchored
+# version of this rule would report four false positives. A window carrying any
+# dedup marker (`new Set`, `.has(`, `dedupeCapped`) is exempt, which is what
+# clears `dedupeCapped` itself and `sanitizeRefs` — both correct by
+# construction.
+#
+# NOT IMPLEMENTED, deliberately: a NON-LITERAL cap (`.slice(0, CAP)`). The
+# widened scope contains ~20 legitimate `.slice(0, <identifier>)` calls —
+# `normalized.slice(0, maxChars)` (string truncation),
+# `.slice(0, MAX_ENUMERATED_ENTRIES)` / `.slice(0, MAX_LISTED_REPORTS)` /
+# `.slice(0, maxAttributes)` / `allInputIds.slice(0, MAX_CONSENSUS_REFS)` (all
+# over already-deduplicated or non-string lists) — so that variant is a false
+# positive generator on this repo and is left out rather than weakened. Same for
+# `.splice` and `xs.length = 20`, which have no instance here to anchor on.
+#
+# Known residual blind spots (accepted; this is a recurrence tripwire, not a
+# type system): a literal cap other than 20 (`.slice(0, 50)`), a named-constant
+# cap, a receiver split so wide that `20,` falls outside the 3-code-line window,
+# a capped `push` written as `if (xs.length < CAP) xs.push(...)` rather than an
+# early `break`, an accumulator that is a struct field instead of a local
+# `string[]`, an unrelated `.has(` inside an offending window, and files outside
+# the globs.
+#
+# The scope is also ASSERTED: if a glob or literal path resolves to nothing
+# (file renamed or deleted), that is a hard error rather than a silent drop to
+# zero coverage while still printing "expected 0".
+#
+# The one exception is a tree where NOT ONE scope entry resolves. That is not a
+# rename — it is the script running outside an opencode-swarm source checkout,
+# which the Check 4 ratchet fixtures (tests/unit/scripts/*.test.ts) do on
+# purpose: they build a temp git repo containing only `scripts/` and an empty
+# `src/`. Failing those runs would report a Check 5 violation for a repository
+# that has no knowledge surface at all. A PARTIAL resolution — some entries
+# present, some missing — is still a hard error, so a real rename or deletion in
+# this repo cannot hide behind the exemption.
+KNOWLEDGE_DEDUP_SCOPE="src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts src/knowledge/*.ts src/learning/*.ts src/services/recommendation-ledger.ts src/consensus/*.ts"
+slice_violations=0
+slice_scanned=0
+slice_resolvable=0
+for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
+  case "$scoped_file" in
+    *.test.ts) continue ;;
+  esac
+  [ -f "$scoped_file" ] && slice_resolvable=$((slice_resolvable + 1))
+done
+if [ "$slice_resolvable" -eq 0 ]; then
+  echo "NOTE: no Check 5 scope entry resolved — not an opencode-swarm source"
+  echo "      checkout (no knowledge surface present). Skipping (non-blocking)."
+fi
+for scoped_file in $KNOWLEDGE_DEDUP_SCOPE; do
+  [ "$slice_resolvable" -gt 0 ] || break
+  case "$scoped_file" in
+    *.test.ts) continue ;;
+  esac
+  if [ ! -f "$scoped_file" ]; then
+    echo "ERROR: Check 5 scope entry '$scoped_file' resolved to no file."
+    echo "       The guardrail would silently scan less than it claims."
+    echo "       Update KNOWLEDGE_DEDUP_SCOPE in $0 after the rename/deletion."
+    violations=$((violations + 1))
+    continue
+  fi
+  slice_scanned=$((slice_scanned + 1))
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    echo "ERROR: $hit"
+    echo "       Positional .slice(0, 20) with no dedup on a knowledge array field."
+    echo "       Use dedupeCapped(values, { cap: 20 }) from src/hooks/knowledge-store.ts"
+    echo "       (add itemMaxChars when the site also truncates each item)."
+    slice_violations=$((slice_violations + 1))
+    violations=$((violations + 1))
+  done < <(awk '
+    function code_of(s) { sub(/\/\/.*$/, "", s); return s }
+    function is_comment(s) { return (s ~ /^[ \t]*(\/\/|\*|\/\*)/) }
+    function squash(s) { gsub(/[ \t]/, "", s); return s }
+    function has_dedup(s) {
+      return (index(s, "newSet") > 0 || index(s, ".has(") > 0 \
+        || index(s, "dedupeCapped") > 0)
+    }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (is_comment(line[i])) continue
+        anchor = code_of(line[i])
+        if (index(anchor, ".slice(") == 0) continue
+        joined = anchor
+        taken = 0
+        for (k = i + 1; k <= NR && taken < 3; k++) {
+          if (is_comment(line[k])) continue
+          piece = code_of(line[k])
+          gsub(/[ \t]/, "", piece)
+          if (piece == "") continue
+          joined = joined piece
+          taken++
+        }
+        gsub(/[ \t]/, "", joined)
+        gsub(/,\)/, ")", joined)
+        if (index(joined, ".slice(0,20)") == 0) continue
+        # The RECEIVER decides whether this is the defect. `[...new Set(xs)]
+        # .slice(0, 20)` is dedupe-then-truncate — correct, and the widened F4
+        # scope contains one. Join up to 6 preceding CODE lines (Biome wraps a
+        # long receiver across several) and skip when the expression already
+        # deduplicates.
+        recv = joined
+        taken = 0
+        for (k = i - 1; k >= 1 && taken < 6; k--) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          recv = piece recv
+        }
+        if (has_dedup(recv)) continue
+        printf "%s:%d:%s\n", FILENAME, i, line[i]
+      }
+    }
+  ' "$scoped_file" || true)
+  # --- Pattern B: capped `string[]` accumulator with no dedup (issue #1821 F5)
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    echo "ERROR: $hit"
+    echo "       Capped string[] accumulator with no dedup — a run of duplicates"
+    echo "       evicts distinct values off the end (truncate-then-dedupe)."
+    echo "       Dedupe BEFORE the cap: use dedupeCapped() from"
+    echo "       src/hooks/knowledge-store.ts, or guard the push with a seen Set."
+    slice_violations=$((slice_violations + 1))
+    violations=$((violations + 1))
+  done < <(awk '
+    function code_of(s) { sub(/\/\/.*$/, "", s); return s }
+    function is_comment(s) { return (s ~ /^[ \t]*(\/\/|\*|\/\*)/) }
+    function squash(s) { gsub(/[ \t]/, "", s); return s }
+    function has_dedup(s) {
+      return (index(s, "newSet") > 0 || index(s, ".has(") > 0 \
+        || index(s, "dedupeCapped") > 0)
+    }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (is_comment(line[i])) continue
+        decl = code_of(line[i])
+        # Anchor: a local string[] accumulator initialized empty.
+        if (decl !~ /(^|[^A-Za-z0-9_$])(const|let)[ \t]/) continue
+        if (decl !~ /:[ \t]*string\[\][ \t]*=[ \t]*\[\]/) continue
+        name = decl
+        sub(/^[ \t]*/, "", name)
+        sub(/^(const|let)[ \t]+/, "", name)
+        sub(/[ \t]*:.*$/, "", name)
+        if (name == "") continue
+
+        # Five CODE lines back: the `const seen = new Set(...)` idiom is
+        # conventionally declared just above its accumulator.
+        dedup = 0
+        taken = 0
+        for (k = i - 1; k >= 1 && taken < 5; k--) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          if (has_dedup(piece)) dedup = 1
+        }
+
+        # Forward window: 30 CODE lines. Look for `<name>.length >= …` joined
+        # with a `break` within 2 further code lines, and for any dedup marker.
+        capped = 0
+        taken = 0
+        for (k = i + 1; k <= NR && taken < 30; k++) {
+          if (is_comment(line[k])) continue
+          piece = squash(code_of(line[k]))
+          if (piece == "") continue
+          taken++
+          if (has_dedup(piece)) dedup = 1
+          if (capped == 0 && index(piece, name ".length>=") > 0) {
+            joined = piece
+            inner = 0
+            for (m = k + 1; m <= NR && inner < 2; m++) {
+              if (is_comment(line[m])) continue
+              nxt = squash(code_of(line[m]))
+              if (nxt == "") continue
+              joined = joined nxt
+              inner++
+            }
+            if (index(joined, "break") > 0) { capped = k }
+          }
+        }
+        if (capped > 0 && dedup == 0) {
+          printf "%s:%d:%s\n", FILENAME, capped, line[capped]
+        }
+      }
+    }
+  ' "$scoped_file" || true)
+done
+echo "Scope: $KNOWLEDGE_DEDUP_SCOPE"
+echo "Files scanned: $slice_scanned"
+echo "Unguarded positional caps: $slice_violations (expected 0 — no exempt list by design)"
+
+echo ""
 echo "=== Summary ==="
+echo "Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |"
+echo "            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |"
+echo "            5 (knowledge array dedup guardrail)"
 if [ "$violations" -gt 0 ]; then
   echo "$violations invariant violation(s) found."
   exit 1

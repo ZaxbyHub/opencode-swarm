@@ -36,6 +36,7 @@ import {
 } from './hive-policy.js';
 import { type HiveAuditEntry, transactHiveStore } from './hive-transaction.js';
 import {
+	dedupeCapped,
 	findNearDuplicate,
 	jaccardBigram,
 	readKnowledge,
@@ -715,6 +716,16 @@ function stageMergeAudit(args: {
  *
  * Returns the staged audit entry to append, or `undefined` when the source id is
  * already recorded (idempotent no-op → no duplicate merge/audit).
+ *
+ * #1821 A3 — OUT OF SCOPE FOR THE ACTIONABILITY FLOOR, DELIBERATELY. This
+ * function mutates hive `lineage.merged_from` outside `evaluatePromotionPolicy`,
+ * so it is worth naming rather than silently ignoring: it is a MERGE, not a
+ * promotion. It creates no hive entry and changes no lesson, predicate, or
+ * scope — it only appends a losing source id for provenance onto an entry that
+ * already cleared the policy when it was promoted. Gating a provenance append on
+ * the promotion actionability floor would drop audit trail, not enforce quality.
+ * The candidate whose id is recorded here was already refused promotion by the
+ * dedup branch above, independent of any gate.
  */
 async function authorizeAndRecordHiveMerge(args: {
 	survivingEntry: HiveKnowledgeEntry;
@@ -849,6 +860,63 @@ export interface ManualPromotionOptions {
 }
 
 /**
+ * Actionability fields supplied on the DIRECT-TEXT promote path (#1821 A3).
+ *
+ * `/swarm promote "<text>"` has no swarm entry to inherit predicates/scope
+ * from, so the command passes them explicitly. Without this parameter the
+ * default-on `actionability_floor` gate would be permanently unsatisfiable on
+ * that path: every direct-text promotion would return "Promotion blocked by
+ * policy" and operators would be pushed into `--force`, poisoning the
+ * override-audit signal that #1847 exists to keep honest.
+ *
+ * `promoteFromSwarm` does NOT take these — it inherits the source swarm entry's
+ * own actionable-directive fields via `carryActionableFields`.
+ */
+export interface ManualActionabilityFields {
+	applies_to_tools?: string[];
+	applies_to_agents?: string[];
+	required_actions?: string[];
+	forbidden_actions?: string[];
+	verification_checks?: string[];
+}
+
+/** Cap applied to each manually-supplied actionability list. Mirrors the store
+ *  write-boundary cap (`WRITE_FIELD_CAP` in knowledge-store.ts, #1821 Lane 0b)
+ *  so the command cannot author a list the store would silently truncate. */
+const MANUAL_ACTIONABILITY_CAP = 20;
+
+const MANUAL_ACTIONABILITY_KEYS = [
+	'applies_to_tools',
+	'applies_to_agents',
+	'required_actions',
+	'forbidden_actions',
+	'verification_checks',
+] as const satisfies readonly (keyof ManualActionabilityFields)[];
+
+/**
+ * Normalize caller-supplied actionability lists: drop non-strings, dedupe
+ * case-insensitively, cap at 20, and OMIT empty fields entirely.
+ *
+ * Omission matters: `validateActionability` and `carryActionableFields` both
+ * test `.length`, and an empty array persisted on the entry is noise that an
+ * absent field is not. Normalizing here (not only in the command) keeps the
+ * exported `promoteToHive` API safe for any other caller.
+ */
+function normalizeManualActionability(
+	fields: ManualActionabilityFields | undefined,
+): ManualActionabilityFields {
+	if (!fields) return {};
+	const out: ManualActionabilityFields = {};
+	for (const key of MANUAL_ACTIONABILITY_KEYS) {
+		const normalized = dedupeCapped(fields[key], {
+			cap: MANUAL_ACTIONABILITY_CAP,
+		});
+		if (normalized.length > 0) out[key] = normalized;
+	}
+	return out;
+}
+
+/**
  * Promote a lesson directly to the hive (manual promotion).
  *
  * Runs the one policy evaluator. On a policy FAIL:
@@ -860,6 +928,11 @@ export interface ManualPromotionOptions {
  * On a policy PASS → promotes with actor='manual'.
  *
  * An exact entry id / direct text alone is NEVER authorization to bypass policy.
+ *
+ * `actionable` (#1821 A3) carries the predicate/scope fields the direct-text
+ * path has no swarm entry to inherit from. They land on the synthetic stand-in
+ * (so the `actionability_floor` gate can see them) AND on the written hive
+ * entry (so a correctly-supplied field is not dropped on write).
  */
 export async function promoteToHive(
 	directory: string,
@@ -867,8 +940,10 @@ export async function promoteToHive(
 	category?: string,
 	options?: ManualPromotionOptions,
 	config?: KnowledgeConfig,
+	actionable?: ManualActionabilityFields,
 ): Promise<string> {
 	const trimmedLesson = lesson.trim();
+	const actionableFields = normalizeManualActionability(actionable);
 	const sourceCohort = await _internals.resolveCohortId(directory);
 	// Use the real project config so manual promotion honors the same
 	// application-evidence / cohort thresholds as automatic promotion (AC9).
@@ -917,6 +992,12 @@ export async function promoteToHive(
 		// failed gates. (F-006: the fast-track tag here is the explicit manual
 		// authorization, not a silent self-satisfaction — it is documented and
 		// the actor field distinguishes authorized-manual from forced-override.)
+		//
+		// #1821 A3: the fast-track tag authorizes the eligibility_route gate ONLY.
+		// It does NOT bypass `actionability_floor` — the stand-in carries exactly
+		// the predicate/scope fields the caller supplied, so a bare
+		// `/swarm promote "<prose>"` is blocked like any other non-actionable
+		// candidate.
 		const swarmStandIn: SwarmKnowledgeEntry = {
 			id: 'manual-direct',
 			tier: 'swarm',
@@ -936,6 +1017,7 @@ export async function promoteToHive(
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
 			project_name: path.basename(directory) || 'unknown',
+			...actionableFields,
 		};
 		const decision = evaluatePromotionPolicy({
 			entry: swarmStandIn,
@@ -991,6 +1073,13 @@ export async function promoteToHive(
 				reason: reason || undefined,
 				overrideFailedGates,
 			}),
+			// #1821 A3 BUG FIX: this write path was the ONLY one of the three
+			// promote paths missing the carry-over spread that
+			// `checkHivePromotions` and `promoteFromSwarm` already have. Without
+			// it, actionability fields that satisfied the policy gate were
+			// silently dropped on write — the promoted hive entry would come back
+			// non-actionable and be unusable by every directive consumer.
+			...carryActionableFields(swarmStandIn),
 		};
 
 		const entries = [...ctx.entries, newHiveEntry];

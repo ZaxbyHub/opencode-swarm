@@ -9,31 +9,80 @@
  * - /swarm promote --force --reason "<why>" ... — Override failed policy gates
  *   with a durable, audited override record (issue #1847 §4). An exact entry id
  *   alone is NEVER authorization to bypass policy; an explicit override is.
+ * - /swarm promote --applies-to-tools <a,b> --required-actions <a,b> "<text>"
+ *   — Supply the actionability fields the default-on `actionability_floor`
+ *   policy gate requires (issue #1821 A3). Without these the direct-text path
+ *   has no swarm entry to inherit a predicate/scope from and every promotion
+ *   would be blocked, forcing operators into `--force` and poisoning the
+ *   override-audit signal. Ignored on `--from-swarm`, which inherits the source
+ *   entry's own actionable-directive fields.
  */
 
 import { loadPluginConfigWithMeta } from '../config';
 import { KnowledgeConfigSchema } from '../config/schema';
 import {
+	type ManualActionabilityFields,
 	type ManualPromotionOptions,
 	promoteFromSwarm,
 	promoteToHive,
 } from '../hooks/hive-promoter';
+import { dedupeCapped } from '../hooks/knowledge-store';
 import type { KnowledgeConfig } from '../hooks/knowledge-types';
 
-export async function handlePromoteCommand(
-	directory: string,
-	args: string[],
-): Promise<string> {
-	// Parse arguments
+/**
+ * Comma-separated list flags → the actionability field they populate.
+ * Repeating a flag accumulates (the merged list is deduped and capped).
+ *
+ * A `Map`, NOT an object literal (issue #1821 F-G). Looking a raw CLI token up
+ * in an object literal also resolves `Object.prototype` keys, so a lesson whose
+ * FIRST token was `constructor`, `toString`, `valueOf`, `hasOwnProperty`, …
+ * matched a "flag" that does not exist: the parser took the actionability
+ * branch, silently swallowed the next token as that flag's value, and dropped
+ * the first word of the user's lesson. `Map.get` has no prototype chain, so an
+ * unknown token is `undefined` — the only correct answer.
+ */
+const ACTIONABILITY_LIST_FLAGS = new Map<
+	string,
+	keyof ManualActionabilityFields
+>([
+	['--applies-to-tools', 'applies_to_tools'],
+	['--applies-to-agents', 'applies_to_agents'],
+	['--required-actions', 'required_actions'],
+	['--forbidden-actions', 'forbidden_actions'],
+	['--verification-checks', 'verification_checks'],
+]);
+
+/** Same cap the knowledge store applies at its write boundary (#1821 Lane 0b). */
+const ACTIONABILITY_FIELD_CAP = 20;
+
+/** Everything `/swarm promote`'s argument vector can express. */
+export interface ParsedPromoteArgs {
+	category?: string;
+	lessonId?: string;
+	lessonText?: string;
+	force: boolean;
+	reason?: string;
+	actionable: ManualActionabilityFields;
+}
+
+/**
+ * Pure argument parser for `/swarm promote`.
+ *
+ * Exported so the token-classification rules can be tested directly — the
+ * command handler itself performs real knowledge-store I/O, which would force a
+ * mock around the one thing worth asserting here.
+ */
+export function parsePromoteArgs(args: string[]): ParsedPromoteArgs {
 	let category: string | undefined;
 	let lessonId: string | undefined;
 	let lessonText: string | undefined;
 	let force = false;
 	let reason: string | undefined;
+	const actionable: ManualActionabilityFields = {};
 
-	// Simple argument parsing
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
+		const actionabilityField = ACTIONABILITY_LIST_FLAGS.get(arg);
 
 		if (arg === '--category' && i + 1 < args.length) {
 			category = args[i + 1];
@@ -49,6 +98,19 @@ export async function handlePromoteCommand(
 			// lesson text is not swallowed by the reason.
 			reason = args[i + 1];
 			i++; // Skip next arg
+		} else if (actionabilityField !== undefined && i + 1 < args.length) {
+			// Comma-separated list; blank items dropped. Merge-then-normalize so a
+			// repeated flag accumulates instead of overwriting, and the final list
+			// is deduped (case-insensitively) and capped exactly once.
+			const supplied = args[i + 1]
+				.split(',')
+				.map((v) => v.trim())
+				.filter((v) => v.length > 0);
+			actionable[actionabilityField] = dedupeCapped(
+				[...(actionable[actionabilityField] ?? []), ...supplied],
+				{ cap: ACTIONABILITY_FIELD_CAP },
+			);
+			i++; // Skip next arg
 		} else if (!arg.startsWith('--')) {
 			// Treat as lesson text (take the rest of the args as text)
 			lessonText = args.slice(i).join(' ');
@@ -56,9 +118,19 @@ export async function handlePromoteCommand(
 		}
 	}
 
+	return { category, lessonId, lessonText, force, reason, actionable };
+}
+
+export async function handlePromoteCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const { category, lessonId, lessonText, force, reason, actionable } =
+		parsePromoteArgs(args);
+
 	// Validate input - check for empty lesson text or lesson ID
 	if (!lessonText && !lessonId) {
-		return `Usage: /swarm promote "<lesson text>" or /swarm promote --from-swarm <id>\nOptions: --category <cat>, --force --reason "<why>" (audited policy override)`;
+		return `Usage: /swarm promote "<lesson text>" or /swarm promote --from-swarm <id>\nOptions: --category <cat>, --force --reason "<why>" (audited policy override)\nActionability (direct text only; required unless knowledge.promotion_require_actionable=false):\n  --applies-to-tools <a,b>, --applies-to-agents <a,b>,\n  --required-actions <a,b>, --forbidden-actions <a,b>, --verification-checks <a,b>`;
 	}
 
 	// --force requires --reason (an override without a reason is not auditable).
@@ -105,6 +177,7 @@ export async function handlePromoteCommand(
 			category,
 			options,
 			config,
+			actionable,
 		);
 	} catch (error) {
 		if (error instanceof Error) {

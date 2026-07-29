@@ -19,6 +19,20 @@ function cleanupDir(dir: string): void {
 	}
 }
 
+/**
+ * #1821 A3: the direct-text promote path must supply its own predicate + scope
+ * or the default-ON `actionability_floor` policy gate blocks the promotion.
+ */
+function actionableArgs(...args: string[]): string[] {
+	return [
+		'--applies-to-tools',
+		'write',
+		'--required-actions',
+		'run the type checker',
+		...args,
+	];
+}
+
 describe('/swarm promote Command Registration', () => {
 	let tempDir: string;
 	let agents: Record<string, AgentDefinition>;
@@ -111,7 +125,8 @@ describe('/swarm promote Command Registration', () => {
 				{
 					command: 'swarm',
 					sessionID: 'test-123',
-					arguments: 'promote Always validate inputs at system boundaries',
+					arguments:
+						'promote --applies-to-tools write --required-actions typecheck Always validate inputs at system boundaries',
 				},
 				output,
 			);
@@ -173,9 +188,10 @@ describe('/swarm promote Command Registration', () => {
 
 	describe('Task 2.1.4: Direct Text Mode', () => {
 		it('should promote direct lesson text', async () => {
-			const result = await handlePromoteCommand(tempDir, [
-				'This is a lesson text',
-			]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs('This is a lesson text'),
+			);
 
 			// promoteToHive returns: `Promoted to hive: "..." (confidence: 1.0, source: manual)`
 			expect(result).toContain('Promoted to hive');
@@ -184,9 +200,10 @@ describe('/swarm promote Command Registration', () => {
 		});
 
 		it('should handle multi-word lesson text', async () => {
-			const result = await handlePromoteCommand(tempDir, [
-				'This is a lesson with multiple words',
-			]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs('This is a lesson with multiple words'),
+			);
 
 			expect(result).toContain('Promoted to hive');
 			expect(result).toContain('multiple words');
@@ -194,7 +211,10 @@ describe('/swarm promote Command Registration', () => {
 
 		it('should truncate long lesson text in output', async () => {
 			const longText = 'a'.repeat(100);
-			const result = await handlePromoteCommand(tempDir, [longText]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs(longText),
+			);
 
 			expect(result).toContain('...');
 			expect(result.length).toBeLessThan(longText.length + 100);
@@ -203,11 +223,10 @@ describe('/swarm promote Command Registration', () => {
 
 	describe('Task 2.1.5: --category Flag Parsing', () => {
 		it('should parse --category flag with lesson text', async () => {
-			const result = await handlePromoteCommand(tempDir, [
-				'--category',
-				'security',
-				'This is a lesson',
-			]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs('--category', 'security', 'This is a lesson'),
+			);
 
 			// promoteToHive return does not include category — just confirms promotion
 			expect(result).toContain('Promoted to hive');
@@ -215,22 +234,28 @@ describe('/swarm promote Command Registration', () => {
 		});
 
 		it('should handle --category before lesson text', async () => {
-			const result = await handlePromoteCommand(tempDir, [
-				'--category',
-				'performance',
-				'Optimize database queries here',
-			]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs(
+					'--category',
+					'performance',
+					'Optimize database queries here',
+				),
+			);
 
 			expect(result).toContain('Promoted to hive');
 			expect(result).toContain('Optimize');
 		});
 
 		it('should handle --category with valid category value', async () => {
-			const result = await handlePromoteCommand(tempDir, [
-				'--category',
-				'testing',
-				'Use type hints in Python code',
-			]);
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs(
+					'--category',
+					'testing',
+					'Use type hints in Python code',
+				),
+			);
 
 			// Implementation accepts a single valid category token
 			expect(result).toContain('Promoted to hive');
@@ -353,6 +378,56 @@ describe('/swarm promote Command Registration', () => {
 			const result = await handlePromoteCommand(tempDir, []);
 			expect(result).toContain('--force');
 			expect(result).toContain('--reason');
+		});
+	});
+
+	describe('#1821 A3: actionability floor on the direct-text path', () => {
+		it('a prose-only promotion is blocked by the actionability_floor gate', async () => {
+			const result = await handlePromoteCommand(tempDir, [
+				'Code quality matters a great deal to this team overall',
+			]);
+			expect(result).toContain('Promotion blocked by policy');
+			expect(result).toContain('actionability_floor');
+		});
+
+		it('--force --reason overrides the failed floor and still promotes', async () => {
+			const result = await handlePromoteCommand(tempDir, [
+				'--force',
+				'--reason',
+				'legacy prose lesson migrated by an operator',
+				'Code quality matters a great deal to this team overall',
+			]);
+			expect(result).toContain('Promoted to hive');
+			expect(result).toContain('manual-override');
+		});
+
+		it('supplying only a scope (no predicate) is still blocked', async () => {
+			const result = await handlePromoteCommand(tempDir, [
+				'--applies-to-agents',
+				'coder',
+				'Code quality matters a great deal to this team overall',
+			]);
+			expect(result).toContain('Promotion blocked by policy');
+			expect(result).toContain('actionability_floor');
+		});
+
+		it('an entry with a predicate and a scope promotes without --force', async () => {
+			const result = await handlePromoteCommand(
+				tempDir,
+				actionableArgs('Prefer array-form spawn over shell strings always'),
+			);
+			expect(result).toContain('Promoted to hive');
+			expect(result).toContain('source: manual');
+			expect(result).not.toContain('manual-override');
+		});
+
+		it('usage text documents the actionability flags', async () => {
+			const result = await handlePromoteCommand(tempDir, []);
+			expect(result).toContain('--applies-to-tools');
+			expect(result).toContain('--applies-to-agents');
+			expect(result).toContain('--required-actions');
+			expect(result).toContain('--forbidden-actions');
+			expect(result).toContain('--verification-checks');
 		});
 	});
 });

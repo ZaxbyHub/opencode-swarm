@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
+import { countConsensusReportFiles } from '../consensus/store';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -32,6 +33,7 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
+import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
@@ -74,6 +76,20 @@ export interface StatusData {
 	leanDegradedTasks?: number;
 	/** Human-readable degradation summary */
 	leanDegradationSummary?: string;
+	/**
+	 * #1657: merge-back conflict recovery worktrees preserved for manual
+	 * recovery (durable records under `.swarm/recovery/`). Surfaced so the
+	 * architect/operator can see pending recovery work in `/swarm status`
+	 * rather than having to re-read a prior tool result. `undefined`/empty when
+	 * no lanes are preserved.
+	 */
+	leanPreservedRecoveryWorktrees?: Array<{
+		laneId: string;
+		status: string;
+		worktreePath: string;
+		reason: string;
+		replayHint: string;
+	}>;
 	/** Whether Full-Auto mode is currently active */
 	fullAutoActive?: boolean;
 	/**
@@ -112,6 +128,19 @@ export interface StatusData {
 	unactionableQueueDepth?: number;
 	/** #1234 Part 3: pending insight candidates awaiting phase boundary consumption */
 	insightCandidatesPending?: number;
+	/**
+	 * #1821 AC22: consensus report FILES stored under
+	 * `.swarm/evolution/consensus/`.
+	 *
+	 * The reader half of the consensus store. Without it the miner's reports were
+	 * a write-only directory — nothing in the product enumerated them, so a user
+	 * had no way to learn they existed. A file count, deliberately: it is one
+	 * `readdir` with no JSON parse and no integrity recomputation, so it costs the
+	 * same whether the store holds one report or fifty. It therefore includes any
+	 * corrupt report, because what it counts is files whose name is a well-formed
+	 * report id.
+	 */
+	consensusReports?: number;
 	/**
 	 * Cohort/link status (issue #1846). Makes the linked knowledge store and its
 	 * health obvious in `/swarm status`. `undefined` when link state is absent.
@@ -288,6 +317,14 @@ export async function getStatusData(
 	status.insightCandidatesPending = await safeLineCount(
 		validateSwarmPath(directory, 'insight-candidates.jsonl'),
 	);
+	// #1821 AC22: make the consensus store reachable. Best-effort like every
+	// other counter in this block — a status command must never fail because an
+	// optional artifact directory is unreadable.
+	try {
+		status.consensusReports = await countConsensusReportFiles(directory);
+	} catch {
+		status.consensusReports = 0;
+	}
 
 	// Issue #1846: surface cohort/link status so `/swarm status` makes the
 	// linked knowledge store and its health obvious. Best-effort: a missing or
@@ -410,6 +447,27 @@ function enrichWithLeanTurbo(
 
 	status.turboStrategy = turboStrategy;
 
+	// #1657: surface durable merge-back recovery records (preserved worktrees)
+	// from `.swarm/recovery/`. This runs BEFORE the `!leanActive` early return
+	// because recovery records persist across sessions and are relevant whenever
+	// any lane's merge-back has failed — even if Lean Turbo is not currently
+	// active (e.g. the session ended, or the user is inspecting past recovery).
+	try {
+		const recoveryRecords = listRecoveryRecords(directory);
+		if (recoveryRecords.length > 0) {
+			status.leanPreservedRecoveryWorktrees = recoveryRecords.map((r) => ({
+				laneId: r.laneId,
+				status: r.status,
+				worktreePath: r.worktreePath,
+				reason: r.reason,
+				replayHint: r.replayHint,
+			}));
+		}
+	} catch {
+		// Non-fatal: status is best-effort. Missing the recovery section does
+		// not invalidate the rest of the status output.
+	}
+
 	if (!leanActive) {
 		return status;
 	}
@@ -528,6 +586,24 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push('**TURBO MODE**: active');
 	}
 
+	// #1657: preserved merge-back recovery worktrees. Rendered as its own block
+	// because recovery records persist across sessions and are relevant even
+	// when Lean Turbo is not currently active.
+	if (
+		status.leanPreservedRecoveryWorktrees &&
+		status.leanPreservedRecoveryWorktrees.length > 0
+	) {
+		lines.push('');
+		lines.push(
+			`**Preserved recovery worktrees**: ${status.leanPreservedRecoveryWorktrees.length} lane(s) preserved for manual merge-back recovery`,
+		);
+		for (const w of status.leanPreservedRecoveryWorktrees) {
+			lines.push(
+				`  - ${w.laneId} (${w.status}): ${w.reason} — \`${w.replayHint}\``,
+			);
+		}
+	}
+
 	// Issue #1781 E2: Full-Auto status is rendered as its own block, OUTSIDE
 	// the turbo block, so escalation detail surfaces even when Full-Auto runs
 	// WITHOUT turbo (the common escalation scenario). Previously this was
@@ -573,7 +649,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 	const proposals = status.pendingProposals ?? 0;
 	const unactionable = status.unactionableQueueDepth ?? 0;
 	const insights = status.insightCandidatesPending ?? 0;
-	if (proposals > 0 || unactionable > 0 || insights > 0) {
+	const consensusReports = status.consensusReports ?? 0;
+	if (
+		proposals > 0 ||
+		unactionable > 0 ||
+		insights > 0 ||
+		consensusReports > 0
+	) {
 		lines.push('', '**Learning Queues**:');
 		if (proposals > 0)
 			lines.push(
@@ -585,6 +667,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 			);
 		if (insights > 0)
 			lines.push(`  - Insight candidates: ${insights} (consumed at phase end)`);
+		// #1821 AC22. The pointer is the directory, not a command: there is no
+		// list command for consensus reports, and naming one that does not exist
+		// would be worse than naming the path a reader can actually open.
+		if (consensusReports > 0)
+			lines.push(
+				`  - Consensus reports: ${consensusReports} (read under \`.swarm/evolution/consensus/\`; each holds proposals-only recommendations)`,
+			);
 	}
 
 	// Issue #1846: cohort/link status — make the shared knowledge store visible.

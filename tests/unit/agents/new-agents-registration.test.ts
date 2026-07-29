@@ -113,11 +113,16 @@ describe('curator_consolidation registration (issue #1464)', () => {
 		expect(MEMORY_AGENT_TOOL_MAP.curator_consolidation).toEqual([
 			'swarm_memory_recall',
 		]);
-		// In the base AGENT_TOOL_MAP it is toolless exactly like its sibling
-		// curators (the memory tool is merged in only when memory is enabled).
-		expect(AGENT_TOOL_MAP.curator_consolidation).toEqual(
-			AGENT_TOOL_MAP.curator_postmortem,
-		);
+		// In the base AGENT_TOOL_MAP it is toolless — the memory tool is merged in
+		// only when memory is enabled.
+		//
+		// Asserted directly rather than by comparison against curator_postmortem.
+		// That comparison was only ever a proxy for "curator_consolidation is
+		// empty" (the sibling curators were never uniformly toolless —
+		// curator_init has carried knowledge_recall/knowledge_receipt throughout),
+		// and it stopped expressing this test's intent once curator_phase and
+		// curator_postmortem gained `consensus_mine` in issue #1821 Workstream C.
+		expect(AGENT_TOOL_MAP.curator_consolidation).toEqual([]);
 	});
 
 	it('default (unprefixed) registration produces curator_consolidation as a subagent', () => {

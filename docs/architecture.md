@@ -222,7 +222,7 @@ All directive language (must, should, needs, verdict, review needed, dead) was r
 - Read-only (cannot write code)
 
 ### Pipeline Agents: The Hands
-- Coder: Implements one task at a time
+- Coder: Implements one task at a time by default; for plans with provably file-disjoint task groups, multiple coders execute concurrently in isolated git worktrees (v8 parallel-first execution, #1674). Serial execution is the automatic, gate-enforced fallback whenever the active phase's pending tasks have overlapping or unknown declared scopes.
 - Reviewer: Dual-pass review — general correctness first, then automatic security-only pass for security-sensitive files (OWASP Top 10 categories)
 - Test Engineer: Generates verification tests + adversarial tests (attack vectors, boundary violations, injection attempts)
 - Gates: Automated `diff`, `imports`, `lint`, and `secretscan` tools verify contracts, dependencies, style, and security before/during review.

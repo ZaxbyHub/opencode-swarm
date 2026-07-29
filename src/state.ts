@@ -38,6 +38,8 @@ import {
 	resetRealtimeLearningNudgeState,
 } from './hooks/realtime-learning-nudge.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
+import { resetSessionQueue } from './learning/candidate-queue.js';
+import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
 import {
 	isTaskSettled,
 	loadPlanJsonOnly,
@@ -967,6 +969,13 @@ export function endAgentSession(sessionId: string): void {
 	}
 	swarmState.agentSessions.delete(sessionId);
 	clearRealtimeLearningNudgeSession(sessionId);
+	// #1821: the same-session learning loop keeps per-session module state (the
+	// candidate queue and the PRM pattern-support/cooldown ledger). Both are
+	// already bounded by a 500-key FIFO, but releasing them at session end is
+	// what keeps that bound from being load-bearing — and it mirrors the
+	// nudge cleanup directly above (invariant 8).
+	resetSessionQueue(sessionId);
+	resetPrmPatternSupport(sessionId);
 }
 
 /**

@@ -1272,6 +1272,10 @@ export const KnowledgeConfigSchema = z.object({
 	/** #1847: minimum DISTINCT canonical cohort ids among the validated
 	 * terminal-application receipts. Default 0 (conservative). */
 	promotion_min_distinct_cohorts: z.number().min(0).max(50).default(0),
+	/** #1821: require a promotion candidate to carry an actionable directive
+	 * (a concrete action, not a bare observation) before it may be promoted.
+	 * Default true — prose-only lessons stay in the swarm tier. */
+	promotion_require_actionable: z.boolean().default(true),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({
@@ -1313,6 +1317,117 @@ export const KnowledgeConfigSchema = z.object({
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
+
+/**
+ * Learning subsystem configuration (issue #1821).
+ *
+ * Governs the three bounded background learning loops: real-time knowledge
+ * admission (drains a queue of candidate lessons while a session is live), PRM
+ * pattern persistence, and the duplicate-knowledge sweep. Every budget here
+ * exists to keep the loops bounded per session (AGENTS.md invariants 1 and 8) —
+ * there is no "unlimited" setting by design.
+ *
+ * Nested blocks use `.prefault({})` rather than `.default({...})`: in Zod 4 a
+ * `.default(value)` is returned verbatim without being parsed, so
+ * `.default({})` would yield an empty object and silently skip every inner
+ * field default. `.prefault({})` runs the substituted value through the object
+ * schema, so inner defaults apply and cannot drift from the field declarations.
+ */
+export const LearningConfigSchema = z.object({
+	/** Real-time admission of candidate lessons during a live session. */
+	realtime_admission: z
+		.object({
+			/** Enable/disable real-time admission entirely. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pending candidates; excess candidates are dropped. */
+			max_queue_size: z.number().int().min(1).max(500).default(50),
+			/** Minimum candidates drained per drain cycle. */
+			min_drain: z.number().int().min(1).max(50).default(1),
+			/** Maximum candidates drained per drain cycle. */
+			max_drain: z.number().int().min(1).max(100).default(10),
+			/** Weight of queue depth when sizing a drain (0 = ignore depth). */
+			drain_depth_factor: z.number().min(0).max(1).default(0.5),
+			/** Weight of arrival velocity when sizing a drain (0 = ignore rate). */
+			drain_velocity_factor: z.number().min(0).max(1).default(0.25),
+			/** Per-session ceiling on admission LLM calls. 0 disables LLM admission. */
+			max_llm_calls_per_session: z.number().int().min(0).max(500).default(20),
+			/** Per-session ceiling on admission tokens. */
+			max_tokens_per_session: z.number().int().min(0).default(50_000),
+			/** Maximum admissions evaluated concurrently. */
+			max_concurrent_admissions: z.number().int().min(1).max(16).default(2),
+			/** Retries allowed per candidate before it is abandoned. */
+			max_retries_per_candidate: z.number().int().min(0).max(5).default(1),
+			/** Per-candidate LLM timeout in milliseconds. */
+			per_candidate_llm_timeout_ms: z.number().int().min(0).default(60_000),
+			/** Wall-clock ceiling for a single drain cycle, in milliseconds. */
+			max_drain_wall_time_ms: z.number().int().min(0).default(10_000),
+			/** SUPPRESS the prompt-only "supersede an existing lesson instead of
+			 * adding a near-duplicate" nudge to the architect while real-time
+			 * admission is enabled, since this loop already admits those lessons
+			 * automatically and the nudge would only ask the architect to redo it by
+			 * hand. Its sole consumer is
+			 * `shouldInjectRealtimeLearningNudge` (`src/hooks/realtime-learning-nudge.ts`),
+			 * which returns false — i.e. no nudge — when `realtime_admission.enabled`
+			 * is true AND this is not `false`. Set it to `false` to keep the nudge
+			 * even with admission on. The default `true` therefore means "suppress",
+			 * not "nudge"; `docs/configuration.md` has always described it correctly. */
+			supersede_nudge: z.boolean().default(true),
+		})
+		.prefault({}),
+	/** Persistence of PRM-detected patterns as durable knowledge. */
+	prm_persistence: z
+		.object({
+			/** Enable/disable PRM pattern persistence. */
+			enabled: z.boolean().default(true),
+			/** Distinct observations required before a pattern is persisted. */
+			min_support: z.number().int().min(1).max(20).default(3),
+			/** Cooldown between persistence passes, in milliseconds. */
+			cooldown_ms: z.number().int().min(0).default(900_000),
+		})
+		.prefault({}),
+	/** Background sweep that merges duplicate knowledge entries. */
+	dedup_sweep: z
+		.object({
+			/** Enable/disable the dedup sweep. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pairwise comparisons performed per sweep. */
+			max_comparisons: z.number().int().min(0).default(2_000),
+			/** Hard cap on merges applied per sweep. */
+			max_merges_per_sweep: z.number().int().min(0).default(10),
+		})
+		.prefault({}),
+});
+
+export type LearningConfig = z.infer<typeof LearningConfigSchema>;
+
+/**
+ * Consensus mining configuration (issue #1821).
+ *
+ * The consensus miner reads completed evaluation/run evidence and proposes
+ * lessons that multiple independent runs agree on. Support thresholds gate what
+ * counts as consensus; the excerpt and retention caps keep the generated report
+ * bounded.
+ */
+export const ConsensusConfigSchema = z.object({
+	/** Enable/disable consensus mining. */
+	enabled: z.boolean().default(true),
+	/** Default distinct-observation threshold for a consensus candidate. */
+	default_min_support: z.number().int().min(1).default(3),
+	/** Default number of successful runs required to trust a candidate. */
+	default_min_successful_runs: z.number().int().min(0).default(2),
+	/** Default cap on evidence items attached to a consensus candidate. */
+	default_max_evidence_items: z.number().int().min(1).default(50),
+	/** Maximum characters retained per evidence excerpt. */
+	max_excerpt_chars: z.number().int().min(1).default(500),
+	/** Enable LLM summarization of mined consensus candidates. */
+	llm_summarization_enabled: z.boolean().default(true),
+	/** Timeout for a consensus summarization LLM call, in milliseconds. */
+	llm_timeout_ms: z.number().int().min(0).default(60_000),
+	/** Number of consensus reports retained on disk. */
+	report_retention: z.number().int().min(0).default(50),
+});
+
+export type ConsensusConfig = z.infer<typeof ConsensusConfigSchema>;
 
 export const MemoryConfigSchema = z.object({
 	/** Enable Swarm memory tools and local memory storage. Default: false. */
@@ -2763,6 +2878,12 @@ export const PluginConfigSchema = z.object({
 
 	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
 	memory: MemoryConfigSchema.optional(),
+
+	// Learning subsystem — real-time admission, PRM persistence, dedup sweep (issue #1821)
+	learning: LearningConfigSchema.optional(),
+
+	// Consensus mining over completed run evidence (issue #1821)
+	consensus: ConsensusConfigSchema.optional(),
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),

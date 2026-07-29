@@ -25,6 +25,10 @@ import type { GuardrailsConfig } from '../../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../../src/hooks/guardrails';
 import { resetSwarmState, startAgentSession } from '../../../../src/state';
 import * as mergeBackModule from '../../../../src/turbo/lean/merge-back';
+import {
+	listRecoveryRecords,
+	writeRecoveryRecord,
+} from '../../../../src/turbo/lean/recovery';
 import type { LaneResult } from '../../../../src/turbo/lean/runner';
 import { LeanTurboRunner } from '../../../../src/turbo/lean/runner';
 import type {
@@ -1861,5 +1865,79 @@ describe('end-to-end: failed lane preserves worktree without merge-back', () => 
 		// worktree must NOT be removed.
 		expect(pipelineOrder).not.toContain('attemptMergeBackFromDirty');
 		expect(pipelineOrder).not.toContain('removeWorktree');
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #1657: recovery-record auto-clear on successful merge-back
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('#1657: recovery record auto-clears on successful merge-back', () => {
+	test('a pre-existing recovery record for a lane is cleared after that lane merges back successfully', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'], '1.2': ['src/b.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+		setupWorktreeMocks(); // merge-back succeeds for every completed lane
+
+		// Pre-write a recovery record for lane-1, simulating a prior failed
+		// merge-back that was preserved. The lane id convention from
+		// setupWorktreeMocks is `lane-<idx+1>` (provisionIdx starts at 0).
+		writeRecoveryRecord(tmpDir, {
+			laneId: 'lane-1',
+			sessionId: SESSION_ID,
+			branchName: fakeBranchName('lane-1'),
+			worktreePath: fakeWorktreePath('lane-1'),
+			status: 'conflict',
+			reason: 'prior merge conflict, now resolving',
+			conflictFiles: ['src/a.ts'],
+			replayHint: `cd ${fakeWorktreePath('lane-1')} && git status`,
+		});
+		expect(listRecoveryRecords(tmpDir)).toHaveLength(1);
+
+		await runner.runPhase(1);
+
+		restoreAllSeams();
+
+		// After a successful phase where lane-1 merged back cleanly, its
+		// recovery record must be auto-cleared (no accumulation).
+		expect(listRecoveryRecords(tmpDir)).toEqual([]);
+	});
+
+	test('a recovery record with no matching successful lane is preserved', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+		setupWorktreeMocks();
+
+		// Write a recovery record for a lane that is NOT in this phase
+		// (lane-9 — no lane-9 will run). It must survive the phase.
+		writeRecoveryRecord(tmpDir, {
+			laneId: 'lane-9',
+			sessionId: SESSION_ID,
+			branchName: fakeBranchName('lane-9'),
+			worktreePath: fakeWorktreePath('lane-9'),
+			status: 'conflict',
+			reason: 'unrelated prior failure',
+			replayHint: `cd ${fakeWorktreePath('lane-9')} && git status`,
+		});
+
+		await runner.runPhase(1);
+
+		restoreAllSeams();
+
+		// lane-9 did not run/merge in this phase → its record persists.
+		const records = listRecoveryRecords(tmpDir);
+		expect(records).toHaveLength(1);
+		expect(records[0].laneId).toBe('lane-9');
 	});
 });

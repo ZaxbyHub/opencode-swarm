@@ -45,6 +45,7 @@ import {
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	LearningConfigSchema,
 	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
@@ -115,7 +116,10 @@ import {
 	knowledgeApplicationTransformScan,
 } from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
-import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
+import {
+	bumpKnowledgeGeneration,
+	createKnowledgeInjectorHook,
+} from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
@@ -135,8 +139,10 @@ import {
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
+import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
-import { createPrmHook } from './prm';
+import { loadPlan } from './plan/manager.js';
+import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
@@ -901,9 +907,23 @@ async function initializeOpenCodeSwarm(
 		agents,
 	);
 	const activityHooks = createAgentActivityHooks(config, ctx.directory);
+	// #1821 Workstream B: real-time admission + PRM pattern persistence budgets.
+	// Parsed once at init (pure Zod, no I/O) so the hot hook path reads plain
+	// numbers rather than re-parsing per tool call.
+	const learningConfig = LearningConfigSchema.parse(config.learning ?? {});
 	const prmHook = createPrmHook(
 		config.prm ?? PrmConfigSchema.parse({}),
 		ctx.directory,
+		// #1821 F3: this mapping used to be an inline literal that ANDed
+		// `realtime_admission.enabled` into the producer's `enabled` flag, which
+		// also disabled the hook's durable `appendInsightCandidates` backstop — so
+		// a deployment with real-time admission off wrote no PRM candidate to
+		// `.swarm/insight-candidates.jsonl` and the phase-boundary drain never saw
+		// one, the exact loss AC8 forbids. `resolvePrmPatternPersistenceOptions`
+		// owns the coupling now (durable ← `prm_persistence.enabled`, enqueue ←
+		// `realtime_admission.enabled`) and is asserted directly by
+		// tests/unit/learning/wiring.test.ts.
+		resolvePrmPatternPersistenceOptions(learningConfig),
 	);
 	const trajectoryLoggerHook = createTrajectoryLoggerHook(
 		{
@@ -2696,9 +2716,56 @@ async function initializeOpenCodeSwarm(
 								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
 								window: knowledgeConfig.enrichment.quota_window,
 							},
+							// #1821: also hand new candidates to the same-session
+							// admission queue. The durable append stays the crash backstop.
+							{
+								enabled: learningConfig.realtime_admission.enabled,
+								maxQueueSize: learningConfig.realtime_admission.max_queue_size,
+							},
 						),
 					)(input, output);
 				}
+				// #1821 Workstream B: drain the same-session admission queue.
+				// Called UNCONDITIONALLY and self-gating inside — there is deliberately
+				// NO `return` here or anywhere else in `hookChain`, because an early
+				// return would skip every downstream hook for non-Task tool calls.
+				// The adapter's first check is `isTaskTool`, and its second is an O(1)
+				// queue-depth probe, so the non-Task path does no I/O and takes no lock.
+				await safeHook(async () => {
+					const summary = await realtimeAdmissionAfter(
+						ctx.directory,
+						{ tool: input.tool, sessionID: input.sessionID },
+						learningConfig.realtime_admission,
+						async () => {
+							const plan = await loadPlan(ctx.directory).catch(() => null);
+							return {
+								knowledgeConfig,
+								projectName: plan?.title ?? 'unknown',
+								phaseNumber: plan?.current_phase ?? 1,
+								sessionID: input.sessionID,
+								llmDelegate: createCuratorLLMDelegate(
+									ctx.directory,
+									'phase',
+									input.sessionID,
+								),
+								onKnowledgeChanged: bumpKnowledgeGeneration,
+							};
+						},
+					);
+					// `DrainSummary`'s counters were computed and discarded here, which
+					// made `deferred` and `failed` — the two that say the drain did NOT
+					// finish its work — unobservable in production (issue #1821).
+					// `log` is gated on OPENCODE_SWARM_DEBUG and writes to stderr, never
+					// to a chat-visible stream (AGENTS.md invariant 10). `undefined`
+					// means a gate short-circuited before any drain ran, which is the
+					// overwhelmingly common case on the hot path and must stay silent.
+					if (summary) {
+						log('realtime admission drain', {
+							sessionID: input.sessionID,
+							...summary,
+						});
+					}
+				})(input, output);
 				// Reviewer receipt collection: persist a returning reviewer Task's
 				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;
 				// independent of the knowledge system.
