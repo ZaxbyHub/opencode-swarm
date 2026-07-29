@@ -28,6 +28,8 @@ export const NATIVE_MODEL_LIMITS: Record<string, number> = {
 	'deepseek-r1': 163840,
 	'deepseek-chat': 163840,
 	'qwen3.5': 131072,
+	'MiniMax-M3': 1000000,
+	'MiniMax-M2.7': 204800,
 };
 
 /**

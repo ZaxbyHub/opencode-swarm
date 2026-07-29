@@ -382,7 +382,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	explorer: 'opencode/big-pickle',
 
 	// Pipeline agents — differentiated models for writing vs reviewing
-	coder: 'opencode/minimax-m2.5-free',
+	coder: 'minimax-coding-plan/MiniMax-M3',
 	reviewer: 'opencode/big-pickle',
 	test_engineer: 'opencode/gpt-5-nano',
 
@@ -428,7 +428,7 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 	{ model: string; fallback_models: string[] }
 > = {
 	coder: {
-		model: 'opencode/minimax-m2.5-free',
+		model: 'minimax-coding-plan/MiniMax-M3',
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},
 	reviewer: {
