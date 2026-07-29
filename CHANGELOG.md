@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.132.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.0...v7.132.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **pr-workflow:** stop lane output from being destroyed and re-sent every poll ([9f4d879](https://github.com/ZaxbyHub/opencode-swarm/commit/9f4d8797e13df3c2f7b11fc708b553b00c01c51c))
+
 ## [7.132.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.131.0...v7.132.0) (2026-07-27)
 
 
