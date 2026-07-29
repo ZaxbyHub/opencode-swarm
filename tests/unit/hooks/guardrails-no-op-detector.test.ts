@@ -197,6 +197,56 @@ describe('no-op work detector: subagent dispatch counts as progress', () => {
 		expect(internals.hasNoOpState('noop-bound-0')).toBe(false);
 	});
 
+	test('an actively-climbing session is NOT evicted by churn from other sessions', async () => {
+		// Regression for a bound that silenced the detector it protects.
+		// `Map.set()` on an existing key does not move it, so plain
+		// insertion-order eviction always drops the FIRST-created session — which
+		// in a real plugin process is the architect, the very session being
+		// watched. Measured with FIFO eviction: the architect's counter was reset
+		// mid-climb and its 15th consecutive no-write call produced ZERO warnings.
+		const hooks = makeHooks();
+		const architect = 'noop-lru-architect';
+		ensureAgentSession(architect, 'architect');
+		swarmState.activeAgent.set(architect, 'architect');
+
+		// The architect is created FIRST — the worst case for FIFO eviction.
+		// A stale session is created immediately AFTER it and then never touched
+		// again: under FIFO the architect dies and this one survives, which is
+		// exactly backwards.
+		const stale = 'noop-lru-stale';
+		ensureAgentSession(stale, 'architect');
+		swarmState.activeAgent.set(stale, 'architect');
+		await readCall(hooks, architect, 0);
+		await readCall(hooks, stale, 0);
+
+		// The architect keeps working — interleaved with heavy churn from other
+		// sessions — so it is continuously the most-recently-touched entry.
+		for (let i = 1; i < THRESHOLD - 1; i++) {
+			await readCall(hooks, architect, i);
+			for (let s = 0; s < 25; s++) {
+				const sid = `noop-lru-churn-${i}-${s}`;
+				ensureAgentSession(sid, 'architect');
+				swarmState.activeAgent.set(sid, 'architect');
+				await readCall(hooks, sid, 0);
+			}
+		}
+		// Churn total (13 × 25 = 325) far exceeds the bound, so eviction ran.
+		expect(internals.noOpStateSize()).toBeLessThanOrEqual(
+			MAX_TRACKED_NO_OP_SESSIONS,
+		);
+		// The stale session — inserted BEFORE all that churn and never touched
+		// again — is gone, which is the correct victim.
+		expect(internals.hasNoOpState(stale)).toBe(false);
+		// The actively-working architect survived, counter intact.
+		expect(internals.hasNoOpState(architect)).toBe(true);
+
+		// And it still warns on its Nth consecutive no-write call. Under FIFO its
+		// counter was reset mid-climb and this produced ZERO warnings.
+		expect(noOpWarnings(architect)).toHaveLength(0);
+		await readCall(hooks, architect, 999);
+		expect(noOpWarnings(architect)).toHaveLength(1);
+	});
+
 	test('the warning no longer advises /swarm handoff', async () => {
 		// The old text told a possibly-stuck agent to reset the session, which
 		// discards exactly the context an orchestrating architect is assembling.

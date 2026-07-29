@@ -179,9 +179,14 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		// `JSON.parse(content) as InitOrphanAdvisory` cast with no runtime
 		// validation, so an older or hand-edited file can be missing these fields
 		// even though the type declares them required. Reading them defensively
-		// means a malformed advisory degrades to silence instead of throwing out
-		// of `messagesTransform` — which would be unrecoverable, since the file
-		// has already been deleted above.
+		// means a PARTIALLY-SHAPED advisory degrades to silence instead of
+		// throwing. The throw itself is caught — `composeHandlers` wraps every
+		// handler in `safeHook` (src/hooks/utils.ts), so it degrades to a warning
+		// rather than breaking the transform chain. What is lost is this
+		// advisory's payload, because the file was already deleted above.
+		// Scope: this covers MISSING fields. A type-confused file (e.g.
+		// `warnings: {}`) still throws, but `writeAdvisoryFile` always writes
+		// arrays, so that shape is not producible.
 		const reclaimedForGate = advisory.reclaimed;
 		const hasReportableContent =
 			(advisory.warnings?.length ?? 0) > 0 ||

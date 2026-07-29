@@ -60,7 +60,7 @@ const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
  * predicate tested for the string 'runaway output', which the pushed message
  * never contained, making the guard permanently inert.
  */
-const RUNAWAY_OUTPUT_ADVISORY_MARKER =
+export const RUNAWAY_OUTPUT_ADVISORY_MARKER =
 	'Model is generating analysis without taking action';
 
 function getMessageText(message: ChatMessageLike | undefined): string {

@@ -259,35 +259,59 @@ const CONTENT_FILTER_PATTERN = /content.?filter/i;
  * nothing removed a key when a session ended. `noOpWarningIssued` was only ever
  * `delete`d on a reset, and `toolCallsSinceLastWrite` never shrank at all.
  *
- * Bounded with the same FIFO discipline used by the PR-workflow response gate
- * (`MAX_TRACKED_WAKE_SESSIONS` / `evictBannerDedupeMapsIfOverBound`). Insertion
- * order is the eviction order, so the oldest session is dropped first; losing a
- * stale session's counter is harmless — the detector simply restarts counting
- * for it, which is the correct behavior for a session that has gone quiet.
+ * Bounded LRU, evicting the LEAST-RECENTLY-TOUCHED session.
+ *
+ * Plain insertion-order (FIFO) eviction is wrong here and actively harmful.
+ * `Map.set()` on an EXISTING key does not move it, so the first session created
+ * in the process stays permanently at the front of the iteration order. In an
+ * OpenCode plugin process that first session is the architect — the very session
+ * this detector exists to watch — making it the guaranteed first eviction victim
+ * while a session touched once and abandoned later survives. Measured: with a
+ * FIFO bound, an architect climbing toward the threshold had its counter evicted
+ * and reset mid-climb, and its 15th consecutive no-write call produced ZERO
+ * warnings. A bound must not silence the detector it was added to protect.
+ *
+ * {@link touchNoOpSession} therefore deletes before setting, moving the key to
+ * the back on every touch, so eviction genuinely targets quiet sessions.
  */
 export const MAX_TRACKED_NO_OP_SESSIONS = 200;
 const toolCallsSinceLastWrite = new Map<string, number>();
 const noOpWarningIssued = new Set<string>();
 
 /**
- * FIFO-evict the oldest entries from the no-op detector's session maps when
- * either exceeds {@link MAX_TRACKED_NO_OP_SESSIONS}. Called at every insertion
- * site so the bound is enforced structurally rather than by an argument about
- * which branches happen to run.
+ * Record a session's no-write counter, refreshing its recency. The `delete`
+ * before `set` is load-bearing: it is what makes the eviction order
+ * least-recently-touched rather than first-inserted.
+ */
+function touchNoOpSession(sessionID: string, count: number): void {
+	toolCallsSinceLastWrite.delete(sessionID);
+	toolCallsSinceLastWrite.set(sessionID, count);
+	evictNoOpStateIfOverBound();
+}
+
+/**
+ * Evict least-recently-touched entries from the no-op detector's session state
+ * when either container exceeds {@link MAX_TRACKED_NO_OP_SESSIONS}. Called from
+ * {@link touchNoOpSession} and from the warning-latch insertion, i.e. at every
+ * site that can grow either container.
  */
 function evictNoOpStateIfOverBound(): void {
 	while (toolCallsSinceLastWrite.size > MAX_TRACKED_NO_OP_SESSIONS) {
-		const oldestKey = toolCallsSinceLastWrite.keys().next().value;
-		if (oldestKey === undefined) break;
-		toolCallsSinceLastWrite.delete(oldestKey);
+		const stalestKey = toolCallsSinceLastWrite.keys().next().value;
+		if (stalestKey === undefined) break;
+		toolCallsSinceLastWrite.delete(stalestKey);
 		// Drop the paired warning latch with it, so an evicted session cannot
 		// come back with a stale "already warned" flag and never warn again.
-		noOpWarningIssued.delete(oldestKey);
+		noOpWarningIssued.delete(stalestKey);
 	}
+	// The latch Set is normally a subset of the counter map, but it is not
+	// guaranteed to be: a session evicted by the loop above can be re-added as a
+	// latch in the same invocation, leaving a latch with no counter. Bound it
+	// independently rather than relying on the subset argument.
 	while (noOpWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
-		const oldestKey = noOpWarningIssued.values().next().value;
-		if (oldestKey === undefined) break;
-		noOpWarningIssued.delete(oldestKey);
+		const stalestKey = noOpWarningIssued.values().next().value;
+		if (stalestKey === undefined) break;
+		noOpWarningIssued.delete(stalestKey);
 	}
 }
 
@@ -778,13 +802,11 @@ export function createGuardrailsHooks(
 					input.args ?? getStoredInputArgs(input.callID),
 				).isDelegation;
 			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
-				toolCallsSinceLastWrite.set(sessionId, 0);
+				touchNoOpSession(sessionId, 0);
 				noOpWarningIssued.delete(sessionId);
-				evictNoOpStateIfOverBound();
 			} else {
 				const count = (toolCallsSinceLastWrite.get(sessionId) ?? 0) + 1;
-				toolCallsSinceLastWrite.set(sessionId, count);
-				evictNoOpStateIfOverBound();
+				touchNoOpSession(sessionId, count);
 				const threshold = cfg.no_op_warning_threshold ?? 15;
 				if (
 					count >= threshold &&
@@ -792,6 +814,10 @@ export function createGuardrailsHooks(
 					session?.pendingAdvisoryMessages
 				) {
 					noOpWarningIssued.add(sessionId);
+					// BL-B: the latch Set can grow here independently of the counter
+					// map, so it needs its own bound check — the "it is a subset"
+					// argument does not hold in the self-eviction case.
+					evictNoOpStateIfOverBound();
 					// The old text advised `/swarm handoff`, which resets the session —
 					// discarding exactly the context an orchestrating architect has
 					// been assembling. Advice that destroys the user's work is worse

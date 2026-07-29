@@ -127,13 +127,27 @@ No breaking changes.
 - **Invariant 8 (module-level session state).** `toolCallsSinceLastWrite` and
   `noOpWarningIssued` (`src/hooks/guardrails/index.ts`) were module-level,
   session-keyed, and **unbounded** — they grew for the lifetime of the plugin
-  process. Both are now FIFO-bounded at `MAX_TRACKED_NO_OP_SESSIONS` (200) with
-  `evictNoOpStateIfOverBound()` called at every insertion site, mirroring the
-  discipline the PR-workflow response gate uses. Evicting a stale session's
-  counter is harmless: the detector simply restarts counting for it. The paired
-  warning latch is dropped with the counter so an evicted session cannot return
-  with a stale "already warned" flag and never warn again.
-  No new module-level state is introduced by this change.
+  process. Both are now bounded at `MAX_TRACKED_NO_OP_SESSIONS` (200).
+
+  The eviction is **least-recently-touched, not insertion-order**, and that
+  distinction is load-bearing. `Map.set()` on an existing key does not move it,
+  so plain FIFO eviction always drops the first-created session — which in a
+  plugin process is the architect, the very session this detector watches. A
+  first attempt shipped FIFO and was measured silencing the detector outright:
+  the architect's counter was evicted mid-climb and its 15th consecutive
+  no-write call produced **zero** warnings. `touchNoOpSession()` now deletes
+  before setting so every touch refreshes recency, and a regression test pins
+  it — an architect working through 325 sessions' worth of churn keeps its
+  counter and still warns, while a stale session inserted before that churn is
+  correctly evicted. The paired warning latch is dropped with its counter so an
+  evicted session cannot return carrying a stale "already warned" flag and then
+  never warn again, and the latch Set is bounded independently rather than
+  relying on it being a subset of the counter map.
+
+  Not claimed: unlike the response gate's `resetBudget`, these maps still have
+  no explicit reset path, so `/swarm reset-session` leaves a stale counter under
+  a reused sessionID. Pre-existing, unchanged here, tracked in #1976.
+  No new module-level session-keyed state is introduced by this change.
 - **Invariant 10 (chat/system-message contract).** This change reduces
   chat-visible diagnostic noise; it adds none. The `[ADVISORIES]` block is now
   blank-free and deduped, one guaranteed content-free advisory is suppressed
