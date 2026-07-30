@@ -1013,11 +1013,12 @@ async function initializeOpenCodeSwarm(
 					loopWarningPending: session.loopWarningPending,
 				}
 			: undefined;
-		let messagesBefore: typeof output.messages;
+		// Capture messages BEFORE the try block so a structuredClone failure
+		// never leaves messagesBefore uninitialized (issue #1961 M-1).
+		const messagesBefore = output.messages
+			? structuredClone(output.messages)
+			: undefined;
 		try {
-			messagesBefore = output.messages
-				? structuredClone(output.messages)
-				: undefined;
 			if (session) {
 				session.pendingAdvisoryMessages ??= [];
 				for (const message of prepared.messages) {

@@ -213,7 +213,9 @@ export function deserializeAgentSession(
 		scopeViolationDetected: s.scopeViolationDetected,
 		modifiedFilesByTask,
 		modifiedFilesThisCoderTask:
-			s.currentTaskId && modifiedFilesByTask.has(s.currentTaskId)
+			s.currentTaskId &&
+			s.currentTaskId.trim() !== '' &&
+			modifiedFilesByTask.has(s.currentTaskId)
 				? [...(modifiedFilesByTask.get(s.currentTaskId) ?? [])]
 				: [],
 		loopDetectionWindow: [],
