@@ -2730,7 +2730,17 @@ export function createDelegationGateHook(
 			// Standard (non-background) coder: check worktree isolation and
 			// short-circuit when no isolated worktree is configured.
 			if (!standardWorktreeIsolationActive) {
-				rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+					);
+				}
 				await publishScopeBinding(input.callID, directory, correlatedBinding);
 				return;
 			}

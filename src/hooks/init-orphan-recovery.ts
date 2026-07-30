@@ -311,35 +311,35 @@ async function removeOrphanedWorktreeDir(
 	}
 }
 
-	async function crossProcessAdvisoryResult(
-		directory: string,
-		warning: string,
-	): Promise<InitOrphanRecoveryResult> {
-		const result: InitOrphanRecoveryResult = {
-			attempted: true,
-			crossProcessLockHeld: true,
-			warnings: [warning],
-			orphanedBranches: [],
-			removedWorktrees: [],
-			prunedWorktrees: false,
-		};
-		await writeAdvisoryFile(
-			directory,
-			{ removed: [], skipped: [], errors: [] },
-			result.warnings,
-			false,
-			[],
-		);
-		return result;
-	}
+async function crossProcessAdvisoryResult(
+	directory: string,
+	warning: string,
+): Promise<InitOrphanRecoveryResult> {
+	const result: InitOrphanRecoveryResult = {
+		attempted: true,
+		crossProcessLockHeld: true,
+		warnings: [warning],
+		orphanedBranches: [],
+		removedWorktrees: [],
+		prunedWorktrees: false,
+	};
+	await writeAdvisoryFile(
+		directory,
+		{ removed: [], skipped: [], errors: [] },
+		result.warnings,
+		false,
+		[],
+	);
+	return result;
+}
 
-	function worktreePathKey(worktreePath: string, directory: string): string {
-		const absolutePath = path.isAbsolute(worktreePath)
-			? worktreePath
-			: path.resolve(directory, worktreePath);
-		const normalized = path.normalize(absolutePath);
-		return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-	}
+function worktreePathKey(worktreePath: string, directory: string): string {
+	const absolutePath = path.isAbsolute(worktreePath)
+		? worktreePath
+		: path.resolve(directory, worktreePath);
+	const normalized = path.normalize(absolutePath);
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
 
 /**
  * Runs bounded orphan cleanup at plugin init time.
@@ -367,27 +367,27 @@ export async function runInitOrphanRecovery(
 		// Standard worktree provisioning publishes its provisional owner while
 		// holding this same lock, so no worktree can appear after our snapshot
 		// without either its marker being visible or waiting for cleanup to finish.
-			const lockHeld = await isCrossProcessLockHeld(directory);
-			if (lockHeld) {
-				return crossProcessAdvisoryResult(
-					directory,
-					'Cross-process lock held — another opencode process may be active. ' +
-						'Skipping destructive cleanup to preserve its worktrees/branches. ' +
-						"Run '/swarm status' or check '.swarm/locks/' to identify active processes.",
-				);
-			}
-			const lockAcquireResult = await _internals.tryAcquireLock(
+		const lockHeld = await isCrossProcessLockHeld(directory);
+		if (lockHeld) {
+			return crossProcessAdvisoryResult(
 				directory,
-				ORPHAN_RECOVERY_LOCK_FILE,
-				'init-orphan-recovery',
-				'init',
+				'Cross-process lock held — another opencode process may be active. ' +
+					'Skipping destructive cleanup to preserve its worktrees/branches. ' +
+					"Run '/swarm status' or check '.swarm/locks/' to identify active processes.",
 			);
-			if (!lockAcquireResult.acquired) {
-				return crossProcessAdvisoryResult(
-					directory,
-					'Cross-process lifecycle lock was acquired by another process during init; ' +
-						'skipping destructive cleanup to preserve its worktrees/branches.',
-				);
+		}
+		const lockAcquireResult = await _internals.tryAcquireLock(
+			directory,
+			ORPHAN_RECOVERY_LOCK_FILE,
+			'init-orphan-recovery',
+			'init',
+		);
+		if (!lockAcquireResult.acquired) {
+			return crossProcessAdvisoryResult(
+				directory,
+				'Cross-process lifecycle lock was acquired by another process during init; ' +
+					'skipping destructive cleanup to preserve its worktrees/branches.',
+			);
 		}
 		recoveryLockRelease = lockAcquireResult.lock._release;
 
@@ -411,15 +411,15 @@ export async function runInitOrphanRecovery(
 			throw new Error(
 				`worktree provisioning ownership state is uncertain; destructive orphan cleanup skipped: ${provisioningOwnerScan.reason}`,
 			);
+		}
+		for (const owner of provisioningOwnerScan.owners) {
+			if (!activeSessionIds.includes(owner.worktreeSessionId)) {
+				activeSessionIds.push(owner.worktreeSessionId);
 			}
-			for (const owner of provisioningOwnerScan.owners) {
-				if (!activeSessionIds.includes(owner.worktreeSessionId)) {
-					activeSessionIds.push(owner.worktreeSessionId);
-				}
-				if (!activeSessionIds.includes(owner.parentSessionId)) {
-					activeSessionIds.push(owner.parentSessionId);
-				}
+			if (!activeSessionIds.includes(owner.parentSessionId)) {
+				activeSessionIds.push(owner.parentSessionId);
 			}
+		}
 		const ownershipTagScan = await withTimeout(
 			_internals.listOwnershipTagSessionIds(directory),
 			OWNERSHIP_TAG_SCAN_TIMEOUT_MS,
@@ -577,10 +577,7 @@ export async function runInitOrphanRecovery(
 					continue;
 				}
 
-				const error = await removeOrphanedWorktreeDir(
-					worktreePath,
-					directory,
-				);
+				const error = await removeOrphanedWorktreeDir(worktreePath, directory);
 				if (error) {
 					worktreeWarnings.push(
 						`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
@@ -612,7 +609,10 @@ export async function runInitOrphanRecovery(
 			warnings: allWarnings,
 			orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
 			removedWorktrees,
-			prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
+			// #1657 fail-safe: when recovery records are unreadable,
+			// cleanupOrphanedBranches skips ALL lane-branch deletions and
+			// does NOT run `git worktree prune`.
+			prunedWorktrees: cleanupResult.recoveryReadError !== true,
 		};
 
 		// Write advisory file (best-effort) so session-start can surface warnings

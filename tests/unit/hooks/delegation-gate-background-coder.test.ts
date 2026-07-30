@@ -12,6 +12,7 @@ import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { writeDisjointScopes } from './_delegation-gate-helpers';
 
 function git(directory: string, args: string[]): void {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -201,6 +202,8 @@ describe('background coder Stage A provenance', () => {
 				},
 			},
 		);
+		// #1674 v8: scope files required for the inline parallel verdict check
+		writeDisjointScopes(directory, ['1.1', '1.2', '1.3']);
 		const session = ensureAgentSession('parent', 'architect', directory);
 		const hook = createDelegationGateHook(config, directory);
 		const fileByTask = new Map([
