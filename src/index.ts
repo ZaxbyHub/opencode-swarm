@@ -159,7 +159,7 @@ import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import { ensureAgentSession, getActiveWindow, swarmState } from './state';
-import { initTelemetry, telemetry } from './telemetry';
+import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
@@ -716,6 +716,7 @@ async function initializeOpenCodeSwarm(
 	// watchdog around the detached scan.
 	// Ensure .swarm/ exists before repo graph init tries to save the first graph.
 	initTelemetry(ctx.directory);
+	startHeartbeatTracking();
 
 	const repoGraphHook = createRepoGraphBuilderHookForInit(
 		ctx.directory,
@@ -2374,6 +2375,10 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm doctor tools',
 					description:
 						'Use /swarm doctor tools to run tool registration coherence check',
+				},
+				'swarm-context-map-stats': {
+					template: '/swarm context-map stats',
+					description: shortcutDescription('context-map-stats'),
 				},
 				'swarm-link': {
 					template: '/swarm link $ARGUMENTS',

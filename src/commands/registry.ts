@@ -27,6 +27,7 @@ import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
+import { handleContextMapStatsCommand } from './context-map-stats.js';
 import { handleConfigCommand } from './config.js';
 import { handleConsolidateCommand } from './consolidate.js';
 import { handleCostsCommand } from './costs.js';
@@ -385,12 +386,29 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	status: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) => handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
 		toolPolicy: 'agent',
 		toolNoArgs: true,
+	},
+	'context-map stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	// Alias for the hyphenated form '/swarm context-map-stats'. Without it,
+	// resolveCommand(['context-map-stats']) returns null and the TUI shows
+	// "command not found". Mirrors the 'doctor-tools' alias above.
+	'context-map-stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		aliasOf: 'context-map stats',
+		deprecated: true,
 	},
 	'show-plan': {
 		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
@@ -666,7 +684,7 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/doctor',
 	},
 	info: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) => handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		aliasOf: 'status',

@@ -86,6 +86,46 @@ let _projectDirectory: string | null = null;
 const _listeners: TelemetryListener[] = [];
 let _disabled: boolean = false;
 
+// ── Heartbeat tracking (FR-010) ───────────────────────────────────
+// Production listener captures latest heartbeat timestamp per sessionId.
+// Used by /swarm status to render "Last activity: Xs ago".
+let _heartbeatTrackingActive = false;
+const heartbeatTimestamps = new Map<string, number>();
+
+function capHeartbeatMap(): void {
+	// Cap at 500 entries (matches _heartbeatTimers pattern in src/index.ts).
+	while (heartbeatTimestamps.size >= 500) {
+		const oldestKey = heartbeatTimestamps.keys().next().value;
+		if (oldestKey === undefined) break;
+		heartbeatTimestamps.delete(oldestKey);
+	}
+}
+
+export function startHeartbeatTracking(): void {
+	if (_heartbeatTrackingActive) return;
+	_heartbeatTrackingActive = true;
+	addTelemetryListener((event, data) => {
+		if (event !== 'heartbeat') return;
+		const payload = data as { sessionId?: string } | undefined;
+		if (!payload?.sessionId) return;
+		heartbeatTimestamps.set(payload.sessionId, Date.now());
+		capHeartbeatMap();
+	});
+}
+
+export function getLastHeartbeat(sessionId: string): number | undefined {
+	return heartbeatTimestamps.get(sessionId);
+}
+
+export function stopHeartbeatTracking(): void {
+	_heartbeatTrackingActive = false;
+}
+
+export function resetHeartbeatTrackingForTesting(): void {
+	_heartbeatTrackingActive = false;
+	heartbeatTimestamps.clear();
+}
+
 /**
  * Emit counter for rotation throttling. Rotation is checked every
  * `ROTATION_CHECK_INTERVAL` emits so the hot path never pays a `statSync`
@@ -106,6 +146,7 @@ export function resetTelemetryForTesting(): void {
 	_projectDirectory = null;
 	_listeners.length = 0;
 	_emitCount = 0;
+	resetHeartbeatTrackingForTesting();
 	if (_writeStream !== null) {
 		_writeStream.end();
 		_writeStream = null;

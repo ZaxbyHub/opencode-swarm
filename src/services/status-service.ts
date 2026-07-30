@@ -37,6 +37,7 @@ import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
+import { getLastHeartbeat } from '../telemetry';
 
 /**
  * Dependency-injection seam for status-service.
@@ -154,6 +155,16 @@ export interface StatusData {
 		sharedRoot?: string;
 		generation?: number;
 	};
+	/** FR-010: last heartbeat activity for the session */
+	lastActivity?: {
+		sessionId: string;
+		/** epoch ms from getLastHeartbeat */
+		timestamp: number;
+		/** null when no heartbeat recorded */
+		agoMs: number | null;
+		/** human-readable: "5s ago", "12m ago", "2h ago", "never" */
+		agoLabel: string;
+	};
 	/**
 	 * #1850: memory cohort link status. Distinct from `cohort` (knowledge link)
 	 * so status can distinguish knowledge-linked from memory-linked (acceptance
@@ -207,12 +218,27 @@ function readSpecStalenessSnapshot(directory: string): {
 }
 
 /**
+ * Format a millisecond duration as a human-readable ago label.
+ */
+function formatAgo(ms: number): string {
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	const days = Math.floor(hours / 24);
+	return `${days}d ago`;
+}
+
+/**
  * Get status data from the swarm directory.
  * Returns structured data that can be used by GUI, background flows, or commands.
  */
 export async function getStatusData(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	sessionId?: string,
 ): Promise<StatusData> {
 	// Try structured plan first
 	const plan = await loadPlan(directory);
@@ -423,6 +449,27 @@ export async function getStatusData(
 		}
 	}
 
+	// FR-010: populate lastActivity when sessionId is provided.
+	if (sessionId) {
+		const timestamp = getLastHeartbeat(sessionId);
+		if (timestamp !== undefined) {
+			const agoMs = Date.now() - timestamp;
+			status.lastActivity = {
+				sessionId,
+				timestamp,
+				agoMs,
+				agoLabel: formatAgo(agoMs),
+			};
+		} else {
+			status.lastActivity = {
+				sessionId,
+				timestamp: 0,
+				agoMs: null,
+				agoLabel: 'never',
+			};
+		}
+	}
+
 	// Enrich with Lean Turbo data if active
 	return enrichWithLeanTurbo(status, directory);
 }
@@ -535,6 +582,20 @@ export function formatStatusMarkdown(status: StatusData): string {
 		`**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
 		`**Agents**: ${status.agentCount} registered`,
 	];
+
+	// FR-010/FR-011: render last activity
+	if (status.lastActivity) {
+		const label = status.lastActivity.agoLabel;
+		// 'never' means no heartbeat was ever recorded — cannot be stalled
+		const annotation =
+			status.lastActivity.agoLabel !== 'never' &&
+			status.lastActivity.agoMs !== null &&
+			status.lastActivity.agoMs > 120 * 1000
+				? ' \u26a0\ufe0f possibly stalled'
+				: '';
+		lines.push('');
+		lines.push(`**Last activity:** ${label}${annotation}`);
+	}
 
 	// Issue #853 Layer C: spec drift surfacing in /swarm status output.
 	if (status.specStale) {
@@ -747,8 +808,9 @@ export function formatStatusMarkdown(status: StatusData): string {
 export async function handleStatusCommand(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	sessionId?: string,
 ): Promise<string> {
-	const statusData = await getStatusData(directory, agents);
+	const statusData = await getStatusData(directory, agents, sessionId);
 
 	if (!statusData.hasPlan) {
 		// Issue #853 Layer C: surface spec drift even with no active plan, so
