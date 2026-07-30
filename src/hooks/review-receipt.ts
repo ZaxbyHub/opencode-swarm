@@ -834,6 +834,32 @@ export async function updateReviewReceiptValidations(
 }
 
 /**
+ * Parse a receipt from hardened, containment-checked text.
+ *
+ * Index entries are sourced from the editable `index.json` manifest, so the
+ * `filename` field is untrusted: a poisoned entry like `../../outside/secret`
+ * would otherwise escape the receipts directory when joined. Route every index
+ * read through {@link readReviewReceiptText}, which asserts the resolved path
+ * remains directly inside the receipts directory (no traversal, symlink,
+ * junction, or open-time ancestor swap) before reading. Returns null on any
+ * containment failure or unreadable content, matching the prior fail-soft
+ * contract of these readers.
+ */
+function parseReceiptFromIndexEntry(
+	directory: string,
+	filename: string,
+): ReviewReceipt | null {
+	const receiptPath = path.join(resolveReceiptsDir(directory), filename);
+	const content = readReviewReceiptText(directory, receiptPath);
+	if (content === null) return null;
+	try {
+		return JSON.parse(content) as ReviewReceipt;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Read a single receipt by ID. Returns null if not found or unreadable.
  */
 export async function readReceiptById(
@@ -843,14 +869,7 @@ export async function readReceiptById(
 	const index = await readReceiptIndex(directory);
 	const entry = index.entries.find((e) => e.id === receiptId);
 	if (!entry) return null;
-
-	const receiptPath = path.join(resolveReceiptsDir(directory), entry.filename);
-	try {
-		const content = await fs.promises.readFile(receiptPath, 'utf-8');
-		return JSON.parse(content) as ReviewReceipt;
-	} catch {
-		return null;
-	}
+	return parseReceiptFromIndexEntry(directory, entry.filename);
 }
 
 /**
@@ -868,16 +887,8 @@ export async function readReceiptsByScopeHash(
 
 	const receipts: ReviewReceipt[] = [];
 	for (const entry of matching) {
-		const receiptPath = path.join(
-			resolveReceiptsDir(directory),
-			entry.filename,
-		);
-		try {
-			const content = await fs.promises.readFile(receiptPath, 'utf-8');
-			receipts.push(JSON.parse(content) as ReviewReceipt);
-		} catch {
-			// Skip unreadable receipts
-		}
+		const receipt = parseReceiptFromIndexEntry(directory, entry.filename);
+		if (receipt) receipts.push(receipt);
 	}
 	return receipts;
 }
@@ -896,16 +907,8 @@ export async function readAllReceipts(
 
 	const receipts: ReviewReceipt[] = [];
 	for (const entry of sorted) {
-		const receiptPath = path.join(
-			resolveReceiptsDir(directory),
-			entry.filename,
-		);
-		try {
-			const content = await fs.promises.readFile(receiptPath, 'utf-8');
-			receipts.push(JSON.parse(content) as ReviewReceipt);
-		} catch {
-			// Skip unreadable receipts
-		}
+		const receipt = parseReceiptFromIndexEntry(directory, entry.filename);
+		if (receipt) receipts.push(receipt);
 	}
 	return receipts;
 }

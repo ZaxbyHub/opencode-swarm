@@ -94,6 +94,21 @@ function isPathInside(parent: string, candidate: string): boolean {
 	);
 }
 
+function sameFileSnapshot(
+	left: fs.BigIntStats,
+	right: fs.BigIntStats,
+): boolean {
+	return (
+		(left.dev !== 0n || left.ino !== 0n) &&
+		(right.dev !== 0n || right.ino !== 0n) &&
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
+	);
+}
+
 function readEvidence(
 	evidencePath: string | undefined,
 	directory: string,
@@ -105,12 +120,51 @@ function readEvidence(
 
 	let descriptor: number | undefined;
 	try {
-		const stat = fs.lstatSync(candidate);
-		if (!stat.isFile() || stat.size > MAX_EVIDENCE_BYTES) return null;
-		descriptor = fs.openSync(candidate, 'r');
-		const buffer = Buffer.alloc(stat.size);
-		const bytesRead = fs.readSync(descriptor, buffer, 0, stat.size, 0);
-		if (bytesRead !== stat.size) return null;
+		// Capture the path identity before opening, then revalidate against the
+		// opened descriptor. A non-symlink reparse point (Windows junction) or
+		// an ancestor swap between lstat and open would otherwise redirect the
+		// read outside `.swarm/`. Mirrors the readSafeUntracked /
+		// readReviewReceiptText containment pattern in the review subsystem,
+		// including exact BigInt filesystem identities so Windows inode values
+		// above Number.MAX_SAFE_INTEGER cannot alias unrelated paths.
+		const statBeforeOpen = fs.lstatSync(candidate, { bigint: true });
+		if (
+			!statBeforeOpen.isFile() ||
+			statBeforeOpen.isSymbolicLink() ||
+			statBeforeOpen.size > BigInt(MAX_EVIDENCE_BYTES)
+		) {
+			return null;
+		}
+		const canonicalBeforeOpen = fs.realpathSync(candidate);
+		if (!isPathInside(swarmRoot, canonicalBeforeOpen)) return null;
+
+		descriptor = fs.openSync(canonicalBeforeOpen, 'r');
+		const openedBeforeRead = fs.fstatSync(descriptor, { bigint: true });
+		const canonicalAfterOpen = fs.realpathSync(candidate);
+		if (
+			!openedBeforeRead.isFile() ||
+			!sameFileSnapshot(statBeforeOpen, openedBeforeRead) ||
+			!sameFileSnapshot(
+				openedBeforeRead,
+				fs.lstatSync(candidate, { bigint: true }),
+			) ||
+			canonicalBeforeOpen !== canonicalAfterOpen ||
+			!isPathInside(swarmRoot, canonicalAfterOpen)
+		) {
+			return null;
+		}
+
+		// openedBeforeRead.size is bounded by the safe-integer MAX_EVIDENCE_BYTES
+		// immediately above, so this conversion cannot lose precision.
+		const buffer = Buffer.alloc(Number(openedBeforeRead.size));
+		const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+		const openedAfterRead = fs.fstatSync(descriptor, { bigint: true });
+		if (
+			bytesRead !== buffer.length ||
+			!sameFileSnapshot(openedBeforeRead, openedAfterRead)
+		) {
+			return null;
+		}
 		const parsed = JSON.parse(buffer.toString('utf8')) as unknown;
 		return isAutoReviewEvidence(parsed) ? parsed : null;
 	} catch {
