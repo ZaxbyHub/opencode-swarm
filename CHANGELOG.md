@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.132.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.1...v7.132.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* **guardrails:** close implementation-review blockers; unbreak biome ci ([4bb2b80](https://github.com/ZaxbyHub/opencode-swarm/commit/4bb2b800621e95b03b7f2dc2a51d73e536942fe6)), closes [#1976](https://github.com/ZaxbyHub/opencode-swarm/issues/1976)
+* **guardrails:** gate injections that fire on healthy sessions ([f12d9e1](https://github.com/ZaxbyHub/opencode-swarm/commit/f12d9e12fc3b56c68c8a2f0187b063c39dc6bd9b))
+* **guardrails:** gate three advisory injections that fire on healthy sessions ([8585029](https://github.com/ZaxbyHub/opencode-swarm/commit/8585029e9d88c45b3e42cfc3515463bdb640b77e)), closes [#1976](https://github.com/ZaxbyHub/opencode-swarm/issues/1976)
+* **guardrails:** make the no-op bound recency-aware; close final-critic blockers ([2149e5e](https://github.com/ZaxbyHub/opencode-swarm/commit/2149e5e8f03523fcc02a519af95739594b4b358b)), closes [#1976](https://github.com/ZaxbyHub/opencode-swarm/issues/1976)
+* **guardrails:** ship the three obligations the final critic found dropped ([59eef94](https://github.com/ZaxbyHub/opencode-swarm/commit/59eef9419617fe34e3347b93142c1115840637df)), closes [#1976](https://github.com/ZaxbyHub/opencode-swarm/issues/1976)
+* **pr-workflow:** close implementation-review blockers on mode and map bounds ([c4e2f82](https://github.com/ZaxbyHub/opencode-swarm/commit/c4e2f82e005548e9b50123b7af619394f506253c))
+* **pr-workflow:** gate banner injection instead of only throttling it ([a6205b4](https://github.com/ZaxbyHub/opencode-swarm/commit/a6205b41f3199f78d2fef9fba2410f647ffa1a2a))
+* **pr-workflow:** restore the three banner suppression guards ([0e5e8f0](https://github.com/ZaxbyHub/opencode-swarm/commit/0e5e8f0db2bf851c7fae1d78e7eee20b9b9233bb))
+* **syntax-check:** an empty check set no longer records a passing verdict ([83e48d7](https://github.com/ZaxbyHub/opencode-swarm/commit/83e48d75d8e30bb9e1eb10c3b404fe3855cd313b))
+
 ## [7.132.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.0...v7.132.1) (2026-07-28)
 
 
