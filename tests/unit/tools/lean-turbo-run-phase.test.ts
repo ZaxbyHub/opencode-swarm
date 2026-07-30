@@ -198,6 +198,87 @@ describe('mergeBackFailures propagation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// DEGRADED-TASK DETAILS PROPAGATION (#1657, F-012)
+// ---------------------------------------------------------------------------
+
+describe('degradedDetails propagation (#1657)', () => {
+	test('executeLeanTurboRunPhase propagates full degraded-task details (reason/files/requiredMode)', async () => {
+		// #1657: the tool result must carry the full LeanTurboDegradedTask[]
+		// (not just the flattened task-id string array) so the architect sees
+		// per-task degradation reasons inline.
+		const mockDegradedDetails = [
+			{
+				taskId: '1.3',
+				reason: 'global file in scope',
+				files: ['package.json'],
+				requiredMode: 'standard' as const,
+			},
+			{
+				taskId: '1.4',
+				reason: 'protected path (auth)',
+				files: ['src/auth/login.ts'],
+				requiredMode: 'balanced' as const,
+			},
+		];
+
+		const mockRunnerInstance = {
+			runPhase: mock(async () => ({
+				ok: true,
+				lanes: [],
+				degradedTasks: mockDegradedDetails.map((d) => d.taskId),
+				degradedDetails: mockDegradedDetails,
+				serializedTasks: [],
+			})),
+			cleanup: mock(async () => {}),
+			cleanupAfterSuccess: mock(async () => {}),
+			cleanupAfterFailure: mock(async () => {}),
+		};
+
+		const origConstructor = MockLeanTurboRunner;
+		_internals.LeanTurboRunner = mock(function CustomRunner(_options: unknown) {
+			return mockRunnerInstance;
+		}) as any;
+
+		try {
+			const args: LeanTurboRunPhaseArgs = {
+				directory: tmpDir,
+				phase: 1,
+				sessionID: 'test-session',
+			};
+
+			const result = await executeLeanTurboRunPhase(args);
+
+			expect(result.success).toBe(true);
+			// Both the flattened id array AND the full details are present.
+			expect(result.degradedTasks).toEqual(['1.3', '1.4']);
+			expect(result.degradedDetails).toEqual(mockDegradedDetails);
+			// Sanity: the details carry the reason/files/requiredMode fields
+			// (not just task ids).
+			expect(result.degradedDetails![0].reason).toBe('global file in scope');
+			expect(result.degradedDetails![0].files).toEqual(['package.json']);
+			expect(result.degradedDetails![0].requiredMode).toBe('standard');
+			expect(result.degradedDetails![1].requiredMode).toBe('balanced');
+		} finally {
+			_internals.LeanTurboRunner = origConstructor;
+		}
+	});
+
+	test('executeLeanTurboRunPhase omits degradedDetails when runner omits it', async () => {
+		// Default mock returns no degradedDetails.
+		const args: LeanTurboRunPhaseArgs = {
+			directory: tmpDir,
+			phase: 1,
+			sessionID: 'test-session',
+		};
+
+		const result = await executeLeanTurboRunPhase(args);
+
+		expect(result.success).toBe(true);
+		expect(result.degradedDetails).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // CONFIG PROPAGATION TESTS
 // ---------------------------------------------------------------------------
 

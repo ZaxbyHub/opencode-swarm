@@ -13,6 +13,8 @@ export { co_change_analyzer } from './co-change-analyzer';
 export { completion_verify } from './completion-verify';
 // v6.5
 export { complexity_hotspots } from './complexity-hotspots';
+// Issue #1821 Workstream C — cross-run consensus mining (proposals only).
+export { consensus_mine } from './consensus-mine';
 export { context_status } from './context-status';
 export { submit_council_verdicts } from './convene-council';
 export { convene_general_council } from './convene-general-council';
@@ -62,6 +64,7 @@ export {
 	placeholder_scan,
 	placeholderScan,
 } from './placeholder-scan';
+export { plan_conflict_check } from './plan-conflict-check';
 export { pr_workflow_status } from './pr-workflow-status';
 // v6.10
 export {

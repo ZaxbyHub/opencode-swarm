@@ -267,6 +267,11 @@ export const TOOL_METADATA = {
 			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
 		agents: ['architect'],
 	},
+	plan_conflict_check: {
+		description:
+			'read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups using declared scopes and optional git co-change; returns a verdict (all_disjoint / conflicts_present / unknown_scopes), per-pair evidence, and a suggested serialization order. Writes nothing — the execution gate independently recomputes the verdict inline at dispatch time via the same helper. Call BEFORE attempting parallel dispatch to confirm disjointness.',
+		agents: ['architect'],
+	},
 	write_pr_review_trigger_eval: {
 		description:
 			'persist the complete PR-review trigger evaluation with exact-set validation, dispatch provenance, and live merge-base verification',
@@ -359,6 +364,13 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+		// Safe to gate-allow: read-only retrieval of a stored summary artifact.
+		// Necessary: the summarizer advertises this tool as the recovery path for
+		// truncated outputs, so it must remain reachable during PR workflows.
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	retrieve_lane_output: {
 		description:
@@ -446,6 +458,22 @@ export const TOOL_METADATA = {
 		description:
 			'run curator phase analysis and optionally apply knowledge recommendations',
 		agents: ['architect'],
+	},
+	consensus_mine: {
+		// Rendered into the architect system prompt, so it must not imply a single
+		// artifact. Naming only the report was false: the run also prunes its own
+		// older reports and appends to the shared recommendation dedup ledger,
+		// whose root is `resolveKnowledgeStoreDir` — under a knowledge-link pointer
+		// that ledger write lands in the shared cohort root, outside this project.
+		description:
+			'mine cross-run consensus from existing .swarm evidence into an immutable proposals-only report; also deletes its own reports past consensus.report_retention, appends to the shared recommendation dedup ledger (in the shared cohort root, outside this project, when a knowledge link is active), and mirrors proposals into pending swarm-memory proposals when memory is enabled',
+		// The curator phase/postmortem roles are the consumers of cross-run
+		// evidence; `curator` itself is NOT an AgentName (see
+		// src/config/agent-names.ts) and using it here would be a compile error.
+		agents: ['architect', 'curator_phase', 'curator_postmortem'],
+		// `prWorkflow` is deliberately omitted: omitted tools are fail-closed in
+		// PR_REVIEW / PR_FEEDBACK, which is the correct posture for a tool that
+		// writes .swarm state during a review-only workflow.
 	},
 	knowledge_add: {
 		description: 'store a new lesson in the knowledge base',
@@ -757,7 +785,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates.',
+			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

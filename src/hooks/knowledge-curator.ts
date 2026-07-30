@@ -20,6 +20,7 @@ import {
 } from './knowledge-events.js';
 import {
 	findActiveSwarmNearDuplicate,
+	isActiveSwarmKnowledgeEntry,
 	reinforceSwarmKnowledgeEntry,
 } from './knowledge-reinforcement.js';
 import {
@@ -27,6 +28,7 @@ import {
 	appendRetractionRecord,
 	computeConfidence,
 	computeOutcomeSignal,
+	dedupeCapped,
 	enforceKnowledgeCap,
 	inferTags,
 	normalize,
@@ -55,8 +57,12 @@ import {
 	validateLesson,
 } from './knowledge-validator.js';
 import {
+	findInsightAdmissionMarker,
 	type InsightCandidate,
+	insightAdmissionMarker,
+	resolveInsightCandidateId,
 	resolveInsightCandidatesPath,
+	unionInsightMarker,
 } from './micro-reflector.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
 
@@ -947,6 +953,45 @@ export async function consumeInsightCandidates(
 		return [];
 	}
 }
+/**
+ * Find an ACTIVE entry already stamped with an insight-admission marker
+ * (issue #1821 D1).
+ *
+ * The active filter is applied HERE deliberately. `snapshotPlusNew` and the
+ * in-transaction `current` array both hold ALL entries including archived and
+ * retracted ones; the active predicate normally lives inside
+ * `findActiveSwarmNearDuplicate`, and a marker scan that skipped it would treat
+ * an archived entry's stale marker as proof of admission and silently drop a
+ * legitimate candidate.
+ *
+ * Module-private. It was exported when D1 landed on this branch and never
+ * acquired an importer; its three callers are all in this file, and the
+ * behaviour above is asserted end-to-end through `curateAndStoreSwarm` in
+ * `tests/unit/learning/admission-idempotency-checks.test.ts`. It is deliberately
+ * NOT added to this module's `_internals` seam either — that seam exists so
+ * tests can SUBSTITUTE a dependency, and nothing needs to substitute this.
+ */
+function findActiveEntryWithInsightMarker(
+	entries: SwarmKnowledgeEntry[],
+	marker: string,
+): SwarmKnowledgeEntry | undefined {
+	return entries.find(
+		(entry) =>
+			isActiveSwarmKnowledgeEntry(entry) &&
+			(entry.source_knowledge_ids ?? []).includes(marker),
+	);
+}
+
+/** Union a marker into an entry's existing `source_knowledge_ids`. */
+function stampInsightMarker(entry: SwarmKnowledgeEntry, marker: string): void {
+	// Bounded union — see `unionInsightMarker`. `source_knowledge_ids` is exempt
+	// from the store's write-path array cap, so it must be bounded at the producer.
+	entry.source_knowledge_ids = unionInsightMarker(
+		entry.source_knowledge_ids,
+		marker,
+	);
+}
+
 /** Build a SwarmKnowledgeEntry from an already-v3-actionable insight candidate. */
 export function insightCandidateToEntry(
 	cand: InsightCandidate,
@@ -965,7 +1010,10 @@ export function insightCandidateToEntry(
 		tier: 'swarm',
 		lesson: cand.lesson.slice(0, 280),
 		category,
-		tags: Array.isArray(cand.tags) ? cand.tags.slice(0, 20) : [],
+		// #1821: dedupe (case-insensitive, first casing wins) before the cap so a
+		// run of duplicate tags cannot evict distinct ones. dedupeCapped also
+		// drops non-string items, which the bare slice did not.
+		tags: dedupeCapped(cand.tags, { cap: 20 }),
 		scope: 'global',
 		confidence: computeConfidence(1, true),
 		status: 'candidate',
@@ -993,9 +1041,16 @@ export function insightCandidateToEntry(
 		verification_checks: cand.verification_checks,
 		triggers: cand.triggers,
 		directive_priority: cand.directive_priority,
-		source_knowledge_ids: cand.source?.task_id
-			? [`task:${cand.source.task_id}`]
-			: undefined,
+		// #1821 D1: UNION, not assignment. The `insight:<id>` marker must be
+		// present even when the candidate carries no `task_id` — it is the ONLY
+		// thing that lets the fold-in recognise a candidate real-time admission
+		// already handled. Phase-number matching cannot serve that purpose:
+		// `curateAndStoreSwarm` has five callers that resolve the phase
+		// differently (`close.ts` hardcodes 0, the plan.md path falls back to 1).
+		source_knowledge_ids: [
+			...(cand.source?.task_id ? [`task:${cand.source.task_id}`] : []),
+			insightAdmissionMarker(resolveInsightCandidateId(cand)),
+		],
 	};
 }
 /**
@@ -1053,6 +1108,13 @@ export async function curateAndStoreSwarm(
 	const snapshotPlusNew: SwarmKnowledgeEntry[] = [...snapshot];
 	const toAdd: SwarmKnowledgeEntry[] = [];
 	const pendingReinforcementIds = new Set<string>();
+	/**
+	 * #1821 D1: reinforcements requested by an INSIGHT candidate, carrying the
+	 * candidate's marker. Kept apart from `pendingReinforcementIds` (which holds
+	 * retro-lesson reinforcements) because each of these must be re-tested
+	 * against fresh disk state inside the transaction.
+	 */
+	const insightReinforcements: Array<{ entryId: string; marker: string }> = [];
 	const pendingBatchEnrichment: Array<{
 		entry: SwarmKnowledgeEntry;
 		lesson: string;
@@ -1252,13 +1314,29 @@ export async function curateAndStoreSwarm(
 				}
 				continue;
 			}
+			// #1821 D1 CHECK 1 (pre-transaction): real-time admission may already
+			// have confirmed this exact candidate earlier in the SAME session. Skip
+			// it before it can reach `reinforceSwarmKnowledgeEntry`, which is NOT a
+			// no-op — it appends a `confirmed_by` record and recomputes confidence,
+			// and `phaseNumbers.size >= 3` feeds hive eligibility route 1
+			// (`hive-policy.ts`). Double-confirming silently inflates confidence and
+			// pushes entries toward automatic promotion.
+			const marker = insightAdmissionMarker(resolveInsightCandidateId(cand));
+			if (findActiveEntryWithInsightMarker(snapshotPlusNew, marker)) {
+				skipped++;
+				continue;
+			}
 			const duplicate = findActiveSwarmNearDuplicate(
 				entry.lesson,
 				snapshotPlusNew,
 				config.dedup_threshold,
 			);
 			if (duplicate) {
-				pendingReinforcementIds.add(duplicate.id);
+				// Routed through a SEPARATE list rather than `pendingReinforcementIds`
+				// so check 2 can re-test this reinforcement against fresh disk state.
+				// A real-time admission that REINFORCED this same entry inside the
+				// snapshot-staleness window is invisible to check 1.
+				insightReinforcements.push({ entryId: duplicate.id, marker });
 				skipped++;
 				continue;
 			}
@@ -1273,7 +1351,11 @@ export async function curateAndStoreSwarm(
 	// same lesson).
 	let stored = 0;
 	let reinforced = 0;
-	if (toAdd.length > 0 || pendingReinforcementIds.size > 0) {
+	if (
+		toAdd.length > 0 ||
+		pendingReinforcementIds.size > 0 ||
+		insightReinforcements.length > 0
+	) {
 		await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (current) => {
 			let changed = false;
 			for (const id of pendingReinforcementIds) {
@@ -1289,8 +1371,46 @@ export async function curateAndStoreSwarm(
 					changed = true;
 				}
 			}
+			// #1821 D1 CHECK 2a: insight-sourced reinforcements, re-tested against
+			// FRESH disk state. `snapshotPlusNew` was read before the LLM enrichment
+			// loop and before `consumeInsightCandidates`, so a real-time admission
+			// committed in that window is invisible to check 1.
+			for (const request of insightReinforcements) {
+				// Full marker SCAN, symmetric with check 1 — deliberately NOT just a
+				// lookup on `request.entryId`. The entry this fold-in picked and the one
+				// real-time admission picked can differ: `findNearDuplicate` is
+				// first-match over the array and `request.entryId` was chosen from the
+				// STALE snapshot, so a targeted check could miss the marker and confirm a
+				// second entry for a candidate already accounted for.
+				if (findActiveEntryWithInsightMarker(current, request.marker)) {
+					continue; // already admitted in real time — do NOT confirm twice
+				}
+				const existing = current.find((e) => e.id === request.entryId);
+				if (!existing || !isActiveSwarmKnowledgeEntry(existing)) continue;
+				const result = reinforceSwarmKnowledgeEntry(existing, {
+					phase_number: phaseInfo.phase_number,
+					confirmed_at: new Date().toISOString(),
+					project_name: projectName,
+				});
+				if (result.reinforced) {
+					// `reinforceSwarmKnowledgeEntry` does NOT write
+					// `source_knowledge_ids`, so stamp it here — otherwise this
+					// reinforcement stays unmarked and a later pass repeats it.
+					stampInsightMarker(existing, request.marker);
+					reinforced++;
+					changed = true;
+				}
+			}
 			const trulyNew: SwarmKnowledgeEntry[] = [];
 			for (const entry of toAdd) {
+				// #1821 D1 CHECK 2b: an insight-derived NEW entry whose candidate was
+				// admitted in the staleness window would otherwise fall through to the
+				// near-duplicate branch below and reinforce the just-admitted entry.
+				const marker = findInsightAdmissionMarker(entry.source_knowledge_ids);
+				if (marker && findActiveEntryWithInsightMarker(current, marker)) {
+					skipped++;
+					continue;
+				}
 				const duplicate = findActiveSwarmNearDuplicate(
 					entry.lesson,
 					current,
@@ -1304,6 +1424,7 @@ export async function curateAndStoreSwarm(
 						project_name: projectName,
 					});
 					if (result.reinforced) {
+						if (marker) stampInsightMarker(duplicate, marker);
 						reinforced++;
 						changed = true;
 					}

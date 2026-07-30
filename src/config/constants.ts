@@ -342,6 +342,38 @@ export const WRITE_TOOL_NAMES = [
 
 export type WriteToolName = (typeof WRITE_TOOL_NAMES)[number];
 
+/**
+ * Single source of truth for tools that must NEVER have their output rewritten
+ * by the tool-output summarizer (tool-summarizer.ts) or the context-budget
+ * tool-output masker (context-budget.ts). Two independent admission reasons:
+ *
+ *   (a) Retrieval tools (`retrieve_summary`, `retrieve_lane_output`, `task`,
+ *       `read`) — rewriting their output would destroy the recovery mechanism
+ *       itself, creating a retrieval loop where the summary/artifact gets
+ *       summarized again.
+ *   (b) Ref-carrying lane tools (`dispatch_lanes`, `dispatch_lanes_async`,
+ *       `collect_lane_results`, `parse_lane_candidates`) — their payloads are
+ *       already self-bounding AND carry the `output_ref`/structured rows that
+ *       the PR-workflow gate requires to settle lanes. Rewriting them to a
+ *       type-signature summary destroys the rows and the refs, so the gate
+ *       can never settle and the model cannot recover.
+ *
+ * This list is a FLOOR, not a default: every consumer must treat these tool
+ * names as always exempt regardless of operator-supplied `exempt_tools`
+ * config — an operator narrowing `exempt_tools` must never be able to strip
+ * this floor.
+ */
+export const SUMMARIZER_EXEMPT_TOOL_NAMES = [
+	'retrieve_summary',
+	'retrieve_lane_output',
+	'task',
+	'read',
+	'dispatch_lanes',
+	'dispatch_lanes_async',
+	'collect_lane_results',
+	'parse_lane_candidates',
+] as const;
+
 // Default models for each agent/category
 // v6.14: switched to free OpenCode Zen models; architect key intentionally
 // omitted so it inherits the OpenCode UI model selection.

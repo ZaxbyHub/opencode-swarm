@@ -41,27 +41,52 @@ export const DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES = 5;
 export const DEFAULT_WAKE_COOLDOWN_MS = 30_000;
 
 /**
- * Minimum time between FULL workflow banners prepended to a single session's
- * completed text parts. The textComplete hook prepends a banner to every
- * architect text part while the durable gate exists; without a cooldown a
- * burst of reasoning parts repeats the full multi-line banner many times
- * (field report: ~8 repeats between two model thoughts). Within the cooldown a
- * short one-line marker is prepended instead; the full banner (and its
- * suspension/interruption recovery notices) returns once the cooldown elapses.
+ * Minimum time between FULL workflow banners for a single session. The banner
+ * is injected at most once per assistant MESSAGE (see the `banneredMessages`
+ * map in {@link createPrWorkflowResponseGate}); this cooldown only chooses
+ * whether that one injection is the full multi-line banner or the short
+ * one-line marker.
  *
- * The input event exposes only `{ sessionID }` — there is NO message/part ID —
- * so this dedupe is necessarily a per-session cooldown, not a per-message one.
- *
- * Suspended and user-interrupted states BYPASS the cooldown entirely: those are
- * invariant-10 operational notices that must appear in full on every part.
+ * Suspended and user-interrupted states BYPASS the cooldown: those are
+ * invariant-10 operational notices that must not be downgraded to the short
+ * marker. They are still subject to the per-message dedupe — "always visible"
+ * means visible on every user-facing turn, not repeated on every part of it.
  * Overridable via `createPrWorkflowResponseGate({ bannerCooldownMs })`.
  */
 export const DEFAULT_BANNER_COOLDOWN_MS = 20_000;
 
 /**
+ * Absolute per-session injection ceiling used ONLY when the host does not
+ * supply `messageID`. The pinned host contract
+ * (`@opencode-ai/plugin` `index.d.ts`: `experimental.text.complete` receives
+ * `{ sessionID, messageID, partID }`, all required) always supplies it, so this
+ * path is defensive. Without a ceiling, a host that omitted `messageID` would
+ * fall back to the wall-clock window alone — which is exactly the behavior that
+ * produced the measured flood (968 marker-only lines, 55.3% of a real review
+ * transcript), because a cooldown only downgrades an injection, it never
+ * suppresses one.
+ */
+export const MAX_FALLBACK_BANNER_INJECTIONS_PER_SESSION = 20;
+
+/**
+ * Structural prefix of every banner this module emits, in either mode and in
+ * both the full and short forms. Used to make injection idempotent: if a text
+ * part already opens with a banner (host write-back of a previously mutated
+ * buffer, or a model that opened its turn by quoting one) a second banner is
+ * never stacked on top. Anchored at `^` on purpose — a reviewer lane quoting
+ * this file's banner literal MID-part is legitimate content and must not be
+ * mistaken for an injection.
+ */
+const BANNER_PREFIX_PATTERN =
+	/^--- \[(?:PR_REVIEW|PR_FEEDBACK) WORKFLOW ACTIVE/;
+
+/**
  * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global
- * state): module-level state must have an explicit eviction strategy. The
- * banner-stamp map (last full-banner instant per session) shares this bound.
+ * state): module-level state must have an explicit eviction strategy. Three
+ * further per-session maps share this same bound and the same FIFO discipline:
+ * `bannerStamps` (instant of the last full banner), `banneredMessages` (the
+ * assistant message already carrying a banner), and `fallbackInjections` (the
+ * injection count on the messageID-less path).
  */
 export const MAX_TRACKED_WAKE_SESSIONS = 200;
 
@@ -134,9 +159,9 @@ function blockedText(
  * see the architect's reasoning and progress while being clearly informed
  * that the output is not a terminal verdict.
  *
- * Recovery instructions for suspended/interrupted states are always present
- * in the banner so they remain visible on every text part regardless of
- * content.
+ * Recovery instructions for suspended/interrupted states are always present in
+ * the banner, so the one injection made for a message always names the recovery
+ * path when the session is suspended or interrupted.
  */
 function workflowBanner(
 	mode: string,
@@ -165,19 +190,23 @@ function workflowBanner(
 
 /**
  * Prevent an architect from masquerading a premature text output as a terminal
- * verdict. The text-complete hook prepends a workflow-active banner to
- * architect-session text parts while the durable gate exists; the model's
- * original text is preserved below the banner. To avoid spamming the full
- * multi-line banner across a burst of reasoning parts, the full banner is
- * throttled per session (see DEFAULT_BANNER_COOLDOWN_MS) — within the cooldown a
- * short one-line marker is prepended instead. session.idle then mechanically
- * resumes that session.
+ * verdict. The text-complete hook prepends a workflow-active banner to the
+ * FIRST substantive text part of each architect message while the durable gate
+ * exists; the model's original text is preserved below the banner.
  *
- * The resume loop is bounded (see DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES)
- * so a session that cannot make progress suspends instead of spinning
- * forever. Suspended and user-interrupted parts bypass the cooldown and always
- * carry the full suspension/interruption recovery notices so the user-visible
- * surface always names the recovery path.
+ * Injection is bounded on three independent axes, because a banner that is
+ * merely throttled is still injected on every part:
+ *   1. blank parts are never decorated (a banner labelling no content is noise);
+ *   2. a part that already opens with a banner is never re-decorated;
+ *   3. at most ONE injection per assistant `messageID`.
+ * The wall-clock cooldown (see DEFAULT_BANNER_COOLDOWN_MS) then only chooses
+ * whether that single injection is the full banner or the short marker.
+ *
+ * session.idle mechanically resumes a gated session. The resume loop is bounded
+ * (see DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES) so a session that cannot make
+ * progress suspends instead of spinning forever. Suspended and user-interrupted
+ * messages bypass the cooldown so their recovery notices are never downgraded to
+ * the short marker.
  */
 export function createPrWorkflowResponseGate(options: {
 	directory: string;
@@ -203,6 +232,22 @@ export function createPrWorkflowResponseGate(options: {
 	 * {@link resetBudget} when the gate clears.
 	 */
 	const bannerStamps = new Map<string, number>();
+	/**
+	 * Per-session `messageID` of the assistant message that already carries a
+	 * banner. The host supplies `messageID` on every `experimental.text.complete`
+	 * invocation, and one assistant message spans the whole multi-step agentic
+	 * loop — so keying on it collapses a burst of text parts down to a single
+	 * injection per user-facing turn. Bounded with the same FIFO discipline as
+	 * {@link wakeBudgets} (invariant 8) and cleared in `resetBudget`.
+	 */
+	const banneredMessages = new Map<string, string>();
+	/**
+	 * Per-session injection count for the defensive path taken only when the host
+	 * omits `messageID` (see
+	 * {@link MAX_FALLBACK_BANNER_INJECTIONS_PER_SESSION}). Bounded and cleared
+	 * alongside the maps above.
+	 */
+	const fallbackInjections = new Map<string, number>();
 	const session = options.client?.session as SessionClient | undefined;
 
 	/** FIFO-evict the oldest budget entry when the map exceeds the bound. */
@@ -215,14 +260,27 @@ export function createPrWorkflowResponseGate(options: {
 	}
 
 	/**
-	 * FIFO-evict the oldest banner-stamp entry when the map exceeds the bound.
-	 * Mirrors {@link evictIfOverBound} for the banner-dedupe map (invariant 8).
+	 * FIFO-evict the oldest entry from each of the three banner-dedupe maps when
+	 * it exceeds the bound. Mirrors {@link evictIfOverBound} (invariant 8).
+	 * Call this at every site that INSERTS into any of them, so the bound is
+	 * enforced by the code rather than by an argument about which branches
+	 * happen to run together.
 	 */
-	function evictBannerStampsIfOverBound(): void {
+	function evictBannerDedupeMapsIfOverBound(): void {
 		while (bannerStamps.size > MAX_TRACKED_WAKE_SESSIONS) {
 			const oldestKey = bannerStamps.keys().next().value;
 			if (oldestKey === undefined) break;
 			bannerStamps.delete(oldestKey);
+		}
+		while (banneredMessages.size > MAX_TRACKED_WAKE_SESSIONS) {
+			const oldestKey = banneredMessages.keys().next().value;
+			if (oldestKey === undefined) break;
+			banneredMessages.delete(oldestKey);
+		}
+		while (fallbackInjections.size > MAX_TRACKED_WAKE_SESSIONS) {
+			const oldestKey = fallbackInjections.keys().next().value;
+			if (oldestKey === undefined) break;
+			fallbackInjections.delete(oldestKey);
 		}
 	}
 
@@ -235,10 +293,12 @@ export function createPrWorkflowResponseGate(options: {
 	function resetBudget(sessionID: string): void {
 		wakeBudgets.delete(sessionID);
 		bannerStamps.delete(sessionID);
+		banneredMessages.delete(sessionID);
+		fallbackInjections.delete(sessionID);
 	}
 
 	const textComplete = async (
-		input: { sessionID?: string },
+		input: { sessionID?: string; messageID?: string; partID?: string },
 		output: { text: string },
 	): Promise<void> => {
 		if (!input.sessionID?.trim()) return;
@@ -254,6 +314,45 @@ export function createPrWorkflowResponseGate(options: {
 			clearPrWorkflowAutoWakeState(options.directory, input.sessionID);
 			return;
 		}
+		// (1) Never decorate a blank part. OpenCode completes empty text parts
+		// between tool calls and reasoning segments; a banner attached to no
+		// content is pure noise, and it was the dominant term in the measured
+		// flood — 968 of ~1015 injections in a real review transcript were
+		// marker-only lines with no model prose, including one unbroken run of
+		// 95. AGENTS.md invariant 10: "Do not emit diagnostic noise into
+		// chat-visible streams."
+		if (!output.text.trim()) return;
+		// (2) Never stack a banner on text that already opens with one. Guards
+		// against a host that hands back a previously mutated buffer, and against
+		// a model that opens its turn by quoting the banner. Anchored at the
+		// start of the part, so a reviewer lane quoting this file mid-part is
+		// untouched.
+		if (BANNER_PREFIX_PATTERN.test(output.text)) return;
+		// (3) At most one injection per assistant message. The host supplies
+		// `messageID` on every invocation (`@opencode-ai/plugin`
+		// `index.d.ts`: `experimental.text.complete` receives
+		// `{ sessionID, messageID, partID }`, all required), and one assistant
+		// message spans the entire multi-step loop — so this is what actually
+		// collapses a burst of parts to a single user-facing notice. Keying on
+		// `partID` instead would suppress nothing: part IDs never repeat.
+		const messageID = input.messageID?.trim();
+		if (messageID) {
+			if (banneredMessages.get(input.sessionID) === messageID) return;
+		} else {
+			// Defensive path: host omitted `messageID`. The wall-clock window
+			// alone cannot bound injections, so apply an absolute ceiling.
+			const injected = fallbackInjections.get(input.sessionID) ?? 0;
+			if (injected >= MAX_FALLBACK_BANNER_INJECTIONS_PER_SESSION) return;
+			fallbackInjections.set(input.sessionID, injected + 1);
+			// Evict at the INSERT site. The bound was previously satisfied only
+			// incidentally — a new key here was always followed by the eviction on
+			// the full-banner path further down — but that argument runs three
+			// branches deep and any early return added between here and there
+			// would silently unbound the map. Invariant 8 wants a structural
+			// guarantee, not a provable coincidence.
+			evictBannerDedupeMapsIfOverBound();
+		}
+
 		const budget = wakeBudgets.get(input.sessionID);
 		const suspended = budget?.suspended ?? false;
 		const userInterrupted = isPrWorkflowAutoWakeSuppressed(
@@ -261,27 +360,29 @@ export function createPrWorkflowResponseGate(options: {
 			input.sessionID,
 		);
 		// Suspended and user-interrupted states carry invariant-10 operational
-		// recovery notices that MUST appear on every text part — never deduped.
-		// Every other part is throttled by a per-session cooldown so a burst of
-		// reasoning parts does not repeat the full multi-line banner (field
-		// report: ~8 repeats between two model thoughts). The input exposes only
-		// { sessionID } — no message/part ID — so the dedupe is a per-session
-		// cooldown, not per-message. Uses Date.now() to match the wake-budget
-		// path's clock (see `now` in the idle handler below); tests freeze the
-		// clock via the test-clock helper to exercise cooldown boundaries.
+		// recovery notices that must never be DOWNGRADED to the short marker, so
+		// they bypass the wall-clock cooldown. They remain subject to the
+		// per-message dedupe above: "always visible" means visible on every
+		// user-facing turn, not repeated on every part of one. Uses Date.now() to
+		// match the wake-budget path's clock (see `now` in the idle handler
+		// below); tests freeze the clock via the test-clock helper to exercise
+		// cooldown boundaries.
 		const forceFullBanner = suspended || userInterrupted;
 		const now = Date.now();
 		const lastBannerAt = bannerStamps.get(input.sessionID);
 		const withinCooldown =
 			lastBannerAt !== undefined && now - lastBannerAt < bannerCooldownMs;
+		if (messageID) {
+			banneredMessages.set(input.sessionID, messageID);
+			evictBannerDedupeMapsIfOverBound();
+		}
 		if (!forceFullBanner && withinCooldown) {
 			// A full banner was shown for this session within the cooldown
 			// window — prepend only a short active marker so the user still
-			// knows the output is gated without re-reading the full banner on
-			// every part. The stamp is NOT refreshed here, so the cooldown is
-			// measured from the last FULL banner and the full form reliably
-			// returns once it elapses. The model's original text is preserved
-			// below the marker.
+			// knows the output is gated without re-reading the full banner. The
+			// stamp is NOT refreshed here, so the cooldown is measured from the
+			// last FULL banner and the full form reliably returns once it
+			// elapses. The model's original text is preserved below the marker.
 			output.text = `--- [${state.mode} WORKFLOW ACTIVE] ---\n\n${output.text}`;
 			return;
 		}
@@ -297,7 +398,7 @@ export function createPrWorkflowResponseGate(options: {
 			maxConsecutive: maxConsecutive,
 		});
 		bannerStamps.set(input.sessionID, now);
-		evictBannerStampsIfOverBound();
+		evictBannerDedupeMapsIfOverBound();
 		output.text = `${banner}\n\n${output.text}`;
 	};
 
@@ -353,8 +454,10 @@ export function createPrWorkflowResponseGate(options: {
 				wakeBudgets.set(sessionID, budget);
 			}
 			// Suspend check: once the consecutive-unproductive budget is
-			// exhausted, never auto-resume again. textComplete still rewrites
-			// text so the user sees the recovery instructions on their next turn.
+			// exhausted, never auto-resume again. textComplete still prepends the
+			// full banner — carrying the suspension recovery notice, never
+			// downgraded to the short marker — to the first substantive part of
+			// the user's next turn.
 			if (budget.suspended) return;
 
 			const now = Date.now();

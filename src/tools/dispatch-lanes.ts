@@ -59,8 +59,64 @@ const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
+const MAX_ZOD_ISSUES_LISTED = 20;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
+
+/**
+ * Bound on how many "already delivered lane output" keys we remember
+ * (invariant 8: module-level state must have an explicit eviction strategy).
+ * `collect_lane_results` is polled repeatedly by the PR-review protocol; once
+ * a settled lane's output has been delivered once, re-delivering the same
+ * bounded preview on every subsequent poll is the dominant controller-context
+ * driver behind PR-review compaction loops (see S1.1). This Set tracks which
+ * `${batchId}\0${laneId}\0${digest}` keys have already been sent so later
+ * polls can omit the `output` field (setting `output_omitted_repeat: true`
+ * instead) while still returning every other metadata field unchanged.
+ *
+ * This is in-memory by design: a process restart re-delivers each preview
+ * once more, which is harmless because `output` is only ever suppressed
+ * when BOTH a digest AND a durable ref (`output_ref`, recoverable via
+ * `retrieve_lane_output`) are present. If either is missing — e.g. the
+ * artifact write failed (disk full, permission error) or the text was too
+ * large to store — this falls open and keeps delivering `output` inline on
+ * every poll, since there would otherwise be no way to recover the text.
+ *
+ * Cross-session caveat: When two sessions in different directories reuse the
+ * same `batch_id`, `laneId`, and produce byte-identical output (identical
+ * digest), the second session's first inline delivery may be suppressed as
+ * though already delivered; subsequent polls correctly return metadata and
+ * `output_ref`. This is degraded-not-broken because `output_ref` is always
+ * returned and `retrieve_lane_output` recovers the full text.
+ */
+const MAX_TRACKED_DELIVERED_LANE_OUTPUTS = 1024;
+const deliveredLaneOutputs = new Set<string>();
+
+/** FIFO-evict the oldest delivered-output key when the set exceeds the bound. */
+function evictDeliveredLaneOutputsIfOverBound(): void {
+	while (deliveredLaneOutputs.size > MAX_TRACKED_DELIVERED_LANE_OUTPUTS) {
+		const oldestKey = deliveredLaneOutputs.values().next().value;
+		if (oldestKey === undefined) break;
+		deliveredLaneOutputs.delete(oldestKey);
+	}
+}
+
+/**
+ * Formats a Zod issue list for error output, bounded to the first
+ * {@link MAX_ZOD_ISSUES_LISTED} entries with a trailing "... and N more"
+ * marker when truncated. A badly-malformed multi-lane payload can otherwise
+ * produce dozens of issue lines, uncapped unlike every other error path in
+ * this file (see MAX_ERROR_CHARS).
+ */
+function boundZodIssues(issues: readonly z.ZodIssue[]): string[] {
+	const formatted = issues.map(
+		(issue) => `${issue.path.join('.')}: ${issue.message}`,
+	);
+	if (formatted.length <= MAX_ZOD_ISSUES_LISTED) return formatted;
+	const shown = formatted.slice(0, MAX_ZOD_ISSUES_LISTED);
+	shown.push(`... and ${formatted.length - MAX_ZOD_ISSUES_LISTED} more`);
+	return shown;
+}
 
 const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
 	'intent-architecture':
@@ -167,6 +223,9 @@ const READ_ONLY_TOOL_DENYLIST = [
 		'write_mutation_evidence',
 		'knowledge_add',
 		'knowledge_remove',
+		// Issue #1821 Workstream C: mining persists a report under `.swarm/`,
+		// so it must not run inside a read-only lane.
+		'consensus_mine',
 		'summarize_work',
 		'doc_scan',
 		'lint',
@@ -292,16 +351,31 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.min(1)
 		.max(80)
 		.optional()
-		.describe('Advisory workflow mode, such as deep-dive or swarm-pr-review'),
-	pr_head_sha: z.string().min(1).max(80).optional(),
+		.describe(
+			'Advisory workflow mode, such as deep-dive. PR-review stages are COLON-SUFFIXED and the suffix is required. Accepted values: swarm-pr-review:base, swarm-pr-review:micro, swarm-pr-review:council, swarm-pr-review:reviewer, swarm-pr-review:critic, swarm-pr-feedback:verification. A bare "swarm-pr-review" does NOT enter the PR-review path — it skips the merge-base bind and later fails with "exact merge-base scope was not verified".',
+		),
+	pr_head_sha: z
+		.string()
+		.min(1)
+		.max(80)
+		.optional()
+		.describe(
+			'Full 40-char SHA of the PR head commit under review. Required when mode starts with swarm-pr-review: or swarm-pr-feedback:.',
+		),
 	base_sha: z
 		.string()
 		.regex(/^[0-9a-f]{6,64}$/i)
-		.optional(),
+		.optional()
+		.describe(
+			'Exact merge base of base_ref and pr_head_sha — NOT the base branch tip. The controller recomputes `git merge-base -- <base_ref> <pr_head_sha>` and rejects any mismatch. Required when mode starts with swarm-pr-review:.',
+		),
 	base_ref: z
 		.string()
 		.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
-		.optional(),
+		.optional()
+		.describe(
+			'Base branch ref used to recompute the merge base. Use the REMOTE-TRACKING form (origin/main), and compute base_sha against that same ref. A local branch ref (main, refs/heads/main) is only as fresh as the last fetch — the PR-review preflight fetches refs/pull/<N>/head and not the base branch, so a local ref commonly resolves to a different merge base and the dispatch is rejected. Required when mode starts with swarm-pr-review:.',
+		),
 	scope: z.string().min(1).max(500).optional(),
 	trigger_evaluation: z
 		.array(PrReviewTriggerEvaluationRowSchema)
@@ -465,6 +539,15 @@ export interface DispatchLaneResult {
 	output_artifact_error?: string;
 	transcript_incomplete?: boolean;
 	message_count?: number;
+	/**
+	 * Set to true when this lane's `output` preview was withheld because an
+	 * identical preview (same batch, lane, and result digest) was already
+	 * delivered on an earlier `collect_lane_results` poll. All other result
+	 * metadata (`output_ref`, `output_digest`, `output_chars`, etc.) is still
+	 * present, so callers who need the full text again should retrieve it via
+	 * `retrieve_lane_output` using `output_ref` rather than re-polling for it.
+	 */
+	output_omitted_repeat?: boolean;
 	error?: string;
 }
 
@@ -598,6 +681,19 @@ export const _test_exports = {
 	DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS,
 	DEFAULT_ASYNC_STALE_TIMEOUT_MS,
 	DEFAULT_COLLECT_TIMEOUT_MS,
+	/**
+	 * Clears the module-level `deliveredLaneOutputs` de-dupe set (see
+	 * S1.1) so tests can assert first-poll vs. repeat-poll behavior without
+	 * cross-test bleed-through.
+	 */
+	resetDeliveredLaneOutputs: () => {
+		deliveredLaneOutputs.clear();
+	},
+	// Test-only export seam: lets tests exercise the S1.1 output-delivery
+	// de-duplication logic directly against in-memory record literals,
+	// without round-tripping through the durable delegation store or a
+	// SessionOps mock.
+	recordToLaneResult,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
@@ -621,9 +717,7 @@ export async function executeDispatchLanes(
 		return failureResult({
 			failure_class: 'invalid_args',
 			message: 'Invalid dispatch_lanes arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
 
@@ -711,10 +805,21 @@ export async function executeDispatchLanesAsync(
 		return asyncFailureResult({
 			failure_class: 'invalid_args',
 			message: 'Invalid dispatch_lanes_async arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
+	}
+	// Normalize `mode` ONCE, before any consumer reads it. Roughly twenty sites
+	// below branch on `parsed.data.mode` with `startsWith` or strict equality, so
+	// surrounding whitespace on an otherwise correct value silently misroutes:
+	// " swarm-pr-review:base" fails every `startsWith('swarm-pr-review:')` check
+	// and skips the merge-base bind entirely, surfacing much later as "exact
+	// merge-base scope was not verified" — the merge base blamed for a typo.
+	// "swarm-pr-review:base " passes the bind but fails the strict-equality
+	// batch-recording branch. Normalizing in one place is what makes that whole
+	// near-miss family impossible, instead of closing one literal at a time.
+	if (typeof parsed.data.mode === 'string') {
+		const normalizedMode = parsed.data.mode.trim();
+		parsed.data.mode = normalizedMode.length > 0 ? normalizedMode : undefined;
 	}
 
 	const duplicateLaneIds = findDuplicateLaneIds(parsed.data.lanes);
@@ -758,6 +863,24 @@ export async function executeDispatchLanesAsync(
 	let verifiedPrHead: string | undefined;
 	let workflowRevisionDigest: string | undefined;
 	let verifiedReviewBaseSha: string | undefined;
+	// Reject a bare, colon-less PR workflow mode explicitly. Every downstream
+	// check keys on the colon-suffixed prefix, so `mode: "swarm-pr-review"` used
+	// to slip past the merge-base bind entirely and surface much later as
+	// "exact merge-base scope was not verified" — blaming the merge base for what
+	// is actually a mode-string typo, while the caller's base_ref/base_sha were
+	// correct. The old `mode` description advertised exactly that bad value.
+	const bareWorkflowMode = ['swarm-pr-review', 'swarm-pr-feedback'].find(
+		(prefix) => parsed.data.mode?.trim() === prefix,
+	);
+	if (bareWorkflowMode) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message:
+				bareWorkflowMode === 'swarm-pr-review'
+					? 'BLOCKED: mode "swarm-pr-review" is missing its required stage suffix. Use one of: swarm-pr-review:base, swarm-pr-review:micro, swarm-pr-review:council, swarm-pr-review:reviewer, swarm-pr-review:critic.'
+					: 'BLOCKED: mode "swarm-pr-feedback" is missing its required stage suffix. Use swarm-pr-feedback:verification.',
+		});
+	}
 	if (
 		context.sessionID?.trim() &&
 		parsed.data.pr_head_sha &&
@@ -790,12 +913,24 @@ export async function executeDispatchLanesAsync(
 					parsed.data.base_ref,
 					parsed.data.pr_head_sha,
 				);
-				if (
-					!resolvedBase ||
-					resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()
-				) {
+				// Split the two structurally different failures and print the
+				// receipt. Collapsing them into one opaque string told a caller
+				// whose ref never resolved that their SHA was wrong, and told a
+				// caller with a genuine mismatch nothing about what was computed —
+				// leaving trial-and-error as the only recovery. The dominant real
+				// cause is ref FORM: a local `main` / `refs/heads/main` is whatever
+				// the clone last fetched, while `origin/main` is current, so the
+				// same base_sha verifies against one and not the other. Mirrors the
+				// diagnostic style already used by write-pr-review-trigger-eval and
+				// assertCurrentCheckoutHead.
+				if (!resolvedBase) {
 					throw new Error(
-						'BLOCKED: PR_REVIEW base_sha is not the exact merge base of base_ref and pr_head_sha',
+						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form, then verify with: git -C "${directory}" fetch origin <base-branch> && git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
+					);
+				}
+				if (resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW merge-base mismatch. git merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha} in "${directory}" resolved to ${resolvedBase}, but base_sha=${parsed.data.base_sha} was passed. If you computed base_sha against a remote-tracking ref, pass that SAME ref as base_ref — a local branch of the same name (main, refs/heads/main) may be stale and yields a different merge base. Verify with: git -C "${directory}" merge-base -- "${parsed.data.base_ref}" ${parsed.data.pr_head_sha}`,
 					);
 				}
 				verifiedReviewBaseSha = resolvedBase;
@@ -1166,9 +1301,7 @@ export async function executeCollectLaneResults(
 			failure_class: 'invalid_args',
 			batch_id: '',
 			message: 'Invalid collect_lane_results arguments',
-			errors: parsed.error.issues.map(
-				(issue) => `${issue.path.join('.')}: ${issue.message}`,
-			),
+			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
 	const session = _internals.getSessionOps();
@@ -1793,7 +1926,7 @@ function buildCollectResult(
 				includePending ||
 				(record.status !== 'pending' && record.status !== 'running'),
 		)
-		.map(recordToLaneResult);
+		.map((record) => recordToLaneResult(record, batchId));
 	const completed = records.filter((record) => record.status === 'completed');
 	const failed = records.filter(
 		(record) =>
@@ -1826,6 +1959,7 @@ function buildCollectResult(
 
 function recordToLaneResult(
 	record: BackgroundDelegationRecord,
+	batchId: string,
 ): DispatchLaneResult {
 	const status =
 		record.status === 'error'
@@ -1835,8 +1969,28 @@ function recordToLaneResult(
 				: record.status === 'running'
 					? 'pending'
 					: record.status;
+	const laneId = record.laneId ?? record.correlationId;
+	// Only settled lanes have a result worth de-duplicating; a pending/running
+	// record has no result text anyway. If the digest is missing we fail open
+	// (always deliver) rather than risk silently withholding output forever.
+	const digest = record.result?.digest;
+	const outputRef = record.result?.outputRef?.trim();
+	let alreadyDelivered = false;
+	if (
+		record.result?.text !== undefined &&
+		status !== 'pending' &&
+		digest &&
+		outputRef
+	) {
+		const key = `${batchId}\0${laneId}\0${digest}`;
+		alreadyDelivered = deliveredLaneOutputs.has(key);
+		if (!alreadyDelivered) {
+			deliveredLaneOutputs.add(key);
+			evictDeliveredLaneOutputsIfOverBound();
+		}
+	}
 	return {
-		id: record.laneId ?? record.correlationId,
+		id: laneId,
 		agent: record.swarmPrefixedAgent,
 		role: record.normalizedAgent,
 		status,
@@ -1847,7 +2001,9 @@ function recordToLaneResult(
 		).toISOString(),
 		...(record.result?.text !== undefined
 			? {
-					output: record.result.text,
+					...(alreadyDelivered
+						? { output_omitted_repeat: true }
+						: { output: record.result.text }),
 					output_chars: record.result.chars,
 					output_truncated: record.result.truncated,
 					output_digest: record.result.digest,

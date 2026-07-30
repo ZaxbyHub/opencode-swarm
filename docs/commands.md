@@ -682,9 +682,21 @@ Import `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` into S
 
 Run the one-time legacy JSONL to SQLite migration. Original JSONL files are backed up under `.swarm/memory/backups/`, and the migration is marked in SQLite `schema_migrations`.
 
-### `/swarm promote [--category <cat>] [--from-swarm <id>] <text>`
+### `/swarm promote [--category <cat>] [--from-swarm <id>] [actionability flags] <text>`
 
 Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson text directly or reference an existing swarm-level lesson by ID.
+
+Promotion is policy-gated. Since #1821 the policy includes an **actionability floor**, enforced by default: a lesson is only promotable if it carries at least one *predicate* and at least one *scope*. Pass them with these comma-separated flags (they may also be repeated):
+
+| Flag | Kind |
+| --- | --- |
+| `--required-actions <a,b>` | predicate |
+| `--forbidden-actions <a,b>` | predicate |
+| `--verification-checks <a,b>` | predicate |
+| `--applies-to-tools <a,b>` | scope |
+| `--applies-to-agents <a,b>` | scope |
+
+A lesson that fails the floor is blocked rather than silently promoted as un-actionable advice. `--force --reason "<why>"` still overrides and records a durable audited override listing the failed gates. To disable the floor entirely, set `knowledge.promotion_require_actionable = false`.
 
 ### `/swarm curate`
 

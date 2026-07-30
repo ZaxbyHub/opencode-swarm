@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
 	DEFAULT_SCORING_CONFIG,
 	resolveScoringConfig,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
 } from '../../../src/config/constants';
 import {
 	AgentOverrideConfigSchema,
@@ -1583,11 +1584,10 @@ describe('SummaryConfigSchema', () => {
 			expect(result.data.max_summary_chars).toBe(1000);
 			expect(result.data.max_stored_bytes).toBe(10485760);
 			expect(result.data.retention_days).toBe(7);
+			// Wiring assertion: the schema default IS the shared floor constant.
+			// The list's membership is owned by summarizer-exempt-guardrail.test.ts.
 			expect(result.data.exempt_tools).toEqual([
-				'retrieve_summary',
-				'retrieve_lane_output',
-				'task',
-				'read',
+				...SUMMARIZER_EXEMPT_TOOL_NAMES,
 			]);
 		}
 	});
@@ -1674,10 +1674,7 @@ describe('SummaryConfigSchema', () => {
 			expect(result.data.enabled).toBe(true); // Default
 			expect(result.data.max_summary_chars).toBe(1000); // Default
 			expect(result.data.exempt_tools).toEqual([
-				'retrieve_summary',
-				'retrieve_lane_output',
-				'task',
-				'read',
+				...SUMMARIZER_EXEMPT_TOOL_NAMES,
 			]); // Default
 		}
 	});

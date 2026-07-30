@@ -182,4 +182,34 @@ describe('PR_REVIEW shell wrapper tolerance', () => {
 		expect(message).toContain('PR_REVIEW is read-only');
 		expect(message).toContain('Reason: unlisted binary');
 	});
+
+	// The blocked-read diagnosis is the only thing telling a caller what IS
+	// allowed, so it has to stay in parity with the classifier. These two tests
+	// assert both halves of that parity: the hint names the listing forms, and
+	// the classifier really admits them (a hint advertising a verb the gate
+	// rejects would be worse than no hint at all).
+	test('names stash list and worktree list among the allowed git reads', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+		// `bisect` is a git verb outside the read allowlist, so it lands on the
+		// unlisted-git-verb branch rather than the checkout/fetch branches.
+		const message = await reviewOutcome('git bisect start');
+		expect(message).toContain('PR_REVIEW is read-only');
+		expect(message).toContain('Reason: unlisted git verb');
+		expect(message).toContain('`stash list`');
+		expect(message).toContain('`worktree list`');
+	});
+
+	test('admits the listing stash/worktree forms the hint advertises', async () => {
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+		expect(await reviewOutcome('git stash list')).toBe('ALLOWED');
+		expect(await reviewOutcome('git worktree list')).toBe('ALLOWED');
+		for (const command of [
+			'git stash',
+			'git stash pop',
+			'git worktree add ../wt main',
+			'git worktree remove ../wt',
+		]) {
+			expect(await reviewOutcome(command)).toContain('fail-closed');
+		}
+	});
 });

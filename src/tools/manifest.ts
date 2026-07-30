@@ -35,6 +35,7 @@ import { co_change_analyzer } from './co-change-analyzer';
 import { complete_pr_workflow } from './complete-pr-workflow';
 import { completion_verify } from './completion-verify';
 import { complexity_hotspots } from './complexity-hotspots';
+import { consensus_mine } from './consensus-mine';
 import { context_status } from './context-status';
 import { submit_council_verdicts } from './convene-council';
 import { convene_general_council } from './convene-general-council';
@@ -89,6 +90,7 @@ import { parse_lane_candidates } from './parse-lane-candidates';
 import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
+import { plan_conflict_check } from './plan-conflict-check';
 import { pr_workflow_status } from './pr-workflow-status';
 import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
@@ -183,6 +185,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	checkpoint: () => checkpoint,
 	pkg_audit: () => pkg_audit,
 	parse_lane_candidates: () => parse_lane_candidates,
+	plan_conflict_check: () => plan_conflict_check,
 	prepare_pr_feedback_scope: () => prepare_pr_feedback_scope,
 	write_pr_review_artifact: () => write_pr_review_artifact,
 	write_pr_review_trigger_eval: () => write_pr_review_trigger_eval,
@@ -209,6 +212,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	doc_scan: () => doc_scan,
 	doc_extract: () => doc_extract,
 	curator_analyze: () => curator_analyze,
+	consensus_mine: () => consensus_mine,
 	knowledge_add: () => knowledge_add,
 	knowledge_recall: () => knowledge_recall,
 	knowledge_remove: () => knowledge_remove,

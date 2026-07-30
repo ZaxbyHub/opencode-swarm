@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../../src/config/constants';
 import { SummaryConfigSchema } from '../../src/config/schema';
 
 describe('SummaryConfigSchema - Adversarial Tests', () => {
@@ -192,19 +193,11 @@ describe('SummaryConfigSchema - Adversarial Tests', () => {
 			const result2 = SummaryConfigSchema.safeParse({});
 			const default2 = result2.success ? result2.data.exempt_tools : [];
 
-			// Both defaults should be correct
-			expect(default1).toEqual([
-				'retrieve_summary',
-				'retrieve_lane_output',
-				'task',
-				'read',
-			]);
-			expect(default2).toEqual([
-				'retrieve_summary',
-				'retrieve_lane_output',
-				'task',
-				'read',
-			]);
+			// Both defaults should be correct. Asserted against the shared floor
+			// constant (src/config/constants.ts) rather than a hardcoded literal
+			// so this test does not silently drift when the floor grows.
+			expect(default1).toEqual([...SUMMARIZER_EXEMPT_TOOL_NAMES]);
+			expect(default2).toEqual([...SUMMARIZER_EXEMPT_TOOL_NAMES]);
 			// SECURITY: Zod creates new instances, not shared references
 			expect(default1).not.toBe(default2);
 		});
@@ -221,10 +214,7 @@ describe('SummaryConfigSchema - Adversarial Tests', () => {
 				const result2 = SummaryConfigSchema.safeParse({});
 				expect(result2.success).toBe(true);
 				expect(result2.data?.exempt_tools).toEqual([
-					'retrieve_summary',
-					'retrieve_lane_output',
-					'task',
-					'read',
+					...SUMMARIZER_EXEMPT_TOOL_NAMES,
 				]);
 			}
 		});

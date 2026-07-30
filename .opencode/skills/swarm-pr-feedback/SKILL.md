@@ -686,6 +686,14 @@ controller snapshots the content revision plus HEAD, index, refs, upstream, and
 Git config before and after every command (including failures/timeouts); any
 mutation invalidates Stage A and prevents later commands from becoming proof.
 
+The Stage A response carries per-check summaries (category, command, exit code,
+duration) rather than inline stdout/stderr. On failure it also carries a bounded
+tail of the failing check and a `full_output_ref` for retrieving the complete
+output via `retrieve_summary`; if that persistence fails, the failing check's
+full stdout/stderr is inlined instead so evidence is never lost. A successful
+run persists nothing — there is no failure evidence to recover, and the
+per-check summaries are the useful record.
+
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 
 Two independent agents on the Stage-A-green diff, run in order: **reviewer

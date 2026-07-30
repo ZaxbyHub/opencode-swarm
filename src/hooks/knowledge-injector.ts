@@ -403,6 +403,35 @@ export interface InjectForDelegateResult {
 }
 
 /**
+ * Monotonic counter bumped whenever the knowledge corpus changes underneath a
+ * live session (issue #1821, Workstream B).
+ *
+ * The architect injector memoizes its rendered block against a cache key built
+ * from the retrieval CONTEXT only (phase, tool, agent, task, files, last user
+ * message). Real-time admission changes the corpus without changing any of
+ * those, so an architect sitting in the same phase would keep seeing the
+ * pre-admission block — the newly learned lesson would be invisible for the
+ * rest of the phase. Folding this counter into the cache key makes an
+ * admission invalidate the memo exactly once.
+ *
+ * The delegate path (`injectForDelegate`) is UNCACHED and `readKnowledge`'s
+ * parse cache is already invalidated by `atomicWriteFile`, so only this
+ * architect-side memo needed the extra signal.
+ */
+let knowledgeGeneration = 0;
+
+/** Invalidate memoized injections. Called by the admission path after a write. */
+export function bumpKnowledgeGeneration(): number {
+	knowledgeGeneration++;
+	return knowledgeGeneration;
+}
+
+/** Current corpus generation. Part of the architect injection cache key. */
+export function getKnowledgeGeneration(): number {
+	return knowledgeGeneration;
+}
+
+/**
  * Retrieve the subset of active knowledge directives scoped to a delegated
  * subagent's role + expected tools (Change 1, Task 1.2). Emits a single
  * `retrieved` event tagged `mode:'delegate_inject'` with the capped, in-scope
@@ -767,6 +796,10 @@ export function createKnowledgeInjectorHook(
 	): string {
 		const parts = [
 			String(phase),
+			// #1821: corpus generation. Without it a real-time admission cannot
+			// invalidate this memo, because none of the context fields below change
+			// when knowledge is added mid-phase.
+			String(getKnowledgeGeneration()),
 			ctx.currentTool ?? '',
 			ctx.currentAction ?? '',
 			ctx.targetAgent ?? '',

@@ -67,6 +67,14 @@ export const _internals = {
 	resolveFallbackModel,
 	dcCheckJunctionCreation,
 	extractErrorSignal,
+	/**
+	 * Test/inspection seams for the no-op detector's bounded session state
+	 * (invariant 8). Production code does not call these; they exist so the
+	 * eviction bound can be asserted without exporting the maps themselves.
+	 */
+	noOpStateSize: (): number => toolCallsSinceLastWrite.size,
+	hasNoOpState: (sessionID: string): boolean =>
+		toolCallsSinceLastWrite.has(sessionID),
 };
 
 /**
@@ -249,9 +257,68 @@ const CONTENT_FILTER_PATTERN = /content.?filter/i;
 
 /**
  * v6.33.1: No-op work detector state.
+ *
+ * AGENTS.md invariant 8: module-level, session-keyed state must have an explicit
+ * eviction strategy. Both containers below are keyed by `sessionID` and were
+ * previously unbounded — they grew for the lifetime of the plugin process, since
+ * nothing removed a key when a session ended. `noOpWarningIssued` was only ever
+ * `delete`d on a reset, and `toolCallsSinceLastWrite` never shrank at all.
+ *
+ * Bounded LRU, evicting the LEAST-RECENTLY-TOUCHED session.
+ *
+ * Plain insertion-order (FIFO) eviction is wrong here and actively harmful.
+ * `Map.set()` on an EXISTING key does not move it, so the first session created
+ * in the process stays permanently at the front of the iteration order. In an
+ * OpenCode plugin process that first session is the architect — the very session
+ * this detector exists to watch — making it the guaranteed first eviction victim
+ * while a session touched once and abandoned later survives. Measured: with a
+ * FIFO bound, an architect climbing toward the threshold had its counter evicted
+ * and reset mid-climb, and its 15th consecutive no-write call produced ZERO
+ * warnings. A bound must not silence the detector it was added to protect.
+ *
+ * {@link touchNoOpSession} therefore deletes before setting, moving the key to
+ * the back on every touch, so eviction genuinely targets quiet sessions.
  */
+export const MAX_TRACKED_NO_OP_SESSIONS = 200;
 const toolCallsSinceLastWrite = new Map<string, number>();
 const noOpWarningIssued = new Set<string>();
+
+/**
+ * Record a session's no-write counter, refreshing its recency. The `delete`
+ * before `set` is load-bearing: it is what makes the eviction order
+ * least-recently-touched rather than first-inserted.
+ */
+function touchNoOpSession(sessionID: string, count: number): void {
+	toolCallsSinceLastWrite.delete(sessionID);
+	toolCallsSinceLastWrite.set(sessionID, count);
+	evictNoOpStateIfOverBound();
+}
+
+/**
+ * Evict least-recently-touched entries from the no-op detector's session state
+ * when either container exceeds {@link MAX_TRACKED_NO_OP_SESSIONS}. Called from
+ * {@link touchNoOpSession} and from the warning-latch insertion, i.e. at every
+ * site that can grow either container.
+ */
+function evictNoOpStateIfOverBound(): void {
+	while (toolCallsSinceLastWrite.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const stalestKey = toolCallsSinceLastWrite.keys().next().value;
+		if (stalestKey === undefined) break;
+		toolCallsSinceLastWrite.delete(stalestKey);
+		// Drop the paired warning latch with it, so an evicted session cannot
+		// come back with a stale "already warned" flag and never warn again.
+		noOpWarningIssued.delete(stalestKey);
+	}
+	// The latch Set is normally a subset of the counter map, but it is not
+	// guaranteed to be: a session evicted by the loop above can be re-added as a
+	// latch in the same invocation, leaving a latch with no counter. Bound it
+	// independently rather than relying on the subset argument.
+	while (noOpWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const stalestKey = noOpWarningIssued.values().next().value;
+		if (stalestKey === undefined) break;
+		noOpWarningIssued.delete(stalestKey);
+	}
+}
 
 /**
  * Extracts phase number from a phase string like "Phase 3: Implementation".
@@ -714,12 +781,40 @@ export function createGuardrailsHooks(
 			// v6.33.1: No-op work detector
 			const sessionId = input.sessionID;
 			const normalizedToolName = normalizeToolName(input.tool);
-			if (isWriteTool(normalizedToolName)) {
-				toolCallsSinceLastWrite.set(sessionId, 0);
+			// Handing work to a subagent IS progress, and it is the ONLY kind of
+			// progress an orchestrating architect makes.
+			//
+			// Before this, the counter reset solely on `isWriteTool`. A subagent's
+			// writes land under a DIFFERENT sessionID, and this counter is keyed by
+			// `input.sessionID`, so those writes could never reset the architect's
+			// count. An architect that delegates and reads therefore climbed toward
+			// the "you may be stuck" warning forever — in every mode, not just PR
+			// review: deep-dive, council, research, consult, discover, issue
+			// tracing, plain planning.
+			//
+			// Both dispatch mechanisms count. `isAgentDelegation` matches only
+			// `Task`/`task` (see its early return), but `/swarm pr-review` dispatches
+			// its lanes through `dispatch_lanes_async` — and the `task` tool is
+			// BLOCKED outright while a PR_REVIEW gate is active
+			// (pr-workflow-gate.ts, "PR_REVIEW is read-only and fail-closed").
+			// Keying on `Task` alone would therefore have left the originally
+			// reported case — a PR review told it was stuck — completely unfixed.
+			const laneDispatchTools = new Set([
+				'dispatch_lanes',
+				'dispatch_lanes_async',
+			]);
+			const isSubagentDispatch =
+				laneDispatchTools.has(normalizedToolName) ||
+				isAgentDelegation(
+					input.tool,
+					input.args ?? getStoredInputArgs(input.callID),
+				).isDelegation;
+			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
+				touchNoOpSession(sessionId, 0);
 				noOpWarningIssued.delete(sessionId);
 			} else {
 				const count = (toolCallsSinceLastWrite.get(sessionId) ?? 0) + 1;
-				toolCallsSinceLastWrite.set(sessionId, count);
+				touchNoOpSession(sessionId, count);
 				const threshold = cfg.no_op_warning_threshold ?? 15;
 				if (
 					count >= threshold &&
@@ -727,8 +822,17 @@ export function createGuardrailsHooks(
 					session?.pendingAdvisoryMessages
 				) {
 					noOpWarningIssued.add(sessionId);
+					// BL-B: the latch Set can grow here independently of the counter
+					// map, so it needs its own bound check — the "it is a subset"
+					// argument does not hold in the self-eviction case.
+					evictNoOpStateIfOverBound();
+					// The old text advised `/swarm handoff`, which resets the session —
+					// discarding exactly the context an orchestrating architect has
+					// been assembling. Advice that destroys the user's work is worse
+					// than no advice, so the recovery hint is gone; the observation
+					// remains.
 					session.pendingAdvisoryMessages.push(
-						`WARNING: Agent has made ${count} tool calls with no file modifications. If you are stuck, use /swarm handoff to reset or /swarm turbo to reduce overhead.`,
+						`WARNING: Agent has made ${count} tool calls with no file modifications and no subagent dispatches. If you are stuck, state what is blocking you and report BLOCKED rather than continuing to probe.`,
 					);
 				}
 			}

@@ -173,7 +173,9 @@ Exception: in explicit Council mode only, the main thread may act as the indepen
 Determine review scope using this priority:
 
 1. explicit user-provided PR URL, PR number, commit, branch, or file scope,
-2. current feature branch diff vs `origin/main`, `main`, `origin/master`, or `master`,
+2. current feature branch diff vs the remote-tracking base ref (`origin/main`,
+   `origin/master`; a local `main`/`master` only as a last resort — it is only as
+   fresh as the last fetch and yields a different merge base),
 3. staged changes,
 4. latest commit,
 5. user-specified files or directories.
@@ -211,6 +213,11 @@ Before launching explorers (Phase 3), perform this exact standalone sequence:
    `git stash` through shell.
 3. Fetch the PR head as one standalone command, for example
    `git fetch origin refs/pull/<N>/head`. Do not compose fetch and checkout.
+3a. Fetch the base branch as its own standalone command, for example
+   `git fetch origin main`. Skipping this is the single most common cause of a
+   rejected dispatch: the merge base is recomputed against `base_ref`, and a
+   local `main`/`refs/heads/main` that was never refreshed resolves to a
+   different commit than `origin/main` for the same `base_sha`.
 4. Prove the full commit exists locally with
    `git cat-file -e <full_pr_head_sha>^{commit}`.
 5. Check out the exact PR filesystem with
@@ -775,8 +782,10 @@ Under Profile A, launch all base lanes with `dispatch_lanes_async`. Pass the six
 lane specs together, set `mode: "swarm-pr-review:base"`, assign each lane its
 exact `workflow_lane` identifier from the table below, set `max_concurrent` to
 `6`, bind the batch with the exact current `pr_head_sha`, record the returned
-`batch_id`, and pass the exact reviewed merge base and its live base tip/ref as
-`base_sha` and `base_ref`. Every later base retry, micro, council, reviewer, and
+`batch_id`, and pass the exact reviewed merge base and its base ref as
+`base_sha` and `base_ref`. Use the REMOTE-TRACKING form for `base_ref`
+(`origin/main`, not `main` or `refs/heads/main`) and compute `base_sha` against
+that same ref, so the controller's recomputation matches yours. Every later base retry, micro, council, reviewer, and
 critic dispatch repeats those same exact bindings. The controller recomputes
 `git merge-base -- <base_ref> <pr_head_sha>`, rejects mismatches, and replaces
 caller `scope` text with the complete verified `base_sha...pr_head_sha` PR diff;
@@ -807,6 +816,8 @@ The join barrier is universal: all base lanes settle before Phase 4 completes
 or synthesis begins, whichever layer enforces it.
 
 **Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
+
+Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
 
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
@@ -1681,8 +1692,9 @@ mode `PR_REVIEW` and the same exact
 `pr_head_sha`. The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime prepends a workflow-active banner
-to architect text parts (the model's text is preserved below the banner) and
-re-wakes an idle parent session. A
+to the first substantive text part of each architect message (the model's text
+is preserved below the banner; later parts of the same message, and blank
+parts, are left untouched) and re-wakes an idle parent session. A
 user interruption pauses every automatic wake path until a later explicit user
 turn settles; the durable gate remains available to continue or abort. Only
 emit the final report after the completion tool confirms that the gate cleared.

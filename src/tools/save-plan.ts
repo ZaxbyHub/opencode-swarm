@@ -660,8 +660,15 @@ export async function executeSavePlan(
 	// permits idempotent no-op profile repeats so recovery retries can proceed.
 	let resolvedProfile: Plan['execution_profile'] = preservedExecutionProfile;
 	if (args.execution_profile !== undefined) {
-		// Merge incoming profile fields over the preserved base (if any)
-		const base = preservedExecutionProfile ?? {};
+		// Merge incoming profile fields over the preserved base (if any).
+		// F-003: a partial profile on a new/effectively-new plan must inherit the
+		// v8 parallel-first default. Only an explicit false opts out; existing
+		// profiles retain their persisted value through the preserved base.
+		const base =
+			preservedExecutionProfile ??
+			(args.execution_profile.parallelization_enabled === undefined
+				? { parallelization_enabled: true }
+				: {});
 		const merged = { ...base, ...args.execution_profile };
 		const parsed = ExecutionProfileSchema.safeParse(merged);
 		if (!parsed.success) {
@@ -677,6 +684,27 @@ export async function executeSavePlan(
 			};
 		}
 		resolvedProfile = parsed.data;
+	}
+
+	// Step 3.1 (v8 / #1674): new-plan-only parallelization default.
+	// When the resolved profile is still undefined at this point — i.e. this is
+	// a NEW plan (no existing profile preserved, no explicit incoming profile) —
+	// apply the v8 default: `parallelization_enabled: true`. This is the ONLY
+	// place the v8 default is injected. Existing plans are loaded via
+	// `PlanSchema.parse` (parsePlanJsonCached), whose schema default STAYS
+	// `false`, so upgrading opencode-swarm never flips an existing plan's
+	// behavior. A revision of a profile-less existing plan also reaches this
+	// branch (effectively-new; documented in the release fragment).
+	//
+	// The default applies only to `parallelization_enabled`; the other profile
+	// fields keep their schema defaults (max_concurrent_tasks: 10, etc.). The
+	// execution gate independently enforces serial when the plan's pending tasks
+	// are not provably file-disjoint (see delegation-gate.ts).
+	if (resolvedProfile === undefined) {
+		resolvedProfile = {
+			...ExecutionProfileSchema.parse({}),
+			parallelization_enabled: true,
+		};
 	}
 
 	// Step 3.5: Task-removal acknowledgement (issue #853).

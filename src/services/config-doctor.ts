@@ -1384,6 +1384,16 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'learning': {
+			emitObjectTypeMismatch('learning', value, findings);
+			break;
+		}
+
+		case 'consensus': {
+			emitObjectTypeMismatch('consensus', value, findings);
+			break;
+		}
+
 		case 'curator': {
 			emitObjectTypeMismatch('curator', value, findings);
 			break;

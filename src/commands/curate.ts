@@ -8,6 +8,7 @@
  * Returns a summary with counts, or zero counts for empty-state.
  */
 
+import { loadPluginConfigWithMeta } from '../config/index.js';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import { checkHivePromotions } from '../hooks/hive-promoter.js';
 import {
@@ -25,6 +26,7 @@ export const _internals = {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 	readSwarmFileAsync,
+	loadPluginConfigWithMeta,
 	loadCuratorDeps: async () => {
 		const [{ CuratorConfigSchema }, curator, { createCuratorLLMDelegate }] =
 			await Promise.all([
@@ -57,8 +59,26 @@ export async function handleCurateCommand(
 	options?: { sessionID?: string },
 ): Promise<string> {
 	try {
-		// Use default config for manual curation
-		const config: KnowledgeConfig = KnowledgeConfigSchema.parse({});
+		// Load the REAL user knowledge config (`.opencode/opencode-swarm.json` plus
+		// the user config dir) so manual curation honors the same promotion policy
+		// as the automatic path. Mirrors `promote.ts`.
+		//
+		// This used to be `KnowledgeConfigSchema.parse({})`. That was harmless while
+		// every knowledge setting only tuned thresholds, but #1821 added
+		// `promotion_require_actionable`, which DEFAULTS TRUE and BLOCKS promotion —
+		// so a user who set it `false` could opt out everywhere except here, and
+		// `/swarm curate` silently re-imposed the gate.
+		//
+		// Best-effort, exactly like `promote.ts`: a malformed or unreadable config
+		// falls back to schema defaults rather than failing the whole command.
+		let config: KnowledgeConfig;
+		try {
+			const { config: loadedConfig } =
+				_internals.loadPluginConfigWithMeta(directory);
+			config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
+		} catch {
+			config = KnowledgeConfigSchema.parse({});
+		}
 
 		// Read existing swarm entries
 		const swarmPath = _internals.resolveSwarmKnowledgePath(directory);

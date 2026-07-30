@@ -107,7 +107,7 @@ Swarm then:
 3. Consults domain experts when needed and caches the guidance.
 4. Writes a phased implementation plan.
 5. Sends that plan through a critic gate before coding starts.
-6. Executes one task at a time through the QA pipeline:
+6. Executes tasks through the QA pipeline — one at a time, or concurrently in isolated worktrees for plans with provably file-disjoint task groups (v8 default for new plans, #1674; serial is the automatic fallback when scopes overlap or are unknown):
 
 * coder writes code
 * automated checks run
@@ -307,7 +307,7 @@ Swarm registers a roster of specialized core, optional, and conditional agents. 
 |---|---|---|
 | **architect** | Orchestrates workflow, writes plans, enforces gates | Core |
 | **explorer** | Scans codebase, gathers context, maps facts | Core |
-| **coder** | Implements one task at a time | Core |
+| **coder** | Implements one task at a time (or concurrently in isolated worktrees for provably file-disjoint task groups — v8, #1674) | Core |
 | **reviewer** | Checks correctness and security | Core |
 | **test_engineer** | Writes and runs tests, adversarial testing | Core |
 | **critic** | Reviews plans before implementation begins | Core |
@@ -1057,13 +1057,22 @@ Control how tool outputs are summarized for LLM context.
 {
   "summaries": {
     "threshold_bytes": 102400,
-    "exempt_tools": ["retrieve_summary", "task", "read"]
+    "exempt_tools": [
+      "retrieve_summary",
+      "retrieve_lane_output",
+      "task",
+      "read",
+      "dispatch_lanes",
+      "dispatch_lanes_async",
+      "collect_lane_results",
+      "parse_lane_candidates"
+    ]
   }
 }
 ```
 
 - **threshold_bytes** – Output size threshold in bytes before summarization is triggered (default 102400 = 100KB).
-- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "task", "read"]` to prevent re-summarization loops.
+- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "retrieve_lane_output", "task", "read", "dispatch_lanes", "dispatch_lanes_async", "collect_lane_results", "parse_lane_candidates"]`. Retrieval and lane tools are always exempt—summarizing them would destroy the references needed to recover their full outputs.
 
 > **Note:** The `retrieve_summary` tool supports paginated retrieval via `offset` and `limit` parameters to fetch large summarized outputs in chunks.
 

@@ -19,7 +19,7 @@
  * - _internals seams only exist where they were explicitly designed
  *
  * MOCK MODULES (remain as mock.module):
- * - src/hooks/knowledge-store.js: all functions
+ * - src/hooks/knowledge-store.js: all functions. `dedupeCapped` (#1821) is a bare ESM-resolution stub: this factory does not spread the real module, and its only consumer (insightCandidateToEntry) is not exercised here, so the stub is never called. Real coverage: knowledge-store-dedupe-capped.test.ts.
  * - src/hooks/knowledge-validator.js: validateLesson, quarantineEntry
  * - src/hooks/knowledge-reader.js: updateRetrievalOutcome
  *
@@ -80,6 +80,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	findNearDuplicate: mockFindNearDuplicate,
 	rewriteKnowledge: mockRewriteKnowledge,
 	computeConfidence: mockComputeConfidence,
+	dedupeCapped: (v: unknown) => (Array.isArray(v) ? v : []), // #1821 ESM stub
 	inferTags: mockInferTags,
 	normalize: mockNormalize,
 	transactFile: async () => false,
