@@ -157,13 +157,15 @@ function formatDoctorMarkdown(result: ConfigDoctorResult): string {
 	if (result.availableMigrations && result.availableMigrations.length > 0) {
 		lines.push('---', '');
 		lines.push('### Migrations Available', '');
-		const version = result.availableMigrations[0]!.currentFormatVersion;
+		const firstMigration = result.availableMigrations[0]!;
+		const userConfigVersion = firstMigration.currentFormatVersion;
+		const earliestDeprecatedIn = firstMigration.deprecatedIn;
 		lines.push(
-			`\u2139\ufe0f Migrations available since config version ${version}:`,
+			`\u2139\ufe0f Your config is at version ${userConfigVersion}. Fields with cleaner replacements (introduced in config version ${earliestDeprecatedIn}) can be migrated:`,
 		);
 		for (const migration of result.availableMigrations) {
 			lines.push(
-				`  - \`${migration.field}\` \u2192 \`${migration.replacement}\` (deprecated in version ${migration.deprecatedIn})`,
+				`  - \`${migration.field}\` \u2192 \`${migration.replacement}\` (available since config version ${migration.sinceVersion}, superseded in config version ${migration.deprecatedIn})`,
 			);
 		}
 		lines.push('');

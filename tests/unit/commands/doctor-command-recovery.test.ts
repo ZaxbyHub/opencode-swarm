@@ -208,7 +208,8 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 			});
 			const output = await handleDoctorCommand(projectDir, []);
 			expect(output).toContain('Migrations Available');
-			expect(output).toContain('deprecated in version 2');
+			expect(output).toContain('superseded in config version 2');
+			expect(output).toContain('Run `/swarm config doctor --fix`');
 		} finally {
 			if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
 			else process.env.XDG_CONFIG_HOME = origXdg;

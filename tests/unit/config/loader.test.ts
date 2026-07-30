@@ -206,8 +206,10 @@ describe('config/loader', () => {
 			const result = loadPluginConfig(tempDir);
 
 			// Should return defaults when no user config and no project config exist.
-			// adversarial_testing has a schema-level default and is always present.
+			// adversarial_testing and config_format_version have schema-level defaults
+			// and are always present.
 			expect(result).toEqual({
+				config_format_version: 1,
 				max_iterations: 5,
 				qa_retry_limit: 3,
 				inject_phase_reminders: true,
