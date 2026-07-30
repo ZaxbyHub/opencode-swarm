@@ -90,6 +90,7 @@ let _disabled: boolean = false;
 // Production listener captures latest heartbeat timestamp per sessionId.
 // Used by /swarm status to render "Last activity: Xs ago".
 let _heartbeatTrackingActive = false;
+let _heartbeatListener: TelemetryListener | null = null;
 const heartbeatTimestamps = new Map<string, number>();
 
 function capHeartbeatMap(): void {
@@ -104,13 +105,18 @@ function capHeartbeatMap(): void {
 export function startHeartbeatTracking(): void {
 	if (_heartbeatTrackingActive) return;
 	_heartbeatTrackingActive = true;
-	addTelemetryListener((event, data) => {
+	// Track the listener reference so stopHeartbeatTracking can remove it.
+	// addTelemetryListener is push-only with no return disposer; without
+	// tracking here, repeated start/stop cycles would leak listeners on _listeners.
+	const listener: TelemetryListener = (event, data) => {
 		if (event !== 'heartbeat') return;
 		const payload = data as { sessionId?: string } | undefined;
 		if (!payload?.sessionId) return;
 		heartbeatTimestamps.set(payload.sessionId, Date.now());
 		capHeartbeatMap();
-	});
+	};
+	_heartbeatListener = listener;
+	addTelemetryListener(listener);
 }
 
 export function getLastHeartbeat(sessionId: string): number | undefined {
@@ -119,11 +125,27 @@ export function getLastHeartbeat(sessionId: string): number | undefined {
 
 export function stopHeartbeatTracking(): void {
 	_heartbeatTrackingActive = false;
+	// Remove the previously-registered listener to prevent accumulation on
+	// repeated start/stop cycles. _listeners.filter preserves the registration
+	// order of unrelated listeners.
+	if (_heartbeatListener !== null) {
+		const idx = _listeners.indexOf(_heartbeatListener);
+		if (idx >= 0) _listeners.splice(idx, 1);
+		_heartbeatListener = null;
+	}
 }
 
 export function resetHeartbeatTrackingForTesting(): void {
 	_heartbeatTrackingActive = false;
 	heartbeatTimestamps.clear();
+	// Drain any heartbeat listener from _listeners so the next test starts
+	// from a clean slate. Without this, listener accumulation would skew
+	// listener-count assertions in the test suite.
+	if (_heartbeatListener !== null) {
+		const idx = _listeners.indexOf(_heartbeatListener);
+		if (idx >= 0) _listeners.splice(idx, 1);
+		_heartbeatListener = null;
+	}
 }
 
 /**
@@ -587,4 +609,5 @@ export const _internals: {
 	telemetry: typeof telemetry;
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
-} = { telemetry, emit, rotateTelemetryIfNeeded };
+	heartbeatListenerCount: () => number;
+} = { telemetry, emit, rotateTelemetryIfNeeded, heartbeatListenerCount: () => _heartbeatListener !== null ? 1 : 0 };

@@ -109,7 +109,11 @@ describe('handleContextMapStatsCommand', () => {
 		const swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		const telemetryPath = path.join(swarmDir, 'context-telemetry.jsonl');
-		fs.writeFileSync(telemetryPath, 'not json\n{broken\n===garbage===\n', 'utf-8');
+		fs.writeFileSync(
+			telemetryPath,
+			'not json\n{broken\n===garbage===\n',
+			'utf-8',
+		);
 
 		const result = await handleContextMapStatsCommand(dir);
 		expect(result).toBe('No capsule telemetry recorded.');

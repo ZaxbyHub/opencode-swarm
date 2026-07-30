@@ -27,9 +27,9 @@ import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
-import { handleContextMapStatsCommand } from './context-map-stats.js';
 import { handleConfigCommand } from './config.js';
 import { handleConsolidateCommand } from './consolidate.js';
+import { handleContextMapStatsCommand } from './context-map-stats.js';
 import { handleCostsCommand } from './costs.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
@@ -386,7 +386,8 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	status: {
-		handler: async (ctx) => handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
@@ -684,7 +685,8 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/doctor',
 	},
 	info: {
-		handler: async (ctx) => handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		aliasOf: 'status',

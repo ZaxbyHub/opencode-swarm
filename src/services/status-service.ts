@@ -33,11 +33,11 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
+import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
-import { getLastHeartbeat } from '../telemetry';
 
 /**
  * Dependency-injection seam for status-service.

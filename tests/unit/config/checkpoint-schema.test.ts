@@ -231,7 +231,9 @@ describe('CheckpointConfigSchema', () => {
 		it('auto_checkpoint_threshold description is set', () => {
 			expect(
 				CheckpointConfigSchema.out.shape.auto_checkpoint_threshold.description,
-			).toBe('Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.');
+			).toBe(
+				'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+			);
 		});
 	});
 
@@ -332,4 +334,3 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 		expect(result.success).toBe(false);
 	});
 });
-

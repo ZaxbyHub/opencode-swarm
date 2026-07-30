@@ -14,8 +14,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	PrMonitorWorker,
-	shouldSkipIdlePoll,
 	type PrMonitorWorkerOptions,
+	shouldSkipIdlePoll,
 	_internals as workerInternals,
 } from '../../../src/background/pr-monitor-worker';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
@@ -29,7 +29,9 @@ import type {
 
 const TEST_DIR = path.join(os.tmpdir(), 'pr-monitor-idle-backoff-test');
 
-function makeConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function makeConfig(
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
 	return {
 		enabled: true,
 		poll_interval_seconds: 60,
@@ -205,14 +207,21 @@ function createWorker(
 
 /** Helper to read the private idlePollCountMap from a worker instance. */
 function getIdleCount(worker: PrMonitorWorker, correlationId: string): number {
-	return (worker as Record<string, unknown>)['idlePollCountMap'] as Map<string, number>;
+	return (worker as Record<string, unknown>)['idlePollCountMap'] as Map<
+		string,
+		number
+	>;
 }
 
 /** Set up mocks for a successful no-change poll cycle. */
 function setupNoChangePoll(sub: PrSubscriptionRecord): void {
 	// Subscription with headRefOid matching fetch result ? no head-ref event
 	// and lastCommentId set ? no new-comment events
-	const stableSub = { ...sub, headRefOid: 'abc123', lastCommentId: 'comment-1' };
+	const stableSub = {
+		...sub,
+		headRefOid: 'abc123',
+		lastCommentId: 'comment-1',
+	};
 	mockState.listActive.mockResolvedValueOnce([stableSub]);
 	mockState.getPRStatus.mockResolvedValue(makePRStatus());
 	mockState.getPRComments.mockResolvedValue(makePRComments());
@@ -258,7 +267,11 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 
 		// Second poll: updateSnapshot throws ? counter must NOT advance
-		const stableSub = { ...sub, headRefOid: 'abc123', lastCommentId: 'comment-1' };
+		const stableSub = {
+			...sub,
+			headRefOid: 'abc123',
+			lastCommentId: 'comment-1',
+		};
 		mockState.listActive.mockResolvedValueOnce([stableSub]);
 		mockState.getPRStatus.mockResolvedValue(makePRStatus());
 		mockState.getPRComments.mockResolvedValue(makePRComments());
@@ -267,8 +280,8 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 		// applyChanges calls updateSnapshot (success), then
 		// the post-success updateSnapshot throws
 		mockState.updateSnapshot
-			.mockResolvedValueOnce(stableSub)  // applyChanges snapshot write
-			.mockRejectedValueOnce(new Error('disk full'));  // post-success persistence write
+			.mockResolvedValueOnce(stableSub) // applyChanges snapshot write
+			.mockRejectedValueOnce(new Error('disk full')); // post-success persistence write
 
 		// pollSinglePr catches the error and calls handlePollError,
 		// which calls updateSnapshot again for error recording
@@ -293,7 +306,11 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		// Second: new head ref ? change detected ? events emitted
 		// Counter should reset to 0 after successful persistence
-		const changedSub = { ...sub, headRefOid: 'abc123', lastCommentId: 'comment-1' };
+		const changedSub = {
+			...sub,
+			headRefOid: 'abc123',
+			lastCommentId: 'comment-1',
+		};
 		mockState.listActive.mockResolvedValueOnce([changedSub]);
 		mockState.getPRStatus.mockResolvedValue(
 			makePRStatus({ headRefOid: 'def456' }),
@@ -319,9 +336,9 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 		await worker.pollCycle();
 
 		// Counter should remain undefined (never set)
-		expect(
-			getIdleCount(worker, CORRELATION_ID).has(CORRELATION_ID),
-		).toBe(false);
+		expect(getIdleCount(worker, CORRELATION_ID).has(CORRELATION_ID)).toBe(
+			false,
+		);
 	});
 
 	test('snapshot-only bookkeeping change (lastCheckRunSet grows) does NOT reset counter', async () => {
@@ -402,12 +419,18 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		// Second: getMergeGroupRun throws ? mergeGroupRunFetchSucceeded = false
 		// ? snapshotUpdates lacks mergeGroupRun* keys
-		const stableSub = { ...sub, headRefOid: 'abc123', lastCommentId: 'comment-1' };
+		const stableSub = {
+			...sub,
+			headRefOid: 'abc123',
+			lastCommentId: 'comment-1',
+		};
 		mockState.listActive.mockResolvedValueOnce([stableSub]);
 		mockState.getPRStatus.mockResolvedValue(makePRStatus());
 		mockState.getPRComments.mockResolvedValue(makePRComments());
 		mockState.getMergeState.mockResolvedValue(makeMergeState());
-		mockState.getMergeGroupRun.mockRejectedValueOnce(new Error('merge group fetch failed'));
+		mockState.getMergeGroupRun.mockRejectedValueOnce(
+			new Error('merge group fetch failed'),
+		);
 		mockState.updateSnapshot.mockResolvedValue(stableSub);
 
 		await worker.pollCycle();
@@ -430,7 +453,11 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 
 		// Second: mergeableState flaps to UNKNOWN (excluded from meaningful)
-		const flappedSub = { ...sub, headRefOid: 'abc123', lastCommentId: 'comment-1' };
+		const flappedSub = {
+			...sub,
+			headRefOid: 'abc123',
+			lastCommentId: 'comment-1',
+		};
 		mockState.listActive.mockResolvedValueOnce([flappedSub]);
 		mockState.getPRStatus.mockResolvedValue(makePRStatus());
 		mockState.getPRComments.mockResolvedValue(makePRComments());
@@ -446,7 +473,10 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 	});
 
 	test('stop() clears idlePollCountMap and resets pollCycleCount', async () => {
-		const sub = makeSubscription({ headRefOid: 'abc123', lastCommentId: 'comment-1' });
+		const sub = makeSubscription({
+			headRefOid: 'abc123',
+			lastCommentId: 'comment-1',
+		});
 		setupNoChangePoll(sub);
 		const worker = createWorker();
 		worker.start();
@@ -463,8 +493,13 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 	test('stop() preserves circuitBreakerMap and reviewStateMap cleanup', () => {
 		const worker = createWorker();
 		worker.start();
-		const cbMap = (worker as Record<string, unknown>)['circuitBreakerMap'] as Map<string, unknown>;
-		const rsMap = (worker as Record<string, unknown>)['reviewStateMap'] as Map<string, unknown>;
+		const cbMap = (worker as Record<string, unknown>)[
+			'circuitBreakerMap'
+		] as Map<string, unknown>;
+		const rsMap = (worker as Record<string, unknown>)['reviewStateMap'] as Map<
+			string,
+			unknown
+		>;
 		cbMap.set('k', { errorCount: 3 });
 		rsMap.set('k', 'APPROVED');
 		expect(cbMap.size).toBe(1);
@@ -481,10 +516,20 @@ describe('shouldSkipIdlePoll — module-level pure function', () => {
 	// idleCount 0-2: never skip.
 	// idleCount 3-5: skipEvery=2.
 	const cases: Array<[number, number, boolean]> = [
-		[0, 1, false], [3, 1, true], [3, 2, false],
-		[6, 1, true], [6, 2, true], [6, 3, false], [6, 6, false],
-		[10, 1, true], [10, 2, true], [10, 3, false], [10, 5, true],
-		[100, 7, true], [100, 5, true], [100, 6, false],
+		[0, 1, false],
+		[3, 1, true],
+		[3, 2, false],
+		[6, 1, true],
+		[6, 2, true],
+		[6, 3, false],
+		[6, 6, false],
+		[10, 1, true],
+		[10, 2, true],
+		[10, 3, false],
+		[10, 5, true],
+		[100, 7, true],
+		[100, 5, true],
+		[100, 6, false],
 	];
 	for (const [idle, cycle, expected] of cases) {
 		test(`idle=${idle} cycle=${cycle} → ${expected ? 'skip' : 'poll'}`, () => {
@@ -496,4 +541,3 @@ describe('shouldSkipIdlePoll — module-level pure function', () => {
 		expect(shouldSkipIdlePoll(10, 1)).toBe(shouldSkipIdlePoll(10, 1));
 	});
 });
-

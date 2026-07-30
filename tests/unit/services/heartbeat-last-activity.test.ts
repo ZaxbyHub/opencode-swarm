@@ -4,12 +4,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
+	getLastHeartbeat,
 	initTelemetry,
+	resetHeartbeatTrackingForTesting,
 	resetTelemetryForTesting,
 	startHeartbeatTracking,
 	stopHeartbeatTracking,
-	getLastHeartbeat,
-	resetHeartbeatTrackingForTesting,
 	_internals as telemetryInternals,
 } from '../../../src/telemetry';
 
@@ -75,6 +75,26 @@ describe('heartbeat last-activity tracking (FR-010)', () => {
 		const ts = getLastHeartbeat('s-stop-new');
 		expect(ts).toBeDefined();
 		expect(typeof ts).toBe('number');
+	});
+
+	test('start/stop cycles do not accumulate listeners on _listeners', () => {
+		// Hermes-pr-review found: prior to fix, start/stop/start would push a second
+		// listener onto _listeners because addTelemetryListener is push-only. After
+		// the fix, the listener count stays at exactly 1 through any number of cycles.
+		expect(telemetryInternals.heartbeatListenerCount()).toBe(0);
+
+		for (let i = 0; i < 3; i++) {
+			startHeartbeatTracking();
+			expect(telemetryInternals.heartbeatListenerCount()).toBe(1);
+			stopHeartbeatTracking();
+			expect(telemetryInternals.heartbeatListenerCount()).toBe(0);
+		}
+
+		// Idempotent start: calling start twice without stop should not double the listener.
+		startHeartbeatTracking();
+		startHeartbeatTracking();
+		expect(telemetryInternals.heartbeatListenerCount()).toBe(1);
+		stopHeartbeatTracking();
 	});
 
 	test('different sessionIds are tracked independently', () => {

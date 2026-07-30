@@ -10,14 +10,14 @@ import * as path from 'node:path';
 
 import type { Plan } from '../../../src/config/plan-schema';
 import {
-	getStatusData,
 	formatStatusMarkdown,
+	getStatusData,
 } from '../../../src/services/status-service';
 import {
 	initTelemetry,
+	resetHeartbeatTrackingForTesting,
 	resetTelemetryForTesting,
 	startHeartbeatTracking,
-	resetHeartbeatTrackingForTesting,
 	_internals as telemetryInternals,
 } from '../../../src/telemetry';
 
@@ -48,9 +48,10 @@ const MINIMAL_PLAN: Plan = {
 	],
 };
 
-const mockAgents: Record<string, { name: string; config: { model: string } }> = {
-	architect: { name: 'architect', config: { model: 'gpt-4' } },
-};
+const mockAgents: Record<string, { name: string; config: { model: string } }> =
+	{
+		architect: { name: 'architect', config: { model: 'gpt-4' } },
+	};
 
 function writePlanJson(dir: string, plan: Plan): void {
 	const swarmDir = path.join(dir, '.swarm');
@@ -236,7 +237,7 @@ describe('Heartbeat staleness (FR-010/FR-011) integration', () => {
 		expect(md).not.toContain('possibly stalled');
 	});
 
-test('Full integration: stale heartbeat shows possibly stalled', async () => {
+	test('Full integration: stale heartbeat shows possibly stalled', async () => {
 		const realNow = Date.now;
 		const pastTimestamp = realNow() - 130_000;
 		// Phase 1: emit with Date.now frozen 130s in the past
