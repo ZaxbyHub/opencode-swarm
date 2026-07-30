@@ -99,12 +99,34 @@ describe('PR workflow response-level gate', () => {
 		expect(output.text).toContain('Stage A checks passing.');
 	});
 
-	test('banner appears even on empty text', async () => {
+	// REVERSAL (deliberate): this previously asserted "banner appears even on
+	// empty text". That behavior was the dominant term in a measured production
+	// flood — 968 of ~1015 injections in a real `/swarm pr-review` transcript
+	// were marker-only lines carrying no model prose (one unbroken run of 95),
+	// making injected text 55.3% of all non-blank lines. A banner labelling no
+	// content communicates nothing and violates AGENTS.md invariant 10 ("Do not
+	// emit diagnostic noise into chat-visible streams"). The banner's purpose —
+	// marking model output as non-terminal — is meaningless with no output to
+	// mark, so a blank part is now left exactly as-is.
+	test('blank text parts are left untouched — a banner labelling no content is noise', async () => {
 		const gate = createPrWorkflowResponseGate({ directory });
 		await activatePrWorkflow(directory, 'empty-text-session', 'PR_REVIEW');
-		const output = { text: '' };
-		await gate.textComplete({ sessionID: 'empty-text-session' }, output);
-		expect(output.text).toContain('WORKFLOW ACTIVE');
+
+		const empty = { text: '' };
+		await gate.textComplete({ sessionID: 'empty-text-session' }, empty);
+		expect(empty.text).toBe('');
+
+		// Whitespace-only parts are equally contentless.
+		const blank = { text: '  \n\t \n ' };
+		await gate.textComplete({ sessionID: 'empty-text-session' }, blank);
+		expect(blank.text).toBe('  \n\t \n ');
+
+		// A substantive part in the same session still gets the banner, proving
+		// the blank parts were skipped rather than the gate being inert.
+		const real = { text: 'Dispatching the base lanes.' };
+		await gate.textComplete({ sessionID: 'empty-text-session' }, real);
+		expect(real.text).toContain('WORKFLOW ACTIVE');
+		expect(real.text).toContain('Dispatching the base lanes.');
 	});
 
 	test('banner carries both suspension and interruption notices when both are active (F-003)', async () => {

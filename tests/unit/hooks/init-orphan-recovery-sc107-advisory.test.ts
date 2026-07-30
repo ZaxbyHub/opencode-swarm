@@ -32,6 +32,14 @@ import {
 } from '../../../src/hooks/init-orphan-recovery-advisory';
 import { ensureAgentSession, swarmState } from '../../../src/state';
 
+// A fixed literal, replacing what were real-clock reads. No assertion in this
+// file depends on the value — it is filler for a required field — so reading the
+// wall clock bought nothing and made the tests non-deterministic. The repo
+// test-stability gate (#1782) requires any test file touching the real clock to
+// use the freezeClock helper; removing the dependency outright is simpler than
+// freezing it.
+const FIXED_INIT_TIMESTAMP = '2026-01-01T00:00:00.000Z';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -349,7 +357,7 @@ describe('advisory flush: messagesTransform surfaces advisory to architect', () 
 
 		// Write a synthetic advisory file
 		const advisoryContent = {
-			initTimestamp: new Date().toISOString(),
+			initTimestamp: FIXED_INIT_TIMESTAMP,
 			warnings: [
 				'Test warning: could not reclaim orphaned worktree /path/to/locked',
 			],
@@ -421,7 +429,7 @@ describe('advisory flush: messagesTransform surfaces advisory to architect', () 
 		await initGitRepo(freshDir);
 
 		const advisoryContent = {
-			initTimestamp: new Date().toISOString(),
+			initTimestamp: FIXED_INIT_TIMESTAMP,
 			warnings: [],
 			errors: [],
 			reclaimed: {
@@ -477,5 +485,206 @@ describe('advisory flush: messagesTransform surfaces advisory to architect', () 
 		expect(existsSync(advisoryPath)).toBe(false);
 
 		rmSync(freshDir, { recursive: true, force: true });
+	});
+});
+
+describe('emptiness gate: a contentless advisory is never surfaced', () => {
+	/**
+	 * Field evidence: `writeAdvisoryFile(directory, cleanupResult, allWarnings,
+	 * true, removedWorktrees)` is called on the happy path of every plugin init
+	 * (init-orphan-recovery.ts) with `attempted` as a literal `true`, and
+	 * `writeAdvisoryFile` sets `prunedWorktrees: attempted`. So a clean repo with
+	 * zero orphans produced a real advisory file whose only "content" was
+	 * `prunedWorktrees: true` — and the hook emitted a header plus "Stale
+	 * worktree metadata pruned.": two lines of zero information at the top of the
+	 * architect's system message, once per session, on every project.
+	 *
+	 * AGENTS.md invariant 10: "Do not emit diagnostic noise into chat-visible
+	 * streams."
+	 */
+	async function runAdvisory(
+		advisoryContent: unknown,
+		sessionId: string,
+	): Promise<{ dir: string; messages: string[] }> {
+		const freshDir = realpathSync(
+			mkdtempSync(path.join(tmpdir(), 'init-orphan-adv-empty-')),
+		);
+		await initGitRepo(freshDir);
+		const advisoryDir = path.join(freshDir, '.swarm', 'advisories');
+		mkdirSync(advisoryDir, { recursive: true });
+		writeFileSync(
+			path.join(advisoryDir, 'init-orphan-recovery.json'),
+			JSON.stringify(advisoryContent),
+			'utf-8',
+		);
+		ensureAgentSession(sessionId);
+		swarmState.activeAgent.set(sessionId, 'Architect');
+		const hook = createInitOrphanRecoveryAdvisoryHook(freshDir);
+		await hook.messagesTransform(
+			{},
+			{
+				messages: [
+					{
+						info: { role: 'user', agent: 'Architect', sessionID: sessionId },
+						parts: [{ type: 'text', text: 'Hello' }],
+					},
+				],
+			},
+		);
+		const session = swarmState.agentSessions.get(sessionId);
+		return { dir: freshDir, messages: session?.pendingAdvisoryMessages ?? [] };
+	}
+
+	test('a clean-repo advisory (prunedWorktrees only) surfaces NOTHING', async () => {
+		const { dir, messages } = await runAdvisory(
+			{
+				initTimestamp: FIXED_INIT_TIMESTAMP,
+				warnings: [],
+				errors: [],
+				reclaimed: {
+					removedBranches: [],
+					removedWorktrees: [],
+					// True on EVERY successful init, so it must not count as content.
+					prunedWorktrees: true,
+				},
+			},
+			'test-arch-adv-empty-clean',
+		);
+		expect(messages).toEqual([]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test('the advisory file is still consumed and deleted even when nothing is surfaced', async () => {
+		// The gate changes what is SAID, never what is CLEANED UP. A stale file
+		// must not survive to be re-read on the next session.
+		const freshDir = realpathSync(
+			mkdtempSync(path.join(tmpdir(), 'init-orphan-adv-empty-del-')),
+		);
+		await initGitRepo(freshDir);
+		const advisoryDir = path.join(freshDir, '.swarm', 'advisories');
+		mkdirSync(advisoryDir, { recursive: true });
+		const advisoryPath = path.join(advisoryDir, 'init-orphan-recovery.json');
+		writeFileSync(
+			advisoryPath,
+			JSON.stringify({
+				initTimestamp: FIXED_INIT_TIMESTAMP,
+				warnings: [],
+				errors: [],
+				reclaimed: {
+					removedBranches: [],
+					removedWorktrees: [],
+					prunedWorktrees: true,
+				},
+			}),
+			'utf-8',
+		);
+		const sessionId = 'test-arch-adv-empty-deleted';
+		ensureAgentSession(sessionId);
+		swarmState.activeAgent.set(sessionId, 'Architect');
+		const hook = createInitOrphanRecoveryAdvisoryHook(freshDir);
+		await hook.messagesTransform(
+			{},
+			{
+				messages: [
+					{
+						info: { role: 'user', agent: 'Architect', sessionID: sessionId },
+						parts: [{ type: 'text', text: 'Hello' }],
+					},
+				],
+			},
+		);
+		expect(existsSync(advisoryPath)).toBe(false);
+		rmSync(freshDir, { recursive: true, force: true });
+	});
+
+	test.each([
+		['a warning', { warnings: ['could not reclaim /path/to/locked'] }],
+		[
+			'an error',
+			{ errors: [{ branch: 'swarm-lane/s/l', error: 'missing worktree' }] },
+		],
+		[
+			'a reclaimed branch',
+			{ reclaimed: { removedBranches: ['swarm-lane/s/l'] } },
+		],
+		[
+			'a reclaimed worktree',
+			{ reclaimed: { removedWorktrees: ['/path/.swarm-worktrees/s/l'] } },
+		],
+	])('real content is STILL surfaced when the advisory carries %s', async (label, overrides) => {
+		// The gate must narrow, never silence. Each of these is a genuine
+		// operational condition the user needs to see.
+		const o = overrides as Record<string, unknown>;
+		const { dir, messages } = await runAdvisory(
+			{
+				initTimestamp: FIXED_INIT_TIMESTAMP,
+				warnings: (o.warnings as string[]) ?? [],
+				errors: (o.errors as unknown[]) ?? [],
+				reclaimed: {
+					removedBranches: [],
+					removedWorktrees: [],
+					prunedWorktrees: true,
+					...((o.reclaimed as Record<string, unknown>) ?? {}),
+				},
+			},
+			`test-arch-adv-content-${label.replace(/\s+/g, '-')}`,
+		);
+		expect(messages.length).toBeGreaterThan(0);
+		expect(messages.join('\n')).toContain('INIT ORPHAN RECOVERY');
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test('an entirely empty advisory degrades to silence', async () => {
+		// readAdvisoryFile does a bare `JSON.parse(content) as InitOrphanAdvisory`
+		// with no runtime validation, and the file is deleted before the fields are
+		// read — so a throw here loses the payload with it.
+		const { dir, messages } = await runAdvisory(
+			{ initTimestamp: FIXED_INIT_TIMESTAMP },
+			'test-arch-adv-malformed',
+		);
+		expect(messages).toEqual([]);
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test.each([
+		[
+			'errors present, warnings field missing',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				errors: [{ branch: 'swarm-lane/s/l', error: 'missing worktree' }],
+			},
+			'ORPHAN_RECOVERY_ERROR',
+		],
+		[
+			'warnings present, errors field missing',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				warnings: ['could not reclaim /path/to/locked'],
+			},
+			'could not reclaim',
+		],
+		[
+			'reclaimed branches present, reclaimed sub-fields partial',
+			{
+				initTimestamp: '2026-01-01T00:00:00.000Z',
+				warnings: [],
+				errors: [],
+				reclaimed: { removedBranches: ['swarm-lane/s/l'] },
+			},
+			'Reclaimed 1 orphaned branch(es)',
+		],
+	])('a PARTIALLY-shaped advisory renders without throwing: %s', async (label, advisoryContent, expectedFragment) => {
+		// These are the dangerous shapes: they PASS the emptiness gate on one
+		// field while another field the renderer dereferences is absent. Guarding
+		// only the gate would still have thrown here — and the advisory file is
+		// already deleted by that point, so the payload would be lost.
+		const { dir, messages } = await runAdvisory(
+			advisoryContent,
+			`test-arch-adv-partial-${label.replace(/[^a-z0-9]+/gi, '-')}`,
+		);
+		const joined = messages.join('\n');
+		expect(joined).toContain('INIT ORPHAN RECOVERY');
+		expect(joined).toContain(expectedFragment);
+		rmSync(dir, { recursive: true, force: true });
 	});
 });
