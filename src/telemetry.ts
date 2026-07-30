@@ -610,4 +610,9 @@ export const _internals: {
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
 	heartbeatListenerCount: () => number;
-} = { telemetry, emit, rotateTelemetryIfNeeded, heartbeatListenerCount: () => _heartbeatListener !== null ? 1 : 0 };
+} = {
+	telemetry,
+	emit,
+	rotateTelemetryIfNeeded,
+	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
+};
