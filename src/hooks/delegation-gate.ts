@@ -97,6 +97,7 @@ import {
 	applyCouncilReward,
 	truncateObjectForJson,
 } from '../memory/reward-capture';
+import { pushAdvisory } from '../utils/advisory-queue';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
 	initDurableStatusPath,
@@ -705,8 +706,8 @@ export function appendDelegationEnvelopeAdvisory(
 		if (!envelope) return null; // free-text / non-envelope → no advisory, no block
 		const result = validateDelegationEnvelope(envelope, context);
 		if (!result.valid) {
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				session,
 				`DELEGATION ENVELOPE ADVISORY: a parsed delegation envelope failed validation (${result.reason}). ` +
 					`This is advisory-only — the delegation was NOT blocked. Review the envelope's structured ` +
 					`fields (including the optional specCriteria acceptance/FR/SC arrays) before the next dispatch.`,
@@ -2382,8 +2383,8 @@ export function createDelegationGateHook(
 							changedFiles,
 						);
 						if (shouldParallelizeReview(routing)) {
-							reviewSession.pendingAdvisoryMessages ??= [];
-							reviewSession.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								reviewSession,
 								`REVIEW ROUTING: High complexity detected (${routing.reason}). ` +
 									`Consider parallel review: ${routing.reviewerCount} reviewers, ${routing.testEngineerCount} test engineers recommended.`,
 							);
@@ -3301,8 +3302,8 @@ export function createDelegationGateHook(
 									'both background correlation stores failed',
 								);
 								backgroundOwnershipDurable = preservation.durable;
-								session.pendingAdvisoryMessages ??= [];
-								session.pendingAdvisoryMessages.push(
+								pushAdvisory(
+									session,
 									`BACKGROUND DELEGATION UNTRACKED: ${subagentType} (${subagentSessionId}) launched, but both durable correlation stores failed. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the dispatch is recovered.`,
 								);
 							} else {
@@ -3317,8 +3318,8 @@ export function createDelegationGateHook(
 											},
 										);
 									if (!bound) {
-										session.pendingAdvisoryMessages ??= [];
-										session.pendingAdvisoryMessages.push(
+										pushAdvisory(
+											session,
 											`BACKGROUND CODER RESERVATION UNBOUND: task ${evidenceTaskId ?? 'unknown'} is durably tracked, but its pre-launch reservation could not be bound to ${subagentSessionId}. Further coder admission remains fail-closed until completion or recovery reconciles it.`,
 										);
 									}
@@ -3336,8 +3337,8 @@ export function createDelegationGateHook(
 							logger.warn(
 								'[delegation-gate] background dispatch had no correlation id (no jobId / no envelope) — not tracked',
 							);
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`BACKGROUND DELEGATION UNCORRELATED: ${subagentType} launched without a trusted session correlation. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered or safely re-dispatched.`,
 							);
 						}
@@ -3350,8 +3351,8 @@ export function createDelegationGateHook(
 						logger.warn(
 							`[delegation-gate] background pending recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`BACKGROUND DELEGATION DURABILITY FAILURE: ${subagentType} launched, but its completion owner could not be persisted. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered.`,
 						);
 					}
@@ -3475,8 +3476,8 @@ export function createDelegationGateHook(
 					const dispatchSession = ensureAgentSession(
 						standardDispatch.parentSessionID,
 					);
-					dispatchSession.pendingAdvisoryMessages ??= [];
-					dispatchSession.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						dispatchSession,
 						`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
 					);
 					// SC-115: Remove from awaiting-merge registry after recording failure.
@@ -3516,8 +3517,8 @@ export function createDelegationGateHook(
 				const dispatchSession = ensureAgentSession(
 					standardDispatch.parentSessionID,
 				);
-				dispatchSession.pendingAdvisoryMessages ??= [];
-				dispatchSession.pendingAdvisoryMessages.push(
+				pushAdvisory(
+					dispatchSession,
 					`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
 				);
 			}
@@ -4057,6 +4058,10 @@ export function createDelegationGateHook(
 			}
 
 			// ── Completion gate: push advisory if a task awaits completion ──
+			// B3 (issue #1976): the `break` below only caps pushes to one per
+			// toolBefore invocation; without cross-invocation state, a task stuck
+			// in tests_run re-injected the identical directive on EVERY Task tool
+			// call. Track warned task IDs so the same stuck task warns once.
 			if (session.taskWorkflowStates) {
 				for (const [, state] of session.taskWorkflowStates) {
 					if (state === 'tests_run') {
@@ -4064,11 +4069,15 @@ export function createDelegationGateHook(
 							directory,
 							session,
 						);
-						if (taskAwaiting) {
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(
+						if (
+							taskAwaiting &&
+							!session.completionGateWarnedForTask.has(taskAwaiting)
+						) {
+							pushAdvisory(
+								session,
 								completionGateViolationMessage(taskAwaiting),
 							);
+							session.completionGateWarnedForTask.add(taskAwaiting);
 						}
 						break; // only push once
 					}

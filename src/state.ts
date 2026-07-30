@@ -306,6 +306,10 @@ export interface AgentSessionState {
 	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
 	/** Task IDs for which partial gate warning has already been issued (prevents per-task spam) */
 	partialGateWarningsIssuedForTask: Set<string>;
+	/** Task IDs for which the completion-gate violation advisory has already been issued
+	 *  (issue #1976 B3: prevents re-injecting the identical, unactionable directive on
+	 *  every subsequent Task tool call while the same task stays stuck in tests_run). */
+	completionGateWarnedForTask: Set<string>;
 	/** Whether architect attempted self-fix write after gate failure */
 	selfFixAttempted: boolean;
 	/** Value of architectWriteCount at the time the self-coding warning was last injected.
@@ -491,6 +495,13 @@ export interface AgentSessionState {
 	prmHardStopPending: boolean;
 	/** Per-session escalation tracker instance (set lazily by PRM hook) */
 	prmEscalationTracker?: EscalationTracker;
+	/** Cross-turn set of already-injected PRM advisory dedupe keys
+	 *  (issue #1976 B1). The pushAdvisory helper only dedupes WITHIN a turn
+	 *  (the drain clears pendingAdvisoryMessages each turn); this set suppresses
+	 *  re-injecting the same pattern@level on subsequent tool calls until the
+	 *  pattern's count advances escalation. Bounded by distinct (pattern, level)
+	 *  pairs — at most (numPatterns × 3 levels). */
+	prmInjectedAdvisoryKeys: Set<string>;
 
 	// PR Monitor subscriptions (Phase 1)
 	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
@@ -1472,6 +1483,7 @@ export function startAgentSession(
 		reviewerCallCount: new Map(),
 		lastGateFailure: null,
 		partialGateWarningsIssuedForTask: new Set(),
+		completionGateWarnedForTask: new Set(),
 		selfFixAttempted: false,
 		selfCodingWarnedAtCount: 0,
 		catastrophicPhaseWarnings: new Set(),
@@ -1530,6 +1542,7 @@ export function startAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		prmInjectedAdvisoryKeys: new Set(),
 		// PR Monitor subscriptions
 		prSubscriptions: new Map<string, PrSubscriptionState>(),
 	};
@@ -1723,6 +1736,9 @@ export function ensureAgentSession(
 		if (!session.partialGateWarningsIssuedForTask) {
 			session.partialGateWarningsIssuedForTask = new Set();
 		}
+		if (!session.completionGateWarnedForTask) {
+			session.completionGateWarnedForTask = new Set();
+		}
 		if (session.selfFixAttempted === undefined) {
 			session.selfFixAttempted = false;
 		}
@@ -1871,6 +1887,9 @@ export function ensureAgentSession(
 		}
 		if (session.prmHardStopPending === undefined) {
 			session.prmHardStopPending = false;
+		}
+		if (!session.prmInjectedAdvisoryKeys) {
+			session.prmInjectedAdvisoryKeys = new Set();
 		}
 		// PR Monitor subscriptions migration safety
 		if (!session.prSubscriptions) {

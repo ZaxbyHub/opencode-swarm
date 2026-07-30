@@ -472,4 +472,64 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			),
 		).resolves.toBeUndefined();
 	});
+
+	it('issue #1976 B7: a NON-shell tool quoting "command not found" does not hard-stop', async () => {
+		// A non-shell tool (e.g. a CI-log inspector) may exit non-zero for an
+		// unrelated reason while its stdout QUOTES "command not found" from the
+		// log it read. The fatal command_not_found category is shell-execution
+		// specific; classifying it on a non-shell tool is a false-positive
+		// hard-stop (reading CI failure logs is a core PR-review activity).
+		const sessionID = 'nonshell-log-reader';
+		setupSession(sessionID);
+		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
+
+		await hooks.toolAfter(
+			{
+				tool: 'read',
+				sessionID,
+				callID: 'ci-log-inspect',
+				args: { filePath: 'ci-failure.log' },
+			},
+			{
+				title: 'read',
+				// Tool exited non-zero (success: false) for an unrelated reason,
+				// but its output quotes "command not found" from the CI log.
+				output:
+					'CI run failed. Log excerpt:\n  step 3: make: command not found in build script\n  step 5: tests exited 1',
+				metadata: {},
+				success: false,
+			} as never,
+		);
+
+		// No fatal command_not_found hard-stop for a non-shell tool. The failure
+		// is still recorded (as a non-fatal failure, never the shell-only
+		// command_not_found category) — the point is it must NOT hard-stop.
+		const c = circuit(sessionID);
+		expect(c?.category).not.toBe('command_not_found');
+		expect(c?.hardStop).toBe(false);
+	});
+
+	it('issue #1976 B7: a shell tool with a real command-not-found STILL hard-stops', async () => {
+		// The shell-gating must not weaken real shell command-not-found
+		// detection. A `bash` tool whose command is missing still hard-stops.
+		const sessionID = 'shell-missing';
+		setupSession(sessionID);
+		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
+
+		await hooks.toolAfter(
+			{
+				tool: 'bash',
+				sessionID,
+				callID: 'missing-cmd',
+				args: { command: 'totally-missing-tool' },
+			},
+			shellResult('totally-missing-tool: command not found', 127),
+		);
+
+		expect(circuit(sessionID)).toMatchObject({
+			category: 'command_not_found',
+			sameCategoryCount: 1,
+			hardStop: true,
+		});
+	});
 });

@@ -31,6 +31,7 @@ import {
 } from '../../review/runtime';
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -776,8 +777,8 @@ export async function dispatchPhaseCritic(
 				// shared session-state path — same as the sibling reviewer.ts.
 				const session = getAgentSession(sessionID);
 				if (session) {
-					session.pendingAdvisoryMessages ??= [];
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`MODEL FALLBACK: lean-turbo critic failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
 					);
 				}

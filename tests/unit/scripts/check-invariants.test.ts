@@ -23,6 +23,15 @@ const LIB_PATH = path.join(
 	'normalize-mock-target.sh',
 );
 const ALLOWLIST_PATH = path.join(REPO_ROOT, 'scripts', 'mock-allowlist.txt');
+// Check 6 (issue #1976) delegates to this sibling script. A fixture that copies
+// check-invariants.sh but not this file makes Check 6's `bash <missing>` fail
+// and increment `violations`, turning every exit-0 fixture into an exit-1
+// failure. The fixtures must mirror what the script now invokes.
+const ADVISORY_PUSH_SCRIPT_PATH = path.join(
+	REPO_ROOT,
+	'scripts',
+	'check-no-raw-advisory-push.sh',
+);
 
 /**
  * TIMING CONTRACT FOR THIS FILE — the two numbers below are NOT interchangeable
@@ -126,6 +135,10 @@ function setupFixtureDir(fixtureName: string): string {
 	fs.copyFileSync(
 		ALLOWLIST_PATH,
 		path.join(fixtureDir, 'scripts', 'mock-allowlist.txt'),
+	);
+	fs.copyFileSync(
+		ADVISORY_PUSH_SCRIPT_PATH,
+		path.join(fixtureDir, 'scripts', 'check-no-raw-advisory-push.sh'),
 	);
 
 	return fixtureDir;

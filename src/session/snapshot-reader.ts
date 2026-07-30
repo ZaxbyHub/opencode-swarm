@@ -132,6 +132,11 @@ export function deserializeAgentSession(
 		s.partialGateWarningsIssuedForTask ?? [],
 	);
 
+	// Convert completionGateWarnedForTask: string[] -> Set<string>
+	const completionGateWarnedForTask = new Set(
+		s.completionGateWarnedForTask ?? [],
+	);
+
 	// Convert catastrophicPhaseWarnings: number[] -> Set<number>
 	const catastrophicPhaseWarnings = new Set(s.catastrophicPhaseWarnings ?? []);
 
@@ -197,6 +202,7 @@ export function deserializeAgentSession(
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,
 		partialGateWarningsIssuedForTask,
+		completionGateWarnedForTask,
 		selfFixAttempted: s.selfFixAttempted ?? false,
 		selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
 		catastrophicPhaseWarnings,
@@ -239,6 +245,10 @@ export function deserializeAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// PRM advisory-injection dedupe state is transient like the rest of the
+		// PRM fields: reset on rehydrate so a resumed run re-evaluates patterns
+		// fresh (issue #1976 B1).
+		prmInjectedAdvisoryKeys: new Set(),
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
 		prSubscriptions: new Map(),

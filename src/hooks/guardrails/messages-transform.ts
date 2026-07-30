@@ -20,6 +20,7 @@ import { loadPlan } from '../../plan/manager';
 import { getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log } from '../../utils';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import {
 	extractStatusCode,
 	TRANSIENT_MODEL_ERROR_PATTERN,
@@ -62,6 +63,44 @@ const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
  */
 export const RUNAWAY_OUTPUT_ADVISORY_MARKER =
 	'Model is generating analysis without taking action';
+
+/**
+ * Drain-level byte budget for the architect [ADVISORIES] block (issue #1976).
+ *
+ * Advisories are prepended AFTER token accounting and therefore escape the
+ * context-budget handler; without a bound, a single turn with many producers
+ * (or a handful of large ones) can flood the architect prompt — the same
+ * failure mode that produced the PR_REVIEW banner flood (55.3% of non-blank
+ * lines in a real transcript).
+ *
+ * This is a defense-in-depth backstop behind the per-producer
+ * `pushAdvisory` helper (dedupe + length cap). When the joined block exceeds
+ * the budget, the OLDEST entries are dropped (keep-latest) because high-value
+ * advisories tend to arrive LATE in a turn — "keep earliest" is a priority
+ * inversion called out in the issue. Truncation is disclosed in the block
+ * header so the architect knows recent items were retained over earlier ones.
+ */
+const MAX_ADVISORY_BLOCK_BYTES = 6000;
+const ADVISORY_TRUNCATION_NOTE =
+	'[advisory block truncated to keep highest-value recent items]';
+
+/**
+ * Bound a set of advisory strings to a total byte budget, keeping the latest
+ * (dropping oldest from the front). Returns the kept entries and whether any
+ * were dropped. Never drops below a single entry (a single oversized advisory
+ * is kept verbatim rather than rendered empty).
+ */
+export function boundAdvisoryBytes(
+	advisories: string[],
+	maxBytes: number,
+): { kept: string[]; truncated: boolean } {
+	const kept = [...advisories];
+	const sizeOf = (arr: string[]) => arr.reduce((n, m) => n + m.length + 5, 0); // 5 = '\n---\n' separator
+	while (sizeOf(kept) > maxBytes && kept.length > 1) {
+		kept.shift();
+	}
+	return { kept, truncated: kept.length < advisories.length };
+}
 
 function getMessageText(message: ChatMessageLike | undefined): string {
 	if (!message?.parts) return '';
@@ -197,8 +236,8 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					previousObserved !== observedFull &&
 					!session.resumeModelAdvisoryDone
 				) {
-					session.pendingAdvisoryMessages ??= [];
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`MODEL CHANGED ACROSS RESUME: this run previously observed model "${previousObserved}"; the active model is now "${observedFull}". If this switch was unintended, re-select the intended model (or use /swarm handoff) before continuing.`,
 					);
 					session.resumeModelAdvisoryDone = true;
@@ -219,8 +258,8 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 						configuredArchitect !== observedFull &&
 						configuredArchitect !== modelID
 					) {
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL CONFIG NOTE: your config pins the architect to "${configuredArchitect}", but the UI has "${observedFull}" active. The UI selection wins for the primary/architect role (its configured model is intentionally not applied), so this difference is expected — switch the UI model if you meant to run "${configuredArchitect}".`,
 						);
 						session.configModelAdvisoryDone = true;
@@ -244,8 +283,7 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			);
 			if (isTransientProviderFailureText(lastAssistantText)) {
 				const fingerprint = getProviderFailureFingerprint(lastAssistantText);
-				session.pendingAdvisoryMessages ??= [];
-				const alreadyPending = session.pendingAdvisoryMessages.some(
+				const alreadyPending = session.pendingAdvisoryMessages?.some(
 					(message: string) =>
 						message.startsWith(TRANSIENT_PROVIDER_RECOVERY_TAG),
 				);
@@ -259,7 +297,8 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					!alreadyPending &&
 					!alreadyInjected
 				) {
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`${TRANSIENT_PROVIDER_RECOVERY_TAG}: The previous Architect response appears to have been interrupted by a transient provider/network error. On this turn, continue from the last stable step, inspect current repo or plan state if needed, and keep working instead of treating the interrupted response as task completion.`,
 					);
 					session.lastProviderRecoveryFingerprint = fingerprint;
@@ -323,23 +362,20 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 							// Reset counter after injection
 							consecutiveNoToolTurns.set(sessionId, 0);
 						} else if (count >= 3) {
-							// Advisory warning at 3 consecutive
+							// Advisory warning at 3 consecutive. Dedupe is handled by
+							// B6 (issue #1976): the dedupe predicate must match a
+							// substring the pushed text actually contains. It previously
+							// tested for 'runaway output' — a string no producer emits —
+							// so the guard was permanently inert. RUNAWAY_OUTPUT_ADVISORY_MARKER
+							// is shared by the text and the predicate so they cannot drift.
 							if (session) {
-								session.pendingAdvisoryMessages ??= [];
-								// The dedupe predicate must match a substring the pushed
-								// text actually contains. It previously tested for
-								// 'runaway output' — a string no producer anywhere in
-								// src/ ever emits, including this one — so `.some()` was
-								// always false, the guard always passed, and the advisory
-								// re-pushed on every qualifying transform. The drain-level
-								// exact-duplicate dedupe does NOT cover this either,
-								// because `${count}` varies between pushes.
 								if (
-									!session.pendingAdvisoryMessages.some((m: string) =>
+									!session.pendingAdvisoryMessages?.some((m: string) =>
 										m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 									)
 								) {
-									session.pendingAdvisoryMessages.push(
+									pushAdvisory(
+										session,
 										`WARNING: ${RUNAWAY_OUTPUT_ADVISORY_MARKER}. ` +
 											`${count} consecutive high-output responses without tool calls detected. ` +
 											`Use a tool or report BLOCKED.`,
@@ -427,11 +463,19 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					seenAdvisories.add(advisory);
 					cleanedAdvisories.push(advisory);
 				}
+				// Byte-budget backstop (issue #1976): advisories are prepended AFTER
+				// token accounting, so even deduped they can flood the prompt. Bound
+				// the cleaned set keep-latest, with a disclosure note when truncated.
+				const { kept, truncated } = boundAdvisoryBytes(
+					cleanedAdvisories,
+					MAX_ADVISORY_BLOCK_BYTES,
+				);
+				const headerNote = truncated ? `${ADVISORY_TRUNCATION_NOTE}\n` : '';
 				// Everything may have been blank; emitting an empty [ADVISORIES]
 				// block would itself be the content-free injection this is removing.
-				if (cleanedAdvisories.length > 0) {
-					const joined = cleanedAdvisories.join('\n---\n');
-					textPart.text = `[ADVISORIES]\n${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
+				if (kept.length > 0) {
+					const joined = kept.join('\n---\n');
+					textPart.text = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
 				}
 			}
 			// Clearing sits OUTSIDE the `if (textPart)` above, which silently

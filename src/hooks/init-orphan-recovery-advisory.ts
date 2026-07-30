@@ -24,6 +24,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ensureAgentSession, swarmState } from '../state';
+import { pushAdvisory } from '../utils/advisory-queue';
 
 export interface InitOrphanAdvisory {
 	initTimestamp: string;
@@ -198,13 +199,13 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		// Push warnings to pendingAdvisoryMessages
 		// ensureAgentSession is idempotent — gets existing or creates new
 		const targetSession = ensureAgentSession(sessionId);
-		targetSession.pendingAdvisoryMessages ??= [];
 
 		// Format header
 		const timestamp = advisory.initTimestamp
 			? new Date(advisory.initTimestamp).toLocaleString()
 			: 'unknown';
-		targetSession.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			targetSession,
 			`[INIT ORPHAN RECOVERY] Plugin init detected the following at ${timestamp}:`,
 		);
 
@@ -219,32 +220,30 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		// `warnings`) would still throw here. The file is already deleted by this
 		// point, so the payload would be lost with it.
 		for (const warning of advisory.warnings ?? []) {
-			targetSession.pendingAdvisoryMessages.push(`  WARNING: ${warning}`);
+			pushAdvisory(targetSession, `  WARNING: ${warning}`);
 		}
 
 		// Add errors (state-unreadable conditions)
 		for (const err of advisory.errors ?? []) {
-			targetSession.pendingAdvisoryMessages.push(
-				`  ERROR: ${formatError(err)}`,
-			);
+			pushAdvisory(targetSession, `  ERROR: ${formatError(err)}`);
 		}
 
 		// Add summary of what was reclaimed
 		const reclaimed = advisory.reclaimed;
 		if ((reclaimed?.removedBranches?.length ?? 0) > 0) {
-			targetSession.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				targetSession,
 				`  Reclaimed ${reclaimed.removedBranches.length} orphaned branch(es): ${reclaimed.removedBranches.join(', ')}`,
 			);
 		}
 		if (reclaimed?.removedWorktrees && reclaimed.removedWorktrees.length > 0) {
-			targetSession.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				targetSession,
 				`  Reclaimed ${reclaimed.removedWorktrees.length} orphaned worktree directory(ies): ${reclaimed.removedWorktrees.join(', ')}`,
 			);
 		}
 		if (reclaimed?.prunedWorktrees) {
-			targetSession.pendingAdvisoryMessages.push(
-				'  Stale worktree metadata pruned.',
-			);
+			pushAdvisory(targetSession, '  Stale worktree metadata pruned.');
 		}
 	}
 

@@ -87,6 +87,7 @@ import {
 import { telemetry } from '../telemetry';
 import { isEpicModeActiveForProject } from '../turbo/epic/state';
 import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
+import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger';
 import { createSwarmTool } from './create-tool';
 import {
@@ -889,8 +890,7 @@ export async function executePhaseComplete(
 				injectAdvisory: (_targetSessionID, advisory) => {
 					const sessionState = swarmState.agentSessions.get(sessionID);
 					if (!sessionState) return;
-					sessionState.pendingAdvisoryMessages ??= [];
-					sessionState.pendingAdvisoryMessages.push(advisory);
+					pushAdvisory(sessionState, advisory);
 				},
 			});
 			gateCtx.autoReviewTrigger = phaseReview.trigger;
@@ -1039,11 +1039,22 @@ export async function executePhaseComplete(
 					},
 				},
 			);
-			if (curationResult) {
+			// curateAndStoreSwarm always returns a non-nullable object, so gate on
+			// substance: only announce the curation when it actually did something
+			// (stored/reinforced/quarantined/rejected). A skipped-only curation is a
+			// no-op not worth surfacing to the architect.
+			const curationTouchedAny =
+				curationResult &&
+				curationResult.stored +
+					curationResult.reinforced +
+					curationResult.quarantined +
+					curationResult.rejected >
+					0;
+			if (curationTouchedAny) {
 				const sessionState = swarmState.agentSessions.get(sessionID);
 				if (sessionState) {
-					sessionState.pendingAdvisoryMessages ??= [];
-					sessionState.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						sessionState,
 						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
@@ -1129,6 +1140,12 @@ export async function executePhaseComplete(
 				curatorResult.knowledge_recommendations,
 				knowledgeConfig,
 			);
+			// Site A: deterministic drift check for the current phase. When it
+			// detects drift it writes an on-disk report AND pushes an advisory via
+			// the callback below. Track whether that callback fired so the
+			// prior-report re-read (Site B) can avoid re-pushing a near-duplicate
+			// for the SAME phase in the SAME run (issue #1976 B5.4).
+			let driftAdvisoryPushedThisRun = false;
 			try {
 				const { runDeterministicDriftCheck } = await import(
 					'../hooks/curator-drift.js'
@@ -1141,8 +1158,8 @@ export async function executePhaseComplete(
 					(message) => {
 						const sessionState = swarmState.agentSessions.get(sessionID);
 						if (sessionState) {
-							sessionState.pendingAdvisoryMessages ??= [];
-							sessionState.pendingAdvisoryMessages.push(message);
+							pushAdvisory(sessionState, message);
+							driftAdvisoryPushedThisRun = true;
 						}
 					},
 				);
@@ -1152,11 +1169,10 @@ export async function executePhaseComplete(
 			// Advisory injection: push actionable curator message to architect session
 			const callerSessionState = swarmState.agentSessions.get(sessionID);
 			if (callerSessionState) {
-				callerSessionState.pendingAdvisoryMessages ??= [];
-
+				const DIGEST_PLACEHOLDER = 'Phase analysis complete';
 				const digestSummary = curatorResult.digest?.summary
 					? curatorResult.digest.summary.slice(0, 200)
-					: 'Phase analysis complete';
+					: DIGEST_PLACEHOLDER;
 				const complianceNote =
 					curatorResult.compliance.length > 0
 						? ` (${curatorResult.compliance.length} compliance observation(s))`
@@ -1169,9 +1185,15 @@ export async function executePhaseComplete(
 					? ' Call curator_analyze with recommendations to apply knowledge updates from this phase.'
 					: '';
 
-				callerSessionState.pendingAdvisoryMessages.push(
-					`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped.${analyzeHint}`,
-				);
+				// Only surface the phase-digest advisory when there is real analysis to
+				// report. When the digest has no summary we fall back to a placeholder,
+				// which carries no information worth announcing to the architect.
+				if (digestSummary !== DIGEST_PLACEHOLDER) {
+					pushAdvisory(
+						callerSessionState,
+						`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped.${analyzeHint}`,
+					);
+				}
 
 				// Check for drift advisories from prior deterministic drift checks
 				try {
@@ -1182,9 +1204,19 @@ export async function executePhaseComplete(
 					const phaseReport = priorReports
 						.filter((r) => r.phase === phase)
 						.pop();
-					if (phaseReport && phaseReport.drift_score > 0) {
-						callerSessionState.pendingAdvisoryMessages.push(
-							`[CURATOR DRIFT DETECTED (phase ${phase}, score ${phaseReport.drift_score})]: Consider running critic_drift_verifier before phase completion to get a proper drift review. Review drift report for phase ${phase} and address spec alignment if applicable.`,
+					// Site B: only reach here for a PRIOR on-disk drift report when the
+					// deterministic check this run did NOT already push for this phase
+					// (e.g. it threw, or returned ALIGNED). When Site A already fired we
+					// skip to avoid a near-duplicate advisory for the same phase (the
+					// critic_drift_verifier nudge was folded into Site A's message).
+					if (
+						phaseReport &&
+						phaseReport.drift_score > 0 &&
+						!driftAdvisoryPushedThisRun
+					) {
+						pushAdvisory(
+							callerSessionState,
+							`[CURATOR DRIFT DETECTED (phase ${phase}, score ${phaseReport.drift_score})]: Prior drift report found on disk. Consider running critic_drift_verifier before phase completion to get a proper drift review. Review drift report for phase ${phase} and address spec alignment if applicable.`,
 						);
 					}
 				} catch {
@@ -1225,12 +1257,12 @@ export async function executePhaseComplete(
 			if (docReport?.verdict === 'DOC_STALE') {
 				const callerSessionState = swarmState.agentSessions.get(sessionID);
 				if (callerSessionState) {
-					callerSessionState.pendingAdvisoryMessages ??= [];
 					const staleIds = docReport.stale_sections
 						.map((s) => s.section_id)
 						.slice(0, 8)
 						.join(', ');
-					callerSessionState.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						callerSessionState,
 						`[DESIGN-DOC DRIFT (phase ${phase})]: ${docReport.stale_sections.length} design-doc section(s) are stale (${staleIds}). Run /swarm design-docs --update to sync ${outDir}/ and append a design-changelog entry. Advisory only — does not block completion.`,
 					);
 				}
@@ -1260,8 +1292,8 @@ export async function executePhaseComplete(
 		if (feedbackResult.processed > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
 			if (sessionState) {
-				sessionState.pendingAdvisoryMessages ??= [];
-				sessionState.pendingAdvisoryMessages.push(
+				pushAdvisory(
+					sessionState,
 					`[FEEDBACK] Skill usage feedback: ${feedbackResult.processed} skills processed, ${feedbackResult.bumps} confidence updates applied.`,
 				);
 			}
@@ -1327,8 +1359,8 @@ export async function executePhaseComplete(
 		if (verdictResult.bumps > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
 			if (sessionState) {
-				sessionState.pendingAdvisoryMessages ??= [];
-				sessionState.pendingAdvisoryMessages.push(
+				pushAdvisory(
+					sessionState,
 					`[FEEDBACK] Knowledge verdict feedback: ${verdictResult.processed} entries processed, ${verdictResult.bumps} confidence updates applied.`,
 				);
 			}
@@ -1620,9 +1652,18 @@ export async function executePhaseComplete(
 						if (!consolidationResult.started) return;
 						const sessionState = swarmState.agentSessions.get(sessionID);
 						if (!sessionState) return;
-						sessionState.pendingAdvisoryMessages ??= [];
-						sessionState.pendingAdvisoryMessages.push(
-							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						// Derive the activation suffix from the critic-gated auto-apply
+						// outcome rather than hardcoding "auto-activated no skills" — the
+						// run may legitimately have activated approved proposals.
+						const activatedSlugs =
+							consolidationResult.result?.autoApply?.approved ?? [];
+						const activationSuffix =
+							activatedSlugs.length > 0
+								? ` and auto-activated ${activatedSlugs.length} skill(s): ${activatedSlugs.join(', ')}.`
+								: ' and auto-activated no skills.';
+						pushAdvisory(
+							sessionState,
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'}${activationSuffix}`,
 						);
 					},
 					(err) => {

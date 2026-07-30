@@ -47,6 +47,7 @@ export interface SerializedAgentSession {
 	reviewerCallCount: Record<string, number>;
 	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
 	partialGateWarningsIssuedForTask: string[];
+	completionGateWarnedForTask: string[];
 	selfFixAttempted: boolean;
 	selfCodingWarnedAtCount: number;
 	catastrophicPhaseWarnings: number[];
@@ -159,6 +160,11 @@ export function serializeAgentSession(
 		s.partialGateWarningsIssuedForTask ?? new Set(),
 	);
 
+	// Convert completionGateWarnedForTask: Set<string> -> string[]
+	const completionGateWarnedForTask = Array.from(
+		s.completionGateWarnedForTask ?? new Set(),
+	);
+
 	// Convert catastrophicPhaseWarnings: Set<number> -> number[]
 	const catastrophicPhaseWarnings = Array.from(
 		s.catastrophicPhaseWarnings ?? new Set(),
@@ -229,6 +235,7 @@ export function serializeAgentSession(
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,
 		partialGateWarningsIssuedForTask,
+		completionGateWarnedForTask,
 		selfFixAttempted: s.selfFixAttempted ?? false,
 		selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
 		catastrophicPhaseWarnings,

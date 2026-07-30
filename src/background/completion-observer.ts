@@ -21,6 +21,7 @@ import {
 	discardReviewerScopeGenerationForCoderCall,
 	swarmState,
 } from '../state.js';
+import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
 import {
@@ -742,10 +743,7 @@ async function publishAdvisory(
 	if (!stored) return;
 	const session = swarmState.agentSessions.get(record.parentSessionId);
 	if (session) {
-		session.pendingAdvisoryMessages ??= [];
-		if (!session.pendingAdvisoryMessages.includes(stored.message)) {
-			session.pendingAdvisoryMessages.push(stored.message);
-		}
+		pushAdvisory(session, stored.message);
 	}
 }
 

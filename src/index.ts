@@ -162,6 +162,7 @@ import { ensureAgentSession, getActiveWindow, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
+import { pushAdvisory } from './utils/advisory-queue';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -987,8 +988,7 @@ async function initializeOpenCodeSwarm(
 	const advisoryInjector = (sessionId: string, message: string) => {
 		const session = swarmState.agentSessions.get(sessionId);
 		if (session) {
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(message);
+			pushAdvisory(session, message);
 		}
 	};
 	// Advisory ingester for trusted background-subagent completion signals.
@@ -1132,11 +1132,8 @@ async function initializeOpenCodeSwarm(
 			: undefined;
 		try {
 			if (session) {
-				session.pendingAdvisoryMessages ??= [];
 				for (const message of prepared.messages) {
-					if (!session.pendingAdvisoryMessages.includes(message)) {
-						session.pendingAdvisoryMessages.push(message);
-					}
+					pushAdvisory(session, message);
 				}
 			}
 			await guardrailsHooks.messagesTransform(input, output);
@@ -1372,8 +1369,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -1391,8 +1387,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -1411,8 +1406,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -2736,8 +2730,7 @@ async function initializeOpenCodeSwarm(
 					input.sessionID,
 					swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
 				);
-				skillSession.pendingAdvisoryMessages ??= [];
-				skillSession.pendingAdvisoryMessages.push(skillResult.reason);
+				pushAdvisory(skillSession, skillResult.reason);
 			}
 
 			// 8. Skill injection: auto-inject recommended skills when SKILLS field
@@ -2802,8 +2795,8 @@ async function initializeOpenCodeSwarm(
 				);
 				if (!pressureSession.contextPressureWarningSent) {
 					pressureSession.contextPressureWarningSent = true;
-					pressureSession.pendingAdvisoryMessages ??= [];
-					pressureSession.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						pressureSession,
 						`CONTEXT PRESSURE: ${swarmState.lastBudgetPct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
 					);
 				}
@@ -3038,8 +3031,8 @@ async function initializeOpenCodeSwarm(
 							const sessionId = input.sessionID;
 							const session = swarmState.agentSessions.get(sessionId);
 							if (session) {
-								session.pendingAdvisoryMessages ??= [];
-								session.pendingAdvisoryMessages.push(
+								pushAdvisory(
+									session,
 									`ADVERSARIAL PATTERN DETECTED: ${adversarialMatches.map((p) => p.pattern).join(', ')}. ` +
 										'Review agent output for potential prompt injection or gate bypass.',
 								);
@@ -3090,8 +3083,7 @@ async function initializeOpenCodeSwarm(
 						);
 						const session = swarmState.agentSessions.get(input.sessionID);
 						if (session) {
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(spiralResult.message);
+							pushAdvisory(session, spiralResult.message);
 						}
 					}
 				} catch {
@@ -3264,8 +3256,8 @@ async function initializeOpenCodeSwarm(
 							baseAgentName === 'critic' ||
 							baseAgentName === 'critic_sounding_board'
 						) {
-							taskSession.pendingAdvisoryMessages ??= [];
-							taskSession.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								taskSession,
 								`[PIPELINE] ${baseAgentName} delegation complete for task ${taskSession.currentTaskId ?? 'unknown'}. ` +
 									`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
 									`Do not stop here.`,
@@ -3278,21 +3270,21 @@ async function initializeOpenCodeSwarm(
 							const rawResponse =
 								typeof output.output === 'string' ? output.output : '';
 							const parsed = parseSoundingBoardResponse(rawResponse);
-							taskSession.pendingAdvisoryMessages ??= [];
 							if (parsed) {
 								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
 								if (parsed.improvedQuestion)
 									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
 								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
 								if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
-								taskSession.pendingAdvisoryMessages.push(verdictMsg);
+								pushAdvisory(taskSession, verdictMsg);
 								taskSession.lastDelegationReason = 'critic_consultation';
 							} else {
 								// Parsing failed — inject a fallback so the architect is not left without
 								// guidance. Use conservative behavior: treat as REPHRASE (needs review)
 								// rather than silently approving. Expected format:
 								// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
-								taskSession.pendingAdvisoryMessages.push(
+								pushAdvisory(
+									taskSession,
 									`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
 										`critic_sounding_board response (${rawResponse.length} chars). ` +
 										`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +

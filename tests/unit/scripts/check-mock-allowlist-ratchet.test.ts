@@ -23,6 +23,14 @@ const isWindows = process.platform === 'win32';
 const REPO_ROOT = path.resolve(__dirname, '../../../');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-invariants.sh');
 const LIB = path.join(REPO_ROOT, 'scripts', 'lib', 'normalize-mock-target.sh');
+// Check 6 (issue #1976) delegates to this sibling script. Every fixture copies
+// check-invariants.sh; without this file Check 6's `bash <missing>` fails and
+// increments `violations`, so every exit-0 assertion would flip to exit 1.
+const ADVISORY_PUSH_SCRIPT = path.join(
+	REPO_ROOT,
+	'scripts',
+	'check-no-raw-advisory-push.sh',
+);
 
 interface SpawnResult {
 	exitCode: number;
@@ -108,6 +116,10 @@ function copyScripts(repoDir: string): void {
 	fs.copyFileSync(
 		LIB,
 		path.join(scriptsDir, 'lib', 'normalize-mock-target.sh'),
+	);
+	fs.copyFileSync(
+		ADVISORY_PUSH_SCRIPT,
+		path.join(scriptsDir, 'check-no-raw-advisory-push.sh'),
 	);
 }
 

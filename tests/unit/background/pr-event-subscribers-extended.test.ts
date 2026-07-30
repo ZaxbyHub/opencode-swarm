@@ -216,8 +216,10 @@ describe('formatAdvisory — new event types', () => {
 			reviewDecision: 'CHANGES_REQUESTED',
 		});
 		expect(msgs).toHaveLength(1);
+		// B8 (issue #1976): review events carry a per-event identity suffix,
+		// so assert the stable token PREFIX.
 		expect(msgs[0]).toContain(
-			'[pr-monitor:pr.review.changes_requested:owner/repo#42]',
+			'[pr-monitor:pr.review.changes_requested:owner/repo#42',
 		);
 		expect(msgs[0]).toContain('changes requested');
 		expect(msgs[0]).toContain('CHANGES_REQUESTED');
@@ -229,7 +231,8 @@ describe('formatAdvisory — new event types', () => {
 			reviewDecision: 'APPROVED',
 		});
 		expect(msgs).toHaveLength(1);
-		expect(msgs[0]).toContain('[pr-monitor:pr.review.approved:owner/repo#42]');
+		// B8 (issue #1976): review events carry a per-event identity suffix.
+		expect(msgs[0]).toContain('[pr-monitor:pr.review.approved:owner/repo#42');
 		expect(msgs[0]).toContain('Review: approved');
 		expect(msgs[0]).toContain('APPROVED');
 	});
