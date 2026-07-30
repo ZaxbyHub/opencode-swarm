@@ -75,8 +75,13 @@ When implementation or review-scoping work depends on explorer agents reading a
 PR branch or commit range, complete this before Phase 1 explorer dispatch:
 
 1. Verify the working tree is clean with `git status --porcelain`. If
-   uncommitted changes exist, stash them or abort the checkout to prevent data
-   loss.
+   uncommitted changes exist, **you (the orchestrator)** must handle them
+   before Phase 1 dispatch — use a temporary save branch
+   (`git branch tmp/save-<topic>`), a git worktree (see `running-tests`
+   skill precedent), or `prepare_pr_workflow_checkout` if the controller tool
+   is available. **Never delegate `git stash`, `git reset`, `git checkout -- .`,
+   or `git restore` to subagents** — these are worktree-global operations that
+   destroy sibling agents' in-flight work under parallel execution.
 2. Fetch and check out the PR head branch locally. Explorer agents read files
    from the working tree (`Read`/`Glob`/`Grep`), not from git history, so a stale
    checkout makes them inspect the base branch.
@@ -89,6 +94,13 @@ PR branch or commit range, complete this before Phase 1 explorer dispatch:
 Launch parallel subagents for disjoint investigation tasks such as repository
 mapping, locating existing patterns, finding tests/contracts, side-effect
 analysis, and dependency or migration checks. Keep the main context focused.
+
+**Subagent prohibition — must reach every subagent prompt:**
+Include this line verbatim in every subagent dispatch prompt:
+"You are a subagent sharing a worktree with sibling agents. You MUST
+NOT run `git stash`, `git reset`, `git checkout -- .`, `git restore`,
+or any other worktree-global destructive git command. These destroy
+sibling agents' in-flight work without error."
 
 ### Phase 2 - Plan
 
