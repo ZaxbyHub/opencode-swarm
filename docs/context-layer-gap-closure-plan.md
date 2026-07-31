@@ -26,6 +26,7 @@ repro recipe is included so the implementer can reproduce before and after.
 | A5 | `toolAfter` boundary-checks with `safeRealpathSync` but passes the **non-realpath'd** `absoluteFilePath` into `updateGraphForFiles`; node keys come from the walk. On case-insensitive filesystems (Windows, default macOS) or via symlink aliases this can silently duplicate nodes / strand stale ones. | `src/hooks/repo-graph-builder.ts` (`_updateGraphForFiles(workspaceRoot, [absoluteFilePath])`) |
 | A7 | Walk truncation (10k-file cap / 5s budget, `builder.ts` `DEFAULT_WALK_FILE_CAP` / `DEFAULT_WALK_BUDGET_MS`) is only a debug log. `RepoGraphDiagnostics` has no truncation field; `graph_health` cannot report an incomplete graph. Windows machines (Defender-slowed walks) truncate first. | `src/tools/repo-graph/types.ts` `RepoGraphDiagnostics`; `src/tools/repo-graph/query.ts` `getGraphHealth` |
 | A8 | `boundaryForModule` hardcodes this repo's own layout (`src/tools/repo-graph`, `packages/`, `crates/`), degrading ontology boundaries on user repos. | `src/tools/repo-graph/ontology.ts` `boundaryForModule` |
+| A6 | `exclude_dirs` matching is case-sensitive on case-insensitive filesystems. **WITHDRAWN from code scope** (documented behavior per the schema JSDoc); PR1's release fragment adds a docs note only. Listed here so the ID sequence has no silent hole. | `src/config/schema.ts` `RepoGraphConfigSchema` JSDoc |
 
 Runtime repro for A1 (reproduce before fixing; convert into the regression test):
 
@@ -145,6 +146,11 @@ PR1 (correctness)  ──►  PR2 (freshness/economics)  ──►  PR4 (deliver
 PR6 (measurement) — after PR4 (needs something to measure); instrumentation seams may land in PR2–PR5 behind no-op defaults
 ```
 
+Explicit couplings the ordering encodes (do not reorder around them): PR4 §7.3
+rewrites the deep-dive skill to trust `graph_health` — that is only sound because PR2
+§5.3 rewires `getGraphHealth.fresh`/`staleFiles` from the deprecated 5-minute TTL to
+probe data. PR6's blind variant toggles `repo_graph.enabled`, which PR2 introduces.
+
 Explicitly deferred (documented decision, not silently dropped): LLM-synthesized prose
 concept nodes (Graft Tier-2 / graphify semantic-pass analogue). It is an enhancement,
 not a gap; it adds an LLM cost model and cache design of its own; revisit only after
@@ -211,9 +217,9 @@ Global rules for every PR below (repeat-checked in each PR's checklist):
 
 Queries: `getImporters`/`getDependencies`/`getBlastRadius` operate on the reverse/forward
 indexes built from edges; asset targets have no node and therefore already do not appear
-as importers. Add one focused test asserting asset edges don't corrupt `key_files`
-in-degree ranking (they currently inflate `getImporters` for asset paths — verify and
-pin whichever behavior is correct: asset targets must be excluded from `key_files`).
+as importers. Required behavior (single answer — do not arbitrate): **asset targets must
+be excluded from `key_files` in-degree ranking and from importer/dependent lists**; add
+one focused test pinning exactly that.
 
 ### 4.2 Fix A2 — one extension source of truth for the write hook
 
@@ -223,12 +229,16 @@ automatically and prevents future drift.
 
 ### 4.3 Fix A4 — reload-and-replay instead of full rebuild on concurrent save
 
-`src/tools/repo-graph/incremental.ts`: in the optimistic-concurrency branch (on-disk
-mtime differs from `getCachedMtime`), instead of full rebuild:
-`clearCache(...)` → `loadGraph(...)` (fresh copy) → re-apply the *same* per-file
-update loop for `filePaths` on the fresh graph → save. Guard with a single retry: if
-the mtime moved again during replay, fall back to the existing full rebuild (bounded,
-never loops). Preserve the existing log line for the terminal fallback only.
+`src/tools/repo-graph/incremental.ts`: first **extract the existing per-file update
+loop (the `for (const rawFilePath of filePaths)` body plus the validation/prune passes)
+into a reusable internal function** `applyFileUpdates(graph, filePaths, absoluteRoot):
+{ validationFailed: boolean }` — the normal path and the replay path below both call it.
+Then, in the optimistic-concurrency branch (on-disk mtime differs from
+`getCachedMtime`), instead of full rebuild:
+`clearCache(...)` → `loadGraph(...)` (fresh copy) → `applyFileUpdates(freshGraph,
+filePaths, ...)` → save. Guard with a single retry: if the mtime moved again during
+replay, fall back to the existing full rebuild (bounded, never loops). Preserve the
+existing log line for the terminal fallback only.
 
 ### 4.4 Fix A7 — surface truncation and fallback counts in diagnostics
 
@@ -254,12 +264,19 @@ symlinked file path asserting node count does not grow on update-through-symlink
 `src/tools/repo-graph` special case. Generic rule: boundary = first two path segments
 when the first segment is one of `packages|crates|apps|libs|services` (workspace-style
 layouts) or when a package-manifest marker (`package.json`, `Cargo.toml`,
-`pyproject.toml`, `go.mod`) exists in that subdirectory of the workspace — pass a
-`hasManifest(dir)` capability into `extractFileOntology` rather than doing fs I/O deep
-in the ontology (keep extraction pure; builder supplies the lookup from its walk).
-Otherwise: first segment (or `src/<second>` for `src/` layouts). Pin current outputs
-for this repo in a snapshot test so the refactor is provably behavior-preserving here
-except for the removed special case.
+`pyproject.toml`, `go.mod`) exists in that subdirectory of the workspace. Mechanics
+(be precise — the current walkers never see manifests because they are not scannable
+extensions): during directory enumeration in `walkSyncInto`/`findSourceFilesAsync`
+(`builder.ts`), record directory-relative paths whose entries include one of the four
+manifest basenames into a `Set<string>` on the walk context; the builders pass a
+`hasManifest(relDir: string) => boolean` closure over that set into
+`extractFileOntology` via a new optional field on `ExtractFileOntologyInput`
+(`ontology.ts`). `boundaryForModule` is private — the public seam is
+`extractFileOntology`'s input type, and the barrel re-export of that type in
+`src/tools/repo-graph.ts` must be updated in the same commit. Ontology stays pure
+(no fs I/O). Otherwise: first segment (or `src/<second>` for `src/` layouts). Pin
+current outputs for this repo in a snapshot test so the refactor is provably
+behavior-preserving here except for the removed special case.
 
 ### 4.7 Tests & acceptance
 
@@ -294,15 +311,28 @@ Graft-pattern stat probe (design source: Graft v0.8.2 `src/graph/fingerprint.ts`
 
 ```ts
 export interface FreshnessProbe {
-  state: 'clean' | 'drifted' | 'no-fingerprint';
+  state: 'clean' | 'drifted' | 'no-fingerprint' | 'inconclusive';
   changed: string[];   // absolute paths: mtime/size mismatch or new file
-  removed: string[];   // fingerprinted paths no longer on disk
+  removed: string[];   // fingerprinted paths no longer on disk — ONLY meaningful when the walk completed
+  truncated: boolean;  // the probe walk hit its budget/cap before finishing
   probedFiles: number;
   elapsedMs: number;
 }
 export async function probeFreshness(workspaceRoot: string, opts?): Promise<FreshnessProbe>
 export async function writeFingerprint(workspaceRoot: string, graph: RepoGraph): Promise<void>
 ```
+
+**Truncation safety (MANDATORY — a truncated probe must never drive deletions).** The
+probe walk uses the same budget/cap options as the builders; a file the walk never
+reached is indistinguishable from a deleted file. Therefore: if the walk aborts on
+budget or cap, the probe returns `state: 'inconclusive'` with `removed: []` (and
+`changed` limited to positively-observed mismatches). Consumers treat `inconclusive`
+exactly like `clean` for answering queries (serve the existing graph, flag
+`stale: unknown`) and never trigger deletions or refreshes from it. Additionally,
+every path in `removed` must be re-checked with a direct `stat` immediately before any
+node deletion (belt-and-braces against races). Without this rule, a Defender-slowed
+Windows walk would mass-delete nodes at init — this is the highest-risk regression the
+naive implementation invites.
 
 - Fingerprint sidecar `.swarm/repo-graph.fingerprint.json`:
   `{ schema_version, extractorStamp, files: { [relPath]: { size, mtimeMs } } }`.
@@ -312,11 +342,19 @@ export async function writeFingerprint(workspaceRoot: string, graph: RepoGraph):
   proxy here). Stamp mismatch ⇒ treat as `no-fingerprint` (full rebuild).
 - Probe = one bounded async walk (reuse `findSourceFilesAsync` walker options — same
   skip dirs, same caps, yielding) collecting `(relPath,size,mtimeMs)`; compare to the
-  sidecar. New files (on disk, not in fingerprint) → `changed`. Missing → `removed`.
-  Target cost: stat-only, tens of ms on this repo.
+  sidecar. New files (on disk, not in fingerprint) → `changed`. Missing (only when the
+  walk completed) → `removed`. Honest cost statement: this is a **readdir+stat
+  directory walk**, not a stat-of-known-files pass — cheap (no reads, no parsing;
+  target well under 1 s on this repo) but bounded by the same walk budget as builds,
+  hence the truncation rule above.
 - Never throws (fail-open to `no-fingerprint`); never touches an LLM; no locks needed
   (writers already serialize through `saveGraph`'s atomic rename + the incremental
   mtime check from PR1/4.3).
+- **Probe result cache** shared by all read-path consumers: a module-scope
+  `Map<directory, { probe, at }>` (bounded 16 entries, LRU), TTL 30 s — keyed
+  per-directory so multi-workspace hosts are correct (never a single-slot global).
+  `repo-map.ts` query actions and `repo-graph-injection.ts` both read through this
+  cache; a fresh probe runs at most once per directory per 30 s.
 
 ### 5.2 Session-start becomes probe-and-refresh
 
@@ -325,7 +363,9 @@ export async function writeFingerprint(workspaceRoot: string, graph: RepoGraph):
 ```
 graph = loadGraph(root)                    // cached/validated, from prior session
 if (!graph or probe.state === 'no-fingerprint'): full buildWorkspaceGraphAsync (current behavior)
-else if probe.state === 'clean': done (log "graph fresh, N files probed in M ms")
+else if probe.state === 'clean' or 'inconclusive': done (log state; inconclusive keeps graph AS-IS, no deletions)
+else if (changed.length + removed.length) > max(refresh_cap * 4, nodeCount * 0.4):
+    full buildWorkspaceGraphAsync            // cutover: per-file rescan beyond this exceeds rebuild cost
 else: updateGraphForFiles(root, [...changed, ...removed])   // PR1 makes this truly incremental
 then: writeFingerprint(root, graph)
 ```
@@ -341,9 +381,17 @@ next probe.
 
 `src/tools/repo-graph/query.ts`:
 
-- Reimplement `isGraphFresh(graph)` as fingerprint-comparison-free **cheap** check used
-  only where a probe result is unavailable; mark `@deprecated` in favor of probe data.
-- `repo-map.ts`: for query actions, run `probeFreshness` first (it is stat-only).
+- **Complete `isGraphFresh` caller audit (do this first; there are exactly three
+  surfaces today):** (1) `repo-map.ts` query actions — handled below; (2)
+  `getGraphHealth` in `query.ts`, whose `fresh` field currently reports the 5-minute
+  TTL — **rewire it to probe data in this PR**: `fresh = probe.state === 'clean'`,
+  plus a `probeState` field, with `staleFiles` derived from `changed ∪ removed`
+  (closes B3 here, and PR4's deep-dive rewrite depends on this field being
+  probe-backed); (3) the public barrel re-export in `src/tools/repo-graph.ts` — keep
+  the export, mark `@deprecated` in JSDoc, retain TTL semantics for any external
+  caller, but no in-repo caller may remain on it (add a grep-based test or lint note).
+- `repo-map.ts`: for query actions, read the probe through the 30 s per-directory
+  cache (§5.1).
   Response `stale` field becomes `{ stale: boolean, changedFiles: number }` derived from
   the probe. When `changed.length > 0 && changed.length <= refresh_cap` (config, default
   50), auto-refresh via `updateGraphForFiles` before answering and report
@@ -371,14 +419,21 @@ max_files: z.number().int().min(100).max(100000).default(10000),
 
 Thread `walk_budget_ms`/`max_files` into `buildWorkspaceGraphAsync` options from the
 hook and the `build` action (today the defaults are unconfigurable — closes the
-"10k/5s silently wrong for big repos" half of A7). `enabled:false` short-circuits in
-`src/index.ts` where the hook is constructed and in `repo-map.ts` execute (clear error
-string; tool stays registered — G4 unaffected).
+"10k/5s silently wrong for big repos" half of A7). `enabled:false` must short-circuit
+**every** consumer — enumerate and cover each with a test: (1) hook construction /
+init scan in `src/index.ts`; (2) `toolAfter` incremental updates in
+`repo-graph-builder.ts`; (3) `repo-map.ts` execute (clear disabled-notice string; tool
+stays registered — G4 unaffected); (4) `repo-graph-injection.ts` `getCachedGraph`
+returns null (which silently disables the coder/reviewer blocks in
+`system-enhancer.ts` and PR4's lane orientation — both already fail-open on null).
 
 ### 5.5 Tests & acceptance
 
 - `tests/unit/tools/repo-graph-freshness.test.ts`: probe clean/drifted/new-file/removed/
-  no-fingerprint/stamp-mismatch; sidecar write-after-save; fail-open on unreadable dir.
+  no-fingerprint/stamp-mismatch; sidecar write-after-save; fail-open on unreadable dir;
+  **truncation safety** — a probe whose walk aborts on budget/cap returns
+  `inconclusive` with empty `removed`, and init performs zero node deletions from it
+  (assert node count unchanged).
 - Update `tests/unit/hooks/repo-graph-builder.test.ts`: init path chooses full vs
   refresh vs no-op correctly (DI-seam the probe).
 - `tests/unit/tools/repo-map.test.ts`: query-action auto-refresh under cap; cap-exceeded
@@ -424,18 +479,20 @@ them"; encodes SOTA finding #2), help/docs surface, tests.
 
 `src/tools/repo-graph/query.ts` `getContextPack` + `repo-map.ts`:
 
-1. Optional arg `include_source: boolean` (default **true**): for each span, read the
-   file segment (bounded: ≤ 80 lines/span, existing `maxTokens` budget governs total;
-   reuse the `TOKENS_PER_LINE` estimate) and return `text` alongside the span. Read
-   failures → span without text plus a note (fail-open). Paths resolved under
-   `ctx.directory` only (G3).
+1. Optional arg `include_source: boolean` (default **false** — preserves the existing
+   response shape and token cost for every current consumer and pinned test; PR4's
+   prompt directives instruct agents to pass `include_source: true` explicitly): when
+   true, for each span read the file segment (bounded: ≤ 80 lines/span, existing
+   `maxTokens` budget governs total; reuse the `TOKENS_PER_LINE` estimate) and return
+   `text` alongside the span. Read failures → span without text plus a note
+   (fail-open). Paths resolved under `ctx.directory` only (G3).
 2. Close the exported-symbols-only hole: when a reached symbol has no `exportRanges`
    entry, fall back to a **signature-mode pointer at the file level** (`startLine 1`,
    `mode 'signature'`, note `'internal symbol — span unavailable'`) instead of silently
    dropping it, so the agent at least learns the file is involved.
 3. Response includes `sourceIncluded: boolean` and per-span `text?`.
 
-### 6.3 Ergonomics & community labels (C6 query-side)
+### 6.3 Ergonomics & community labels (C4/C5 polish — NOT part of C6; the gating policy is entirely PR4 §7.2)
 
 - `key_files`/`package_boundaries`: add `community` labels — reuse `packageBoundary`
   as the community key (no new clustering algorithm; explicitly NOT Leiden — deferred
@@ -448,13 +505,15 @@ them"; encodes SOTA finding #2), help/docs surface, tests.
 - `tests/unit/tools/repo-graph-ask.test.ts`: determinism (same graph → byte-identical
   output), vocab expansion (camelCase/snake_case), idf weighting sanity (rare term
   outranks common), PageRank convergence + early exit, asset-edge exclusion, budget
-  counts. Fixture: small synthetic graph (≤ 20 nodes) + one snapshot on a subtree of
-  this repo's real graph.
+  counts. Fixture: small synthetic graph (≤ 20 nodes), hand-built in the test — do NOT
+  build a real graph in unit tests.
 - `tests/unit/tools/repo-graph-context-pack-source.test.ts`: source inclusion bounds,
   fail-open on unreadable file, internal-symbol fallback pointer.
-- Acceptance: `repo_map action="ask" question="where are lane prompts assembled"` on
-  this repo returns `src/tools/dispatch-lanes.ts` in the top 3 hits (add as an
-  integration-style test against the real repo graph, tolerant to rank ≤ 5).
+- Acceptance / integration: build the graph over **one bounded subtree only**
+  (`src/tools/repo-graph/` — ~10 files, sub-second) and assert
+  `ask question="where is the graph saved atomically"` ranks `storage.ts` in the top 3.
+  Building the whole repo's graph takes minutes of tree-sitter work and is forbidden in
+  CI tests (walk-budget options exist — pass the subtree as the workspace root).
 
 ---
 
@@ -487,21 +546,31 @@ Update the consumer-contract tests (`src/agents/explorer-consumer-contract.test.
 
 `src/tools/dispatch-lanes.ts`:
 
-1. New optional dispatch arg `orientation: boolean` (default true when a fresh graph
-   exists, false otherwise) — assembled by a new helper
+1. New optional dispatch arg `orientation` added to **both** tool schemas
+   (`dispatch_lanes` and `dispatch_lanes_async` — they are registered separately in
+   `dispatch-lanes.ts`): `z.boolean().optional()` with **no zod default** (a schema
+   default cannot depend on graph state); resolved at execute time as "undefined ⇒
+   true when a fresh graph exists, false otherwise". Assembled by a new helper
    `buildLaneOrientationBlock(directory, lanePrompts): string | null` in
    `src/hooks/repo-graph-injection.ts`:
    - Runs `ask` over the **concatenated lane mission texts** once (not per lane),
      takes top 6 files + `key_files` top 4 + a one-line freshness statement.
-   - **Gating policy (C7 push-side, Graft-pattern):** emit only when the top ask score
+   - **Gating policy (C6 push-side, Graft-pattern):** emit only when the top ask score
      clears a floor (constant, start 0.35 — tune in PR6) and the block is ≤ 600 tokens
-     (`estimateTokens` from `src/hooks/context-budget.ts`); dedupe against a
+     (`estimateTokens` from `src/hooks/utils.ts`); dedupe against a
      per-session set of already-delivered file pointers (bounded 128, FIFO) — suppressed
-     repeats emit nothing (no nudge text inside lane prompts; keep lanes deterministic).
-   - Deterministic for a given graph + mission set (no timestamps — SOTA #5); appended
-     to `common_prompt` (shared prefix position) ahead of per-lane text.
-2. Respect `MAX_PROMPT_CHARS`; orientation is dropped (logged) rather than truncating
-   user content.
+     repeats emit nothing (no nudge text inside lane prompts).
+   - Determinism contract (precise, because it interacts with dedupe): the block is a
+     pure function of (graph state, mission texts, **empty dedupe state**) — no
+     timestamps or randomness (SOTA #5). A second identical dispatch in the same
+     session is expected to be **suppressed by dedupe**, which is correct behavior,
+     not nondeterminism. Appended to `common_prompt` (shared prefix position) ahead of
+     per-lane text.
+2. Overflow rule: the combined-length check in dispatch **throws** on
+   `MAX_PROMPT_CHARS` overrun, so compute `max over lanes of (common_prompt +
+   orientation + separator + lane.prompt).length` **before** appending; if any lane
+   would exceed the cap, drop the orientation block entirely (log at debug) rather
+   than truncating or failing dispatch.
 
 ### 7.3 deep-dive skill reuse (C3) and skill-side posture (G6)
 
@@ -525,8 +594,11 @@ by sessionID; entries for other sessions pruned FIFO.
 - Prompt-contract tests updated (7.1) — assert the directive text is present and the
   blind-scan opener is gone from explorer.
 - `tests/unit/tools/dispatch-lanes-orientation.test.ts`: block emitted when floor
-  cleared; suppressed on repeat; suppressed when graph stale-over-cap; dropped when
-  budget exceeded; determinism (two identical dispatches → identical block).
+  cleared; **suppressed on repeat dispatch (dedupe)** — separate test; determinism —
+  two identical dispatches **each starting from a reset dedupe state** produce
+  byte-identical blocks (reset via a test-only seam, mirroring the existing
+  `deliveredLaneOutputs` handling); suppressed when graph stale-over-cap; dropped when
+  the pre-computed combined length would exceed `MAX_PROMPT_CHARS`.
 - Skill drift check green (G6). Registration drift green (G4 — dispatch arg change
   needs schema/docs update).
 - Acceptance (manual, record in PR body): dispatch a 2-lane exploration on this repo;
@@ -544,13 +616,18 @@ prune on missing anchor) and Zep/Graphiti (temporal anchoring). All pattern-only
 
 ### 8.1 Outcome capture (D1)
 
-- Extend the memory record schema (`src/memory/` — locate the entry type used by
-  `swarm_memory_propose`) with optional fields:
+- Extend the shared memory entry type (in `src/memory/types.ts` — verify the exact
+  file; it is the type both providers consume) with optional fields:
   `anchors?: { file: string; symbol?: string }[]` and
   `outcomes?: { outcome: 'useful' | 'dead_end' | 'corrected'; at: string;
-  taskId?: string; correction?: string }[]` (SQLite migration following the existing
-  migration pattern in `src/memory/` / `/swarm memory migrate` machinery; additive
-  columns or JSON field per the provider's storage shape).
+  taskId?: string; correction?: string }[]`. There are **two providers** to update:
+  `src/memory/sqlite-provider.ts` (additive migration following the existing
+  `/swarm memory migrate` machinery — new nullable columns or a JSON column,
+  matching whichever pattern the provider already uses for optional structures) and
+  the JSONL provider (`src/memory/` — locate `local-jsonl-provider.ts` or equivalent;
+  JSON storage makes additive fields automatic, but its parse/validate path must
+  accept them). Run the existing provider round-trip and migration tests to prove
+  older stores load unchanged.
 - New tool `swarm_memory_outcome` (full G4 wiring): args
   `{ memory_id?: string, question?: string, outcome, anchors?, correction? }` —
   records an outcome against an existing memory (by id) or files a lightweight
@@ -577,13 +654,16 @@ export function renderReflectionMarkdown(d: ReflectionDigest): string   // byte-
   outcomes; both-signs → `contested`, resolved by most recent.
 - Persistence: `.swarm/reflections/lessons.md` + `.json` sidecar (G3). Regenerated by a
   post-resolution-queue task at session start (bounded: read memory store + render;
-  no LLM, no network — G1-compatible) and after each `swarm_memory_outcome` call
-  (debounced 60 s).
+  no LLM, no network — G1-compatible) and **synchronously (write-through) at the end of
+  each `swarm_memory_outcome` execution** — the render is a cheap deterministic pass,
+  so no debounce, no background timer, no deferred work (permanent directive #1: a
+  test can observe the updated artifact immediately after the tool call returns).
 - Injection: extend the existing session-start injection path — add a compact digest
   block (≤ 500 tokens: top 5 preferred, top 5 dead ends, top 3 corrections) through the
   system-enhancer composition (before the collapse — G5), gated on
-  `memory.reflection.enabled` config (default **true**; `{}`-safe default preserves
-  behavior for users with memory disabled entirely).
+  `memory.reflection.enabled` config (default **false** in this PR — G9: existing
+  behavior preserved unless set; flip the default to true only in PR6 once the A/B
+  numbers justify it, as a one-line follow-up recorded in PR6's fragment).
 
 ### 8.3 Structural anchoring & pruning (D3)
 
@@ -663,7 +743,7 @@ must never be cited as expected outcomes — only our own A/B numbers.
 | Gap | PR | Gap | PR | Gap | PR |
 |-----|----|-----|----|-----|----|
 | A1 | 1 | B1 | 2 | C5 | 3 |
-| A2 | 1 | B2 | 2 | C6 | 3+4 |
+| A2 | 1 | B2 | 2 | C6 | 4 |
 | A3 | 2 | B3 | 2 | C7 | 4 |
 | A4 | 1 | B4 | 2 | D1 | 5 |
 | A5 | 1 | B5 | 2 | D2 | 5 |
@@ -674,8 +754,8 @@ must never be cited as expected outcomes — only our own A/B numbers.
 
 Deferred with rationale (§3): LLM prose concept nodes; Leiden-style clustering beyond
 `packageBoundary` communities; graft/graphify artifact interop (critic-fenced as
-low-value/risky); exclude_dirs case-folding (documented behavior; revisit only on a
-real user report — record as a docs note in PR1's fragment).
+low-value/risky); A6 exclude_dirs case-folding (withdrawn — documented behavior;
+revisit only on a real user report — record as a docs note in PR1's fragment).
 
 ## 11. Execution notes for the implementing agent
 
