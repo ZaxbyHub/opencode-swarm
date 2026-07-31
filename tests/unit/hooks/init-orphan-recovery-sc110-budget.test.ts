@@ -184,7 +184,7 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 		);
 		await initGitRepo(freshDir);
 
-		// Create orphaned worktree dir (not a real git worktree)
+		// Create a worktree-shaped orphan so recovery exercises git removal first.
 		const worktreeRoot = path.resolve(
 			path.dirname(freshDir),
 			'.swarm-worktrees',
@@ -192,6 +192,7 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 		const orphanedPath = path.join(worktreeRoot, 'crashed-session', 'lane-1');
 		mkdirSync(orphanedPath, { recursive: true });
 		writeFileSync(path.join(orphanedPath, 'locked.txt'), 'locked\n');
+		writeFileSync(path.join(orphanedPath, '.git'), 'gitdir: unavailable\n');
 
 		// Save real removeWorktree and rmSync
 		const realRemoveWorktree = InitOrphanRecoveryInternals.removeWorktree;

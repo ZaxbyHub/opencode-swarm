@@ -17,6 +17,7 @@ import {
 import {
 	type AgentSessionState,
 	advanceTaskState,
+	advanceTaskStateAndPersist,
 	getReviewerScopeGenerationForCoderCall,
 	getReviewerScopeOwnershipHistory,
 	getTaskState,
@@ -24,6 +25,7 @@ import {
 	hasBothStageBCompletions,
 	markReviewerScopeGenerationReady,
 	type ReviewerScopeGeneration,
+	recordModifiedFilesForTask,
 	recordStageBCompletion,
 	reviewerScopeGenerationHasDeclaredOverlap,
 	swarmState,
@@ -216,12 +218,28 @@ export async function ingestBackgroundStageBCompletion(args: {
 
 	if (args.record.normalizedAgent === 'coder') {
 		const taskChangeContext = args.record.taskChangeContext;
-		const observedFiles = taskChangeContext
-			? changedFilesSinceSnapshot(
-					taskChangeContext.baseline.directory,
-					taskChangeContext.baseline,
-				)
-			: null;
+		const settledFiles =
+			args.record.coderSettlement?.state === 'settled'
+				? args.record.coderSettlement.observedFiles
+				: undefined;
+		const observedFiles =
+			settledFiles !== undefined
+				? settledFiles
+				: taskChangeContext
+					? changedFilesSinceSnapshot(
+							taskChangeContext.baseline.directory,
+							taskChangeContext.baseline,
+						)
+					: null;
+		if (observedFiles === null) {
+			return {
+				ok: false,
+				consumed: false,
+				stale: true,
+				reason:
+					'background coder files could not be attributed to a clean immutable baseline',
+			};
+		}
 		try {
 			const observedSet = normalizedPathSet(observedFiles);
 			const declaredSet = normalizedPathSet(
@@ -229,6 +247,15 @@ export async function ingestBackgroundStageBCompletion(args: {
 			);
 			const completionTime = args.record.completedAt ?? args.record.updatedAt;
 			let attributedFiles = observedFiles ?? [];
+			if (args.reviewerReceiptOptions?.config?.enabled !== true) {
+				// Without ownership validation, restrict attributed files to the
+				// declared scope so concurrent background coders don't cross-attribute.
+				if (observedSet && declaredSet) {
+					attributedFiles = [...observedSet].filter((file) =>
+						declaredSet.has(file),
+					);
+				}
+			}
 			if (args.reviewerReceiptOptions?.config?.enabled === true) {
 				if (!observedSet || !declaredSet) {
 					return {
@@ -349,6 +376,37 @@ export async function ingestBackgroundStageBCompletion(args: {
 					};
 				}
 				attributedFiles = [...routedFiles];
+			}
+			const parentSession = swarmState.agentSessions.get(
+				args.record.parentSessionId,
+			);
+			if (parentSession) {
+				const state = getTaskState(parentSession, taskId);
+				if (state !== 'idle' && state !== 'coder_delegated') {
+					return {
+						ok: false,
+						consumed: false,
+						reason: `background coder completion is late for task ${taskId}: current state is ${state}`,
+					};
+				}
+				if (
+					!recordModifiedFilesForTask(parentSession, taskId, attributedFiles)
+				) {
+					return {
+						ok: false,
+						consumed: false,
+						reason: `background coder file-attribution capacity is exhausted for task ${taskId}`,
+					};
+				}
+				if (state === 'idle') {
+					await advanceTaskStateAndPersist(
+						parentSession,
+						taskId,
+						'coder_delegated',
+						args.directory,
+						{ telemetrySessionId: args.record.parentSessionId },
+					);
+				}
 			}
 			await recordAgentDispatch(args.directory, taskId, 'coder', undefined, {
 				testEngineerExempt: isMarkdownOnlyTaskChange(

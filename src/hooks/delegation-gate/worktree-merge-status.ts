@@ -50,8 +50,14 @@ export interface WorktreeMergeFailure {
 	completedAt?: number;
 }
 
+export type WorktreeMergeRecoveryScanResult =
+	| { status: 'ok'; failures: Array<[string, WorktreeMergeFailure]> }
+	| { status: 'uncertain'; reason: string };
+
 const failuresByTask = new Map<string, WorktreeMergeFailure>();
 let durableStatusPath: string | undefined;
+const MAX_RECOVERY_STATUS_BYTES = 2 * 1024 * 1024;
+const MAX_RECOVERY_STATUS_ENTRIES = 512;
 /**
  * True once the durable file has been read into `failuresByTask` for the
  * current `durableStatusPath`. Guards against re-reading (and re-clearing)
@@ -115,6 +121,107 @@ function saveDurableStatus(statusPath: string): void {
 		}
 	} catch {
 		// Non-fatal — in-memory map still works; durable backup may be lost on restart
+	}
+}
+
+function isRecoveryFailure(value: unknown): value is WorktreeMergeFailure {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	if (
+		(candidate.outcome !== 'partial' && candidate.outcome !== 'failed') ||
+		typeof candidate.stage !== 'string' ||
+		!candidate.stage ||
+		typeof candidate.message !== 'string' ||
+		!candidate.message
+	) {
+		return false;
+	}
+	for (const key of ['worktreePath', 'branch'] as const) {
+		if (
+			candidate[key] !== undefined &&
+			(typeof candidate[key] !== 'string' || candidate[key].length === 0)
+		) {
+			return false;
+		}
+	}
+	for (const key of ['queuedAt', 'completedAt'] as const) {
+		if (
+			candidate[key] !== undefined &&
+			(typeof candidate[key] !== 'number' ||
+				!Number.isFinite(candidate[key]) ||
+				candidate[key] < 0)
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Strict recovery-only read of durable merge ownership. The normal registry
+ * stays fail-open for plugin loadability, while destructive orphan cleanup
+ * receives an explicit uncertainty result for read, parse, schema, or cap
+ * failures.
+ */
+export function scanWorktreeMergeFailuresForRecovery(
+	projectDir: string,
+): WorktreeMergeRecoveryScanResult {
+	const statusPath = path.join(
+		projectDir,
+		'.swarm',
+		'worktree-merge-status.json',
+	);
+	try {
+		const stat = fs.statSync(statusPath);
+		if (stat.size > MAX_RECOVERY_STATUS_BYTES) {
+			return {
+				status: 'uncertain',
+				reason: `worktree merge-status file exceeds the ${MAX_RECOVERY_STATUS_BYTES}-byte recovery bound`,
+			};
+		}
+		const raw = fs.readFileSync(statusPath, 'utf-8');
+		if (Buffer.byteLength(raw, 'utf8') > MAX_RECOVERY_STATUS_BYTES) {
+			return {
+				status: 'uncertain',
+				reason: `worktree merge-status file changed beyond the ${MAX_RECOVERY_STATUS_BYTES}-byte recovery bound`,
+			};
+		}
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+			return {
+				status: 'uncertain',
+				reason: 'worktree merge-status file does not contain an object',
+			};
+		}
+		const entries = Object.entries(parsed);
+		if (entries.length > MAX_RECOVERY_STATUS_ENTRIES) {
+			return {
+				status: 'uncertain',
+				reason: `worktree merge-status owner count exceeds the ${MAX_RECOVERY_STATUS_ENTRIES}-entry safety bound`,
+			};
+		}
+		for (const [taskId, failure] of entries) {
+			if (!taskId || !isRecoveryFailure(failure)) {
+				return {
+					status: 'uncertain',
+					reason: `worktree merge-status has an invalid owner record for task "${taskId}"`,
+				};
+			}
+		}
+		return {
+			status: 'ok',
+			failures: entries as Array<[string, WorktreeMergeFailure]>,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return { status: 'ok', failures: [] };
+		}
+		return {
+			status: 'uncertain',
+			reason: `worktree merge-status is unreadable or malformed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
 	}
 }
 
@@ -215,6 +322,15 @@ export const _internals = {
 	initDurableStatusPath,
 	/** Reset both in-memory and durable state for test isolation. */
 	resetForTest(): void {
+		// Delete the durable file on disk so a subsequent lazy-load in
+		// another test does not re-read stale merge-failure state.
+		if (durableStatusPath !== undefined) {
+			try {
+				fs.unlinkSync(durableStatusPath);
+			} catch {
+				// The file may not exist (ENOENT) — that's fine.
+			}
+		}
 		failuresByTask.clear();
 		durableStatusPath = undefined;
 		hasLoaded = false;

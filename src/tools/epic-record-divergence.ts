@@ -6,10 +6,8 @@
  *
  *   1. Reads the task's DECLARED scope from `.swarm/scopes/scope-{taskId}.json`
  *      (the same on-disk record `readScopeFromDisk` consults).
- *   2. Reads the ACTUAL files the coder modified from the session's
- *      `modifiedFilesThisCoderTask` — populated by the guardrails write hook
- *      and reset by Lean Turbo at task-boundaries, so it captures THIS
- *      task's writes only.
+ *   2. Reads the ACTUAL files attributed to this exact task by the guardrails
+ *      write hook and background-completion ingestion.
  *   3. Appends one record to `.swarm/epic/divergence.jsonl` via
  *      `recordTaskDivergence`. The calibration engine reads that file on the
  *      next `epic_decide_phase` invocation (the architect-facing decide
@@ -32,7 +30,9 @@ import { loadPlanJsonOnly as loadPlanJsonOnly_import } from '../plan/manager.js'
 import { readScopeFromDisk as readScopeFromDisk_import } from '../scope/scope-persistence.js';
 import {
 	getAgentSession as getAgentSession_import,
+	getModifiedFilesForTask as getModifiedFilesForTask_import,
 	hasActiveEpicMode as hasActiveEpicMode_import,
+	resetModifiedFilesForTask as resetModifiedFilesForTask_import,
 } from '../state.js';
 import { recordTaskDivergence as recordTaskDivergence_import } from '../turbo/epic/divergence-recorder.js';
 import * as logger from '../utils/logger.js';
@@ -75,6 +75,8 @@ export interface EpicRecordDivergenceResult {
 export const _internals = {
 	hasActiveEpicMode: hasActiveEpicMode_import,
 	getAgentSession: getAgentSession_import,
+	getModifiedFilesForTask: getModifiedFilesForTask_import,
+	resetModifiedFilesForTask: resetModifiedFilesForTask_import,
 	readScopeFromDisk: readScopeFromDisk_import,
 	loadPlanJsonOnly: loadPlanJsonOnly_import,
 	recordTaskDivergence: recordTaskDivergence_import,
@@ -117,46 +119,52 @@ export async function executeEpicRecordDivergence(
 		return { success: true, reason: 'no-session' };
 	}
 
-	const declaredScope = _internals.readScopeFromDisk(directory, taskId);
-	if (declaredScope === null) {
-		// No declared scope means the coder skipped declare_scope, the file
-		// expired its TTL, or the task is a non-code phase. Record nothing —
-		// calibration only learns from tasks with a declared baseline.
-		return { success: true, reason: 'no-scope' };
+	try {
+		const declaredScope = _internals.readScopeFromDisk(directory, taskId);
+		if (declaredScope === null) {
+			// No declared scope means the coder skipped declare_scope, the file
+			// expired its TTL, or the task is a non-code phase. Record nothing —
+			// calibration only learns from tasks with a declared baseline.
+			return { success: true, reason: 'no-scope' };
+		}
+
+		const actualFiles = _internals.getModifiedFilesForTask(session, taskId);
+		const phaseNumber = await findPhaseForTask(directory, taskId);
+
+		const result = _internals.recordTaskDivergence({
+			directory,
+			sessionID,
+			taskId,
+			phaseNumber,
+			declaredScope,
+			actualFiles,
+		});
+
+		if (!result) {
+			logger.warn(
+				`[epic_record_divergence] persist failed for ${taskId}; calibration will miss one observation`,
+			);
+			return { success: true, reason: 'persist-failed' };
+		}
+
+		const { record } = result;
+		return {
+			success: true,
+			reason: 'recorded',
+			summary: {
+				declaredCount: record.declaredScope.length,
+				actualCount: record.actualFiles.length,
+				undeclaredCount: record.undeclared.length,
+				unusedCount: record.unused.length,
+				divergenceRatio: record.divergenceRatio,
+				isClean: record.isClean,
+			},
+		};
+	} finally {
+		// Epic retains completed-task attribution until this calibration attempt,
+		// then releases it regardless of the tool's best-effort outcome.
+		_internals.resetModifiedFilesForTask(session, taskId, { remove: true });
 	}
-
-	const actualFiles = session.modifiedFilesThisCoderTask ?? [];
-	const phaseNumber = await findPhaseForTask(directory, taskId);
-
-	const result = _internals.recordTaskDivergence({
-		directory,
-		sessionID,
-		taskId,
-		phaseNumber,
-		declaredScope,
-		actualFiles,
-	});
-
-	if (!result) {
-		logger.warn(
-			`[epic_record_divergence] persist failed for ${taskId}; calibration will miss one observation`,
-		);
-		return { success: true, reason: 'persist-failed' };
-	}
-
-	const { record } = result;
-	return {
-		success: true,
-		reason: 'recorded',
-		summary: {
-			declaredCount: record.declaredScope.length,
-			actualCount: record.actualFiles.length,
-			undeclaredCount: record.undeclared.length,
-			unusedCount: record.unused.length,
-			divergenceRatio: record.divergenceRatio,
-			isClean: record.isClean,
-		},
-	};
 }
 
 export const epic_record_divergence: ToolDefinition = createSwarmTool({

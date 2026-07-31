@@ -8,6 +8,7 @@ import {
 	type AgentSessionState,
 	ensureAgentSession,
 	getAgentSession,
+	recordModifiedFilesForTask,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -75,16 +76,20 @@ describe('modifiedFilesThisCoderTask adversarial tests', () => {
 
 		it('should handle null assigned to modifiedFilesThisCoderTask', () => {
 			const session = ensureAgentSession(sessionId1, 'coder');
+			session.currentTaskId = 'task-null-repair';
+			expect(
+				recordModifiedFilesForTask(session, 'task-null-repair', ['trusted.ts']),
+			).toBe(true);
 
 			// Corrupt the field with null
 			(session as any).modifiedFilesThisCoderTask = null;
 
-			// Migration guard should NOT catch null (only undefined)
-			// Subsequent ensureAgentSession call should not fix it
+			// The task-keyed map is authoritative. Re-projecting the active task
+			// repairs a corrupted legacy compatibility field.
 			const sessionAgain = ensureAgentSession(sessionId1, 'coder');
 
-			// null should persist (no migration for null)
-			expect(sessionAgain.modifiedFilesThisCoderTask).toBe(null);
+			expect(sessionAgain.modifiedFilesThisCoderTask).toEqual(['trusted.ts']);
+			expect(Array.isArray(sessionAgain.modifiedFilesThisCoderTask)).toBe(true);
 		});
 
 		it('should handle number (42) assigned to modifiedFilesThisCoderTask', () => {
@@ -359,19 +364,22 @@ describe('modifiedFilesThisCoderTask adversarial tests', () => {
 
 		it('should handle push after reassignment attempts', () => {
 			const session = ensureAgentSession(sessionId1, 'coder');
+			session.currentTaskId = 'task-reassignment-repair';
 
-			// Add some files
-			session.modifiedFilesThisCoderTask.push('original.ts');
+			// Seed the authoritative task-keyed attribution.
+			expect(
+				recordModifiedFilesForTask(session, 'task-reassignment-repair', [
+					'original.ts',
+				]),
+			).toBe(true);
 
 			// Attempt to reassign the array entirely (simulating mutation attack)
 			(session as any).modifiedFilesThisCoderTask = ['hacked.js'];
 
-			// New ensureAgentSession call should NOT restore original
-			// (migration only handles undefined, not other invalid values)
+			// Re-projection discards direct reassignment of the compatibility view.
 			const sessionAgain = ensureAgentSession(sessionId1, 'coder');
 
-			// The corrupted value should persist
-			expect(sessionAgain.modifiedFilesThisCoderTask).toEqual(['hacked.js']);
+			expect(sessionAgain.modifiedFilesThisCoderTask).toEqual(['original.ts']);
 		});
 
 		it('should handle concurrent-like access patterns', () => {

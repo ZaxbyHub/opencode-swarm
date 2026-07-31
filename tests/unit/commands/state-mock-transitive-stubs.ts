@@ -31,4 +31,8 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	reviewerScopeGenerationHasDeclaredOverlap: () => false,
 	discardReviewerScopeGenerationForCoderCall: () => undefined,
 	isReviewerScopeGenerationCurrent: () => false,
+	resetModifiedFilesForTask: () => false,
+	recordModifiedFilesForTask: () => false,
+	recordModifiedFileForTask: () => false,
+	getModifiedFilesForTask: () => [],
 } as const;

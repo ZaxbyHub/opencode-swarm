@@ -231,6 +231,10 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 				path.join(orphanedWorktreePath, 'locked.txt'),
 				'locked content\n',
 			);
+			writeFileSync(
+				path.join(orphanedWorktreePath, '.git'),
+				'gitdir: unavailable\n',
+			);
 
 			// Save real removeWorktree and rmSync
 			const realRemoveWorktree = InitOrphanRecoveryInternals.removeWorktree;

@@ -171,6 +171,10 @@ export interface DirtyMergeSuccess {
 	strategy: string;
 	autoCommitted: boolean;
 	cleaned: boolean;
+	/** True when a resumed operation was already present on the target. */
+	reconciled?: boolean;
+	/** Durable identity for the Git operation, when settlement tracking is enabled. */
+	provenance?: MergeOperationProvenance;
 }
 
 export interface DirtyMergePartial {
@@ -180,12 +184,51 @@ export interface DirtyMergePartial {
 	cleaned: boolean;
 	message: string;
 	conflictFiles?: string[];
+	provenance?: MergeOperationProvenance;
 }
 
 export interface DirtyMergeFailure {
 	failed: true;
 	stage: string;
 	message: string;
+	provenance?: MergeOperationProvenance;
+}
+
+/**
+ * Durable identity for a standard-worktree merge-back operation.
+ *
+ * `sourceHead` is captured after the lane's dirty state is auto-committed and
+ * `targetHeadBefore` immediately before the merge starts. The stable
+ * `operationId` is supplied by the durable background-delegation record.
+ */
+export interface MergeOperationProvenance {
+	operationId: string;
+	sourceHead: string;
+	targetHeadBefore: string;
+	branchName: string;
+	strategy: MergeStrategy;
+}
+
+export type MergeReconciliationResult =
+	| {
+			landed: true;
+			method: 'ancestry' | 'cherry-pick-trailer';
+	  }
+	| {
+			landed: false;
+			error?: string;
+	  };
+
+export interface DirtyMergeOptions {
+	/** Stable identifier allocated before the merge-back begins. */
+	operationId?: string;
+	/** Previously persisted provenance when resuming a `settling` operation. */
+	resume?: MergeOperationProvenance;
+	/**
+	 * Awaited after auto-commit and HEAD capture, but before the Git merge.
+	 * A rejection fails closed without invoking the merge.
+	 */
+	onBeforeMerge?: (provenance: MergeOperationProvenance) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +309,7 @@ export async function mergeLaneBranch(
 			if (mergeBaseResult.exitCode === 0 && mergeBaseResult.stdout.trim()) {
 				const mergeBase = mergeBaseResult.stdout.trim();
 				result = await runGit(
-					['cherry-pick', `${mergeBase}..${branchName}`],
+					['cherry-pick', `${mergeBase}..${branchName}`, '-x'],
 					primaryDir,
 				);
 			} else {
@@ -275,7 +318,7 @@ export async function mergeLaneBranch(
 				advisoryWarn(
 					'[worktree] mergeLaneBranch: git merge-base failed for cherry-pick; falling back to tip-only cherry-pick',
 				);
-				result = await runGit(['cherry-pick', branchName], primaryDir);
+				result = await runGit(['cherry-pick', branchName, '-x'], primaryDir);
 			}
 			break;
 		}
@@ -312,6 +355,72 @@ export async function mergeLaneBranch(
 	return {
 		error: result.stderr.trim() || result.stdout.trim(),
 	};
+}
+
+/**
+ * Detect whether a previously-started merge-back already landed on the target.
+ *
+ * Merge and rebase settlement uses ancestry. Cherry-pick settlement uses the
+ * exact provenance trailer emitted by Git's `cherry-pick -x`; patch identity or
+ * subject matching is intentionally insufficient.
+ */
+export async function reconcileLandedMerge(
+	primaryDir: string,
+	provenance: MergeOperationProvenance,
+): Promise<MergeReconciliationResult> {
+	if (
+		!provenance.operationId ||
+		!provenance.sourceHead ||
+		!provenance.targetHeadBefore
+	) {
+		return { landed: false, error: 'Incomplete merge operation provenance' };
+	}
+
+	if (provenance.strategy !== 'cherry-pick') {
+		const ancestry = await runGit(
+			['merge-base', '--is-ancestor', provenance.sourceHead, 'HEAD'],
+			primaryDir,
+		);
+		if (ancestry.exitCode === 0) {
+			return { landed: true, method: 'ancestry' };
+		}
+		if (ancestry.exitCode === 1) {
+			return { landed: false };
+		}
+		return {
+			landed: false,
+			error:
+				ancestry.stderr.trim() ||
+				ancestry.stdout.trim() ||
+				`git merge-base exited ${ancestry.exitCode}`,
+		};
+	}
+
+	const exactTrailer = `(cherry picked from commit ${provenance.sourceHead})`;
+	const escapedTrailer = exactTrailer.replace(/[\\.^$|?*+()[\]{}]/g, '\\$&');
+	const trailerSearch = await runGit(
+		[
+			'log',
+			'--format=%H',
+			'--extended-regexp',
+			`--grep=^${escapedTrailer}$`,
+			'--max-count=1',
+			`${provenance.targetHeadBefore}..HEAD`,
+		],
+		primaryDir,
+	);
+	if (trailerSearch.exitCode !== 0) {
+		return {
+			landed: false,
+			error:
+				trailerSearch.stderr.trim() ||
+				trailerSearch.stdout.trim() ||
+				`git log exited ${trailerSearch.exitCode}`,
+		};
+	}
+	return trailerSearch.stdout.trim()
+		? { landed: true, method: 'cherry-pick-trailer' }
+		: { landed: false };
 }
 
 /**
@@ -441,21 +550,78 @@ export async function attemptMergeBackFromDirty(
 	branchName: string,
 	primaryDir: string,
 	strategy: MergeStrategy,
+	options: DirtyMergeOptions = {},
 ): Promise<DirtyMergeSuccess | DirtyMergePartial | DirtyMergeFailure> {
 	let autoCommitted = false;
 	let cleaned = false;
 	let autoCommitFailed = false;
 	let cleanFailed = false;
+	let provenance = options.resume;
+
+	if (provenance) {
+		if (
+			provenance.branchName !== branchName ||
+			provenance.strategy !== strategy ||
+			(options.operationId !== undefined &&
+				provenance.operationId !== options.operationId)
+		) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: 'Stored merge operation identity does not match this dispatch',
+				provenance,
+			};
+		}
+
+		const reconciliation = await reconcileLandedMerge(primaryDir, provenance);
+		if ('error' in reconciliation && reconciliation.error) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: `Unable to reconcile prior merge-back: ${reconciliation.error}`,
+				provenance,
+			};
+		}
+		if (reconciliation.landed) {
+			return {
+				merged: true,
+				strategy,
+				autoCommitted: false,
+				cleaned: false,
+				reconciled: true,
+				provenance,
+			};
+		}
+
+		const sourceHead = await runGit(['rev-parse', 'HEAD'], worktreePath);
+		const targetHead = await runGit(['rev-parse', 'HEAD'], primaryDir);
+		if (
+			sourceHead.exitCode !== 0 ||
+			targetHead.exitCode !== 0 ||
+			sourceHead.stdout.trim() !== provenance.sourceHead ||
+			targetHead.stdout.trim() !== provenance.targetHeadBefore
+		) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message:
+					'Stored merge operation did not land and its source or target HEAD has changed',
+				provenance,
+			};
+		}
+	}
 
 	// Step 1: Auto-commit dirty state
-	const commitResult = await autoCommitDirty(worktreePath);
-	if (commitResult.committed) {
-		autoCommitted = true;
-	} else if (commitResult.reason !== 'Nothing to commit') {
-		autoCommitFailed = true;
-		log(
-			`[worktree] attemptMergeBackFromDirty: auto-commit failed for worktree "${worktreePath}" branch "${branchName}": ${commitResult.reason}`,
-		);
+	if (!provenance) {
+		const commitResult = await autoCommitDirty(worktreePath);
+		if (commitResult.committed) {
+			autoCommitted = true;
+		} else if (commitResult.reason !== 'Nothing to commit') {
+			autoCommitFailed = true;
+			log(
+				`[worktree] attemptMergeBackFromDirty: auto-commit failed for worktree "${worktreePath}" branch "${branchName}": ${commitResult.reason}`,
+			);
+		}
 	}
 
 	// Step 2: Clean untracked files
@@ -475,14 +641,64 @@ export async function attemptMergeBackFromDirty(
 			failed: true,
 			stage: 'cleanup',
 			message: 'Auto-commit and clean both failed; abandoning worktree',
+			...(provenance ? { provenance } : {}),
 		};
+	}
+
+	if (!provenance && (options.operationId || options.onBeforeMerge)) {
+		if (!options.operationId) {
+			return {
+				failed: true,
+				stage: 'pre-merge',
+				message: 'A pre-merge callback requires a stable operationId',
+			};
+		}
+		const sourceHead = await runGit(['rev-parse', 'HEAD'], worktreePath);
+		const targetHead = await runGit(['rev-parse', 'HEAD'], primaryDir);
+		if (
+			sourceHead.exitCode !== 0 ||
+			targetHead.exitCode !== 0 ||
+			!sourceHead.stdout.trim() ||
+			!targetHead.stdout.trim()
+		) {
+			return {
+				failed: true,
+				stage: 'pre-merge',
+				message: 'Unable to capture source and target HEAD before merge-back',
+			};
+		}
+		provenance = {
+			operationId: options.operationId,
+			sourceHead: sourceHead.stdout.trim(),
+			targetHeadBefore: targetHead.stdout.trim(),
+			branchName,
+			strategy,
+		};
+		if (options.onBeforeMerge) {
+			try {
+				await options.onBeforeMerge(provenance);
+			} catch (error) {
+				return {
+					failed: true,
+					stage: 'pre-merge',
+					message: `Unable to persist merge operation provenance: ${String(error)}`,
+					provenance,
+				};
+			}
+		}
 	}
 
 	// Step 3b: Attempt merge-back
 	const mergeResult = await mergeLaneBranch(primaryDir, branchName, strategy);
 
 	if ('merged' in mergeResult && mergeResult.merged) {
-		return { merged: true, strategy, autoCommitted, cleaned };
+		return {
+			merged: true,
+			strategy,
+			autoCommitted,
+			cleaned,
+			...(provenance ? { reconciled: false, provenance } : {}),
+		};
 	}
 
 	if ('conflict' in mergeResult) {
@@ -493,6 +709,7 @@ export async function attemptMergeBackFromDirty(
 			cleaned,
 			message: mergeResult.message,
 			conflictFiles: mergeResult.files,
+			...(provenance ? { provenance } : {}),
 		};
 	}
 
@@ -502,6 +719,7 @@ export async function attemptMergeBackFromDirty(
 			failed: true,
 			stage: 'merge',
 			message: mergeResult.error,
+			...(provenance ? { provenance } : {}),
 		};
 	}
 
@@ -510,6 +728,7 @@ export async function attemptMergeBackFromDirty(
 		failed: true,
 		stage: 'merge',
 		message: 'Merge failed with unexpected result',
+		...(provenance ? { provenance } : {}),
 	};
 }
 

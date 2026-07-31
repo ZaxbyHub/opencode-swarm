@@ -146,6 +146,15 @@ export type TaskWorkflowState =
 	| 'complete';
 
 /**
+ * Upper bound for per-session task file-attribution entries.
+ *
+ * Runtime concurrency is capped well below this value. When the map is full,
+ * only workflow-complete entries may be reclaimed; live task attribution is
+ * never evicted to make room.
+ */
+export const MAX_TRACKED_TASK_FILE_ATTRIBUTIONS = 128;
+
+/**
  * Canonical ordering of TaskWorkflowState values for forward-only transition checks.
  * Used by advanceTaskState, canAdvanceTaskState, and applyRehydrationCache.
  * Extracted from three duplicate local literals to a single module-level constant
@@ -361,7 +370,12 @@ export interface AgentSessionState {
 	lastScopeViolation: string | null;
 	/** Flag for one-shot scope violation warning injection in messagesTransform */
 	scopeViolationDetected?: boolean;
-	/** Files modified by the current coder task (populated by guardrails toolBefore/toolAfter, reset on new coder delegation) */
+	/** Task-keyed files modified by coder work. Bounded by MAX_TRACKED_TASK_FILE_ATTRIBUTIONS. */
+	modifiedFilesByTask: Map<string, string[]>;
+	/**
+	 * Compatibility projection for callers that still inspect the active task.
+	 * Helpers in this module keep it synchronized only with `currentTaskId`.
+	 */
 	modifiedFilesThisCoderTask: string[];
 	/** Bounded coder generations awaiting exact reviewer claims. */
 	reviewerScopeGenerations?: Map<string, ReviewerScopeGeneration>;
@@ -1478,6 +1492,7 @@ export function startAgentSession(
 		declaredCoderScope: null,
 		lastScopeViolation: null,
 		scopeViolationDetected: false,
+		modifiedFilesByTask: new Map(),
 		modifiedFilesThisCoderTask: [],
 		reviewerScopeGenerations: new Map(),
 		reviewerScopeGenerationCounter: 0,
@@ -1761,9 +1776,22 @@ export function ensureAgentSession(
 		if (session.lastScopeViolation === undefined) {
 			session.lastScopeViolation = null;
 		}
-		if (session.modifiedFilesThisCoderTask === undefined) {
-			session.modifiedFilesThisCoderTask = [];
+		if (!(session.modifiedFilesByTask instanceof Map)) {
+			session.modifiedFilesByTask = new Map();
+			if (
+				isValidTaskId(session.currentTaskId) &&
+				Array.isArray(session.modifiedFilesThisCoderTask) &&
+				session.modifiedFilesThisCoderTask.length > 0
+			) {
+				session.modifiedFilesByTask.set(session.currentTaskId!, [
+					...new Set(session.modifiedFilesThisCoderTask),
+				]);
+			}
 		}
+		// modifiedFilesThisCoderTask is a derived compatibility view of the
+		// authoritative modifiedFilesByTask map. Re-project on every
+		// ensureAgentSession call so direct mutation/reassignment is discarded.
+		projectModifiedFilesForActiveTask(session);
 		if (!session.reviewerScopeGenerations) {
 			session.reviewerScopeGenerations = new Map();
 		}
@@ -2035,6 +2063,136 @@ export function recordPhaseAgentDispatch(
 	session.phaseAgentsDispatched.add(normalizedName);
 }
 
+function ensureModifiedFilesByTask(
+	session: AgentSessionState,
+): Map<string, string[]> {
+	if (!(session.modifiedFilesByTask instanceof Map)) {
+		session.modifiedFilesByTask = new Map();
+	}
+	return session.modifiedFilesByTask;
+}
+
+function projectModifiedFilesForActiveTask(session: AgentSessionState): void {
+	const taskId = session.currentTaskId;
+	session.modifiedFilesThisCoderTask =
+		isValidTaskId(taskId) && session.modifiedFilesByTask instanceof Map
+			? [...(session.modifiedFilesByTask.get(taskId!) ?? [])]
+			: [];
+}
+
+/**
+ * Ensure an attribution slot exists without evicting live task data.
+ * Completed entries are reclaimed oldest-first (Map insertion order).
+ */
+function ensureModifiedFileTaskSlot(
+	session: AgentSessionState,
+	taskId: string,
+): boolean {
+	if (!isValidTaskId(taskId)) return false;
+	const entries = ensureModifiedFilesByTask(session);
+	if (entries.has(taskId)) return true;
+
+	while (entries.size >= MAX_TRACKED_TASK_FILE_ATTRIBUTIONS) {
+		const reclaimable = [...entries.keys()].find(
+			(candidate) =>
+				candidate !== taskId &&
+				session.taskWorkflowStates?.get(candidate) === 'complete',
+		);
+		if (!reclaimable) return false;
+		entries.delete(reclaimable);
+	}
+
+	entries.set(taskId, []);
+	return true;
+}
+
+/**
+ * Atomically replace one task's attributed file list.
+ *
+ * Returns false without mutation when the task id is invalid or the bounded
+ * map has no reclaimable workflow-complete slot.
+ */
+export function recordModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+	files: readonly string[],
+): boolean {
+	if (!ensureModifiedFileTaskSlot(session, taskId)) return false;
+	const normalized = [
+		...new Set(
+			files.filter((file) => typeof file === 'string' && file.length > 0),
+		),
+	];
+	session.modifiedFilesByTask.set(taskId, normalized);
+	if (session.currentTaskId === taskId) {
+		projectModifiedFilesForActiveTask(session);
+	}
+	return true;
+}
+
+/**
+ * Add one file to a task's attribution without disturbing its existing files.
+ */
+export function recordModifiedFileForTask(
+	session: AgentSessionState,
+	taskId: string,
+	file: string,
+): boolean {
+	if (typeof file !== 'string' || file.length === 0) return false;
+	const existing = getModifiedFilesForTask(session, taskId);
+	if (existing.includes(file)) return true;
+	return recordModifiedFilesForTask(session, taskId, [...existing, file]);
+}
+
+/**
+ * Return a defensive copy of the files attributed to one task.
+ */
+export function getModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+): string[] {
+	if (!isValidTaskId(taskId)) return [];
+	return [...(ensureModifiedFilesByTask(session).get(taskId) ?? [])];
+}
+
+/**
+ * Reset one task's attribution. `remove` is used at terminal cleanup; the
+ * default keeps an empty live-task slot ready for subsequent writes.
+ */
+export function resetModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+	options?: { remove?: boolean },
+): boolean {
+	if (!isValidTaskId(taskId)) return false;
+	const entries = ensureModifiedFilesByTask(session);
+	if (options?.remove) {
+		entries.delete(taskId);
+	} else {
+		if (!ensureModifiedFileTaskSlot(session, taskId)) return false;
+		entries.set(taskId, []);
+	}
+	if (session.currentTaskId === taskId) {
+		projectModifiedFilesForActiveTask(session);
+	}
+	return true;
+}
+
+/**
+ * Apply task-completion retention rules.
+ *
+ * Non-Epic sessions release attribution at the workflow-complete boundary.
+ * Epic sessions retain it until `epic_record_divergence` consumes the entry.
+ */
+export function completeModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	if (!session.epicModeActive) {
+		resetModifiedFilesForTask(session, taskId, { remove: true });
+	}
+}
+
 /**
  * Check if a task ID is valid (not null, undefined, empty, or whitespace-only).
  * @param taskId - The task identifier to validate
@@ -2129,6 +2287,7 @@ export function advanceTaskState(
 	// fire prematurely from stale completion data.
 	if (newState === 'complete') {
 		session.stageBCompletion?.delete(taskId);
+		completeModifiedFilesForTask(session, taskId);
 	}
 	if (options?.emitTelemetry !== false) {
 		telemetry.taskStateChanged(

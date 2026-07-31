@@ -77,6 +77,7 @@ import {
 	createRepoGraphBuilderHook,
 	createSystemEnhancerHook,
 	createToolSummarizerHook,
+	outputLooksLikeBackgroundRunning,
 	safeHook,
 } from './hooks';
 import {
@@ -1074,6 +1075,112 @@ async function initializeOpenCodeSwarm(
 		authorityConfig,
 		worktreeBaseDirOverrides,
 	);
+	const durableBackgroundAdvisoryMessagesTransform = async (
+		input: Record<string, never>,
+		output: {
+			messages?: Array<{
+				info: { role: string; agent?: string; sessionID?: string };
+				parts: Array<{ type: string; text?: string; [key: string]: unknown }>;
+			}>;
+		},
+	): Promise<void> => {
+		const mctx = resolveMessageTransformContext(output);
+		if (!mctx.sessionID) {
+			await guardrailsHooks.messagesTransform(input, output);
+			return;
+		}
+		const observedTexts = (output.messages ?? []).flatMap((message) =>
+			(message.parts ?? [])
+				.filter((part) => part.type === 'text' && typeof part.text === 'string')
+				.map((part) => part.text as string),
+		);
+		await backgroundCompletionObserver.ackObservedAdvisories(
+			mctx.sessionID,
+			observedTexts,
+		);
+		const prepared = await backgroundCompletionObserver.prepareAdvisories(
+			mctx.sessionID,
+		);
+		if (!prepared) {
+			await guardrailsHooks.messagesTransform(input, output);
+			return;
+		}
+		const session = swarmState.agentSessions.get(mctx.sessionID);
+		const pendingBefore = session
+			? [...(session.pendingAdvisoryMessages ?? [])]
+			: undefined;
+		// Snapshot guardrails-affected session flags so a failed advisory
+		// injection can fully undo guardrails' one-shot side effects (e.g.
+		// resumeModelAdvisoryDone, configModelAdvisoryDone). Without this,
+		// a rollback leaves those flags permanently set, and guardrails
+		// skips the corresponding advisories on the next turn.
+		const guardrailsSnapshot = session
+			? {
+					resumeModelAdvisoryDone: session.resumeModelAdvisoryDone,
+					configModelAdvisoryDone: session.configModelAdvisoryDone,
+					lastObservedModel: session.lastObservedModel,
+					lastObservedProviderID: session.lastObservedProviderID,
+					lastProviderRecoveryFingerprint:
+						session.lastProviderRecoveryFingerprint,
+					loopWarningPending: session.loopWarningPending,
+				}
+			: undefined;
+		// Capture messages BEFORE the try block so a structuredClone failure
+		// never leaves messagesBefore uninitialized (issue #1961 M-1).
+		const messagesBefore = output.messages
+			? structuredClone(output.messages)
+			: undefined;
+		try {
+			if (session) {
+				session.pendingAdvisoryMessages ??= [];
+				for (const message of prepared.messages) {
+					if (!session.pendingAdvisoryMessages.includes(message)) {
+						session.pendingAdvisoryMessages.push(message);
+					}
+				}
+			}
+			await guardrailsHooks.messagesTransform(input, output);
+			const delivered = prepared.messages.every((message) =>
+				(output.messages ?? []).some((candidate) =>
+					(candidate.parts ?? []).some(
+						(part) =>
+							part.type === 'text' &&
+							typeof part.text === 'string' &&
+							part.text.includes(message),
+					),
+				),
+			);
+			if (!delivered) {
+				throw new Error('durable background advisory insertion failed');
+			}
+		} catch (error) {
+			if (session && pendingBefore) {
+				session.pendingAdvisoryMessages = pendingBefore;
+			}
+			// Restore guardrails-specific session flags to their pre-guardrails
+			// state so a retry does not skip one-shot advisories (PRR-001).
+			if (session && guardrailsSnapshot) {
+				session.resumeModelAdvisoryDone =
+					guardrailsSnapshot.resumeModelAdvisoryDone;
+				session.configModelAdvisoryDone =
+					guardrailsSnapshot.configModelAdvisoryDone;
+				session.lastObservedModel = guardrailsSnapshot.lastObservedModel;
+				session.lastObservedProviderID =
+					guardrailsSnapshot.lastObservedProviderID;
+				session.lastProviderRecoveryFingerprint =
+					guardrailsSnapshot.lastProviderRecoveryFingerprint;
+				session.loopWarningPending = guardrailsSnapshot.loopWarningPending;
+			}
+			output.messages = messagesBefore;
+			await backgroundCompletionObserver.releaseAdvisories(
+				mctx.sessionID,
+				prepared,
+			);
+			warn(
+				`[background] advisory injection rolled back for ${mctx.sessionID}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	};
 
 	// Full-auto intercept: autonomous oversight when full-auto mode is active
 	const fullAutoInterceptHook = createFullAutoInterceptHook(
@@ -1645,9 +1752,9 @@ async function initializeOpenCodeSwarm(
 			getActiveReviewAgentName,
 		),
 
-		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
-		// ADVISORY/observer-only - catches locally so it can never block event delivery or
-		// plugin load. Background observer is no-op unless hooks.background_subagents is opted in.
+		// Observe and ingest trusted background-subagent terminal signals. Errors
+		// are caught locally so completion handling can never block event delivery
+		// or plugin load. The observer is opt-in and fail-closed.
 		event: async (input: { event: unknown }): Promise<void> => {
 			try {
 				rememberAssistantUsageEvent(input);
@@ -2322,7 +2429,7 @@ async function initializeOpenCodeSwarm(
 				pipelineHook['experimental.chat.messages.transform'],
 				contextBudgetHandler,
 				initOrphanRecoveryAdvisoryHook.messagesTransform,
-				guardrailsHooks.messagesTransform,
+				durableBackgroundAdvisoryMessagesTransform,
 				fullAutoInterceptHook?.messagesTransform,
 				ccCommandInterceptHook?.messagesTransform,
 				delegationGateHooks.messagesTransform,
@@ -3111,6 +3218,8 @@ async function initializeOpenCodeSwarm(
 			// Hooks must see the original subagent identity to record evidence
 			// correctly. The handoff restores architect identity afterward.
 			if (isTaskTool) {
+				const backgroundResultIsRunning =
+					outputLooksLikeBackgroundRunning(output);
 				const sessionId = input.sessionID;
 				const agentName = swarmState.activeAgent.get(sessionId) || 'unknown';
 				const baseAgentName = stripKnownSwarmPrefix(agentName);
@@ -3135,56 +3244,61 @@ async function initializeOpenCodeSwarm(
 				if (taskSession) {
 					taskSession.delegationActive = false;
 					taskSession.lastAgentEventTime = Date.now();
-					telemetry.delegationEnd(
-						sessionId,
-						agentName,
-						taskSession.currentTaskId || '',
-						'completed',
-						costFields,
-					);
-					// Pipeline continuation advisory — prevents happy-path stall when
-					// delegated agents return clean results. The architect must resume
-					// direct tool execution for remaining QA gate steps.
-					if (
-						baseAgentName === 'reviewer' ||
-						baseAgentName === 'test_engineer' ||
-						baseAgentName === 'critic' ||
-						baseAgentName === 'critic_sounding_board'
-					) {
-						taskSession.pendingAdvisoryMessages ??= [];
-						taskSession.pendingAdvisoryMessages.push(
-							`[PIPELINE] ${baseAgentName} delegation complete for task ${taskSession.currentTaskId ?? 'unknown'}. ` +
-								`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
-								`Do not stop here.`,
+					// A background Task's running placeholder is a handoff boundary,
+					// not terminal completion. Restore architect continuation now, but
+					// defer completion telemetry/advisories to the trusted terminal event.
+					if (!backgroundResultIsRunning) {
+						telemetry.delegationEnd(
+							sessionId,
+							agentName,
+							taskSession.currentTaskId || '',
+							'completed',
+							costFields,
 						);
-					}
-					// Issue #414: Wire Target B — parse sounding-board response and inject verdict advisory.
-					// Note: output.output is NOT truncated for task tools (tool name 'task' is not
-					// in defaultTruncatableTools), so the full critic response is available here.
-					if (baseAgentName === 'critic_sounding_board') {
-						const rawResponse =
-							typeof output.output === 'string' ? output.output : '';
-						const parsed = parseSoundingBoardResponse(rawResponse);
-						taskSession.pendingAdvisoryMessages ??= [];
-						if (parsed) {
-							let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
-							if (parsed.improvedQuestion)
-								verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
-							if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
-							if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
-							taskSession.pendingAdvisoryMessages.push(verdictMsg);
-							taskSession.lastDelegationReason = 'critic_consultation';
-						} else {
-							// Parsing failed — inject a fallback so the architect is not left without
-							// guidance. Use conservative behavior: treat as REPHRASE (needs review)
-							// rather than silently approving. Expected format:
-							// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
+						// Pipeline continuation advisory — prevents happy-path stall when
+						// delegated agents return clean results. The architect must resume
+						// direct tool execution for remaining QA gate steps.
+						if (
+							baseAgentName === 'reviewer' ||
+							baseAgentName === 'test_engineer' ||
+							baseAgentName === 'critic' ||
+							baseAgentName === 'critic_sounding_board'
+						) {
+							taskSession.pendingAdvisoryMessages ??= [];
 							taskSession.pendingAdvisoryMessages.push(
-								`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
-									`critic_sounding_board response (${rawResponse.length} chars). ` +
-									`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
-									`Do not silently accept as resolved.`,
+								`[PIPELINE] ${baseAgentName} delegation complete for task ${taskSession.currentTaskId ?? 'unknown'}. ` +
+									`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
+									`Do not stop here.`,
 							);
+						}
+						// Issue #414: Wire Target B — parse sounding-board response and inject verdict advisory.
+						// Note: output.output is NOT truncated for task tools (tool name 'task' is not
+						// in defaultTruncatableTools), so the full critic response is available here.
+						if (baseAgentName === 'critic_sounding_board') {
+							const rawResponse =
+								typeof output.output === 'string' ? output.output : '';
+							const parsed = parseSoundingBoardResponse(rawResponse);
+							taskSession.pendingAdvisoryMessages ??= [];
+							if (parsed) {
+								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
+								if (parsed.improvedQuestion)
+									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
+								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
+								if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
+								taskSession.pendingAdvisoryMessages.push(verdictMsg);
+								taskSession.lastDelegationReason = 'critic_consultation';
+							} else {
+								// Parsing failed — inject a fallback so the architect is not left without
+								// guidance. Use conservative behavior: treat as REPHRASE (needs review)
+								// rather than silently approving. Expected format:
+								// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
+								taskSession.pendingAdvisoryMessages.push(
+									`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
+										`critic_sounding_board response (${rawResponse.length} chars). ` +
+										`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
+										`Do not silently accept as resolved.`,
+								);
+							}
 						}
 					}
 				}
