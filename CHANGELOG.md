@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.134.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.133.0...v7.134.0) (2026-07-31)
+
+
+### Features
+
+* **background:** graduate coder completion ingestion ([920d519](https://github.com/ZaxbyHub/opencode-swarm/commit/920d519421e6372cbc868aa5fde75c4cafeef97c))
+
+
+### Bug Fixes
+
+* **background:** fail closed on dirty baseline in coder attribution ([5038f25](https://github.com/ZaxbyHub/opencode-swarm/commit/5038f250c4712a654a95898aca975f6f14fd0128))
+* **background:** restore ownership attribution and state persistence in stage-b-gates ([0dd36e5](https://github.com/ZaxbyHub/opencode-swarm/commit/0dd36e5418148a690a77de343c8e867f071a1dbe))
+* **background:** wire reviewer receipts and scope lifecycle through completion-observer ([46f4929](https://github.com/ZaxbyHub/opencode-swarm/commit/46f49293b023f0a1b3e9ba8db6e8bc9917eb88df))
+* **guardrails:** make allowedPrefix block reason disclose allowed patterns ([6522a1d](https://github.com/ZaxbyHub/opencode-swarm/commit/6522a1d24952b16e3fcbf6fb03f1d4ab3a39c211))
+* **guardrails:** make allowedPrefix block reason disclose allowed patterns ([1cc57ff](https://github.com/ZaxbyHub/opencode-swarm/commit/1cc57ff78c3893535600918f7fae81652f8f99e8)), closes [#1984](https://github.com/ZaxbyHub/opencode-swarm/issues/1984)
+* **guardrails:** make allowedPrefix block reason disclose allowed patterns ([0e34d99](https://github.com/ZaxbyHub/opencode-swarm/commit/0e34d9975fb9c6a6ff1130b621525601289cbd87)), closes [#1984](https://github.com/ZaxbyHub/opencode-swarm/issues/1984)
+* **hooks:** handle terminal failures in delegation-gate and repair state ([a1e2f5f](https://github.com/ZaxbyHub/opencode-swarm/commit/a1e2f5f086107f42abc2c46e9efee606a8a155a5))
+* **smoke:** bump bundle budget to 5.5 MiB for background subagent delegation ([33aa94b](https://github.com/ZaxbyHub/opencode-swarm/commit/33aa94bcb65629dafc4fb26231aba62b95c64fd8))
+* **tests:** add missing state exports to close-command mock stubs ([9b9f8d6](https://github.com/ZaxbyHub/opencode-swarm/commit/9b9f8d6b77cdf66b687928c65ea38bdd830a9755))
+
 ## [7.133.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.2...v7.133.0) (2026-07-31)
 
 
