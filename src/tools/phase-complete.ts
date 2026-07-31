@@ -15,6 +15,7 @@ import {
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
+	resolveAutoReviewConfig,
 	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
@@ -68,6 +69,12 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import {
+	mayRunPhaseAutoReview,
+	runPhaseAutoReview,
+} from '../review/phase-runner.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { runMemoryConsolidationFireAndForget } from '../services/memory-consolidation.js';
 import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
@@ -88,6 +95,7 @@ import {
 	runCompletionVerifyGate,
 	runDriftGate,
 	runFinalCouncilGate,
+	runFinalReviewGate,
 	runHallucinationGate,
 	runMutationGate,
 	runPhaseCouncilGate,
@@ -114,6 +122,19 @@ export interface PhaseCompleteArgs {
 	acceptViolationsJustification?: string;
 	/** Calling agent identity (from tool ctx) — gates the override to the architect. */
 	callerAgent?: string;
+}
+
+export interface PhaseCompleteRuntime {
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	generatedAgentNames?: readonly string[];
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
+	getActiveAgentName?: (sessionID: string) => string | undefined;
+}
+
+function resolvePhaseReviewAgentNames(
+	runtime: PhaseCompleteRuntime,
+): Iterable<string> {
+	return runtime.generatedAgentNames ?? swarmState.generatedAgentNames;
 }
 
 /**
@@ -152,6 +173,7 @@ function safeWarn(message: string, error: unknown): void {
 	}
 }
 
+/** @tool-opt-out Output-size constant, not a tool definition. */
 export const MAX_OUTPUT_BYTES = 512_000; // 512KB max output (FR-007, DD-013)
 
 const TASK_GATE_INFERABLE_AGENTS = new Set([
@@ -465,6 +487,7 @@ export async function executePhaseComplete(
 	args: PhaseCompleteArgs,
 	workingDirectory?: string,
 	directory?: string,
+	runtime: PhaseCompleteRuntime = {},
 ): Promise<string> {
 	// Extract arguments
 	const phase = Number(args.phase);
@@ -839,6 +862,61 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
+	// Generalized whole-diff review. This tool body owns the bounded dispatch
+	// and durable evidence write; the gate only verifies that exact evidence.
+	// Gate mode is intentionally not bypassed by Turbo.
+	try {
+		const autoReviewConfig = resolveAutoReviewConfig(config.auto_review ?? {});
+		if (mayRunPhaseAutoReview(autoReviewConfig)) {
+			const plan = await loadPlan(dir).catch(() => null);
+			const phaseIds =
+				plan?.phases
+					?.map((item) => Number(item.id))
+					.filter((id) => Number.isInteger(id) && id > 0) ?? [];
+			const phaseReview = await runPhaseAutoReview({
+				directory: dir,
+				sessionID,
+				phase,
+				isFinalPlanPhase:
+					phaseIds.length > 0 && phase === Math.max(...phaseIds),
+				activeLeanTurbo: hasActiveLeanTurbo(sessionID),
+				config: autoReviewConfig,
+				dispatcher: runtime.reviewModelDispatcher,
+				generatedAgentNames: resolvePhaseReviewAgentNames(runtime),
+				activeAgentName:
+					args.callerAgent ?? runtime.getActiveAgentName?.(sessionID),
+				agentModelRegistry: runtime.reviewAgentModelRegistry,
+				injectAdvisory: (_targetSessionID, advisory) => {
+					const sessionState = swarmState.agentSessions.get(sessionID);
+					if (!sessionState) return;
+					sessionState.pendingAdvisoryMessages ??= [];
+					sessionState.pendingAdvisoryMessages.push(advisory);
+				},
+			});
+			gateCtx.autoReviewTrigger = phaseReview.trigger;
+			gateCtx.autoReviewScopeHash = phaseReview.scopeHash;
+			gateCtx.autoReviewScopeComplete = phaseReview.scopeComplete;
+			gateCtx.autoReviewBlocked = phaseReview.blocked;
+			gateCtx.autoReviewBlockReason = phaseReview.blockReason;
+			warnings.push(...phaseReview.warnings);
+		}
+	} catch (error) {
+		gateCtx.autoReviewTrigger = 'phase_completion';
+		gateCtx.autoReviewBlocked = true;
+		gateCtx.autoReviewBlockReason = 'REVIEW_DISPATCH_FAILED';
+		warnings.push(
+			`Auto-review configuration or dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	{
+		const reviewGateResult = await runFinalReviewGate(gateCtx);
+		if (reviewGateResult.blocked) {
+			return blockedResult(phase, reviewGateResult);
+		}
+		warnings.push(...reviewGateResult.warnings);
+	}
+
 	const gateResult = await runFinalCouncilGate(gateCtx);
 	if (gateResult.blocked) {
 		return blockedResult(phase, gateResult);
@@ -1974,112 +2052,121 @@ export function _buildOutputJson(outputData: {
 /**
  * Tool definition for phase_complete
  */
-export const phase_complete: ToolDefinition = createSwarmTool({
-	description:
-		'Mark a phase as complete and track which agents were dispatched. ' +
-		'Used for phase completion gating and tracking. ' +
-		'Accepts phase number and optional summary. Returns list of agents that were dispatched.',
-	args: {
-		phase: z
-			.number()
-			.int()
-			.min(1)
-			.describe(
-				'The phase number being completed — a positive integer (e.g., 1, 2, 3)',
-			),
-		summary: z
-			.string()
-			.optional()
-			.describe('Optional summary of what was accomplished in this phase'),
-		sessionID: z
-			.string()
-			.optional()
-			.describe(
-				'Session ID for tracking state (auto-provided by plugin context)',
-			),
-		working_directory: z
-			.string()
-			.optional()
-			.describe(
-				'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
-			),
-		accept_violations: z
-			.array(z.string())
-			.optional()
-			.describe(
-				'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
-			),
-		accept_violations_justification: z
-			.string()
-			.optional()
-			.describe(
-				'Written justification required when accept_violations is provided.',
-			),
-	},
-	execute: async (args, directory, ctx) => {
-		// Parse and validate arguments
-		let phaseCompleteArgs: PhaseCompleteArgs;
-		let workingDirInput: string | undefined;
+export function createPhaseCompleteTool(
+	runtime: PhaseCompleteRuntime = {},
+): ToolDefinition {
+	return createSwarmTool({
+		description:
+			'Mark a phase as complete and track which agents were dispatched. ' +
+			'Used for phase completion gating and tracking. ' +
+			'Accepts phase number and optional summary. Returns list of agents that were dispatched.',
+		args: {
+			phase: z
+				.number()
+				.int()
+				.min(1)
+				.describe(
+					'The phase number being completed — a positive integer (e.g., 1, 2, 3)',
+				),
+			summary: z
+				.string()
+				.optional()
+				.describe('Optional summary of what was accomplished in this phase'),
+			sessionID: z
+				.string()
+				.optional()
+				.describe(
+					'Session ID for tracking state (auto-provided by plugin context)',
+				),
+			working_directory: z
+				.string()
+				.optional()
+				.describe(
+					'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
+				),
+			accept_violations: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
+				),
+			accept_violations_justification: z
+				.string()
+				.optional()
+				.describe(
+					'Written justification required when accept_violations is provided.',
+				),
+		},
+		execute: async (args, directory, ctx) => {
+			// Parse and validate arguments
+			let phaseCompleteArgs: PhaseCompleteArgs;
+			let workingDirInput: string | undefined;
 
-		try {
-			phaseCompleteArgs = {
-				phase: Number(args.phase),
-				summary: args.summary !== undefined ? String(args.summary) : undefined,
-				sessionID:
-					ctx?.sessionID ??
-					(args.sessionID !== undefined ? String(args.sessionID) : undefined),
-				acceptViolations: Array.isArray(args.accept_violations)
-					? (args.accept_violations as unknown[]).map((s) => String(s))
-					: undefined,
-				acceptViolationsJustification:
-					args.accept_violations_justification !== undefined
-						? String(args.accept_violations_justification)
+			try {
+				phaseCompleteArgs = {
+					phase: Number(args.phase),
+					summary:
+						args.summary !== undefined ? String(args.summary) : undefined,
+					sessionID:
+						ctx?.sessionID ??
+						(args.sessionID !== undefined ? String(args.sessionID) : undefined),
+					acceptViolations: Array.isArray(args.accept_violations)
+						? (args.accept_violations as unknown[]).map((s) => String(s))
 						: undefined,
-				// Caller identity for the architect-only override gate.
-				callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
-			};
-			workingDirInput =
-				args.working_directory !== undefined
-					? String(args.working_directory)
-					: undefined;
-		} catch {
-			return JSON.stringify(
-				{
-					success: false,
-					phase: 0,
-					message: 'Invalid arguments',
-					agentsDispatched: [],
-					warnings: ['Failed to parse arguments'],
-				},
-				null,
-				2,
-			);
-		}
+					acceptViolationsJustification:
+						args.accept_violations_justification !== undefined
+							? String(args.accept_violations_justification)
+							: undefined,
+					// Caller identity for the architect-only override gate.
+					callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
+				};
+				workingDirInput =
+					args.working_directory !== undefined
+						? String(args.working_directory)
+						: undefined;
+			} catch {
+				return JSON.stringify(
+					{
+						success: false,
+						phase: 0,
+						message: 'Invalid arguments',
+						agentsDispatched: [],
+						warnings: ['Failed to parse arguments'],
+					},
+					null,
+					2,
+				);
+			}
 
-		// Resolve effective directory: explicit working_directory > injected directory
-		const dirResult = resolveWorkingDirectory(workingDirInput, directory);
-		if (!dirResult.success) {
-			return JSON.stringify(
-				{
-					success: false,
-					phase: phaseCompleteArgs.phase,
-					message: dirResult.message,
-					agentsDispatched: [],
-					warnings: [dirResult.message],
-				},
-				null,
-				2,
-			);
-		}
+			// Resolve effective directory: explicit working_directory > injected directory
+			const dirResult = resolveWorkingDirectory(workingDirInput, directory);
+			if (!dirResult.success) {
+				return JSON.stringify(
+					{
+						success: false,
+						phase: phaseCompleteArgs.phase,
+						message: dirResult.message,
+						agentsDispatched: [],
+						warnings: [dirResult.message],
+					},
+					null,
+					2,
+				);
+			}
 
-		return executePhaseComplete(
-			phaseCompleteArgs,
-			dirResult.directory,
-			dirResult.directory,
-		);
-	},
-});
+			return executePhaseComplete(
+				phaseCompleteArgs,
+				dirResult.directory,
+				dirResult.directory,
+				runtime,
+			);
+		},
+	});
+}
+
+export const phase_complete: ToolDefinition = createPhaseCompleteTool();
 
 export const _test_exports = {
 	allCompletedTasksHavePassedGateEvidence,
+	resolvePhaseReviewAgentNames,
 };

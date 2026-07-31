@@ -408,7 +408,7 @@ export class LeanTurboRunner {
 		/** OpenCode SDK client. Pass null to stay fail-closed. Omit to allow test mock injection. */
 		opencodeClient?: OpencodeClient | null;
 		/** Pre-registered generated agent names */
-		generatedAgentNames?: string[];
+		generatedAgentNames?: readonly string[];
 		/** Lean-mode configuration. Falls back to hardcoded defaults if omitted. */
 		leanConfig?: LeanTurboConfig;
 	}) {
@@ -942,7 +942,7 @@ export class LeanTurboRunner {
 	 * Prefers agents matching swarm prefix patterns (e.g. `mega_coder`)
 	 * over bare `coder`. Falls back to `['coder']` if no coder agents found.
 	 */
-	private _resolveCoderAgents(names: string[]): string[] {
+	private _resolveCoderAgents(names: readonly string[]): string[] {
 		// Filter to coder-role agents
 		const coders = names.filter((n) => n.toLowerCase().includes('coder'));
 

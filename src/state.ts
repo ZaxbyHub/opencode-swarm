@@ -12,6 +12,7 @@
 // exported symbols and 100+ importing files. Splitting is deferred pending a concrete
 // driver. See .swarm/spec.md FR-007.
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -159,6 +160,93 @@ const STATE_ORDER: TaskWorkflowState[] = [
 	'complete',
 ];
 
+/** Exact lifecycle state for one coder generation and its paired reviewer. */
+export interface ReviewerScopeGeneration {
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+	background: boolean;
+	declaredFiles: string[];
+	modifiedFiles: string[];
+	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
+	status: 'collecting' | 'ready' | 'claimed';
+	createdAt: number;
+	readyAt?: number;
+	reviewerCallID?: string;
+	reviewerDispatchScope?: ReviewerScopeDispatchSnapshot;
+}
+
+export interface ReviewerScopeDispatchSnapshot {
+	hash: string;
+	description: string;
+	files: string[];
+	headSha: string;
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+}
+
+function cloneReviewerScopeGeneration(
+	generation: ReviewerScopeGeneration,
+): ReviewerScopeGeneration {
+	return {
+		...generation,
+		declaredFiles: [...generation.declaredFiles],
+		modifiedFiles: [...generation.modifiedFiles],
+		modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
+			(entry) => ({
+				...entry,
+			}),
+		),
+		reviewerDispatchScope: generation.reviewerDispatchScope
+			? {
+					...generation.reviewerDispatchScope,
+					files: [...generation.reviewerDispatchScope.files],
+				}
+			: undefined,
+	};
+}
+
+export interface ReviewerScopeGenerationIdentity {
+	generation: number;
+	coderCallID: string;
+	sessionIncarnation: string;
+}
+
+/**
+ * Immutable ownership provenance retained after a background generation's
+ * reviewer consumes the live handoff. Delayed sibling completion ingestion may
+ * consult this bounded history, but only exact fingerprints and overlapping
+ * dispatch intervals can establish ownership.
+ */
+export interface ReviewerScopeOwnershipTombstone
+	extends ReviewerScopeGenerationIdentity {
+	parentSessionID: string;
+	taskId: string;
+	background: true;
+	declaredFiles: string[];
+	modifiedFiles: string[];
+	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
+	createdAt: number;
+	readyAt: number;
+	consumedAt: number;
+}
+
+function cloneReviewerScopeOwnershipTombstone(
+	tombstone: ReviewerScopeOwnershipTombstone,
+): ReviewerScopeOwnershipTombstone {
+	return {
+		...tombstone,
+		declaredFiles: [...tombstone.declaredFiles],
+		modifiedFiles: [...tombstone.modifiedFiles],
+		modifiedFileFingerprints: tombstone.modifiedFileFingerprints.map(
+			(fingerprint) => ({ ...fingerprint }),
+		),
+	};
+}
+
 /**
  * Represents per-session state for guardrail tracking.
  * Budget fields (toolCallCount, consecutiveErrors, etc.) have moved to InvocationWindow.
@@ -275,6 +363,19 @@ export interface AgentSessionState {
 	scopeViolationDetected?: boolean;
 	/** Files modified by the current coder task (populated by guardrails toolBefore/toolAfter, reset on new coder delegation) */
 	modifiedFilesThisCoderTask: string[];
+	/** Bounded coder generations awaiting exact reviewer claims. */
+	reviewerScopeGenerations?: Map<string, ReviewerScopeGeneration>;
+	/** Monotonic per-session generation source; call identity remains authoritative. */
+	reviewerScopeGenerationCounter?: number;
+	/** Non-reused identity for this in-memory parent-session incarnation. */
+	reviewerScopeIncarnation?: string;
+	/** Latest generation token by task, retained through async validation. */
+	reviewerScopeLatestGenerationByTask?: Map<
+		string,
+		ReviewerScopeGenerationIdentity
+	>;
+	/** Bounded recent background ownership retained after reviewer consumption. */
+	reviewerScopeOwnershipHistory?: Map<string, ReviewerScopeOwnershipTombstone>;
 
 	// Bounded Coder Revisions (v6.33)
 	/** Number of coder revisions in the current task (incremented on each coder delegation completion) */
@@ -706,6 +807,534 @@ export function resetSwarmStatePreservingSingletons(): void {
  */
 const STALE_SESSION_TTL_MS = 7_200_000;
 
+/** Match the Stage-B scope builder's hard file-count ceiling. */
+export const MAX_REVIEWER_SCOPE_GENERATION_FILES = 256;
+/** One parent session may retain at most this many parallel task generations. */
+export const MAX_REVIEWER_SCOPE_GENERATIONS = 256;
+/** Recent consumed owners are bounded to the maximum parallel generation set. */
+export const MAX_REVIEWER_SCOPE_OWNERSHIP_HISTORY = 256;
+/** Generation expiry never exceeds the parent session's normal idle TTL. */
+export const REVIEWER_SCOPE_GENERATION_TTL_MS = STALE_SESSION_TTL_MS;
+
+function isBoundedGenerationValue(value: string, maxLength: number): boolean {
+	return (
+		value.length > 0 &&
+		value.length <= maxLength &&
+		!Array.from(value).some((char) => {
+			const code = char.charCodeAt(0);
+			return code <= 0x1f || code === 0x7f;
+		})
+	);
+}
+
+function reviewerScopeGenerationKey(
+	taskId: string,
+	coderCallID: string,
+	generation: number,
+): string {
+	return `${taskId}\0${coderCallID}\0${generation}`;
+}
+
+function reviewerScopeOwnershipKey(
+	taskId: string,
+	coderCallID: string,
+	generation: number,
+	sessionIncarnation: string,
+): string {
+	return `${taskId}\0${coderCallID}\0${generation}\0${sessionIncarnation}`;
+}
+
+function ensureReviewerScopeGenerationState(session: AgentSessionState): {
+	generations: Map<string, ReviewerScopeGeneration>;
+	counter: number;
+	incarnation: string;
+	latestByTask: Map<string, ReviewerScopeGenerationIdentity>;
+	ownershipHistory: Map<string, ReviewerScopeOwnershipTombstone>;
+} {
+	session.reviewerScopeGenerations ??= new Map();
+	session.reviewerScopeGenerationCounter ??= 0;
+	session.reviewerScopeIncarnation ??= randomUUID();
+	session.reviewerScopeLatestGenerationByTask ??= new Map();
+	session.reviewerScopeOwnershipHistory ??= new Map();
+	return {
+		generations: session.reviewerScopeGenerations,
+		counter: session.reviewerScopeGenerationCounter,
+		incarnation: session.reviewerScopeIncarnation,
+		latestByTask: session.reviewerScopeLatestGenerationByTask,
+		ownershipHistory: session.reviewerScopeOwnershipHistory,
+	};
+}
+
+function sweepReviewerScopeGenerations(
+	session: AgentSessionState,
+	now: number,
+): void {
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	for (const [key, entry] of generations) {
+		// Claimed state is correlated to a durable reviewer delegation. Its
+		// terminal/error/stale lifecycle owns cleanup; an unrelated in-memory
+		// clock sweep must never invalidate a reviewer that is still running.
+		if (entry.status === 'claimed') continue;
+		if (
+			!Number.isFinite(entry.createdAt) ||
+			now < entry.createdAt ||
+			now - entry.createdAt > REVIEWER_SCOPE_GENERATION_TTL_MS
+		) {
+			generations.delete(key);
+		}
+	}
+}
+
+/** Begin one exact coder generation after the full blocking before-chain passes. */
+export function startReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	background?: boolean;
+	declaredFiles?: string[];
+	createdAt?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.coderCallID, 512)
+	) {
+		return null;
+	}
+	const now = input.createdAt ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations, counter, incarnation, latestByTask } =
+		ensureReviewerScopeGenerationState(session);
+	// A new coder call for the same task supersedes only older unclaimed
+	// generations. Claimed generations remain bound to their already-approved
+	// reviewer calls while the new coder generation proceeds independently.
+	for (const [key, entry] of generations) {
+		if (entry.taskId === input.taskId && entry.status !== 'claimed') {
+			generations.delete(key);
+		}
+	}
+	while (generations.size >= MAX_REVIEWER_SCOPE_GENERATIONS) {
+		const oldestUnclaimed = [...generations.entries()].find(
+			([, entry]) => entry.status !== 'claimed',
+		)?.[0];
+		if (!oldestUnclaimed) return null;
+		generations.delete(oldestUnclaimed);
+	}
+	session.reviewerScopeGenerationCounter =
+		counter >= Number.MAX_SAFE_INTEGER ? 1 : counter + 1;
+	const generation: ReviewerScopeGeneration = {
+		taskId: input.taskId,
+		coderCallID: input.coderCallID,
+		generation: session.reviewerScopeGenerationCounter,
+		sessionIncarnation: incarnation,
+		background: input.background === true,
+		declaredFiles: [...new Set(input.declaredFiles ?? [])],
+		modifiedFiles: [],
+		modifiedFileFingerprints: [],
+		status: 'collecting',
+		createdAt: now,
+	};
+	if (!latestByTask.has(generation.taskId)) {
+		while (latestByTask.size >= MAX_REVIEWER_SCOPE_GENERATIONS) {
+			const oldestTask = latestByTask.keys().next().value as string | undefined;
+			if (!oldestTask) break;
+			latestByTask.delete(oldestTask);
+		}
+	}
+	latestByTask.delete(generation.taskId);
+	latestByTask.set(generation.taskId, {
+		generation: generation.generation,
+		coderCallID: generation.coderCallID,
+		sessionIncarnation: generation.sessionIncarnation,
+	});
+	const key = reviewerScopeGenerationKey(
+		generation.taskId,
+		generation.coderCallID,
+		generation.generation,
+	);
+	generations.set(key, generation);
+	return cloneReviewerScopeGeneration(generation);
+}
+
+/** Route one child-observed write to its exact parent/task/coder generation. */
+export function recordReviewerScopeGenerationFile(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	file: string;
+	now?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.file, 4_096) ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.coderCallID, 512)
+	) {
+		return false;
+	}
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (generation.modifiedFiles.includes(input.file)) return true;
+	if (generation.modifiedFiles.length >= MAX_REVIEWER_SCOPE_GENERATION_FILES) {
+		const key = reviewerScopeGenerationKey(
+			generation.taskId,
+			generation.coderCallID,
+			generation.generation,
+		);
+		generations.delete(key);
+		return false;
+	}
+	generation.modifiedFiles.push(input.file);
+	return true;
+}
+
+/**
+ * Record the bounded post-write state only after a guarded child write returns
+ * successfully. Pre-write routing in modifiedFiles remains authorization metadata.
+ */
+export function recordReviewerScopeGenerationFileFingerprint(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	fingerprint: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (!generation.modifiedFiles.includes(input.fingerprint.file)) return false;
+	const existingIndex = generation.modifiedFileFingerprints.findIndex(
+		(entry) => entry.file === input.fingerprint.file,
+	);
+	if (existingIndex >= 0) {
+		generation.modifiedFileFingerprints[existingIndex] = {
+			...input.fingerprint,
+		};
+		return true;
+	}
+	if (
+		generation.modifiedFileFingerprints.length >=
+		MAX_REVIEWER_SCOPE_GENERATION_FILES
+	) {
+		return false;
+	}
+	generation.modifiedFileFingerprints.push({ ...input.fingerprint });
+	return true;
+}
+
+/** Mark the exact coder call terminal; background running placeholders do not call this. */
+export function markReviewerScopeGenerationReady(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	readyAt?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const now = input.readyAt ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			(entry.status === 'collecting' || entry.status === 'ready'),
+	);
+	if (matches.length !== 1) return false;
+	if (matches[0].status === 'ready') return true;
+	matches[0].status = 'ready';
+	matches[0].readyAt = now;
+	return true;
+}
+
+/** Read one exact coder generation for terminal guardrail/evidence checks. */
+export function getReviewerScopeGenerationForCoderCall(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.coderCallID === input.coderCallID &&
+			(input.taskId === undefined || entry.taskId === input.taskId),
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/** Inspect the only ready generation for a task without claiming it. */
+export function peekReadyReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/**
+ * Claim the only ready generation for an exact task after every blocking
+ * reviewer before-hook has passed. Ambiguity fails closed to no receipt.
+ */
+export function claimReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.reviewerCallID, 512)
+	) {
+		return null;
+	}
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	if (matches.length !== 1) return null;
+	matches[0].status = 'claimed';
+	matches[0].reviewerCallID = input.reviewerCallID;
+	return cloneReviewerScopeGeneration(matches[0]);
+}
+
+/** Bind the immutable scope captured immediately before the reviewer Task dispatch. */
+export function attachReviewerScopeGenerationDispatchSnapshot(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	snapshot: ReviewerScopeDispatchSnapshot;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed' &&
+			entry.coderCallID === input.snapshot.coderCallID &&
+			entry.generation === input.snapshot.generation &&
+			entry.sessionIncarnation === input.snapshot.sessionIncarnation,
+	);
+	if (matches.length !== 1) return false;
+	matches[0].reviewerDispatchScope = {
+		...input.snapshot,
+		files: [...input.snapshot.files],
+	};
+	return true;
+}
+
+/** Terminal one-shot consumption by exact task and reviewer Task call. */
+export function takeReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	if (matches.length !== 1) return null;
+	const [key, generation] = matches[0];
+	if (
+		generation.background === true &&
+		generation.readyAt !== undefined &&
+		Number.isFinite(generation.createdAt) &&
+		Number.isFinite(generation.readyAt)
+	) {
+		const { ownershipHistory } = ensureReviewerScopeGenerationState(session);
+		while (ownershipHistory.size >= MAX_REVIEWER_SCOPE_OWNERSHIP_HISTORY) {
+			const oldestKey = ownershipHistory.keys().next().value as
+				| string
+				| undefined;
+			if (!oldestKey) break;
+			ownershipHistory.delete(oldestKey);
+		}
+		const tombstone: ReviewerScopeOwnershipTombstone = {
+			parentSessionID: input.parentSessionID,
+			taskId: generation.taskId,
+			coderCallID: generation.coderCallID,
+			generation: generation.generation,
+			sessionIncarnation: generation.sessionIncarnation,
+			background: true,
+			declaredFiles: [...generation.declaredFiles],
+			modifiedFiles: [...generation.modifiedFiles],
+			modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
+				(fingerprint) => ({ ...fingerprint }),
+			),
+			createdAt: generation.createdAt,
+			readyAt: generation.readyAt,
+			consumedAt: input.now ?? Date.now(),
+		};
+		ownershipHistory.set(
+			reviewerScopeOwnershipKey(
+				tombstone.taskId,
+				tombstone.coderCallID,
+				tombstone.generation,
+				tombstone.sessionIncarnation,
+			),
+			tombstone,
+		);
+	}
+	generations.delete(key);
+	return cloneReviewerScopeGeneration(generation);
+}
+
+/** Read bounded immutable ownership history for delayed background ingestion. */
+export function getReviewerScopeOwnershipHistory(input: {
+	parentSessionID: string;
+}): ReviewerScopeOwnershipTombstone[] {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return [];
+	const { ownershipHistory } = ensureReviewerScopeGenerationState(session);
+	return [...ownershipHistory.values()].map(
+		cloneReviewerScopeOwnershipTombstone,
+	);
+}
+
+/** Inspect one exact reviewer claim without consuming retryable state. */
+export function peekReviewerScopeGenerationClaim(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/** Clear one exact terminal/stale reviewer claim without touching parallel tasks. */
+export function discardReviewerScopeGenerationClaim(input: {
+	parentSessionID: string;
+	taskId?: string;
+	reviewerCallID: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	if (matches.length !== 1) return false;
+	generations.delete(matches[0][0]);
+	return true;
+}
+
+/**
+ * Detect a concurrently collecting coder generation whose declaration overlaps
+ * this exact coder call. Shared declared paths cannot be attributed safely from
+ * one workspace snapshot, even when child write routing observed both calls.
+ */
+export function reviewerScopeGenerationHasDeclaredOverlap(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	declaredFiles: string[];
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const declared = new Set(input.declaredFiles);
+	return [...generations.values()].some(
+		(entry) =>
+			entry.status === 'collecting' &&
+			(entry.taskId !== input.taskId ||
+				entry.coderCallID !== input.coderCallID) &&
+			entry.declaredFiles.some((file) => declared.has(file)),
+	);
+}
+
+/** Clear one exact collecting/ready coder generation on terminal error/stale. */
+export function discardReviewerScopeGenerationForCoderCall(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status !== 'claimed',
+	);
+	if (matches.length !== 1) return false;
+	generations.delete(matches[0][0]);
+	return true;
+}
+
+/** Validate an async result against the latest coder generation for its task. */
+export function isReviewerScopeGenerationCurrent(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { incarnation, latestByTask } =
+		ensureReviewerScopeGenerationState(session);
+	const latest = latestByTask.get(input.taskId);
+	return (
+		incarnation === input.sessionIncarnation &&
+		latest?.generation === input.generation &&
+		latest.coderCallID === input.coderCallID &&
+		latest.sessionIncarnation === input.sessionIncarnation
+	);
+}
+
 /**
  * Minimum interval (ms) between opportunistic idle sweeps triggered from the
  * per-tool-call hot path. Bounds the O(n) stale scan to at most once per
@@ -850,6 +1479,11 @@ export function startAgentSession(
 		lastScopeViolation: null,
 		scopeViolationDetected: false,
 		modifiedFilesThisCoderTask: [],
+		reviewerScopeGenerations: new Map(),
+		reviewerScopeGenerationCounter: 0,
+		reviewerScopeIncarnation: randomUUID(),
+		reviewerScopeLatestGenerationByTask: new Map(),
+		reviewerScopeOwnershipHistory: new Map(),
 		// Turbo Mode (v6.26)
 		turboMode: false,
 		// Lean Turbo Mode (Phase 2)
@@ -1129,6 +1763,21 @@ export function ensureAgentSession(
 		}
 		if (session.modifiedFilesThisCoderTask === undefined) {
 			session.modifiedFilesThisCoderTask = [];
+		}
+		if (!session.reviewerScopeGenerations) {
+			session.reviewerScopeGenerations = new Map();
+		}
+		if (session.reviewerScopeGenerationCounter === undefined) {
+			session.reviewerScopeGenerationCounter = 0;
+		}
+		if (!session.reviewerScopeIncarnation) {
+			session.reviewerScopeIncarnation = randomUUID();
+		}
+		if (!session.reviewerScopeLatestGenerationByTask) {
+			session.reviewerScopeLatestGenerationByTask = new Map();
+		}
+		if (!session.reviewerScopeOwnershipHistory) {
+			session.reviewerScopeOwnershipHistory = new Map();
 		}
 		if (session.scopeViolationDetected === undefined) {
 			session.scopeViolationDetected = false;

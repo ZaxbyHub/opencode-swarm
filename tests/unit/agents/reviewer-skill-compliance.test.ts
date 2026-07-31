@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-// Extract REVIEWER_PROMPT from reviewer.ts source (it's not exported)
+// Extract the stable legacy reviewer prompt from reviewer.ts source.
 // Uses the same approach as architect prompt extraction in other tests
 function findWorkspaceRoot(): string {
 	let dir = resolve(import.meta.dir);
@@ -22,15 +22,15 @@ function extractReviewerPrompt(): string {
 	const filePath = resolve(workspaceRoot, 'src/agents/reviewer.ts');
 	const content = readFileSync(filePath, 'utf-8');
 
-	// Find the REVIEWER_PROMPT template literal start
-	const startMarker = 'const REVIEWER_PROMPT = `';
+	// Runtime construction may append the structured-finding contract after
+	// this prompt body.
+	const startMarker = 'const LEGACY_REVIEWER_PROMPT = `';
 	const startIdx = content.indexOf(startMarker);
-	if (startIdx === -1) throw new Error('REVIEWER_PROMPT not found');
+	if (startIdx === -1) throw new Error('LEGACY_REVIEWER_PROMPT not found');
 
 	const actualBacktick = startIdx + startMarker.length; // position of opening backtick
 
-	// Find the closing backtick: it's a `; that is NOT escaped (not preceded by \)
-	// and is followed by newline and then 'export function'
+	// Find the closing backtick: it is a `; that is NOT escaped.
 	let endIdx = -1;
 	for (let i = actualBacktick + 1; i < content.length - 3; i++) {
 		if (
@@ -38,16 +38,13 @@ function extractReviewerPrompt(): string {
 			content.charAt(i + 1) === ';' &&
 			content.charAt(i - 1) !== '\\'
 		) {
-			// Check if followed by newline and then 'export function'
-			const after = content.substring(i + 2, i + 25).trim();
-			if (after.startsWith('export function')) {
-				endIdx = i;
-				break;
-			}
+			endIdx = i;
+			break;
 		}
 	}
 
-	if (endIdx === -1) throw new Error('Could not find end of REVIEWER_PROMPT');
+	if (endIdx === -1)
+		throw new Error('Could not find end of LEGACY_REVIEWER_PROMPT');
 
 	return content.substring(actualBacktick + 1, endIdx);
 }

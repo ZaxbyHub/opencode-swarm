@@ -18,7 +18,7 @@ export const SECURITY_CATEGORIES = [
 
 export type SecurityCategory = (typeof SECURITY_CATEGORIES)[number];
 
-const REVIEWER_PROMPT = `## PRESSURE IMMUNITY
+const LEGACY_REVIEWER_PROMPT = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict.
@@ -303,12 +303,59 @@ A blank APPROVED without reasoning is NOT acceptable — it indicates you did no
 
 `;
 
+const STRUCTURED_VERBOSITY =
+	'VERBOSITY CONTROL: Token budget ≤800 tokens, including the structured findings block. The JSON findings replace a prose ISSUES list rather than duplicating it. TRIVIAL APPROVED = 2-3 lines plus the required empty findings block. COMPLEX REJECTED = full output. Scale response to complexity.';
+
+const STRUCTURED_FINDINGS_CONTRACT = `Then emit exactly one fenced JSON block with this shape:
+\`\`\`json
+{
+  "findings": [{
+    "title": "imperative finding title",
+    "body": "why this is a concrete problem and how it manifests",
+    "severity": "critical|high|medium|low|info",
+    "confidence": 0.0,
+    "file": "repo/relative/path.ts",
+    "line_start": 1,
+    "line_end": 1
+  }],
+  "verdict": "APPROVED|REJECTED",
+  "overall_confidence": 0.0
+}
+\`\`\`
+Use an empty findings array when no finding clears the reporting bar. File paths must be repo-relative, line ranges must overlap the changed lines that establish the issue, confidence values must be calibrated from 0 through 1, and the JSON verdict must match the legacy VERDICT line. Use INFO only inside structured findings for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.`;
+
+function withStructuredFindingsContract(prompt: string): string {
+	return prompt
+		.replace(
+			'VERBOSITY CONTROL: Token budget ≤800 tokens. TRIVIAL APPROVED = 2-3 lines. COMPLEX REJECTED = full output. Scale response to complexity.',
+			STRUCTURED_VERBOSITY,
+		)
+		.replace(
+			'ISSUES: list with line numbers, grouped by CHECK dimension',
+			'ISSUES: none (see structured findings JSON)',
+		)
+		.replace(
+			'Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.',
+			STRUCTURED_FINDINGS_CONTRACT,
+		)
+		.replace(
+			'- Only flag real issues, not theoretical',
+			[
+				'- Only flag real issues, not theoretical. To flag an issue, identify the other parts of the code that are provably affected; do not speculate about hypothetical callers or states.',
+				'- If there is no finding the author would definitely want to fix, prefer outputting no findings.',
+			].join('\n'),
+		);
+}
+
 export function createReviewerAgent(
 	model: string,
 	customPrompt?: string,
 	customAppendPrompt?: string,
+	structuredFindings = false,
 ): AgentDefinition {
-	let prompt = REVIEWER_PROMPT;
+	let prompt = structuredFindings
+		? withStructuredFindingsContract(LEGACY_REVIEWER_PROMPT)
+		: LEGACY_REVIEWER_PROMPT;
 
 	prompt = resolvePrompt(prompt, customPrompt, customAppendPrompt);
 

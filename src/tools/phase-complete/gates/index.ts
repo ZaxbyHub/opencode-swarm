@@ -7,6 +7,7 @@ export { runArchitectureSupervisorGate } from './architecture-supervisor-gate.js
 export { runCompletionVerifyGate } from './completion-verify-gate.js';
 export { runDriftGate } from './drift-gate.js';
 export { runFinalCouncilGate } from './final-council-gate.js';
+export { runFinalReviewGate } from './final-review-gate.js';
 export { runHallucinationGate } from './hallucination-gate.js';
 export { runMutationGate } from './mutation-gate.js';
 export { runPhaseCouncilGate } from './phase-council-gate.js';

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 /**
  * After /swarm close, plan.json is moved to the timestamped archive bundle and
@@ -272,6 +273,7 @@ function mockResetSwarmStatePreservingSingletons(): void {
 }
 
 mock.module('../../../src/state.js', () => ({
+	...STATE_MOCK_TRANSITIVE_STUBS,
 	swarmState: mockSwarmState,
 	endAgentSession: mockEndAgentSession,
 	resetSwarmState: mockResetSwarmState,
@@ -314,7 +316,6 @@ const { handleCloseCommand, _internals } = await import(
 	'../../../src/commands/close.js'
 );
 
-// ── DI Conversion Summary ────────────────────────────────────────────
 //
 // WITHIN-MODULE MOCKS: NONE POSSIBLE
 // close.ts imports all functions directly (flushPendingSnapshot, swarmState,
@@ -324,7 +325,6 @@ const { handleCloseCommand, _internals } = await import(
 // state._internals directly). Since close.ts has no _internals usage, none of
 // its imports can be intercepted via _internals.
 //
-// CROSS-MODULE MOCKS: All mocks remain as mock.module
 // - executeWriteRetro (tools/write-retro.ts)
 // - curateAndStoreSwarm (hooks/knowledge-curator.ts)
 // - archiveEvidence (evidence/manager.ts) — not in manager._internals

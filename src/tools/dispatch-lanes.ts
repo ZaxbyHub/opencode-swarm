@@ -195,6 +195,7 @@ const READ_ONLY_LANE_ROLES: ReadonlySet<string> = new Set([
 	'critic_drift_verifier',
 	'critic_hallucination_verifier',
 	'critic_architecture_supervisor',
+	'critic_finding_validator',
 	'sme',
 	'researcher',
 	'council_generalist',
@@ -668,6 +669,7 @@ export const _test_exports = {
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
 	applyPrWorkflowPromptContract,
+	buildCollectResult,
 	buildReadOnlyTools,
 	buildLaneSessionCreateArgs,
 	extractAssistantTranscript,
@@ -1922,7 +1924,9 @@ function buildCollectResult(
 		.filter(
 			(record) =>
 				includePending ||
-				(record.status !== 'pending' && record.status !== 'running'),
+				(record.status !== 'pending' &&
+					record.status !== 'running' &&
+					record.status !== 'ingesting'),
 		)
 		.map((record) => recordToLaneResult(record, batchId));
 	const completed = records.filter((record) => record.status === 'completed');
@@ -1933,7 +1937,10 @@ function buildCollectResult(
 	const cancelled = records.filter((record) => record.status === 'cancelled');
 	const stale = records.filter((record) => record.status === 'stale');
 	const pending = records.filter(
-		(record) => record.status === 'pending' || record.status === 'running',
+		(record) =>
+			record.status === 'pending' ||
+			record.status === 'running' ||
+			record.status === 'ingesting',
 	);
 	const consumed = records.filter((record) => record.status === 'consumed');
 	return {
@@ -1964,7 +1971,7 @@ function recordToLaneResult(
 			? 'failed'
 			: record.status === 'ingestion_error'
 				? 'failed'
-				: record.status === 'running'
+				: record.status === 'running' || record.status === 'ingesting'
 					? 'pending'
 					: record.status;
 	const laneId = record.laneId ?? record.correlationId;

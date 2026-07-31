@@ -23,12 +23,16 @@
  * `.swarm/` (Invariant 4).
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import {
+	discardReviewerScopeGenerationClaim,
+	discardReviewerScopeGenerationForCoderCall,
+} from '../state.js';
 import * as logger from '../utils/logger.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
@@ -42,6 +46,7 @@ export type BackgroundDelegationStatus =
 	| 'running'
 	| 'ingestion_error'
 	| 'completed'
+	| 'ingesting'
 	| 'error'
 	| 'cancelled'
 	| 'stale'
@@ -93,6 +98,12 @@ export interface BackgroundDelegationRecord {
 	generation?: number;
 	result?: BackgroundDelegationResult;
 	completedAt?: number;
+	/** Unique lease token for the process currently applying Stage-B side effects. */
+	ingestionId?: string;
+	/** Start time for bounded crash-recovery of an abandoned ingestion lease. */
+	ingestionStartedAt?: number;
+	/** Terminal result digest claimed by the ingester. */
+	ingestionDigest?: string;
 }
 
 export interface BackgroundWorkspaceSnapshot {
@@ -190,6 +201,7 @@ const RecordSchema = z
 			'running',
 			'ingestion_error',
 			'completed',
+			'ingesting',
 			'error',
 			'cancelled',
 			'stale',
@@ -213,6 +225,9 @@ const RecordSchema = z
 		generation: z.number().optional(),
 		result: ResultSchema.optional(),
 		completedAt: z.number().optional(),
+		ingestionId: z.string().min(1).max(128).optional(),
+		ingestionStartedAt: z.number().optional(),
+		ingestionDigest: z.string().min(1).max(128).optional(),
 	})
 	.strict();
 
@@ -411,6 +426,10 @@ export async function appendDelegationTransition(
 			async () => {
 				const current = findByCorrelationId(directory, correlationId);
 				if (!current) return;
+				if (current.status === 'consumed' || current.status === 'ingesting') {
+					next = current;
+					return;
+				}
 				if (
 					isTerminal(current.status) &&
 					transition.status !== 'consumed' &&
@@ -444,6 +463,154 @@ export async function appendDelegationTransition(
 	}
 }
 
+/** An abandoned ingestion lease may be reclaimed after this bounded interval. */
+export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
+
+export type BackgroundIngestionClaim =
+	| {
+			outcome: 'claimed';
+			record: BackgroundDelegationRecord;
+			ingestionId: string;
+	  }
+	| {
+			outcome: 'busy' | 'settled' | 'rejected' | 'missing';
+			record: BackgroundDelegationRecord | null;
+	  };
+
+/**
+ * Acquire the single durable right to apply Stage-B side effects.
+ *
+ * The completed/ingestion_error -> ingesting transition is a compare-and-set
+ * performed under the pending-delegation store lock. A stale ingesting lease
+ * may be reclaimed after a crash; live duplicates observe `busy` and do no
+ * work. Result digest equality keeps replay bound to the immutable completion.
+ */
+export async function claimDelegationIngestion(
+	directory: string,
+	correlationId: string,
+	resultDigest: string,
+	options: { now?: number; leaseMs?: number } = {},
+): Promise<BackgroundIngestionClaim> {
+	const now = options.now ?? Date.now();
+	const leaseMs = Math.max(
+		1,
+		Math.min(options.leaseMs ?? BACKGROUND_INGESTION_LEASE_MS, 300_000),
+	);
+	const ingestionId = randomUUID();
+	let claim: BackgroundIngestionClaim = {
+		outcome: 'missing',
+		record: null,
+	};
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const current = findByCorrelationId(directory, correlationId);
+				if (!current) return;
+				if (current.status === 'consumed') {
+					claim = { outcome: 'settled', record: current };
+					return;
+				}
+				if (current.result?.digest !== resultDigest || !resultDigest) {
+					claim = { outcome: 'rejected', record: current };
+					return;
+				}
+				if (current.status === 'ingesting') {
+					const startedAt = current.ingestionStartedAt;
+					if (
+						Number.isFinite(startedAt) &&
+						now - (startedAt as number) <= leaseMs
+					) {
+						claim = { outcome: 'busy', record: current };
+						return;
+					}
+				} else if (
+					current.status !== 'completed' &&
+					current.status !== 'ingestion_error'
+				) {
+					claim = { outcome: 'rejected', record: current };
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion:
+						current.schemaVersion === 1 ? 2 : current.schemaVersion,
+					status: 'ingesting',
+					updatedAt: now,
+					ingestionId,
+					ingestionStartedAt: now,
+					ingestionDigest: resultDigest,
+				};
+				appendRecord(directory, next);
+				claim = { outcome: 'claimed', record: next, ingestionId };
+			},
+		);
+		return claim;
+	} catch (err) {
+		logger.warn(
+			`[background] claimDelegationIngestion failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return { outcome: 'missing', record: null };
+	}
+}
+
+/**
+ * Settle only the ingestion lease held by `ingestionId`.
+ *
+ * A consumed record is forward-only and returned idempotently; no late error
+ * path can regress it to ingestion_error.
+ */
+export async function settleDelegationIngestion(
+	directory: string,
+	correlationId: string,
+	ingestionId: string,
+	transition: {
+		status: 'consumed' | 'ingestion_error';
+		result?: BackgroundDelegationResult;
+	},
+): Promise<BackgroundDelegationRecord | null> {
+	const now = Date.now();
+	let settled: BackgroundDelegationRecord | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const current = findByCorrelationId(directory, correlationId);
+				if (!current) return;
+				if (current.status === 'consumed') {
+					settled = current;
+					return;
+				}
+				if (
+					current.status !== 'ingesting' ||
+					current.ingestionId !== ingestionId
+				) {
+					return;
+				}
+				settled = {
+					...current,
+					status: transition.status,
+					updatedAt: now,
+					...(transition.result ? { result: transition.result } : {}),
+				};
+				appendRecord(directory, settled);
+			},
+		);
+		return settled;
+	} catch (err) {
+		logger.warn(
+			`[background] settleDelegationIngestion failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
+}
+
 export function findByBatchId(
 	directory: string,
 	batchId: string,
@@ -464,7 +631,9 @@ export function findOpenAsyncLaneBatches(
 	return readDelegations(directory).filter(
 		(record) =>
 			record.batchId !== undefined &&
-			(record.status === 'pending' || record.status === 'running'),
+			(record.status === 'pending' ||
+				record.status === 'running' ||
+				record.status === 'ingesting'),
 	);
 }
 
@@ -492,7 +661,8 @@ function sweepStaleLocked(
 		if (
 			record.status !== 'pending' &&
 			record.status !== 'running' &&
-			record.status !== 'ingestion_error'
+			record.status !== 'ingestion_error' &&
+			record.status !== 'ingesting'
 		)
 			continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
@@ -501,6 +671,20 @@ function sweepStaleLocked(
 			status: 'stale',
 			updatedAt: now,
 		});
+		const taskId = record.evidenceTaskId ?? record.planTaskId;
+		if (taskId && record.normalizedAgent === 'reviewer') {
+			discardReviewerScopeGenerationClaim({
+				parentSessionID: record.parentSessionId,
+				taskId,
+				reviewerCallID: record.callID,
+			});
+		} else if (taskId && record.normalizedAgent === 'coder') {
+			discardReviewerScopeGenerationForCoderCall({
+				parentSessionID: record.parentSessionId,
+				taskId,
+				coderCallID: record.callID,
+			});
+		}
 		swept += 1;
 	}
 	return swept;

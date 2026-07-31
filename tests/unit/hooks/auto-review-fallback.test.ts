@@ -16,48 +16,119 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getAgentConfigs } from '../../../src/agents/index';
 import type { PluginConfig } from '../../../src/config';
-import { _internals, runAutoReview } from '../../../src/hooks/auto-review';
+import { resolveAutoReviewConfig } from '../../../src/config/schema';
+import { runAutoReview } from '../../../src/hooks/auto-review';
+import {
+	createReviewModelDispatcher,
+	type ReviewDispatchResult,
+	type ReviewModelDispatcher,
+} from '../../../src/review/contracts';
+import type { ReviewDiffResult } from '../../../src/review/diff-source';
+import { _internals as engineInternals } from '../../../src/review/engine';
+import {
+	captureReviewAgentModelRegistry,
+	type ReviewAgentModelRegistry,
+} from '../../../src/review/runtime';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
 
-const APPROVED = 'VERDICT: APPROVED\nRISK: LOW\nISSUES:\n- none';
+const APPROVED = [
+	'VERDICT: APPROVED',
+	'RISK: LOW',
+	'ISSUES: none (see structured findings)',
+	'```json',
+	'{"findings":[],"verdict":"APPROVED","overall_confidence":0.99}',
+	'```',
+].join('\n');
 
-function seedReviewerFallback(): void {
+function reviewerRegistry(
+	fallbackModels: string[] = ['prov/fb1', 'prov/fb2'],
+): ReviewAgentModelRegistry {
 	const config = {
 		agents: {
 			reviewer: {
 				model: 'prov/primary-reviewer',
-				fallback_models: ['prov/fb1', 'prov/fb2'],
+				fallback_models: fallbackModels,
 			},
 		},
 	} as unknown as PluginConfig;
-	getAgentConfigs(config);
+	return captureReviewAgentModelRegistry(config, [
+		'reviewer',
+		'critic_finding_validator',
+	]);
 }
 
 let tmpDir: string;
 let origClient: typeof swarmState.opencodeClient;
-const origComputeDiff = _internals.computeExecutionDiff;
-const origDispatch = _internals.dispatchReviewer;
-const origNow = _internals.now;
+let agentModelRegistry: ReviewAgentModelRegistry;
+const originalCollectReviewDiff = engineInternals.collectReviewDiff;
+
+function diffResult(): Extract<ReviewDiffResult, { status: 'ok' }> {
+	const canonicalText =
+		'diff --git a/src/state.ts b/src/state.ts\n@@ -9,1 +10,1 @@\n-old\n+new\n';
+	return {
+		status: 'ok',
+		selector: { kind: 'working-tree' },
+		canonicalText,
+		reviewTextBytes: canonicalText.length,
+		scopeHash: 'a'.repeat(64),
+		headSha: 'b'.repeat(40),
+		baseRef: 'origin/main',
+		baseSha: 'c'.repeat(40),
+		mergeBase: 'c'.repeat(40),
+		changedLines: new Map([['src/state.ts', [{ start: 10, end: 10 }]]]),
+		deletedLines: new Map([['src/state.ts', [{ start: 9, end: 9 }]]]),
+		files: new Map([
+			[
+				'src/state.ts',
+				{ kind: 'modified', oldPath: 'src/state.ts', newPath: 'src/state.ts' },
+			],
+		]),
+		completeness: { complete: true, truncated: false, skipReasons: [] },
+		staleness: {
+			collectedAt: new Date().toISOString(),
+			headSha: 'b'.repeat(40),
+			selectorKey: 'working-tree',
+			includesWorkingTree: true,
+			scopeHash: 'a'.repeat(64),
+		},
+	};
+}
+
+function dispatchResult(
+	request: Parameters<ReviewModelDispatcher['dispatch']>[0],
+	status: ReviewDispatchResult['status'],
+	text = '',
+	error?: string,
+): ReviewDispatchResult {
+	return {
+		status,
+		text,
+		error,
+		agentName: request.agentName,
+		durationMs: 1,
+		promptBytes: request.prompt.length,
+		responseBytes: text.length,
+	};
+}
 
 beforeEach(() => {
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'auto-review-fb-')),
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+	fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+	fs.writeFileSync(path.join(tmpDir, 'src', 'state.ts'), 'line\n'.repeat(20));
 	origClient = swarmState.opencodeClient;
 	resetSwarmState();
-	seedReviewerFallback();
-	_internals.now = () => 1_000_000;
+	agentModelRegistry = reviewerRegistry();
+	engineInternals.collectReviewDiff = async () => diffResult();
 });
 
 afterEach(() => {
 	swarmState.opencodeClient = origClient;
-	_internals.computeExecutionDiff = origComputeDiff;
-	_internals.dispatchReviewer = origDispatch;
-	_internals.now = origNow;
+	engineInternals.collectReviewDiff = originalCollectReviewDiff;
 	resetSwarmState();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -66,13 +137,22 @@ afterEach(() => {
 	}
 });
 
-function runInput(advisories: string[]) {
+function runInput(
+	advisories: string[],
+	dispatcher: ReviewModelDispatcher,
+	registry = agentModelRegistry,
+) {
 	return {
 		directory: tmpDir,
 		sessionID: 's1',
-		trigger: 'phase_boundary' as const,
-		phase: 1,
-		config: { timeout_ms: 30_000, max_diff_kb: 256 },
+		trigger: 'task_completion' as const,
+		config: resolveAutoReviewConfig({
+			enabled: true,
+			trigger: 'task_completion',
+		}),
+		dispatcher,
+		generatedAgentNames: ['reviewer', 'critic_finding_validator'],
+		agentModelRegistry: registry,
 		injectAdvisory: (_sid: string, msg: string) => {
 			advisories.push(msg);
 		},
@@ -91,28 +171,24 @@ function readEvents(): Array<Record<string, unknown>> {
 
 describe('runAutoReview — model failover (#1905)', () => {
 	test('fails over to a fallback model on a quota dispatch error and records APPROVED', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
 		const calls: Array<string | undefined> = [];
-		_internals.dispatchReviewer = async (
-			_dir,
-			_prompt,
-			_agent,
-			_timeout,
-			_parent,
-			model,
-		) => {
-			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
-			// Primary (no override) hits quota; fallback succeeds.
-			if (!model)
-				throw new Error('429 insufficient_quota: usage limit exceeded');
-			return APPROVED;
+		const dispatcher: ReviewModelDispatcher = {
+			async dispatch(request) {
+				const model = request.model;
+				calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+				return !model
+					? dispatchResult(
+							request,
+							'error',
+							'',
+							'429 insufficient_quota: usage limit exceeded',
+						)
+					: dispatchResult(request, 'completed', APPROVED);
+			},
 		};
 		const advisories: string[] = [];
 
-		await runAutoReview(runInput(advisories));
+		await runAutoReview(runInput(advisories, dispatcher));
 
 		// Recovered → APPROVED event, NOT verdict:'error'.
 		const events = readEvents();
@@ -126,25 +202,22 @@ describe('runAutoReview — model failover (#1905)', () => {
 	});
 
 	test('a permanent dispatch error still fails open (verdict:error) with no failover', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
 		const calls: Array<string | undefined> = [];
-		_internals.dispatchReviewer = async (
-			_dir,
-			_prompt,
-			_agent,
-			_timeout,
-			_parent,
-			model,
-		) => {
-			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
-			throw new Error('401 unauthorized: invalid api key');
+		const dispatcher: ReviewModelDispatcher = {
+			async dispatch(request) {
+				const model = request.model;
+				calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+				return dispatchResult(
+					request,
+					'error',
+					'',
+					'401 unauthorized: invalid api key',
+				);
+			},
 		};
 		const advisories: string[] = [];
 
-		await runAutoReview(runInput(advisories));
+		await runAutoReview(runInput(advisories, dispatcher));
 
 		const events = readEvents();
 		expect(events).toHaveLength(1);
@@ -159,24 +232,21 @@ describe('runAutoReview — model failover (#1905)', () => {
 		// The classify step explicitly treats "auto-review timed out" as
 		// permanent. This pins the carve-out so a future classifier change
 		// cannot silently start burning the fallback chain on a slow call.
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
 		const calls: Array<string | undefined> = [];
-		_internals.dispatchReviewer = async (
-			_dir,
-			_prompt,
-			_agent,
-			_timeout,
-			_parent,
-			model,
-		) => {
-			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
-			throw new Error('auto-review timed out after 30000ms');
+		const dispatcher: ReviewModelDispatcher = {
+			async dispatch(request) {
+				const model = request.model;
+				calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+				return dispatchResult(
+					request,
+					'timeout',
+					'',
+					'auto-review timed out after 30000ms',
+				);
+			},
 		};
 
-		await runAutoReview(runInput([]));
+		await runAutoReview(runInput([], dispatcher));
 
 		const events = readEvents();
 		expect(events[0]?.verdict).toBe('error');
@@ -185,21 +255,17 @@ describe('runAutoReview — model failover (#1905)', () => {
 	});
 
 	test('emits telemetry.modelFallback on a quota failover', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async (
-			_dir,
-			_prompt,
-			_agent,
-			_timeout,
-			_parent,
-			model,
-		) => {
-			if (!model)
-				throw new Error('429 insufficient_quota: usage limit exceeded');
-			return APPROVED;
+		const dispatcher: ReviewModelDispatcher = {
+			async dispatch(request) {
+				return !request.model
+					? dispatchResult(
+							request,
+							'error',
+							'',
+							'429 insufficient_quota: usage limit exceeded',
+						)
+					: dispatchResult(request, 'completed', APPROVED);
+			},
 		};
 
 		const emitted: Array<Record<string, unknown>> = [];
@@ -212,7 +278,7 @@ describe('runAutoReview — model failover (#1905)', () => {
 		}) as typeof telemetryInternals.emit;
 
 		try {
-			await runAutoReview(runInput([]));
+			await runAutoReview(runInput([], dispatcher));
 		} finally {
 			telemetryInternals.emit = origEmit;
 		}
@@ -228,19 +294,18 @@ describe('runAutoReview — model failover (#1905)', () => {
 		// the only attempt and the quota error exhausts the (empty) chain
 		// immediately. The verdict:'error' event detail should carry the quota
 		// annotation added by the isQuotaError branch.
-		const config = {
-			agents: { reviewer: { model: 'prov/primary-reviewer' } },
-		} as unknown as PluginConfig;
-		getAgentConfigs(config);
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async () => {
-			throw new Error('429 insufficient_quota: usage limit exceeded');
+		const dispatcher: ReviewModelDispatcher = {
+			async dispatch(request) {
+				return dispatchResult(
+					request,
+					'error',
+					'',
+					'429 insufficient_quota: usage limit exceeded',
+				);
+			},
 		};
 
-		await runAutoReview(runInput([]));
+		await runAutoReview(runInput([], dispatcher, reviewerRegistry([])));
 
 		const events = readEvents();
 		expect(events).toHaveLength(1);
@@ -255,10 +320,6 @@ describe('runAutoReview — model failover (#1905)', () => {
 		// envelope-preservation fix at the dispatch site, the classifier would
 		// see only "auto-review session returned no data" with no quota token
 		// → permanent → no failover. The fix embeds JSON.stringify(error).
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = {
 			session: {
@@ -285,7 +346,9 @@ describe('runAutoReview — model failover (#1905)', () => {
 			},
 		} as typeof swarmState.opencodeClient;
 
-		await runAutoReview(runInput([]));
+		await runAutoReview(
+			runInput([], createReviewModelDispatcher(swarmState.opencodeClient)),
+		);
 
 		// Failover fired on the envelope-shaped error → APPROVED event.
 		const events = readEvents();

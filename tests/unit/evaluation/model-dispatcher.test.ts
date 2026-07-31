@@ -162,6 +162,14 @@ describe('evaluation model dispatcher', () => {
 		expect(debugLog).not.toHaveBeenCalled();
 	});
 
+	test('omits the system field when evaluation supplies no override', async () => {
+		const fake = fakeClient();
+		const result = await createEvaluationModelDispatcher(fake.value)(request());
+
+		expect(result.status).toBe('completed');
+		expect(fake.promptRequest().body).not.toHaveProperty('system');
+	});
+
 	test('bounds a stalled session create before prompt', async () => {
 		const fake = fakeClient({ create: () => new Promise(() => {}) });
 		const result = await createEvaluationModelDispatcher(fake.value)(
@@ -191,10 +199,13 @@ describe('evaluation model dispatcher', () => {
 		const result = await createEvaluationModelDispatcher(fake.value)(request());
 		expect(result.status).toBe('completed');
 		expect(fake.deleted()).toBe(1);
-		expect(debugLog).toHaveBeenCalledWith('evaluation session cleanup failed', {
-			sessionId: 'session-1',
-			error: 'cleanup denied',
-		});
+		expect(debugLog).toHaveBeenCalledWith(
+			'ephemeral agent session cleanup failed',
+			{
+				sessionId: 'session-1',
+				error: 'cleanup denied',
+			},
+		);
 	});
 
 	test('bounds and reports stalled session cleanup', async () => {
@@ -205,7 +216,7 @@ describe('evaluation model dispatcher', () => {
 		await _internals.boundedDelete(fake.value, 'session-1', 10);
 		expect(performance.now() - startedAt).toBeLessThan(250);
 		expect(debugLog).toHaveBeenCalledWith(
-			'evaluation session cleanup timed out',
+			'ephemeral agent session cleanup timed out',
 			{
 				sessionId: 'session-1',
 				timeoutMs: 10,

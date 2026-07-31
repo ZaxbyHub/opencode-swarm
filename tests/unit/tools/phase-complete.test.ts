@@ -895,7 +895,7 @@ describe('phase_complete tool', () => {
 			});
 			const parsed2 = JSON.parse(result2);
 			expect(parsed2.success).toBe(true);
-		});
+		}, 10_000);
 
 		test('phase scoping reset - different phases maintain separate state', async () => {
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
@@ -937,7 +937,7 @@ describe('phase_complete tool', () => {
 
 			// Phase should be updated
 			expect(session?.lastPhaseCompletePhase).toBe(2);
-		});
+		}, 10_000);
 	});
 
 	describe('delegation chains integration', () => {

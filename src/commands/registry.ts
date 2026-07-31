@@ -3,11 +3,14 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
 	type PrWorkflowMode,
 } from '../hooks/pr-workflow-gate.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { warn } from '../utils/logger.js';
 import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
@@ -91,6 +94,7 @@ import { handleQaGatesCommand } from './qa-gates.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
+import { handleReviewCommand } from './review.js';
 import { handleRollbackCommand } from './rollback.js';
 import {
 	handleSddCommand,
@@ -269,6 +273,10 @@ export type CommandContext = {
 	 */
 	source?: 'cli' | 'chat';
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	autoReviewConfig?: AutoReviewConfig;
+	activeAgentName?: string;
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 };
 
 export type CommandResult = Promise<string>;
@@ -578,6 +586,15 @@ export const COMMAND_REGISTRY = {
 		args: '--json, --min-samples <n>',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
+	},
+	review: {
+		handler: handleReviewCommand,
+		description: 'Run the independent review model against a selected Git diff',
+		args: '--base <ref>, --range <from..to|from...to>, --working-tree, --json',
+		details:
+			'Collects one bounded canonical diff, dispatches the configured reviewer in a fresh read-only session, optionally validates eligible HIGH/CRITICAL findings when configured or required by gate mode, and persists the receipt and evidence. With no selector, reviews the default merge-base plus working-tree scope.',
+		category: 'diagnostics',
+		toolPolicy: 'human-only',
 	},
 	costs: {
 		handler: (ctx) => handleCostsCommand(ctx.directory, ctx.args),

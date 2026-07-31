@@ -22,11 +22,12 @@ import { TOOL_NAMES } from '../../../src/tools/tool-names';
 
 describe('constants.ts', () => {
 	describe('QA_AGENTS', () => {
-		it('contains reviewer, critic, and critic_oversight (3 total)', () => {
+		it('contains reviewer, critic, critic_oversight, and critic_finding_validator (4 total)', () => {
 			expect(QA_AGENTS).toContain('reviewer');
 			expect(QA_AGENTS).toContain('critic');
 			expect(QA_AGENTS).toContain('critic_oversight');
-			expect(QA_AGENTS).toHaveLength(3);
+			expect(QA_AGENTS).toContain('critic_finding_validator');
+			expect(QA_AGENTS).toHaveLength(4);
 		});
 	});
 
@@ -50,7 +51,7 @@ describe('constants.ts', () => {
 	});
 
 	describe('ALL_SUBAGENT_NAMES', () => {
-		it('contains all 24 subagents (sme + researcher + docs + docs_design + designer + critic variants + curator variants + council + QA + pipeline)', () => {
+		it('contains all 25 subagents (sme + researcher + docs + docs_design + designer + critic variants + curator variants + council + QA + pipeline)', () => {
 			// v6.1: added docs (default enabled) and designer (opt-in); v6.34: added critic_sounding_board; v6.36.0: added critic_drift_verifier; v6.42.1: added curator_init + curator_phase; v6.x.x: added critic_oversight; v7.0.2: council_member/moderator → council_generalist/skeptic/domain_expert; feat: +researcher
 			expect(ALL_SUBAGENT_NAMES).toContain('sme');
 			expect(ALL_SUBAGENT_NAMES).toContain('researcher');
@@ -60,6 +61,7 @@ describe('constants.ts', () => {
 			expect(ALL_SUBAGENT_NAMES).toContain('critic_sounding_board');
 			expect(ALL_SUBAGENT_NAMES).toContain('critic_drift_verifier');
 			expect(ALL_SUBAGENT_NAMES).toContain('critic_hallucination_verifier');
+			expect(ALL_SUBAGENT_NAMES).toContain('critic_finding_validator');
 			expect(ALL_SUBAGENT_NAMES).toContain('curator_init');
 			expect(ALL_SUBAGENT_NAMES).toContain('curator_phase');
 			expect(ALL_SUBAGENT_NAMES).toContain('curator_consolidation');
@@ -75,12 +77,12 @@ describe('constants.ts', () => {
 			expect(ALL_SUBAGENT_NAMES).toContain('skill_improver');
 			expect(ALL_SUBAGENT_NAMES).toContain('spec_writer');
 			expect(ALL_SUBAGENT_NAMES).toContain('critic_architecture_supervisor');
-			expect(ALL_SUBAGENT_NAMES).toHaveLength(24);
+			expect(ALL_SUBAGENT_NAMES).toHaveLength(25);
 		});
 	});
 
 	describe('ALL_AGENT_NAMES', () => {
-		it('contains architect + all 24 subagents = 25 total', () => {
+		it('contains architect + all 25 subagents = 26 total', () => {
 			// v6.1: added docs and designer; v6.34: added critic_sounding_board; v6.36.0: added critic_drift_verifier; v6.42.1: added curator_init + curator_phase; v6.x.x: added critic_oversight; v6.72.x: added critic_hallucination_verifier; v7.0.2: council_member/moderator → council_generalist/skeptic/domain_expert; v7.10.0: +skill_improver +spec_writer; +docs_design; feat: +researcher
 			// architect must be first — it is the orchestrator and must be listed before all subagents
 			expect(ALL_AGENT_NAMES[0]).toBe('architect');
@@ -88,7 +90,7 @@ describe('constants.ts', () => {
 			for (const name of ALL_SUBAGENT_NAMES) {
 				expect(ALL_AGENT_NAMES).toContain(name);
 			}
-			expect(ALL_AGENT_NAMES).toHaveLength(25);
+			expect(ALL_AGENT_NAMES).toHaveLength(26);
 		});
 	});
 
@@ -114,7 +116,7 @@ describe('constants.ts', () => {
 	});
 
 	describe('isSubagent()', () => {
-		it('returns true for all 23 subagent names', () => {
+		it('returns true for all 25 subagent names', () => {
 			expect(isSubagent('sme')).toBe(true);
 			expect(isSubagent('researcher')).toBe(true);
 			expect(isSubagent('docs')).toBe(true);
@@ -124,8 +126,10 @@ describe('constants.ts', () => {
 			expect(isSubagent('critic_drift_verifier')).toBe(true);
 			expect(isSubagent('critic_hallucination_verifier')).toBe(true);
 			expect(isSubagent('critic_architecture_supervisor')).toBe(true);
+			expect(isSubagent('critic_finding_validator')).toBe(true);
 			expect(isSubagent('curator_init')).toBe(true);
 			expect(isSubagent('curator_phase')).toBe(true);
+			expect(isSubagent('curator_consolidation')).toBe(true);
 			expect(isSubagent('reviewer')).toBe(true);
 			expect(isSubagent('critic')).toBe(true);
 			expect(isSubagent('critic_oversight')).toBe(true);
@@ -180,9 +184,9 @@ describe('constants.ts', () => {
 			}
 		});
 
-		it('has exactly 22 entries (subagents + default, no architect or council role-agents)', () => {
+		it('has exactly 23 entries (subagents + default, no architect or council role-agents)', () => {
 			// v6.14: architect removed; v6.36.0: +critic_drift_verifier; v6.42.1: +curator_init/phase; v6.x.x: +critic_oversight; v6.72.x: +critic_hallucination_verifier; v7.0.2: council_member/moderator removed (council agents use reviewer/critic/sme model keys instead); v7.10.0: +skill_improver +spec_writer; #893: +critic_architecture_supervisor; +docs_design; feat: +researcher; #1464: +curator_consolidation
-			expect(Object.keys(DEFAULT_MODELS)).toHaveLength(22);
+			expect(Object.keys(DEFAULT_MODELS)).toHaveLength(23);
 		});
 	});
 

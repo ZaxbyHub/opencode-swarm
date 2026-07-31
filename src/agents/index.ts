@@ -539,13 +539,22 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	for (const { name, factory } of TYPE_A_AGENTS) {
 		if (!isAgentDisabled(name, swarmAgents, swarmPrefix)) {
 			const prompts = getPrompts(name);
-			const agent = (
-				factory as (
-					model: string,
-					customPrompt?: string,
-					customAppendPrompt?: string,
-				) => AgentDefinition
-			)(getModel(name), prompts.prompt, prompts.appendPrompt);
+			const agent =
+				name === 'reviewer'
+					? createReviewerAgent(
+							getModel(name),
+							prompts.prompt,
+							prompts.appendPrompt,
+							pluginConfig?.auto_review?.enabled === true &&
+								pluginConfig.auto_review.structured_findings !== false,
+						)
+					: (
+							factory as (
+								model: string,
+								customPrompt?: string,
+								customAppendPrompt?: string,
+							) => AgentDefinition
+						)(getModel(name), prompts.prompt, prompts.appendPrompt);
 			agent.name = prefixName(name);
 			agents.push(applyOverrides(agent, swarmAgents, swarmPrefix, quiet));
 		}
@@ -613,6 +622,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			'architecture_supervisor' as CriticRole,
 		);
 		critic.name = prefixName('critic_architecture_supervisor');
+		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5c-quater. Create independent structured-finding validator
+	if (!isAgentDisabled('critic_finding_validator', swarmAgents, swarmPrefix)) {
+		const critic = createCriticAgent(
+			swarmAgents?.critic_finding_validator?.model ?? getModel('critic'),
+			undefined,
+			undefined,
+			'finding_validator' as CriticRole,
+		);
+		critic.name = prefixName('critic_finding_validator');
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 

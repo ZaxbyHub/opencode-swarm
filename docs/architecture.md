@@ -230,6 +230,7 @@ All directive language (must, should, needs, verdict, review needed, dead) was r
 ### Critic: The Gate
 - Reviews architect's plan BEFORE implementation begins
 - Returns APPROVED / NEEDS_REVISION / REJECTED
+- The read-only `critic_finding_validator` variant checks review findings in a separate fresh context and emits one `CONFIRMED`, `DISPROVED`, or `UNVERIFIED` disposition per stable finding ID
 - Read-only (cannot write code)
 
 ### Docs: The Scribe
@@ -443,24 +444,26 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
 │         - .swarm/evidence/{phase}/phase-council.json (if phase_council enabled; written by submit_phase_council_verdicts)
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
+│         - .swarm/evidence/{phase}/auto-review.json (written by phase_complete when auto_review phase/plan review is enabled)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         If either missing: run the missing gate first
-│         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor and final-council are never bypassed
-├── 6. Call phase_complete (enforces up to seven gates automatically)
+│         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
+├── 6. Call phase_complete (enforces up to eight gates automatically)
 │         - Gate 1: completion-verify — deterministic identifier check in source files
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
 │         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
+│         - Final review: dispatches the bounded whole-diff engine, then verifies current auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
-│         - Gates 1–5 bypassed when turbo mode is active; Gates 5b and 6 are never bypassed
+│         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
 ```
 
 ### Phase Completion Gates
 
-The `phase_complete` tool enforces up to seven gates before marking a phase complete. Gates 1–5 and phase council are turbo-bypassed; architecture supervisor and final council are never turbo-bypassed.
+The `phase_complete` tool enforces up to eight gates before marking a phase complete. Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, and final council are never turbo-bypassed.
 
 | Gate | Purpose | Blocking Reason | Turbo Bypass |
 |------|---------|-----------------|--------------|
@@ -470,6 +473,7 @@ The `phase_complete` tool enforces up to seven gates before marking a phase comp
 | `mutation-test` | Evidence-based check that mutation tests achieved a passing kill rate | `MUTATION_GATE_MISSING` or `MUTATION_GATE_FAIL` | Yes |
 | `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved (if `phase_council` enabled) | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
+| `final-review` | Evidence-only check that the phase body persisted complete, current structured review and independent validation evidence | `FINAL_REVIEW_*` — missing/stale/incomplete evidence or confirmed anchored HIGH/CRITICAL findings | **No in gate mode** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
 
 **Gate 1: Completion Verify**
@@ -505,7 +509,18 @@ The `phase_complete` tool enforces up to seven gates before marking a phase comp
 - **Expensive**: requires one LLM call per mutation phase due to LLM-based patch generation; OFF by default to avoid cost on all projects
 
 **Turbo Mode Behavior:**
-When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor) and Gate 6 (final council) are **never** turbo-bypassed — enabling `architectural_supervision.mode === 'gate'` or `final_council` is an explicit opt-in to a hard quality check.
+When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor), auto-review in explicit `gate` mode, and Gate 6 (final council) are **never** turbo-bypassed. Lean Turbo's own reviewer owns advisory phase review, so the generic advisory pass is skipped to avoid duplicate model calls.
+
+### Independent Auto-Review Engine
+
+The automatic task, phase, plan, Lean, and `/swarm review` paths share one set of runtime primitives instead of maintaining separate model-session and diff implementations:
+
+1. `src/evaluation/ephemeral-agent-dispatcher.ts` owns the bounded session lifecycle: instance-local client injection, fresh parent-bound session, replacement system prompt, false-only read-only tool map, prompt/response byte caps, timeout/abort handling, cost extraction, and awaited best-effort cleanup.
+2. `src/review/diff-source.ts` owns canonical scope construction. Default/base scopes compute the merge base and include current tracked plus safe untracked text; exact ranges are committed-only; working-tree scope compares `HEAD` with tracked plus safe untracked text. Every Git child is non-interactive, bounded, killable, and rooted explicitly.
+3. `src/review/engine.ts` owns the shared policy pipeline: reviewer fallback dispatch, tolerant structured parsing, stable finding IDs and deduplication, current-side hunk anchoring, confidence demotion, batched independent validation, receipts/evidence, telemetry/cost accounting, and advisory/gate disposition.
+4. `src/tools/phase-complete.ts` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `final-review-gate.ts` never invokes a model; it only checks that the in-memory scope hash and configured policy match durable evidence and that scope, structured output, validation, required receipt, and confirmed-finding policy are satisfied. Clean-scope evidence is valid without a finding receipt.
+
+Advisory mode injects ranked findings and continues. Gate mode fails closed on missing, stale, truncated, malformed, or unpersisted evidence and blocks only on independently `CONFIRMED`, diff-anchored, effective HIGH/CRITICAL findings. `DISPROVED`, `UNVERIFIED`, unanchored, out-of-scope, and below-threshold findings remain visible evidence but are non-blocking.
 
 ---
 

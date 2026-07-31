@@ -39,6 +39,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'coder',
 			'test_engineer',
@@ -51,7 +52,12 @@ export const TOOL_METADATA = {
 	diff_summary: {
 		description:
 			'filter classified AST changes by category, risk level, or file for reviewer drill-down',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -68,7 +74,7 @@ export const TOOL_METADATA = {
 	},
 	placeholder_scan: {
 		description: 'todo and FIXME comment detection',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -87,6 +93,7 @@ export const TOOL_METADATA = {
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -99,7 +106,7 @@ export const TOOL_METADATA = {
 	lint: {
 		description:
 			'run project linter in check or fix mode; supports biome, eslint, ruff, clippy, and more, returns structured results',
-		agents: ['architect', 'reviewer', 'coder'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator', 'coder'],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -108,7 +115,12 @@ export const TOOL_METADATA = {
 	secretscan: {
 		description:
 			'scan for secrets (API keys, tokens, passwords) via regex and entropy; returns redacted previews, excludes common dirs',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -116,7 +128,12 @@ export const TOOL_METADATA = {
 	},
 	sast_scan: {
 		description: 'static analysis security scan',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -130,7 +147,7 @@ export const TOOL_METADATA = {
 	pre_check_batch: {
 		description:
 			'parallel verification: lint:check + secretscan + sast_scan + quality_budget',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 	},
 	quality_budget: {
 		description: 'code quality budget check',
@@ -155,6 +172,7 @@ export const TOOL_METADATA = {
 			'critic_hallucination_verifier',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -170,6 +188,7 @@ export const TOOL_METADATA = {
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -254,6 +273,7 @@ export const TOOL_METADATA = {
 			'architect',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'test_engineer',
 		],
@@ -289,7 +309,12 @@ export const TOOL_METADATA = {
 	},
 	test_runner: {
 		description: 'auto-detect and run tests',
-		agents: ['architect', 'reviewer', 'test_engineer'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'test_engineer',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -298,7 +323,13 @@ export const TOOL_METADATA = {
 	test_impact: {
 		description:
 			'identify test files impacted by changed source files via import analysis',
-		agents: ['architect', 'reviewer', 'critic_oversight', 'test_engineer'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+			'test_engineer',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -332,7 +363,7 @@ export const TOOL_METADATA = {
 	git_blame: {
 		description:
 			'per-line git blame metadata: sha, author, date, summary for each line in a file',
-		agents: ['reviewer', 'explorer', 'architect'],
+		agents: ['reviewer', 'critic_finding_validator', 'explorer', 'architect'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -360,6 +391,7 @@ export const TOOL_METADATA = {
 			'critic_architecture_supervisor',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -496,6 +528,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -530,6 +563,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'explorer',
 			'coder',
@@ -596,6 +630,7 @@ export const TOOL_METADATA = {
 			'architect',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'explorer',
 		],
@@ -603,7 +638,7 @@ export const TOOL_METADATA = {
 	suggest_patch: {
 		description:
 			'Reviewer-safe structured patch suggestion tool. Produces context-anchored patch artifacts without file modification. Returns structured diagnostics on context mismatch.',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 	},
 	req_coverage: {
 		description:
@@ -632,6 +667,7 @@ export const TOOL_METADATA = {
 			'critic_hallucination_verifier',
 			'critic_architecture_supervisor',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -736,6 +772,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -767,6 +804,7 @@ export const TOOL_METADATA = {
 			'docs_design',
 			'designer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'explorer',
 			'coder',

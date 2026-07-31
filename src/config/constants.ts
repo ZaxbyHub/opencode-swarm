@@ -216,6 +216,7 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	critic_drift_verifier: ['swarm_memory_recall'],
 	critic_hallucination_verifier: ['swarm_memory_recall'],
 	critic_architecture_supervisor: ['swarm_memory_recall'],
+	critic_finding_validator: ['swarm_memory_recall'],
 	docs: ['swarm_memory_recall', 'swarm_memory_propose'],
 	docs_design: ['swarm_memory_recall', 'swarm_memory_propose'],
 	designer: ['swarm_memory_recall', 'swarm_memory_propose'],
@@ -397,6 +398,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// Architecture supervisor is the expensive cross-task reviewer — inherits the
 	// critic model at runtime; this entry mirrors that for config/doc completeness.
 	critic_architecture_supervisor: 'opencode/big-pickle',
+	critic_finding_validator: 'opencode/big-pickle',
 	docs: 'opencode/big-pickle',
 	docs_design: 'opencode/big-pickle',
 	designer: 'opencode/big-pickle',
@@ -484,6 +486,10 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 		fallback_models: ['opencode/big-pickle'],
 	},
 	critic_architecture_supervisor: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
+	},
+	critic_finding_validator: {
 		model: 'opencode/big-pickle',
 		fallback_models: ['opencode/gpt-5-nano'],
 	},

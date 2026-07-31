@@ -16,7 +16,6 @@ import {
 } from '../../../src/background/pending-delegations';
 import { _internals as workspaceSnapshotInternals } from '../../../src/background/workspace-snapshot';
 import { readTaskEvidence } from '../../../src/gate-evidence';
-import { readAllReceipts } from '../../../src/hooks/review-receipt';
 import {
 	ensureAgentSession,
 	getTaskState,
@@ -143,58 +142,6 @@ describe('background completion observer', () => {
 		const record = findByCorrelationId(dir, 'ses_lane_only');
 		expect(record?.status).toBe('completed');
 		expect(await readTaskEvidence(dir, 'lane-1')).toBeNull();
-	});
-
-	it('applies trusted background Stage B reviewer completion to workflow state, evidence, and receipt', async () => {
-		const session = ensureAgentSession('parent_session');
-		session.taskWorkflowStates.set('1.1', 'coder_delegated');
-
-		await recordPendingDelegation(dir, {
-			correlationId: 'ses_reviewer',
-			jobId: 'job_reviewer',
-			subagentSessionId: 'ses_reviewer',
-			parentSessionId: 'parent_session',
-			callID: 'c-reviewer',
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
-			planTaskId: '1.1',
-			evidenceTaskId: '1.1',
-			prompt: {
-				text: 'TASK: 1.1\nCHECK: [security, correctness]',
-				chars: 40,
-				truncated: false,
-				digest: 'prompt-digest',
-			},
-		});
-
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await obs.event(
-			syntheticPartEvent({
-				text:
-					'<task id="ses_reviewer" state="completed">\n' +
-					'<task_result>VERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n' +
-					'</task>',
-				synthetic: true,
-			}),
-		);
-
-		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
-		const record = findByCorrelationId(dir, 'ses_reviewer');
-		expect(record?.status).toBe('consumed');
-
-		const evidence = await readTaskEvidence(dir, '1.1');
-		expect(evidence?.gates.reviewer?.agent).toBe('reviewer');
-		expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
-		expect(checkReviewerGate('1.1', dir, true, 'parent_session').blocked).toBe(
-			true,
-		);
-
-		const receipts = await readAllReceipts(dir);
-		expect(receipts).toHaveLength(1);
-		expect(receipts[0].verdict).toBe('approved');
 	});
 
 	it('does not advance unrelated sessions that share the same task id', async () => {

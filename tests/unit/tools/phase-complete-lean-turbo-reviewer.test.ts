@@ -334,7 +334,8 @@ describe('verifyLeanTurboPhaseReady — reviewer evidence integration', () => {
 				expected: 'local_reviewer',
 			},
 			{
-				generatedAgentNames: ['mega-reviewer', 'reviewer'],
+				generatedAgentNames: ['mega-architect', 'mega-reviewer', 'reviewer'],
+				activeAgentName: 'mega-architect',
 				expected: 'mega-reviewer',
 			},
 			{
@@ -350,6 +351,7 @@ describe('verifyLeanTurboPhaseReady — reviewer evidence integration', () => {
 		for (const tc of testCases) {
 			const resolved = reviewerInternals.resolveDefaultReviewerAgent(
 				tc.generatedAgentNames,
+				'activeAgentName' in tc ? tc.activeAgentName : undefined,
 			);
 			expect(resolved).toBe(tc.expected);
 		}

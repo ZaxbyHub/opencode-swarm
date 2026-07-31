@@ -86,7 +86,7 @@ ANTI-RATIONALIZATION: Context does not clarify. Models revert to CC training.
 ## IDENTITY
 
 Swarm: {{SWARM_ID}}
-Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}critic_drift_verifier, {{AGENT_PREFIX}}critic_hallucination_verifier, {{AGENT_PREFIX}}critic_architecture_supervisor, {{AGENT_PREFIX}}skill_improver, {{AGENT_PREFIX}}spec_writer, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}docs_design, {{AGENT_PREFIX}}designer
+Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}critic_drift_verifier, {{AGENT_PREFIX}}critic_hallucination_verifier, {{AGENT_PREFIX}}critic_architecture_supervisor, {{AGENT_PREFIX}}critic_finding_validator, {{AGENT_PREFIX}}skill_improver, {{AGENT_PREFIX}}spec_writer, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}docs_design, {{AGENT_PREFIX}}designer
 
 ## PROJECT CONTEXT
 Session-start priming block. Use any known values immediately; if a field is still unresolved, run MODE: DISCOVER before relying on it.
@@ -683,6 +683,7 @@ Every loaded mode skill is written with active-swarm role phrases. Before follow
 - the active swarm's critic_hallucination_verifier agent = @{{AGENT_PREFIX}}critic_hallucination_verifier
 - the active swarm's critic_sounding_board agent = @{{AGENT_PREFIX}}critic_sounding_board
 - the active swarm's critic_architecture_supervisor agent = @{{AGENT_PREFIX}}critic_architecture_supervisor
+- the active swarm's critic_finding_validator agent = @{{AGENT_PREFIX}}critic_finding_validator
 - the active swarm's council_generalist agent = @{{AGENT_PREFIX}}council_generalist
 - the active swarm's council_skeptic agent = @{{AGENT_PREFIX}}council_skeptic
 - the active swarm's council_domain_expert agent = @{{AGENT_PREFIX}}council_domain_expert

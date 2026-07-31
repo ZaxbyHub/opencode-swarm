@@ -2,15 +2,16 @@ import { describe, expect, it } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Read the reviewer.ts source directly to access REVIEWER_PROMPT
+// Read the reviewer.ts source directly to access the stable legacy prompt body.
 const reviewerSource = fs.readFileSync(
 	path.join(__dirname, '../../../src/agents/reviewer.ts'),
 	'utf-8',
 );
 
-// Extract REVIEWER_PROMPT from source using regex
+// Runtime construction may append the structured-finding contract after this
+// prompt, but these assertions intentionally cover the legacy review contract.
 const promptMatch = reviewerSource.match(
-	/const REVIEWER_PROMPT = `([\s\S]*?)`;?\s*$/m,
+	/const LEGACY_REVIEWER_PROMPT = `([\s\S]*?)`;?\s*$/m,
 );
 const REVIEWER_PROMPT = promptMatch ? promptMatch[1] : '';
 
