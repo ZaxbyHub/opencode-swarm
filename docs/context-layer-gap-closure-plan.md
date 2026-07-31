@@ -134,6 +134,19 @@ Sources: [LocAgent (GitHub)](https://github.com/gersteinlab/LocAgent) · [LocAge
 
 ## 3. PR sequence
 
+Tracking issues (each is self-contained for an implementing agent; this document is the
+long-form reference they cite):
+
+| PR | Issue | Scope |
+|----|-------|-------|
+| PR1 | [#1985](https://github.com/ZaxbyHub/opencode-swarm/issues/1985) | repo-graph lifecycle correctness (A1, A2, A4, A5, A7, A8) |
+| PR2 | [#1986](https://github.com/ZaxbyHub/opencode-swarm/issues/1986) | content-based freshness + persist-and-refresh (B1–B5, A3) |
+| PR3 | [#1987](https://github.com/ZaxbyHub/opencode-swarm/issues/1987) | ask/orient action + context_pack upgrades (C4, C5) |
+| PR4 | [#1988](https://github.com/ZaxbyHub/opencode-swarm/issues/1988) | delivery wiring: prompts, lanes, skills (C1, C2, C3, C6, C7) |
+| PR5 | [#1989](https://github.com/ZaxbyHub/opencode-swarm/issues/1989) | structure-anchored memory outcome loop (D1, D2, D3) |
+| PR6 | [#1990](https://github.com/ZaxbyHub/opencode-swarm/issues/1990) | savings attribution + A/B benchmark (E1, E2) |
+
+
 Six PRs. This is the minimum that keeps every change fully wired and tested inside its
 own PR (AGENTS.md invariant: no unwired code, no untested branches) while keeping each
 diff reviewable. Dependencies are strict where marked.
