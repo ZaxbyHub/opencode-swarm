@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 5.4 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 5.5 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -38,13 +38,14 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5.4MiB)', () => {
+	test('dist/index.js file size is reasonable (< 5.5MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// The current memory-sharing and PR-workflow controllers add durable
-		// provenance, validation, and publication enforcement. The exact merged
-		// size is rechecked after every build; 5.4 MiB is a bounded budget.
+		// The current memory-sharing, PR-workflow, and background-subagent
+		// delegation controllers add durable provenance, validation, and
+		// publication enforcement. The exact merged size is rechecked after
+		// every build; 5.5 MiB is a bounded budget.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);
