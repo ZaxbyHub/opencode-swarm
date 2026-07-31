@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.133.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.2...v7.133.0) (2026-07-31)
+
+
+### Features
+
+* **doctor:** versioned deprecated-field migration table + version-check pairing ([60b4cd2](https://github.com/ZaxbyHub/opencode-swarm/commit/60b4cd28ecddde127bdb6b930d4b25708c272636))
+* **doctor:** versioned deprecated-field migration table + version-check pairing ([f68b6ef](https://github.com/ZaxbyHub/opencode-swarm/commit/f68b6efbd8e072076c350cd29f7bca3a71744316)), closes [#1667](https://github.com/ZaxbyHub/opencode-swarm/issues/1667)
+* **review:** add default auto-review engine ([9488476](https://github.com/ZaxbyHub/opencode-swarm/commit/94884768fb5a6e8cbb59c8dea97c927f0b1c594f))
+* **review:** add default auto-review engine ([c208fb8](https://github.com/ZaxbyHub/opencode-swarm/commit/c208fb87aa72d7941826507c54f46f6768afeaf4))
+
+
+### Bug Fixes
+
+* **doctor:** address [#1667](https://github.com/ZaxbyHub/opencode-swarm/issues/1667) PR review feedback (PRR-001..016) ([8109d92](https://github.com/ZaxbyHub/opencode-swarm/commit/8109d927992120387dc21abd83c526f2d24c4300))
+* **review:** harden receipt-index reads and evidence-read TOCTOU ([67f7516](https://github.com/ZaxbyHub/opencode-swarm/commit/67f751626a9ce6b6241dd38d5e84e5684b4a37a4))
+* **review:** repair cross-platform CI contracts ([fdc9f48](https://github.com/ZaxbyHub/opencode-swarm/commit/fdc9f48260b61ebac5f20b62cb1e7affe2a89af4))
+* **review:** use exact filesystem identities ([45a3881](https://github.com/ZaxbyHub/opencode-swarm/commit/45a388152748f885171f31e55ad0649793bd6363))
+
 ## [7.132.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.132.1...v7.132.2) (2026-07-30)
 
 
