@@ -555,11 +555,19 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		return results;
 	}
 
-	// tee writes to every positional (non-flag) argument; -a means append (still a write)
+	// tee writes to every positional (non-flag) argument; -a means append (still a write).
+	// After a '--' end-of-flags sentinel, all remaining tokens are positional even if they
+	// start with '-' (e.g. tee -- -dashed-filename).
 	if (lowerName === 'tee') {
 		const suffixWords = getSuffixWords(cmd);
+		let pastDoubleDash = false;
 		for (const word of suffixWords) {
-			if (word && !word.startsWith('-') && !isNullDevice(word)) {
+			if (word === '--') {
+				pastDoubleDash = true;
+				continue;
+			}
+			if (!pastDoubleDash && word.startsWith('-')) continue;
+			if (word && !isNullDevice(word)) {
 				results.push({ category: 'builtin_write', operator: 'tee', path: word });
 			}
 		}

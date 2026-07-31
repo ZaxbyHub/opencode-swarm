@@ -3,7 +3,7 @@
  * @jest-environment node
  */
 
-// FR-011: This file contains 253 tests against a security-sensitive shell command
+// FR-011: This file contains 271 tests against a security-sensitive shell command
 // parser. The high test count is justified by the need to cover many shell syntax
 // variants, quoting modes, escape sequences, and cross-platform command patterns.
 // See .swarm/spec.md FR-011.
@@ -250,6 +250,13 @@ describe('tee write detection', () => {
 		const result = detectPosixWrites('cat file.txt | tee');
 		expect(result.hasWrites).toBe(false);
 	});
+
+	test('tee -- -dashed-filename detects write to dashed filename (post-end-of-flags)', () => {
+		// After '--', all remaining tokens are positional even if they start with '-'
+		expectWrites('tee -- -important.log', [
+			{ category: 'builtin_write', operator: 'tee', path: '-important.log' },
+		]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -396,6 +403,30 @@ describe('interpreter eval', () => {
 		// Ensure the glued-flag fix does not regress the -m carve-out.
 		// `-m<module>` starts with `-m` but `-m` is not in python's eval flags.
 		expect(detectPosixWrites('python -mpytest').hasWrites).toBe(false);
+	});
+
+	test('glued ruby -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
+		expectWrites("ruby -e'puts 42'", [
+			{ category: 'interpreter_eval', operator: 'ruby [eval]', path: null },
+		]);
+	});
+
+	test('glued perl -E flag: -E<code> (no space) is flagged as eval (issue #1928)', () => {
+		expectWrites("perl -E'say 1'", [
+			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
+		]);
+	});
+
+	test('glued php -r flag: -r<code> (no space) is flagged as eval (issue #1928)', () => {
+		expectWrites("php -r'echo 1;'", [
+			{ category: 'interpreter_eval', operator: 'php [eval]', path: null },
+		]);
+	});
+
+	test('glued node -pe flag: -pe<code> (no space) is flagged as eval (issue #1928)', () => {
+		expectWrites("node -pe'1+1'", [
+			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
+		]);
 	});
 });
 
