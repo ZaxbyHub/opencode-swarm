@@ -516,6 +516,60 @@ function isInDeclaredScope(
 }
 
 /**
+ * Maximum number of entries rendered per allow-pattern category in a Step 8
+ * block reason. Generous so every built-in rule shows in full (the largest is
+ * test_engineer's 15 ordinary globs at the time of writing); only pathological
+ * custom configs truncate, with an accurate omitted-count tail. Keeps the
+ * surfaced WRITE BLOCKED message bounded.
+ */
+const MAX_ALLOWED_HINT_ENTRIES = 20;
+
+/**
+ * Formats an agent's effective positive allow patterns into a hint appended to a
+ * Step 8 allowedPrefix block reason, so a blocked agent can self-correct (rename
+ * / redirect the file) instead of guessing.
+ *
+ * SECURITY: discloses ONLY the current agent's OWN positive permissions — never
+ * blocked* rules, universal deny prefixes, or any other agent's policy. Allow
+ * patterns are necessary-but-not-sufficient: blocked zones/prefixes/globs and
+ * universal deny paths still take precedence, which the trailing caveat states
+ * so a looping agent does not assume every listed pattern will succeed.
+ *
+ * Categories are rendered separately (exact paths, prefixes, globs, and
+ * case-sensitive globs) because they have distinct matching semantics — in
+ * particular `allowedCaseSensitiveGlobs` must not be merged into the
+ * case-insensitive globs list (e.g. `*Test.java` is case-sensitive; merging it
+ * could mislead an agent into a wrong-case filename).
+ */
+function formatAllowedHints(rules: AgentRule): string {
+	const fmt = (items: string[] | undefined): string => {
+		if (!items || items.length === 0) return '(none)';
+		if (items.length <= MAX_ALLOWED_HINT_ENTRIES) return items.join(', ');
+		const omitted = items.length - MAX_ALLOWED_HINT_ENTRIES;
+		return `${items.slice(0, MAX_ALLOWED_HINT_ENTRIES).join(', ')}, … (+${omitted} more)`;
+	};
+	const parts: string[] = [];
+	// Order mirrors the DENY-first evaluation so the hint reads like the rule model.
+	if (rules.allowedExact && rules.allowedExact.length > 0) {
+		parts.push(`Allowed exact paths: ${fmt(rules.allowedExact)}`);
+	}
+	parts.push(`Allowed prefixes: ${fmt(rules.allowedPrefix)}`);
+	parts.push(`Allowed globs: ${fmt(rules.allowedGlobs)}`);
+	if (
+		rules.allowedCaseSensitiveGlobs &&
+		rules.allowedCaseSensitiveGlobs.length > 0
+	) {
+		parts.push(
+			`Allowed case-sensitive globs: ${fmt(rules.allowedCaseSensitiveGlobs)}`,
+		);
+	}
+	parts.push(
+		'Block rules (blocked zones/prefixes/globs/exact) and universal deny paths still apply.',
+	);
+	return parts.join(' ');
+}
+
+/**
  * Checks file path authority against a pre-computed rules map.
  * Implements DENY-first evaluation order:
  * 1. readOnly - blocks all writes
@@ -733,7 +787,7 @@ export function checkFileAuthorityWithRules(
 			if (!isAllowed) {
 				return {
 					allowed: false,
-					reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}`,
+					reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
 				};
 			}
 		} else if (
@@ -743,7 +797,7 @@ export function checkFileAuthorityWithRules(
 			// Empty allowedPrefix means nothing is allowed by prefix
 			return {
 				allowed: false,
-				reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}`,
+				reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
 			};
 		}
 	}
