@@ -259,6 +259,10 @@ export function createBackgroundCompletionObserver(opts: {
 						directory,
 						record: ingestion.record,
 						result: ingestion.record.result ?? result,
+						reviewerReceiptOptions:
+							opts.reviewerReceiptOptions as
+								| import('../hooks/review-receipt-collector.js').ReviewerReceiptValidationOptions
+								| undefined,
 					});
 					const claimToken = ingestion.record.ingestion?.claimToken;
 					if (!claimToken) {
@@ -316,6 +320,12 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 					return;
 				}
+			}
+
+			// After successful ingestion, discard the reviewer scope claim
+			// so the claimed scope generation is consumed.
+			if (record.normalizedAgent === 'reviewer') {
+				discardScopeForRecord(record);
 			}
 
 			if (record.normalizedAgent === 'coder') {

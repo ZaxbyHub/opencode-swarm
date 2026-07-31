@@ -28,6 +28,7 @@ import { beginApprovedReviewerScopeLifecycle } from '../../../src/hooks/reviewer
 import {
 	claimReviewerScopeGeneration,
 	ensureAgentSession,
+	getAgentSession,
 	getReviewerScopeGenerationForCoderCall,
 	getTaskState,
 	markReviewerScopeGenerationReady,
@@ -214,6 +215,7 @@ describe('background completion observer reviewer receipts', () => {
 		runGit(dir, 'add', 'src/a.ts');
 		runGit(dir, 'commit', '-m', 'fixture');
 		startAgentSession('parent_session', 'architect', dir);
+		getAgentSession('parent_session')!.currentTaskId = '1.1';
 		startAgentSession('coder_child', 'coder', dir);
 		installActiveScopeBinding({
 			directory: dir,
