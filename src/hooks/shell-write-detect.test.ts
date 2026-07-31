@@ -212,6 +212,47 @@ describe('builtin write-effect commands', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Category 3b: tee — write to positional file arguments (issue #1928)
+// ---------------------------------------------------------------------------
+
+describe('tee write detection', () => {
+	test('tee FILE writes to file argument', () => {
+		expectWrites('tee output.txt', [
+			{ category: 'builtin_write', operator: 'tee', path: 'output.txt' },
+		]);
+	});
+
+	test('tee -a FILE appends — still flagged as write', () => {
+		expectWrites('tee -a log.txt', [
+			{ category: 'builtin_write', operator: 'tee', path: 'log.txt' },
+		]);
+	});
+
+	test('echo piped to tee FILE detects tee write', () => {
+		expectWrites('echo hello | tee out.txt', [
+			{ category: 'builtin_write', operator: 'tee', path: 'out.txt' },
+		]);
+	});
+
+	test('tee with multiple file args detects all write targets', () => {
+		expectWrites('tee file1.txt file2.txt', [
+			{ category: 'builtin_write', operator: 'tee', path: 'file1.txt' },
+			{ category: 'builtin_write', operator: 'tee', path: 'file2.txt' },
+		]);
+	});
+
+	test('tee /dev/null is not a write target (sink device)', () => {
+		const result = detectPosixWrites('tee /dev/null');
+		expect(result.hasWrites).toBe(false);
+	});
+
+	test('tee with no file arguments (stdout only) is not flagged', () => {
+		const result = detectPosixWrites('cat file.txt | tee');
+		expect(result.hasWrites).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Category 4: In-place editing (sed -i, perl -i, awk -i)
 // ---------------------------------------------------------------------------
 
@@ -329,6 +370,32 @@ describe('interpreter eval', () => {
 	test('plain node without -e is not flagged', () => {
 		const result = detectPosixWrites('node script.js');
 		expect(result.hasWrites).toBe(false);
+	});
+
+	test('glued python -c flag: -c<code> (no space) is flagged as eval (issue #1928)', () => {
+		// `python -c'print(1)'` passes `-cprint(1)` as a single token after shell quoting.
+		// The interpreter-eval guard must match even when the code is glued to the flag.
+		expectWrites("python -c'import os; os.remove(\"f\")'", [
+			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
+		]);
+	});
+
+	test('glued node -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
+		expectWrites("node -e'require(\"fs\").writeFileSync(\"x\",\"y\")'", [
+			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
+		]);
+	});
+
+	test('glued python -c with equals separator: -c=CODE is flagged as eval', () => {
+		expectWrites('python -c="print(1)"', [
+			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
+		]);
+	});
+
+	test('python -m is not flagged even with glued module name (issue #1902 regression guard)', () => {
+		// Ensure the glued-flag fix does not regress the -m carve-out.
+		// `-m<module>` starts with `-m` but `-m` is not in python's eval flags.
+		expect(detectPosixWrites('python -mpytest').hasWrites).toBe(false);
 	});
 });
 
@@ -549,10 +616,9 @@ describe('git destructive operations', () => {
 describe('edge cases — compound structures', () => {
 	test('pipeline: both sides scanned for writes', () => {
 		expectWrites('cat a.txt | tee b.txt > c.txt', [
-			// tee b.txt writes to b.txt; > c.txt is the redirect on the whole pipeline
+			// > c.txt is the redirect on tee's stdout; tee b.txt writes b.txt as a positional arg
 			{ category: 'redirect', operator: '>', path: 'c.txt' },
-			// tee writes b.txt — this is a builtin with a path arg
-			// (tee isn't in our builtin list, so it won't be detected)
+			{ category: 'builtin_write', operator: 'tee', path: 'b.txt' },
 		]);
 	});
 
