@@ -231,6 +231,15 @@ export async function ingestBackgroundStageBCompletion(args: {
 							taskChangeContext.baseline,
 						)
 					: null;
+		if (observedFiles === null) {
+			return {
+				ok: false,
+				consumed: false,
+				stale: true,
+				reason:
+					'background coder files could not be attributed to a clean immutable baseline',
+			};
+		}
 		try {
 			const observedSet = normalizedPathSet(observedFiles);
 			const declaredSet = normalizedPathSet(
