@@ -1788,6 +1788,10 @@ export function ensureAgentSession(
 				]);
 			}
 		}
+		// modifiedFilesThisCoderTask is a derived compatibility view of the
+		// authoritative modifiedFilesByTask map. Re-project on every
+		// ensureAgentSession call so direct mutation/reassignment is discarded.
+		projectModifiedFilesForActiveTask(session);
 		if (!session.reviewerScopeGenerations) {
 			session.reviewerScopeGenerations = new Map();
 		}

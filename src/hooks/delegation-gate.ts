@@ -3143,7 +3143,14 @@ export function createDelegationGateHook(
 			//   - PR 2 Stage A (flag ON): additionally record a DURABLE pending delegation so a
 			//     later (Stage B) trusted completion can be correlated. Still no gate effect.
 			// Either way: clean up stored args so the callID entry does not leak, then bail.
+			// A terminal failure (state === 'failed' or 'error') must not record a
+			// pending delegation — there is no later trusted completion to correlate.
+			const outputTerminalState = (_output as { state?: string } | undefined)
+				?.state;
+			const isTerminalFailure =
+				outputTerminalState === 'failed' || outputTerminalState === 'error';
 			if (
+				!isTerminalFailure &&
 				typeof subagentType === 'string' &&
 				isKnownCanonicalRole(stripKnownSwarmPrefix(subagentType)) &&
 				(isBackgroundTrue(directArgs?.background) ||
@@ -3404,7 +3411,13 @@ export function createDelegationGateHook(
 			}
 
 			let standardWorktreeSettled = !standardDispatch;
-			if (standardDispatch) {
+			// A terminal failure (cancelled/error/failed) must not attempt merge-back.
+			// The worktree is preserved for inspection and cleaned up without merging.
+			const isStandardWorktreeFailure =
+				outputTerminalState === 'cancelled' ||
+				outputTerminalState === 'failed' ||
+				outputTerminalState === 'error';
+			if (standardDispatch && !isStandardWorktreeFailure) {
 				const taskChangeContext = coderTaskChangeContextByCallID.get(
 					input.callID,
 				);
@@ -3471,6 +3484,43 @@ export function createDelegationGateHook(
 				});
 				standardWorktreeSettled = settlement?.outcome === 'merged';
 			}
+			if (standardDispatch && isStandardWorktreeFailure) {
+				// Terminal failure: preserve the worktree for inspection, clean up
+				// the lane without merge-back, and record the failure.
+				standardWorktreeByCallID.delete(input.callID);
+				const reason = (
+					outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
+				) as 'cancelled' | 'denied';
+				await _wtiInternals.preserveDirtyWorktreeForCallId(
+					input.callID,
+					reason,
+					directory,
+				);
+				await _wtiInternals.removeWorktree(
+					standardDispatch.handle.worktreePath,
+					directory,
+				);
+				await _wtiInternals.postMergeCleanup(
+					directory,
+					standardDispatch.handle.branchName,
+				);
+				awaitingMergeByCallID.delete(input.callID);
+				recordWorktreeMergeFailure(
+					standardDispatch.planTaskId ?? standardDispatch.taskId,
+					{
+						outcome: 'failed',
+						stage: 'task-result',
+						message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
+					},
+				);
+				const dispatchSession = ensureAgentSession(
+					standardDispatch.parentSessionID,
+				);
+				dispatchSession.pendingAdvisoryMessages ??= [];
+				dispatchSession.pendingAdvisoryMessages.push(
+					`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
+				);
+			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args
 			let hasReviewer = false;
@@ -3496,7 +3546,12 @@ export function createDelegationGateHook(
 						// Order-independent barrier: record each completion independently.
 						// Advance to tests_run only when BOTH reviewer and test_engineer
 						// have completed. Either may complete first.
+						// A terminal failure must never advance Stage B.
+						const outputStatus = (_output as { status?: string } | undefined)
+							?.status;
 						if (
+							outputStatus !== 'failed' &&
+							!isStandardWorktreeFailure &&
 							(targetAgent === 'reviewer' || targetAgent === 'test_engineer') &&
 							session.taskWorkflowStates
 						) {
