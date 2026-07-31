@@ -422,6 +422,8 @@ describe('PluginConfigSchema', () => {
 				enabled: true,
 				scope: 'all',
 			});
+			// config_format_version has a schema-level default of 1 (issue #1667).
+			expect(result.data.config_format_version).toBe(1);
 			expect(result.data.full_auto?.enabled).toBe(false);
 			expect(result.data.full_auto?.max_interactions_per_phase).toBe(50);
 			expect(result.data.full_auto?.deadlock_threshold).toBe(3);

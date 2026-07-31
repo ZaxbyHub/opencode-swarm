@@ -153,6 +153,27 @@ function formatDoctorMarkdown(result: ConfigDoctorResult): string {
 		}
 	}
 
+	// -- Migration Availability Section --
+	if (result.availableMigrations && result.availableMigrations.length > 0) {
+		lines.push('---', '');
+		lines.push('### Migrations Available', '');
+		const firstMigration = result.availableMigrations[0]!;
+		const userConfigVersion = firstMigration.currentFormatVersion;
+		const earliestDeprecatedIn = firstMigration.deprecatedIn;
+		lines.push(
+			`\u2139\ufe0f Your config is at version ${userConfigVersion}. Fields with cleaner replacements (introduced in config version ${earliestDeprecatedIn}) can be migrated:`,
+		);
+		for (const migration of result.availableMigrations) {
+			lines.push(
+				`  - \`${migration.field}\` \u2192 \`${migration.replacement}\` (available since config version ${migration.sinceVersion}, superseded in config version ${migration.deprecatedIn})`,
+			);
+		}
+		lines.push('');
+		lines.push(
+			'Run `/swarm config doctor --fix` to apply available migrations.',
+		);
+	}
+
 	if (result.hasAutoFixableIssues) {
 		lines.push('---');
 		lines.push('');

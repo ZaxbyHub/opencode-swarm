@@ -40,6 +40,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 		message: string;
 		replacement: string;
 		isDefaultValue: (v: unknown) => boolean;
+		deprecatedIn: number;
+		sinceVersion: number;
 	}
 > = new Map([
 	[
@@ -48,6 +50,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.skill_improver.model',
 			isDefaultValue: (v: unknown) => v === null,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -56,6 +60,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.skill_improver.fallback_models',
 			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -64,6 +70,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.spec_writer.model',
 			isDefaultValue: (v: unknown) => v === null,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 	[
@@ -72,6 +80,8 @@ const DEPRECATED_FIELDS: ReadonlyMap<
 			message: 'deprecated',
 			replacement: 'agents.spec_writer.fallback_models',
 			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+			deprecatedIn: 2,
+			sinceVersion: 1,
 		},
 	],
 ]);
@@ -540,6 +550,18 @@ export interface ConfigDoctorResult {
 	timestamp: number;
 	/** The config that was analyzed */
 	configSource: string;
+	/**
+	 * Migration availability metadata. Present when the loaded config's
+	 * config_format_version predates the deprecatedIn version of any
+	 * DEPRECATED_FIELDS entry.
+	 */
+	availableMigrations?: Array<{
+		field: string;
+		replacement: string;
+		deprecatedIn: number;
+		sinceVersion: number;
+		currentFormatVersion: number;
+	}>;
 }
 
 /** Backup artifact for rollback */
@@ -894,6 +916,33 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 						description: 'Remove deprecated agents config - use swarms instead',
 						risk: 'low',
 					},
+				});
+			}
+			break;
+		}
+
+		// Check config_format_version type
+		case 'config_format_version': {
+			if (
+				typeof value !== 'number' ||
+				!Number.isFinite(value) ||
+				!Number.isInteger(value) ||
+				value < 0
+			) {
+				findings.push({
+					id: 'type-mismatch',
+					title: `Config field "${path}" has wrong type`,
+					description: `Expected non-negative integer, got ${
+						typeof value === 'number'
+							? Number.isInteger(value)
+								? value
+								: `${value} (non-integer)`
+							: typeof value
+					}`,
+					severity: 'error',
+					path,
+					currentValue: value,
+					autoFixable: false,
 				});
 			}
 			break;
@@ -1729,12 +1778,51 @@ export function runConfigDoctor(
 		configSource = userConfigPath;
 	}
 
+	// -- Migration availability detection --
+	// The config normally arrives Zod-validated (config_format_version is a
+	// non-negative int with .default(1)). Guard against a raw/unvalidated object
+	// bypassing Zod (e.g. the readConfigFromFile cast in runConfigDoctorWithFixes):
+	// `NaN < deprecatedIn` is false, which would silently suppress migrations.
+	const rawConfigVersion = config.config_format_version;
+	// Coerce any non-finite, non-integer, or negative value back to the schema
+	// default of 1. The config normally arrives Zod-validated (which rejects
+	// these), but a raw object can bypass Zod (e.g. the readConfigFromFile cast
+	// in runConfigDoctorWithFixes): `NaN < deprecatedIn` is false and would
+	// silently suppress migrations, while a negative version is nonsensical.
+	const configVersion =
+		typeof rawConfigVersion === 'number' &&
+		Number.isFinite(rawConfigVersion) &&
+		Number.isInteger(rawConfigVersion) &&
+		rawConfigVersion >= 0
+			? rawConfigVersion
+			: 1;
+	const availableMigrations: Array<{
+		field: string;
+		replacement: string;
+		deprecatedIn: number;
+		sinceVersion: number;
+		currentFormatVersion: number;
+	}> = [];
+
+	for (const [depPath, depInfo] of DEPRECATED_FIELDS) {
+		if (configVersion < depInfo.deprecatedIn) {
+			availableMigrations.push({
+				field: depPath,
+				replacement: depInfo.replacement,
+				deprecatedIn: depInfo.deprecatedIn,
+				sinceVersion: depInfo.sinceVersion,
+				currentFormatVersion: configVersion,
+			});
+		}
+	}
+
 	return {
 		findings,
 		summary,
 		hasAutoFixableIssues,
 		timestamp: Date.now(),
 		configSource,
+		...(availableMigrations.length > 0 ? { availableMigrations } : {}),
 	};
 }
 
@@ -1914,6 +2002,112 @@ export function applySafeAutoFixes(
 					appliedFixes.push(fix);
 				}
 				break;
+		}
+	}
+
+	// Apply deprecated-field migrations. Like lossy fixes, these rewrite
+	// user-authored config (moving a legacy key's value to its replacement
+	// path and removing the legacy key), so they run only under the
+	// interactive `--fix` command (applyLossy === true), never the passive
+	// startup autofix path (issue #1886). Only fields holding a non-default
+	// value are migrated; a default-valued legacy key is a no-op.
+	if (
+		applyLossy &&
+		result.availableMigrations &&
+		result.availableMigrations.length > 0
+	) {
+		for (const migration of result.availableMigrations) {
+			// Legacy key lives at a top-level object path (e.g.
+			// `skill_improver.model` → config.skill_improver.model).
+			if (!isPathSafe(migration.field) || !isPathSafe(migration.replacement)) {
+				continue;
+			}
+			const legacyParts = migration.field.split('.');
+			// Read the current legacy value, navigating to its parent.
+			let legacyParent: unknown = config;
+			let legacyNavigated = true;
+			for (let i = 0; i < legacyParts.length - 1; i++) {
+				const part = legacyParts[i];
+				if (
+					legacyParent === null ||
+					legacyParent === undefined ||
+					typeof legacyParent !== 'object' ||
+					Array.isArray(legacyParent)
+				) {
+					legacyNavigated = false;
+					break;
+				}
+				const obj = legacyParent as Record<string, unknown>;
+				if (obj[part] === undefined || obj[part] === null) {
+					legacyNavigated = false;
+					break;
+				}
+				legacyParent = obj[part];
+			}
+			if (!legacyNavigated) {
+				continue;
+			}
+			const legacyKey = legacyParts[legacyParts.length - 1]!;
+			const legacyHolder = legacyParent as Record<string, unknown>;
+			if (!(legacyKey in legacyHolder)) {
+				// Legacy key absent — nothing to migrate.
+				continue;
+			}
+			const legacyValue = legacyHolder[legacyKey];
+
+			// Skip if the legacy value is at its schema default (mirrors the
+			// deprecated-field finding-emission logic: only non-default values
+			// warrant migration).
+			const depInfo = DEPRECATED_FIELDS.get(migration.field);
+			if (!depInfo || depInfo.isDefaultValue(legacyValue)) {
+				continue;
+			}
+
+			// Navigate/create the replacement path's parent.
+			const replParts = migration.replacement.split('.');
+			let replParent: unknown = config;
+			let replNavigated = true;
+			for (let i = 0; i < replParts.length - 1; i++) {
+				const part = replParts[i];
+				if (
+					replParent === null ||
+					replParent === undefined ||
+					typeof replParent !== 'object' ||
+					Array.isArray(replParent)
+				) {
+					replNavigated = false;
+					break;
+				}
+				const obj = replParent as Record<string, unknown>;
+				if (obj[part] === undefined) {
+					obj[part] = {};
+				} else if (obj[part] === null || typeof obj[part] !== 'object') {
+					replNavigated = false;
+					break;
+				}
+				replParent = obj[part];
+			}
+			if (!replNavigated) {
+				continue;
+			}
+			const replKey = replParts[replParts.length - 1]!;
+			(replParent as Record<string, unknown>)[replKey] = legacyValue;
+			delete legacyHolder[legacyKey];
+			appliedFixes.push({
+				type: 'update',
+				path: migration.replacement,
+				value: legacyValue,
+				description: `Migrate deprecated field \`${migration.field}\` → \`${migration.replacement}\``,
+				risk: 'low',
+				lossy: true,
+			});
+			appliedFixes.push({
+				type: 'remove',
+				path: migration.field,
+				description: `Remove deprecated field \`${migration.field}\` (migrated to \`${migration.replacement}\`)`,
+				risk: 'low',
+				lossy: true,
+			});
 		}
 	}
 

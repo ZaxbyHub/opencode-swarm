@@ -298,7 +298,8 @@ function maybeWarn(
 	if (compareVersions(npmLatest, runningVersion) > 0) {
 		emitWarning(
 			`[opencode-swarm] Update available: ${runningVersion} → ${npmLatest}. ` +
-				'OpenCode caches plugins indefinitely. Run `bunx opencode-swarm update` to refresh.',
+				'OpenCode caches plugins indefinitely. Run `bunx opencode-swarm update` to refresh. ' +
+				'Also run `/swarm config doctor` to check for available config migrations.',
 		);
 	}
 }

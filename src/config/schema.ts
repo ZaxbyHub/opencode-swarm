@@ -2850,6 +2850,9 @@ export function resolveExternalSkillsConfig(
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
+	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
+	config_format_version: z.number().int().min(0).default(1),
+
 	// Legacy: Per-agent overrides (default swarm)
 	agents: z.record(z.string(), AgentOverrideConfigSchema).optional(),
 

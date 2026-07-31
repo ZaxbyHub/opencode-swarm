@@ -36,6 +36,51 @@ const {
 	runTests,
 } = testRunnerModule;
 
+/**
+ * Build a Bun.spawn stub that emits vitest-style JSON on stdout, so the
+ * test-runner's full execute -> buildTestCommand -> runTests -> parseTestOutput
+ * vitest path can be exercised deterministically without spawning a real
+ * `npx vitest` (which would require a network fetch when node_modules/vitest is
+ * absent — the source of intermittent coverage-gate timeouts). Mirrors the
+ * rspec Bun.spawn stub pattern used later in this file.
+ */
+function makeVitestSpawnStub(result: {
+	passed: number;
+	failed: number;
+	skipped: number;
+}): typeof Bun.spawn {
+	const encoder = new TextEncoder();
+	const total = result.passed + result.failed + result.skipped;
+	// Shape matched by parseTestOutput's vitest/jest/bun JSON branch:
+	// a JSON object containing "testResults" plus num*Tests counters.
+	const payload = JSON.stringify({
+		numTotalTests: total,
+		numPassedTests: result.passed,
+		numFailedTests: result.failed,
+		numPendingTests: result.skipped,
+		testResults: [],
+	});
+	return (() =>
+		({
+			stdout: new ReadableStream({
+				start(controller) {
+					controller.enqueue(encoder.encode(payload));
+					controller.close();
+				},
+			}),
+			stderr: new ReadableStream({
+				start(controller) {
+					controller.close();
+				},
+			}),
+			// A failing test must produce a non-zero exit code for runTests to
+			// classify the run as a regression; passing tests exit 0.
+			exited: Promise.resolve(result.failed > 0 ? 1 : 0),
+			exitCode: result.failed > 0 ? 1 : 0,
+			kill: () => {},
+		}) as ReturnType<typeof Bun.spawn>) as typeof Bun.spawn;
+}
+
 describe('test-runner.ts - Constants and Types', () => {
 	describe('exported constants', () => {
 		test('DEFAULT_TIMEOUT_MS is 60000', () => {
@@ -669,40 +714,44 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		expect(parsed.message).toContain('scope "graph"');
 	});
 
-	// Flaky on macOS/Windows: spawns vitest in temp dir without node_modules installed
-	test.skipIf(process.platform !== 'linux')(
-		'allows narrow scope requests to execute normally',
-		async () => {
-			// Create a temp directory with a simple test file
-			const tempDir = fs.realpathSync(
-				fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-narrow-')),
-			);
-			const originalCwd = process.cwd();
-			process.chdir(tempDir);
+	// Previously spawned `npx vitest` in a temp dir without node_modules installed,
+	// which made the test depend on an npx network fetch and intermittently time
+	// out under the per-file coverage gate. The execution path is now exercised
+	// deterministically by stubbing Bun.spawn to emit vitest-style JSON (mirrors
+	// the rspec stub pattern below), so the test still validates the full
+	// execute -> buildTestCommand -> runTests -> parseTestOutput vitest path
+	// without any subprocess or network dependency.
+	test('allows Narrow scope requests to execute normally', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-narrow-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
 
-			// Create minimal package.json for vitest detection
-			fs.writeFileSync(
-				'package.json',
-				JSON.stringify({
-					scripts: { test: 'vitest run' },
-					devDependencies: { vitest: '^1.0.0' },
-				}),
-			);
+		// Framework detection still reads package.json — keep it so the vitest
+		// path is selected by the real detectTestFramework logic.
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync(
+			'src/utils.ts',
+			'export const add = (a: number, b: number) => a + b;',
+		);
+		fs.writeFileSync(
+			'src/utils.test.ts',
+			'import { describe, test, expect } from "vitest"; import { add } from "./utils"; describe("add", () => { test("adds", () => { expect(add(1, 2)).toBe(3); }); });',
+		);
 
-			// Create src directory FIRST, then source file
-			fs.mkdirSync('src', { recursive: true });
-			fs.writeFileSync(
-				'src/utils.ts',
-				'export const add = (a: number, b: number) => a + b;',
-			);
-
-			// Create corresponding test file
-			fs.writeFileSync(
-				'src/utils.test.ts',
-				'import { describe, test, expect } from "vitest"; import { add } from "./utils"; describe("add", () => { test("adds", () => { expect(add(1, 2)).toBe(3); }); });',
-			);
-
-			// Use convention scope with explicit file - should NOT be rejected
+		// Stub the spawn so no real `npx vitest` (network fetch) runs. Emit a
+		// passing vitest JSON result on stdout; parseTestOutput reads num*Tests.
+		const originalSpawn = Bun.spawn;
+		Bun.spawn = makeVitestSpawnStub({ passed: 1, failed: 0, skipped: 0 });
+		try {
 			const result = await test_runner.execute(
 				{ scope: 'convention', files: ['src/utils.ts'] },
 				{} as any,
@@ -712,10 +761,10 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 			// First verify execution succeeded (not blocked by safety guards)
 			expect(parsed.success).toBe(true);
 			expect(parsed.outcome).toBe('pass');
-
 			// Should NOT have an error field when successful
 			expect(parsed.error).toBeUndefined();
-
+		} finally {
+			Bun.spawn = originalSpawn;
 			process.chdir(originalCwd);
 			(() => {
 				try {
@@ -724,9 +773,8 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 					// Ignore
 				}
 			})();
-		},
-		15000,
-	);
+		}
+	});
 
 	test('rejects source file with no matching test file for convention scope', async () => {
 		// Create a temp directory with a source file but NO test file
@@ -1014,40 +1062,38 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 			})();
 		}, 30000);
 
-		// Flaky on macOS/Windows: spawns vitest in temp dir without node_modules installed
-		test.skipIf(process.platform !== 'linux')(
-			'returns outcome "regression" when tests fail',
-			async () => {
-				// Create a temp directory with a failing test
-				const tempDir = fs.realpathSync(
-					fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-fail-')),
-				);
-				const originalCwd = process.cwd();
-				process.chdir(tempDir);
+		// Previously spawned `npx vitest` in a temp dir without node_modules
+		// installed (network fetch → intermittent coverage-gate timeout). Now
+		// stubbed to emit a failing vitest JSON result deterministically.
+		test('returns outcome "regression" when tests fail', async () => {
+			const tempDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-fail-')),
+			);
+			const originalCwd = process.cwd();
+			process.chdir(tempDir);
 
-				// Create minimal package.json for vitest detection
-				fs.writeFileSync(
-					'package.json',
-					JSON.stringify({
-						scripts: { test: 'vitest run' },
-						devDependencies: { vitest: '^1.0.0' },
-					}),
-				);
+			fs.writeFileSync(
+				'package.json',
+				JSON.stringify({
+					scripts: { test: 'vitest run' },
+					devDependencies: { vitest: '^1.0.0' },
+				}),
+			);
+			fs.mkdirSync('src', { recursive: true });
+			fs.writeFileSync(
+				'src/utils.ts',
+				'export const add = (a: number, b: number) => a + b;',
+			);
+			// A FAILING test file (content kept for fidelity of the scenario).
+			fs.writeFileSync(
+				'src/utils.test.ts',
+				'import { describe, test, expect } from "vitest"; import { add } from "./utils"; describe("add", () => { test("adds incorrectly", () => { expect(add(1, 2)).toBe(999); }); });',
+			);
 
-				// Create src directory and source file
-				fs.mkdirSync('src', { recursive: true });
-				fs.writeFileSync(
-					'src/utils.ts',
-					'export const add = (a: number, b: number) => a + b;',
-				);
-
-				// Create a FAILING test file
-				fs.writeFileSync(
-					'src/utils.test.ts',
-					'import { describe, test, expect } from "vitest"; import { add } from "./utils"; describe("add", () => { test("adds incorrectly", () => { expect(add(1, 2)).toBe(999); }); });',
-				);
-
-				// Execute with convention scope
+			// Stub the spawn with a FAILING vitest result (1 failed test).
+			const originalSpawn = Bun.spawn;
+			Bun.spawn = makeVitestSpawnStub({ passed: 0, failed: 1, skipped: 0 });
+			try {
 				const result = await test_runner.execute(
 					{ scope: 'convention', files: ['src/utils.ts'] },
 					{} as any,
@@ -1058,7 +1104,8 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 				expect(parsed.outcome).toBe('regression');
 				expect(parsed.totals).toBeDefined();
 				expect(parsed.totals.failed).toBeGreaterThan(0);
-
+			} finally {
+				Bun.spawn = originalSpawn;
 				process.chdir(originalCwd);
 				(() => {
 					try {
@@ -1067,9 +1114,8 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 						// Ignore
 					}
 				})();
-			},
-			15000,
-		);
+			}
+		});
 	});
 });
 

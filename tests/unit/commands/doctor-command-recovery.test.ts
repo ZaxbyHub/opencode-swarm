@@ -194,4 +194,27 @@ describe('/swarm config doctor — FR-004 (SC-004.1 + SC-004.2 + SC-004.3)', () 
 			rmSync(userDir, { recursive: true, force: true });
 		}
 	});
+
+	test('SC-003: /swarm config doctor output includes Migrations Available for outdated config', async () => {
+		// config_format_version defaults to 1 (below deprecatedIn=2) → migration shown
+		const projectDir = mkdtempSync(join(tmpdir(), 'doctor-migrate-'));
+		const userDir = mkdtempSync(join(tmpdir(), 'doctor-migrate-user-'));
+		const origXdg = process.env.XDG_CONFIG_HOME;
+		try {
+			process.env.XDG_CONFIG_HOME = userDir;
+			writeProjectConfig(projectDir, {
+				...VALID_CONFIG,
+				config_format_version: 1,
+			});
+			const output = await handleDoctorCommand(projectDir, []);
+			expect(output).toContain('Migrations Available');
+			expect(output).toContain('superseded in config version 2');
+			expect(output).toContain('Run `/swarm config doctor --fix`');
+		} finally {
+			if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = origXdg;
+			rmSync(projectDir, { recursive: true, force: true });
+			rmSync(userDir, { recursive: true, force: true });
+		}
+	});
 });
