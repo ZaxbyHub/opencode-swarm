@@ -4,7 +4,10 @@ import {
 	recordGateEvidence,
 } from '../gate-evidence.js';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
-import { collectReviewerReceiptFromTranscript } from '../hooks/review-receipt-collector.js';
+import {
+	collectReviewerReceiptFromTranscript,
+	type ReviewerReceiptValidationOptions,
+} from '../hooks/review-receipt-collector.js';
 import {
 	type AgentSessionState,
 	advanceTaskState,
@@ -12,6 +15,7 @@ import {
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	markReviewerScopeGenerationReady,
 	recordModifiedFilesForTask,
 	recordStageBCompletion,
 	swarmState,
@@ -79,6 +83,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 	directory: string;
 	record: BackgroundDelegationRecord;
 	result: BackgroundDelegationResult;
+	reviewerReceiptOptions?: ReviewerReceiptValidationOptions;
 }): Promise<StageBIngestionResult> {
 	const taskId = args.record.evidenceTaskId ?? args.record.planTaskId;
 	if (!taskId) {
@@ -152,6 +157,11 @@ export async function ingestBackgroundStageBCompletion(args: {
 					{ telemetrySessionId: args.record.parentSessionId },
 				);
 			}
+			markReviewerScopeGenerationReady({
+				parentSessionID: args.record.parentSessionId,
+				taskId,
+				coderCallID: args.record.callID,
+			});
 			return { ok: true, consumed: true };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -198,12 +208,16 @@ export async function ingestBackgroundStageBCompletion(args: {
 		);
 
 		if (args.record.normalizedAgent === 'reviewer') {
-			await collectReviewerReceiptFromTranscript(args.directory, {
-				targetAgent: args.record.swarmPrefixedAgent,
-				prompt: args.record.prompt?.text ?? '',
-				transcript: args.result.text ?? '',
-				sessionID: args.record.subagentSessionId,
-			});
+			await collectReviewerReceiptFromTranscript(
+				args.directory,
+				{
+					targetAgent: args.record.swarmPrefixedAgent,
+					prompt: args.record.prompt?.text ?? '',
+					transcript: args.result.text ?? '',
+					sessionID: args.record.parentSessionId,
+				},
+				args.reviewerReceiptOptions,
+			);
 		}
 
 		if (
