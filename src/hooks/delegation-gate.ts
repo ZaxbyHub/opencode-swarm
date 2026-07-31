@@ -1304,7 +1304,7 @@ function getPlanTaskDeclaredFiles(
 	return null;
 }
 
-function resolveDelegatedPlanTaskId(
+export function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
 	knownPlanTaskIds?: ReadonlySet<string>,
 ): string | null {

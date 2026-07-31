@@ -1,8 +1,3 @@
-/**
- * Tests for src/hooks/auto-review.ts — opt-in execution-diff review by the
- * reviewer model at task/phase boundaries. Uses the _internals DI seam
- * (writing-tests skill) instead of mock.module.
- */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -11,90 +6,91 @@ import { AutoReviewConfigSchema } from '../../../src/config/schema';
 import {
 	_internals,
 	createAutoReviewHook,
-	resetAutoReviewTracking,
-	runAutoReview,
 } from '../../../src/hooks/auto-review';
+import type { ReviewModelDispatcher } from '../../../src/review/contracts';
 import { swarmState } from '../../../src/state';
 
 let tmpDir: string;
-let origClient: typeof swarmState.opencodeClient;
-const origComputeDiff = _internals.computeExecutionDiff;
-const origDispatch = _internals.dispatchReviewer;
-const origRun = _internals.runAutoReview;
-const origNow = _internals.now;
+const originalRunAutoReview = _internals.runAutoReview;
+const originalNow = _internals.now;
+const originalGeneratedAgentNames = [...swarmState.generatedAgentNames];
+const dispatcher = {
+	dispatch: async () => {
+		throw new Error('not called directly');
+	},
+} as ReviewModelDispatcher;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
 	return AutoReviewConfigSchema.parse({ enabled: true, ...overrides });
 }
 
+function readEvents(): Array<Record<string, unknown>> {
+	const target = path.join(tmpDir, '.swarm', 'events.jsonl');
+	if (!fs.existsSync(target)) return [];
+	return fs
+		.readFileSync(target, 'utf8')
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+}
+
 beforeEach(() => {
 	tmpDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'auto-review-')),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'auto-review-hook-')),
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
-	origClient = swarmState.opencodeClient;
-	resetAutoReviewTracking();
+	swarmState.generatedAgentNames = [
+		'architect',
+		'reviewer',
+		'critic_finding_validator',
+	];
 });
 
 afterEach(() => {
-	swarmState.opencodeClient = origClient;
-	_internals.computeExecutionDiff = origComputeDiff;
-	_internals.dispatchReviewer = origDispatch;
-	_internals.runAutoReview = origRun;
-	_internals.now = origNow;
-	resetAutoReviewTracking();
-	try {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
-	} catch {
-		// best-effort
-	}
+	_internals.runAutoReview = originalRunAutoReview;
+	_internals.now = originalNow;
+	swarmState.activeAgent.delete('s1');
+	swarmState.generatedAgentNames = [...originalGeneratedAgentNames];
+	fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// ─── Hook gating ──────────────────────────────────────────────────────────────
-
-describe('createAutoReviewHook — gating', () => {
+describe('createAutoReviewHook', () => {
 	function recordingHook(config = makeConfig()) {
-		const calls: Array<{ trigger: string; taskId?: string; phase?: number }> =
-			[];
+		const calls: Array<{ trigger: string; taskId?: string }> = [];
 		_internals.runAutoReview = async (input) => {
-			calls.push({
-				trigger: input.trigger,
-				taskId: input.taskId,
-				phase: input.phase,
-			});
+			calls.push({ trigger: input.trigger, taskId: input.taskId });
+			return undefined;
 		};
-		const hook = createAutoReviewHook({
-			config,
-			directory: tmpDir,
-			injectAdvisory: () => {},
-		});
-		return { hook, calls };
+		return {
+			calls,
+			hook: createAutoReviewHook({
+				config,
+				directory: tmpDir,
+				dispatcher,
+				injectAdvisory: () => {},
+			}),
+		};
 	}
 
-	test('no-op when disabled', async () => {
-		const { hook, calls } = recordingHook(makeConfig({ enabled: false }));
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 1 } },
-		);
-		expect(calls).toHaveLength(0);
+	test('disabled and phase-boundary-only configs are no-op hooks', async () => {
+		for (const config of [
+			makeConfig({ enabled: false }),
+			makeConfig({ trigger: 'phase_boundary' }),
+		]) {
+			const { hook, calls } = recordingHook(config);
+			await hook.toolAfter(
+				{ tool: 'phase_complete', sessionID: 's1' },
+				{ args: { phase: 1 } },
+			);
+			await hook.toolAfter(
+				{ tool: 'update_task_status', sessionID: 's1' },
+				{ args: { task_id: '1.1', status: 'completed' } },
+			);
+			expect(calls).toHaveLength(0);
+		}
 	});
 
-	test('default trigger (phase_boundary) dispatches on phase_complete only', async () => {
-		const { hook, calls } = recordingHook();
-		await hook.toolAfter(
-			{ tool: 'update_task_status', sessionID: 's1' },
-			{ args: { task_id: '1.1', status: 'completed' } },
-		);
-		expect(calls).toHaveLength(0);
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 2 } },
-		);
-		expect(calls).toEqual([{ trigger: 'phase_boundary', phase: 2 }]);
-	});
-
-	test('task_completion trigger dispatches only on completed status', async () => {
+	test('task_completion dispatches only for completed tasks', async () => {
 		const { hook, calls } = recordingHook(
 			makeConfig({ trigger: 'task_completion' }),
 		);
@@ -102,7 +98,6 @@ describe('createAutoReviewHook — gating', () => {
 			{ tool: 'update_task_status', sessionID: 's1' },
 			{ args: { task_id: '1.1', status: 'in_progress' } },
 		);
-		expect(calls).toHaveLength(0);
 		await hook.toolAfter(
 			{ tool: 'update_task_status', sessionID: 's1' },
 			{ args: { task_id: '1.1', status: 'completed' } },
@@ -110,298 +105,274 @@ describe('createAutoReviewHook — gating', () => {
 		expect(calls).toEqual([{ trigger: 'task_completion', taskId: '1.1' }]);
 	});
 
-	test('both trigger covers task and phase, other tools ignored', async () => {
-		const { hook, calls } = recordingHook(makeConfig({ trigger: 'both' }));
-		let now = 1_000_000;
-		_internals.now = () => now;
-		await hook.toolAfter(
-			{ tool: 'update_task_status', sessionID: 's1' },
-			{ args: { task_id: '2.1', status: 'completed' } },
-		);
-		now += 61_000; // past cooldown
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 3 } },
-		);
-		await hook.toolAfter({ tool: 'write', sessionID: 's1' }, { args: {} });
-		expect(calls.map((c) => c.trigger)).toEqual([
-			'task_completion',
-			'phase_boundary',
+	test('two hook instances retain their own multi-swarm agent registry', async () => {
+		const calls: Array<{
+			directory: string;
+			sessionID: string;
+			dispatcher?: ReviewModelDispatcher;
+			generatedAgentNames: string[];
+		}> = [];
+		_internals.runAutoReview = async (input) => {
+			calls.push({
+				directory: input.directory,
+				sessionID: input.sessionID,
+				dispatcher: input.dispatcher,
+				generatedAgentNames: [...(input.generatedAgentNames ?? [])],
+			});
+			return undefined;
+		};
+		const directoryA = path.join(tmpDir, 'instance-a');
+		const directoryB = path.join(tmpDir, 'instance-b');
+		const dispatcherA = { dispatch: async () => ({}) } as ReviewModelDispatcher;
+		const dispatcherB = { dispatch: async () => ({}) } as ReviewModelDispatcher;
+		const namesA = [
+			'alpha_architect',
+			'alpha_reviewer',
+			'alpha_critic_finding_validator',
+		];
+		const namesB = [
+			'beta_architect',
+			'beta_reviewer',
+			'beta_critic_finding_validator',
+		];
+		const hookA = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: directoryA,
+			dispatcher: dispatcherA,
+			generatedAgentNames: namesA,
+			injectAdvisory: () => {},
+		});
+		const hookB = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: directoryB,
+			dispatcher: dispatcherB,
+			generatedAgentNames: namesB,
+			injectAdvisory: () => {},
+		});
+
+		namesA.splice(0, namesA.length, 'mutated_reviewer');
+		swarmState.generatedAgentNames = ['global_reviewer'];
+		await Promise.all([
+			hookA.toolAfter(
+				{ tool: 'update_task_status', sessionID: 'instance-session-a' },
+				{ args: { task_id: '1.1', status: 'completed' } },
+			),
+			hookB.toolAfter(
+				{ tool: 'update_task_status', sessionID: 'instance-session-b' },
+				{ args: { task_id: '2.1', status: 'completed' } },
+			),
+		]);
+
+		expect(calls).toEqual([
+			{
+				directory: directoryA,
+				sessionID: 'instance-session-a',
+				dispatcher: dispatcherA,
+				generatedAgentNames: [
+					'alpha_architect',
+					'alpha_reviewer',
+					'alpha_critic_finding_validator',
+				],
+			},
+			{
+				directory: directoryB,
+				sessionID: 'instance-session-b',
+				dispatcher: dispatcherB,
+				generatedAgentNames: namesB,
+			},
 		]);
 	});
 
-	test('non-architect session never triggers a review pass', async () => {
-		const { hook, calls } = recordingHook();
-		swarmState.activeAgent.set('s-coder', 'coder');
-		try {
-			await hook.toolAfter(
-				{ tool: 'phase_complete', sessionID: 's-coder' },
-				{ args: { phase: 1 } },
+	test('same-session in-flight and cooldown state is isolated per hook instance', async () => {
+		const calls: string[] = [];
+		_internals.runAutoReview = (input) => {
+			calls.push(input.directory);
+			return new Promise(() => {});
+		};
+		const directoryA = path.join(tmpDir, 'instance-state-a');
+		const directoryB = path.join(tmpDir, 'instance-state-b');
+		const hookA = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: directoryA,
+			dispatcher,
+			injectAdvisory: () => {},
+		});
+		const hookB = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: directoryB,
+			dispatcher,
+			injectAdvisory: () => {},
+		});
+		const complete = (hook: typeof hookA) =>
+			hook.toolAfter(
+				{ tool: 'update_task_status', sessionID: 'shared-session' },
+				{ args: { task_id: '1.1', status: 'completed' } },
 			);
-			expect(calls).toHaveLength(0);
-			swarmState.activeAgent.set('s-arch', 'mega_architect');
-			await hook.toolAfter(
-				{ tool: 'phase_complete', sessionID: 's-arch' },
-				{ args: { phase: 1 } },
-			);
-			expect(calls).toHaveLength(1);
-		} finally {
-			swarmState.activeAgent.delete('s-coder');
-			swarmState.activeAgent.delete('s-arch');
-		}
+
+		await complete(hookA);
+		await complete(hookB);
+
+		// Previous module-global state suppressed hook B because hook A owned the
+		// same session key. Each plugin instance must schedule independently.
+		expect(calls).toEqual([directoryA, directoryB]);
+		hookA.resetTracking();
+		hookB.resetTracking();
+
+		calls.length = 0;
+		_internals.runAutoReview = async (input) => {
+			calls.push(input.directory);
+			return undefined;
+		};
+		await complete(hookA);
+		await Bun.sleep(0);
+		await complete(hookB);
+		expect(calls).toEqual([directoryA, directoryB]);
 	});
 
-	test('60s cooldown suppresses repeated dispatches for the same session', async () => {
-		const { hook, calls } = recordingHook();
+	test('propagates the exact active architect for multi-swarm routing', async () => {
+		let activeAgentName: string | undefined;
+		let generatedAgentNames: string[] = [];
+		_internals.runAutoReview = async (input) => {
+			activeAgentName = input.activeAgentName;
+			generatedAgentNames = [...(input.generatedAgentNames ?? [])];
+			return undefined;
+		};
+		const names = [
+			'alpha_architect',
+			'alpha_reviewer',
+			'alpha_critic_finding_validator',
+			'longer_swarm_architect',
+			'longer_swarm_reviewer',
+			'longer_swarm_critic_finding_validator',
+		];
+		const hook = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: tmpDir,
+			dispatcher,
+			generatedAgentNames: names,
+			getActiveAgentName: () => 'alpha_architect',
+			injectAdvisory: () => {},
+		});
+
+		await hook.toolAfter(
+			{ tool: 'update_task_status', sessionID: 'alpha-session' },
+			{ args: { task_id: '1.1', status: 'completed' } },
+		);
+
+		expect(activeAgentName).toBe('alpha_architect');
+		expect(generatedAgentNames).toEqual(names);
+	});
+
+	test('both still leaves phase/plan ownership to phase_complete body', async () => {
+		const { hook, calls } = recordingHook(makeConfig({ trigger: 'both' }));
+		await hook.toolAfter(
+			{ tool: 'phase_complete', sessionID: 's1' },
+			{ args: { phase: 1 } },
+		);
+		await hook.toolAfter(
+			{ tool: 'update_task_status', sessionID: 's1' },
+			{ args: { task_id: '1.1', status: 'completed' } },
+		);
+		expect(calls).toEqual([{ trigger: 'task_completion', taskId: '1.1' }]);
+	});
+
+	test('non-architect session never triggers', async () => {
+		const { hook, calls } = recordingHook(
+			makeConfig({ trigger: 'task_completion' }),
+		);
+		swarmState.activeAgent.set('s1', 'coder');
+		await hook.toolAfter(
+			{ tool: 'update_task_status', sessionID: 's1' },
+			{ args: { task_id: '1.1', status: 'completed' } },
+		);
+		expect(calls).toHaveLength(0);
+	});
+
+	test('session-keyed cooldown suppresses repeated completion retries', async () => {
+		const { hook, calls } = recordingHook(
+			makeConfig({ trigger: 'task_completion' }),
+		);
 		let now = 1_000_000;
 		_internals.now = () => now;
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 1 } },
-		);
-		now += 10_000; // within cooldown — phase_complete retry must not spam
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 1 } },
-		);
+		const invoke = () =>
+			hook.toolAfter(
+				{ tool: 'update_task_status', sessionID: 's1' },
+				{ args: { task_id: '1.1', status: 'completed' } },
+			);
+		await invoke();
+		now += 10_000;
+		await invoke();
 		expect(calls).toHaveLength(1);
 		now += 61_000;
-		await hook.toolAfter(
-			{ tool: 'phase_complete', sessionID: 's1' },
-			{ args: { phase: 1 } },
-		);
+		await invoke();
 		expect(calls).toHaveLength(2);
 	});
-});
 
-// ─── runAutoReview ────────────────────────────────────────────────────────────
+	test('caps active unique sessions, reports overflow, and reuses a rejected slot', async () => {
+		const calls: string[] = [];
+		const advisories: string[] = [];
+		let rejectFirst: ((reason: Error) => void) | undefined;
+		_internals.runAutoReview = (input) => {
+			calls.push(input.sessionID);
+			return new Promise((_, reject) => {
+				if (input.sessionID === 'session-0') rejectFirst = reject;
+			});
+		};
+		const hook = createAutoReviewHook({
+			config: makeConfig({ trigger: 'task_completion' }),
+			directory: tmpDir,
+			dispatcher,
+			injectAdvisory: (_sessionID, message) => advisories.push(message),
+		});
+		const complete = (sessionID: string) =>
+			hook.toolAfter(
+				{ tool: 'update_task_status', sessionID },
+				{ args: { task_id: sessionID, status: 'completed' } },
+			);
 
-const APPROVED = 'VERDICT: APPROVED\nRISK: LOW\nISSUES: none';
-const REJECTED = [
-	'VERDICT: REJECTED',
-	'RISK: HIGH',
-	'ISSUES:',
-	'- [CRITICAL] src/a.ts:7 SQL built by string concatenation',
-	'FIXES:',
-	'- use a parameterized query',
-].join('\n');
+		for (let index = 0; index < 256; index++) {
+			await complete(`session-${index}`);
+		}
+		await complete('session-overflow');
 
-function runInput(advisories: string[]) {
-	return {
-		directory: tmpDir,
-		sessionID: 's1',
-		trigger: 'phase_boundary' as const,
-		phase: 1,
-		config: { timeout_ms: 30_000, max_diff_kb: 256 },
-		injectAdvisory: (_sid: string, msg: string) => {
-			advisories.push(msg);
-		},
-	};
-}
+		expect(calls).toHaveLength(256);
+		expect(calls).not.toContain('session-overflow');
+		expect(readEvents().at(-1)).toMatchObject({
+			session_id: 'session-overflow',
+			verdict: 'skipped',
+			model_calls: 0,
+		});
+		expect(readEvents().at(-1)?.detail).toContain(
+			'active review capacity reached (256)',
+		);
+		expect(advisories.at(-1)).toContain('Completion remains fail-open');
 
-function readEvents(): Array<Record<string, unknown>> {
-	const p = path.join(tmpDir, '.swarm', 'events.jsonl');
-	if (!fs.existsSync(p)) return [];
-	return fs
-		.readFileSync(p, 'utf-8')
-		.split('\n')
-		.filter(Boolean)
-		.map((l) => JSON.parse(l));
-}
-
-function readReceipts(): Array<Record<string, unknown>> {
-	const indexPath = path.join(
-		tmpDir,
-		'.swarm',
-		'review-receipts',
-		'index.json',
-	);
-	if (!fs.existsSync(indexPath)) return [];
-	return JSON.parse(fs.readFileSync(indexPath, 'utf-8')).entries;
-}
-
-describe('runAutoReview', () => {
-	test('dispatchReviewer binds the reviewer session under the calling session', async () => {
-		let capturedBody: { parentID?: string; title?: string } | undefined;
-		swarmState.opencodeClient = {
-			session: {
-				create: async (params: {
-					body?: { parentID?: string; title?: string };
-					query: { directory: string };
-				}) => {
-					capturedBody = params.body;
-					return { data: { id: 'review-session-1' } };
-				},
-				prompt: async () => ({
-					data: { parts: [{ type: 'text', text: APPROVED }] },
-				}),
-				delete: async () => ({}),
-			},
-		} as typeof swarmState.opencodeClient;
-
-		const transcript = await origDispatch(
-			tmpDir,
-			'review this diff',
-			'test_reviewer',
-			30_000,
-			'parent-session-1',
+		rejectFirst?.(new Error('injected scheduler rejection'));
+		await Bun.sleep(0);
+		expect(readEvents().at(-1)).toMatchObject({
+			session_id: 'session-0',
+			verdict: 'error',
+			model_calls: 0,
+		});
+		expect(readEvents().at(-1)?.detail).toContain(
+			'unexpected review scheduler rejection',
 		);
 
-		expect(transcript).toBe(APPROVED);
-		expect(capturedBody).toMatchObject({
-			parentID: 'parent-session-1',
-			title: 'auto-review (test_reviewer) background',
-		});
-	});
-
-	test('dispatchReviewer omits parentID when parentSessionId is empty string', async () => {
-		let capturedBody: { parentID?: string; title?: string } | undefined;
-		swarmState.opencodeClient = {
-			session: {
-				create: async (params: {
-					body?: { parentID?: string; title?: string };
-					query: { directory: string };
-				}) => {
-					capturedBody = params.body;
-					return { data: { id: 'review-session-1' } };
-				},
-				prompt: async () => ({
-					data: { parts: [{ type: 'text', text: APPROVED }] },
-				}),
-				delete: async () => ({}),
-			},
-		} as typeof swarmState.opencodeClient;
-
-		const transcript = await origDispatch(
-			tmpDir,
-			'review this diff',
-			'test_reviewer',
-			30_000,
-			'',
-		);
-
-		expect(transcript).toBe(APPROVED);
-		// parentID must be absent (not undefined, not empty string)
-		expect(Object.hasOwn(capturedBody!, 'parentID')).toBe(false);
-		expect(capturedBody).toMatchObject({
-			title: 'auto-review (test_reviewer) background',
-		});
-	});
-
-	test('APPROVED verdict: persists receipt + event, no advisory', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async () => APPROVED;
-		const advisories: string[] = [];
-		await runAutoReview(runInput(advisories));
-
-		expect(advisories).toHaveLength(0);
-		const receipts = readReceipts();
-		expect(receipts).toHaveLength(1);
-		expect(receipts[0].verdict).toBe('approved');
-		const events = readEvents();
-		expect(events).toHaveLength(1);
-		expect(events[0].type).toBe('auto_review');
-		expect(events[0].verdict).toBe('approved');
-	});
-
-	test('REJECTED verdict: persists rejected receipt and injects advisory with findings', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async () => REJECTED;
-		const advisories: string[] = [];
-		await runAutoReview(runInput(advisories));
-
-		expect(advisories).toHaveLength(1);
-		expect(advisories[0]).toContain('[AUTO-REVIEW]');
-		expect(advisories[0]).toContain('REJECTED');
-		expect(advisories[0]).toContain('SQL built by string concatenation');
-		expect(advisories[0]).toContain('parameterized query');
-		expect(readReceipts()[0].verdict).toBe('rejected');
-		expect(readEvents()[0].verdict).toBe('rejected');
-	});
-
-	test('unparseable reviewer output: advisory marks UNVERIFIED, no receipt', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async () => 'looks great!';
-		const advisories: string[] = [];
-		await runAutoReview(runInput(advisories));
-
-		expect(advisories).toHaveLength(1);
-		expect(advisories[0]).toContain('UNVERIFIED');
-		expect(readReceipts()).toHaveLength(0);
-		expect(readEvents()[0].verdict).toBe('unparseable');
-	});
-
-	test('clean working tree: skipped event, no dispatch, no advisory', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'clean' as const,
-		});
-		let dispatched = false;
-		_internals.dispatchReviewer = async () => {
-			dispatched = true;
-			return APPROVED;
-		};
-		const advisories: string[] = [];
-		await runAutoReview(runInput(advisories));
-
-		expect(dispatched).toBe(false);
-		expect(advisories).toHaveLength(0);
-		expect(readEvents()[0].verdict).toBe('skipped');
-	});
-
-	test('dispatch failure is fail-open: error event, no throw, no advisory', async () => {
-		_internals.computeExecutionDiff = async () => ({
-			status: 'ok' as const,
-			diff: 'diff --git a/x b/x\n+1',
-		});
-		_internals.dispatchReviewer = async () => {
-			throw new Error('no client');
-		};
-		const advisories: string[] = [];
-		await expect(runAutoReview(runInput(advisories))).resolves.toBeUndefined();
-		expect(advisories).toHaveLength(0);
-		expect(readEvents()[0].verdict).toBe('error');
-	});
-
-	test('diff collection failure is reported honestly as error, not as skipped', async () => {
-		// Previously a collection failure (git missing, timeout, maxBuffer
-		// exceeded) was indistinguishable from a clean tree and mislabeled
-		// "no working-tree changes" (adversarial review finding 4).
-		_internals.computeExecutionDiff = async () => ({
-			status: 'error' as const,
-			reason: 'maxBuffer length exceeded',
-		});
-		let dispatched = false;
-		_internals.dispatchReviewer = async () => {
-			dispatched = true;
-			return APPROVED;
-		};
-		const advisories: string[] = [];
-		await runAutoReview(runInput(advisories));
-		expect(dispatched).toBe(false);
-		const event = readEvents()[0];
-		expect(event.verdict).toBe('error');
-		expect(event.detail).toContain('maxBuffer length exceeded');
+		await complete('session-overflow');
+		expect(calls).toHaveLength(257);
+		expect(calls.at(-1)).toBe('session-overflow');
 	});
 });
-
-// ─── Schema ───────────────────────────────────────────────────────────────────
 
 describe('AutoReviewConfigSchema', () => {
-	test('safe defaults: disabled, phase_boundary trigger, bounded sizes', () => {
+	test('v7-safe defaults expose the full bounded review contract', () => {
 		const parsed = AutoReviewConfigSchema.parse({});
 		expect(parsed.enabled).toBe(false);
 		expect(parsed.trigger).toBe('phase_boundary');
 		expect(parsed.timeout_ms).toBe(300_000);
 		expect(parsed.max_diff_kb).toBe(256);
+		expect(parsed.min_confidence).toBe(0.7);
+		expect(parsed.final_review.mode).toBe('advisory');
 	});
 
 	test('rejects out-of-range bounds', () => {
@@ -412,7 +383,7 @@ describe('AutoReviewConfigSchema', () => {
 			AutoReviewConfigSchema.safeParse({ max_diff_kb: 99_999 }).success,
 		).toBe(false);
 		expect(
-			AutoReviewConfigSchema.safeParse({ trigger: 'always' }).success,
+			AutoReviewConfigSchema.safeParse({ min_confidence: 2 }).success,
 		).toBe(false);
 	});
 });

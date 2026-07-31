@@ -31,11 +31,10 @@ afterEach(() => {
 
 describe('createAgents', () => {
 	describe('no config', () => {
-		it('returns 20 agents (docs enabled by default, designer opt-in)', () => {
+		it('returns 21 agents (docs and finding validator enabled by default, designer opt-in)', () => {
 			const agents = createAgents();
-			expect(agents).toHaveLength(20);
+			expect(agents).toHaveLength(21);
 		});
-
 		it('agent names are correct', () => {
 			const agents = createAgents();
 			const names = agents.map((a) => a.name).sort();
@@ -45,6 +44,7 @@ describe('createAgents', () => {
 				'critic',
 				'critic_architecture_supervisor',
 				'critic_drift_verifier',
+				'critic_finding_validator',
 				'critic_hallucination_verifier',
 				'critic_oversight',
 				'critic_sounding_board',
@@ -109,7 +109,6 @@ describe('createAgents', () => {
 			const coder = agents.find((a) => a.name === 'coder');
 			expect(coder?.config.model).toBe('custom/model');
 		});
-
 		it('temperature override applies correctly', () => {
 			const config = {
 				agents: {
@@ -123,7 +122,6 @@ describe('createAgents', () => {
 			const coder = agents.find((a) => a.name === 'coder');
 			expect(coder?.config.temperature).toBe(0.5);
 		});
-
 		it('variant override applies correctly', () => {
 			const config = {
 				agents: {
@@ -387,8 +385,8 @@ describe('createAgents', () => {
 			const agents = createAgents(config as unknown as PluginConfig);
 			const sme = agents.find((a) => a.name === 'sme');
 			expect(sme).toBeUndefined();
-			// 20 agents - 1 disabled = 19 agents (docs still included by default)
-			expect(agents).toHaveLength(19);
+			// 21 agents - 1 disabled = 20 agents (validator/docs included by default)
+			expect(agents).toHaveLength(20);
 		});
 	});
 
@@ -408,6 +406,7 @@ describe('createAgents', () => {
 				'critic',
 				'critic_architecture_supervisor',
 				'critic_drift_verifier',
+				'critic_finding_validator',
 				'critic_hallucination_verifier',
 				'critic_oversight',
 				'critic_sounding_board',
@@ -444,6 +443,7 @@ describe('createAgents', () => {
 				'local_critic',
 				'local_critic_architecture_supervisor',
 				'local_critic_drift_verifier',
+				'local_critic_finding_validator',
 				'local_critic_hallucination_verifier',
 				'local_critic_oversight',
 				'local_critic_sounding_board',
@@ -786,7 +786,7 @@ describe('getAgentConfigs', () => {
 
 		const configs = getAgentConfigs(config as unknown as PluginConfig);
 		expect(configs.sme).toBeUndefined();
-		// 20 agents - 1 disabled = 19 agents (docs included by default)
-		expect(Object.keys(configs)).toHaveLength(19);
+		// 21 agents - 1 disabled = 20 agents (validator/docs included by default)
+		expect(Object.keys(configs)).toHaveLength(20);
 	});
 });

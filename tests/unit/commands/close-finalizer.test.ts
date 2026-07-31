@@ -36,6 +36,7 @@ import path from 'node:path';
 
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
+import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -201,6 +202,7 @@ mock.module('../../../src/state.js', () => {
 		environmentProfiles: new Map<string, unknown>(),
 	};
 	return {
+		...STATE_MOCK_TRANSITIVE_STUBS,
 		swarmState: mockedSwarmState,
 		endAgentSession: () => {},
 		// NOTE: resetSwarmState is NOT called by close.ts — only resetSwarmStatePreservingSingletons
@@ -264,14 +266,12 @@ const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 const realResetSwarmStatePreservingSingletons =
 	closeInternals.resetSwarmStatePreservingSingletons;
 
-// ── DI Conversion Summary ────────────────────────────────────────────
 //
 // WITHIN-MODULE MOCKS:
 // close.ts routes Git alignment dependencies through close._internals so this
 // file can test finalize alignment without a process-global mock of git/branch.
 // Other direct imports remain cross-module mocks.
 //
-// CROSS-MODULE MOCKS: All mocks remain as mock.module
 // - executeWriteRetro (tools/write-retro.ts)
 // - curateAndStoreSwarm (hooks/knowledge-curator.ts)
 // - archiveEvidence (evidence/manager.ts) — not in manager._internals

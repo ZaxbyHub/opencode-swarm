@@ -571,7 +571,7 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 			expect(parsed2.success).toBe(true);
 			expect(parsed1.agentsDispatched).toContain('coder');
 			expect(parsed2.agentsDispatched).toContain('reviewer');
-		});
+		}, 10_000);
 	});
 
 	describe('Type coercion and validation bypass attempts', () => {

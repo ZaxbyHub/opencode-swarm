@@ -600,6 +600,20 @@ Use `--model`, `--swarm`, `--gates`, `--tasks`, `--runs`, `--max-concurrency`, `
 
 Aggregate stored audit cells by model and gate using exact run/task/candidate/model/gate/repetition ground-truth joins. Reports catch and clean-control false-rejection rates with Wilson confidence intervals, malformed/ambiguous/unjoined history, retries, unavailable cost, infrastructure failures, and reviewer-gate fallback versus genuine evidence telemetry. See [Evaluation Substrate](evaluation-substrate.md).
 
+### `/swarm review [--base <ref> | --range <from..to|from...to> | --working-tree] [--json]`
+
+Run the same bounded, read-only whole-diff engine used by automatic phase review. The command creates a fresh reviewer session, parses structured findings, independently validates eligible anchored HIGH/CRITICAL findings when configured (or required by gate mode), and persists both the review receipt and evidence.
+
+- No selector: review the merge base of the resolved default branch through the current tracked working tree, plus safe untracked text files.
+- `--base <ref>`: compute the merge base of `<ref>` and `HEAD`, then include current tracked and safe untracked working-tree changes.
+- `--range <from..to>` or `--range <from...to>`: review that exact committed-only Git range; uncommitted and untracked changes are excluded.
+- `--working-tree`: review tracked changes from `HEAD` plus safe untracked text files.
+- `--json`: return the bounded structured result inside `[SWARM_REVIEW_JSON]` markers.
+
+Exactly one selector is accepted. Refs are validated before they reach Git, all Git calls are bounded and non-interactive, and unsafe, binary, symlink/reparse, unreadable, or oversized untracked files are represented as explicit scope caveats. The human output includes scope completeness/hash, validation state, model calls, observed cost data, receipt/evidence paths, and severity-ranked findings.
+
+This is a local diff-review command. Use `/swarm pr-review` for the formal multi-lane pull-request review workflow.
+
 ### `/swarm costs [--json]`
 
 Show per-agent, per-task, per-gate, and per-retry-loop token and cost totals from `.swarm/telemetry.jsonl`.

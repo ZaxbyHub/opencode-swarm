@@ -44,6 +44,11 @@ const ALLOWLIST: Record<string, string> = {
 	// intentionally same-model-retry-only to preserve benchmark attribution.
 	'src/evaluation/model-dispatcher.ts':
 		'#1927 out-of-scope: same-model-retry-only to preserve benchmark attribution',
+	// Shared low-level primitive: callers pass an already-resolved model and own
+	// fallback policy. Review callers wrap it with dispatchWithModelFallback;
+	// evaluation callers intentionally use bounded same-model retry.
+	'src/evaluation/ephemeral-agent-dispatcher.ts':
+		'policy-free primitive: callers own fallback or same-model retry policy',
 	// Issue #1927 "out of scope": generateMutants dispatches with agent:undefined
 	// (no role/chain), so resolveFallbackModel cannot resolve a target; the
 	// existing graceful `return []` is the correct opt-in-tool behavior.

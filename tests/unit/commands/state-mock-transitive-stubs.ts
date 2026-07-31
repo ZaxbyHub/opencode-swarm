@@ -1,0 +1,34 @@
+/**
+ * Runtime state exports reached only through command-test transitive imports.
+ * Close-command suites replace their directly exercised stateful bindings
+ * separately; these inert bindings keep unrelated hook modules loadable.
+ */
+export const STATE_MOCK_TRANSITIVE_STUBS = {
+	beginInvocation: () => undefined,
+	getActiveWindow: () => undefined,
+	advanceTaskState: () => undefined,
+	advanceTaskStateAndPersist: async () => undefined,
+	getTaskState: () => undefined,
+	recordStageBCompletion: () => undefined,
+	hasBothStageBCompletions: () => false,
+	isCouncilGateActive: async () => false,
+	MAX_REVIEWER_SCOPE_GENERATION_FILES: 256,
+	MAX_REVIEWER_SCOPE_GENERATIONS: 256,
+	MAX_REVIEWER_SCOPE_OWNERSHIP_HISTORY: 256,
+	REVIEWER_SCOPE_GENERATION_TTL_MS: 30 * 60 * 1000,
+	startReviewerScopeGeneration: () => undefined,
+	recordReviewerScopeGenerationFile: () => undefined,
+	recordReviewerScopeGenerationFileFingerprint: () => undefined,
+	markReviewerScopeGenerationReady: () => false,
+	getReviewerScopeGenerationForCoderCall: () => undefined,
+	peekReadyReviewerScopeGeneration: () => undefined,
+	claimReviewerScopeGeneration: () => undefined,
+	attachReviewerScopeGenerationDispatchSnapshot: () => false,
+	takeReviewerScopeGeneration: () => undefined,
+	getReviewerScopeOwnershipHistory: () => [],
+	peekReviewerScopeGenerationClaim: () => undefined,
+	discardReviewerScopeGenerationClaim: () => undefined,
+	reviewerScopeGenerationHasDeclaredOverlap: () => false,
+	discardReviewerScopeGenerationForCoderCall: () => undefined,
+	isReviewerScopeGenerationCurrent: () => false,
+} as const;

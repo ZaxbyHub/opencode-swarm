@@ -12,7 +12,12 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import type { AgentDefinition } from '../agents/index.js';
 import type { PluginConfig } from '../config/index.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
+import { createLeanTurboReviewTool } from './lean-turbo-review.js';
+import { createLeanTurboRunPhaseTool } from './lean-turbo-run-phase.js';
 import { TOOL_MANIFEST } from './manifest';
+import { createPhaseCompleteTool } from './phase-complete.js';
 import { createSwarmCommandTool } from './swarm-command';
 
 /**
@@ -29,8 +34,13 @@ export function buildPluginToolObject(
 	agents: Record<string, AgentDefinition>,
 	config?: PluginConfig,
 	evaluationModelDispatcher?: EvaluationModelDispatcher,
+	reviewModelDispatcher?: ReviewModelDispatcher,
+	generatedAgentNames: Iterable<string> = Object.keys(agents),
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry,
+	getActiveAgentName?: (sessionID: string) => string | undefined,
 ): Record<string, ToolDefinition> {
 	const tools: Record<string, ToolDefinition> = {};
+	const reviewAgentNames = Object.freeze([...generatedAgentNames]);
 	const knowledgeEnabled = config?.knowledge?.enabled !== false;
 	const knowledgeTools = new Set([
 		'knowledge_add',
@@ -52,6 +62,23 @@ export function buildPluginToolObject(
 	tools.swarm_command = createSwarmCommandTool(
 		agents,
 		evaluationModelDispatcher,
+		reviewModelDispatcher,
+		config?.auto_review,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
 	);
+	tools.phase_complete = createPhaseCompleteTool({
+		reviewModelDispatcher,
+		generatedAgentNames: reviewAgentNames,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
+	});
+	tools.lean_turbo_review = createLeanTurboReviewTool(
+		reviewModelDispatcher,
+		reviewAgentNames,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
+	);
+	tools.lean_turbo_run_phase = createLeanTurboRunPhaseTool(reviewAgentNames);
 	return tools;
 }

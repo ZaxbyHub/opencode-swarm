@@ -263,8 +263,10 @@ describe('Reviewer Agent - Three-Tier Review Structure (Task 3.1)', () => {
 			const agent = createReviewerAgent('gpt-4');
 			const prompt = agent.config.prompt as string;
 
-			expect(prompt).toContain('ISSUES: list with line numbers');
-			expect(prompt).toContain('grouped by CHECK dimension');
+			expect(prompt).toContain(
+				'ISSUES: list with line numbers, grouped by CHECK dimension',
+			);
+			expect(prompt).not.toContain('"findings": [{');
 		});
 
 		it('should specify FIXES field', () => {

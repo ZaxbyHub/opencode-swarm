@@ -146,6 +146,7 @@ describe('dispatchPhaseCritic', () => {
 
 	beforeEach(() => {
 		dir = mkdtemp();
+		swarmState.generatedAgentNames = [];
 	});
 
 	afterEach(() => {
@@ -154,6 +155,7 @@ describe('dispatchPhaseCritic', () => {
 		_internals.readPhaseEvidence = _originalReadPhaseEvidence;
 		_internals.readReviewerEvidence = _originalReadReviewerEvidence;
 		_internals.dispatchCriticAgent = _originalDispatchCriticAgent;
+		swarmState.generatedAgentNames = [];
 
 		// Clean up temp dir
 		try {
@@ -595,39 +597,6 @@ describe('dispatchPhaseCritic', () => {
 		expect(parsed.verdict).toBe('APPROVED');
 		expect(parsed.reason).toBe('test reason');
 		expect(parsed.timestamp).toBeTruthy();
-	});
-
-	// ─── Test 8: resolveDefaultCriticAgent ─────────────────────────────────────
-
-	test('resolveDefaultCriticAgent: returns critic when no generated names', () => {
-		const result = _internals.resolveDefaultCriticAgent([]);
-		expect(result).toBe('critic');
-	});
-
-	test('resolveDefaultCriticAgent: returns longest matching _critic suffix', () => {
-		const result = _internals.resolveDefaultCriticAgent([
-			'critic',
-			'local_critic',
-			'mega_critic',
-		]);
-		// 'local_critic' (12 chars) is longest
-		expect(result).toBe('local_critic');
-	});
-
-	test('resolveDefaultCriticAgent: prefers -critic suffix over bare critic', () => {
-		const result = _internals.resolveDefaultCriticAgent([
-			'critic',
-			'cloud-critic',
-		]);
-		expect(result).toBe('cloud-critic');
-	});
-
-	test('resolveDefaultCriticAgent: falls back to first generated name if no critic suffix', () => {
-		const result = _internals.resolveDefaultCriticAgent([
-			'mega_coder',
-			'local_coder',
-		]);
-		expect(result).toBe('mega_coder');
 	});
 
 	// ─── Test 9: Evidence file path follows expected pattern ────────────────────

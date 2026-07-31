@@ -34,6 +34,7 @@ import {
 	getModifiedFilesForTask,
 	type InvocationWindow,
 	recordModifiedFileForTask,
+	recordReviewerScopeGenerationFile,
 	resetModifiedFilesForTask,
 	swarmState,
 } from '../../state';
@@ -107,6 +108,14 @@ export interface ToolBeforeContext {
 	 * trusted roots when exempting `git worktree remove --force` (issue #1708).
 	 */
 	worktreeBaseDirOverrides?: string[];
+	/** Hold exact child-write provenance until the matching after-hook succeeds. */
+	rememberReviewerScopeWrite?: (input: {
+		callID: string;
+		parentSessionID: string;
+		taskId: string;
+		coderCallID: string;
+		file: string;
+	}) => void;
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -140,13 +149,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		rememberReviewerScopeWrite,
 	} = ctx;
 
 	/**
 	 * Resolves only an active, child-owned, Task-correlated v2 binding.
 	 * Legacy v1 disk/session entries are intentionally not authorization sources.
 	 */
-	function resolveDeclaredScope(sessionID: string): string[] | null {
+	function resolveActiveScopeBinding(sessionID: string) {
 		const session = swarmState.agentSessions.get(sessionID);
 		const taskId = session?.currentTaskId ?? null;
 		const binding = taskId
@@ -163,7 +173,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			session.currentTaskId = binding.taskId;
 			session.declaredCoderScope = [...binding.files];
 		}
-		return binding?.files ?? null;
+		return binding;
+	}
+
+	function resolveDeclaredScope(sessionID: string): string[] | null {
+		return resolveActiveScopeBinding(sessionID)?.files ?? null;
 	}
 
 	/**
@@ -873,6 +887,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	 */
 	function checkShellWriteScope(
 		sessionID: string,
+		callID: string,
 		tool: string,
 		args: unknown,
 		commandOverride?: string,
@@ -1062,6 +1077,36 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				throw new Error(
 					`bash write detected outside declared scope: ${write.resolvedPath} (original: ${write.original.path})`,
 				);
+			}
+			if (isCoder) {
+				const writeBinding = resolveActiveScopeBinding(sessionID);
+				if (
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
+				) {
+					const relativeTarget = path
+						.relative(
+							path.resolve(effectiveDirectory),
+							path.resolve(effectiveDirectory, write.resolvedPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
+				}
 			}
 		}
 	}
@@ -2000,6 +2045,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		try {
 			checkShellWriteScope(
 				input.sessionID,
+				input.callID,
 				input.tool,
 				output.args,
 				rawShellCommand,
@@ -2211,7 +2257,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 
 				// Per-agent authority check
-				const writeDeclaredScope = resolveDeclaredScope(input.sessionID);
+				const writeBinding = resolveActiveScopeBinding(input.sessionID);
+				const writeDeclaredScope = writeBinding?.files ?? null;
 
 				const authorityCheck = checkFileAuthorityWithRules(
 					agentName,
@@ -2295,6 +2342,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						`${input.sessionID}:unknown`;
 					trackingSession.currentTaskId = taskId;
 					recordModifiedFileForTask(trackingSession, taskId, targetPath);
+				}
+				if (
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
+				) {
+					const relativeTarget = path
+						.relative(
+							path.resolve(effectiveDirectory),
+							path.resolve(effectiveDirectory, targetPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID: input.callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
 				}
 			}
 		}

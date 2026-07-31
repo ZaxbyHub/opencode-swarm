@@ -41,7 +41,7 @@ import {
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
-	AutoReviewConfigSchema,
+	type AutoReviewConfig,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
@@ -49,6 +49,7 @@ import {
 	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
+	resolveAutoReviewConfig,
 	SelfReviewConfigSchema,
 	SkillImproverConfigSchema,
 	SkillPropagationConfigSchema,
@@ -128,6 +129,10 @@ import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
+import {
+	beginApprovedReviewerScopeLifecycle,
+	completeReviewerScopeLifecycle,
+} from './hooks/reviewer-scope-lifecycle.js';
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
@@ -144,6 +149,9 @@ import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
+import { createReviewModelDispatcher } from './review/contracts.js';
+import { createFindingValidationScheduler } from './review/finding-validator.js';
+import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
@@ -300,6 +308,7 @@ let schedulePostResolutionTasksForInit = schedulePostResolutionTasks;
 let loadPluginConfigWithMetaAsyncForInit = loadPluginConfigWithMetaAsync;
 let loadSnapshotForInit = loadSnapshot;
 let ensureSwarmGitExcludedForInit = ensureSwarmGitExcluded;
+let resolveAutoReviewConfigForInit = resolveAutoReviewConfig;
 
 export function overrideIndexInternalsForTest(overrides: {
 	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
@@ -307,6 +316,7 @@ export function overrideIndexInternalsForTest(overrides: {
 	loadPluginConfigWithMetaAsync?: typeof loadPluginConfigWithMetaAsync;
 	loadSnapshot?: typeof loadSnapshot;
 	ensureSwarmGitExcluded?: typeof ensureSwarmGitExcluded;
+	resolveAutoReviewConfig?: typeof resolveAutoReviewConfig;
 }): () => void {
 	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
 	const previousSchedulePostResolutionTasks =
@@ -315,6 +325,7 @@ export function overrideIndexInternalsForTest(overrides: {
 		loadPluginConfigWithMetaAsyncForInit;
 	const previousLoadSnapshot = loadSnapshotForInit;
 	const previousEnsureSwarmGitExcluded = ensureSwarmGitExcludedForInit;
+	const previousResolveAutoReviewConfig = resolveAutoReviewConfigForInit;
 	if (overrides.createRepoGraphBuilderHook) {
 		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
 	}
@@ -331,6 +342,9 @@ export function overrideIndexInternalsForTest(overrides: {
 	if (overrides.ensureSwarmGitExcluded) {
 		ensureSwarmGitExcludedForInit = overrides.ensureSwarmGitExcluded;
 	}
+	if (overrides.resolveAutoReviewConfig) {
+		resolveAutoReviewConfigForInit = overrides.resolveAutoReviewConfig;
+	}
 	return () => {
 		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
 		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
@@ -338,6 +352,7 @@ export function overrideIndexInternalsForTest(overrides: {
 			previousLoadPluginConfigWithMetaAsync;
 		loadSnapshotForInit = previousLoadSnapshot;
 		ensureSwarmGitExcludedForInit = previousEnsureSwarmGitExcluded;
+		resolveAutoReviewConfigForInit = previousResolveAutoReviewConfig;
 	};
 }
 
@@ -841,16 +856,36 @@ async function initializeOpenCodeSwarm(
 		return null;
 	});
 
+	let autoReviewConfig: AutoReviewConfig;
+	try {
+		autoReviewConfig = resolveAutoReviewConfigForInit(config.auto_review ?? {});
+	} catch (error) {
+		addDeferredWarning(
+			`[swarm] Invalid auto_review configuration; auto-review is disabled until corrected: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		autoReviewConfig = resolveAutoReviewConfigForInit({ enabled: false });
+	}
+	// Agent prompts must use the same release-aware resolution as runtime hooks.
+	// In particular, a future approved v8 default must not leave the reviewer on
+	// the legacy output contract merely because `auto_review` was omitted.
+	const configWithResolvedAutoReview = {
+		...config,
+		auto_review: autoReviewConfig,
+	};
 	const agents = getAgentConfigs(
-		config,
+		configWithResolvedAutoReview,
 		ctx.directory,
 		undefined,
 		projectContext ?? undefined,
 	);
-	const agentDefinitions = createAgents(config, projectContext ?? undefined);
+	const agentDefinitions = createAgents(
+		configWithResolvedAutoReview,
+		projectContext ?? undefined,
+	);
 	const agentDefinitionMap = Object.fromEntries(
 		agentDefinitions.map((agent) => [agent.name, agent]),
 	);
+	const instanceGeneratedAgentNames = Object.freeze(Object.keys(agents));
 
 	// Collect all registered curator agent names across all swarms.
 	// The factory resolves the correct name at call time by matching the active
@@ -882,7 +917,7 @@ async function initializeOpenCodeSwarm(
 	// user-supplied prose like `not_an_architect` could collapse to
 	// `architect` via suffix-only matching and slip past the delegation
 	// guard (adversarial review C1 fix).
-	swarmState.generatedAgentNames = Object.keys(agents);
+	swarmState.generatedAgentNames = [...instanceGeneratedAgentNames];
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
@@ -893,14 +928,26 @@ async function initializeOpenCodeSwarm(
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
+	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
+	const findingValidationScheduler = createFindingValidationScheduler();
+	const reviewAgentModelRegistry = captureReviewAgentModelRegistry(
+		config,
+		instanceGeneratedAgentNames,
+	);
+	const getActiveReviewAgentName = (sessionID: string): string | undefined =>
+		swarmState.activeAgent.get(sessionID) ??
+		swarmState.agentSessions.get(sessionID)?.agentName;
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
 		agentDefinitionMap,
 		{
-			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+			getActiveAgentName: getActiveReviewAgentName,
 			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
 			evaluationModelDispatcher,
+			reviewModelDispatcher,
+			autoReviewConfig,
+			reviewAgentModelRegistry,
 		},
 	);
 	const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(
@@ -933,10 +980,19 @@ async function initializeOpenCodeSwarm(
 		},
 		ctx.directory,
 	);
-	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
-	// Trusted background-subagent completion ingester. No-op unless the hook is
-	// opted in; correlated fresh terminal events may apply role-appropriate
-	// workflow/evidence and durable advisories.
+	const delegationGateHooks = createDelegationGateHook(
+		configWithResolvedAutoReview,
+		ctx.directory,
+	);
+	const advisoryInjector = (sessionId: string, message: string) => {
+		const session = swarmState.agentSessions.get(sessionId);
+		if (session) {
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(message);
+		}
+	};
+	// Advisory ingester for trusted background-subagent completion signals.
+	// No-op unless hooks.background_subagents is opted in; never advances gates.
 	const backgroundCompletionObserver = createBackgroundCompletionObserver({
 		config: {
 			enabled:
@@ -944,8 +1000,14 @@ async function initializeOpenCodeSwarm(
 					?.background_subagents === true,
 		},
 		directory: ctx.directory,
-		onTerminalClaimed: (record) =>
-			delegationGateHooks.backgroundCompletionClaimed(record),
+		reviewerReceiptOptions: {
+			dispatcher: reviewModelDispatcher,
+			config: autoReviewConfig,
+			generatedAgentNames: instanceGeneratedAgentNames,
+			agentModelRegistry: reviewAgentModelRegistry,
+			injectAdvisory: advisoryInjector,
+			validationScheduler: findingValidationScheduler,
+		},
 	});
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
@@ -1160,13 +1222,6 @@ async function initializeOpenCodeSwarm(
 
 	// Watchdog: scope-guard + delegation-ledger
 	const watchdogConfig = WatchdogConfigSchema.parse(config.watchdog ?? {});
-	const advisoryInjector = (sessionId: string, message: string) => {
-		const s = swarmState.agentSessions.get(sessionId);
-		if (s) {
-			s.pendingAdvisoryMessages ??= [];
-			s.pendingAdvisoryMessages.push(message);
-		}
-	};
 
 	const scopeGuardHook = createScopeGuardHook(
 		{
@@ -1213,8 +1268,12 @@ async function initializeOpenCodeSwarm(
 	// ephemeral session to review the execution diff at task/phase
 	// boundaries. Advisory + fire-and-forget — never blocks a tool call.
 	const autoReviewHook = createAutoReviewHook({
-		config: AutoReviewConfigSchema.parse(config.auto_review ?? {}),
+		config: autoReviewConfig,
 		directory: ctx.directory,
+		dispatcher: reviewModelDispatcher,
+		generatedAgentNames: instanceGeneratedAgentNames,
+		agentModelRegistry: reviewAgentModelRegistry,
+		getActiveAgentName: getActiveReviewAgentName,
 		injectAdvisory: advisoryInjector,
 	});
 
@@ -1687,6 +1746,10 @@ async function initializeOpenCodeSwarm(
 			agentDefinitionMap,
 			config,
 			evaluationModelDispatcher,
+			reviewModelDispatcher,
+			instanceGeneratedAgentNames,
+			reviewAgentModelRegistry,
+			getActiveReviewAgentName,
 		),
 
 		// Observe and ingest trusted background-subagent terminal signals. Errors
@@ -2087,6 +2150,11 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm pr-review $ARGUMENTS',
 					description:
 						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
+				},
+				'swarm-review': {
+					template: '/swarm review $ARGUMENTS',
+					description:
+						'Use /swarm review to run the bounded whole-diff review engine for the selected local scope',
 				},
 				'swarm-pr-feedback': {
 					template: '/swarm pr-feedback $ARGUMENTS',
@@ -2595,7 +2663,7 @@ async function initializeOpenCodeSwarm(
 				prWorkflowControllerSessionID,
 				normalizeToolName(input.tool) ?? input.tool,
 				prWorkflowToolContext.args ?? undefined,
-				swarmState.generatedAgentNames,
+				instanceGeneratedAgentNames,
 			);
 
 			// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
@@ -2745,6 +2813,20 @@ async function initializeOpenCodeSwarm(
 			// Wrapped in safeHook intentionally: errors here must NOT block
 			// the tool call that the fail-closed chain above has already
 			// approved.
+			// Stage-B scope state begins only after every blocking before-hook
+			// above approved this exact Task call. Starting or claiming earlier
+			// would strand identity-bound state when a later policy gate throws.
+			if (autoReviewConfig.enabled) {
+				await beginApprovedReviewerScopeLifecycle({
+					directory: ctx.directory,
+					tool: input.tool,
+					args: toolBeforeArgs,
+					parentSessionID: input.sessionID,
+					callID: input.callID,
+					maxBytes: autoReviewConfig.max_diff_kb * 1024,
+				});
+			}
+
 			await safeHook(activityHooks.toolBefore)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
@@ -2769,6 +2851,16 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			if (autoReviewConfig.enabled && isTaskTool) {
+				await completeReviewerScopeLifecycle({
+					directory: ctx.directory,
+					tool: input.tool,
+					args: afterCtx.args,
+					output,
+					parentSessionID: input.sessionID,
+					callID: input.callID,
+				});
+			}
 
 			const hookChain = async (): Promise<void> => {
 				await activityHooks.toolAfter(input, output);
@@ -2887,14 +2979,23 @@ async function initializeOpenCodeSwarm(
 						{
 							tool: input.tool,
 							sessionID: input.sessionID,
+							callID: input.callID,
 							args: afterCtx.args,
 						},
 						output,
+						{
+							dispatcher: reviewModelDispatcher,
+							config: autoReviewConfig,
+							generatedAgentNames: instanceGeneratedAgentNames,
+							agentModelRegistry: reviewAgentModelRegistry,
+							injectAdvisory: advisoryInjector,
+							validationScheduler: findingValidationScheduler,
+						},
 					);
 				})(input, output);
 				// Auto-review (opt-in): fire-and-forget execution-diff review by
 				// the reviewer model at task/phase boundaries.
-				await safeHook(autoReviewHook.toolAfter)(input, output);
+				await safeHook(autoReviewHook.toolAfter)(input, afterCtx);
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)

@@ -16,7 +16,11 @@ import {
 	standardWorktreeByCallID,
 } from '../hooks/delegation-gate/worktree-isolation.js';
 import { isInDeclaredScope } from '../hooks/guardrails/helpers.js';
-import { swarmState } from '../state.js';
+import {
+	discardReviewerScopeGenerationClaim,
+	discardReviewerScopeGenerationForCoderCall,
+	swarmState,
+} from '../state.js';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
 import {
@@ -78,6 +82,9 @@ export function createBackgroundCompletionObserver(opts: {
 	directory: string;
 	onTerminalClaimed?: (record: BackgroundDelegationRecord) => void;
 	recordIngestionResult?: typeof recordDelegationIngestionResult;
+	// Accepted from caller for API compatibility; reviewer receipt validation
+	// is handled internally by the completion observer when enabled.
+	reviewerReceiptOptions?: Record<string, unknown>;
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
 	prepareAdvisories: (
@@ -186,13 +193,20 @@ export function createBackgroundCompletionObserver(opts: {
 				);
 				return;
 			}
+			const isDuplicate = terminalClaim.disposition === 'duplicate';
 			let record = terminalClaim.record;
 			opts.onTerminalClaimed?.(record);
 
 			if (terminal.status !== 'completed') {
+				if (isDuplicate) {
+					// Duplicate error/cancelled event: scope was already preserved
+					// on first processing; just return without re-discarding.
+					return;
+				}
 				if (record.normalizedAgent === 'coder' && !record.worktree) {
 					await releaseCoderReservation(directory, record, 'recovered');
 				}
+				discardScopeForRecord(record);
 				await publishAdvisory(
 					directory,
 					record,
@@ -214,12 +228,15 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 					return;
 				}
-			} else if (isBackgroundGateBearingRecord(record)) {
+			} else if (!isDuplicate && isBackgroundGateBearingRecord(record)) {
+				// On a duplicate event the workspace was already validated
+				// during first processing; skip re-validation to preserve scope.
 				const freshness = validateStageBWorkspace(directory, record);
 				if (freshness.stale) {
 					await appendDelegationTransition(directory, record.correlationId, {
 						status: 'stale',
 					});
+					discardScopeForRecord(record);
 					await publishAdvisory(directory, record, terminal.eventId, 'stale');
 					return;
 				}
@@ -725,6 +742,25 @@ async function publishAdvisory(
 
 function taskLabel(record: BackgroundDelegationRecord): string {
 	return record.evidenceTaskId ?? record.planTaskId ?? 'unknown';
+}
+
+/** Discard the reviewer scope generation for a terminal (error/stale) delegation. */
+function discardScopeForRecord(record: BackgroundDelegationRecord): void {
+	const taskId = record.evidenceTaskId ?? record.planTaskId;
+	if (!taskId) return;
+	if (record.normalizedAgent === 'reviewer') {
+		discardReviewerScopeGenerationClaim({
+			parentSessionID: record.parentSessionId,
+			taskId,
+			reviewerCallID: record.callID,
+		});
+	} else if (record.normalizedAgent === 'coder') {
+		discardReviewerScopeGenerationForCoderCall({
+			parentSessionID: record.parentSessionId,
+			taskId,
+			coderCallID: record.callID,
+		});
+	}
 }
 
 function digest(text: string): string {

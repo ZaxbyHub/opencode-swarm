@@ -56,9 +56,13 @@ const RESERVATION_LOCK_TASK = 'background-coder-reservations';
 const ADVISORY_PREPARE_LEASE_MS = 30_000;
 const INGESTION_CLAIM_LEASE_MS = 30_000;
 
+/** An abandoned ingestion lease may be reclaimed after this bounded interval. */
+export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
+
 export type BackgroundDelegationStatus =
 	| 'pending'
 	| 'running'
+	| 'ingesting'
 	| 'ingestion_error'
 	| 'completed'
 	| 'error'
