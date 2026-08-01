@@ -186,9 +186,16 @@ describe('classifyPrWorkflowGitState', () => {
 		expect(state.code).toBe('GIT_OPERATION_IN_PROGRESS');
 		expect(state.evidence.operations).toEqual(['merge']);
 		expect(state.evidence.gitDir).toBe(gitDir);
-		expect(path.resolve(state.evidence.worktreeRoot ?? '')).toBe(
-			path.resolve(worktreeDir),
-		);
+		const [reportedRoot, expectedRoot] = await Promise.all([
+			fs.stat(state.evidence.worktreeRoot ?? '', { bigint: true }),
+			fs.stat(worktreeDir, { bigint: true }),
+		]);
+		expect(reportedRoot.dev).not.toBe(0n);
+		expect(reportedRoot.ino).not.toBe(0n);
+		expect({ dev: reportedRoot.dev, ino: reportedRoot.ino }).toEqual({
+			dev: expectedRoot.dev,
+			ino: expectedRoot.ino,
+		});
 	});
 
 	test('classifies ordinary tracked and untracked dirt as stashable', async () => {
