@@ -55,5 +55,7 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   the controller computes the tier from the bound diff. While it is active a
   different dispatch path is not equivalent — never bypass the controller.
 - If actionable findings remain, write the canonical handoff artifact and ask
-  whether to continue with `swarm-pr-feedback`; carry validated findings
-  forward with their original IDs and provenance.
+  whether to continue with the exact `/swarm pr-feedback <PR_URL> continue from
+  .swarm/pr-review/<run_id>/feedback-handoff.json` command. On Profile A this is
+  a mechanical terminal transition, not free-text forwarding; carry validated
+  findings forward with their original IDs and provenance.

@@ -411,7 +411,7 @@ describe('buildWakeMessage', () => {
 		]);
 
 		expect(text).toContain(
-			'<pr-activity pr="owner/repo#42" url="https://github.com/owner/repo/pull/42" events="pr.ci.failed,pr.new.comment">',
+			'<pr-activity pr="owner/repo#42" url="https://github.com/owner/repo/pull/42" events="pr.ci.failed,pr.new.comment" disposition="active">',
 		);
 		expect(text).toContain('</pr-activity>');
 		expect(text).toContain('[pr-monitor:pr.ci.failed:owner/repo#42]');
@@ -427,6 +427,16 @@ describe('buildWakeMessage', () => {
 		expect(text).toContain(
 			'pr.closed: report final status and stop — the subscription ends.',
 		);
+	});
+
+	test('queued-for-later events carry a mode-neutral lifecycle instruction', () => {
+		const text = buildWakeMessage([
+			makeEvent({ disposition: 'queued-for-later' }),
+		]);
+
+		expect(text).toContain('disposition="queued-for-later"');
+		expect(text).toContain('The active workflow remains authoritative');
+		expect(text).toContain('Do not switch workflow mode');
 	});
 
 	test('groups events from different PRs into separate blocks', () => {

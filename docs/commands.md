@@ -244,7 +244,7 @@ Ingest and close **known** PR feedback â€” review comments, requested chang
 **Command forms:**
 - `/swarm pr-feedback 155` â€” close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
 - `/swarm pr-feedback owner/repo#155 also fix the lint errors` â€” PR + extra instructions
-- `/swarm pr-feedback owner/repo#155 continue from .swarm/pr-review/pr-155-20260619203000/feedback-handoff.md` - PR + review handoff artifact
+- `/swarm pr-feedback owner/repo#155 continue from .swarm/pr-review/pr-155-20260619203000/feedback-handoff.json` - atomically continue a terminal controller-backed review into feedback
 - `/swarm pr-feedback` â€” pasted-feedback session on the current branch
 - `/swarm pr-feedback address the review notes about error handling` â€” a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
 
@@ -260,7 +260,10 @@ A leading token that **is** shaped like a PR reference (bare number, `owner/repo
 5. **Mandatory gates** â€” Stage A always runs exact `git diff --check` and a targeted reproduction/regression plus every concrete workspace/category/source build, typecheck, and lint/format obligation mechanically discovered from the repository; Stage B (independent `reviewer` + `test_engineer`) must then pass on the current diff, followed by the separate reviewer + critic closeout gate. No fix lands and no closure ledger row is marked FIXED until all three gates pass
 6. **Closure ledger** â€” report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
 
-**No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
+**No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The exact
+`continue from .swarm/pr-review/<run_id>/feedback-handoff.json` form is
+mechanically validated and rejects malformed, tampered, or nonterminal
+handoffs; other free-text input remains ordinary feedback instructions.
 
 ### `/swarm ci-monitor <pr-url|owner/repo#N|N>`
 

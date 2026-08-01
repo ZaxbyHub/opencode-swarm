@@ -29,9 +29,12 @@ ledger row is marked FIXED, and no PR is published until all three gates pass on
 the current diff. There is no speed, efficiency, or time exception. See
 "Mandatory Gates" below for the full protocol.
 
-When the work starts from a prior `swarm-pr-review` run, ingest the review's
-handoff artifact (for example
-`.swarm/pr-review/<run_id>/feedback-handoff.md` or `.json`) before triage.
+When the work starts from a prior Profile-A `swarm-pr-review` run, use the exact
+user command `/swarm pr-feedback <PR_URL> continue from
+.swarm/pr-review/<run_id>/feedback-handoff.json`. The controller validates the
+terminal review and artifact before atomically creating an unbound feedback
+gate; the artifact alone is not write authorization. Profiles B/C ingest their
+task-workspace handoff directly before triage.
 Carry forward the original review finding IDs, classifications, reviewer/critic
 provenance, and any operational blockers instead of renumbering them as new
 discoveries.
@@ -175,6 +178,10 @@ tree:
   stashes untracked files; move or remove those manually, or abort the checkout.
   Without the controller, surface dirty tracked state to the user or abort the
   checkout — do not blind-stash.
+- Treat `recovery-required` and `indeterminate` controller results as terminal
+  for the current attempt: report the typed `required_action`, abort/clear any
+  already-active gate, and stop. Only `stashable` permits one preparation call;
+  retry only when the controller explicitly returns `retryable: true`.
 - **Check out the head branch locally before dispatching feedback lanes.** Feedback verification reads the working-tree
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the

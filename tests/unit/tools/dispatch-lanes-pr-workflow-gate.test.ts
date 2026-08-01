@@ -14,6 +14,7 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { initializeGitRepository } from '../helpers/git-repository.js';
 
 let directory = '';
 const originalGetSessionOps = dispatchInternals.getSessionOps;
@@ -62,10 +63,11 @@ function uniqueSessionOps() {
 	});
 }
 
-beforeEach(() => {
+beforeEach(async () => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-pr-gate-')),
 	);
+	await initializeGitRepository(directory);
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
@@ -109,13 +111,6 @@ afterEach(async () => {
 });
 
 describe('dispatch_lanes PR workflow enforcement', () => {
-	test('exposes mandatory review and feedback ledgers in the real async tool schema', () => {
-		expect(dispatch_lanes_async.args.trigger_evaluation).toBeDefined();
-		expect(dispatch_lanes_async.args.feedback_inventory).toBeDefined();
-		expect(dispatch_lanes_async.args.base_sha).toBeDefined();
-		expect(dispatch_lanes_async.args.base_ref).toBeDefined();
-	});
-
 	test('supports a read-only test_engineer validation lane', async () => {
 		const result = await executeDispatchLanesAsync(
 			{

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { type BigIntStats, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -31,6 +31,10 @@ import {
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import { resolveGeneratedAgentRole } from '../config/schema.js';
+import {
+	classifyPrWorkflowGitState,
+	type PrWorkflowGitState,
+} from '../git/pr-workflow-state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -60,6 +64,30 @@ export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = [
 export type PrReviewBaseDimensionId =
 	(typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
 export type PrWorkflowMode = 'PR_REVIEW' | 'PR_FEEDBACK';
+
+export interface PrWorkflowCheckoutRecoveryRecord {
+	code:
+		| 'UNMERGED_INDEX'
+		| 'GIT_OPERATION_IN_PROGRESS'
+		| 'DIRTY_SUBMODULE'
+		| 'SWARM_STATE_TRACKING_ERROR'
+		| 'GIT_STATE_INDETERMINATE';
+	retryable: false;
+	requiredAction: string;
+	evidence: PrWorkflowGitState['evidence'];
+	detectedAt: string;
+}
+
+export interface PrFeedbackReviewHandoffRecord {
+	path: string;
+	runId: string;
+	sourcePrHeadSha: string;
+	prUrl: string;
+	findingIds: string[];
+	digest: string;
+	sourceWorkflowInstanceId: string;
+	provenance: 'active-review-v1' | 'external-v1';
+}
 
 export type PrReviewDepthTier = 'S' | 'M' | 'L';
 
@@ -275,6 +303,8 @@ export interface PrWorkflowGateState {
 	schemaVersion: 1;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
 	revision: number;
+	/** Stable identity that prevents revision-only ABA during mode replacement. */
+	workflowInstanceId?: string;
 	sessionID: string;
 	mode: PrWorkflowMode;
 	activatedAt: string;
@@ -300,6 +330,10 @@ export interface PrWorkflowGateState {
 	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
 	prReviewHandoffPath?: string;
 	prReviewHandoffRequired?: boolean;
+	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
+	/** Canonical PR URL selected when PR_FEEDBACK was mechanically activated. */
+	prFeedbackTargetUrl?: string;
+	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
 	prFeedbackVerifications?: PrFeedbackVerificationRecord[];
 	/** @deprecated Compatibility projection of the most recent verification dispatch. */
@@ -495,10 +529,52 @@ const PrFeedbackScopeDeclarationRecordSchema = z
 	})
 	.strict();
 
+const PrWorkflowCheckoutRecoveryRecordSchema = z
+	.object({
+		code: z.enum([
+			'UNMERGED_INDEX',
+			'GIT_OPERATION_IN_PROGRESS',
+			'DIRTY_SUBMODULE',
+			'SWARM_STATE_TRACKING_ERROR',
+			'GIT_STATE_INDETERMINATE',
+		]),
+		retryable: z.literal(false),
+		requiredAction: z.string().min(1).max(2000),
+		evidence: z
+			.object({
+				worktreeRoot: z.string().nullable(),
+				gitDir: z.string().nullable(),
+				operations: z.array(z.string().min(1)).max(16),
+				unmergedCodes: z.array(z.string().min(1)).max(16),
+				paths: z.array(z.string()).max(20),
+				trackedCount: z.number().int().nonnegative(),
+				untrackedCount: z.number().int().nonnegative(),
+				pathsTruncated: z.boolean(),
+				detail: z.string().max(1000).optional(),
+			})
+			.strict(),
+		detectedAt: z.string().min(1),
+	})
+	.strict();
+
+const PrFeedbackReviewHandoffRecordSchema = z
+	.object({
+		path: z.string().min(1).max(512),
+		runId: z.string().min(1).max(128),
+		sourcePrHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		prUrl: z.string().url().max(2000),
+		findingIds: z.array(z.string().min(1).max(128)).min(1).max(1000),
+		digest: z.string().regex(/^[0-9a-f]{64}$/),
+		sourceWorkflowInstanceId: z.string().min(1).max(128),
+		provenance: z.enum(['active-review-v1', 'external-v1']),
+	})
+	.strict();
+
 const PrWorkflowGateStateSchema = z
 	.object({
 		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
 		revision: z.number().int().nonnegative().default(0),
+		workflowInstanceId: z.string().min(1).max(128).optional(),
 		sessionID: z.string().min(1),
 		mode: z.enum(['PR_REVIEW', 'PR_FEEDBACK']),
 		activatedAt: z.string().min(1),
@@ -538,6 +614,9 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewHandoffPath: z.string().min(1).optional(),
 		prReviewHandoffRequired: z.boolean().optional(),
+		checkoutRecovery: PrWorkflowCheckoutRecoveryRecordSchema.optional(),
+		prFeedbackTargetUrl: z.string().url().max(2000).optional(),
+		prFeedbackReviewHandoff: PrFeedbackReviewHandoffRecordSchema.optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
 		prFeedbackVerifications: z
 			.array(PrFeedbackVerificationRecordSchema)
@@ -567,11 +646,45 @@ const PrWorkflowGateStateSchema = z
 	// it doesn't know about" instead of "refuse to read the file at all".
 	.passthrough();
 
+function formatCheckoutRecoveryBlock(state: PrWorkflowGitState): string {
+	const evidence = JSON.stringify({
+		operations: state.evidence.operations,
+		unmerged_codes: state.evidence.unmergedCodes,
+		paths: state.evidence.paths,
+		paths_truncated: state.evidence.pathsTruncated,
+	});
+	return (
+		`BLOCKED: PR workflow checkout requires manual Git recovery before activation. ` +
+		`code=${state.code} retryable=false required_action=${state.requiredAction} evidence=${evidence}`
+	);
+}
+
+function checkoutRecoveryRecord(
+	state: PrWorkflowGitState,
+): PrWorkflowCheckoutRecoveryRecord {
+	if (state.kind !== 'recovery-required' && state.kind !== 'indeterminate') {
+		throw new Error(
+			'PR workflow checkout recovery requires a terminal Git state',
+		);
+	}
+	return {
+		code: state.code as PrWorkflowCheckoutRecoveryRecord['code'],
+		retryable: false,
+		requiredAction: state.requiredAction,
+		evidence: state.evidence,
+		detectedAt: isoNow(),
+	};
+}
+
 export async function activatePrWorkflow(
 	directory: string,
 	sessionID: string,
 	mode: PrWorkflowMode,
-	options: { prHeadSha?: string } = {},
+	options: {
+		prHeadSha?: string;
+		requireCheckoutPreflight?: boolean;
+		prUrl?: string;
+	} = {},
 ): Promise<PrWorkflowGateState> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const existing = await readPrWorkflowGateState(
@@ -579,27 +692,74 @@ export async function activatePrWorkflow(
 		normalizedSessionID,
 	);
 	if (existing?.mode === mode) {
+		let activeState = existing;
+		if (mode === 'PR_FEEDBACK' && options.prUrl) {
+			const requestedTarget = canonicalGitHubPrUrl(options.prUrl);
+			if (!requestedTarget) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
+				);
+			}
+			const existingTarget = existing.prFeedbackTargetUrl
+				? canonicalGitHubPrUrl(existing.prFeedbackTargetUrl)
+				: null;
+			if (existingTarget && requestedTarget !== existingTarget) {
+				throw new Error(
+					`BLOCKED: active PR_FEEDBACK targets a different GitHub pull request`,
+				);
+			}
+			if (!existingTarget) {
+				activeState = {
+					...existing,
+					prFeedbackTargetUrl: options.prUrl,
+					updatedAt: isoNow(),
+				};
+				await persistState(directory, activeState);
+			}
+		}
 		return options.prHeadSha
 			? bindPrWorkflowHead(directory, normalizedSessionID, options.prHeadSha)
-			: existing;
+			: activeState;
 	}
 	if (existing) {
 		throw new Error(
 			`BLOCKED: session "${normalizedSessionID}" already has an active ${existing.mode} workflow; complete it before starting ${mode}`,
 		);
 	}
+	if (options.requireCheckoutPreflight) {
+		const checkoutState = await classifyPrWorkflowGitState(directory);
+		if (
+			checkoutState.kind === 'recovery-required' ||
+			checkoutState.kind === 'indeterminate'
+		) {
+			throw new Error(formatCheckoutRecoveryBlock(checkoutState));
+		}
+	}
 	const initialHead = options.prHeadSha
 		? await assertCurrentCheckoutHead(directory, options.prHeadSha)
 		: undefined;
 	const timestamp = isoNow();
+	const feedbackTargetUrl =
+		mode === 'PR_FEEDBACK' && options.prUrl
+			? canonicalGitHubPrUrl(options.prUrl)
+				? options.prUrl
+				: null
+			: undefined;
+	if (feedbackTargetUrl === null) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
+		);
+	}
 	const nextState: PrWorkflowGateState = {
 		schemaVersion: GATE_SCHEMA_VERSION,
 		revision: 0,
+		workflowInstanceId: randomUUID(),
 		sessionID: normalizedSessionID,
 		mode,
 		activatedAt: timestamp,
 		updatedAt: timestamp,
 		...(initialHead ? { prHeadSha: initialHead } : {}),
+		...(feedbackTargetUrl ? { prFeedbackTargetUrl: feedbackTargetUrl } : {}),
 	};
 	await persistState(directory, nextState);
 	return nextState;
@@ -637,7 +797,14 @@ export async function readPrWorkflowGateState(
 export async function withPrWorkflowCheckoutPreparationLock<T>(
 	directory: string,
 	sessionID: string,
-	action: (state: PrWorkflowGateState) => Promise<T>,
+	action: (
+		state: PrWorkflowGateState,
+		controls: {
+			markRecoveryRequired: (
+				gitState: PrWorkflowGitState,
+			) => Promise<PrWorkflowGateState>;
+		},
+	) => Promise<T>,
 ): Promise<T> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	return withSessionStateMutation(directory, normalizedSessionID, async () => {
@@ -666,7 +833,18 @@ export async function withPrWorkflowCheckoutPreparationLock<T>(
 				`BLOCKED: ${state.mode} checkout preparation is allowed only before the PR head is bound`,
 			);
 		}
-		return action(state);
+		return action(state, {
+			markRecoveryRequired: async (gitState) => {
+				const nextState: PrWorkflowGateState = {
+					...state,
+					updatedAt: isoNow(),
+					checkoutRecovery: checkoutRecoveryRecord(gitState),
+				};
+				const persisted = await writeStateWhileLocked(directory, nextState);
+				Object.assign(state, persisted);
+				return persisted;
+			},
+		});
 	});
 }
 
@@ -1291,6 +1469,16 @@ export async function declarePrFeedbackInventory(
 		throw wrongModeError(state, 'PR_FEEDBACK');
 	}
 	const normalizedInventory = normalizeInventoryIds(inventoryIds);
+	const requiredHandoffIds = state.prFeedbackReviewHandoff?.findingIds ?? [];
+	const inventorySet = new Set(normalizedInventory);
+	const missingHandoffIds = requiredHandoffIds.filter(
+		(findingId) => !inventorySet.has(findingId),
+	);
+	if (missingHandoffIds.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK inventory must include every continued review finding: ${missingHandoffIds.join(', ')}`,
+		);
+	}
 	if (state.prFeedbackInventory) {
 		if (!sameStringArray(state.prFeedbackInventory, normalizedInventory)) {
 			throw new Error(
@@ -2165,6 +2353,568 @@ export async function markPrReviewHandoffComplete(
 	return nextState;
 }
 
+const PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN =
+	/^pr-review\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/feedback-handoff\.json$/;
+const PR_REVIEW_HANDOFF_MAX_BYTES = 128 * 1024;
+const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
+
+const PrReviewFeedbackHandoffArtifactSchema = z
+	.object({
+		schema_version: z.literal(1),
+		run_id: z.string().min(1).max(128),
+		pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		created_at: z.string().datetime(),
+		pr_url: z.string().url().max(2000),
+		finding_ids: z.array(z.string().min(1).max(128)).min(1).max(1000),
+		summary: z.string().min(1).max(20_000),
+		provenance: z.array(z.string().min(1).max(4000)).min(1).max(1000),
+	})
+	.strict();
+
+function normalizePrReviewFeedbackHandoffPath(
+	handoffPath: string,
+): { runId: string; relativePath: string } | null {
+	const normalized = handoffPath.trim().replace(/\\/g, '/');
+	const relative = normalized.startsWith('.swarm/')
+		? normalized.slice('.swarm/'.length)
+		: normalized;
+	const matched = relative.match(PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN);
+	if (!matched) return null;
+	return { runId: matched[1], relativePath: relative };
+}
+
+async function readBoundedSwarmRegularFile(
+	directory: string,
+	relativePath: string,
+	maxBytes: number,
+	label: string,
+): Promise<string> {
+	const absPath = validateSwarmPath(directory, relativePath);
+	const swarmRoot = path.resolve(directory, '.swarm');
+	let rootStat: BigIntStats;
+	let artifactStat: BigIntStats;
+	try {
+		rootStat = await fsp.lstat(swarmRoot, { bigint: true });
+		artifactStat = await fsp.lstat(absPath, { bigint: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			throw new Error(`BLOCKED: ${label} "${relativePath}" does not exist`);
+		}
+		throw error;
+	}
+	if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+		throw new Error(
+			`BLOCKED: ${label} root must be a real project .swarm directory`,
+		);
+	}
+	if (artifactStat.isSymbolicLink() || !artifactStat.isFile()) {
+		throw new Error(`BLOCKED: ${label} must be a bounded regular file`);
+	}
+	if (artifactStat.size > BigInt(maxBytes)) {
+		throw new Error(`BLOCKED: ${label} exceeds ${maxBytes} bytes`);
+	}
+	const [realRoot, realArtifact] = await Promise.all([
+		fsp.realpath(swarmRoot),
+		fsp.realpath(absPath),
+	]);
+	const relativeRealPath = path.relative(realRoot, realArtifact);
+	if (
+		relativeRealPath === '' ||
+		relativeRealPath === '..' ||
+		relativeRealPath.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativeRealPath)
+	) {
+		throw new Error(`BLOCKED: ${label} escapes the project .swarm directory`);
+	}
+	await _test_exports.beforeBoundedSwarmFileOpen?.();
+	const handle = await fsp.open(realArtifact, 'r');
+	try {
+		const openedStat = await handle.stat({ bigint: true });
+		if (
+			!openedStat.isFile() ||
+			openedStat.size > BigInt(maxBytes) ||
+			!sameBigIntFileIdentity(artifactStat, openedStat)
+		) {
+			throw new Error(`BLOCKED: ${label} changed during its bounded read`);
+		}
+		const [postRootStat, postArtifactStat, postRealRoot, postRealArtifact] =
+			await Promise.all([
+				fsp.lstat(swarmRoot, { bigint: true }),
+				fsp.lstat(absPath, { bigint: true }),
+				fsp.realpath(swarmRoot),
+				fsp.realpath(absPath),
+			]);
+		const postRelativeRealPath = path.relative(postRealRoot, postRealArtifact);
+		if (
+			postRootStat.isSymbolicLink() ||
+			!postRootStat.isDirectory() ||
+			!sameBigIntFileIdentity(rootStat, postRootStat) ||
+			postArtifactStat.isSymbolicLink() ||
+			!postArtifactStat.isFile() ||
+			!sameBigIntFileIdentity(artifactStat, postArtifactStat) ||
+			!sameBigIntFileIdentity(openedStat, postArtifactStat) ||
+			normalizeComparableFsPath(realRoot) !==
+				normalizeComparableFsPath(postRealRoot) ||
+			normalizeComparableFsPath(realArtifact) !==
+				normalizeComparableFsPath(postRealArtifact) ||
+			postRelativeRealPath === '' ||
+			postRelativeRealPath === '..' ||
+			postRelativeRealPath.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(postRelativeRealPath)
+		) {
+			throw new Error(
+				`BLOCKED: ${label} changed or escaped during its bounded read`,
+			);
+		}
+		const buffer = Buffer.allocUnsafe(maxBytes + 1);
+		const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+		if (bytesRead > maxBytes) {
+			throw new Error(`BLOCKED: ${label} exceeds ${maxBytes} bytes`);
+		}
+		return buffer.subarray(0, bytesRead).toString('utf8');
+	} finally {
+		await handle.close();
+	}
+}
+
+function sameBigIntFileIdentity(
+	left: Pick<BigIntStats, 'dev' | 'ino'>,
+	right: Pick<BigIntStats, 'dev' | 'ino'>,
+): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+function normalizeComparableFsPath(value: string): string {
+	const normalized = path.normalize(path.resolve(value));
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+async function readPrReviewFeedbackHandoffArtifact(
+	directory: string,
+	relativePath: string,
+): Promise<{
+	artifact: z.infer<typeof PrReviewFeedbackHandoffArtifactSchema>;
+	digest: string;
+}> {
+	const raw = await readBoundedSwarmRegularFile(
+		directory,
+		relativePath,
+		PR_REVIEW_HANDOFF_MAX_BYTES,
+		'PR_REVIEW feedback handoff artifact',
+	);
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(raw);
+	} catch {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback handoff artifact is not valid JSON',
+		);
+	}
+	const parsed = PrReviewFeedbackHandoffArtifactSchema.safeParse(parsedJson);
+	if (!parsed.success) {
+		throw new Error('BLOCKED: PR_REVIEW feedback handoff artifact is invalid');
+	}
+	if (
+		new Set(parsed.data.finding_ids).size !== parsed.data.finding_ids.length
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback handoff artifact contains duplicate finding IDs',
+		);
+	}
+	return {
+		artifact: parsed.data,
+		digest: createHash('sha256').update(raw, 'utf8').digest('hex'),
+	};
+}
+
+const PrReviewFindingProjectionSchema = z
+	.object({
+		finding_id: z.string().min(1).max(128),
+		status: z.enum(['PENDING', 'CONFIRMED', 'DISPROVED', 'PRE_EXISTING']),
+		next_action: z.enum([
+			'route_to_reviewer',
+			'route_to_critic',
+			'report',
+			'suppress_with_reason',
+			'handoff_to_feedback',
+		]),
+	})
+	.passthrough();
+
+async function readActionableReviewFindingIds(
+	directory: string,
+	state: PrWorkflowGateState,
+	runId: string,
+): Promise<string[]> {
+	const expectedPath = `pr-review/${runId}/findings.jsonl`;
+	if (state.prReviewFindingsPath !== expectedPath) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW transition requires the exact final findings artifact "${expectedPath}"`,
+		);
+	}
+	const raw = await readBoundedSwarmRegularFile(
+		directory,
+		expectedPath,
+		PR_REVIEW_FINDINGS_MAX_BYTES,
+		'PR_REVIEW final findings artifact',
+	);
+	const latest = new Map<
+		string,
+		z.infer<typeof PrReviewFindingProjectionSchema>
+	>();
+	for (const [index, line] of raw.split(/\r?\n/).entries()) {
+		if (!line.trim()) continue;
+		let value: unknown;
+		try {
+			value = JSON.parse(line);
+		} catch {
+			throw new Error(
+				`BLOCKED: PR_REVIEW final findings artifact contains invalid JSON at line ${index + 1}`,
+			);
+		}
+		const parsed = PrReviewFindingProjectionSchema.safeParse(value);
+		if (!parsed.success) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW final findings artifact contains an invalid record at line ${index + 1}`,
+			);
+		}
+		latest.set(parsed.data.finding_id, parsed.data);
+	}
+	return [...latest.values()]
+		.filter(
+			(record) =>
+				record.status === 'CONFIRMED' &&
+				record.next_action === 'handoff_to_feedback',
+		)
+		.map((record) => record.finding_id)
+		.sort();
+}
+
+function canonicalGitHubPrUrl(value: string): string | null {
+	try {
+		const url = new URL(value);
+		if (
+			url.protocol !== 'https:' ||
+			url.hostname.toLowerCase() !== 'github.com'
+		) {
+			return null;
+		}
+		const matched = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+		if (!matched) return null;
+		const prNumber = Number(matched[3]);
+		if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+		return `github.com/${matched[1].toLowerCase()}/${matched[2].toLowerCase()}/pull/${prNumber}`;
+	} catch {
+		return null;
+	}
+}
+
+function workflowIdentity(state: PrWorkflowGateState): string {
+	return (
+		state.workflowInstanceId ??
+		`legacy-${createHash('sha256')
+			.update(`${state.sessionID}\0${state.mode}\0${state.activatedAt}`)
+			.digest('hex')
+			.slice(0, 32)}`
+	);
+}
+
+function sameHandoffIds(
+	left: readonly string[],
+	right: readonly string[],
+): boolean {
+	const normalizedLeft = [...new Set(left)].sort();
+	const normalizedRight = [...new Set(right)].sort();
+	return sameStringArray(normalizedLeft, normalizedRight);
+}
+
+function assertSamePrFeedbackHandoff(
+	state: PrWorkflowGateState,
+	relativePath: string,
+	read: {
+		artifact: z.infer<typeof PrReviewFeedbackHandoffArtifactSchema>;
+		digest: string;
+	},
+	requestedPrUrl?: string,
+): void {
+	const existing = state.prFeedbackReviewHandoff;
+	if (!existing) {
+		throw new Error(
+			`BLOCKED: session "${state.sessionID}" is already active in PR_FEEDBACK without persisted review handoff provenance`,
+		);
+	}
+	const artifactPr = canonicalGitHubPrUrl(read.artifact.pr_url);
+	const requestedPr = requestedPrUrl
+		? canonicalGitHubPrUrl(requestedPrUrl)
+		: artifactPr;
+	if (
+		!artifactPr ||
+		(requestedPrUrl && requestedPr !== artifactPr) ||
+		existing.path !== relativePath ||
+		existing.runId !== read.artifact.run_id ||
+		existing.digest !== read.digest ||
+		existing.sourcePrHeadSha.toLowerCase() !==
+			read.artifact.pr_head_sha.toLowerCase() ||
+		canonicalGitHubPrUrl(existing.prUrl) !== artifactPr ||
+		!sameHandoffIds(existing.findingIds, read.artifact.finding_ids)
+	) {
+		throw new Error(
+			`BLOCKED: session "${state.sessionID}" is already active in PR_FEEDBACK for a different handoff or PR`,
+		);
+	}
+}
+
+async function assertPrReviewTerminalReady(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	await assertPrReviewCleanCheckout(directory, 'PR_REVIEW');
+	const open = readDelegations(directory).filter(
+		(record) =>
+			record.parentSessionId === state.sessionID &&
+			record.mode?.startsWith('swarm-pr-') &&
+			(record.status === 'pending' || record.status === 'running'),
+	);
+	if (open.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW transition has ${open.length} unsettled PR workflow lane(s)`,
+		);
+	}
+	await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	if (!state.prReviewTriggerEvalPath) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW transition requires a persisted trigger evaluation artifact',
+		);
+	}
+	if (
+		(state.prReviewValidationBatches ?? []).some(
+			(batch) => batch.phase === 'council',
+		)
+	) {
+		await assertPrReviewValidationSettled(directory, sessionID, 'council');
+	}
+	await assertPrReviewValidationSettled(directory, sessionID, 'reviewer');
+	const criticInventory = derivePrReviewCriticInventory(directory, state);
+	if (criticInventory.length > 0) {
+		if (
+			!(state.prReviewValidationBatches ?? []).some(
+				(batch) => batch.phase === 'critic',
+			)
+		) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW reviewer verdicts require critic coverage for: ${criticInventory.join(', ')}`,
+			);
+		}
+		await assertPrReviewValidationSettled(directory, sessionID, 'critic');
+	}
+	const requiredBoundaries: PrReviewArtifactBoundary[] = [
+		'post_explorer',
+		'post_reviewer',
+		'post_critic',
+	];
+	const persistedBoundaries = new Set(state.prReviewArtifactBoundaries ?? []);
+	const missing = requiredBoundaries.filter(
+		(boundary) => !persistedBoundaries.has(boundary),
+	);
+	if (!state.prReviewFindingsPath || missing.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW transition requires durable findings checkpoints; missing: ${missing.join(', ') || 'findings path'}`,
+		);
+	}
+	if (state.prReviewHandoffRequired && !state.prReviewHandoffPath) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
+		);
+	}
+	return state;
+}
+
+export async function transitionPrReviewToFeedback(
+	directory: string,
+	sessionID: string,
+	request: {
+		runId: string;
+		handoffPath: string;
+		prUrl?: string;
+	},
+): Promise<PrWorkflowGateState> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const normalizedHandoff = normalizePrReviewFeedbackHandoffPath(
+		request.handoffPath,
+	);
+	if (!normalizedHandoff || normalizedHandoff.runId !== request.runId) {
+		throw new Error(
+			'BLOCKED: PR-feedback continuation must use .swarm/pr-review/<run_id>/feedback-handoff.json',
+		);
+	}
+	const preliminaryRead = await readPrReviewFeedbackHandoffArtifact(
+		directory,
+		normalizedHandoff.relativePath,
+	);
+	const artifact = preliminaryRead.artifact;
+	const artifactPr = canonicalGitHubPrUrl(artifact.pr_url);
+	const requestedPr = request.prUrl
+		? canonicalGitHubPrUrl(request.prUrl)
+		: null;
+	if (!artifactPr || (request.prUrl && requestedPr !== artifactPr)) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback handoff artifact does not match the requested GitHub PR URL',
+		);
+	}
+	if (artifact.run_id !== request.runId) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback handoff artifact does not match the requested review run',
+		);
+	}
+	const preliminary = await readPrWorkflowGateState(
+		directory,
+		normalizedSessionID,
+	);
+	if (preliminary?.mode === 'PR_FEEDBACK') {
+		assertSamePrFeedbackHandoff(
+			preliminary,
+			normalizedHandoff.relativePath,
+			preliminaryRead,
+			request.prUrl,
+		);
+		return preliminary;
+	}
+
+	let sourceIdentity: string;
+	let sourceRevision = 0;
+	let provenance: PrFeedbackReviewHandoffRecord['provenance'];
+	if (preliminary) {
+		if (preliminary.mode !== 'PR_REVIEW') {
+			throw wrongModeError(preliminary, 'PR_REVIEW');
+		}
+		const ready = await assertPrReviewTerminalReady(
+			directory,
+			normalizedSessionID,
+		);
+		if (
+			workflowIdentity(ready) !== workflowIdentity(preliminary) ||
+			ready.revision !== preliminary.revision ||
+			ready.mode !== 'PR_REVIEW' ||
+			ready.prReviewHandoffPath !== normalizedHandoff.relativePath ||
+			ready.prReviewArtifactRunId !== request.runId ||
+			!ready.prHeadSha ||
+			ready.prHeadSha.toLowerCase() !== artifact.pr_head_sha.toLowerCase() ||
+			canonicalGitHubPrUrl(artifact.pr_url) !==
+				canonicalGitHubPrUrl(request.prUrl ?? artifact.pr_url)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback handoff does not match the terminal active review state',
+			);
+		}
+		const actionableIds = await readActionableReviewFindingIds(
+			directory,
+			ready,
+			request.runId,
+		);
+		if (!sameHandoffIds(actionableIds, artifact.finding_ids)) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback handoff finding IDs do not match the authoritative final findings ledger',
+			);
+		}
+		sourceIdentity = workflowIdentity(ready);
+		sourceRevision = ready.revision;
+		provenance = 'active-review-v1';
+	} else {
+		if (!request.prUrl) {
+			throw new Error(
+				'BLOCKED: continuing a completed PR_REVIEW requires an explicit GitHub PR URL',
+			);
+		}
+		sourceIdentity = `external-${preliminaryRead.digest.slice(0, 32)}`;
+		provenance = 'external-v1';
+	}
+
+	await _test_exports.beforePrFeedbackTransitionLock?.();
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const current = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (current?.mode === 'PR_FEEDBACK') {
+			assertSamePrFeedbackHandoff(
+				current,
+				normalizedHandoff.relativePath,
+				preliminaryRead,
+				request.prUrl,
+			);
+			return current;
+		}
+		if (provenance === 'active-review-v1') {
+			if (
+				!current ||
+				current.mode !== 'PR_REVIEW' ||
+				workflowIdentity(current) !== sourceIdentity ||
+				current.revision !== sourceRevision ||
+				current.prHeadSha?.toLowerCase() !==
+					artifact.pr_head_sha.toLowerCase() ||
+				current.prReviewArtifactRunId !== request.runId ||
+				current.prReviewHandoffPath !== normalizedHandoff.relativePath
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW state changed while validating the feedback handoff; retry from current state',
+				);
+			}
+		} else if (current) {
+			throw new Error(
+				'BLOCKED: another PR workflow became active while validating the external handoff',
+			);
+		}
+		const lockedRead = await readPrReviewFeedbackHandoffArtifact(
+			directory,
+			normalizedHandoff.relativePath,
+		);
+		if (lockedRead.digest !== preliminaryRead.digest) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+			);
+		}
+		if (
+			artifactPr !== canonicalGitHubPrUrl(lockedRead.artifact.pr_url) ||
+			lockedRead.artifact.run_id !== request.runId ||
+			lockedRead.artifact.pr_head_sha.toLowerCase() !==
+				artifact.pr_head_sha.toLowerCase() ||
+			!sameHandoffIds(lockedRead.artifact.finding_ids, artifact.finding_ids)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+			);
+		}
+		const timestamp = isoNow();
+		const nextState: PrWorkflowGateState = {
+			schemaVersion: GATE_SCHEMA_VERSION,
+			revision: sourceRevision,
+			workflowInstanceId: randomUUID(),
+			sessionID: normalizedSessionID,
+			mode: 'PR_FEEDBACK',
+			activatedAt: timestamp,
+			updatedAt: timestamp,
+			prFeedbackReviewHandoff: {
+				path: normalizedHandoff.relativePath,
+				runId: lockedRead.artifact.run_id,
+				sourcePrHeadSha: lockedRead.artifact.pr_head_sha.toLowerCase(),
+				prUrl: lockedRead.artifact.pr_url,
+				findingIds: [...new Set(lockedRead.artifact.finding_ids)].sort(),
+				digest: preliminaryRead.digest,
+				sourceWorkflowInstanceId: sourceIdentity,
+				provenance,
+			},
+			prFeedbackTargetUrl: artifact.pr_url,
+		};
+		return writeStateWhileLocked(directory, nextState, {
+			replaceWorkflowInstanceId:
+				provenance === 'active-review-v1'
+					? current?.workflowInstanceId
+					: undefined,
+		});
+	});
+}
+
 export async function declarePrFeedbackScope(
 	directory: string,
 	sessionID: string,
@@ -2347,6 +3097,27 @@ export async function enforcePrWorkflowToolBefore(
 		(normalizedTool !== 'build_check' &&
 			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
 			readOnlyToolArgumentsAreSafe(args ?? {}));
+	const isRecoverySafeEvidenceTool =
+		(trustedCapability === 'observe' &&
+			isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {})) ||
+		(normalizedTool !== 'build_check' &&
+			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
+			readOnlyToolArgumentsAreSafe(args ?? {}));
+	if (state.checkoutRecovery) {
+		if (
+			isRecoverySafeEvidenceTool ||
+			isReadOnlyShell ||
+			normalizedTool === 'abort_pr_workflow' ||
+			normalizedTool === 'pr_workflow_status' ||
+			normalizedTool === 'prepare_pr_workflow_checkout'
+		) {
+			return;
+		}
+		throw new Error(
+			`BLOCKED: ${state.mode} requires manual Git recovery before controller work can continue. ` +
+				`code=${state.checkoutRecovery.code} retryable=false required_action=${state.checkoutRecovery.requiredAction}`,
+		);
+	}
 	if (
 		referencesProtectedWorkflowEvidence &&
 		!isInternalWorkflowTool &&
@@ -2595,51 +3366,13 @@ export async function completePrWorkflow(
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
-		await assertPrReviewCleanCheckout(directory);
-		await assertPrReviewBaseCoverageSettled(directory, sessionID);
-		if (!state.prReviewTriggerEvalPath) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW completion requires a persisted trigger evaluation artifact',
-			);
-		}
+		const readyState = await assertPrReviewTerminalReady(directory, sessionID);
 		if (
-			(state.prReviewValidationBatches ?? []).some(
-				(batch) => batch.phase === 'council',
-			)
+			workflowIdentity(readyState) !== workflowIdentity(state) ||
+			readyState.revision !== state.revision
 		) {
-			await assertPrReviewValidationSettled(directory, sessionID, 'council');
-		}
-		await assertPrReviewValidationSettled(directory, sessionID, 'reviewer');
-		const criticInventory = derivePrReviewCriticInventory(directory, state);
-		if (criticInventory.length > 0) {
-			if (
-				!(state.prReviewValidationBatches ?? []).some(
-					(batch) => batch.phase === 'critic',
-				)
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW reviewer verdicts require critic coverage for: ${criticInventory.join(', ')}`,
-				);
-			}
-			await assertPrReviewValidationSettled(directory, sessionID, 'critic');
-		}
-		const requiredArtifactBoundaries: PrReviewArtifactBoundary[] = [
-			'post_explorer',
-			'post_reviewer',
-			'post_critic',
-		];
-		const persistedBoundaries = new Set(state.prReviewArtifactBoundaries ?? []);
-		const missingArtifactBoundaries = requiredArtifactBoundaries.filter(
-			(boundary) => !persistedBoundaries.has(boundary),
-		);
-		if (!state.prReviewFindingsPath || missingArtifactBoundaries.length > 0) {
 			throw new Error(
-				`BLOCKED: PR_REVIEW completion requires durable findings checkpoints; missing: ${missingArtifactBoundaries.join(', ') || 'findings path'}`,
-			);
-		}
-		if (state.prReviewHandoffRequired && !state.prReviewHandoffPath) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
+				'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
 			);
 		}
 	} else {
@@ -2752,8 +3485,22 @@ export const _test_exports = {
 		trackedStatesByProjectSession.clear();
 		pendingStateMutationsByProjectSession.clear();
 		_test_exports.beforeTerminalClear = undefined;
+		_test_exports.beforePrFeedbackTransitionLock = undefined;
+		_test_exports.beforeBoundedSwarmFileOpen = undefined;
+		_test_exports.beforeSafeDirectoryCreate = undefined;
+		_test_exports.beforeAtomicTempWrite = undefined;
+		_test_exports.beforeAtomicRename = undefined;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
+	beforePrFeedbackTransitionLock: undefined as
+		| (() => Promise<void>)
+		| undefined,
+	beforeBoundedSwarmFileOpen: undefined as (() => Promise<void>) | undefined,
+	beforeSafeDirectoryCreate: undefined as
+		| ((parentPath: string, nextPath: string) => Promise<void>)
+		| undefined,
+	beforeAtomicTempWrite: undefined as (() => Promise<void>) | undefined,
+	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -4703,27 +5450,46 @@ async function persistState(
 ): Promise<void> {
 	const validated = PrWorkflowGateStateSchema.parse(state);
 	await withSessionStateMutation(directory, validated.sessionID, async () => {
-		const current = await readPrWorkflowGateStateFromDisk(
-			directory,
-			validated.sessionID,
-		);
-		if (
-			current
-				? current.revision !== validated.revision
-				: validated.revision !== 0
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-			);
-		}
-		const nextRevision = validated.revision + 1;
-		const nextState = { ...validated, revision: nextRevision };
-		const filePath = workflowGateStatePath(directory, validated.sessionID);
-		await fsp.mkdir(path.dirname(filePath), { recursive: true });
-		await writeAtomicJson(filePath, nextState);
+		const nextState = await writeStateWhileLocked(directory, validated);
 		Object.assign(state, nextState);
-		rememberState(directory, nextState);
 	});
+}
+
+/** Persist one CAS-checked state replacement while the session lock is held. */
+async function writeStateWhileLocked(
+	directory: string,
+	state: PrWorkflowGateState,
+	options: { replaceWorkflowInstanceId?: string } = {},
+): Promise<PrWorkflowGateState> {
+	const validated = PrWorkflowGateStateSchema.parse(state);
+	const current = await readPrWorkflowGateStateFromDisk(
+		directory,
+		validated.sessionID,
+	);
+	if (
+		current ? current.revision !== validated.revision : validated.revision !== 0
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+		);
+	}
+	if (
+		current?.workflowInstanceId &&
+		validated.workflowInstanceId !== current.workflowInstanceId &&
+		options.replaceWorkflowInstanceId !== current.workflowInstanceId
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+		);
+	}
+	const nextState = PrWorkflowGateStateSchema.parse({
+		...validated,
+		revision: validated.revision + 1,
+	});
+	const filePath = workflowGateStatePath(directory, validated.sessionID);
+	await writeAtomicJson(directory, filePath, nextState);
+	rememberState(directory, nextState);
+	return nextState;
 }
 
 /** Serialize in-process mutations; the durable revision rejects stale callers. */
@@ -4771,12 +5537,17 @@ async function acquireSessionStateMutationLock(
 				pid: process.pid,
 				createdAtMs: _test_exports.nowMs(),
 			};
+			let writeError: unknown;
 			try {
 				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-				await handle.close();
 			} catch (error) {
+				writeError = error;
+			} finally {
+				await handle.close().catch(() => undefined);
+			}
+			if (writeError) {
 				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-				throw error;
+				throw writeError;
 			}
 			return { path: lockPath, ownerToken: lock.ownerToken };
 		} catch (error) {
@@ -4977,14 +5748,168 @@ function normalizeSessionID(sessionID: string): string {
 	return normalized;
 }
 
+export async function ensurePrWorkflowSafeParentDirectory(
+	directory: string,
+	filePath: string,
+): Promise<string> {
+	const swarmRoot = path.resolve(directory, '.swarm');
+	const parentPath = path.dirname(path.resolve(filePath));
+	const relativeParent = path.relative(swarmRoot, parentPath);
+	if (
+		relativeParent === '..' ||
+		relativeParent.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativeParent)
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow atomic destination escapes the project .swarm directory',
+		);
+	}
+	await fsp.mkdir(swarmRoot, { recursive: true });
+	let currentPath = swarmRoot;
+	let currentIdentity = await assertSafeDirectory(currentPath, undefined);
+	for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
+		const nextPath = path.join(currentPath, segment);
+		await _test_exports.beforeSafeDirectoryCreate?.(currentPath, nextPath);
+		await assertSafeDirectory(currentPath, currentIdentity);
+		try {
+			await fsp.mkdir(nextPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+		}
+		await assertSafeDirectory(currentPath, currentIdentity);
+		const nextIdentity = await assertSafeDirectory(nextPath, undefined);
+		const [realCurrent, realNext] = await Promise.all([
+			fsp.realpath(currentPath),
+			fsp.realpath(nextPath),
+		]);
+		if (
+			normalizeComparableFsPath(path.dirname(realNext)) !==
+			normalizeComparableFsPath(realCurrent)
+		) {
+			throw new Error(
+				'BLOCKED: PR workflow directory creation escaped the project .swarm tree',
+			);
+		}
+		currentPath = nextPath;
+		currentIdentity = nextIdentity;
+	}
+	const realRoot = await fsp.realpath(swarmRoot);
+	const realParent = await fsp.realpath(parentPath);
+	const relativeRealParent = path.relative(realRoot, realParent);
+	if (
+		relativeRealParent === '..' ||
+		relativeRealParent.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativeRealParent)
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow atomic parent escapes the project .swarm directory',
+		);
+	}
+	return realParent;
+}
+
+async function assertSafeDirectory(
+	directoryPath: string,
+	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
+): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
+	const stat = await fsp.lstat(directoryPath, { bigint: true });
+	if (
+		stat.isSymbolicLink() ||
+		!stat.isDirectory() ||
+		(expectedIdentity && !sameBigIntFileIdentity(stat, expectedIdentity))
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow .swarm path must be a real directory and must not change during the operation',
+		);
+	}
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+async function assertOpenedSwarmFileIdentity(
+	directory: string,
+	filePath: string,
+	handle: Awaited<ReturnType<typeof fsp.open>>,
+	expectedParent: string,
+	label: string,
+): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
+	const openedStat = await handle.stat({ bigint: true });
+	if (!openedStat.isFile()) throw new Error(`BLOCKED: ${label} is not a file`);
+	await assertClosedSwarmFileIdentity(
+		directory,
+		filePath,
+		openedStat,
+		expectedParent,
+		label,
+	);
+	return { dev: openedStat.dev, ino: openedStat.ino };
+}
+
+async function assertClosedSwarmFileIdentity(
+	directory: string,
+	filePath: string,
+	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
+	expectedParent: string,
+	label: string,
+): Promise<void> {
+	if (!expectedIdentity) throw new Error(`BLOCKED: ${label} has no identity`);
+	const [stat, realRoot, realFile, realParent] = await Promise.all([
+		fsp.lstat(filePath, { bigint: true }),
+		fsp.realpath(path.resolve(directory, '.swarm')),
+		fsp.realpath(filePath),
+		fsp.realpath(path.dirname(filePath)),
+	]);
+	const relativeFile = path.relative(realRoot, realFile);
+	if (
+		stat.isSymbolicLink() ||
+		!stat.isFile() ||
+		!sameBigIntFileIdentity(stat, expectedIdentity) ||
+		normalizeComparableFsPath(realParent) !==
+			normalizeComparableFsPath(expectedParent) ||
+		relativeFile === '' ||
+		relativeFile === '..' ||
+		relativeFile.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativeFile)
+	) {
+		throw new Error(`BLOCKED: ${label} changed or escaped .swarm`);
+	}
+}
+
 async function writeAtomicJson(
+	directory: string,
 	filePath: string,
 	value: unknown,
 ): Promise<void> {
+	const safeParent = await ensurePrWorkflowSafeParentDirectory(
+		directory,
+		filePath,
+	);
 	const tempPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
+	let tempIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
 	let lastError: unknown;
 	try {
-		await fsp.writeFile(tempPath, JSON.stringify(value, null, 2), 'utf-8');
+		const handle = await fsp.open(tempPath, 'wx');
+		try {
+			await _test_exports.beforeAtomicTempWrite?.();
+			tempIdentity = await assertOpenedSwarmFileIdentity(
+				directory,
+				tempPath,
+				handle,
+				safeParent,
+				'PR workflow atomic temporary file',
+			);
+			await handle.writeFile(JSON.stringify(value, null, 2), 'utf-8');
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await _test_exports.beforeAtomicRename?.();
+		await assertClosedSwarmFileIdentity(
+			directory,
+			tempPath,
+			tempIdentity,
+			safeParent,
+			'PR workflow atomic temporary file',
+		);
 		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
 			try {
 				await _test_exports.rename(tempPath, filePath);
@@ -5004,6 +5929,13 @@ async function writeAtomicJson(
 		if (lastError) {
 			throw lastError;
 		}
+		await assertClosedSwarmFileIdentity(
+			directory,
+			filePath,
+			tempIdentity,
+			safeParent,
+			'PR workflow atomic destination file',
+		);
 	} finally {
 		try {
 			await fsp.rm(tempPath, { force: true });
@@ -5019,10 +5951,11 @@ async function writeAtomicJson(
  * rename contention as canonical gate state.
  */
 export async function writePrWorkflowAtomicJson(
+	directory: string,
 	filePath: string,
 	value: unknown,
 ): Promise<void> {
-	await writeAtomicJson(filePath, value);
+	await writeAtomicJson(directory, filePath, value);
 }
 
 function isoNow(): string {

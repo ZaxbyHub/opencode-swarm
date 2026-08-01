@@ -494,7 +494,7 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 | `notify_merged` | boolean | `true` | Emit notification when the PR is merged (terminal event) |
 | `notify_closed` | boolean | `true` | Emit notification when the PR is closed without merge (terminal event) |
 | `notify_ci_success` | boolean | `false` | Emit notification when CI recovers / all checks pass (quiet by default) |
-| `auto_pr_feedback` | boolean | `false` | When enabled, injects `[MODE: PR_FEEDBACK pr="URL"]` signal on CI failure and merge conflict events. Advisory-channel only: with `event_delivery: "prompt"` the wake message already routes fix events through the swarm-pr-feedback protocol, so no separate MODE signal is injected on successful wakes |
+| `auto_pr_feedback` | boolean | `false` | When enabled, CI failure and merge-conflict events mechanically establish PR_FEEDBACK before routing fix work. Events arriving during PR_REVIEW or after a PR_FEEDBACK inventory freezes are durably queued and delivered mode-neutrally for a later round; they never override the active controller. |
 | `event_delivery` | string | `"prompt"` | `"prompt"` wakes the subscribed session with a structured `<pr-activity>` message via the SDK session prompt; `"advisory"` is the legacy passive channel (session advisories surface on the next model turn) |
 | `auto_subscribe_on_pr_create` | boolean | `true` | Automatically subscribe the session to a PR created via `gh pr create` in a bash tool call |
 

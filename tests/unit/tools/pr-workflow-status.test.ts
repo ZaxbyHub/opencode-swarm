@@ -37,12 +37,29 @@ const realReadGate = _internals.readPrWorkflowGateState;
 const realHead = _internals.resolveCurrentGitHeadAsync;
 const realClean = _internals.resolveIsWorkingTreeCleanAsync;
 const realRunGit = _internals.runGitCapture;
+const realClassifyGitState = _internals.classifyGitState;
 
 // Deterministic git stub: detached HEAD, one tracked + one untracked change,
 // a single origin remote (fetch/push rows). Individual tests override members.
 function installDefaultGitStub(): void {
 	_internals.resolveCurrentGitHeadAsync = async () => 'a'.repeat(40);
 	_internals.resolveIsWorkingTreeCleanAsync = async () => false;
+	_internals.classifyGitState = async () => ({
+		kind: 'clean',
+		code: 'CLEAN',
+		retryable: true,
+		requiredAction: 'No checkout recovery is required.',
+		evidence: {
+			worktreeRoot: tempDir,
+			gitDir: `${tempDir}/.git`,
+			operations: [],
+			unmergedCodes: [],
+			paths: [],
+			trackedCount: 0,
+			untrackedCount: 0,
+			pathsTruncated: false,
+		},
+	});
 	_internals.runGitCapture = async (_dir: string, args: string[]) => {
 		if (args[0] === 'rev-parse') return 'HEAD\n';
 		if (args[0] === 'status') return ' M src/a.ts\n?? new.txt\n';
@@ -63,6 +80,7 @@ afterEach(async () => {
 	_internals.resolveCurrentGitHeadAsync = realHead;
 	_internals.resolveIsWorkingTreeCleanAsync = realClean;
 	_internals.runGitCapture = realRunGit;
+	_internals.classifyGitState = realClassifyGitState;
 	await teardownPrWorkflowGateFixtures();
 });
 
@@ -178,6 +196,47 @@ describe('pr_workflow_status — git state observation', () => {
 		expect(git.branch).toBeNull();
 		expect(git.detached).toBeNull();
 	});
+
+	test('surfaces checkout recovery classification and manual next step', async () => {
+		_internals.classifyGitState = async () => ({
+			kind: 'recovery-required',
+			code: 'GIT_OPERATION_IN_PROGRESS',
+			retryable: false,
+			requiredAction:
+				'Complete or abort the active Git operation manually before starting the PR workflow.',
+			evidence: {
+				worktreeRoot: tempDir,
+				gitDir: `${tempDir}/.git`,
+				operations: ['merge'],
+				unmergedCodes: [],
+				paths: ['src/a.ts'],
+				trackedCount: 1,
+				untrackedCount: 0,
+				pathsTruncated: false,
+			},
+		});
+
+		const parsed = await runTool(tempDir, SESSION_ID);
+		expect(parsed.checkout).toEqual({
+			kind: 'recovery-required',
+			code: 'GIT_OPERATION_IN_PROGRESS',
+			retryable: false,
+			requiredAction:
+				'Complete or abort the active Git operation manually before starting the PR workflow.',
+			evidence: {
+				worktreeRoot: tempDir,
+				gitDir: `${tempDir}/.git`,
+				operations: ['merge'],
+				unmergedCodes: [],
+				paths: ['src/a.ts'],
+				trackedCount: 1,
+				untrackedCount: 0,
+				pathsTruncated: false,
+			},
+		});
+		expect(parsed.nextStep).toContain('Manual Git recovery required');
+		expect(parsed.nextStep).toContain('code=GIT_OPERATION_IN_PROGRESS');
+	});
 });
 
 describe('pr_workflow_status — session-pinned gate read', () => {
@@ -257,6 +316,42 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0][0]).toBe(tempDir);
 		expect(calls[0][1]).toBe('caller-xyz');
+	});
+});
+
+describe('durable checkout recovery status', () => {
+	test('remains authoritative after live Git becomes clean', async () => {
+		_internals.readPrWorkflowGateState = async () => ({
+			schemaVersion: 1,
+			revision: 1,
+			sessionID: SESSION_ID,
+			mode: 'PR_REVIEW',
+			activatedAt: '2026-08-01T00:00:00.000Z',
+			updatedAt: '2026-08-01T00:00:01.000Z',
+			checkoutRecovery: {
+				code: 'UNMERGED_INDEX',
+				retryable: false,
+				requiredAction: 'Resolve the conflicted index manually.',
+				detectedAt: '2026-08-01T00:00:01.000Z',
+				evidence: {
+					worktreeRoot: tempDir,
+					gitDir: `${tempDir}/.git`,
+					operations: [],
+					unmergedCodes: ['UU'],
+					paths: ['conflict.ts'],
+					trackedCount: 1,
+					untrackedCount: 0,
+					pathsTruncated: false,
+				},
+			},
+		});
+
+		const parsed = await runTool(tempDir, SESSION_ID);
+		expect((parsed.checkout as Record<string, unknown>).code).toBe(
+			'UNMERGED_INDEX',
+		);
+		expect(parsed.nextStep).toContain('retryable=false');
+		expect(parsed.nextStep).toContain('Resolve the conflicted index manually.');
 	});
 });
 

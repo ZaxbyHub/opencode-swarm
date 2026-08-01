@@ -69,13 +69,17 @@ describe('task workspace change observation', () => {
 			),
 		).toEqual({
 			gitHead: hash,
-			changedFiles: [
+			dirtyTrackedPaths: [
 				'tracked file.ts',
 				'renamed file.ts',
 				'original file.ts',
 				'conflicted.ts',
-				'untracked.ts',
 			],
+			untrackedPaths: ['untracked.ts'],
+			renameOrCopy: true,
+			unmergedPaths: ['conflicted.ts'],
+			unmergedCodes: ['UU'],
+			dirtySubmodulePaths: [],
 		});
 	});
 

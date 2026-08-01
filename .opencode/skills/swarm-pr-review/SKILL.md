@@ -36,9 +36,11 @@ path substituted for `<handoff_artifact_path>`:
 
 `<run_id>` is a stable identifier for this review run, such as
 `pr-<number>-<YYYYMMDDHHMMSS>` or the existing review artifact run ID when one
-was already created. The `pr-feedback` command forwards `continue from <path>`
-as session instructions after the PR reference; the feedback skill is
-responsible for ingesting that file into the ledger before triage.
+was already created. Under Profile A, the exact command is parsed mechanically:
+the controller validates the terminal review, the bounded handoff artifact, and
+its provenance before atomically replacing the review gate with an unbound
+feedback gate. Extra trailing text is not permitted on this continuation form.
+Profiles B/C ingest their task-workspace artifact through the skill-managed path.
 
 Review closure is not the end of the PR lifecycle: when PR monitoring is
 enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
@@ -211,6 +213,12 @@ Before launching explorers (Phase 3), perform this exact standalone sequence:
    contract. Without the controller (Profiles B/C), do not blind-stash over
    dirty state: surface tracked changes to the user, or abort. Do not issue
    `git stash` through shell.
+   Treat the controller's Git-state result as final for this attempt: `clean`
+   proceeds, `stashable` permits exactly one checkout-preparation call, and
+   `recovery-required` or `indeterminate` means report the typed
+   `required_action`, abort/clear any already-active gate, and stop. Retry only
+   when the controller explicitly returns `retryable: true`; never fight an
+   unmerged index or in-progress Git operation with repeated stash attempts.
 3. Fetch the PR head as one standalone command, for example
    `git fetch origin refs/pull/<N>/head`. Do not compose fetch and checkout.
 3a. Fetch the base branch as its own standalone command, for example

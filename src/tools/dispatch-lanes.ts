@@ -959,6 +959,7 @@ export async function executeDispatchLanesAsync(
 					directory,
 					context.sessionID,
 					'PR_REVIEW',
+					{ requireCheckoutPreflight: true },
 				);
 			} else if (
 				!gateState &&
@@ -968,6 +969,7 @@ export async function executeDispatchLanesAsync(
 					directory,
 					context.sessionID,
 					'PR_FEEDBACK',
+					{ requireCheckoutPreflight: true },
 				);
 			}
 			if (gateState?.mode === 'PR_REVIEW') {
