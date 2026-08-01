@@ -142,7 +142,10 @@ describe('BubblewrapSandboxExecutor', () => {
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/tmp');
 			expect(result).toContain('--size');
-			expect(result).toContain('500M');
+			// bwrap --size requires a plain decimal byte count, not a suffixed
+			// value like "500M" (issue #1997). 500 MiB = 524288000 bytes.
+			expect(result).toContain('524288000');
+			expect(result).not.toContain('500M');
 		});
 
 		test('uses custom tempDir when provided to wrapCommand', () => {
@@ -151,7 +154,8 @@ describe('BubblewrapSandboxExecutor', () => {
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/custom/tmp');
 			expect(result).toContain('--size');
-			expect(result).toContain('500M');
+			expect(result).toContain('524288000');
+			expect(result).not.toContain('500M');
 		});
 
 		test('includes --ro-bind /usr', () => {
