@@ -71,14 +71,30 @@ When the review target is a PR branch or commit range, complete this before any
 explorer or candidate-generation dispatch:
 
 1. Verify the working tree is clean with `git status --porcelain`. If
-   uncommitted changes exist, stash them or abort the checkout to prevent data
-   loss.
+   uncommitted changes exist, **you (the orchestrator)** must handle them
+   before any explorer/candidate dispatch — use `prepare_pr_workflow_checkout`
+   (the controller-owned path; it preserves every dirty path — including
+   untracked files when called with no `paths` argument — and returns a recovery
+   command), or a git worktree (see `running-tests` skill precedent). Note:
+   `git branch tmp/save-<topic>` only moves the HEAD ref — it does not record or
+   preserve uncommitted working-tree changes, so do not rely on it to save dirty
+   work. **Never delegate `git stash`, `git reset`, `git checkout -- .`,
+   or `git restore` to subagents** — these are worktree-global operations that
+   destroy sibling agents' in-flight work under parallel execution.
 2. Fetch and check out the PR head branch locally. Explorer agents read the
    working-tree filesystem (`Read`/`Glob`/`Grep`), not git history, so reviewing
    a PR while the base branch is checked out produces invalid candidates.
 3. Record the exact commit range (`base_ref..head_ref`) in the source-of-truth
    packet and pass that range in every explorer/candidate-generation delegation
    so agents have revision context for targeted `git show` inspection.
+
+**Subagent prohibition — must reach every subagent prompt:**
+Include this line verbatim in every explorer/candidate-generation lane
+or subagent dispatch prompt:
+"You are a subagent sharing a worktree with sibling agents. You MUST
+NOT run `git stash`, `git reset`, `git checkout -- .`, `git restore`,
+or any other worktree-global destructive git command. These destroy
+sibling agents' in-flight work without error."
 
 ## Async advisory lanes
 
