@@ -76,10 +76,13 @@ PR branch or commit range, complete this before Phase 1 explorer dispatch:
 
 1. Verify the working tree is clean with `git status --porcelain`. If
    uncommitted changes exist, **you (the orchestrator)** must handle them
-   before Phase 1 dispatch — use a temporary save branch
-   (`git branch tmp/save-<topic>`), a git worktree (see `running-tests`
-   skill precedent), or `prepare_pr_workflow_checkout` if the controller tool
-   is available. **Never delegate `git stash`, `git reset`, `git checkout -- .`,
+   before Phase 1 dispatch — use `prepare_pr_workflow_checkout` (the
+   controller-owned path; it preserves every dirty path — including untracked
+   files when called with no `paths` argument — and returns a recovery command),
+   or a git worktree (see `running-tests` skill precedent). Note: `git branch
+   tmp/save-<topic>` only moves the HEAD ref — it does not record or preserve
+   uncommitted working-tree changes, so do not rely on it to save dirty work.
+   **Never delegate `git stash`, `git reset`, `git checkout -- .`,
    or `git restore` to subagents** — these are worktree-global operations that
    destroy sibling agents' in-flight work under parallel execution.
 2. Fetch and check out the PR head branch locally. Explorer agents read files
