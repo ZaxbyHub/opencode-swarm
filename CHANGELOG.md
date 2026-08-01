@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.134.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.1...v7.134.2) (2026-08-01)
+
+
+### Bug Fixes
+
+* **guardrails:** detect tee writes and glued interpreter-eval flags ([b90daaa](https://github.com/ZaxbyHub/opencode-swarm/commit/b90daaafc07688afd534b42b10087bf2c0da2c83))
+
 ## [7.134.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.0...v7.134.1) (2026-08-01)
 
 
