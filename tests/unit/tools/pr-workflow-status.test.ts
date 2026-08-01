@@ -353,6 +353,39 @@ describe('durable checkout recovery status', () => {
 		expect(parsed.nextStep).toContain('retryable=false');
 		expect(parsed.nextStep).toContain('Resolve the conflicted index manually.');
 	});
+
+	test('uses the live classifier when no durable recovery is recorded (FB-005)', async () => {
+		// The persisted-recovery test above bypasses the live result. This case
+		// proves live checkout classification remains authoritative without it.
+		let classifyCalls = 0;
+		_internals.readPrWorkflowGateState = async () => null;
+		_internals.classifyGitState = async () => {
+			classifyCalls += 1;
+			return {
+				kind: 'recovery-required',
+				code: 'UNMERGED_INDEX',
+				retryable: false,
+				requiredAction: 'Resolve the live conflicted index.',
+				evidence: {
+					worktreeRoot: tempDir,
+					gitDir: `${tempDir}/.git`,
+					operations: [],
+					unmergedCodes: ['UU'],
+					paths: ['live-conflict.ts'],
+					trackedCount: 1,
+					untrackedCount: 0,
+					pathsTruncated: false,
+				},
+			};
+		};
+
+		const parsed = await runTool(tempDir, SESSION_ID);
+		const checkout = parsed.checkout as Record<string, unknown>;
+		expect(classifyCalls).toBe(1);
+		expect(checkout.code).toBe('UNMERGED_INDEX');
+		expect(checkout.requiredAction).toBe('Resolve the live conflicted index.');
+		expect(parsed.nextStep).toContain('Resolve the live conflicted index.');
+	});
 });
 
 // PRR-008: `describeNextStep`'s final branch must not conflate a genuinely

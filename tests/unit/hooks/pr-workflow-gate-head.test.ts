@@ -237,4 +237,76 @@ describe('PR workflow exact checkout head', () => {
 		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
 		await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
+
+	test.skipIf(process.platform === 'win32')(
+		'rejects a state-lock parent swapped after exclusive open (PRR-009)',
+		async () => {
+			const sessionID = 'state-lock-parent-swap';
+			_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
+			await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+			const lockPath = path.join(
+				directory,
+				'.swarm',
+				_test_exports.workflowGateStateLockRelativePath(sessionID),
+			);
+			const gateDirectory = path.dirname(lockPath);
+			const preserved = `${gateDirectory}-preserved`;
+			const outside = path.join(directory, 'outside-state-lock-race');
+			let swapInstalled = false;
+			await fs.mkdir(outside, { recursive: true });
+			_test_exports.beforeSessionStateLockWrite = async () => {
+				_test_exports.beforeSessionStateLockWrite = undefined;
+				await fs.rename(gateDirectory, preserved);
+				await fs.symlink(
+					outside,
+					gateDirectory,
+					process.platform === 'win32' ? 'junction' : 'dir',
+				);
+				expect(path.normalize(await fs.realpath(gateDirectory))).toBe(
+					path.normalize(await fs.realpath(outside)),
+				);
+				swapInstalled = true;
+			};
+
+			await expect(
+				bindPrWorkflowHead(directory, sessionID, HEAD_SHA),
+			).rejects.toThrow(/changed|escaped|ENOENT/i);
+			expect(swapInstalled).toBe(true);
+			expect(await fs.readdir(outside)).toEqual([]);
+		},
+	);
+
+	test.skipIf(process.platform !== 'win32')(
+		'Windows blocks a state-lock parent rename after exclusive open (PRR-009)',
+		async () => {
+			const sessionID = 'state-lock-parent-rename-blocked';
+			_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
+			await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+			const lockPath = path.join(
+				directory,
+				'.swarm',
+				_test_exports.workflowGateStateLockRelativePath(sessionID),
+			);
+			const gateDirectory = path.dirname(lockPath);
+			const preserved = `${gateDirectory}-preserved`;
+			let hookReached = false;
+			let renameBlocked = false;
+			_test_exports.beforeSessionStateLockWrite = async () => {
+				_test_exports.beforeSessionStateLockWrite = undefined;
+				hookReached = true;
+				try {
+					await fs.rename(gateDirectory, preserved);
+				} catch (error) {
+					renameBlocked = (error as NodeJS.ErrnoException).code === 'EPERM';
+					throw error;
+				}
+			};
+
+			await expect(
+				bindPrWorkflowHead(directory, sessionID, HEAD_SHA),
+			).rejects.toThrow(/EPERM/i);
+			expect(hookReached).toBe(true);
+			expect(renameBlocked).toBe(true);
+		},
+	);
 });

@@ -163,6 +163,29 @@ describe('PR event delivery lifecycle intake', () => {
 		expect(claim).not.toHaveBeenCalled();
 	});
 
+	test('preserves the durable queue when the workflow gate read fails (FB-002)', async () => {
+		// The previously uncovered read-error branch must not activate, claim, or
+		// deliver an event whose lifecycle owner could not be determined.
+		const readGate = mock(async () => {
+			throw new Error('disk error');
+		});
+		const activate = mock(async () => feedbackState());
+		const send = mock(async () => true);
+		const claim = mock(async () => []);
+		_internals.readPrFeedbackMonitorQueue = mock(async () => queueRecord());
+		_internals.readPrWorkflowGateState = readGate;
+		_internals.activatePrWorkflow = activate;
+		_internals.sendWakePrompt = send;
+		_internals.claimPrFeedbackMonitorEvents = claim;
+
+		noteSessionIdle(SESSION_ID);
+		await waitFor(() => readGate.mock.calls.length === 1);
+
+		expect(activate).not.toHaveBeenCalled();
+		expect(send).not.toHaveBeenCalled();
+		expect(claim).not.toHaveBeenCalled();
+	});
+
 	test('does not claim or deliver when guarded activation fails', async () => {
 		const send = mock(async () => true);
 		const claim = mock(async () => []);

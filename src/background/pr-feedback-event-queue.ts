@@ -220,7 +220,13 @@ function normalizeEvent(
 		'claimedWorkflowInstanceId' | 'claimedAt'
 	>,
 ): PrFeedbackMonitorEvent {
-	return PrFeedbackMonitorEventSchema.parse(event);
+	const parsed = PrFeedbackMonitorEventSchema.parse(event);
+	if (!canonicalGitHubPrUrl(parsed.prUrl)) {
+		throw new Error(
+			'BLOCKED: PR feedback monitor queue events require a canonical GitHub PR URL',
+		);
+	}
+	return parsed;
 }
 
 function emptyQueueRecord(sessionID: string): PrFeedbackMonitorQueueRecord {

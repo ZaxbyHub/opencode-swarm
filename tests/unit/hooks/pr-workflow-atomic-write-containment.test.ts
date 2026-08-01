@@ -23,35 +23,86 @@ afterEach(async () => {
 });
 
 describe('PR workflow atomic write containment', () => {
-	test('does not write content after the destination parent is junction-swapped', async () => {
-		const receiptDirectory = path.join(
-			directory,
-			'.swarm',
-			'pr-workflow-checkouts',
-			'session',
-		);
-		const destination = path.join(receiptDirectory, 'receipt.json');
-		const preserved = path.join(
-			directory,
-			'.swarm',
-			'pr-workflow-checkouts',
-			'session-preserved',
-		);
-		const outside = path.join(directory, 'outside-atomic-race');
-		await fs.mkdir(outside, { recursive: true });
-		_test_exports.beforeAtomicTempWrite = async () => {
-			_test_exports.beforeAtomicTempWrite = undefined;
-			await fs.rename(receiptDirectory, preserved);
-			await fs.symlink(
-				outside,
-				receiptDirectory,
-				process.platform === 'win32' ? 'junction' : 'dir',
+	test.skipIf(process.platform === 'win32')(
+		'does not write content after the destination parent is symlink-swapped',
+		async () => {
+			const receiptDirectory = path.join(
+				directory,
+				'.swarm',
+				'pr-workflow-checkouts',
+				'session',
 			);
-		};
+			const destination = path.join(receiptDirectory, 'receipt.json');
+			const preserved = path.join(
+				directory,
+				'.swarm',
+				'pr-workflow-checkouts',
+				'session-preserved',
+			);
+			const outside = path.join(directory, 'outside-atomic-race');
+			let swapInstalled = false;
+			await fs.mkdir(outside, { recursive: true });
+			_test_exports.beforeAtomicTempWrite = async () => {
+				_test_exports.beforeAtomicTempWrite = undefined;
+				await fs.rename(receiptDirectory, preserved);
+				await fs.symlink(
+					outside,
+					receiptDirectory,
+					process.platform === 'win32' ? 'junction' : 'dir',
+				);
+				expect((await fs.lstat(receiptDirectory)).isSymbolicLink()).toBe(true);
+				swapInstalled = true;
+			};
 
-		await expect(
-			writePrWorkflowAtomicJson(directory, destination, { secret: 'blocked' }),
-		).rejects.toThrow(/changed|escaped|ENOENT|EPERM/i);
-		expect(await fs.readdir(outside)).toEqual([]);
-	});
+			await expect(
+				writePrWorkflowAtomicJson(directory, destination, {
+					secret: 'blocked',
+				}),
+			).rejects.toThrow(/changed|escaped|ENOENT|EPERM/i);
+			expect(swapInstalled).toBe(true);
+			expect(await fs.readdir(outside)).toEqual([]);
+		},
+	);
+
+	test.skipIf(process.platform !== 'win32')(
+		'Windows blocks the parent rename while the atomic temp handle is open',
+		async () => {
+			const receiptDirectory = path.join(
+				directory,
+				'.swarm',
+				'pr-workflow-checkouts',
+				'session',
+			);
+			const destination = path.join(receiptDirectory, 'receipt.json');
+			const preserved = path.join(
+				directory,
+				'.swarm',
+				'pr-workflow-checkouts',
+				'session-preserved',
+			);
+			const outside = path.join(directory, 'outside-atomic-race');
+			let hookReached = false;
+			let renameBlocked = false;
+			await fs.mkdir(outside, { recursive: true });
+			_test_exports.beforeAtomicTempWrite = async () => {
+				_test_exports.beforeAtomicTempWrite = undefined;
+				hookReached = true;
+				try {
+					await fs.rename(receiptDirectory, preserved);
+				} catch (error) {
+					renameBlocked = (error as NodeJS.ErrnoException).code === 'EPERM';
+					throw error;
+				}
+			};
+
+			await expect(
+				writePrWorkflowAtomicJson(directory, destination, {
+					secret: 'blocked',
+				}),
+			).rejects.toThrow(/EPERM/i);
+			expect(hookReached).toBe(true);
+			expect(renameBlocked).toBe(true);
+			expect(await fs.readdir(outside)).toEqual([]);
+		},
+	);
 });

@@ -84,6 +84,18 @@ describe('pr-feedback-event-queue', () => {
 		});
 	});
 
+	test('rejects an unclaimable GitHub PR subpath at enqueue (PRR-008)', async () => {
+		// Previously any URL passed schema validation, even when claim-time
+		// canonicalization could never match it.
+		await expect(
+			enqueuePrFeedbackMonitorEvent(
+				directory,
+				SESSION_ID,
+				event({ prUrl: 'https://github.com/owner/repo/pull/42/files' }),
+			),
+		).rejects.toThrow(/canonical GitHub PR URL/i);
+	});
+
 	test('dedups by token and keeps the most recent payload', async () => {
 		await enqueuePrFeedbackMonitorEvent(directory, SESSION_ID, event());
 		await enqueuePrFeedbackMonitorEvent(
@@ -181,6 +193,28 @@ describe('pr-feedback-event-queue', () => {
 		expect(first).toHaveLength(1);
 		expect(second).toHaveLength(1);
 		expect(second[0]?.claimedWorkflowInstanceId).toBe('workflow-a');
+	});
+
+	test('does not let a second workflow steal an already claimed event (FB-007)', async () => {
+		await enqueuePrFeedbackMonitorEvent(directory, SESSION_ID, event());
+
+		const first = await claimPrFeedbackMonitorEvents(
+			directory,
+			SESSION_ID,
+			'workflow-a',
+			'https://github.com/owner/repo/pull/42',
+		);
+		const second = await claimPrFeedbackMonitorEvents(
+			directory,
+			SESSION_ID,
+			'workflow-b',
+			'https://github.com/OWNER/REPO/pull/42/',
+		);
+
+		expect(first).toHaveLength(1);
+		expect(second).toEqual([]);
+		const queue = await readPrFeedbackMonitorQueue(directory, SESSION_ID);
+		expect(queue?.events[0]?.claimedWorkflowInstanceId).toBe('workflow-a');
 	});
 
 	test('claim can bind only the exact delivered dedup tokens', async () => {
@@ -302,6 +336,33 @@ describe('pr-feedback-event-queue', () => {
 		await enqueuePrFeedbackMonitorEvent(directory, SESSION_ID, event());
 		const queue = await readPrFeedbackMonitorQueue(directory, SESSION_ID);
 		expect(queue?.events).toHaveLength(1);
+	});
+
+	test('does not steal an old initialized lock from a live PID without fencing (PRR-007)', async () => {
+		const lockPath = path.join(
+			directory,
+			'.swarm',
+			_internals.queueLockRelativePath(SESSION_ID),
+		);
+		await fs.mkdir(path.dirname(lockPath), { recursive: true });
+		await fs.writeFile(
+			lockPath,
+			JSON.stringify({
+				ownerToken: 'live-owner-lock',
+				pid: 42,
+				createdAtMs: 1,
+			}),
+			'utf-8',
+		);
+		_internals.nowMs = () => 5 * 60_000 + 2;
+		_internals.isProcessAlive = () => true;
+
+		await expect(
+			enqueuePrFeedbackMonitorEvent(directory, SESSION_ID, event()),
+		).rejects.toThrow(/being mutated by another process/i);
+		expect(JSON.parse(await fs.readFile(lockPath, 'utf-8')).ownerToken).toBe(
+			'live-owner-lock',
+		);
 	});
 
 	test('reclaims an uninitialized stale lock file by age', async () => {

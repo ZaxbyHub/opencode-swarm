@@ -331,7 +331,7 @@ export interface PrWorkflowGateState {
 	prReviewHandoffPath?: string;
 	prReviewHandoffRequired?: boolean;
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
-	/** Canonical PR URL selected when PR_FEEDBACK was mechanically activated. */
+	/** HTTPS PR URL selected after canonical GitHub PR identity validation. */
 	prFeedbackTargetUrl?: string;
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
@@ -3487,6 +3487,7 @@ export const _test_exports = {
 		_test_exports.beforeTerminalClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
 		_test_exports.beforeBoundedSwarmFileOpen = undefined;
+		_test_exports.beforeSessionStateLockWrite = undefined;
 		_test_exports.beforeSafeDirectoryCreate = undefined;
 		_test_exports.beforeAtomicTempWrite = undefined;
 		_test_exports.beforeAtomicRename = undefined;
@@ -3496,6 +3497,7 @@ export const _test_exports = {
 		| (() => Promise<void>)
 		| undefined,
 	beforeBoundedSwarmFileOpen: undefined as (() => Promise<void>) | undefined,
+	beforeSessionStateLockWrite: undefined as (() => Promise<void>) | undefined,
 	beforeSafeDirectoryCreate: undefined as
 		| ((parentPath: string, nextPath: string) => Promise<void>)
 		| undefined,
@@ -5528,7 +5530,10 @@ async function acquireSessionStateMutationLock(
 	sessionID: string,
 ): Promise<{ path: string; ownerToken: string }> {
 	const lockPath = workflowGateStateLockPath(directory, sessionID);
-	await fsp.mkdir(path.dirname(lockPath), { recursive: true });
+	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
+		directory,
+		lockPath,
+	);
 	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
 		try {
 			const handle = await fsp.open(lockPath, 'wx');
@@ -5539,6 +5544,14 @@ async function acquireSessionStateMutationLock(
 			};
 			let writeError: unknown;
 			try {
+				await _test_exports.beforeSessionStateLockWrite?.();
+				await assertOpenedSwarmFileIdentity(
+					directory,
+					lockPath,
+					handle,
+					verifiedParent,
+					'PR workflow state mutation lock',
+				);
 				await handle.writeFile(JSON.stringify(lock), 'utf-8');
 			} catch (error) {
 				writeError = error;
