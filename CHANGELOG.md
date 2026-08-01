@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.134.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.0...v7.134.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* **advisory:** gate the advisory-injection defect class and structural defects ([c3b94c2](https://github.com/ZaxbyHub/opencode-swarm/commit/c3b94c20371f7691bce9f1ba360d79ee3f98a738))
+* **advisory:** gate the advisory-injection defect class and structural defects ([f22d470](https://github.com/ZaxbyHub/opencode-swarm/commit/f22d470a4af2be18aa75b006b43748ca857a3a65))
+* **skills:** correct misleading 'git branch' save-branch alternative ([31bb8ee](https://github.com/ZaxbyHub/opencode-swarm/commit/31bb8eef35a28b3c9e041064a5b0a69b8b169c8c))
+* **skills:** remove git stash instructions from subagent pre-flight checks ([2300293](https://github.com/ZaxbyHub/opencode-swarm/commit/2300293c8bb1c1c4613c66ab95782e3d800fdb2f))
+
 ## [7.134.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.133.0...v7.134.0) (2026-07-31)
 
 
