@@ -31,6 +31,7 @@ import {
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import { log } from '../../utils/logger';
 import {
 	dispatchWithModelFallback,
@@ -283,12 +284,12 @@ function pushDirtyTreeDowngradeAdvisory(
 	lanesAffected: string[] = [],
 ): void {
 	const session = ensureAgentSession(sessionID);
-	session.pendingAdvisoryMessages ??= [];
 	const affected =
 		lanesAffected.length > 0
 			? `; affected lanes: ${lanesAffected.join(', ')}`
 			: '';
-	session.pendingAdvisoryMessages.push(
+	pushAdvisory(
+		session,
 		`LEAN_TURBO_DIRTY_TREE_DOWNGRADE: ${reason}${affected}. Worktree isolation is OFF for this phase; lanes run in the shared working tree.`,
 	);
 }
@@ -1246,8 +1247,8 @@ export class LeanTurboRunner {
 						? getAgentSession(this._sessionID)
 						: undefined;
 					if (session) {
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: coder lane ${lane.laneId} failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
 						);
 					}

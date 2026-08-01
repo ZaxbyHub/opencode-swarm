@@ -48,6 +48,7 @@ import { enqueueCandidate } from '../learning/candidate-queue.js';
 import { recordPatternObservation } from '../learning/prm-pattern-support.js';
 import { getAgentSession } from '../state';
 import { telemetry } from '../telemetry';
+import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger.js';
 import {
 	formatCourseCorrectionForInjection,
@@ -141,6 +142,7 @@ interface ResettablePrmSessionState {
 	prmLastPatternDetected?: unknown;
 	prmHardStopPending?: boolean;
 	prmTrajectoryStep?: number;
+	prmInjectedAdvisoryKeys?: Set<string>;
 	replayArtifactPath?: string | null;
 }
 
@@ -155,6 +157,9 @@ export function resetPrmSessionState(
 	session.prmLastPatternDetected = null;
 	session.prmHardStopPending = false;
 	session.prmTrajectoryStep = 0;
+	// Clear cross-turn injection-dedupe state so a reset re-evaluates patterns
+	// fresh (issue #1976 B1).
+	session.prmInjectedAdvisoryKeys = new Set();
 	session.replayArtifactPath = null;
 
 	if (sessionId) {
@@ -371,7 +376,6 @@ export function createPrmHook(
 							escalationLevel: session.prmEscalationLevel,
 							lastPatternDetected: session.prmLastPatternDetected,
 							hardStopPending: session.prmHardStopPending,
-							correctionsPending: [],
 						}
 					: undefined;
 
@@ -392,12 +396,6 @@ export function createPrmHook(
 				const formattedCorrection =
 					_internals.formatCourseCorrectionForInjection(correction);
 
-				// Add to session pending advisory messages for injection
-				if (!session.pendingAdvisoryMessages) {
-					session.pendingAdvisoryMessages = [];
-				}
-				session.pendingAdvisoryMessages.push(formattedCorrection);
-
 				// Record detection for escalation tracking
 				let escalationLevel = 0;
 				let hardStopPending = false;
@@ -405,6 +403,35 @@ export function createPrmHook(
 					const escalationResult = escalationTracker.recordDetection(match);
 					escalationLevel = escalationResult.level;
 					hardStopPending = escalationResult.hardStop;
+				}
+
+				// Add to session pending advisory messages for injection.
+				// dedupeKey = pattern + escalationLevel so within-level re-detections
+				// (same pattern, new step window) dedupe, while genuine escalation
+				// (level 1→2→3) survives. recordDetection / counts / telemetry /
+				// replay below run unconditionally — only the INJECTION is gated.
+				// The key tag is embedded in the rendered message (same convention
+				// as council-advisory `[council:...]` and pr-event `[pr-monitor:...]`)
+				// so the helper's key-presence dedupe can match it despite the
+				// volatile step range in the alert line.
+				//
+				// B1 (issue #1976): the helper only dedupes WITHIN a turn (the drain
+				// clears pendingAdvisoryMessages each turn), so a per-tool-call
+				// re-detection of the same pattern@level would re-inject across
+				// turns. prmInjectedAdvisoryKeys is the cross-turn suppressor: skip
+				// injection once a (pattern, level) advisory has been delivered,
+				// until escalation advances to a new level (distinct key). This does
+				// NOT gate recordDetection/counts/telemetry/replay below.
+				const prmDedupeKey = `prm:${match.pattern}:${escalationLevel}`;
+				// Defensive: the field is initialized by ensureAgentSession, but
+				// guard so a session object lacking it (e.g. a minimal test mock)
+				// does not throw and abort the unconditional match-processing.
+				if (!session.prmInjectedAdvisoryKeys?.has(prmDedupeKey)) {
+					pushAdvisory(session, `[${prmDedupeKey}] ${formattedCorrection}`, {
+						dedupeKey: prmDedupeKey,
+					});
+					session.prmInjectedAdvisoryKeys ??= new Set();
+					session.prmInjectedAdvisoryKeys.add(prmDedupeKey);
 				}
 
 				// Update session PRM state fields
@@ -465,10 +492,6 @@ export function createPrmHook(
 					});
 				}
 			}
-
-			// Clear the corrections queue after all matches are injected so a batch
-			// cannot discard later matches before session state has observed them.
-			escalationTracker.clearPendingCorrections();
 
 			// Record escalation level change for replay (non-blocking, serialized)
 			if (

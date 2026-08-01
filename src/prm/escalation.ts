@@ -23,14 +23,6 @@ export function createDefaultEscalationState(): EscalationState {
 		escalationLevel: 0,
 		lastPatternDetected: null,
 		hardStopPending: false,
-		correctionsPending: [],
-	};
-}
-
-function cloneCourseCorrection(correction: CourseCorrection): CourseCorrection {
-	return {
-		...correction,
-		stepRange: [...correction.stepRange] as [number, number],
 	};
 }
 
@@ -50,7 +42,6 @@ function cloneEscalationState(state: EscalationState): EscalationState {
 				}
 			: null,
 		hardStopPending: state.hardStopPending,
-		correctionsPending: state.correctionsPending.map(cloneCourseCorrection),
 	};
 }
 
@@ -163,7 +154,6 @@ export class EscalationTracker {
 		if (newCount === 1) {
 			// Level 1: First detection - guidance via pendingAdvisoryMessages
 			const correction = generateCorrection(match, 1);
-			this._state.correctionsPending.push(correction);
 			this._state.escalationLevel = 1;
 
 			return {
@@ -174,7 +164,6 @@ export class EscalationTracker {
 		} else if (newCount === 2) {
 			// Level 2: Second detection - stronger guidance
 			const correction = generateCorrection(match, 2);
-			this._state.correctionsPending.push(correction);
 			this._state.escalationLevel = 2;
 
 			// Emit escalation event to telemetry
@@ -193,7 +182,6 @@ export class EscalationTracker {
 		} else {
 			// Level 3: Third or more detection - hard stop
 			const correction = generateCorrection(match, 3);
-			this._state.correctionsPending.push(correction);
 			this._state.escalationLevel = 3;
 			this._state.hardStopPending = true;
 
@@ -219,26 +207,10 @@ export class EscalationTracker {
 
 	/**
 	 * Resets all escalation counts and flags to their default values.
-	 * Clears pattern counts, corrections pending, and all flags.
+	 * Clears pattern counts and all flags.
 	 */
 	reset(): void {
 		this._state = createDefaultEscalationState();
-	}
-
-	/**
-	 * Returns defensive copies of all pending course corrections.
-	 *
-	 * @returns Array of pending CourseCorrection objects
-	 */
-	getPendingCorrections(): CourseCorrection[] {
-		return this._state.correctionsPending.map(cloneCourseCorrection);
-	}
-
-	/**
-	 * Clears all pending course corrections.
-	 */
-	clearPendingCorrections(): void {
-		this._state.correctionsPending = [];
 	}
 
 	/**

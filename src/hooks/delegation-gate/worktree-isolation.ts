@@ -17,6 +17,7 @@ import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { tryAcquireLock } from '../../parallel/file-locks';
 import { isValidEnvKey } from '../../sandbox/executor';
 import { ensureAgentSession, swarmState } from '../../state';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
 import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
@@ -323,8 +324,7 @@ function hardStopStandardWorktreeLifecycle(
 	message: string,
 ): never {
 	const session = ensureAgentSession(parentSessionID);
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(message);
+	pushAdvisory(session, message);
 	throw new Error(message);
 }
 
@@ -338,8 +338,8 @@ function serializeStandardWorktreeDispatches(
 		// the release mechanism (checkStandardWorktreeSerializationRelease) needs
 		// the tracking entry. Let the session continue in normal parallel mode.
 		const session = ensureAgentSession(sessionID);
-		session.pendingAdvisoryMessages ??= [];
-		session.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			session,
 			`${message} Serialization tracking is at capacity (256 sessions active); ` +
 				`continuing in normal parallel mode.`,
 		);
@@ -347,8 +347,8 @@ function serializeStandardWorktreeDispatches(
 	}
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = 1;
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
+	pushAdvisory(
+		session,
 		`${message} Serializing standard coder dispatches for this session.`,
 	);
 }
@@ -372,8 +372,8 @@ function releaseStandardWorktreeSerialization(sessionID: string): boolean {
 	serializationStateBySessionID.delete(sessionID);
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = undefined;
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
+	pushAdvisory(
+		session,
 		`WORKTREE_SERIALIZATION_RELEASED: ${sessionID} regains parallel dispatch eligibility (release-after-dispatches or TTL).`,
 	);
 	return true;
@@ -907,15 +907,20 @@ export async function precreateStandardWorktreeSession(args: {
 	const resolvedDeps = worktreeConfig.deps_strategy ?? 'skip';
 	if (resolvedDeps === 'skip') {
 		const desc = (args.description ?? args.taskId ?? '').toLowerCase();
+		// B4 (issue #1976): use word-boundary matching instead of bare includes().
+		// `includes('test')` matched 'latest'/'attest'; `includes('check')` matched
+		// 'checkout'/'unchecked' — firing the deps-skip advisory for tasks whose
+		// descriptions merely contain those substrings without actually running
+		// test/build/lint/check commands.
 		const mayNeedDeps =
-			desc.includes('test') ||
-			desc.includes('build') ||
-			desc.includes('lint') ||
-			desc.includes('check');
+			/\btests?\b/.test(desc) ||
+			/\bbuild(ing|s)?\b/.test(desc) ||
+			/\blint(ing|er)?\b/.test(desc) ||
+			/\bchecks?\b/.test(desc);
 		if (mayNeedDeps) {
 			const session = ensureAgentSession(args.parentSessionID);
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				session,
 				`WORKTREE_DEPS_SKIP: task ${args.taskId} was provisioned with deps_strategy: 'skip' (default). This task's gates appear to include test/build commands; the lane may lack node_modules. Set worktree.deps_strategy to 'copy' or 'link' (or use a non-worktree lane) if the task requires host dependencies.`,
 			);
 		}
@@ -1276,8 +1281,8 @@ export async function preserveDirtyWorktreeForCallId(
 
 	// Push advisory
 	const session = ensureAgentSession(parentSessionID);
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
+	pushAdvisory(
+		session,
 		`STANDARD_WORKTREE_PRESERVED: dispatch ${callID} dirty work preserved as commit ${commitHash} (tag: ${tagName}; reason: ${reason}); worktree will be cleaned.`,
 	);
 
@@ -1602,8 +1607,8 @@ export async function cleanupStandardWorktreeForCallId(
 		awaitingMergeByCallID.delete(callID);
 
 		const session = ensureAgentSession(parentSessionID);
-		session.pendingAdvisoryMessages ??= [];
-		session.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			session,
 			`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: dispatch ${callID} has dirty uncommitted work but preservation failed (${preserveResult.error}). ` +
 				`Cleanup aborted to protect uncommitted work. Investigate and resolve manually. ` +
 				`Worktree=${worktreePath}; branch=${branchName}.`,
@@ -1641,8 +1646,8 @@ export async function cleanupStandardWorktreeForCallId(
 	awaitingMergeByCallID.delete(callID);
 
 	const session = ensureAgentSession(parentSessionID);
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
+	pushAdvisory(
+		session,
 		`STANDARD_WORKTREE_CLEANUP: dispatch ${callID} cleaned up (reason: ${reason}); worktree=${worktreePath}; branch=${branchName}.`,
 	);
 }
@@ -1667,8 +1672,8 @@ export async function abortStandardWorktreeDispatch(
 	if (!dispatch) {
 		// No entry — either never provisioned or already cleaned up.
 		const session = ensureAgentSession('unknown');
-		session.pendingAdvisoryMessages ??= [];
-		session.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			session,
 			`STANDARD_WORKTREE_ABORT_NOOP: dispatch ${callID} has no tracked worktree to abort (reason: ${reason}).`,
 		);
 		return;
@@ -1747,8 +1752,8 @@ export async function finishStandardWorktreeDispatch(
 						completedAt: Date.now(),
 					});
 					const session = ensureAgentSession(dispatch.parentSessionID);
-					session.pendingAdvisoryMessages ??= [];
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`STANDARD_WORKTREE_SETTLEMENT_PERSIST_FAILED: task ${dispatch.taskId} landed in ${directory}, but settlement persistence failed; worktree and branch preserved at ${dispatch.handle.worktreePath} (${dispatch.handle.branchName}).`,
 					);
 					return failedSettlement;
@@ -1803,8 +1808,8 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				session,
 				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
 			);
 
@@ -1833,8 +1838,8 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				session,
 				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
 

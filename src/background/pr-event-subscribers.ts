@@ -27,6 +27,7 @@
 import type { PrMonitorConfig } from '../config/schema';
 import { getAgentSession } from '../state';
 import { log } from '../utils';
+import { pushAdvisory } from '../utils/advisory-queue';
 import type { AutomationEventType, EventListener } from './event-bus';
 import { getGlobalEventBus } from './event-bus';
 import {
@@ -198,7 +199,7 @@ async function handlePrEvent(
 	const message = formatAdvisory(event.type, payload);
 	if (!message) return;
 
-	const dedupToken = `[pr-monitor:${event.type}:${payload.repoFullName}#${payload.prNumber}]`;
+	const dedupToken = buildPrEventToken(event.type, payload);
 
 	// Build optional MODE signal when auto_pr_feedback is enabled
 	const modeSignal =
@@ -257,17 +258,16 @@ async function handlePrEvent(
 			continue;
 		}
 
-		session.pendingAdvisoryMessages ??= [];
-		// Dedup: skip if the advisory for this PR+event type was already delivered.
-		// The advisory body always starts with the dedupToken, so scanning all
-		// pending messages detects duplicates regardless of interleaving order.
-		const isDuplicate = session.pendingAdvisoryMessages.some((msg) =>
-			msg.includes(dedupToken),
-		);
-		if (isDuplicate) {
+		// Dedup + cap via the shared pushAdvisory helper. The dedupeToken (from
+		// buildPrEventToken) is embedded at the start of the advisory body
+		// (formatAdvisory uses the same builder), so it serves as the
+		// key-presence identity. Content events (comments/reviews) already carry
+		// per-event identity (@author:content-hash); state events keep the
+		// per-PR token (issue #1976 B8).
+		const delivered = pushAdvisory(session, message, { dedupeKey: dedupToken });
+		if (!delivered) {
 			continue;
 		}
-		session.pendingAdvisoryMessages.push(message);
 		_internals.scheduleClearUnaddressed(directory, sub.correlationId);
 		_internals.log(
 			`[pr-monitor] Delivered ${event.type} advisory to session ${sub.sessionID}`,
@@ -275,7 +275,7 @@ async function handlePrEvent(
 
 		// Inject MODE signal alongside the advisory
 		if (modeSignal) {
-			session.pendingAdvisoryMessages.push(modeSignal);
+			pushAdvisory(session, modeSignal);
 			_internals.log(
 				`[pr-monitor] Injected PR_FEEDBACK mode signal for session ${sub.sessionID} (${event.type})`,
 			);
@@ -325,12 +325,62 @@ function scheduleClearUnaddressed(
 }
 
 /**
+ * Build the dedup/identity token for a PR event advisory.
+ *
+ * B8 (issue #1976): the legacy token `[pr-monitor:<type>:<repo>#<n>]` lacked
+ * per-event identity, so N distinct comments on one PR collapsed to 1 advisory
+ * (the dedupe check matched on the shared token). Content events (comments,
+ * reviews) now fold in the author + a short content fingerprint so distinct
+ * events survive dedupe while a re-delivered identical event is suppressed.
+ * State events (CI pass/fail, merge-conflict) keep the per-PR token because
+ * re-reporting the same state IS the intended dedupe.
+ *
+ * The token always starts with `[pr-monitor:` so the non-architect drain's
+ * TRANSIENT_PREFIXES filter (messages-transform.ts) still recognizes it. This
+ * is the SINGLE source of truth — handlePrEvent, formatAdvisory, and the
+ * wake-channel payload all call it, avoiding the twin-token-construction
+ * hazard where changing one builder silently broke dedupe.
+ */
+const CONTENT_EVENT_TYPES = new Set([
+	'pr.new.comment',
+	'pr.review.changes_requested',
+	'pr.review.approved',
+	'pr.review.comment',
+]);
+
+function shortHash(input: string): string {
+	// Small deterministic fingerprint (not cryptographic). base36 keeps the
+	// token short and token-safe.
+	let h = 0;
+	for (let i = 0; i < input.length; i++) {
+		h = (h * 31 + input.charCodeAt(i)) | 0;
+	}
+	return (h >>> 0).toString(36);
+}
+
+function buildPrEventToken(type: string, payload: PrEventPayload): string {
+	const base = `[pr-monitor:${type}:${payload.repoFullName}#${payload.prNumber}`;
+	if (!CONTENT_EVENT_TYPES.has(type)) {
+		return `${base}]`;
+	}
+	// Content event: fold in author + content fingerprint.
+	const author = payload.author ?? 'unknown';
+	const content = (
+		payload.body ??
+		payload.checkName ??
+		payload.reviewDecision ??
+		''
+	).slice(0, 80);
+	return `${base}@${author}:${shortHash(content)}]`;
+}
+
+/**
  * Format a structured advisory message for the given PR event type.
  * Returns null for unknown event types. The first token is always the
- * dedup token `[pr-monitor:<type>:<repo>#<n>]`.
+ * dedup token from buildPrEventToken.
  */
 function formatAdvisory(type: string, payload: PrEventPayload): string | null {
-	const dedupToken = `[pr-monitor:${type}:${payload.repoFullName}#${payload.prNumber}]`;
+	const dedupToken = buildPrEventToken(type, payload);
 
 	switch (type) {
 		case 'pr.ci.failed': {

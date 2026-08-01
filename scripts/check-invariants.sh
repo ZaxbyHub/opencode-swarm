@@ -333,6 +333,7 @@ else
 fi
 
 echo ""
+
 echo "=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ==="
 # A positional `.slice(0, 20)` on a knowledge array field keeps the FIRST 20
 # items without deduplicating: duplicates survive AND, because the cap is
@@ -592,11 +593,19 @@ echo "Scope: $KNOWLEDGE_DEDUP_SCOPE"
 echo "Files scanned: $slice_scanned"
 echo "Unguarded positional caps: $slice_violations (expected 0 — no exempt list by design)"
 
+echo "=== Check 6: no raw pendingAdvisoryMessages.push outside the helper (issue #1976) ==="
+# Advisory-injection gating ratchet: every producer must route through
+# pushAdvisory() (src/utils/advisory-queue.ts) so the queue gets dedupe +
+# length cap by construction. Delegate to the standalone script so the logic
+# and fix instructions live in one place.
+if ! bash "$(dirname "$0")/check-no-raw-advisory-push.sh"; then
+  violations=$((violations + 1))
+fi
 echo ""
 echo "=== Summary ==="
 echo "Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |"
 echo "            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |"
-echo "            5 (knowledge array dedup guardrail)"
+echo "            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet)"
 if [ "$violations" -gt 0 ]; then
   echo "$violations invariant violation(s) found."
   exit 1

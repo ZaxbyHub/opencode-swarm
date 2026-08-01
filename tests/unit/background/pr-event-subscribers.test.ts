@@ -339,9 +339,76 @@ describe('handlePrEvent', () => {
 		expect(session.pendingAdvisoryMessages[0]).toContain('pr.new.comment');
 		expect(session.pendingAdvisoryMessages[0]).toContain('@reviewer');
 		expect(session.pendingAdvisoryMessages[0]).toContain('LGTM!');
+		// B8 (issue #1976): content events carry a per-event identity suffix.
 		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:org/repo#99]',
+			'[pr-monitor:pr.new.comment:org/repo#99',
 		);
+	});
+
+	test('issue #1976 B8: N distinct comments on one PR produce N advisories (not 1)', async () => {
+		// The legacy per-PR dedup token collapsed all comments on a PR to a single
+		// advisory (N comments → 1 advisory, N−1 silently dropped). The per-event
+		// identity suffix (@author:content-hash) lets distinct comments survive.
+		const session = makeMockSession('sess-b8');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const comments = [
+			{ author: 'alice', body: 'looks good' },
+			{ author: 'bob', body: 'please fix the typo' },
+			{ author: 'alice', body: 'fixed, rebased' },
+		];
+		for (const c of comments) {
+			await _internals.handlePrEvent(
+				{
+					type: 'pr.new.comment',
+					payload: {
+						prNumber: 42,
+						repoFullName: 'owner/repo',
+						prUrl: 'https://github.com/owner/repo/pull/42',
+						author: c.author,
+						body: c.body,
+					},
+				},
+				TEST_DIR,
+				makeConfig(),
+			);
+		}
+
+		// Three distinct comments → three distinct per-event tokens → three advisories.
+		expect(session.pendingAdvisoryMessages).toHaveLength(3);
+	});
+
+	test('issue #1976 B8: an identical re-delivered comment is deduped', async () => {
+		// Per-event identity still suppresses a byte-identical re-delivery of the
+		// SAME comment (same author + same body → same token).
+		const session = makeMockSession('sess-b8b');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8b' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const payload = {
+			prNumber: 42,
+			repoFullName: 'owner/repo',
+			prUrl: 'https://github.com/owner/repo/pull/42',
+			author: 'alice',
+			body: 'same comment twice',
+		};
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 	});
 
 	test('delivers pr.merge.conflict advisory to subscribed session', async () => {
@@ -798,8 +865,11 @@ describe('formatAdvisory', () => {
 			makeConfig(),
 		);
 
+		// B8 (issue #1976): content events (comments/reviews) carry a per-event
+		// identity suffix (@author:hash) before the closing bracket, so assert
+		// the stable token PREFIX rather than the exact per-PR token.
 		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:owner/repo#42]',
+			'[pr-monitor:pr.new.comment:owner/repo#42',
 		);
 	});
 

@@ -28,6 +28,7 @@ import {
 } from '../../review/runtime';
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -635,8 +636,8 @@ export async function dispatchPhaseReviewer(
 				);
 				const session = getAgentSession(sessionID);
 				if (session) {
-					session.pendingAdvisoryMessages ??= [];
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`MODEL FALLBACK: reviewer failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
 					);
 				}

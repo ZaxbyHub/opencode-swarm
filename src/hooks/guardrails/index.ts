@@ -31,6 +31,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import * as logger from '../../utils/logger';
 import {
 	extractStatusCode,
@@ -789,8 +790,8 @@ export function createGuardrailsHooks(
 							if (session.coderRevisions >= maxRevisions) {
 								session.revisionLimitHit = true;
 								telemetry.revisionLimitHit(input.sessionID, session.agentName);
-								session.pendingAdvisoryMessages ??= [];
-								session.pendingAdvisoryMessages.push(
+								pushAdvisory(
+									session,
 									`CODER REVISION LIMIT: Agent has been revised ${session.coderRevisions} times ` +
 										`(max: ${maxRevisions}) for task ${session.currentTaskId ?? 'unknown'}. ` +
 										`Escalate to user or consider a fundamentally different approach.`,
@@ -889,8 +890,9 @@ export function createGuardrailsHooks(
 					// discarding exactly the context an orchestrating architect has
 					// been assembling. Advice that destroys the user's work is worse
 					// than no advice, so the recovery hint is gone; the observation
-					// remains.
-					session.pendingAdvisoryMessages.push(
+					// remains. Route through pushAdvisory for dedupe + cap (issue #1976).
+					pushAdvisory(
+						session,
 						`WARNING: Agent has made ${count} tool calls with no file modifications and no subagent dispatches. If you are stuck, state what is blocking you and report BLOCKED rather than continuing to probe.`,
 					);
 				}
@@ -1025,27 +1027,29 @@ export function createGuardrailsHooks(
 							!fallbackModels ||
 							session.model_fallback_index > fallbackModels.length;
 
-						session.pendingAdvisoryMessages ??= [];
 						if (isContentFilter) {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Content policy violation detected (content filter). Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
 									`The input may need content modification to comply with provider policies.`,
 							);
 						} else {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Context-limit or token-limit error detected. Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
 									`Consider reducing input size or using /swarm handoff to switch models.`,
 							);
 						}
 					} else if (session) {
-						session.pendingAdvisoryMessages ??= [];
 						if (isContentFilter) {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Content policy violation detected (content filter). No fallback models available. ` +
 									`The input may need content modification to comply with provider policies.`,
 							);
 						} else {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Context-limit or token-limit error detected. No fallback models available. ` +
 									`Consider reducing input size or add "fallback_models" config.`,
 							);
@@ -1090,15 +1094,15 @@ export function createGuardrailsHooks(
 							swarmAgents[baseAgentName].model = fallbackModel;
 						}
 
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` +
 								`Using /swarm handoff to reset to primary model.`,
 						);
 						modelFallbackAdvisoryEmitted = true;
 					} else {
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: Transient model error detected (attempt ${session.model_fallback_index}). ` +
 								`No fallback models configured for this agent. Add "fallback_models": ["model-a", "model-b"] ` +
 								`to the agent's config in opencode-swarm.json.`,
@@ -1123,15 +1127,15 @@ export function createGuardrailsHooks(
 					isTransientMatch &&
 					!modelFallbackAdvisoryEmitted
 				) {
-					session.pendingAdvisoryMessages ??= [];
 					if (
-						!session.pendingAdvisoryMessages.some(
+						!session.pendingAdvisoryMessages?.some(
 							(m: string) =>
 								m.startsWith('TRANSIENT ERROR:') ||
 								m.startsWith('MODEL FALLBACK:'),
 						)
 					) {
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${maxTransientRetries}). Retrying...`,
 						);
 					}
