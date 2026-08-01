@@ -44,9 +44,11 @@ argv changes from an invalid suffixed form to the required plain-byte form.
 
 ## Caveats
 
-- Validated via unit tests (`tests/unit/sandbox/linux.test.ts`,
-  `tests/unit/sandbox/linux-envoverride-verification.test.ts`) and a clean
-  `bun run build`. A live `bwrap --size 524288000 --tmpfs /tmp …` end-to-end
-  smoke test on a Linux host with bwrap installed is the gold-standard
-  confirmation; the parse contract was confirmed against the bwrap manpage and
-  upstream `bubblewrap.c` source.
+- The `--size` byte-count fix is validated by unit tests in
+  `tests/unit/sandbox/linux.test.ts`, which assert the `--size <bytes> --tmpfs`
+  adjacency bwrap requires. (`tests/unit/sandbox/linux-envoverride-verification.test.ts`
+  exercises `wrapCommand()` env-override paths but asserts no size value.)
+  Also confirmed by a clean `bun run build`. A live
+  `bwrap --size 524288000 --tmpfs /tmp …` end-to-end smoke test on a Linux host
+  with bwrap installed is the gold-standard confirmation; the parse contract was
+  confirmed against the bwrap manpage and upstream `bubblewrap.c` source.

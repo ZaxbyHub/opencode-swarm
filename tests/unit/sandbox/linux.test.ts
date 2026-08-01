@@ -141,10 +141,12 @@ describe('BubblewrapSandboxExecutor', () => {
 
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/tmp');
-			expect(result).toContain('--size');
 			// bwrap --size requires a plain decimal byte count, not a suffixed
 			// value like "500M" (issue #1997). 500 MiB = 524288000 bytes.
-			expect(result).toContain('524288000');
+			// bwrap also binds --size to the NEXT --tmpfs, so assert the two
+			// appear as an adjacent argv pair (`--size <bytes> --tmpfs`), not
+			// just as independent substrings (PRR-001/PRR-002 hardening).
+			expect(result).toContain('--size 524288000 --tmpfs');
 			expect(result).not.toContain('500M');
 		});
 
@@ -153,8 +155,7 @@ describe('BubblewrapSandboxExecutor', () => {
 
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/custom/tmp');
-			expect(result).toContain('--size');
-			expect(result).toContain('524288000');
+			expect(result).toContain('--size 524288000 --tmpfs');
 			expect(result).not.toContain('500M');
 		});
 
