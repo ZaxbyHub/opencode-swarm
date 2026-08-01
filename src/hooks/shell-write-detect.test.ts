@@ -382,13 +382,13 @@ describe('interpreter eval', () => {
 	test('glued python -c flag: -c<code> (no space) is flagged as eval (issue #1928)', () => {
 		// `python -c'print(1)'` passes `-cprint(1)` as a single token after shell quoting.
 		// The interpreter-eval guard must match even when the code is glued to the flag.
-		expectWrites("python -c'import os; os.remove(\"f\")'", [
+		expectWrites('python -c\'import os; os.remove("f")\'', [
 			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
 		]);
 	});
 
 	test('glued node -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("node -e'require(\"fs\").writeFileSync(\"x\",\"y\")'", [
+		expectWrites('node -e\'require("fs").writeFileSync("x","y")\'', [
 			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
 		]);
 	});

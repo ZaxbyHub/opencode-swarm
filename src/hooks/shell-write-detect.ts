@@ -568,7 +568,11 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			}
 			if (!pastDoubleDash && word.startsWith('-')) continue;
 			if (word && !isNullDevice(word)) {
-				results.push({ category: 'builtin_write', operator: 'tee', path: word });
+				results.push({
+					category: 'builtin_write',
+					operator: 'tee',
+					path: word,
+				});
 			}
 		}
 		return results;
@@ -705,7 +709,9 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	const relevantFlags = evalFlags[lowerName] ?? [];
 	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
 	const hasEvalFlag = suffixWords.some((word) =>
-		relevantFlags.some((f) => word === f || (word.startsWith(f) && word.length > f.length)),
+		relevantFlags.some(
+			(f) => word === f || (word.startsWith(f) && word.length > f.length),
+		),
 	);
 
 	if (!hasEvalFlag) return [];
