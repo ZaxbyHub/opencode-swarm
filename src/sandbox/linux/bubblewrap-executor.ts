@@ -20,6 +20,13 @@ const BWRAP_VERSION_EXIT = 0;
 const BWRAP_UNAVAILABLE_CODES = new Set(['ENOENT', 'EACCES', 'ENOSPC']);
 
 /**
+ * Size in bytes for the /tmp tmpfs (500 MiB).
+ * bwrap --size requires a plain non-zero decimal byte count; suffixes (M, MB)
+ * are rejected with "--size takes a non-zero number of bytes" (issue #1997).
+ */
+const TMPFS_SIZE_BYTES = 524288000; // 500 * 1024 * 1024
+
+/**
  * Check whether the bwrap binary is present on PATH.
  * Uses spawnSync to probe synchronously without throwing.
  * Logs specific error codes when bwrap is found but unusable.
@@ -221,7 +228,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'--dev',
 			'/dev',
 			'--size',
-			'500M',
+			String(TMPFS_SIZE_BYTES),
 			'--tmpfs',
 			`'${shellEscape(temp)}'`,
 			'--ro-bind',
