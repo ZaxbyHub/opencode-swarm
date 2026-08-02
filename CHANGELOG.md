@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.135.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.3...v7.135.0) (2026-08-02)
+
+
+### Features
+
+* **pr-monitor,status,context-map:** FR-008 timing/snapshot-delta/3x cap; FR-010/011/012 heartbeat staleness; FR-013/014/015 stats command ([2b9c372](https://github.com/ZaxbyHub/opencode-swarm/commit/2b9c372e300fc66b756ddea2a325ee912764c716))
+
 ## [7.134.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.2...v7.134.3) (2026-08-02)
 
 
