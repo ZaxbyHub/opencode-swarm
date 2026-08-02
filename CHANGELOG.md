@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.134.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.2...v7.134.3) (2026-08-02)
+
+
+### Bug Fixes
+
+* **ci:** stabilize PR workflow unit shard ([aa485b0](https://github.com/ZaxbyHub/opencode-swarm/commit/aa485b0440d98ea189493220ac825107dd74d8d0))
+* **pr-workflow:** address review and ci feedback ([47693d3](https://github.com/ZaxbyHub/opencode-swarm/commit/47693d3ee344bcae8bb4ebbcb5be05af751f9d38))
+* **pr-workflow:** harden startup and feedback transition ([5ace3f6](https://github.com/ZaxbyHub/opencode-swarm/commit/5ace3f60249486e030d022157835ec020f64105c))
+
 ## [7.134.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.134.1...v7.134.2) (2026-08-01)
 
 
