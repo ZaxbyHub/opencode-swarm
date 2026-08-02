@@ -352,6 +352,95 @@ export function getAuthorizedScopeBindingByPlanIdentity(input: {
 	return matches.length === 1 ? matches[0] : null;
 }
 
+/**
+ * Issue #2002 recurrence guardrail (detection half).
+ *
+ * The defect class is: *a hook constructed once with the plugin-root
+ * `ctx.directory` applies that root to sessions that actually execute in a
+ * different root.* Its signature failure is silent — a binding for this exact
+ * session exists and is otherwise valid, but `workspaceIdentity` (filter
+ * condition #1 in `getAuthorizedScopeBindingByPlanIdentity`) never matches, so
+ * the lookup returns null and the caller reports a generic
+ * `SCOPE_NOT_DECLARED` that names neither root.
+ *
+ * This turns that silence into a precise, self-describing diagnostic at the one
+ * user-visible failure site (`src/hooks/scope-guard.ts`). It catches the class
+ * at ANY call site that resolves a binding with the wrong root — present or
+ * future — rather than only at the two gates fixed for this issue.
+ *
+ * Diagnostic-only: never grants or denies authorization. Callers still fall
+ * back to the ordinary `SCOPE_NOT_DECLARED` denial whenever this returns null.
+ *
+ * The candidate filter mirrors every non-workspace correlation clause
+ * `getAuthorizedScopeBindingByPlanIdentity` requires for an otherwise-valid
+ * Task-scoped authorization — dispatch correlation (`dispatchCallId` present
+ * and equal to `ownerMessageId`/`parentCallId`) plus a genuine parent/child
+ * session split — so a stale or malformed "active" leftover that never went
+ * through the real claim/derive path cannot be mislabeled as a workspace
+ * mismatch just because it happens to share session + task + `activation`.
+ * `pr_feedback` bindings are excluded outright: they resolve through an
+ * entirely separate authorization path
+ * (`getAuthorizedPrFeedbackScopeBinding` / `resolveAuthorizedPrFeedbackScopeBindingFromDisk`)
+ * that the caller already attempted before falling into this diagnostic, and
+ * a live `pr_feedback` binding otherwise satisfies every correlation clause
+ * above.
+ *
+ * `planId`/`planStructureHash` are deliberately NOT compared here: a
+ * plan-drifted binding at the SAME root is already excluded by the
+ * `workspaceIdentity` clause below (it would never have reached this
+ * diagnostic branch in the first place — the ordinary lookup would have
+ * rejected it on plan identity, not returned null for lack of a match at
+ * all). Reading the plan at `input.directory` to compare identities would
+ * also be unreliable here: `input.directory` is, by construction, the root
+ * this diagnostic suspects is wrong, so its `.swarm/plan.json` may not exist
+ * or may belong to an unrelated project — silently disabling the guardrail
+ * exactly where it matters most.
+ *
+ * Returns null (no mismatch claim) whenever `input.directory` itself cannot
+ * be resolved to a canonical identity (e.g. a deleted lane directory) —
+ * otherwise every active binding for the session would trivially satisfy
+ * `workspaceIdentity !== null`, misreporting a missing-directory failure as a
+ * wrong-root failure.
+ *
+ * @param input.directory - The root the caller resolved against
+ * @param input.activeSessionId - The session attempting the write
+ * @param input.taskId - Optional task filter
+ * @returns A human-readable mismatch description, or null
+ */
+export function describeScopeWorkspaceMismatch(input: {
+	directory: string;
+	activeSessionId: string;
+	taskId?: string | null;
+}): string | null {
+	sweepExpired();
+	if (!input.activeSessionId.trim()) return null;
+	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
+	if (!workspaceIdentity) return null;
+	const mismatched = [...pendingScopeBindings.values()].filter(
+		(binding) =>
+			binding.ownerSessionId === input.activeSessionId &&
+			binding.activation === 'active' &&
+			binding.source !== 'pr_feedback' &&
+			(!input.taskId || binding.taskId === input.taskId) &&
+			typeof binding.dispatchCallId === 'string' &&
+			binding.dispatchCallId.length > 0 &&
+			binding.ownerMessageId === binding.dispatchCallId &&
+			typeof binding.parentOwnerSessionId === 'string' &&
+			binding.parentOwnerSessionId.length > 0 &&
+			binding.ownerSessionId !== binding.parentOwnerSessionId &&
+			binding.parentCallId === binding.dispatchCallId &&
+			binding.workspaceIdentity !== workspaceIdentity,
+	);
+	const first = mismatched[0];
+	if (!first) return null;
+	return (
+		`SCOPE_WORKSPACE_MISMATCH: an active scope binding for session ` +
+		`"${input.activeSessionId}" (task ${first.taskId}, source ${first.source}) is rooted at ` +
+		`"${first.workspaceIdentity}", but this gate resolved "${workspaceIdentity}". ` +
+		`The gate is using the wrong workspace root for this session.`
+	);
+}
+
 export function clearScopeBindings(
 	predicate?: (binding: ScopeBinding) => boolean,
 ): ScopeBinding[] {
@@ -447,7 +536,17 @@ export function deriveChildScopeBinding(
 	};
 }
 
-function scopeContains(scope: readonly string[], candidate: string): boolean {
+/**
+ * Containment predicate shared by every scope consumer: a candidate path is
+ * covered by a scope entry when it is that entry or lives beneath it. Exported
+ * so authority-minting callers (e.g. the Lean Turbo lane publisher) narrow a
+ * candidate file set against plan authority using the *same* semantics the
+ * write gates later enforce, instead of re-implementing containment.
+ */
+export function scopeContains(
+	scope: readonly string[],
+	candidate: string,
+): boolean {
 	return scope.some(
 		(entry) => candidate === entry || candidate.startsWith(`${entry}/`),
 	);

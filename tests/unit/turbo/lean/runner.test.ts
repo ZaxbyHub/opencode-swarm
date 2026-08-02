@@ -4144,4 +4144,112 @@ describe('FR-106: dirty-tree downgrade advisory', () => {
 			LeanTurboRunner._internals.removeWorktree = origRemove;
 		}
 	});
+
+	test('FR-106 regression: an absent architect session is never minted — the advisory is emitted via criticalWarn (always-on stderr), not delivered, and no identity is created from a caller-supplied id', async () => {
+		// Deliberately do NOT call startTestSession() here. Every other FR-106
+		// test above pre-registers SESSION_ID via
+		// `startAgentSession(SESSION_ID, 'architect')`, which is exactly why the
+		// prior lookup-only regression (pushDirtyTreeDowngradeAdvisory silently
+		// dropping the advisory when the session was absent) was invisible to
+		// this suite. This test resets state and never re-registers the
+		// session, so the advisory push meets a genuinely absent session — the
+		// case where it must emit via criticalWarn and mint nothing.
+		resetSwarmState();
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		// Sanity check: the session must be genuinely absent going in, or this
+		// test would pass vacuously.
+		expect(swarmState.agentSessions.get(SESSION_ID)).toBeUndefined();
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to return dirty, same as SC-118.
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.resolve({
+				clean: false,
+				error: 'uncommitted changes in src/',
+			}),
+		);
+
+		// Mock provisionWorktree to avoid being called (degraded).
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Capture console.warn directly (not via mock.module — this file's
+		// documented strategy is "No mock.module usage — all mocking via
+		// instance seam or _internals"). `criticalWarn` (src/utils/logger.ts)
+		// writes to stderr through console.warn unconditionally; `log()`/`warn()`
+		// only reach console under OPENCODE_SWARM_DEBUG=1, and even then `warn()`
+		// tags its line `WARN:` rather than `CRITICAL-WARN:`. Capturing here
+		// (rather than mocking the logger module) means the assertion below
+		// fails if the production call is deleted OR swapped to `log`/`warn`,
+		// in every environment — not just when debug logging happens to be off.
+		const capturedWarnCalls: unknown[][] = [];
+		const originalConsoleWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			capturedWarnCalls.push(args);
+		};
+
+		try {
+			await runner.runPhase(1);
+
+			// No session may be minted for an absent id. `sessionID` reaches the
+			// runner from the `lean_turbo_run_phase` tool's zod `sessionID`
+			// argument, so it is caller-supplied.
+			//
+			// NOT because 'architect' would be more permissive than 'unknown' —
+			// it is not. scope-guard.ts early-returns for BOTH ('isArchitect'
+			// and 'agentRole !== coder'), and on the shell path 'unknown' is
+			// strictly MORE permissive, because noScopeLenient in
+			// guardrails/tool-before.ts is `!isArch && !isCoder && …` and skips
+			// the authority check for 'unknown' only. The reason is simply that
+			// minting writes a durable, cross-hook identity assertion into
+			// swarmState.activeAgent for an id the plugin never issued.
+			// See the block comment on pushDirtyTreeDowngradeAdvisory.
+			//
+			// The advisory is emitted via criticalWarn instead of delivered, so
+			// it stays observable without minting authority.
+			expect(swarmState.agentSessions.get(SESSION_ID)).toBeUndefined();
+			expect(swarmState.activeAgent.get(SESSION_ID)).toBeUndefined();
+		} finally {
+			console.warn = originalConsoleWarn;
+			LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+		}
+
+		// Emission half of the guarantee: pushDirtyTreeDowngradeAdvisory
+		// (src/turbo/lean/runner.ts) must have actually called criticalWarn with
+		// the advisory code, the "not delivered" wording, and the session id —
+		// not merely skipped minting. Deleting the criticalWarn call, or
+		// swapping it for `log(...)`/`warn(...)`, leaves the non-minting
+		// assertions above passing byte-identically while this fails.
+		const dirtyTreeAdvisoryCall = capturedWarnCalls.find((call) =>
+			call.some(
+				(arg) =>
+					typeof arg === 'string' &&
+					arg.includes('CRITICAL-WARN:') &&
+					arg.includes('LEAN_TURBO_DIRTY_TREE_DOWNGRADE') &&
+					arg.includes(
+						`(advisory not delivered: session ${SESSION_ID} is not registered)`,
+					),
+			),
+		);
+		expect(dirtyTreeAdvisoryCall).toBeDefined();
+	});
 });

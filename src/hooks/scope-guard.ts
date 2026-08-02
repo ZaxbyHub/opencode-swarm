@@ -12,13 +12,20 @@
 import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { getAuthorizedPrFeedbackScopeBinding } from '../scope/scope-binding';
+import {
+	describeScopeWorkspaceMismatch,
+	getAuthorizedPrFeedbackScopeBinding,
+} from '../scope/scope-binding';
 import {
 	resolveAuthorizedPrFeedbackScopeBindingFromDisk,
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
 } from '../scope/scope-persistence';
-import { type AgentSessionState, swarmState } from '../state';
+import {
+	type AgentSessionState,
+	resolveSessionWorkspaceDirectory,
+	swarmState,
+} from '../state';
 import { normalizeToolName } from './normalize-tool-name';
 import { validatePrFeedbackScopeBinding } from './pr-workflow-gate';
 import { resolveWriteTargets } from './write-target-resolver';
@@ -44,12 +51,17 @@ export interface ScopeGuardConfig {
 /**
  * Creates the scope-guard hook that blocks out-of-scope writes.
  * @param config - ScopeGuardConfig (enabled, skip_in_turbo)
- * @param _directory - The workspace directory (reserved for future use)
+ * @param fallbackDirectory - The plugin-root directory (`ctx.directory`). Used
+ *   ONLY as the fallback for sessions with no recorded workspace root. Issue
+ *   #2002: this hook is constructed once per plugin instance and serves every
+ *   session, including worktree-isolated coder children that execute in a
+ *   different root — so this value must never be used directly as "the
+ *   directory" inside the handler. Resolve per session instead.
  * @param injectAdvisory - Optional callback to push advisory to architect session
  */
 export function createScopeGuardHook(
 	config: Partial<ScopeGuardConfig>,
-	directory: string,
+	fallbackDirectory: string,
 	injectAdvisory?: (sessionId: string, message: string) => void,
 ): {
 	toolBefore: (
@@ -81,6 +93,20 @@ export function createScopeGuardHook(
 			// Scope bindings are a coder Task contract. Other roles remain governed
 			// by the universal/lstat and per-agent authority checks in guardrails.
 			if (agentRole !== 'coder') return;
+
+			// Issue #2002: this hook is constructed ONCE at plugin init with the
+			// plugin-root `ctx.directory`, but worktree-isolated coder children
+			// execute in a lane root, and their scope binding is derived and
+			// published against that lane. Resolve the session's own root once
+			// here and use it for EVERY directory-sensitive decision below —
+			// binding lookup, write-target resolution, and containment must share
+			// one base, or a split base produces silent false-allows/false-denies.
+			// Fail-closed: a session with no recorded root resolves to the plugin
+			// root, which is byte-identical to the pre-#2002 behaviour.
+			const directory = _internals.resolveSessionWorkspaceDirectory(
+				sessionId,
+				fallbackDirectory,
+			);
 
 			// Resolve the complete write set before looking up scope. Missing or
 			// novel argument shapes must not become a no-scope bypass.
@@ -133,6 +159,20 @@ export function createScopeGuardHook(
 			}
 			const declaredScope = binding?.files ?? null;
 			if (!declaredScope || declaredScope.length === 0) {
+				// Issue #2002 recurrence guardrail: if a valid active binding for
+				// THIS session exists but is rooted elsewhere, the gate is using the
+				// wrong workspace root. Say so precisely instead of emitting a
+				// generic SCOPE_NOT_DECLARED that names neither root.
+				const mismatch = _internals.describeScopeWorkspaceMismatch({
+					directory,
+					activeSessionId: sessionId,
+					taskId,
+				});
+				if (mismatch) {
+					throw new Error(
+						`${mismatch} ${agentName} cannot invoke ${toolName} for task ${taskId ?? 'unknown'}.`,
+					);
+				}
 				throw new Error(
 					`SCOPE_NOT_DECLARED: ${agentName} cannot invoke ${toolName} without a validated scope for task ${taskId ?? 'unknown'}.`,
 				);
@@ -228,6 +268,8 @@ export const _internals = {
 	getAuthorizedPrFeedbackScopeBinding,
 	resolveAuthorizedPrFeedbackScopeBindingFromDisk,
 	validatePrFeedbackScopeBinding,
+	resolveSessionWorkspaceDirectory,
+	describeScopeWorkspaceMismatch,
 	resolveTaskId: (session: AgentSessionState | undefined): string | null =>
 		session?.currentTaskId ?? null,
 };

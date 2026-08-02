@@ -18,6 +18,7 @@ import {
 import {
 	endAgentSession,
 	ensureAgentSession,
+	recordSessionWorkspaceRoot,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
@@ -170,10 +171,17 @@ describe('scope guard identity authorization', () => {
 			parentCallId: 'worktree-call',
 		});
 		registerScopeBinding(active);
+		// Issue #2002: register the child, THEN record its lane root — the exact
+		// production ordering from worktree-isolation.ts. Previously this test
+		// constructed the hook with `worktree`, which silently assumed the gate
+		// already knew the lane root; that assumption is what the #2002 defect
+		// violated, so the suite stayed green while the runtime path was broken.
 		const child = ensureAgentSession('worktree-child', 'coder', worktree);
+		recordSessionWorkspaceRoot('worktree-child', worktree);
 		child.currentTaskId = '1.1';
-		swarmState.activeAgent.set('worktree-child', 'coder');
-		const hook = createScopeGuardHook({ enabled: true }, worktree);
+		// PRODUCTION WIRING: src/index.ts constructs this hook with the
+		// plugin-root ctx.directory, never with a lane.
+		const hook = createScopeGuardHook({ enabled: true }, directory);
 		const write = () =>
 			hook.toolBefore(
 				{
