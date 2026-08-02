@@ -606,6 +606,7 @@ describe('Command registration parity', () => {
 			'memory consolidation-log',
 			'gate-audit',
 			'gate-stats',
+			'context-map stats',
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
@@ -640,7 +641,7 @@ describe('Command registration parity', () => {
 				...NEWER_ALLOWLIST_ADDITIONS,
 				'review',
 			]),
-			noArgs: new Set(['pr status', 'lanes']),
+			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};
 		const expectedAllowlist = new Set([
 			...BASELINE_28_ALLOWLIST,

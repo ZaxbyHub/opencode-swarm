@@ -258,11 +258,11 @@ describe('run() dispatch function', () => {
 			expect(mockConsoleLog).toHaveBeenCalledWith('dark-matter output');
 		});
 
-		it('status: calls handleStatusCommand with cwd and empty agents', async () => {
+		it('status: calls handleStatusCommand with cwd, empty agents, and sessionId', async () => {
 			const result = await run(['status']);
 
 			expect(result).toBe(0);
-			expect(mockHandleStatusCommand).toHaveBeenCalledWith(cwd, {});
+			expect(mockHandleStatusCommand).toHaveBeenCalledWith(cwd, {}, '');
 			expect(mockConsoleLog).toHaveBeenCalledWith('status output');
 		});
 
