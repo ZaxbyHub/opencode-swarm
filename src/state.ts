@@ -370,6 +370,72 @@ export interface AgentSessionState {
 	} | null;
 	/** Declared file scope for current coder task (null = no scope declared) */
 	declaredCoderScope: string[] | null;
+	/**
+	 * Issue #2002: the root this session actually EXECUTES in, when it differs
+	 * from the plugin-root `ctx.directory`.
+	 *
+	 * Worktree-isolated coder children are created with
+	 * `session.create({ query: { directory: <lane> } })`, and their scope binding
+	 * is derived and published against that lane. The write gates are constructed
+	 * once at plugin init with `ctx.directory` and would otherwise resolve every
+	 * session's binding, containment, and `.swarm/` reads against the project
+	 * root — which can never match a lane-rooted binding.
+	 *
+	 * TRUST BOUNDARY: written ONLY by `recordSessionWorkspaceRoot`, whose single
+	 * closed allowlist of production callers each pass `provisionWorktree`'s own
+	 * output. `ensureAgentSession`'s `directory` argument (which can carry an
+	 * agent-supplied `working_directory`, e.g. via `declare_scope`) must NEVER
+	 * write this field.
+	 *
+	 * DELIBERATELY NOT SNAPSHOTTED (issue #2002 follow-up). `serializeAgentSession`
+	 * (`src/session/snapshot-writer.ts`) intentionally omits this field, and it
+	 * MUST stay omitted. The reason is trust, not oversight: `.swarm/session/state.json`
+	 * lives under the project-root `.swarm/` directory, which the architect agent
+	 * can write, so a restored string in that file is not a trusted resolution
+	 * root — a tampered or stale snapshot could install an arbitrary root, or
+	 * re-point a session at a *different* lane it never owned (cross-lane
+	 * containment re-rooting). Persisting it would only be safe if rehydrate could
+	 * revalidate the restored value against a durable, plugin-owned record of
+	 * provisioned lanes, and no such record exists:
+	 *   - `worktree-provisioning-owner.ts`'s durable marker
+	 *     (`recordWorktreeProvisioningOwner`) stores no `worktreePath` at all, and
+	 *     its `worktreeSessionId` field is always the *parent* session id
+	 *     (`worktree-isolation.ts` passes `args.parentSessionID`, confirmed by
+	 *     every production and test call site) — it cannot answer "does child
+	 *     session X own lane path Y".
+	 *   - `background-delegations.jsonl` (`src/background/pending-delegations.ts`)
+	 *     does carry a `worktree.worktreePath` keyed by the child session id, but
+	 *     it is written only inside the `isBackgroundTrue(...)` branch of
+	 *     `delegation-gate.ts` (~line 3157) — i.e. only for `background: true` Task
+	 *     dispatches. It is never written for the ordinary synchronous worktree
+	 *     dispatch in `worktree-isolation.ts`, nor for the Lean Turbo dispatch in
+	 *     `src/turbo/lean/lane-scope.ts`, which are the two actual
+	 *     `recordSessionWorkspaceRoot` callers. It does not cover the field it
+	 *     would need to validate.
+	 *   - Re-deriving the expected path from `provisionWorktree`'s own naming
+	 *     scheme (`resolveWorktreeBaseDir(directory, worktreeDir)/parentSessionId/taskId`,
+	 *     or the `os.tmpdir()/swwt/...` Windows-shortened form) does not close the
+	 *     gap either: it requires the child's *parent* session id, which is only
+	 *     available from `delegationChains` in the very same untrusted snapshot —
+	 *     validating one untrusted field with another untrusted field is circular,
+	 *     not a validation. It would also require spawning `git worktree list` per
+	 *     restored session inside `loadSnapshot`, which runs on the plugin-init
+	 *     path under a bounded timeout (AGENTS.md invariant 1 / repro-704).
+	 * Net effect: a plugin restart mid-lane loses the recorded root, and
+	 * `resolveSessionWorkspaceDirectory` falls back to the plugin-root directory —
+	 * fail-closed, byte-identical to pre-#2002 behaviour, never a widened
+	 * authority (see its own doc comment). The lane coder is blocked with
+	 * `SCOPE_NOT_DECLARED` (`src/hooks/scope-guard.ts`,
+	 * `src/hooks/guardrails/tool-before.ts`) until a human/architect re-dispatches
+	 * it, exactly like the pre-fix bug — not worse. `rehydrateState` (which would
+	 * apply a restored value) only runs from `loadSnapshot`, itself only called at
+	 * plugin init (`src/index.ts`), so this window is a real process restart, not
+	 * something that can strip a live in-session lane coder of its root.
+	 * Do NOT add this field to `TRANSIENT_SESSION_FIELDS`
+	 * (`src/session/snapshot-reader.ts`) either — it is never restored in the
+	 * first place, so there is nothing to reset.
+	 */
+	workspaceDirectory?: string;
 	/** Last scope violation message (null = no violation) */
 	lastScopeViolation: string | null;
 	/** Flag for one-shot scope violation warning injection in messagesTransform */
@@ -1920,6 +1986,91 @@ export function ensureAgentSession(
 		throw new Error(`Failed to create guardrail session for ${sessionId}`);
 	}
 	return session;
+}
+
+/**
+ * Issue #2002 — record the root a session actually EXECUTES in, when it
+ * differs from the plugin-root `ctx.directory`.
+ *
+ * TRUST BOUNDARY (security-critical): this function performs NO path
+ * validation. `laneRoot` is trusted purely because of WHO calls it, not
+ * because of its shape — `provisionWorktree` can legitimately relocate a lane
+ * outside the swarm worktree base (e.g. a `os.tmpdir()`-shortened path on
+ * Windows when the path-budget check trips), so a shape predicate would
+ * refuse a legitimately provisioned lane and silently reintroduce the bug
+ * this closes.
+ *
+ * The only thing standing between this setter and a privilege-escalation bug
+ * is a closed allowlist of production callers, each of which passes
+ * `provisionWorktree`'s own return value — never a tool argument, never
+ * `ensureAgentSession`'s `directory` parameter (which CAN carry an
+ * agent-supplied `working_directory`, e.g. via `declare_scope`). That
+ * allowlist is mechanically enforced by
+ * `tests/unit/state/session-workspace-root-trusted-callers.test.ts`. Adding a
+ * new call site is a privilege-escalation review, not a formality: the
+ * reviewer must confirm the new caller passes `provisionWorktree` output
+ * before adding it to that test's allowlist.
+ *
+ * A blank or whitespace-only `laneRoot` is ignored (treated as unset) rather
+ * than being recorded and later resolving to `path.resolve('')` (cwd).
+ *
+ * ORDERING IS PART OF THE CONTRACT. This never creates the session — callers
+ * MUST register it with its real agent name (`ensureAgentSession(sessionId,
+ * 'coder', laneRoot)`) FIRST. Calling this on an unregistered session is a
+ * deliberate no-op, so resolution falls back to the plugin root and the write
+ * is blocked. Creating the session here instead would register
+ * `swarmState.activeAgent` as 'unknown', which fails OPEN rather than closed —
+ * see the inline comment in the body for the full chain.
+ *
+ * @param sessionId - The session identifier
+ * @param laneRoot - `provisionWorktree`'s own output; never agent-supplied
+ */
+export function recordSessionWorkspaceRoot(
+	sessionId: string,
+	laneRoot: string,
+): void {
+	const trimmed = laneRoot.trim();
+	if (!trimmed) return;
+	// MUST NOT create the session. `ensureAgentSession(sessionId)` with no agent
+	// name routes to `startAgentSession(..., 'unknown', ...)`, which sets
+	// `swarmState.activeAgent` to 'unknown' — and a later
+	// `ensureAgentSession(id, 'coder', dir)` updates `session.agentName` but
+	// never repairs `activeAgent`. That would FAIL OPEN, not closed: 'unknown'
+	// is truthy, so it passes the no-active-agent guards in
+	// `src/hooks/guardrails/tool-before.ts`, then lands in the `noScopeLenient`
+	// branch that skips the authority check for non-coder/non-architect roles,
+	// while `src/hooks/scope-guard.ts` returns early because the role is not
+	// 'coder'. A lane child's shell write would execute unenforced.
+	//
+	// Callers therefore register the session (with its real agent name) FIRST.
+	// If they have not, this is a no-op and resolution falls back to the plugin
+	// root — the fail-closed outcome.
+	const session = swarmState.agentSessions.get(sessionId);
+	if (!session) return;
+	session.workspaceDirectory = trimmed;
+}
+
+/**
+ * Issue #2002 — resolve the root a write gate should evaluate path
+ * containment and scope-binding lookups against for a given session.
+ *
+ * Fail-closed: returns `fallbackDirectory` (the plugin-root `ctx.directory`)
+ * whenever no root was recorded for this session, or the recorded value is
+ * blank/unset — i.e. byte-identical to pre-#2002 behaviour for every session
+ * that was never lane-rooted.
+ *
+ * @param sessionId - The session identifier
+ * @param fallbackDirectory - The plugin-root directory to fall back to
+ * @returns the session's recorded workspace root, or `fallbackDirectory`
+ */
+export function resolveSessionWorkspaceDirectory(
+	sessionId: string,
+	fallbackDirectory: string,
+): string {
+	const session = swarmState.agentSessions.get(sessionId);
+	const recorded = session?.workspaceDirectory;
+	if (recorded?.trim()) return recorded;
+	return fallbackDirectory;
 }
 
 /**

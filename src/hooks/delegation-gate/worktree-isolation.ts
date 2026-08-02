@@ -16,7 +16,11 @@ import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { tryAcquireLock } from '../../parallel/file-locks';
 import { isValidEnvKey } from '../../sandbox/executor';
-import { ensureAgentSession, swarmState } from '../../state';
+import {
+	ensureAgentSession,
+	recordSessionWorkspaceRoot,
+	swarmState,
+} from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
 import * as logger from '../../utils/logger.js';
@@ -956,6 +960,41 @@ export async function precreateStandardWorktreeSession(args: {
 	}
 
 	args.outputArgs.task_id = createResult.data.id;
+	// Issue #2002: the child session executes in the lane, not in the project
+	// root. Record that root so the write gates (scope-guard, guardrails
+	// tool-before) resolve this session's scope binding and path containment
+	// against the lane instead of the plugin-root `ctx.directory` they were
+	// constructed with — otherwise the child binding derived and published
+	// against the lane can never be found and every write fails
+	// SCOPE_NOT_DECLARED.
+	//
+	// Recorded HERE, at the session-creation site, rather than alongside
+	// `ensureAgentSession(childSessionId, 'coder', worktreePath)` in
+	// delegation-gate.ts: that call sits inside `if (resolvedTaskId)`, so a lane
+	// dispatched without a resolvable plan task id would get a lane-rooted
+	// session with no recorded root. This site covers every lane-rooted session
+	// unconditionally. `provisionResult.worktreePath` is provisionWorktree's own
+	// output and is never reachable from a tool argument.
+	//
+	// ORDER IS LOAD-BEARING. The child session must be registered with its real
+	// agent name BEFORE its workspace root is recorded. `recordSessionWorkspaceRoot`
+	// deliberately refuses to create a session, because creating one unnamed would
+	// register `swarmState.activeAgent` as 'unknown' — which FAILS OPEN: 'unknown'
+	// is truthy, so it clears the no-active-agent guards in guardrails and then
+	// takes the `noScopeLenient` branch that skips the authority check entirely,
+	// while scope-guard returns early because the role is not 'coder'. The lane
+	// child's shell writes would run unenforced. Registering as 'coder' first also
+	// restores this session's `recordSessionStart` and disk rehydration, which the
+	// `directory` argument drives on the create path.
+	ensureAgentSession(
+		createResult.data.id,
+		'coder',
+		provisionResult.worktreePath,
+	);
+	recordSessionWorkspaceRoot(
+		createResult.data.id,
+		provisionResult.worktreePath,
+	);
 	rememberStandardWorktreeDispatch({
 		callID: args.callID,
 		parentSessionID: args.parentSessionID,

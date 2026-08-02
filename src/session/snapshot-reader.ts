@@ -24,6 +24,12 @@ import type {
 /**
  * Transient session fields that must be reset on rehydration.
  * Centralised here to keep the reset logic DRY and auditable.
+ *
+ * `workspaceDirectory` (issue #2002) deliberately does NOT belong in this
+ * list: it is never part of `SerializedAgentSession` in the first place (see
+ * the TRUST BOUNDARY / DELIBERATELY NOT SNAPSHOTTED comment at its field
+ * declaration in `src/state.ts`), so `deserializeAgentSession` never restores
+ * it and there is nothing here to reset.
  */
 export const TRANSIENT_SESSION_FIELDS: ReadonlyArray<{
 	name: string;

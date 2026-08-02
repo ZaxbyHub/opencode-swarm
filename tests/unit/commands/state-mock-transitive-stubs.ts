@@ -35,4 +35,15 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	recordModifiedFilesForTask: () => false,
 	recordModifiedFileForTask: () => false,
 	getModifiedFilesForTask: () => [],
+	// Issue #2002 — lane-workspace-root recording/resolution. Not exercised by
+	// close-command assertions, but reached transitively via the delegation
+	// gate / scope-guard import graph. recordSessionWorkspaceRoot is a no-op
+	// (no session bookkeeping needed here); resolveSessionWorkspaceDirectory
+	// mirrors the real fail-closed default of returning fallbackDirectory
+	// unconditionally, since this mock never records a workspace root.
+	recordSessionWorkspaceRoot: () => undefined,
+	resolveSessionWorkspaceDirectory: (
+		_sessionId: string,
+		fallbackDirectory: string,
+	) => fallbackDirectory,
 } as const;
