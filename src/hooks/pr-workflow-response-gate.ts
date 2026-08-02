@@ -1,4 +1,8 @@
 import {
+	claimPrFeedbackMonitorEvents,
+	readPrFeedbackMonitorQueue,
+} from '../background/pr-feedback-event-queue.js';
+import {
 	cancelPrWorkflowPluginWake,
 	clearPrWorkflowAutoWakeState,
 	isPrWorkflowAutoWakeSuppressed,
@@ -11,8 +15,12 @@ const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
 
 export const _internals: {
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	claimPrFeedbackMonitorEvents: typeof claimPrFeedbackMonitorEvents;
+	readPrFeedbackMonitorQueue: typeof readPrFeedbackMonitorQueue;
 } = {
 	readPrWorkflowGateState,
+	claimPrFeedbackMonitorEvents,
+	readPrFeedbackMonitorQueue,
 };
 
 /**
@@ -115,6 +123,47 @@ interface WakeBudget {
 	suspended: boolean;
 }
 
+function canonicalGitHubPrUrl(value: string): string | null {
+	try {
+		const url = new URL(value);
+		const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+		if (
+			url.protocol !== 'https:' ||
+			url.hostname.toLowerCase() !== 'github.com' ||
+			!match
+		) {
+			return null;
+		}
+		const number = Number(match[3]);
+		if (!Number.isSafeInteger(number) || number <= 0) return null;
+		return `github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}/pull/${number}`;
+	} catch {
+		return null;
+	}
+}
+
+function sameGitHubPr(left: string, right: string): boolean {
+	const leftCanonical = canonicalGitHubPrUrl(left);
+	return (
+		leftCanonical !== null && leftCanonical === canonicalGitHubPrUrl(right)
+	);
+}
+
+function formatQueuedMonitorEventsText(
+	events: Awaited<ReturnType<typeof claimPrFeedbackMonitorEvents>>,
+): string {
+	if (events.length === 0) return '';
+	const lines = [
+		'Queued PR monitor events are now authorized for this PR_FEEDBACK workflow and must be treated as feedback inputs for the current round:',
+		...events.map(
+			(event) =>
+				`- ${event.type} on ${event.repoFullName}#${event.prNumber}: ${event.message.split('\n')[0]}`,
+		),
+		'Do not expand or replace an already-declared immutable feedback inventory; if these events require a later round, finish or abort the current round first.',
+	];
+	return lines.join('\n');
+}
+
 /**
  * Compose the auto-wake continuation prompt text. This is sent to the model
  * as a user-role message on session.idle — NOT as a replacement of the
@@ -131,6 +180,7 @@ function blockedText(
 		suspended?: boolean;
 		userInterrupted?: boolean;
 		maxConsecutive?: number;
+		recovery?: { code: string; requiredAction: string };
 	} = {},
 ): string {
 	const lines: string[] = [
@@ -147,6 +197,11 @@ function blockedText(
 	if (options.userInterrupted) {
 		lines.push(
 			'Auto-resume is paused after a user interruption. The durable workflow gate is preserved, but the plugin will not re-awaken this session. Send a new message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.',
+		);
+	}
+	if (options.recovery) {
+		lines.push(
+			`Auto-resume is disabled because manual Git recovery is required. code=${options.recovery.code} retryable=false required_action=${options.recovery.requiredAction}`,
 		);
 	}
 	return lines.join('\n');
@@ -169,6 +224,7 @@ function workflowBanner(
 		suspended?: boolean;
 		userInterrupted?: boolean;
 		maxConsecutive?: number;
+		recovery?: { code: string; requiredAction: string };
 	} = {},
 ): string {
 	const lines: string[] = [
@@ -183,6 +239,11 @@ function workflowBanner(
 	if (options.userInterrupted) {
 		lines.push(
 			'[Auto-resume paused after a user interruption. Send a new message to continue, or run `/swarm abort-pr-workflow` to clear the workflow.]',
+		);
+	}
+	if (options.recovery) {
+		lines.push(
+			`[Manual Git recovery required; auto-resume disabled. code=${options.recovery.code} retryable=false required_action=${options.recovery.requiredAction}]`,
 		);
 	}
 	return lines.join(' ');
@@ -367,7 +428,13 @@ export function createPrWorkflowResponseGate(options: {
 		// match the wake-budget path's clock (see `now` in the idle handler
 		// below); tests freeze the clock via the test-clock helper to exercise
 		// cooldown boundaries.
-		const forceFullBanner = suspended || userInterrupted;
+		const recovery = state.checkoutRecovery
+			? {
+					code: state.checkoutRecovery.code,
+					requiredAction: state.checkoutRecovery.requiredAction,
+				}
+			: undefined;
+		const forceFullBanner = suspended || userInterrupted || Boolean(recovery);
 		const now = Date.now();
 		const lastBannerAt = bannerStamps.get(input.sessionID);
 		const withinCooldown =
@@ -396,6 +463,7 @@ export function createPrWorkflowResponseGate(options: {
 			suspended,
 			userInterrupted,
 			maxConsecutive: maxConsecutive,
+			recovery,
 		});
 		bannerStamps.set(input.sessionID, now);
 		evictBannerDedupeMapsIfOverBound();
@@ -435,6 +503,11 @@ export function createPrWorkflowResponseGate(options: {
 				// coupling to a specific clear caller.
 				resetBudget(sessionID);
 				clearPrWorkflowAutoWakeState(options.directory, sessionID);
+				return;
+			}
+			if (state.checkoutRecovery) {
+				// Manual Git recovery is a terminal startup condition, not a model
+				// retry condition. Keep the durable banner but never re-wake the model.
 				return;
 			}
 			// The idle decision above can race a later abort because OpenCode does
@@ -492,7 +565,29 @@ export function createPrWorkflowResponseGate(options: {
 				options.directory,
 				sessionID,
 			);
+			const feedbackTarget =
+				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
+			const queuedMonitorRecord =
+				state.mode === 'PR_FEEDBACK' &&
+				!state.prFeedbackInventory &&
+				feedbackTarget
+					? await _internals
+							.readPrFeedbackMonitorQueue(options.directory, sessionID)
+							.catch(() => null)
+					: null;
+			const queuedMonitorEvents =
+				queuedMonitorRecord?.events.filter(
+					(event) =>
+						!event.claimedWorkflowInstanceId &&
+						Boolean(feedbackTarget) &&
+						sameGitHubPr(event.prUrl, feedbackTarget ?? ''),
+				) ?? [];
+			const queuedMonitorText =
+				queuedMonitorEvents.length > 0
+					? `\n${formatQueuedMonitorEventsText(queuedMonitorEvents)}`
+					: '';
 			let promptRejected = false;
+			let promptAccepted = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			try {
 				const args = {
@@ -505,7 +600,7 @@ export function createPrWorkflowResponseGate(options: {
 								text: `${blockedText(state.mode, {
 									suspended: false,
 									maxConsecutive: maxConsecutive,
-								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.`,
+								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.${queuedMonitorText}`,
 							},
 						],
 					},
@@ -528,6 +623,7 @@ export function createPrWorkflowResponseGate(options: {
 						`PR workflow resume prompt failed: ${String(result.error)}`,
 					);
 				}
+				promptAccepted = true;
 				// Note: budget bookkeeping runs in the finally block below so an
 				// attempted wake counts against the budget even when the resume
 				// prompt itself fails or times out. Otherwise a host that keeps
@@ -561,6 +657,31 @@ export function createPrWorkflowResponseGate(options: {
 					options.directory,
 					sessionID,
 				);
+				if (
+					promptAccepted &&
+					queuedMonitorEvents.length > 0 &&
+					feedbackTarget &&
+					state.workflowInstanceId &&
+					postWakeState?.mode === 'PR_FEEDBACK' &&
+					postWakeState.workflowInstanceId === state.workflowInstanceId &&
+					!postWakeState.prFeedbackInventory &&
+					sameGitHubPr(
+						postWakeState.prFeedbackTargetUrl ??
+							postWakeState.prFeedbackReviewHandoff?.prUrl ??
+							'',
+						feedbackTarget,
+					)
+				) {
+					await _internals
+						.claimPrFeedbackMonitorEvents(
+							options.directory,
+							sessionID,
+							state.workflowInstanceId,
+							feedbackTarget,
+							queuedMonitorEvents.map((event) => event.dedupToken),
+						)
+						.catch(() => []);
+				}
 				budget.lastWakeAt = now;
 				if (postWakeState === null) {
 					// Gate cleared during the wake (complete/abort). Drop the

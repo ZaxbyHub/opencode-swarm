@@ -904,6 +904,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Quality is the only metric — there is no speed, efficiency, or time exception; time, tokens, and agent dispatches are irrelevant to correctness
 - FOLLOW THE SKILL EXACTLY: execute every phase of the loaded SKILL.md in order with no shortcuts, no phase-skipping, and no premature synthesis. If a required coverage phase cannot complete, apply the skill's coverage gate (retry or verified equivalent alternative). If the gap still cannot be closed, stop and surface the lane failure to the user as BLOCKED; do not produce a degraded review, partial verdict, or final synthesis.
 - CHECK OUT THE EXACT PR HEAD LOCALLY before dispatching explorer lanes: resolve the authoritative full PR head SHA, verify the working tree is clean (git status --porcelain), and if it is dirty call \`prepare_pr_workflow_checkout\` before checkout — either with no \`paths\` to auto-discover and preserve every dirty and untracked change in one auditable stash, or with an explicit exact dirty tracked path set. It returns the stash OID and recovery command; an already-clean tree is a no-op. Do NOT run \`git stash\` through shell. Then use standalone commands: fetch the PR head, verify \`git cat-file -e <full_pr_head_sha>^{commit}\`, run \`git switch --detach <full_pr_head_sha>\`, confirm HEAD equals that SHA, and bind it through the PR-review controller. Do not use \`--track FETCH_HEAD\`. Explorers read the working-tree filesystem (Read/Glob/Grep), so without this checkout they read the base branch and produce invalid candidates. Always pass the base..head commit range in explorer delegations.
+- Treat the controller Git-state result as final for the attempt: \`clean\` proceeds; \`stashable\` permits one preparation call; \`recovery-required\` or \`indeterminate\` means report the typed \`required_action\`, abort/clear any already-active gate, and STOP unless \`retryable: true\`. Never loop on stash against an unmerged index or in-progress Git operation.
 - RUN ALL BASE LANES: the default PR_REVIEW path always launches exactly six repository-agnostic base check-type lanes from the skill. Use \`mode: "swarm-pr-review:base"\` and the exact six \`workflow_lane\` identifiers. The runtime rejects partial, duplicate, or mislabelled waves. Do not collapse, omit, or scale down the base lanes for a small, docs-only, or CI-only PR.
 - RETRY STRUCTURALLY: retry only failed base obligations in later \`swarm-pr-review:base\` async batches with the same exact \`pr_head_sha\`. Blocking \`dispatch_lanes\` and direct Task explorer/reviewer/critic dispatch are not provenance-equivalent and are rejected.
 - USE ASYNC DISPATCH WITHOUT IDLING: launch the base lanes with one \`dispatch_lanes_async\` call when available, record the \`batch_id\`, then keep doing non-dependent architect work while they run. Poll with \`collect_lane_results\` without \`wait\` (or \`wait: false\`) to process settled lanes and continue independent work between polls; use \`wait: true\` only as the final join when no independent work remains.
@@ -917,6 +918,13 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 Activates when: architect receives \`[MODE: PR_FEEDBACK pr="https://github.com/..."]\` (PR reference optional) signal from the pr-feedback command handler, optionally followed by free-text instructions.
 
 Purpose: Ingest and resolve KNOWN pull-request feedback — review threads, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes — verifying every claim against source before fixing. This is NOT a fresh broad PR review; use MODE: PR_REVIEW for new-finding discovery.
+
+An exact \`continue from .swarm/pr-review/<run_id>/feedback-handoff.json\`
+command is a controller-validated lifecycle transition: it succeeds only from a
+terminal review (or a strict external-v1 artifact with an explicit matching PR
+URL), creates a fresh unbound feedback gate atomically, and preserves handoff
+IDs as mandatory members of the later immutable feedback inventory. The artifact
+alone is not write authorization.
 
 ACTION: Load skill ${bundledProjectSkillFileReference('swarm-pr-feedback')} immediately and follow its protocol.
 

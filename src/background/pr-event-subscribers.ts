@@ -25,6 +25,11 @@
  */
 
 import type { PrMonitorConfig } from '../config/schema';
+import {
+	activatePrWorkflow,
+	type PrWorkflowGateState,
+	readPrWorkflowGateState,
+} from '../hooks/pr-workflow-gate';
 import { getAgentSession } from '../state';
 import { log } from '../utils';
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -35,6 +40,7 @@ import {
 	type FormattedPrEvent,
 	isPrEventDeliveryRegistered,
 } from './pr-event-delivery';
+import { enqueuePrFeedbackMonitorEvent } from './pr-feedback-event-queue.js';
 import { listActive, updateSnapshot } from './pr-subscriptions';
 
 export interface PrEventSubscriberOptions {
@@ -71,6 +77,9 @@ export const _internals: {
 	listActive: typeof listActive;
 	updateSnapshot: typeof updateSnapshot;
 	getAgentSession: typeof getAgentSession;
+	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	activatePrWorkflow: typeof activatePrWorkflow;
+	enqueuePrFeedbackMonitorEvent: typeof enqueuePrFeedbackMonitorEvent;
 	deliverPrActivity: typeof deliverPrActivity;
 	isPrEventDeliveryRegistered: typeof isPrEventDeliveryRegistered;
 	scheduleClearUnaddressed: typeof scheduleClearUnaddressed;
@@ -83,6 +92,9 @@ export const _internals: {
 	listActive,
 	updateSnapshot,
 	getAgentSession,
+	readPrWorkflowGateState,
+	activatePrWorkflow,
+	enqueuePrFeedbackMonitorEvent,
 	deliverPrActivity,
 	isPrEventDeliveryRegistered,
 	scheduleClearUnaddressed,
@@ -218,14 +230,109 @@ async function handlePrEvent(
 
 	// Deliver to each subscribed session
 	for (const sub of matching) {
+		const prUrl = payload.prUrl ?? sub.prUrl;
+		let activeGate: PrWorkflowGateState | null = null;
+		let gateReadFailed = false;
+		try {
+			activeGate = await _internals.readPrWorkflowGateState(
+				directory,
+				sub.sessionID,
+			);
+		} catch (error) {
+			gateReadFailed = true;
+			_internals.log(
+				`[pr-monitor] Failed to read PR workflow ownership for session ${sub.sessionID}`,
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+		}
+		const autoFeedbackEventAuthorized = Boolean(modeSignal) && Boolean(prUrl);
+		const feedbackTarget =
+			activeGate?.prFeedbackTargetUrl ??
+			activeGate?.prFeedbackReviewHandoff?.prUrl;
+		let queueForLater =
+			gateReadFailed ||
+			activeGate?.mode === 'PR_REVIEW' ||
+			(activeGate?.mode === 'PR_FEEDBACK' &&
+				(Boolean(activeGate.prFeedbackInventory) ||
+					!feedbackTarget ||
+					!sameGitHubPr(feedbackTarget, prUrl)));
+		let queuedForLater = false;
+		if (queueForLater || autoFeedbackEventAuthorized) {
+			try {
+				await _internals.enqueuePrFeedbackMonitorEvent(
+					directory,
+					sub.sessionID,
+					{
+						type: event.type,
+						repoFullName: payload.repoFullName,
+						prNumber: payload.prNumber,
+						prUrl,
+						message,
+						dedupToken,
+						authorized: autoFeedbackEventAuthorized,
+						queuedAt: new Date().toISOString(),
+					},
+				);
+				queuedForLater = true;
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+			}
+		}
+		if (!gateReadFailed && !activeGate && autoFeedbackEventAuthorized) {
+			try {
+				activeGate = await _internals.activatePrWorkflow(
+					directory,
+					sub.sessionID,
+					'PR_FEEDBACK',
+					{ requireCheckoutPreflight: true, prUrl },
+				);
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Auto PR_FEEDBACK activation failed for session ${sub.sessionID}`,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+				queueForLater = true;
+			}
+		}
+		if (queueForLater && !queuedForLater) {
+			try {
+				await _internals.enqueuePrFeedbackMonitorEvent(
+					directory,
+					sub.sessionID,
+					{
+						type: event.type,
+						repoFullName: payload.repoFullName,
+						prNumber: payload.prNumber,
+						prUrl,
+						message,
+						dedupToken,
+						authorized: autoFeedbackEventAuthorized,
+						queuedAt: new Date().toISOString(),
+					},
+				);
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
+		}
 		if (usePromptDelivery) {
 			const formatted: FormattedPrEvent = {
 				type: event.type,
 				repoFullName: payload.repoFullName,
 				prNumber: payload.prNumber,
-				prUrl: payload.prUrl ?? sub.prUrl,
+				prUrl,
 				message,
 				dedupToken,
+				...(queueForLater ? { disposition: 'queued-for-later' as const } : {}),
 			};
 			let wakeOk = false;
 			try {
@@ -257,7 +364,6 @@ async function handlePrEvent(
 			);
 			continue;
 		}
-
 		// Dedup + cap via the shared pushAdvisory helper. The dedupeToken (from
 		// buildPrEventToken) is embedded at the start of the advisory body
 		// (formatAdvisory uses the same builder), so it serves as the
@@ -273,11 +379,13 @@ async function handlePrEvent(
 			`[pr-monitor] Delivered ${event.type} advisory to session ${sub.sessionID}`,
 		);
 
-		// Inject MODE signal alongside the advisory
-		if (modeSignal) {
-			pushAdvisory(session, modeSignal);
+		if (autoFeedbackEventAuthorized && activeGate?.mode === 'PR_REVIEW') {
 			_internals.log(
-				`[pr-monitor] Injected PR_FEEDBACK mode signal for session ${sub.sessionID} (${event.type})`,
+				`[pr-monitor] Queued PR_FEEDBACK monitor event for session ${sub.sessionID} without mutating the active PR_REVIEW workflow`,
+			);
+		} else if (autoFeedbackEventAuthorized) {
+			_internals.log(
+				`[pr-monitor] Queued PR_FEEDBACK monitor event for session ${sub.sessionID} for workflow-safe intake`,
 			);
 		}
 	}
@@ -347,6 +455,32 @@ const CONTENT_EVENT_TYPES = new Set([
 	'pr.review.approved',
 	'pr.review.comment',
 ]);
+
+function canonicalGitHubPrUrl(value: string): string | null {
+	try {
+		const url = new URL(value);
+		const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+		if (
+			url.protocol !== 'https:' ||
+			url.hostname.toLowerCase() !== 'github.com' ||
+			!match
+		) {
+			return null;
+		}
+		const number = Number(match[3]);
+		if (!Number.isSafeInteger(number) || number <= 0) return null;
+		return `github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}/pull/${number}`;
+	} catch {
+		return null;
+	}
+}
+
+function sameGitHubPr(left: string, right: string): boolean {
+	const leftCanonical = canonicalGitHubPrUrl(left);
+	return (
+		leftCanonical !== null && leftCanonical === canonicalGitHubPrUrl(right)
+	);
+}
 
 function shortHash(input: string): string {
 	// Small deterministic fingerprint (not cryptographic). base36 keeps the

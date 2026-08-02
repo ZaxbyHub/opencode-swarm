@@ -8,6 +8,7 @@ import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.j
 import {
 	activatePrWorkflow,
 	type PrWorkflowMode,
+	transitionPrReviewToFeedback,
 } from '../hooks/pr-workflow-gate.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
@@ -83,7 +84,10 @@ import {
 } from './memory-link.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePostMortemCommand } from './post-mortem.js';
-import { handlePrFeedbackCommand } from './pr-feedback.js';
+import {
+	handlePrFeedbackCommand,
+	parsePrFeedbackCommandInput,
+} from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
 import { handlePrSubscribeCommand } from './pr-subscribe.js';
@@ -308,10 +312,41 @@ async function handleModeCommandWithBundledSkills(
 	const result = await Promise.resolve(handler(ctx.directory, ctx.args));
 	if (/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)) {
 		if (mechanicalMode) {
-			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode);
+			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
+				requireCheckoutPreflight: true,
+			});
 		}
 	}
 	return result;
+}
+
+async function handlePrFeedbackCommandWithTransition(
+	ctx: CommandContext,
+): CommandResult {
+	if (ctx.packageRoot) {
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+			true,
+		);
+	}
+	const parsed = parsePrFeedbackCommandInput(ctx.directory, ctx.args);
+	if (parsed.error) {
+		return handlePrFeedbackCommand(ctx.directory, ctx.args);
+	}
+	if (parsed.continuation) {
+		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
+			runId: parsed.continuation.runId,
+			handoffPath: parsed.continuation.handoffPath,
+			prUrl: parsed.prUrl,
+		});
+	} else {
+		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {
+			requireCheckoutPreflight: true,
+			...(parsed.prUrl ? { prUrl: parsed.prUrl } : {}),
+		});
+	}
+	return handlePrFeedbackCommand(ctx.directory, ctx.args);
 }
 
 export type CommandCategory =
@@ -984,12 +1019,7 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'pr-feedback': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
-				ctx,
-				handlePrFeedbackCommand,
-				'PR_FEEDBACK',
-			),
+		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),
 		description:
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',

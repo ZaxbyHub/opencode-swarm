@@ -101,14 +101,14 @@ describe('PR workflow response-level gate', () => {
 
 	// REVERSAL (deliberate): this previously asserted "banner appears even on
 	// empty text". That behavior was the dominant term in a measured production
-	// flood — 968 of ~1015 injections in a real `/swarm pr-review` transcript
+	// flood â€” 968 of ~1015 injections in a real `/swarm pr-review` transcript
 	// were marker-only lines carrying no model prose (one unbroken run of 95),
 	// making injected text 55.3% of all non-blank lines. A banner labelling no
 	// content communicates nothing and violates AGENTS.md invariant 10 ("Do not
-	// emit diagnostic noise into chat-visible streams"). The banner's purpose —
-	// marking model output as non-terminal — is meaningless with no output to
+	// emit diagnostic noise into chat-visible streams"). The banner's purpose â€”
+	// marking model output as non-terminal â€” is meaningless with no output to
 	// mark, so a blank part is now left exactly as-is.
-	test('blank text parts are left untouched — a banner labelling no content is noise', async () => {
+	test('blank text parts are left untouched â€” a banner labelling no content is noise', async () => {
 		const gate = createPrWorkflowResponseGate({ directory });
 		await activatePrWorkflow(directory, 'empty-text-session', 'PR_REVIEW');
 
@@ -147,7 +147,7 @@ describe('PR workflow response-level gate', () => {
 				properties: { sessionID: 'combined-session' },
 			},
 		};
-		// Wake 1 (probe), wake 2 (unproductive → suspend at max=1).
+		// Wake 1 (probe), wake 2 (unproductive â†’ suspend at max=1).
 		await gate.event(idle);
 		await gate.event(idle);
 		expect(gate._inspectWakeBudget('combined-session')?.suspended).toBe(true);
@@ -253,7 +253,7 @@ describe('PR workflow response-gate wake budget', () => {
 			maxConsecutiveUnproductiveWakes: 2,
 			wakeCooldownMs: 0,
 		});
-		// Hold revision constant → every wake is "unproductive".
+		// Hold revision constant â†’ every wake is "unproductive".
 		await writeStateWithRevision('stuck-session', 0);
 
 		const idleEvent = {
@@ -262,8 +262,8 @@ describe('PR workflow response-gate wake budget', () => {
 				properties: { sessionID: 'stuck-session' },
 			},
 		};
-		// Wake 1 (first probe — counts as progress), wake 2 (unproductive, counter→1),
-		// wake 3 (unproductive, counter→2 → suspend).
+		// Wake 1 (first probe â€” counts as progress), wake 2 (unproductive, counterâ†’1),
+		// wake 3 (unproductive, counterâ†’2 â†’ suspend).
 		await gate.event(idleEvent);
 		await gate.event(idleEvent);
 		await gate.event(idleEvent);
@@ -299,20 +299,20 @@ describe('PR workflow response-gate wake budget', () => {
 		// Wake 1 (probe, revision 0), wake 2 (unproductive, revision still 0).
 		await gate.event(idle('healthy-session'));
 		await gate.event(idle('healthy-session'));
-		// Now the controller makes progress — revision bumps to 5.
+		// Now the controller makes progress â€” revision bumps to 5.
 		await writeStateWithRevision('healthy-session', 5);
-		// Wake 3 sees revision 5 > lastSeenRevision 0 → progress → counter resets.
+		// Wake 3 sees revision 5 > lastSeenRevision 0 â†’ progress â†’ counter resets.
 		await gate.event(idle('healthy-session'));
-		// Wake 4 (revision unchanged at 5 → unproductive again, counter→1).
+		// Wake 4 (revision unchanged at 5 â†’ unproductive again, counterâ†’1).
 		await gate.event(idle('healthy-session'));
-		// Wake 5 (unproductive, counter→2 → suspend).
+		// Wake 5 (unproductive, counterâ†’2 â†’ suspend).
 		await gate.event(idle('healthy-session'));
 		// Wake 6 must be skipped.
 		await gate.event(idle('healthy-session'));
 		expect(promptAsync).toHaveBeenCalledTimes(5);
 	});
 
-	test('evicts the wake budget when the gate clears (state → null)', async () => {
+	test('evicts the wake budget when the gate clears (state â†’ null)', async () => {
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,
@@ -347,7 +347,7 @@ describe('PR workflow response-gate wake budget', () => {
 				properties: { sessionID: 'cleared-session' },
 			},
 		});
-		// Budget must be evicted — a future activation of the same sessionID
+		// Budget must be evicted â€” a future activation of the same sessionID
 		// starts fresh, not stuck in the old suspended state.
 		expect(gate._inspectWakeBudget('cleared-session')).toBeUndefined();
 
@@ -382,8 +382,8 @@ describe('PR workflow response-gate wake budget', () => {
 		// Each wake throws because promptAsync returns {error}; the throw must
 		// NOT skip budget bookkeeping. After the configured budget of
 		// unproductive wakes, further idles stop calling promptAsync.
-		// Wake 1 (probe), wake 2 (unproductive, counter→1), wake 3
-		// (unproductive, counter→2 → suspend). Wake 4 must be skipped.
+		// Wake 1 (probe), wake 2 (unproductive, counterâ†’1), wake 3
+		// (unproductive, counterâ†’2 â†’ suspend). Wake 4 must be skipped.
 		for (let i = 0; i < 3; i++) {
 			await gate.event(idle).catch(() => {
 				/* expected throw from the failing resume prompt */
@@ -407,8 +407,8 @@ describe('PR workflow response-gate wake budget', () => {
 		// productive if the revision advanced.
 		await writeStateWithRevision('race-session', 0);
 		// Drive the counter to MAX-1 (4 with max=5) by holding revision at 0.
-		// Sequence: wake1 (probe, counter stays 0), wake2 (unproductive, counter→1),
-		// wake3 (→2), wake4 (→3), wake5 (→4 = MAX-1).
+		// Sequence: wake1 (probe, counter stays 0), wake2 (unproductive, counterâ†’1),
+		// wake3 (â†’2), wake4 (â†’3), wake5 (â†’4 = MAX-1).
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,

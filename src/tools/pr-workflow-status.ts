@@ -6,6 +6,10 @@ import {
 	resolveIsWorkingTreeCleanAsync,
 } from '../background/workspace-snapshot';
 import {
+	classifyPrWorkflowGitState,
+	type PrWorkflowGitState,
+} from '../git/pr-workflow-state';
+import {
 	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
@@ -62,6 +66,7 @@ interface PrWorkflowStatusGateSummary {
 	mode?: PrWorkflowGateState['mode'];
 	prHeadBound?: boolean;
 	prHeadSha?: string | null;
+	prFeedbackTargetUrl?: string | null;
 	prReviewBaseRef?: string | null;
 	prReviewBaseSha?: string | null;
 	prReviewDepthTier?: PrWorkflowGateState['prReviewDepthTier'] | null;
@@ -78,6 +83,7 @@ interface PrWorkflowStatusResult {
 	success: true;
 	sessionID: string | null;
 	git: PrWorkflowStatusGitState;
+	checkout: PrWorkflowGitState;
 	gate: PrWorkflowStatusGateSummary;
 	nextStep: string;
 }
@@ -236,7 +242,14 @@ async function countCheckoutReceiptFiles(
 function describeNextStep(
 	gate: PrWorkflowStatusGateSummary,
 	git: PrWorkflowStatusGitState,
+	checkout: PrWorkflowGitState,
 ): string {
+	if (
+		checkout.kind === 'recovery-required' ||
+		checkout.kind === 'indeterminate'
+	) {
+		return `Manual Git recovery required. code=${checkout.code} retryable=false required_action=${checkout.requiredAction}`;
+	}
 	if (!gate.active) {
 		return 'No active PR workflow gate for this session. Activate with `/swarm pr-review <pr-ref>` or `/swarm pr-feedback <pr-ref>` before PR-workflow tool calls are admitted.';
 	}
@@ -264,6 +277,9 @@ function summarizeGate(
 		mode: state.mode,
 		prHeadBound: Boolean(state.prHeadSha),
 		prHeadSha: state.prHeadSha ?? null,
+		prFeedbackTargetUrl: state.prFeedbackTargetUrl
+			? boundUntrusted(state.prFeedbackTargetUrl, MAX_FIELD_LEN)
+			: null,
 		prReviewBaseRef: state.prReviewBaseRef
 			? boundUntrusted(state.prReviewBaseRef, MAX_FIELD_LEN)
 			: null,
@@ -285,7 +301,7 @@ async function executePrWorkflowStatus(
 ): Promise<string> {
 	const sessionID = rawSessionID?.trim() ? rawSessionID.trim() : null;
 
-	const [head, isClean, branchInfo, porcelain, remoteOutput] =
+	const [head, isClean, branchInfo, porcelain, remoteOutput, liveCheckout] =
 		await Promise.all([
 			_internals.resolveCurrentGitHeadAsync(directory),
 			_internals.resolveIsWorkingTreeCleanAsync(directory),
@@ -296,6 +312,7 @@ async function executePrWorkflowStatus(
 				'--untracked-files=all',
 			]),
 			_internals.runGitCapture(directory, ['remote', '-v']),
+			_internals.classifyGitState(directory),
 		]);
 
 	const dirty = parseDirtyFiles(porcelain);
@@ -316,25 +333,40 @@ async function executePrWorkflowStatus(
 	// sessionID; we never enumerate .swarm/pr-workflow-gates/* to "find the
 	// active gate", which would leak a sibling session's state.
 	let gate: PrWorkflowStatusGateSummary;
+	let activeState: PrWorkflowGateState | null = null;
 	if (!sessionID) {
 		gate = { active: false, reason: 'no-session-context' };
 	} else {
-		const state = await _internals.readPrWorkflowGateState(
+		activeState = await _internals.readPrWorkflowGateState(
 			directory,
 			sessionID,
 		);
-		const receiptFiles = state
+		const receiptFiles = activeState
 			? await countCheckoutReceiptFiles(directory, sessionID)
 			: null;
-		gate = summarizeGate(state, receiptFiles);
+		gate = summarizeGate(activeState, receiptFiles);
 	}
+	const recovery = activeState?.checkoutRecovery;
+	const checkout: PrWorkflowGitState = recovery
+		? {
+				kind:
+					recovery.code === 'GIT_STATE_INDETERMINATE'
+						? 'indeterminate'
+						: 'recovery-required',
+				code: recovery.code,
+				retryable: false,
+				requiredAction: recovery.requiredAction,
+				evidence: recovery.evidence,
+			}
+		: liveCheckout;
 
 	const result: PrWorkflowStatusResult = {
 		success: true,
 		sessionID,
 		git,
+		checkout,
 		gate,
-		nextStep: describeNextStep(gate, git),
+		nextStep: describeNextStep(gate, git, checkout),
 	};
 	return JSON.stringify(result, null, 2);
 }
@@ -354,11 +386,13 @@ export const _internals: {
 	resolveCurrentGitHeadAsync: typeof resolveCurrentGitHeadAsync;
 	resolveIsWorkingTreeCleanAsync: typeof resolveIsWorkingTreeCleanAsync;
 	runGitCapture: typeof runGitCapture;
+	classifyGitState: typeof classifyPrWorkflowGitState;
 	truncateToByteBudget: typeof truncateToByteBudget;
 } = {
 	readPrWorkflowGateState,
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
 	runGitCapture,
+	classifyGitState: classifyPrWorkflowGitState,
 	truncateToByteBudget,
 };

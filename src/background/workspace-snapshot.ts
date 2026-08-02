@@ -942,16 +942,23 @@ export function parsePorcelainPaths(output: string): string[] | null {
 	return [...new Set(paths)];
 }
 
-interface PorcelainV2Snapshot {
+export interface PorcelainV2Snapshot {
 	gitHead: string | null;
-	changedFiles: string[];
+	dirtyTrackedPaths: string[];
+	untrackedPaths: string[];
+	renameOrCopy: boolean;
+	unmergedPaths: string[];
+	unmergedCodes: string[];
+	dirtySubmodulePaths: string[];
 }
 
 /**
  * Parse the one-command `git status --porcelain=v2 --branch -z` snapshot used
  * by background evidence capture. A malformed or unknown record fails closed.
  */
-function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
+export function parsePorcelainV2Snapshot(
+	output: string,
+): PorcelainV2Snapshot | null {
 	const records = output.split('\0');
 	const headers: string[] = [];
 	while (records[0]?.startsWith('# ')) {
@@ -959,41 +966,73 @@ function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
 	}
 	const oidMatch = headers.join('\n').match(/^# branch\.oid (.+)$/m);
 	if (!oidMatch) return null;
-	const gitHead = /^[0-9a-f]{6,64}$/i.test(oidMatch[1])
-		? oidMatch[1]
-		: oidMatch[1] === '(initial)'
-			? null
-			: null;
-	const paths: string[] = [];
+	if (
+		!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oidMatch[1]) &&
+		oidMatch[1] !== '(initial)'
+	) {
+		return null;
+	}
+	const gitHead = oidMatch[1] === '(initial)' ? null : oidMatch[1];
+	const dirtyTrackedPaths: string[] = [];
+	const untrackedPaths: string[] = [];
+	const unmergedPaths: string[] = [];
+	const unmergedCodes: string[] = [];
+	const dirtySubmodulePaths: string[] = [];
+	let renameOrCopy = false;
 	for (let index = 0; index < records.length; index++) {
 		const record = records[index];
 		if (!record) continue;
 		if (record.startsWith('? ')) {
-			paths.push(record.slice(2));
+			untrackedPaths.push(record.slice(2));
 			continue;
 		}
 		if (record.startsWith('1 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 8);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			if (!changedPath || !fields[2]) return null;
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('2 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 9);
 			const originalPath = records[++index];
-			if (!changedPath || !originalPath) return null;
-			paths.push(changedPath, originalPath);
+			if (!changedPath || !originalPath || !fields[2]) return null;
+			renameOrCopy = true;
+			dirtyTrackedPaths.push(changedPath, originalPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('u ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 10);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			const unmergedCode = fields[1];
+			if (
+				!changedPath ||
+				!fields[2] ||
+				!unmergedCode ||
+				!/^(?:DD|AU|UD|UA|DU|AA|UU)$/.test(unmergedCode)
+			) {
+				return null;
+			}
+			unmergedPaths.push(changedPath);
+			unmergedCodes.push(unmergedCode);
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		return null;
 	}
-	return { gitHead, changedFiles: [...new Set(paths)] };
+	return {
+		gitHead,
+		dirtyTrackedPaths: [...new Set(dirtyTrackedPaths)],
+		untrackedPaths: [...new Set(untrackedPaths)],
+		renameOrCopy,
+		unmergedPaths: [...new Set(unmergedPaths)],
+		unmergedCodes: [...new Set(unmergedCodes)],
+		dirtySubmodulePaths: [...new Set(dirtySubmodulePaths)],
+	};
 }
 
 function porcelainV2PathAfterFields(
@@ -1053,7 +1092,14 @@ export function captureWorkspaceSnapshot(
 		directory: path.resolve(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles: snapshot?.changedFiles ?? null,
+		changedFiles: snapshot
+			? [
+					...new Set([
+						...snapshot.dirtyTrackedPaths,
+						...snapshot.untrackedPaths,
+					]),
+				]
+			: null,
 		prHeadSha,
 		scope,
 	};

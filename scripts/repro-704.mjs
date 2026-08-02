@@ -46,6 +46,28 @@ const TIMING_DEADLINE_MS = 400;
 // Test 2/3 overall budget.
 const BUDGET_MS = 10_000;
 
+// The repro must exercise repository defaults, not the invoking user's global
+// OpenCode config. A hybrid automation config can legitimately start persistent
+// workers and watchers, turning a successful init assertion into a hung harness.
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+const isolatedHome = mkdtempSync(join(tmpdir(), 'opencode-swarm-704-home-'));
+const isolatedConfigHome = join(isolatedHome, '.config');
+mkdirSync(isolatedConfigHome, { recursive: true });
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
+process.env.XDG_CONFIG_HOME = isolatedConfigHome;
+process.once('exit', () => {
+	if (originalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = originalHome;
+	if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+	else process.env.USERPROFILE = originalUserProfile;
+	if (originalXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+	else process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+	rmSync(isolatedHome, { recursive: true, force: true });
+});
+
 function makeLargeWorkspace(fileCount = 500) {
 	const dir = mkdtempSync(join(tmpdir(), 'opencode-swarm-704-large-'));
 	const src = join(dir, 'src');
@@ -81,10 +103,18 @@ function makeCtx(directory) {
 
 async function runTest(plugin, ctx, deadlineMs, label) {
 	const start = performance.now();
-	const winner = await Promise.race([
-		plugin.server(ctx, {}).then(() => 'ok'),
-		new Promise((resolve) => setTimeout(() => resolve('timeout'), deadlineMs)),
-	]);
+	let timeoutHandle;
+	let winner;
+	try {
+		winner = await Promise.race([
+			plugin.server(ctx, {}).then(() => 'ok'),
+			new Promise((resolve) => {
+				timeoutHandle = setTimeout(() => resolve('timeout'), deadlineMs);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutHandle);
+	}
 	const elapsedMs = performance.now() - start;
 	const elapsed = elapsedMs.toFixed(1);
 	if (winner === 'timeout' || elapsedMs > deadlineMs) {

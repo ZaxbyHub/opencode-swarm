@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { classifyPrWorkflowGitState } from '../git/pr-workflow-state.js';
 import {
+	type PrWorkflowCheckoutRecoveryRecord,
 	prWorkflowSessionFileStem,
 	withPrWorkflowCheckoutPreparationLock,
 	writePrWorkflowAtomicJson,
@@ -46,6 +48,7 @@ interface CheckoutPreparation {
 
 type PreparationOutcome =
 	| { kind: 'already_clean' }
+	| { kind: 'recovery_required'; recovery: PrWorkflowCheckoutRecoveryRecord }
 	| { kind: 'prepared'; preparation: CheckoutPreparation };
 
 /**
@@ -91,6 +94,23 @@ export async function executePreparePrWorkflowCheckout(
 					'Working tree is already clean; no checkout preparation was needed. Proceed to bind the PR head.',
 			});
 		}
+		if (outcome.kind === 'recovery_required') {
+			const affectedPaths = outcome.recovery.evidence.paths
+				.map(boundUntrustedPath)
+				.filter(Boolean);
+			const pathSummary =
+				affectedPaths.length > 0
+					? ` Affected paths: ${affectedPaths.join(', ')}.`
+					: '';
+			return JSON.stringify({
+				success: false,
+				code: outcome.recovery.code,
+				retryable: false,
+				required_action: outcome.recovery.requiredAction,
+				evidence: outcome.recovery.evidence,
+				message: `PR workflow checkout requires manual Git recovery (${outcome.recovery.code}); no stash command was attempted. ${outcome.recovery.requiredAction}${pathSummary}`,
+			});
+		}
 		const { preparation } = outcome;
 		const response: Record<string, unknown> = {
 			success: true,
@@ -125,7 +145,28 @@ async function preparePrWorkflowCheckout(
 	return withPrWorkflowCheckoutPreparationLock(
 		directory,
 		sessionID,
-		async (gate) => {
+		async (gate, controls) => {
+			if (gate.checkoutRecovery) {
+				return {
+					kind: 'recovery_required',
+					recovery: gate.checkoutRecovery,
+				};
+			}
+			const checkoutState = await _internals.classifyGitState(directory);
+			if (
+				checkoutState.kind === 'recovery-required' ||
+				checkoutState.kind === 'indeterminate'
+			) {
+				const recoveredState =
+					await controls.markRecoveryRequired(checkoutState);
+				return {
+					kind: 'recovery_required',
+					recovery: recoveredState.checkoutRecovery!,
+				};
+			}
+			if (discoveryMode && checkoutState.kind === 'clean') {
+				return { kind: 'already_clean' };
+			}
 			const outstandingReceiptCount = await countOutstandingReceipts(
 				directory,
 				sessionID,
@@ -742,8 +783,7 @@ async function writeReceipt(
 			`${preparation.stashOid}.json`,
 		),
 	);
-	await fsp.mkdir(path.dirname(receiptPath), { recursive: true });
-	await writePrWorkflowAtomicJson(receiptPath, {
+	await writePrWorkflowAtomicJson(directory, receiptPath, {
 		schemaVersion: 1,
 		sessionID,
 		...preparation,
@@ -783,8 +823,10 @@ async function appendPreparationEvent(
  */
 export const _internals: {
 	runGit: typeof runGit;
+	classifyGitState: typeof classifyPrWorkflowGitState;
 } = {
 	runGit,
+	classifyGitState: classifyPrWorkflowGitState,
 };
 
 /**

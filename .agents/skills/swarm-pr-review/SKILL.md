@@ -54,6 +54,6 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   whose `owned_workflow_lanes` partition all six dimensions at tiers S/M —
   the controller computes the tier from the bound diff. While it is active a
   different dispatch path is not equivalent — never bypass the controller.
-- If actionable findings remain, write the canonical handoff artifact and ask
-  whether to continue with `swarm-pr-feedback`; carry validated findings
-  forward with their original IDs and provenance.
+- If actionable findings remain, write the canonical handoff and ask to continue with
+  `/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json`.
+  On Profile A this is a mechanical transition; preserve finding IDs and provenance.

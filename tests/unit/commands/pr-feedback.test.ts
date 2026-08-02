@@ -67,12 +67,51 @@ describe('handlePrFeedbackCommand', () => {
 					'owner/repo#155',
 					'continue',
 					'from',
-					'.swarm/pr-review/run-123/feedback-handoff.md',
+					'.swarm/pr-review/run-123/feedback-handoff.json',
 				]),
 			).toBe(
-				'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/155"] continue from .swarm/pr-review/run-123/feedback-handoff.md',
+				'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/155"] continue from .swarm/pr-review/run-123/feedback-handoff.json',
 			);
 		});
+
+		test('malformed continue-from path returns an error instead of free text', () => {
+			const result = handlePrFeedbackCommand(DIR, [
+				'owner/repo#155',
+				'continue',
+				'from',
+				'.swarm/pr-review/run-123/feedback-handoff.md',
+			]);
+			expect(result).toContain(
+				'Error: PR-feedback continuation must use .swarm/pr-review/<run_id>/feedback-handoff.json',
+			);
+			expect(result).not.toContain('[MODE: PR_FEEDBACK pr=');
+		});
+
+		test('extra tokens after continue-from are rejected', () => {
+			const result = handlePrFeedbackCommand(DIR, [
+				'owner/repo#155',
+				'continue',
+				'from',
+				'.swarm/pr-review/run-123/feedback-handoff.json',
+				'and',
+				'also',
+				'fix',
+			]);
+			expect(result).toContain(
+				'Error: PR-feedback continuation must use the exact form "continue from .swarm/pr-review/<run_id>/feedback-handoff.json"',
+			);
+		});
+	});
+
+	test('ordinary free text beginning with continue remains backward compatible', () => {
+		expect(
+			handlePrFeedbackCommand('/repo', [
+				'continue',
+				'working',
+				'through',
+				'CI',
+			]),
+		).toBe('[MODE: PR_FEEDBACK] continue working through CI');
 	});
 
 	describe('pasted feedback (no parseable PR ref)', () => {
