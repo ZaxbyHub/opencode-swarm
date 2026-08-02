@@ -187,4 +187,68 @@ describe('repo graph health diagnostics', () => {
 			'Graph has no recorded diagnostics. Rebuild with repo_map action="build" to collect health details.',
 		);
 	});
+
+	test('truncated walk surfaces walkTruncated and an INCOMPLETE note (A7)', async () => {
+		// Force a walk truncation by setting a tiny file cap and producing more
+		// scannable files than it allows.
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		for (let i = 0; i < 5; i++) {
+			fs.writeFileSync(
+				path.join(tmp, 'src', `f${i}.ts`),
+				`export const f${i} = ${i};\n`,
+			);
+		}
+		const graph = await buildWorkspaceGraphAsync(tmp, { maxFiles: 2 });
+
+		expect(graph.diagnostics?.walkTruncated).toBe(true);
+		expect(graph.diagnostics?.walkTruncationReason).toBe('cap');
+
+		const health = getGraphHealth(graph);
+		expect(health.walkTruncated).toBe(true);
+		expect(health.walkTruncationReason).toBe('cap');
+		expect(
+			health.notes.some((n) =>
+				n.startsWith(
+					'Graph is INCOMPLETE: walk hit the file-cap/wall-clock budget',
+				),
+			),
+		).toBe(true);
+	});
+
+	test('budget-truncated walk reports reason "budget" (A7)', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		for (let i = 0; i < 3; i++) {
+			fs.writeFileSync(
+				path.join(tmp, 'src', `f${i}.ts`),
+				`export const f${i} = ${i};\n`,
+			);
+		}
+		// A 0ms budget aborts on the first budget check.
+		const graph = await buildWorkspaceGraphAsync(tmp, { walkBudgetMs: 0 });
+		expect(graph.diagnostics?.walkTruncated).toBe(true);
+		expect(graph.diagnostics?.walkTruncationReason).toBe('budget');
+	});
+
+	test('incrementalFallbacks surface in graph_health (A7)', () => {
+		const graph = createEmptyGraph(tmp);
+		graph.diagnostics = { incrementalFallbacks: 4 };
+		const health = getGraphHealth(graph);
+		expect(health.incrementalFallbacks).toBe(4);
+		expect(
+			health.notes.some((n) =>
+				n.includes('incremental update(s) fell back to a full rebuild'),
+			),
+		).toBe(true);
+	});
+
+	test('non-truncated build reports walkTruncated false (A7)', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(tmp, 'src', 'a.ts'), 'export const a = 1;\n');
+		const graph = await buildWorkspaceGraphAsync(tmp);
+		expect(graph.diagnostics?.walkTruncated).toBe(false);
+		const health = getGraphHealth(graph);
+		expect(health.walkTruncated).toBe(false);
+		expect(health.walkTruncationReason).toBeNull();
+		expect(health.incrementalFallbacks).toBe(0);
+	});
 });

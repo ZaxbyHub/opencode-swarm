@@ -393,4 +393,13 @@ export function validateGraphEdge(edge: GraphEdge): void {
 			}
 		}
 	}
+	// targetKind is optional (schema >= 1.3.0). Old graphs omit it and load
+	// unchanged; a present-but-invalid value fails closed (issue #1985, A1).
+	if (
+		edge.targetKind !== undefined &&
+		edge.targetKind !== 'node' &&
+		edge.targetKind !== 'asset'
+	) {
+		throw new Error('Invalid edge: targetKind must be "node" or "asset"');
+	}
 }

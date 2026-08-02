@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { extractFileOntology } from '../../../src/tools/repo-graph';
+import {
+	type ExtractFileOntologyInput,
+	extractFileOntology,
+} from '../../../src/tools/repo-graph';
+import { inferPackageBoundary } from '../../../src/tools/repo-graph/types';
 
 describe('repo graph ontology extraction', () => {
 	test('extracts route, data, security, and convention facts for an API route', () => {
@@ -105,5 +109,71 @@ describe('repo graph ontology extraction', () => {
 		expect(ontology.routes).toContainEqual(
 			expect.objectContaining({ method: 'POST', path: '/api/projects' }),
 		);
+	});
+});
+
+describe('package boundary inference (A8)', () => {
+	function ontologyFor(
+		moduleName: string,
+		hasManifest?: (d: string) => boolean,
+	) {
+		const input: ExtractFileOntologyInput = {
+			moduleName,
+			filePath: `/repo/${moduleName}`,
+			language: 'typescript',
+			exports: [],
+			imports: [],
+			content: '',
+			hasManifest,
+		};
+		return extractFileOntology(input).packageBoundary;
+	}
+
+	test('src/tools/repo-graph special case is removed (regression)', () => {
+		// Before A8 this returned 'src/tools/repo-graph'; the generic rule now
+		// returns 'src/tools'. This is the one intentional behavior change.
+		expect(ontologyFor('src/tools/repo-graph/builder.ts')).toBe('src/tools');
+	});
+
+	test('generic packages/crates/apps/libs/services boundary', () => {
+		expect(ontologyFor('packages/foo/src/index.ts')).toBe('packages/foo');
+		expect(ontologyFor('crates/core/src/lib.rs')).toBe('crates/core');
+		expect(ontologyFor('apps/web/pages/index.tsx')).toBe('apps/web');
+		expect(ontologyFor('libs/shared/src/index.ts')).toBe('libs/shared');
+		expect(ontologyFor('services/api/src/main.ts')).toBe('services/api');
+	});
+
+	test('src and tests layouts', () => {
+		expect(ontologyFor('src/hooks/foo.ts')).toBe('src/hooks');
+		expect(ontologyFor('tests/unit/foo.test.ts')).toBe('tests/unit');
+	});
+
+	test('manifest-driven boundary for arbitrary top-level dirs', () => {
+		// Without a manifest, a custom top-level dir falls back to segment 0.
+		expect(ontologyFor('customdomain/index.ts')).toBe('customdomain');
+		// With a manifest in customdomain/, the first two segments become the
+		// boundary.
+		const hasManifest = (d: string) => d === 'customdomain';
+		expect(ontologyFor('customdomain/users/svc.ts', hasManifest)).toBe(
+			'customdomain/users',
+		);
+		// Manifest under seg0/seg1 also splits there.
+		const hasManifestNested = (d: string) => d === 'customdomain/users';
+		expect(ontologyFor('customdomain/users/svc.ts', hasManifestNested)).toBe(
+			'customdomain/users',
+		);
+	});
+
+	test('inferPackageBoundary shared helper matches ontology + query fallback', () => {
+		// The shared helper is the single source of truth for both ontology
+		// extraction and the query-side no-ontology fallback.
+		expect(inferPackageBoundary('packages/a/b.ts')).toBe('packages/a');
+		expect(inferPackageBoundary('src/tools/repo-graph/builder.ts')).toBe(
+			'src/tools',
+		);
+		expect(inferPackageBoundary('foo.ts')).toBe('foo.ts');
+		expect(inferPackageBoundary('')).toBe('.');
+		// Query fallback path (no hasManifest) only uses static rules.
+		expect(inferPackageBoundary('customdomain/x/y.ts')).toBe('customdomain');
 	});
 });

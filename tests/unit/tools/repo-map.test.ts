@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { GRAPH_SCHEMA_VERSION } from '../../../src/tools/repo-graph';
 import { repo_map } from '../../../src/tools/repo-map';
 
 let tmp: string;
@@ -106,7 +107,7 @@ describe('repo_map: graph_health', () => {
 			unresolvedImports: unknown[];
 		};
 		expect(r.success).toBe(true);
-		expect(r.schemaVersion).toBe('1.2.0');
+		expect(r.schemaVersion).toBe(GRAPH_SCHEMA_VERSION);
 		expect(r.fresh).toBe(true);
 		expect(r.extractionFailures).toEqual([]);
 		expect(r.unresolvedImports).toEqual([]);

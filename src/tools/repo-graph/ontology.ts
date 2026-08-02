@@ -9,6 +9,7 @@ import type {
 	RouteMethod,
 	SecurityFact,
 } from './types';
+import { inferPackageBoundary } from './types';
 
 export interface ExtractFileOntologyInput {
 	moduleName: string;
@@ -17,6 +18,14 @@ export interface ExtractFileOntologyInput {
 	language: string;
 	exports: string[];
 	imports: string[];
+	/**
+	 * Optional callback returning true when a workspace-relative directory
+	 * contains a package manifest (`package.json`, `Cargo.toml`,
+	 * `pyproject.toml`, `go.mod`). When provided, the package-boundary rule
+	 * becomes manifest-driven; otherwise it falls back to the static segment
+	 * rules (issue #1985, defect A8). The extractor stays pure — no fs I/O.
+	 */
+	hasManifest?: (relDir: string) => boolean;
 }
 
 const HTTP_METHODS: RouteMethod[] = [
@@ -102,21 +111,18 @@ function addRole(roles: Set<FileRole>, role: FileRole): void {
 	roles.add(role);
 }
 
-function boundaryForModule(moduleName: string): string {
-	const normalized = normalizeModuleName(moduleName);
-	const parts = normalized.split('/').filter(Boolean);
-	if (parts.length === 0) return '.';
-	if ((parts[0] === 'packages' || parts[0] === 'crates') && parts.length >= 2) {
-		return `${parts[0]}/${parts[1]}`;
-	}
-	if (parts[0] === 'src' && parts.length >= 3) {
-		if (parts[1] === 'tools' && parts[2] === 'repo-graph') {
-			return 'src/tools/repo-graph';
-		}
-		return `src/${parts[1]}`;
-	}
-	if (parts[0] === 'tests' && parts.length >= 2) return `tests/${parts[1]}`;
-	return parts[0];
+/**
+ * Infer the package boundary for a module. Delegates to the shared, pure
+ * `inferPackageBoundary` helper so ontology extraction and the query-side
+ * no-ontology fallback stay in lockstep (issue #1985, defect A8). The
+ * previous `src/tools/repo-graph` special case is removed: user repos should
+ * not inherit this project's internal layout.
+ */
+function boundaryForModule(
+	moduleName: string,
+	hasManifest?: (relDir: string) => boolean,
+): string {
+	return inferPackageBoundary(moduleName, hasManifest);
 }
 
 function inferRoles(moduleName: string, content: string): FileRole[] {
@@ -487,7 +493,7 @@ export function extractFileOntology(
 
 	return {
 		roles,
-		packageBoundary: boundaryForModule(moduleName),
+		packageBoundary: boundaryForModule(moduleName, input.hasManifest),
 		routes,
 		dataOperations,
 		security,

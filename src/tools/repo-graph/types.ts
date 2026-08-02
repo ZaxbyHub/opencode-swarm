@@ -28,11 +28,20 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * still load without corruption. New queries may use these fields to provide
  * more precise context-packing and symbol-level navigation.
  *
+ * 1.3.0 adds the optional per-edge `targetKind` field (`'node' | 'asset'`)
+ * that distinguishes edges whose resolved target is a scannable source file
+ * (a graph node) from edges whose target is an asset (JSON/CSS/etc. — a real
+ * file that never becomes a node). The field is optional, so 1.0.0–1.2.0
+ * graphs still load; `storage.ts` only checks that a version string is
+ * present, and feature gating is per-query via {@link isSchemaVersionAtLeast}.
+ * For pre-1.3.0 graphs the loader/queries fall back to an extension check
+ * (`isScannableSourcePath`) to classify an untagged edge's target kind.
+ *
  * Diagnostics are additive and optional on all schema versions. Old graphs
  * without diagnostics remain readable; graph-health queries surface empty
  * diagnostics with an explicit rebuild note.
  */
-export const GRAPH_SCHEMA_VERSION = '1.2.0';
+export const GRAPH_SCHEMA_VERSION = '1.3.0';
 
 /**
  * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
@@ -251,6 +260,16 @@ export interface GraphEdge {
 	 * imports, where individual symbol usage is not statically resolvable.
 	 */
 	usedSymbols?: string[];
+	/**
+	 * Whether the resolved target is a graph node or an asset. `'node'` targets
+	 * are scannable source files that become graph nodes; `'asset'` targets are
+	 * real files (JSON/CSS/etc.) that never become nodes (schema >= 1.3.0).
+	 * Absent on older graphs — callers fall back to `isScannableSourcePath` on
+	 * the target path. Asset edges only require their source node to exist
+	 * during incremental validation, and are excluded from in-degree ranking /
+	 * importer / dependent queries.
+	 */
+	targetKind?: 'node' | 'asset';
 }
 
 export interface FileReference {
@@ -378,6 +397,20 @@ export interface RepoGraphDiagnostics {
 	binaryFiles?: string[];
 	unreadableFiles?: string[];
 	lowConfidenceEdgeCount?: number;
+	/**
+	 * True when the last workspace walk was truncated by the file cap or wall-
+	 * clock budget (issue #1985, defect A7). Additive/optional on all schema
+	 * versions — old graphs without it read as `false`.
+	 */
+	walkTruncated?: boolean;
+	/** Why the walk truncated: hit the wall-clock `'budget'` or the `'cap'`. */
+	walkTruncationReason?: 'budget' | 'cap';
+	/**
+	 * Count of incremental-update passes that fell back to a full rebuild
+	 * (issue #1985, defect A1). Accumulated across incremental runs; reset on
+	 * a fresh full build.
+	 */
+	incrementalFallbacks?: number;
 }
 
 export interface GraphHealthResult {
@@ -391,6 +424,9 @@ export interface GraphHealthResult {
 	binaryFiles: string[];
 	unreadableFiles: string[];
 	lowConfidenceEdgeCount: number;
+	walkTruncated: boolean;
+	walkTruncationReason: 'budget' | 'cap' | null;
+	incrementalFallbacks: number;
 	notes: string[];
 }
 
@@ -478,6 +514,70 @@ export interface BuildWorkspaceGraphOptions {
  */
 export function normalizeGraphPath(filePath: string): string {
 	return path.normalize(filePath).replace(/\\/g, '/');
+}
+
+/**
+ * Top-level directory segments that, when present as the first path segment,
+ * mark the next segment as a package boundary (monorepo workspaces). Used by
+ * {@link inferPackageBoundary} (issue #1985, defect A8).
+ */
+const PACKAGE_BOUNDARY_ROOTS = new Set([
+	'packages',
+	'crates',
+	'apps',
+	'libs',
+	'services',
+]);
+
+/**
+ * Infer the package boundary for a module name using the generic rule shared
+ * by ontology extraction and the query-side no-ontology fallback (issue #1985,
+ * defect A8). Pure / dependency-free / no fs I/O so it can live in this
+ * foundation module and stay callable from both `ontology.ts` and `query.ts`.
+ *
+ * Rules (in order):
+ *  - empty → `'.'`
+ *  - segment 0 ∈ {packages, crates, apps, libs, services} with ≥2 segments → `<seg0>/<seg1>`
+ *  - segment 0 === `src` with ≥2 segments → `src/<seg1>`
+ *  - segment 0 === `tests` with ≥2 segments → `tests/<seg1>`
+ *  - when `hasManifest` is provided and either `<seg0>` or `<seg0>/<seg1>` is a
+ *    manifest-bearing directory (with ≥2 segments) → `<seg0>/<seg1>`
+ *  - otherwise → segment 0 (or `'.'` when there are no segments)
+ *
+ * The previous `src/tools/repo-graph` special case is intentionally removed:
+ * user repos should not inherit this project's internal layout.
+ *
+ * @param moduleName - Workspace-relative module name (forward slashes).
+ * @param hasManifest - Optional callback returning true when a workspace-
+ *   relative directory contains a package manifest (`package.json`,
+ *   `Cargo.toml`, `pyproject.toml`, `go.mod`). When omitted, only the static
+ *   segment rules apply.
+ */
+export function inferPackageBoundary(
+	moduleName: string,
+	hasManifest?: (relDir: string) => boolean,
+): string {
+	const normalized = moduleName.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+	const parts = normalized.split('/').filter(Boolean);
+	if (parts.length === 0) return '.';
+	if (PACKAGE_BOUNDARY_ROOTS.has(parts[0]) && parts.length >= 2) {
+		return `${parts[0]}/${parts[1]}`;
+	}
+	if (parts[0] === 'src' && parts.length >= 2) {
+		return `src/${parts[1]}`;
+	}
+	if (parts[0] === 'tests' && parts.length >= 2) {
+		return `tests/${parts[1]}`;
+	}
+	if (hasManifest && parts.length >= 2) {
+		// A manifest directly under seg0 (e.g. `<seg0>/package.json`) marks the
+		// whole subtree as one package root; a manifest under seg0/seg1 marks
+		// that subdirectory as its own package.
+		if (hasManifest(parts[0]) || hasManifest(`${parts[0]}/${parts[1]}`)) {
+			return `${parts[0]}/${parts[1]}`;
+		}
+	}
+	return parts[0];
 }
 
 // ============ Basic Graph Construction ============
