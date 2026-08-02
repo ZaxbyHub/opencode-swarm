@@ -225,6 +225,23 @@ git worktree remove "$env:TEMP\repro-check"
 
 ---
 
+## placeholder_scan and `added_lines`
+
+`placeholder_scan` is diff-aware when the caller passes `added_lines: { "<relpath>": [number, ...] }`. When the caller omits
+`added_lines`, the result mixes pre-existing and PR-introduced placeholders, and the verdict cannot distinguish them. The
+tool's `added_lines` contract is fully wired at `src/tools/placeholder-scan.ts:23,311-317,442-443,785-787,826,868-871` —
+the gap is in the caller, not the tool.
+
+If you are calling `placeholder_scan` from an LLM agent and do not have diff line numbers handy, either:
+
+- compute `added_lines` first via `git diff --unified=0 origin/main...HEAD -- <path>` and pass it through, or
+- treat the verdict as informational only and explicitly cross-check each finding against the diff before declaring it a
+  regression.
+
+This is the fallback documented by issue #1994 disposition S1.
+
+---
+
 ## Failure Classification
 
 Not all failures are equal. Before deciding what to do, classify the failure:

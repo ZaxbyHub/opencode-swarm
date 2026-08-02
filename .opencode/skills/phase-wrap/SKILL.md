@@ -102,6 +102,8 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
 
 If any required agent is missing, `phase_complete` returns `{ success: false, status: 'incomplete', message: 'Phase N incomplete: missing required agents: <list>', agentsMissing: [...] }` and the phase is not closed. Dispatch each agent during normal task execution (not only inside optional Phase/Final Councils in steps 5.65/5.7) so the closeout gate is satisfied.
 
+**Docs attestation is not a mechanical no-op.** When the `docs` agent is required, it must attest "no further edits needed" only *after* inspecting the changed files in the phase and recording evidence (changed files, search results, or a brief evidence bundle). A trivial "no edits" reply without inspection fails the gate. The architect must verify the attestation cites concrete evidence before allowing `phase_complete` to succeed. This is the issue #1994 disposition P2.
+
 The `docs` agent is only required when `require_docs: true` in the effective QA gate profile (visible via `get_qa_gate_profile`). For most small plans and feedback cycles, `docs` is NOT required and can be skipped. For multi-task implementation plans, `docs` is typically required.
 
 The `coder` and `test_engineer` agents are required because every phase that modifies source code or tests must have at least one implementation and one test-verification delegation. For pure documentation or retrospective phases, these may be waived by the user explicitly.

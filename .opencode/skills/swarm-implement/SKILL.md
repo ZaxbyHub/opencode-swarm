@@ -106,6 +106,19 @@ If the project exposes `sast_scan` with `capture_baseline`, capture the
 phase-scoped SAST baseline before first coder delegation so later scans fail only
 on new findings rather than pre-existing infrastructure noise.
 
+**`SCOPE_CONFLICT` resolution.** When `declare_scope` or a delegation gate returns `SCOPE_CONFLICT`, do NOT auto-widen
+the scope to a plan-inferred superset — auto-widening can over-authorize writes and hide an inaccurate plan or
+delegation prompt. Instead:
+
+1. Read the error to identify which sources disagree (explicit scope vs. plan files vs. directive files).
+2. Reconcile the intended files first. If the plan is wrong, fix the plan and re-declare.
+3. Re-declare the **smallest justified** scope that covers the intended files. If the task genuinely needs more than
+   one disjoint scope, split the task before delegating.
+4. Never retry the same scope after `SCOPE_CONFLICT` — the conflict will not resolve itself.
+
+The detection lives at `src/scope/scope-binding.ts:resolveCoderScopeSources`; the architect must match the resolution
+path to the source category identified in the error. This guidance is the issue #1994 disposition S4.
+
 ### Phase 4 - Objective validation
 
 Run the strongest objective checks available for the task: tests, lint,
