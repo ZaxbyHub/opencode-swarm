@@ -199,6 +199,18 @@ function assertMatchedRowsHaveProvenance(input: unknown): void {
 	}
 }
 
+function assertNoLegacyNoMatchResult(input: unknown): void {
+	if (!Array.isArray(input)) return;
+	for (const row of input) {
+		if (typeof row !== 'object' || row === null) continue;
+		if ((row as { result?: unknown }).result === 'NO-MATCH') {
+			throw new Error(
+				'NO-MATCH is not a valid PR_REVIEW trigger result; use MATCHED or NOT_TRIGGERED with concrete evidence',
+			);
+		}
+	}
+}
+
 function exactTriggerRows<TRow extends { trigger_id: PrReviewTriggerId }>(
 	rows: readonly TRow[],
 ): TRow[] {
@@ -267,6 +279,7 @@ export function validatePrReviewInlineTriggerLedger(
 	input: unknown,
 ): ValidatedTriggerLedger<PrReviewInlineTriggerRow> {
 	assertExactTriggerIdSet(input);
+	assertNoLegacyNoMatchResult(input);
 	return summarizeTriggerRows(
 		parseRows(input, PrReviewInlineTriggerRowSchema, 'Invalid trigger ledger'),
 	);
@@ -276,6 +289,7 @@ export function validatePrReviewPersistedInputLedger(
 	input: unknown,
 ): ValidatedTriggerLedger<PrReviewPersistedInputRow> {
 	assertExactTriggerIdSet(input);
+	assertNoLegacyNoMatchResult(input);
 	assertMatchedRowsHaveProvenance(input);
 	return summarizeTriggerRows(
 		parseRows(

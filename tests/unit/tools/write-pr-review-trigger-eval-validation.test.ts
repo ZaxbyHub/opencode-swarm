@@ -312,7 +312,9 @@ describe('write_pr_review_trigger_eval - row validation', () => {
 			),
 		);
 		expect(result.success).toBe(false);
+		expect(result.message).toContain('NO-MATCH');
 		expect(result.message).toContain('MATCHED');
+		expect(result.message).toContain('NOT_TRIGGERED');
 	});
 
 	test('rejects traversal', async () => {

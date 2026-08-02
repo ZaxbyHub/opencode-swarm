@@ -102,6 +102,15 @@ describe('inline PR-review trigger ledger', () => {
 		);
 	});
 
+	test('rejects legacy NO-MATCH with a stable actionable diagnostic', () => {
+		const rows = inlineRows() as unknown as Array<Record<string, unknown>>;
+		rows[0] = { ...rows[0], result: 'NO-MATCH' };
+
+		expect(() => validatePrReviewInlineTriggerLedger(rows)).toThrow(
+			'NO-MATCH is not a valid PR_REVIEW trigger result; use MATCHED or NOT_TRIGGERED',
+		);
+	});
+
 	test('rejects provenance on NOT_TRIGGERED, including null and empty values', () => {
 		for (const provenance of [
 			{ source_batch_id: null },
