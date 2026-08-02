@@ -51,6 +51,7 @@ const SKILL_DOCUMENTED_SPACE_VARIANTS: Record<string, string> = {
 const REGISTRY_INTENTIONALLY_UNDOCUMENTED: Set<string> = new Set([
 	'gate-audit', // Evaluation gate matrix — internal diagnostic
 	'gate-stats', // Offline gate statistics — internal diagnostic
+	'context-map stats', // Aggregated context-capsule telemetry — internal diagnostic
 ]);
 
 describe('swarm-subcommand-parity', () => {

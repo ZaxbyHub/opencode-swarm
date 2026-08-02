@@ -227,6 +227,16 @@ describe('CheckpointConfigSchema', () => {
 		});
 	});
 
+	describe('description (FR-006 SC-006)', () => {
+		it('auto_checkpoint_threshold description is set', () => {
+			expect(
+				CheckpointConfigSchema.out.shape.auto_checkpoint_threshold.description,
+			).toBe(
+				'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+			);
+		});
+	});
+
 	describe('edge cases', () => {
 		it('rejects non-boolean enabled: "true"', () => {
 			const result = CheckpointConfigSchema.safeParse({ enabled: 'true' });
