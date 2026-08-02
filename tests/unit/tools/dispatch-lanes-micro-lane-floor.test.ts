@@ -14,7 +14,7 @@ const { validatePrReviewMicroDispatch } = dispatchTestExports as unknown as {
 		args: {
 			trigger_evaluation?: Array<{
 				trigger_id: string;
-				result: 'MATCHED';
+				result: 'MATCHED' | 'NOT_TRIGGERED';
 				evidence: string;
 			}>;
 			lanes: Array<{ workflow_lane: string; owned_workflow_lanes?: string[] }>;
@@ -30,6 +30,20 @@ function fullEvaluation() {
 		trigger_id: id,
 		result: 'MATCHED' as const,
 		evidence: `mandatory review focus for ${id}`,
+	}));
+}
+
+function mixedEvaluation() {
+	return FAMILIES.map((id, index) => ({
+		trigger_id: id,
+		result:
+			index < 3 || id === 'unclassified-risk'
+				? ('MATCHED' as const)
+				: ('NOT_TRIGGERED' as const),
+		evidence:
+			index < 3 || id === 'unclassified-risk'
+				? `changed behavior relevant to ${id}`
+				: `diff contains no ${id} surface`,
 	}));
 }
 
@@ -155,5 +169,46 @@ describe('validatePrReviewMicroDispatch — per-tier full-sweep floor (issue #19
 				'L',
 			),
 		).toThrow(/one dedicated lane per risk family/);
+	});
+
+	test('a mixed ledger dispatches only MATCHED families', () => {
+		const evaluation = mixedEvaluation();
+		const matched = evaluation
+			.filter((row) => row.result === 'MATCHED')
+			.map((row) => row.trigger_id);
+		expect(() =>
+			validatePrReviewMicroDispatch(
+				{
+					trigger_evaluation: evaluation,
+					lanes: matched.map((id) => ({
+						workflow_lane: id,
+						owned_workflow_lanes: [id],
+					})),
+				},
+				'L',
+			),
+		).not.toThrow();
+	});
+
+	test('a NOT_TRIGGERED family cannot be dispatched as a micro lane', () => {
+		const evaluation = mixedEvaluation();
+		const notTriggered = evaluation.find(
+			(row) => row.result === 'NOT_TRIGGERED',
+		)?.trigger_id;
+		expect(notTriggered).toBeDefined();
+		expect(() =>
+			validatePrReviewMicroDispatch(
+				{
+					trigger_evaluation: evaluation,
+					lanes: [
+						{
+							workflow_lane: notTriggered!,
+							owned_workflow_lanes: [notTriggered!],
+						},
+					],
+				},
+				'M',
+			),
+		).toThrow(/NOT_TRIGGERED families must not be dispatched|invalid/);
 	});
 });

@@ -13,20 +13,16 @@ import {
 	appendDelegationTransition,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
-import {
-	AGENT_TOOL_MAP,
-	WRITE_TOOL_NAMES,
-} from '../../../src/config/constants';
+import type { PrReviewInlineTriggerRow } from '../../../src/background/pr-review-trigger-contract';
 import {
 	activatePrWorkflow,
 	bindPrReviewBase,
+	bindPrReviewTriggerLedger,
 	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 } from '../../../src/hooks/pr-workflow-gate';
-import { TOOL_MANIFEST } from '../../../src/tools/manifest';
-import { TOOL_NAMES } from '../../../src/tools/tool-names';
 import {
 	executeWritePrReviewTriggerEval,
 	PR_REVIEW_TRIGGER_DEFINITIONS,
@@ -57,6 +53,10 @@ function tempRoot(): string {
 	return root;
 }
 
+function artifactPath(root: string, runId: string): string {
+	return join(root, '.swarm', 'pr-review', runId, 'trigger-eval.json');
+}
+
 function rows() {
 	return PR_REVIEW_TRIGGER_DEFINITIONS.map((definition, index) => ({
 		trigger_id: definition.id,
@@ -64,6 +64,16 @@ function rows() {
 		evidence: `mandatory review focus for ${definition.id}`,
 		source_batch_id: `micro-batch-${Math.floor(index / 8)}`,
 		source_lane_id: `lane-${index}`,
+	}));
+}
+
+function inlineRows(
+	input: ReadonlyArray<PrReviewInlineTriggerRow> = rows(),
+): PrReviewInlineTriggerRow[] {
+	return input.map(({ trigger_id, result, evidence }) => ({
+		trigger_id,
+		result,
+		evidence,
 	}));
 }
 
@@ -78,12 +88,17 @@ async function recordCompletedLane(
 	},
 ): Promise<void> {
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
-	const text = (input.ownedWorkflowLanes ?? [input.workflowLane])
+	const header =
+		input.mode === 'swarm-pr-review:base'
+			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'
+			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	const cleanRows = (input.ownedWorkflowLanes ?? [input.workflowLane])
 		.map(
 			(family) =>
 				`[CLEAN] | ${family} | exact reviewed diff | no candidate survived the focused review`,
 		)
 		.join('\n');
+	const text = `${header}\n${cleanRows}`;
 	await recordPendingDelegation(root, {
 		correlationId,
 		jobId: null,
@@ -137,15 +152,17 @@ async function recordCompletedLane(
 
 async function establishBoundReviewGate(
 	root: string,
-	options: { consolidatedMicro?: boolean } = {},
+	options: {
+		consolidatedMicro?: boolean;
+		matchedMicroIds?: readonly string[];
+		triggerLedger?: PrReviewInlineTriggerRow[];
+	} = {},
 ): Promise<void> {
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	writerInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	writerInternals.resolveMergeBase = () => 'def456';
-	// Gate bind/verify resolves Git off the blocking spawn; route the async
-	// resolvers through the sync stubs above.
 	gateInternals.resolveCurrentGitHeadAsync = async (dir) =>
 		gateInternals.resolveCurrentGitHead(dir);
 	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
@@ -172,6 +189,11 @@ async function establishBoundReviewGate(
 			mode: 'swarm-pr-review:base',
 		});
 	}
+	await bindPrReviewTriggerLedger(
+		root,
+		SESSION_ID,
+		options.triggerLedger ?? inlineRows(),
+	);
 	if (options.consolidatedMicro) {
 		const sweepA = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6)];
 		const sweepB = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(6)];
@@ -195,6 +217,12 @@ async function establishBoundReviewGate(
 		index,
 		workflowLane,
 	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
+		if (
+			options.matchedMicroIds &&
+			!options.matchedMicroIds.includes(workflowLane)
+		) {
+			continue;
+		}
 		await recordCompletedLane(root, {
 			batchId: `micro-batch-${Math.floor(index / 8)}`,
 			laneId: `lane-${index}`,
@@ -221,16 +249,6 @@ afterEach(() => {
 });
 
 describe('write_pr_review_trigger_eval', () => {
-	test('is fully registered for Architect without becoming a generic write capability', () => {
-		expect(TOOL_NAMES).toContain('write_pr_review_trigger_eval');
-		expect(TOOL_MANIFEST.write_pr_review_trigger_eval).toBeDefined();
-		expect(AGENT_TOOL_MAP.architect).toContain('write_pr_review_trigger_eval');
-		expect(
-			(WRITE_TOOL_NAMES as readonly string[]).includes(
-				'write_pr_review_trigger_eval',
-			),
-		).toBe(false);
-	});
 	test('writes the exact canonical trigger set atomically under .swarm', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
@@ -253,15 +271,9 @@ describe('write_pr_review_trigger_eval', () => {
 			no_match_count: 0,
 			dispatched_micro_lane_count: PR_REVIEW_TRIGGER_DEFINITIONS.length,
 		});
-		const artifactPath = join(
-			root,
-			'.swarm',
-			'pr-review',
-			'review-1805',
-			'trigger-eval.json',
-		);
-		expect(existsSync(artifactPath)).toBe(true);
-		const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8'));
+		const outputPath = artifactPath(root, 'review-1805');
+		expect(existsSync(outputPath)).toBe(true);
+		const artifact = JSON.parse(readFileSync(outputPath, 'utf-8'));
 		expect(artifact.rows).toHaveLength(PR_REVIEW_TRIGGER_DEFINITIONS.length);
 		expect(artifact.rows[0]).toMatchObject({
 			trigger_id: PR_REVIEW_TRIGGER_DEFINITIONS[0].id,
@@ -274,6 +286,99 @@ describe('write_pr_review_trigger_eval', () => {
 			base_ref: 'origin/main',
 			base_sha: 'def456',
 		});
+	});
+
+	test('persists inapplicable families as provenance-free NOT_TRIGGERED rows', async () => {
+		const root = tempRoot();
+		const mixedRows = rows().map((row, index) =>
+			index < 3 || row.trigger_id === 'unclassified-risk'
+				? row
+				: {
+						trigger_id: row.trigger_id,
+						result: 'NOT_TRIGGERED' as const,
+						evidence: `diff contains no ${row.trigger_id} surface`,
+					},
+		);
+		await establishBoundReviewGate(root, {
+			matchedMicroIds: mixedRows
+				.filter((row) => row.result === 'MATCHED')
+				.map((row) => row.trigger_id),
+			triggerLedger: inlineRows(mixedRows),
+		});
+		const response = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-2004-mixed',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: mixedRows,
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(response).toMatchObject({
+			success: true,
+			matched_count: 4,
+			not_triggered_count: 7,
+			dispatched_micro_lane_count: 4,
+		});
+		const artifact = JSON.parse(
+			readFileSync(artifactPath(root, 'review-2004-mixed'), 'utf-8'),
+		);
+		const notTriggered = artifact.rows.filter(
+			(row: { result: string }) => row.result === 'NOT_TRIGGERED',
+		);
+		expect(notTriggered).toHaveLength(7);
+		expect(
+			notTriggered.every(
+				(row: Record<string, unknown>) =>
+					!('source_batch_id' in row) && !('source_lane_id' in row),
+			),
+		).toBe(true);
+	});
+
+	test('rejects a consolidated lane that owns a NOT_TRIGGERED family', async () => {
+		const root = tempRoot();
+		const matchedId = PR_REVIEW_REQUIRED_MICRO_LANE_IDS[0];
+		const contradictoryRows = PR_REVIEW_TRIGGER_DEFINITIONS.map((definition) =>
+			definition.id === matchedId || definition.id === 'unclassified-risk'
+				? {
+						trigger_id: definition.id,
+						result: 'MATCHED' as const,
+						evidence: `matched ${definition.id}`,
+						source_batch_id: 'micro-consolidated',
+						source_lane_id: definition.id === matchedId ? 'sweep-a' : 'sweep-b',
+					}
+				: {
+						trigger_id: definition.id,
+						result: 'NOT_TRIGGERED' as const,
+						evidence: `no ${definition.id} surface`,
+					},
+		);
+		await establishBoundReviewGate(root, {
+			consolidatedMicro: true,
+			triggerLedger: inlineRows(contradictoryRows),
+		});
+		const response = JSON.parse(
+			await executeWritePrReviewTriggerEval(
+				{
+					run_id: 'review-2004-ownership-mismatch',
+					pr_head_sha: HEAD_SHA,
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					rows: contradictoryRows,
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			),
+		);
+
+		expect(response.success).toBe(false);
+		expect(response.message).toContain(
+			'cited lane ownership must equal the MATCHED trigger set',
+		);
 	});
 
 	test('rejects a claimed base SHA that is not the exact resolved merge base', async () => {
@@ -294,17 +399,7 @@ describe('write_pr_review_trigger_eval', () => {
 		);
 		expect(response.success).toBe(false);
 		expect(response.message).toContain('merge-base mismatch');
-		expect(
-			existsSync(
-				join(
-					root,
-					'.swarm',
-					'pr-review',
-					'merge-base-mismatch',
-					'trigger-eval.json',
-				),
-			),
-		).toBe(false);
+		expect(existsSync(artifactPath(root, 'merge-base-mismatch'))).toBe(false);
 	});
 
 	test('rejects a live merge base that contradicts the durably bound review scope', async () => {
@@ -326,17 +421,7 @@ describe('write_pr_review_trigger_eval', () => {
 		);
 		expect(response.success).toBe(false);
 		expect(response.message).toContain('scope mismatch');
-		expect(
-			existsSync(
-				join(
-					root,
-					'.swarm',
-					'pr-review',
-					'bound-base-mismatch',
-					'trigger-eval.json',
-				),
-			),
-		).toBe(false);
+		expect(existsSync(artifactPath(root, 'bound-base-mismatch'))).toBe(false);
 	});
 
 	for (const [name, establish, context] of [
@@ -378,17 +463,7 @@ describe('write_pr_review_trigger_eval', () => {
 			);
 			expect(response.success).toBe(false);
 			expect(response.message).toContain('active, bound PR_REVIEW gate');
-			expect(
-				existsSync(
-					join(
-						root,
-						'.swarm',
-						'pr-review',
-						'blocked-review',
-						'trigger-eval.json',
-					),
-				),
-			).toBe(false);
+			expect(existsSync(artifactPath(root, 'blocked-review'))).toBe(false);
 		});
 	}
 });

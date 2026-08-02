@@ -24,6 +24,10 @@ export const REVISION_DIGEST = 'revision-test';
 export const PR_REVIEW_BASE_SHA = 'def456';
 /** Scope every persisted artifact must carry once a fixture binds a base. */
 export const PR_REVIEW_SCOPE = `complete PR diff ${PR_REVIEW_BASE_SHA}...${HEAD_SHA}`;
+const BASE_CANDIDATE_HEADER =
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+const MICRO_CANDIDATE_HEADER =
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
 
 export let tempDir = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
@@ -173,7 +177,9 @@ export async function persistBatch(
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
 							: [
-									'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+									mode === 'swarm-pr-review:micro'
+										? MICRO_CANDIDATE_HEADER
+										: BASE_CANDIDATE_HEADER,
 									`C-${index} | ${ownedLanes[0]} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
 									...ownedLanes
 										.slice(1)
@@ -315,6 +321,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 		(family) => ({
 			trigger_id: family,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${family}`,
 			source_batch_id: consolidatedBatchId,
 			source_lane_id: consolidatedLaneId,
 		}),
@@ -327,12 +334,13 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});
@@ -380,12 +388,13 @@ export async function establishReviewPrerequisites(): Promise<void> {
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});
@@ -516,13 +525,14 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 				scope: PR_REVIEW_SCOPE,
 			},
 		);
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});
@@ -654,12 +664,13 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});

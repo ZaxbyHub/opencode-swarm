@@ -727,6 +727,82 @@ export async function resolveRemoteRefsContainingHeadAsync(
 		.map(([ref]) => ref);
 }
 
+export type PrFeedbackTrackingCandidate =
+	| {
+			kind: 'local';
+			branchName: string;
+			remoteTrackingRef: string;
+	  }
+	| {
+			kind: 'remote';
+			remoteTrackingRef: string;
+	  };
+
+/**
+ * Discover the exact tracked branches that can safely attach a detached
+ * PR_FEEDBACK checkout. Full ref names come from Git; no remote-name slash
+ * boundary is guessed in application code.
+ */
+export async function resolvePrFeedbackTrackingCandidatesAsync(
+	directory: string,
+	headSha: string,
+): Promise<{
+	local: Extract<PrFeedbackTrackingCandidate, { kind: 'local' }>[];
+	remote: Extract<PrFeedbackTrackingCandidate, { kind: 'remote' }>[];
+} | null> {
+	const [localOutput, remoteRefs] = await Promise.all([
+		runGitAsync(directory, [
+			'for-each-ref',
+			'--format=%(refname)%09%(objectname)%09%(upstream)',
+			'refs/heads',
+		]),
+		resolveRemoteRefsContainingHeadAsync(directory, headSha),
+	]);
+	if (localOutput === null || remoteRefs === null) return null;
+	const exactRemoteRefs = new Set(remoteRefs);
+	const local = localOutput
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.flatMap(([ref, objectName, upstream, ...extras]) => {
+			if (
+				extras.length > 0 ||
+				!ref?.startsWith('refs/heads/') ||
+				objectName?.toLowerCase() !== headSha.toLowerCase() ||
+				!upstream?.startsWith('refs/remotes/') ||
+				!exactRemoteRefs.has(upstream)
+			) {
+				return [];
+			}
+			return [
+				{
+					kind: 'local' as const,
+					branchName: ref.slice('refs/heads/'.length),
+					remoteTrackingRef: upstream,
+				},
+			];
+		});
+	return {
+		local,
+		remote: remoteRefs.map((remoteTrackingRef) => ({
+			kind: 'remote' as const,
+			remoteTrackingRef,
+		})),
+	};
+}
+
+/** Run the exact array-form switch selected by the controller. */
+export async function switchPrFeedbackTrackingCandidateAsync(
+	directory: string,
+	candidate: PrFeedbackTrackingCandidate,
+): Promise<boolean> {
+	const args =
+		candidate.kind === 'local'
+			? ['switch', '--no-guess', '--', candidate.branchName]
+			: ['switch', '--track', '--', candidate.remoteTrackingRef];
+	const output = await runGitAsync(directory, args);
+	return output !== null;
+}
+
 /**
  * Bind a mutable working tree to its actual content, not merely porcelain status.
  * This lets PR-feedback approvals fail closed when a same-path edit occurs after a

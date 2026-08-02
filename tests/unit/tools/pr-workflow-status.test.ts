@@ -262,10 +262,8 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', {
 			prHeadSha: HEAD_SHA,
 		});
-		const gate = (await runTool(tempDir, SESSION_ID)).gate as Record<
-			string,
-			unknown
-		>;
+		const parsed = await runTool(tempDir, SESSION_ID);
+		const gate = parsed.gate as Record<string, unknown>;
 		expect(gate.active).toBe(true);
 		expect(gate.mode).toBe('PR_REVIEW');
 		expect(gate.prHeadBound).toBe(true);
@@ -276,14 +274,15 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 
 	test('reports prHeadBound false before the PR head is bound', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_FEEDBACK');
-		const gate = (await runTool(tempDir, SESSION_ID)).gate as Record<
-			string,
-			unknown
-		>;
+		const parsed = await runTool(tempDir, SESSION_ID);
+		const gate = parsed.gate as Record<string, unknown>;
 		expect(gate.active).toBe(true);
 		expect(gate.mode).toBe('PR_FEEDBACK');
 		expect(gate.prHeadBound).toBe(false);
 		expect(gate.prHeadSha).toBeNull();
+		expect(parsed.nextStep).toContain('exact tracking checkout');
+		expect(parsed.nextStep).toContain('bind');
+		expect(parsed.nextStep).not.toContain('switch --detach');
 	});
 
 	test('does NOT read another session gate (session-pinned)', async () => {

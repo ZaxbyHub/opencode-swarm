@@ -5,6 +5,13 @@ import { z } from 'zod';
 import { readLaneOutput } from '../background/lane-output-store.js';
 import { findByBatchId } from '../background/pending-delegations.js';
 import {
+	buildPrReviewTriggerReceiptV2,
+	PrReviewPersistedInputRowSchema,
+	prReviewTriggerLedgerDigest,
+	validatePrReviewInlineTriggerLedger,
+	validatePrReviewPersistedInputLedger,
+} from '../background/pr-review-trigger-contract.js';
+import {
 	resolveExactMergeBase,
 	resolvePrWorkflowRevisionDigest,
 } from '../background/workspace-snapshot.js';
@@ -12,106 +19,18 @@ import {
 	assertPrReviewBaseCoverageSettled,
 	markPrReviewTriggerEvaluationComplete,
 	PR_REVIEW_MICRO_LANE_FLOORS,
-	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	prReviewDiscoveryArtifactCoversLane,
 	readPrWorkflowGateState,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { createSwarmTool } from './create-tool';
 
+export { PR_REVIEW_TRIGGER_DEFINITIONS } from '../background/pr-review-trigger-contract.js';
+
 export const _internals = {
 	resolvePrWorkflowRevisionDigest,
 	resolveMergeBase: resolveExactMergeBase,
 };
-
-/** Canonical trigger IDs and display values shared with the PR-review protocol. */
-export const PR_REVIEW_TRIGGER_DEFINITIONS = [
-	{
-		id: 'auth-identity-secrets',
-		scope: 'universal',
-		trigger_row:
-			'authentication, authorization, identity, sessions, permissions, secrets, cryptography',
-		micro_lane: 'Identity and secret boundaries',
-	},
-	{
-		id: 'untrusted-input-boundaries',
-		scope: 'universal',
-		trigger_row:
-			'parsing, serialization, queries, templates/rendering, file or network input/output',
-		micro_lane: 'Untrusted input and sink analysis',
-	},
-	{
-		id: 'subprocess-platform',
-		scope: 'universal',
-		trigger_row:
-			'subprocesses, shell commands, filesystem operations, OS/runtime-specific code',
-		micro_lane: 'Subprocess and platform safety',
-	},
-	{
-		id: 'concurrency-state',
-		scope: 'universal',
-		trigger_row:
-			'queues, caches, retries, transactions, locks, state machines, async coordination',
-		micro_lane: 'Concurrency and state transitions',
-	},
-	{
-		id: 'dependencies-build-release',
-		scope: 'universal',
-		trigger_row:
-			'dependency manifests, lockfiles, installers, build scripts, CI, packaging, deployment',
-		micro_lane: 'Dependency and delivery integrity',
-	},
-	{
-		id: 'api-schema-migrations',
-		scope: 'universal',
-		trigger_row:
-			'public API, wire/schema/config/storage formats, migrations, feature flags',
-		micro_lane: 'Compatibility and migration safety',
-	},
-	{
-		id: 'test-infrastructure',
-		scope: 'universal',
-		trigger_row: 'tests, mocks, fixtures, harnesses, coverage, CI matrices',
-		micro_lane: 'Test validity and isolation',
-	},
-	{
-		id: 'ui-accessibility-i18n',
-		scope: 'universal',
-		trigger_row:
-			'user interfaces, interaction flows, rendering, accessibility, localization',
-		micro_lane: 'UI and human-interface quality',
-	},
-	{
-		id: 'privacy-observability',
-		scope: 'universal',
-		trigger_row: 'telemetry, logs, analytics, traces, retention, diagnostics',
-		micro_lane: 'Privacy and observability safety',
-	},
-	{
-		id: 'generated-provenance',
-		scope: 'universal',
-		trigger_row:
-			'generated, vendored, binary, model-produced, codegen or checked-in build artifacts',
-		micro_lane: 'Generated artifact provenance',
-	},
-	{
-		id: 'unclassified-risk',
-		scope: 'universal',
-		trigger_row:
-			'any changed artifact or behavior not confidently classified by the rows above',
-		micro_lane: 'Unclassified high-risk fallback',
-	},
-] as const;
-
-const TriggerEvalRowSchema = z
-	.object({
-		trigger_id: z.string().min(1),
-		result: z.literal('MATCHED'),
-		evidence: z.string().trim().min(1).max(4000),
-		source_batch_id: z.string().trim().min(1).optional(),
-		source_lane_id: z.string().trim().min(1).optional(),
-	})
-	.strict();
 
 const WritePrReviewTriggerEvalArgsSchema = z
 	.object({
@@ -135,7 +54,7 @@ const WritePrReviewTriggerEvalArgsSchema = z
 			.trim()
 			.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
 			.optional(),
-		rows: z.array(TriggerEvalRowSchema).min(1),
+		rows: z.array(PrReviewPersistedInputRowSchema).min(1),
 	})
 	.strict();
 
@@ -153,6 +72,16 @@ export async function executeWritePrReviewTriggerEval(
 	directory: string,
 	context: { sessionID?: string } = {},
 ): Promise<string> {
+	let triggerLedger: ReturnType<typeof validatePrReviewPersistedInputLedger>;
+	try {
+		triggerLedger = validatePrReviewPersistedInputLedger(
+			typeof args === 'object' && args !== null
+				? (args as { rows?: unknown }).rows
+				: undefined,
+		);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
 	const parsed = WritePrReviewTriggerEvalArgsSchema.safeParse(args);
 	if (!parsed.success) {
 		return failure(
@@ -162,49 +91,8 @@ export async function executeWritePrReviewTriggerEval(
 		);
 	}
 
-	const expectedIds = new Set<string>(PR_REVIEW_REQUIRED_MICRO_LANE_IDS);
-	const seenIds = new Set<string>();
-	const duplicateIds = new Set<string>();
-	for (const row of parsed.data.rows) {
-		if (seenIds.has(row.trigger_id)) duplicateIds.add(row.trigger_id);
-		seenIds.add(row.trigger_id);
-	}
-	if (duplicateIds.size > 0) {
-		return failure(`duplicate trigger IDs: ${[...duplicateIds].join(', ')}`);
-	}
+	const validatedRows = triggerLedger.rows;
 
-	const unknownIds = [...seenIds].filter((id) => !expectedIds.has(id));
-	if (unknownIds.length > 0) {
-		// Issue #1931: the validator accepts ONLY the 11 micro-lane IDs in
-		// PR_REVIEW_REQUIRED_MICRO_LANE_IDS. Callers commonly confuse three
-		// namespaces — dispatch `mode` strings (swarm-pr-review:base,
-		// swarm-pr-review:micro), base-lane IDs (intent-architecture,
-		// correctness-state, tests-falsifiability, security-trust,
-		// reliability-performance, compatibility-delivery), and informal
-		// short names (correctness, security, deps, docs, tests, perf).
-		// Surface the valid set so the next call succeeds without a
-		// skill-prose treasure hunt.
-		return failure(
-			`unknown trigger IDs: ${unknownIds.join(', ')}. ` +
-				`trigger_id must be one of the 11 mandatory micro-lane IDs: ` +
-				`${[...expectedIds].join(', ')}. ` +
-				`Base-lane IDs and mode strings (e.g. swarm-pr-review:base) are NOT trigger IDs.`,
-		);
-	}
-	const missingIds = [...expectedIds].filter((id) => !seenIds.has(id));
-	if (missingIds.length > 0) {
-		return failure(`missing trigger IDs: ${missingIds.join(', ')}`);
-	}
-
-	for (const row of parsed.data.rows) {
-		if (row.result === 'MATCHED') {
-			if (!row.source_batch_id || !row.source_lane_id) {
-				return failure(
-					`MATCHED rows require source_batch_id and source_lane_id: ${row.trigger_id}`,
-				);
-			}
-		}
-	}
 	// One dispatch tuple may back several rows only when the dispatched lane
 	// declared consolidated ownership of exactly those families; the per-row
 	// record validation below enforces ownership containment and all-owned
@@ -238,6 +126,31 @@ export async function executeWritePrReviewTriggerEval(
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
 	}
+	if (!gateState.prReviewTriggerLedger) {
+		return failure(
+			'PR_REVIEW trigger evaluation requires the canonical ledger frozen by the first micro dispatch',
+		);
+	}
+	let frozenLedger: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
+	try {
+		frozenLedger = validatePrReviewInlineTriggerLedger(
+			gateState.prReviewTriggerLedger,
+		);
+	} catch (error) {
+		return failure(
+			`Persisted PR_REVIEW trigger ledger is invalid: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+	if (
+		prReviewTriggerLedgerDigest(frozenLedger.rows) !==
+		prReviewTriggerLedgerDigest(validatedRows)
+	) {
+		return failure(
+			'PR_REVIEW trigger evaluation differs from the canonical ledger frozen across micro dispatches',
+		);
+	}
 	const currentRevisionDigest = _internals.resolvePrWorkflowRevisionDigest(
 		directory,
 		parsed.data.pr_head_sha,
@@ -253,7 +166,7 @@ export async function executeWritePrReviewTriggerEval(
 	// overlap would let both artifacts legitimately back the same family,
 	// duplicating (or reintroducing stale) content for it downstream.
 	const citedLaneOwnership = new Map<string, string[]>();
-	for (const row of parsed.data.rows) {
+	for (const row of validatedRows) {
 		if (row.result !== 'MATCHED') continue;
 		const records = findByBatchId(directory, row.source_batch_id!, {
 			parentSessionId: sessionID,
@@ -304,6 +217,7 @@ export async function executeWritePrReviewTriggerEval(
 				prReviewDiscoveryArtifactCoversLane(
 					outputArtifact.artifact.text,
 					ownedFamily,
+					recordOwnedLanes,
 				),
 			) ||
 			record.workspace?.prHeadSha !== parsed.data.pr_head_sha ||
@@ -326,6 +240,24 @@ export async function executeWritePrReviewTriggerEval(
 				);
 			}
 		}
+	}
+	const matchedFamilySet = new Set<string>(triggerLedger.matchedIds);
+	const citedOwnershipSet = new Set(
+		citedLaneEntries.flatMap(([, owned]) => owned),
+	);
+	const ownershipOutsideMatchedLedger = [...citedOwnershipSet].filter(
+		(family) => !matchedFamilySet.has(family),
+	);
+	const matchedWithoutOwnedLane = [...matchedFamilySet].filter(
+		(family) => !citedOwnershipSet.has(family),
+	);
+	if (
+		ownershipOutsideMatchedLedger.length > 0 ||
+		matchedWithoutOwnedLane.length > 0
+	) {
+		return failure(
+			`PR_REVIEW cited lane ownership must equal the MATCHED trigger set; owned but NOT_TRIGGERED/unlisted: ${ownershipOutsideMatchedLedger.join(', ') || '(none)'}; MATCHED without cited ownership: ${matchedWithoutOwnedLane.join(', ') || '(none)'}`,
+		);
 	}
 	if (!parsed.data.base_sha) {
 		return failure(
@@ -361,60 +293,42 @@ export async function executeWritePrReviewTriggerEval(
 		);
 	}
 
-	const rowsById = new Map(
-		parsed.data.rows.map((row) => [row.trigger_id, row] as const),
-	);
-	const artifactRows = PR_REVIEW_TRIGGER_DEFINITIONS.map((definition) => {
-		const row = rowsById.get(definition.id);
-		if (!row)
-			throw new Error(`Missing validated trigger row: ${definition.id}`);
-		return {
-			trigger_id: definition.id,
-			scope: definition.scope,
-			trigger_row: definition.trigger_row,
-			micro_lane: definition.micro_lane,
-			result: row.result,
-			evidence: row.evidence,
-			source_batch_id: row.source_batch_id,
-			source_lane_id: row.source_lane_id,
-		};
-	});
-	const matchedCount = artifactRows.length;
+	const matchedCount = validatedRows.filter(
+		(row) => row.result === 'MATCHED',
+	).length;
 	const dispatchedMicroLaneCount = new Set(
-		parsed.data.rows.map(
-			(row) => `${row.source_batch_id}\0${row.source_lane_id}`,
-		),
+		validatedRows
+			.filter((row) => row.result === 'MATCHED')
+			.map((row) => `${row.source_batch_id}\0${row.source_lane_id}`),
 	).size;
 	// Aggregate per-tier micro-lane floor on the durable attestation. The final
-	// ledger attributes all eleven families to some number of distinct dispatch
-	// lanes; that count must meet the tier floor regardless of dispatch history.
+	// ledger attributes every MATCHED family to a distinct dispatch tuple while
+	// retaining NOT_TRIGGERED families as provenance-free rows.
 	// Normal one-for-one lane retries preserve the count, so legitimate flows are
-	// never rejected; only a final attestation that under-consolidates the eleven
-	// families into fewer than the floor's worth of independent lanes is blocked —
+	// never rejected; only a final attestation that under-consolidates the matched
+	// set into fewer than the floor's worth of independent lanes is blocked —
 	// which is exactly the gap this gate closes (including split-batch dodges that
 	// slip past the per-batch dispatch floor).
-	const microFloor =
-		PR_REVIEW_MICRO_LANE_FLOORS[gateState.prReviewDepthTier ?? 'L'];
+	const microFloor = Math.min(
+		PR_REVIEW_MICRO_LANE_FLOORS[gateState.prReviewDepthTier ?? 'L'],
+		matchedCount,
+	);
 	if (dispatchedMicroLaneCount < microFloor) {
 		return failure(
 			`PR_REVIEW micro lane floor unmet: depth tier ${
 				gateState.prReviewDepthTier ?? 'L'
-			} requires at least ${microFloor} dispatched micro lane(s) across the attestation; the ledger attributes all ${PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length} families to only ${dispatchedMicroLaneCount}`,
+			} requires at least ${microFloor} dispatched micro lane(s) across the attestation; the ledger attributes ${matchedCount} matched families to only ${dispatchedMicroLaneCount}`,
 		);
 	}
-	const artifact = {
-		schema_version: 1,
+	const artifact = buildPrReviewTriggerReceiptV2({
 		run_id: parsed.data.run_id,
 		pr_head_sha: parsed.data.pr_head_sha,
 		base_ref: parsed.data.base_ref,
 		base_sha: parsed.data.base_sha,
 		evaluated_at: new Date().toISOString(),
-		trigger_count: artifactRows.length,
-		matched_count: matchedCount,
-		no_match_count: 0,
 		dispatched_micro_lane_count: dispatchedMicroLaneCount,
-		rows: artifactRows,
-	};
+		rows: validatedRows,
+	});
 
 	const relativePath = path.join(
 		'pr-review',
@@ -457,9 +371,10 @@ export async function executeWritePrReviewTriggerEval(
 		{
 			success: true,
 			path: relativePath.split(path.sep).join('/'),
-			trigger_count: artifactRows.length,
-			matched_count: matchedCount,
-			no_match_count: 0,
+			trigger_count: artifact.trigger_count,
+			matched_count: artifact.matched_count,
+			not_triggered_count: artifact.not_triggered_count,
+			no_match_count: artifact.no_match_count,
 			dispatched_micro_lane_count: dispatchedMicroLaneCount,
 		},
 		null,
@@ -470,7 +385,7 @@ export async function executeWritePrReviewTriggerEval(
 export const write_pr_review_trigger_eval: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Persist the complete, exact-set PR-review micro-lane ledger after every repository-agnostic lane has completed.',
+			'Persist the complete, exact-set PR-review trigger receipt after every MATCHED family has completed; NOT_TRIGGERED families remain provenance-free.',
 		args: {
 			run_id: WritePrReviewTriggerEvalArgsSchema.shape.run_id,
 			pr_head_sha: WritePrReviewTriggerEvalArgsSchema.shape.pr_head_sha,

@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+	candidateHeaderFamily,
+	splitPipeFields,
+} from '../../../src/background/candidate-contract';
 
 const CANONICAL_SKILL = '.opencode/skills/swarm-pr-review/SKILL.md';
 const ADAPTER_SKILLS = [
@@ -85,6 +89,22 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'single message with multiple Agent tool calls',
 		);
 		expect(phase3Section).toContain('do not dispatch reviewers yet');
+		expect(phase3Section).toContain('expected_family: "base_explorer"');
+		expect(phase3Section).toContain('`expected_lane`');
+		expect(phase3Section).toContain('`expected_lanes`');
+		expect(phase3Section).toContain(
+			'complete\n   `owned_workflow_lanes` array',
+		);
+		const canonicalBaseHeader = source
+			.split(/\r?\n/)
+			.find((line) => line.startsWith('[CANDIDATE] | candidate_id | lane'));
+		expect(canonicalBaseHeader).toBeDefined();
+		expect(
+			candidateHeaderFamily(splitPipeFields(canonicalBaseHeader ?? '')),
+		).toBe('base_explorer');
+		expect(source).toContain(
+			'The confidence data value must be exactly LOW, MEDIUM, or HIGH.',
+		);
 		// Depth tiers scale dispatch shape (never dimension coverage) on
 		// profiles without the controller.
 		expect(phase3Section).toContain('### Review depth tiers');
@@ -104,8 +124,11 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase4Section).toContain(
 			'Repository-agnostic mandatory micro-lane map',
 		);
-		expect(phase4Section).toContain('`NO-MATCH` is invalid');
-		expect(phase4Section).toContain('eleven mandatory micro-lanes');
+		expect(phase4Section).toContain('`NOT_TRIGGERED` only when');
+		expect(phase4Section).toContain('not a waiver');
+		expect(phase4Section).toContain('must not be dispatched');
+		expect(phase4Section).not.toContain('`NO-MATCH`');
+		expect(phase4Section).toContain('exact eleven-row v2 receipt');
 		expect(phase4Section).toContain('Scope');
 		expect(phase4Section).toContain('universal');
 		expect(phase4Section).not.toContain('swarm-extension');

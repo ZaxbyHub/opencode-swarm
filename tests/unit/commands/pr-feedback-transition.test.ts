@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { createSwarmCommandHandler } from '../../../src/commands/index.js';
 import {
 	_test_exports,
+	bindPrWorkflowHead,
 	completePrWorkflow,
 	declarePrFeedbackInventory,
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -227,6 +228,13 @@ describe('PR feedback continuation transition', () => {
 		});
 		expect(state?.prHeadSha).toBeUndefined();
 		expect(state?.prFeedbackInventory).toBeUndefined();
+
+		const bound = await bindPrWorkflowHead(tempDir, SESSION_ID, HEAD_SHA);
+		expect(bound).toMatchObject({
+			mode: 'PR_FEEDBACK',
+			prHeadSha: HEAD_SHA,
+		});
+		expect(bound.prFeedbackReviewHandoff?.findingIds).toEqual(findingIds);
 	});
 
 	test('nonterminal active reviews reject the continuation and preserve PR_REVIEW', async () => {

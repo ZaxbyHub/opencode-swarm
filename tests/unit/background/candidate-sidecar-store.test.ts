@@ -98,7 +98,7 @@ function beRow(
 	c6 = 'claim1',
 	c7 = 'evidence1',
 	c8 = 'impact1',
-	c9 = '0.9',
+	c9 = 'HIGH',
 ): string {
 	return [c1, c2, c3, c4, c5, c6, c7, c8, c9].join(' | ');
 }
@@ -461,7 +461,7 @@ describe('Record validation — candidate schema', () => {
 			evidence_summary: 'evidence1',
 			impact_context: 'impact1',
 			invariant_violated: null,
-			confidence: '0.9',
+			confidence: 'HIGH',
 		};
 
 		expect(() =>
@@ -507,7 +507,7 @@ describe('Record validation — candidate schema', () => {
 			evidence_summary: 'evidence1',
 			impact_context: 'impact1',
 			invariant_violated: null,
-			confidence: '0.9',
+			confidence: 'HIGH',
 		};
 
 		expect(() =>
@@ -648,7 +648,7 @@ describe('FR-019 — producer on candidate records (schema + round-trip)', () =>
 			evidence_summary: 'evidence1',
 			impact_context: 'impact1',
 			invariant_violated: null,
-			confidence: '0.9',
+			confidence: 'HIGH',
 		};
 
 		// Should NOT throw — schema accepts producer field
@@ -896,7 +896,7 @@ describe('FR-021 — sanitizeString preserves surrogate pairs', () => {
 					'claim with 😀',
 					'evidence',
 					'impact',
-					'0.9',
+					'HIGH',
 				),
 			]),
 		};
@@ -1012,7 +1012,7 @@ describe('SC-025 / FR-021 — appendToSidecar does not mutate caller objects', (
 			evidence_summary: 'evidence1',
 			impact_context: 'impact1',
 			invariant_violated: null,
-			confidence: '0.9',
+			confidence: 'HIGH',
 		};
 
 		const originalEnvelope = JSON.stringify(envelope);
@@ -1064,7 +1064,7 @@ describe('SC-025 / FR-021 — appendToSidecar does not mutate caller objects', (
 				evidence_summary: 'evidence1',
 				impact_context: 'impact1',
 				invariant_violated: null,
-				confidence: '0.9',
+				confidence: 'HIGH',
 			},
 			{
 				record_type: 'candidate' as const,
@@ -1087,7 +1087,7 @@ describe('SC-025 / FR-021 — appendToSidecar does not mutate caller objects', (
 				evidence_summary: 'evidence2',
 				impact_context: 'impact2',
 				invariant_violated: null,
-				confidence: '0.8',
+				confidence: 'MEDIUM',
 			},
 		];
 

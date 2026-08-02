@@ -130,7 +130,7 @@ function beRow(
 	c6 = 'claim1',
 	c7 = 'evidence1',
 	c8 = 'impact1',
-	c9 = '0.9',
+	c9 = 'HIGH',
 ): string {
 	return [c1, c2, c3, c4, c5, c6, c7, c8, c9].join(' | ');
 }
@@ -356,7 +356,7 @@ describe('parse_lane_candidates', () => {
 					'cl',
 					'ev',
 					'imp',
-					'0.9',
+					'HIGH',
 				),
 			);
 			const digest = sha256(text);
@@ -419,7 +419,7 @@ describe('parse_lane_candidates', () => {
 			const dir = makeTempDir();
 			const text =
 				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n' +
-				'[CLEAN] | wrong-lane | checked scope | no findings';
+				'[CLEAN] | wrong-lane | complete changed-file scope | no candidate survived focused review';
 			const artifact = buildArtifact({
 				batchId: 'micro-clean-public-batch',
 				laneId: 'micro-clean-public-lane',
@@ -478,7 +478,7 @@ describe('parse_lane_candidates', () => {
 					'cl',
 					'ev',
 					'imp',
-					'0.8',
+					'HIGH',
 				),
 			);
 			const digest = sha256(text);
@@ -574,7 +574,7 @@ describe('parse_lane_candidates', () => {
 					'cl',
 					'ev',
 					'imp',
-					'0.9',
+					'HIGH',
 				),
 			);
 			const digest = sha256(text);
@@ -649,7 +649,7 @@ describe('parse_lane_candidates', () => {
 					'cl',
 					'ev',
 					'imp',
-					'0.9',
+					'HIGH',
 				),
 			);
 			const artifact = buildArtifact({
@@ -839,7 +839,7 @@ describe('parse_lane_candidates', () => {
 					'claim',
 					'ev',
 					'imp',
-					'1.0',
+					'HIGH',
 				),
 			);
 			const digest = sha256(text);

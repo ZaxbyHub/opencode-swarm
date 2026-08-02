@@ -154,8 +154,9 @@ async function resolveBranch(
 	// guessing at it.
 	if (raw === null) return { branch: null, detached: null };
 	const value = raw.trim();
-	// `--abbrev-ref HEAD` prints the literal "HEAD" for a detached checkout,
-	// which is the PR_REVIEW/PR_FEEDBACK steady state (detached review HEAD).
+	// `--abbrev-ref HEAD` prints the literal "HEAD" for a detached checkout.
+	// That is the PR_REVIEW steady state and a valid pre-bind PR_FEEDBACK intake
+	// state; the feedback controller attaches the unique exact tracking ref.
 	if (!value || value === 'HEAD') return { branch: null, detached: true };
 	return { branch: boundUntrusted(value, MAX_FIELD_LEN), detached: false };
 }
@@ -254,7 +255,9 @@ function describeNextStep(
 		return 'No active PR workflow gate for this session. Activate with `/swarm pr-review <pr-ref>` or `/swarm pr-feedback <pr-ref>` before PR-workflow tool calls are admitted.';
 	}
 	if (!gate.prHeadBound) {
-		return `${gate.mode} gate active; PR head not yet bound. If the working tree is dirty, preserve it with prepare_pr_workflow_checkout (call it with no paths to auto-discover), then bind the PR head via the canonical detached checkout.`;
+		return gate.mode === 'PR_FEEDBACK'
+			? 'PR_FEEDBACK gate active; PR head not yet bound. If the working tree is dirty, preserve it with prepare_pr_workflow_checkout (omit paths to include tracked and untracked changes). Prefer the intended exact tracking checkout, then bind; if this workflow inherited an already-detached exact intake head, bind it directly and the controller will attach the unique exact local/remote tracking ref. Ambiguity or an existing mismatched upstream fails closed.'
+			: 'PR_REVIEW gate active; PR head not yet bound. If the working tree is dirty, preserve it with prepare_pr_workflow_checkout (omit paths to include tracked and untracked changes), then bind the exact detached PR head.';
 	}
 	if (git.isClean === false) {
 		return `${gate.mode} gate active and head bound, but the working tree is dirty. Read-only observation only; the gate keeps writes and non-tracking fetches fail-closed.`;

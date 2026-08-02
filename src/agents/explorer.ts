@@ -126,11 +126,14 @@ Field rules:
 Emit a header row first, then one unprefixed data row per finding. Use pipe (|) to
 separate fields; escape literal pipe characters inside field values as \\|.
 
-If a standard explorer finds zero issues, emit the header row with no data rows.
-If a micro-lane finds zero issues, emit the header followed by exactly:
+If either a standard explorer or a micro-lane finds zero issues, emit the
+header followed by exactly the matching family form:
+[CLEAN] | lane | coverage_scope | evidence
 [CLEAN] | micro_lane | coverage_scope | evidence
-Fill every CLEAN field with the assigned micro-lane, checks completed, and the
-negative evidence. Do NOT fall back to the default PROJECT/STRUCTURE format.
+Replace lane or micro_lane with the exact controller-assigned value and fill
+the remaining fields with the checks completed and concrete negative evidence.
+Header-only output is unattested. Do NOT fall back to the default
+PROJECT/STRUCTURE format.
 
 For micro-lane dispatches, use the micro-lane variant:
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence

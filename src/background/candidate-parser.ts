@@ -1,4 +1,20 @@
 import { z } from 'zod';
+import {
+	analyzeCandidateFields,
+	analyzeCandidateLaneContext,
+	analyzeCleanFields,
+	CANDIDATE_FIELD_COUNT,
+	CANDIDATE_FIELDS,
+	type CandidateConfidence,
+	type CandidateSeverity,
+	candidateDiagnosticPreview,
+	candidateHeaderFamily,
+	isCandidateLookingShortRow,
+	type RowFormatFamily,
+	removeCandidateCodeFences,
+	type CleanAttestationRecord as SharedCleanAttestationRecord,
+	splitPipeFields,
+} from './candidate-contract';
 import { appendToSidecar } from './candidate-sidecar-store';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +49,12 @@ const ParseFlagsSchema = z
 		row_format_version: z.number().int().nonnegative(),
 		producer: z.string().optional(),
 		expected_family: z.enum(['base_explorer', 'micro_lane']).optional(),
+		expected_lane: z.string().trim().min(1).max(120).optional(),
+		expected_lanes: z
+			.array(z.string().trim().min(1).max(120))
+			.min(1)
+			.max(11)
+			.optional(),
 		expected_micro_lane: z.string().trim().min(1).max(120).optional(),
 		/**
 		 * Full owned family set of a consolidated (depth-tiered) lane artifact.
@@ -47,7 +69,16 @@ const ParseFlagsSchema = z
 			.max(11)
 			.optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, context) => {
+		for (const issue of analyzeCandidateLaneContext(value)) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: [issue.field],
+				message: issue.message,
+			});
+		}
+	});
 
 export type ArtifactInput = z.infer<typeof ArtifactInputSchema>;
 export type ParseFlags = z.infer<typeof ParseFlagsSchema>;
@@ -55,11 +86,6 @@ export type ParseFlags = z.infer<typeof ParseFlagsSchema>;
 // ---------------------------------------------------------------------------
 // Output types
 // ---------------------------------------------------------------------------
-
-/**
- * The two supported pipe-delimited format families produced by lane agents.
- */
-export type RowFormatFamily = 'base_explorer' | 'micro_lane';
 
 /**
  * A single parsed candidate record extracted from lane text.
@@ -86,35 +112,18 @@ export interface CandidateRecord {
 	candidate_id: string;
 	lane: string | null;
 	micro_lane: string | null;
-	severity: string | null;
+	severity: CandidateSeverity | null;
 	category: string | null;
 	file_line: string | null;
 	claim: string | null;
 	evidence_summary: string | null;
 	impact_context: string | null;
 	invariant_violated: string | null;
-	confidence: string | null;
+	confidence: CandidateConfidence | null;
 }
 
-/** A machine-readable attestation that a complete micro-lane found no candidates. */
-export interface CleanAttestationRecord {
-	record_type: 'clean_attestation';
-	row_format_family: 'micro_lane';
-	row_format_version: number;
-	record_version: { major: number; minor: number };
-	source_output_ref: string;
-	source_batch_id: string;
-	source_lane_id: string;
-	source_agent: string;
-	source_digest: string;
-	extracted_from_partial_source: false;
-	sessionId?: string;
-	parentSessionId?: string;
-	producer?: string;
-	micro_lane: string;
-	coverage_scope: string;
-	evidence: string;
-}
+/** A machine-readable attestation that a complete lane found no candidates. */
+export type CleanAttestationRecord = SharedCleanAttestationRecord;
 
 /**
  * One invocation-envelope record per parseCandidates call.
@@ -217,88 +226,11 @@ export interface ParseResultWithSidecar extends ParseResult {
 // Format-family field ordering and discriminators
 // ---------------------------------------------------------------------------
 
-const BASE_EXPLORER_FIELDS = [
-	'candidate_id',
-	'lane',
-	'severity',
-	'category',
-	'file_line',
-	'claim',
-	'evidence_summary',
-	'impact_context',
-	'confidence',
-] as const;
-
-const MICRO_LANE_FIELDS = [
-	'candidate_id',
-	'micro_lane',
-	'severity',
-	'category',
-	'file_line',
-	'claim',
-	'invariant_violated',
-	'evidence_summary',
-	'confidence',
-] as const;
-
-const BASE_EXPLORER_DISCRIMINATOR = 'impact_context';
-const MICRO_LANE_DISCRIMINATOR = 'invariant_violated';
-
-const EXPECTED_FIELD_COUNT = 9;
 const RECORD_VERSION = { major: 1, minor: 1 };
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Split a single line on unescaped `|` characters.
- * A `\|` sequence is treated as a literal pipe inside a field value (FR-008).
- */
-function splitRow(line: string): string[] {
-	const fields: string[] = [];
-	let current = '';
-	let i = 0;
-
-	while (i < line.length) {
-		if (line[i] === '\\' && i + 1 < line.length && line[i + 1] === '|') {
-			current += '|';
-			i += 2;
-		} else if (line[i] === '|') {
-			fields.push(current);
-			current = '';
-			i++;
-		} else {
-			current += line[i];
-			i++;
-		}
-	}
-
-	fields.push(current);
-	return fields;
-}
-
-/**
- * Remove content that lives inside triple-backtick markdown code fences.
- * The fence markers themselves are also removed (FR-006).
- */
-function removeCodeFences(text: string): string {
-	const lines: string[] = [];
-	let inFence = false;
-
-	for (const rawLine of text.split('\n')) {
-		const trimmedStart = rawLine.trimStart();
-		if (trimmedStart.startsWith('```')) {
-			inFence = !inFence;
-			continue;
-		}
-		if (!inFence) {
-			lines.push(rawLine);
-		}
-	}
-
-	return lines.join('\n');
-}
 
 /**
  * Thrown when neither format-family discriminator is present in a header row.
@@ -310,28 +242,6 @@ class UnknownFormatFamilyError extends Error {
 		);
 		this.name = 'UnknownFormatFamilyError';
 	}
-}
-
-/**
- * Determine the format family from the header field names (FR-017).
- *
- * - `impact_context` present        → base_explorer
- * - `invariant_violated` present    → micro_lane
- * - both present                    → base_explorer (+ caller emits parse_error)
- * - neither present                 → throws UnknownFormatFamilyError
- */
-function detectFormatFamily(headerFields: string[]): RowFormatFamily {
-	const trimmed = headerFields.map((f) => f.trim());
-	const hasImpactContext = trimmed.includes(BASE_EXPLORER_DISCRIMINATOR);
-	const hasInvariantViolated = trimmed.includes(MICRO_LANE_DISCRIMINATOR);
-
-	if (hasImpactContext) {
-		return 'base_explorer';
-	}
-	if (hasInvariantViolated) {
-		return 'micro_lane';
-	}
-	throw new UnknownFormatFamilyError();
 }
 
 /**
@@ -366,8 +276,7 @@ function mapFields(
 	family: RowFormatFamily,
 ): Record<string, string | null> {
 	const trimmed = fields.map((f) => f.trim());
-	const names =
-		family === 'base_explorer' ? BASE_EXPLORER_FIELDS : MICRO_LANE_FIELDS;
+	const names = CANDIDATE_FIELDS[family];
 	const result: Record<string, string | null> = {};
 
 	for (let i = 0; i < names.length; i++) {
@@ -388,7 +297,7 @@ function mapFields(
 }
 
 function getRequiredFields(family: RowFormatFamily): readonly string[] {
-	return family === 'base_explorer' ? BASE_EXPLORER_FIELDS : MICRO_LANE_FIELDS;
+	return CANDIDATE_FIELDS[family];
 }
 
 /** Runtime assertion: candidate_id is guaranteed non-null after the rowMalformed guard. */
@@ -603,7 +512,7 @@ export function parseCandidates(
 
 function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	// Strip markdown code fences before row parsing (FR-006).
-	const cleanedText = removeCodeFences(input.text);
+	const cleanedText = removeCandidateCodeFences(input.text);
 	const lines = cleanedText.split('\n');
 
 	// Locate the header row: first non-empty line that looks tabular.
@@ -613,7 +522,7 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	for (let i = 0; i < lines.length; i++) {
 		const trimmed = lines[i].trim();
 		if (trimmed === '') continue;
-		const fields = splitRow(trimmed);
+		const fields = splitPipeFields(trimmed);
 		if (fields.length >= 2 && fields.some((f) => f.trim() !== '')) {
 			headerIndex = i;
 			headerFields = fields.map((f) => f.trim());
@@ -626,17 +535,18 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		return emptyTextResult(input, flags);
 	}
 
-	// The asserted batch family is authoritative only when it agrees with a
-	// recognizable header. A mismatch is a contract failure, not a remapping hint.
-	let headerFamily: RowFormatFamily | undefined;
-	try {
-		headerFamily = detectFormatFamily(headerFields);
-	} catch (e) {
-		if (e instanceof UnknownFormatFamilyError) {
-			// Header has no recognizable family — continue with per-row detection.
-		} else {
-			throw e;
-		}
+	// Marker-bearing candidate output has one exact shared header contract. A
+	// markerless unknown header keeps the historical positional fallback, but a
+	// malformed marker header (including a lone marker-prefixed data row) fails
+	// closed instead of being skipped as if it were trustworthy metadata.
+	const headerFamily = candidateHeaderFamily(headerFields) ?? undefined;
+	if (headerFields[0] === '[CANDIDATE]' && headerFamily === undefined) {
+		return refusalResult(
+			'invalid-candidate-header',
+			'Candidate output must begin with one exact canonical base or micro [CANDIDATE] header',
+			input,
+			flags,
+		);
 	}
 	if (
 		flags.expected_family !== undefined &&
@@ -651,21 +561,7 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		);
 	}
 
-	const bothDiscriminators =
-		headerFields.includes(BASE_EXPLORER_DISCRIMINATOR) &&
-		headerFields.includes(MICRO_LANE_DISCRIMINATOR);
-
 	const parseErrorDetails: ParseErrorDetail[] = [];
-
-	// Emit parse_error when both discriminators are present in the header (FR-017).
-	if (bothDiscriminators && headerFamily === 'base_explorer') {
-		parseErrorDetails.push({
-			row_index: headerIndex,
-			field: 'header',
-			message:
-				'Both format-family discriminators present; defaulting to base_explorer',
-		});
-	}
 
 	const candidates: CandidateRecord[] = [];
 	const idCounts = new Map<string, number>();
@@ -673,9 +569,7 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	const formatFamiliesDetected = new Set<RowFormatFamily>();
 	let malformedRows = 0;
 	let currentCandidate: Partial<CandidateRecord> | null = null;
-	let pendingClean:
-		| { micro_lane: string; coverage_scope: string; evidence: string }
-		| undefined;
+	let pendingClean: SharedCleanAttestationRecord | undefined;
 	let cleanErrorCode: string | undefined;
 	let cleanErrorMessage: string | undefined;
 
@@ -686,55 +580,94 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		// Skip blank lines — continuation is preserved across blank lines per FR-007.
 		if (trimmed === '') continue;
 
-		let fields = splitRow(trimmed);
+		let fields = splitPipeFields(trimmed);
 
 		// A CLEAN sentinel is a distinct record, not a short continuation row.
 		if (fields[0]?.trim() === '[CLEAN]') {
 			const cleanFamily = flags.expected_family ?? headerFamily;
 			const cleanFields = fields.map((field) => field.trim());
+			const cleanLane =
+				cleanFamily === 'micro_lane'
+					? flags.expected_micro_lane
+					: flags.expected_lane;
+			const cleanLanes =
+				cleanFamily === 'micro_lane'
+					? (flags.expected_micro_lanes ??
+						(flags.expected_micro_lane
+							? [flags.expected_micro_lane]
+							: undefined))
+					: (flags.expected_lanes ??
+						(flags.expected_lane ? [flags.expected_lane] : undefined));
 			// Out-of-scope family from a consolidated lane artifact: another
 			// per-family call extracts it; this call skips it silently.
 			if (
-				cleanFamily === 'micro_lane' &&
+				cleanFamily !== undefined &&
 				cleanFields.length === 4 &&
-				flags.expected_micro_lane !== undefined &&
-				cleanFields[1] !== flags.expected_micro_lane &&
-				(flags.expected_micro_lanes ?? [flags.expected_micro_lane]).includes(
-					cleanFields[1],
-				)
+				cleanLane !== undefined &&
+				cleanFields[1] !== cleanLane &&
+				(cleanLanes ?? [cleanLane]).includes(cleanFields[1])
 			) {
 				continue;
 			}
-			if (cleanFamily !== 'micro_lane') {
-				cleanErrorCode = 'invalid-clean-attestation';
-				cleanErrorMessage =
-					'CLEAN attestation is valid only for micro_lane output';
-			} else if (
-				cleanFields.length !== 4 ||
-				cleanFields.slice(1).some((field) => field.length === 0)
-			) {
-				cleanErrorCode = 'invalid-clean-attestation';
-				cleanErrorMessage =
-					'CLEAN attestation requires micro_lane, coverage_scope, and evidence';
-			} else if (pendingClean !== undefined) {
+			const cleanAnalysis = cleanFamily
+				? analyzeCleanFields(cleanFields, cleanFamily, cleanLane)
+				: undefined;
+			if (pendingClean !== undefined) {
 				cleanErrorCode = 'invalid-clean-attestation';
 				cleanErrorMessage =
 					'Only one CLEAN attestation is allowed per artifact';
-			} else if (flags.degraded || input.transcriptIncomplete === true) {
-				cleanErrorCode = 'untrusted-clean-attestation';
+			} else if (!cleanFamily || !cleanAnalysis) {
+				cleanErrorCode = 'invalid-clean-attestation';
 				cleanErrorMessage =
-					'CLEAN attestation cannot come from a degraded or partial artifact';
-			} else if (
-				flags.expected_micro_lane !== undefined &&
-				cleanFields[1] !== flags.expected_micro_lane
-			) {
-				cleanErrorCode = 'expected-micro-lane-mismatch';
-				cleanErrorMessage = `Expected CLEAN attestation for ${flags.expected_micro_lane}, received ${cleanFields[1]}`;
+					'CLEAN attestation is valid only for base_explorer or micro_lane output';
+			} else if (!cleanAnalysis.valid) {
+				cleanErrorCode = cleanAnalysis.issues.some((issue) =>
+					['lane', 'micro_lane'].includes(issue.field),
+				)
+					? cleanFamily === 'base_explorer'
+						? 'expected-lane-mismatch'
+						: 'expected-micro-lane-mismatch'
+					: 'invalid-clean-attestation';
+				cleanErrorMessage = cleanAnalysis.issues
+					.map((issue) => `${issue.field}: ${issue.message}`)
+					.join('; ');
+			} else if (cleanFamily === 'base_explorer') {
+				pendingClean = {
+					record_type: 'clean_attestation',
+					row_format_family: 'base_explorer',
+					row_format_version: flags.row_format_version,
+					record_version: RECORD_VERSION,
+					source_output_ref: input.output_ref,
+					source_batch_id: input.batchId,
+					source_lane_id: input.laneId,
+					source_agent: input.agent,
+					source_digest: input.digest,
+					extracted_from_partial_source: false,
+					sessionId: input.sessionId,
+					parentSessionId: input.parentSessionId,
+					producer: flags.producer,
+					lane: cleanAnalysis.lane!,
+					coverage_scope: cleanAnalysis.coverageScope!,
+					evidence: cleanAnalysis.evidence!,
+				};
 			} else {
 				pendingClean = {
-					micro_lane: cleanFields[1],
-					coverage_scope: cleanFields[2],
-					evidence: cleanFields[3],
+					record_type: 'clean_attestation',
+					row_format_family: 'micro_lane',
+					row_format_version: flags.row_format_version,
+					record_version: RECORD_VERSION,
+					source_output_ref: input.output_ref,
+					source_batch_id: input.batchId,
+					source_lane_id: input.laneId,
+					source_agent: input.agent,
+					source_digest: input.digest,
+					extracted_from_partial_source: false,
+					sessionId: input.sessionId,
+					parentSessionId: input.parentSessionId,
+					producer: flags.producer,
+					micro_lane: cleanAnalysis.lane!,
+					coverage_scope: cleanAnalysis.coverageScope!,
+					evidence: cleanAnalysis.evidence!,
 				};
 			}
 			if (cleanErrorCode) {
@@ -744,17 +677,41 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 					message: cleanErrorMessage ?? 'Invalid CLEAN attestation',
 				});
 				malformedRows++;
+				continue;
+			}
+			if (flags.degraded || input.transcriptIncomplete === true) {
+				cleanErrorCode = 'untrusted-clean-attestation';
+				cleanErrorMessage =
+					'CLEAN attestation cannot come from a degraded or partial artifact';
+				parseErrorDetails.push({
+					row_index: i,
+					field: 'clean_attestation',
+					message: cleanErrorMessage,
+				});
+				malformedRows++;
+				continue;
 			}
 			continue;
 		}
 
 		// Compatibility: older prompt text put the marker on every data row.
-		if (fields[0]?.trim() === '[CANDIDATE]') {
+		const hadCandidateMarker = fields[0]?.trim() === '[CANDIDATE]';
+		if (hadCandidateMarker) {
 			fields = fields.slice(1);
 		}
 
 		// Continuation line: fewer fields than the format family expects (FR-007).
-		if (fields.length < EXPECTED_FIELD_COUNT) {
+		if (fields.length < CANDIDATE_FIELD_COUNT) {
+			if (isCandidateLookingShortRow(fields, flags, hadCandidateMarker)) {
+				parseErrorDetails.push({
+					row_index: i,
+					field: 'row',
+					message:
+						'Structurally short [CANDIDATE] row must be a full candidate or CLEAN attestation, not continuation text',
+				});
+				malformedRows++;
+				continue;
+			}
 			if (currentCandidate) {
 				const prev = currentCandidate.evidence_summary ?? '';
 				currentCandidate.evidence_summary = `${prev}\n${trimmed}`;
@@ -765,8 +722,9 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			continue;
 		}
 
-		// Complete row — take exactly the expected number of fields.
-		const rowFields = fields.slice(0, EXPECTED_FIELD_COUNT);
+		// Map the canonical positions; semantic validation below still receives the
+		// complete field list so trailing fields fail the exact-nine-field contract.
+		const rowFields = fields.slice(0, CANDIDATE_FIELD_COUNT);
 
 		// Resolve family from the asserted batch, then the recognized header. Only
 		// legacy/unknown-header callers use positional inference.
@@ -805,6 +763,25 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 
 		const mapped = mapFields(rowFields, rowFamily);
 		if (
+			rowFamily === 'base_explorer' &&
+			flags.expected_lane !== undefined &&
+			mapped.lane !== flags.expected_lane
+		) {
+			if (
+				mapped.lane !== null &&
+				(flags.expected_lanes ?? [flags.expected_lane]).includes(mapped.lane)
+			) {
+				continue;
+			}
+			parseErrorDetails.push({
+				row_index: i,
+				field: 'lane',
+				message: `Expected lane ${candidateDiagnosticPreview(flags.expected_lane)}, received ${candidateDiagnosticPreview(mapped.lane ?? '<missing>')}`,
+			});
+			malformedRows++;
+			continue;
+		}
+		if (
 			rowFamily === 'micro_lane' &&
 			flags.expected_micro_lane !== undefined &&
 			mapped.micro_lane !== flags.expected_micro_lane
@@ -822,8 +799,20 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			parseErrorDetails.push({
 				row_index: i,
 				field: 'micro_lane',
-				message: `Expected micro_lane ${flags.expected_micro_lane}, received ${mapped.micro_lane ?? '<missing>'}`,
+				message: `Expected micro_lane ${candidateDiagnosticPreview(flags.expected_micro_lane)}, received ${candidateDiagnosticPreview(mapped.micro_lane ?? '<missing>')}`,
 			});
+			malformedRows++;
+			continue;
+		}
+		const semanticAnalysis = analyzeCandidateFields(fields, rowFamily);
+		if (!semanticAnalysis.valid) {
+			for (const issue of semanticAnalysis.issues) {
+				parseErrorDetails.push({
+					row_index: i,
+					field: issue.field,
+					message: issue.message,
+				});
+			}
 			malformedRows++;
 			continue;
 		}
@@ -881,14 +870,14 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			candidate_id: candidateId,
 			lane: mapped.lane,
 			micro_lane: mapped.micro_lane,
-			severity: mapped.severity,
+			severity: mapped.severity as CandidateSeverity,
 			category: mapped.category,
 			file_line: mapped.file_line,
 			claim: mapped.claim,
 			evidence_summary: mapped.evidence_summary,
 			impact_context: mapped.impact_context,
 			invariant_violated: mapped.invariant_violated,
-			confidence: mapped.confidence,
+			confidence: mapped.confidence as CandidateConfidence,
 		};
 
 		// Track duplicate candidate_ids (FR-005).
@@ -910,14 +899,14 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		if (count > 1) {
 			duplicateIdCount++;
 			duplicateIdWarnings.push({
-				candidate_id: id,
+				candidate_id: candidateDiagnosticPreview(id),
 				occurrences: count,
 			});
 			// Record each duplicate as a parse-error detail (SC-006).
 			parseErrorDetails.push({
 				row_index: idFirstRows.get(id) ?? -1,
 				field: 'candidate_id',
-				message: `Duplicate candidate_id: "${id}" appears ${count} times`,
+				message: `Duplicate candidate_id: "${candidateDiagnosticPreview(id)}" appears ${count} times`,
 			});
 		}
 	}
@@ -948,26 +937,11 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 
 	const cleanAttestation: CleanAttestationRecord | undefined =
 		pendingClean && !cleanErrorCode && candidates.length === 0
-			? {
-					record_type: 'clean_attestation',
-					row_format_family: 'micro_lane',
-					row_format_version: flags.row_format_version,
-					record_version: RECORD_VERSION,
-					source_output_ref: input.output_ref,
-					source_batch_id: input.batchId,
-					source_lane_id: input.laneId,
-					source_agent: input.agent,
-					source_digest: input.digest,
-					extracted_from_partial_source: false,
-					sessionId: input.sessionId,
-					parentSessionId: input.parentSessionId,
-					producer: flags.producer,
-					micro_lane: pendingClean.micro_lane,
-					coverage_scope: pendingClean.coverage_scope,
-					evidence: pendingClean.evidence,
-				}
+			? pendingClean
 			: undefined;
-	if (cleanAttestation) formatFamiliesDetected.add('micro_lane');
+	if (cleanAttestation) {
+		formatFamiliesDetected.add(cleanAttestation.row_format_family);
+	}
 
 	const acceptedCandidates = cleanErrorCode ? [] : candidates;
 	const parseErrors = parseErrorDetails.length;

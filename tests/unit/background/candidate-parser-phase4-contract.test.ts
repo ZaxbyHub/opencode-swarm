@@ -23,7 +23,9 @@ const microHeader =
 const baseHeader =
 	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
 const microRow =
-	'M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | 0.95';
+	'M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | HIGH';
+const cleanScope = 'complete changed subprocess paths';
+const cleanEvidence = 'no candidate survived focused review';
 
 function input(
 	text: string,
@@ -76,7 +78,7 @@ describe('candidate parser Phase 4 contract', () => {
 			micro_lane: 'subprocess',
 			invariant_violated: 'invariant 3',
 			evidence_summary: 'direct evidence',
-			confidence: '0.95',
+			confidence: 'HIGH',
 		});
 	});
 
@@ -94,14 +96,14 @@ describe('candidate parser Phase 4 contract', () => {
 			flags({ expected_family: 'micro_lane' }),
 		);
 		expect(result.candidates[0]?.candidate_id).toBe('M-1');
-		expect(result.candidates[0]?.confidence).toBe('0.95');
+		expect(result.candidates[0]?.confidence).toBe('HIGH');
 		expect(result.diagnostics.duplicate_id_count).toBe(0);
 	});
 
 	test('fails closed when expected family conflicts with a recognized header', () => {
 		const result = parseCandidates(
 			input(
-				`${baseHeader}\nB-1 | runtime | HIGH | bug | src/a.ts:1 | claim | evidence | impact | 0.9`,
+				`${baseHeader}\nB-1 | runtime | HIGH | bug | src/a.ts:1 | claim | evidence | impact | HIGH`,
 			),
 			flags({ expected_family: 'micro_lane' }),
 		);
@@ -166,7 +168,7 @@ describe('candidate parser Phase 4 contract', () => {
 	test('rejects CLEAN when any other row is malformed', () => {
 		const result = parseCandidates(
 			input(
-				`${microHeader}\nmalformed orphan row\n[CLEAN] | subprocess | scope | evidence`,
+				`${microHeader}\nmalformed orphan row\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}`,
 			),
 			flags({
 				expected_family: 'micro_lane',
@@ -181,7 +183,9 @@ describe('candidate parser Phase 4 contract', () => {
 
 	test('rejects CLEAN whose lane identity differs from dispatch provenance', () => {
 		const result = parseCandidates(
-			input(`${microHeader}\n[CLEAN] | wrong-lane | scope | evidence`),
+			input(
+				`${microHeader}\n[CLEAN] | wrong-lane | ${cleanScope} | ${cleanEvidence}`,
+			),
 			flags({
 				expected_family: 'micro_lane',
 				expected_micro_lane: 'subprocess',
@@ -208,25 +212,19 @@ describe('candidate parser Phase 4 contract', () => {
 	for (const [name, text, family, overrides] of [
 		[
 			'duplicate CLEAN sentinels',
-			`${microHeader}\n[CLEAN] | subprocess | scope | evidence\n[CLEAN] | subprocess | scope | evidence`,
+			`${microHeader}\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}`,
 			'micro_lane',
 			{},
 		],
 		[
 			'candidates plus CLEAN',
-			`${microHeader}\n${microRow}\n[CLEAN] | subprocess | scope | evidence`,
+			`${microHeader}\n${microRow}\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}`,
 			'micro_lane',
 			{},
 		],
 		[
-			'CLEAN under base family',
-			`${baseHeader}\n[CLEAN] | runtime | scope | evidence`,
-			'base_explorer',
-			{},
-		],
-		[
 			'degraded CLEAN source',
-			`${microHeader}\n[CLEAN] | subprocess | scope | evidence`,
+			`${microHeader}\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}`,
 			'micro_lane',
 			{ degraded: true, accept_degraded: true },
 		],
@@ -243,11 +241,28 @@ describe('candidate parser Phase 4 contract', () => {
 		});
 	}
 
+	test('accepts lane-bound CLEAN under the base family', () => {
+		const result = parseCandidates(
+			input(
+				`${baseHeader}\n[CLEAN] | runtime | ${cleanScope} | ${cleanEvidence}`,
+			),
+			flags({ expected_family: 'base_explorer', expected_lane: 'runtime' }),
+		);
+		expect(result.error_code).toBeUndefined();
+		expect(result.clean_attestation).toMatchObject({
+			row_format_family: 'base_explorer',
+			lane: 'runtime',
+		});
+	});
+
 	test('rejects CLEAN from an incomplete transcript even when partial candidates are allowed', () => {
 		const result = parseCandidates(
-			input(`${microHeader}\n[CLEAN] | subprocess | scope | evidence`, {
-				transcriptIncomplete: true,
-			}),
+			input(
+				`${microHeader}\n[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence}`,
+				{
+					transcriptIncomplete: true,
+				},
+			),
 			flags({
 				accept_partial: true,
 				expected_family: 'micro_lane',

@@ -72,6 +72,21 @@ async function writeArmedState(sessionID: string): Promise<void> {
 }
 
 describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
+	test('prepare checkout remains reachable immediately after activation while unbound', async () => {
+		for (const mode of ['PR_REVIEW', 'PR_FEEDBACK'] as const) {
+			const sessionID = `prepare-${mode.toLowerCase()}`;
+			await activatePrWorkflow(directory, sessionID, mode);
+			await expect(
+				enforcePrWorkflowToolBefore(
+					directory,
+					sessionID,
+					'prepare_pr_workflow_checkout',
+					{},
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
 	test('passes the PR_REVIEW read-only gate as an internal controller tool', async () => {
 		// The deadlock scenario: PR_REVIEW is active but unbound. Every bash
 		// command fails closed, but abort_pr_workflow must be reachable so the
