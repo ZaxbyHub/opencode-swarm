@@ -622,13 +622,16 @@ describe('Command registration parity', () => {
 			// is a pre-existing alias that the canonical-aware derivation now
 			// also covers, closing a latent bypass.
 			// FR-004: sdd-project removed — canonical target (sdd project) is now agent
-			// `abort-pr-workflow` is a new restricted human-only escape hatch for
+			// `abort-pr-workflow` is a restricted human-only escape hatch for
 			// unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gates.
+			// `approve-plan-critic` is a restricted human-only escape hatch for
+			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
 				'memory-import',
 				'memory-migrate',
 				'clear',
 				'abort-pr-workflow',
+				'approve-plan-critic',
 			]),
 			toolCommands: new Set([
 				'pr subscribe',
@@ -673,7 +676,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 4 canonical-inheriting aliases', () => {
+		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 5 canonical-inheriting aliases', () => {
 			const actual = HUMAN_ONLY_SWARM_COMMANDS;
 			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
 			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));

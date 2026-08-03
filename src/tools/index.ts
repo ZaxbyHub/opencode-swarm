@@ -161,6 +161,10 @@ export {
 	executeAbortPrWorkflow,
 } from './abort-pr-workflow';
 export {
+	approve_plan_critic,
+	executeApprovePlanCritic,
+} from './approve-plan-critic';
+export {
 	complete_pr_workflow,
 	executeCompletePrWorkflow,
 } from './complete-pr-workflow';

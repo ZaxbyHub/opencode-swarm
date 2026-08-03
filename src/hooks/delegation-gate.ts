@@ -1106,11 +1106,77 @@ function outputText(output: unknown): string {
 function extractPlanCriticVerdict(
 	output: unknown,
 ): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
-	const match = /^\s*VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
-		outputText(output),
+	const text = outputText(output);
+	if (!text) return null;
+
+	// Primary signal (highest confidence): a `VERDICT: <TOKEN>` line. The critic
+	// system prompt (src/agents/critic.ts) instructs this exact shape, so a
+	// conforming critic always matches here. Also tolerates markdown-bold labels
+	// (`**VERDICT**:`) which LLMs frequently emit despite the plain instruction.
+	const primary = /^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+		text,
 	);
-	if (!match) return null;
-	return match[1].toUpperCase() as 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED';
+	if (primary) {
+		return primary[1].toUpperCase() as
+			| 'APPROVED'
+			| 'NEEDS_REVISION'
+			| 'REJECTED';
+	}
+
+	// Fallback 1: a `## Verdict` (or `### Verdict`, …) heading followed (within
+	// 2 lines) by a line whose only non-whitespace content is the verdict token.
+	// Matches critics that emit the verdict under a markdown heading instead of
+	// the `VERDICT:` label. The heading must be the verdict section specifically
+	// (not e.g. `## PLAN REVIEW`), so the `Verdict` word is required.
+	const heading = /^(#{1,6})\s*Verdict\s*$/im.exec(text);
+	if (heading && heading.index !== undefined) {
+		const after = text.slice(heading.index + heading[0].length);
+		const nextLines = after.split('\n').slice(0, 3).join('\n');
+		const headingMatch =
+			/^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(nextLines);
+		if (headingMatch) {
+			return headingMatch[1].toUpperCase() as
+				| 'APPROVED'
+				| 'NEEDS_REVISION'
+				| 'REJECTED';
+		}
+	}
+
+	// Fallback 2: a BARE verdict token on its own line — but ONLY in the final
+	// few lines of output (so a mid-review mention like "this is approved for
+	// execution" cannot trigger it) and ONLY when the line does not contain a
+	// `|` separator (which marks the critic-rubric template line
+	// `VERDICT: APPROVED | NEEDS_REVISION | REJECTED`, an enumeration rather
+	// than a real verdict) and is not inside a fenced code block.
+	//
+	// Issue #2012: real critics do not always emit the `VERDICT:` label, and a
+	// missing snapshot here permanently wedges every coder delegation because
+	// the gate is ratchet-tighter with no escape hatch. The tail-only + no-pipe
+	// + no-code-fence guards keep false positives out while recovering the
+	// common "the critic just wrote APPROVED at the end" case.
+	const lines = text.split('\n');
+	const tailStart = Math.max(0, lines.length - 6);
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		// Match 3+ backticks so a 4-backtick fenced block (common for nested
+		// code blocks) also toggles the fence state, not just exactly ```.
+		// The regex is "3 or more backtick characters" — the {3,} quantifier
+		// applies to the single preceding backtick literal.
+		if (/^\s*(?:`{3,})/.test(lines[i])) inFence = !inFence;
+		if (i < tailStart) continue;
+		if (inFence) continue;
+		const line = lines[i];
+		if (line.includes('|')) continue;
+		const bare = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/i.exec(line);
+		if (bare) {
+			return bare[1].toUpperCase() as
+				| 'APPROVED'
+				| 'NEEDS_REVISION'
+				| 'REJECTED';
+		}
+	}
+
+	return null;
 }
 
 function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
@@ -1144,6 +1210,20 @@ const PLAN_CRITIC_TASK_SIGNALS = [
 	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
 	'approve the plan',
 	'plan approval',
+	// Issue #2012: realistic architect phrasings that the original 7 signals
+	// silently missed, wedging the ratchet-tighter critic_pre_plan gate with
+	// no recovery. These are safe to add: the caller already narrows to
+	// `subagent_type === 'critic'` (a target the trusted architect controls),
+	// so a false positive is low-risk, while a false negative silently blocks
+	// ALL EXECUTE-phase coder work with no auto-recovery.
+	'pre-implementation review',
+	'evaluate this plan',
+	'evaluate the plan',
+	'assess this plan',
+	'assess the plan',
+	'plan soundness',
+	'before implementation',
+	'review the plan below',
 ] as const;
 
 /**
@@ -1191,7 +1271,10 @@ async function assertPlanCriticApprovedForExecution(
 	if (!approved) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
-				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE.',
+				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE. ' +
+				'If the critic already returned APPROVED but the snapshot was not recorded ' +
+				'(format/signal mismatch — issue #2012), call approve_plan_critic with a reason, ' +
+				'or run /swarm approve-plan-critic <reason>, to record a manual approval.',
 		);
 	}
 
@@ -1204,7 +1287,9 @@ async function assertPlanCriticApprovedForExecution(
 	) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Latest approved-plan snapshot does not contain plan critic VERDICT: APPROVED evidence. ' +
-				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution.',
+				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution. ' +
+				'If the critic already returned APPROVED but the snapshot was not recorded ' +
+				'(issue #2012), call approve_plan_critic or run /swarm approve-plan-critic.',
 		);
 	}
 
@@ -1218,7 +1303,9 @@ async function assertPlanCriticApprovedForExecution(
 	if (approved.payloadHash !== computePlanStructureHash(plan)) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
-				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
+				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder. ' +
+				'If re-review is not possible, call approve_plan_critic or run ' +
+				'/swarm approve-plan-critic to record a fresh manual approval for the current plan.',
 		);
 	}
 }
@@ -1237,8 +1324,31 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	if (!taskLooksLikePlanCritic(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
-	const plan = await loadPlanJsonOnly(directory);
-	if (!plan) return;
+	// Issue #2012: a critic APPROVED verdict that fails to record a snapshot
+	// permanently wedges the ratchet-tighter critic_pre_plan gate (no escape
+	// hatch). loadPlanJsonOnly can transiently return null if the critic
+	// dispatch landed microseconds before a concurrent save_plan flush. The
+	// architect skill ordering (save_plan → CRITIC-GATE) is the primary
+	// guarantee; this bounded retry is cheap insurance against the race so a
+	// legitimate APPROVED is not silently dropped. Keep attempts tiny — the
+	// common path resolves on the first read.
+	let plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		for (let attempt = 0; attempt < 2 && !plan; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			plan = await loadPlanJsonOnly(directory);
+		}
+	}
+	if (!plan) {
+		logger.warn(
+			`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
+				`plan.json not readable after retry. The critic_pre_plan gate will ` +
+				`block coder delegation until a snapshot exists. Call ` +
+				`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
+				`to record a manual approval if the critic genuinely approved.`,
+		);
+		return;
+	}
 
 	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
 	// so `assertPlanCriticApprovedForExecution` can match this approval after the
@@ -1256,6 +1366,141 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 		},
 		payloadHashOverride: computePlanStructureHash(plan),
 	});
+}
+
+/**
+ * Escape hatch for the ratchet-tighter `critic_pre_plan` gate (issue #2012).
+ *
+ * When the critic returns APPROVED but the mechanical snapshot recorder
+ * ({@link recordPlanCriticApprovalSnapshotIfApplicable}) fails to persist it
+ * (verdict-format mismatch, dispatch-signal miss, or a plan.json read race),
+ * the gate permanently blocks ALL coder delegations because `critic_pre_plan`
+ * defaults to `true` and cannot be disabled (ratchet-tighter). This records a
+ * manual `plan_critic_gate` approval snapshot so the gate unblocks, with a
+ * distinct `method: 'manual_override'` audit marker so a human or downstream
+ * review can distinguish a manual approval from a mechanical critic approval.
+ *
+ * This mirrors the established escape-hatch pattern (PR_REVIEW gate #1898:
+ * `abortPrWorkflow` + `/swarm abort-pr-workflow` + `abort_pr_workflow` tool).
+ *
+ * Fail-closed preconditions:
+ * - The session must be an active **architect** session. The escape hatch is an
+ *   escalation; non-architect callers are rejected so a coder/reviewer cannot
+ *   self-unblock.
+ * - A plan.json must exist; you cannot approve a non-existent plan.
+ *
+ * @param directory - Project root containing `.swarm/`
+ * @param sessionID - The caller's session id (must be an architect session)
+ * @param options.reason - Optional human/agent-supplied reason (audited)
+ * @param options.userConfirmed - `true` only when invoked via the restricted
+ *   `/swarm approve-plan-critic` command (human-run); `false` when invoked via
+ *   the `approve_plan_critic` tool (agent-initiated). Recorded in the audit so a
+ *   self-approve is visible.
+ */
+export async function forceRecordPlanCriticApproval(
+	directory: string,
+	sessionID: string,
+	options: { reason?: string; userConfirmed?: boolean } = {},
+): Promise<{
+	planId: string;
+	recordedAt: string;
+	reason?: string;
+	userConfirmed: boolean;
+}> {
+	const session = ensureAgentSession(sessionID);
+	// Defense-in-depth: the approve_plan_critic tool is registered in
+	// AGENT_TOOL_MAP.architect only, so only the architect can call it. But the
+	// /swarm approve-plan-critic command passes the *current* sessionID, whose
+	// agentName may not be the architect (e.g. a user ran it while a coder was
+	// active). Require the active session to be the architect so a non-architect
+	// context cannot self-unblock the gate. agentName may be swarm-prefixed.
+	if (
+		!session ||
+		!session.agentName ||
+		stripKnownSwarmPrefix(session.agentName) !== 'architect'
+	) {
+		throw new Error(
+			'NOT_AUTHORIZED: approve_plan_critic requires an active architect session. ' +
+				'The plan-critic gate escape hatch is an architect-only escalation; ' +
+				'a coder/reviewer cannot self-unblock. Run /swarm approve-plan-critic ' +
+				'from an architect context, or ask the user to run it.',
+		);
+	}
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		// loadPlanJsonOnly returns null for missing, corrupt, OR schema-invalid
+		// plan.json. Distinguish so the user knows whether to save a plan or
+		// repair a corrupt one.
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		if (fs.existsSync(planPath)) {
+			throw new Error(
+				'PLAN_CORRUPT: .swarm/plan.json exists but could not be parsed ' +
+					'(corrupt or schema-invalid). Repair or re-save the plan before ' +
+					'recording a plan-critic approval.',
+			);
+		}
+		throw new Error(
+			'PLAN_NOT_FOUND: no .swarm/plan.json — cannot record a plan-critic ' +
+				'approval for a non-existent plan. Save a plan first.',
+		);
+	}
+
+	const planId = derivePlanId(plan);
+	const recordedAt = new Date().toISOString();
+	const sanitizedReason =
+		typeof options.reason === 'string' && options.reason.trim().length > 0
+			? options.reason.trim().slice(0, 500)
+			: undefined;
+	const userConfirmed = options.userConfirmed === true;
+
+	// Write a snapshot the gate's scoped loader accepts. `source: 'plan_critic_gate'`
+	// MUST match {@link loadLastPlanCriticApprovedSnapshot}'s extraFilter so the
+	// gate unblocks; `method: 'manual_override'` distinguishes it from a
+	// mechanical critic approval for audit/review.
+	await takeSnapshotEvent(directory, plan, {
+		source: 'critic_approved',
+		approvalMetadata: {
+			verdict: 'APPROVED',
+			source: 'plan_critic_gate',
+			method: 'manual_override',
+			reason: sanitizedReason,
+			user_confirmed: userConfirmed,
+			session_id: sessionID,
+			approved_at: recordedAt,
+		},
+		payloadHashOverride: computePlanStructureHash(plan),
+	});
+
+	// Best-effort non-fatal audit event (matches abortPrWorkflow / knowledge-gate
+	// precedent). The snapshot is authoritative for the gate; the audit event is
+	// the human-readable trail.
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await fs.promises.appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'plan_critic_gate_manual_approval',
+				timestamp: recordedAt,
+				sessionID,
+				plan_id: planId,
+				user_confirmed: userConfirmed,
+				...(sanitizedReason ? { reason: sanitizedReason } : {}),
+			})}\n`,
+			'utf-8',
+		);
+	} catch (err) {
+		logger.warn(
+			`[delegation-gate] plan_critic_gate_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return {
+		planId,
+		recordedAt,
+		...(sanitizedReason ? { reason: sanitizedReason } : {}),
+		userConfirmed,
+	};
 }
 
 /**
@@ -1822,6 +2067,8 @@ export const _internals = {
 	loadPlanJsonOnly,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
+	extractPlanCriticVerdict,
+	forceRecordPlanCriticApproval,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},

@@ -371,4 +371,269 @@ describe('delegation gate plan critic approval', () => {
 			expect(signals.some((signal) => signal.includes(token))).toBe(true);
 		}
 	});
+
+	// ── Issue #2012: robust verdict extraction (Change B) ──────────────────
+	// The mechanical recorder must capture APPROVED even when the critic emits
+	// the verdict with formatting variance. A silent miss permanently wedges
+	// the ratchet-tighter critic_pre_plan gate with no recovery.
+	describe('extractPlanCriticVerdict (issue #2012 robustness)', () => {
+		const { extractPlanCriticVerdict } = delegationGateInternals;
+
+		test('primary: matches VERDICT: APPROVED', () => {
+			expect(extractPlanCriticVerdict('VERDICT: APPROVED\nok')).toBe(
+				'APPROVED',
+			);
+		});
+
+		test('bold label: matches **VERDICT**: APPROVED', () => {
+			expect(
+				extractPlanCriticVerdict('**VERDICT**: APPROVED\nAll good.'),
+			).toBe('APPROVED');
+		});
+
+		test('heading: matches ## Verdict followed by token', () => {
+			expect(extractPlanCriticVerdict('## Verdict\nAPPROVED')).toBe(
+				'APPROVED',
+			);
+		});
+
+		test('bare token in final lines: matches a trailing bare APPROVED', () => {
+			expect(
+				extractPlanCriticVerdict(
+					'PLAN REVIEW:\nLooks good.\n\nAPPROVED',
+				),
+			).toBe('APPROVED');
+		});
+
+		test('NEGATIVE: rubric template enumeration does NOT false-positive', () => {
+			// The critic's own output-format template line contains
+			// "VERDICT: APPROVED | NEEDS_REVISION | REJECTED" as an enumeration.
+			// The primary regex matches APPROVED here (correct — it IS a VERDICT:
+			// line), but the bare-line fallback must NOT additionally misfire on
+			// a mid-output bare token. This pins the behavior: a VERDICT: line
+			// with a pipe-separated enumeration still resolves to APPROVED (the
+			// first token), which is the documented behavior.
+			const template = 'VERDICT: APPROVED | NEEDS_REVISION | REJECTED';
+			expect(extractPlanCriticVerdict(template)).toBe('APPROVED');
+		});
+
+		test('NEGATIVE: bare token mid-output (not in tail) does NOT match', () => {
+			// A bare "APPROVED" in the middle of a long review (e.g. "task 1.1 is
+			// approved for execution") must not trigger a false approval.
+			const mid = [
+				'APPROVED for execution in the current phase',
+				'line 2',
+				'line 3',
+				'line 4',
+				'line 5',
+				'line 6',
+				'line 7',
+			].join('\n');
+			expect(extractPlanCriticVerdict(mid)).toBeNull();
+		});
+
+		test('NEGATIVE: bare token inside a code fence does NOT match', () => {
+			const fenced = '```\nAPPROVED\n```';
+			expect(extractPlanCriticVerdict(fenced)).toBeNull();
+		});
+
+		test('NEGATIVE: pipe-separated bare line does NOT match', () => {
+			// The rubric enumeration as a bare line (no VERDICT: prefix) must
+			// not match because it contains a pipe separator.
+			const pipeLine = 'APPROVED | NEEDS_REVISION | REJECTED';
+			expect(extractPlanCriticVerdict(pipeLine)).toBeNull();
+		});
+
+		test('NEGATIVE: bare token inside a 4-backtick fence does NOT match', () => {
+			// A 4-backtick fenced block (common for nested code blocks) must also
+			// toggle the fence state, not just exactly 3 backticks.
+			const fenced = '````\nAPPROVED\n````';
+			expect(extractPlanCriticVerdict(fenced)).toBeNull();
+		});
+	});
+
+	// ── Issue #2012: broadened dispatch signals (Change C) ─────────────────
+	const broadenedPromptVariants: Array<{ name: string; prompt: string }> = [
+		{
+			name: '"evaluate this plan" phrasing',
+			prompt: 'Evaluate this plan for soundness before we proceed.',
+		},
+		{
+			name: '"pre-implementation review" phrasing',
+			prompt: 'Perform the pre-implementation review on the plan below.',
+		},
+		{
+			name: '"assess the plan" phrasing',
+			prompt: 'Assess the plan for coverage gaps and risks.',
+		},
+	];
+
+	for (const variant of broadenedPromptVariants) {
+		test(`records an approved snapshot for broadened signal: ${variant.name}`, async () => {
+			const plan = makePlan();
+			await writePlan(dir, plan);
+			ensureAgentSession('session-broadened', 'architect');
+			const hook = createDelegationGateHook(makeConfig(), dir);
+
+			await hook.toolAfter(
+				{
+					tool: 'Task',
+					sessionID: 'session-broadened',
+					callID: 'critic-broadened',
+					args: {
+						subagent_type: 'critic',
+						prompt: variant.prompt,
+					},
+				},
+				{ output: 'VERDICT: APPROVED\nThe plan is ready.' },
+			);
+
+			const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
+			expect(approved).not.toBeNull();
+			expect(approved?.approval?.verdict).toBe('APPROVED');
+			expect(approved?.approval?.source).toBe('plan_critic_gate');
+		});
+	}
+
+	// ── Issue #2012: escape hatch (Change A) ──────────────────────────────
+	describe('forceRecordPlanCriticApproval escape hatch (issue #2012)', () => {
+		test('records a manual-override snapshot that satisfies the gate', async () => {
+			const plan = makePlan();
+			await writePlan(dir, plan);
+			ensureAgentSession('session-escape', 'architect');
+
+			const summary =
+				await delegationGateInternals.forceRecordPlanCriticApproval(
+					dir,
+					'session-escape',
+					{ reason: 'critic returned APPROVED but format mismatched' },
+				);
+
+			expect(summary.planId).toBe(derivePlanId(plan));
+			expect(summary.userConfirmed).toBe(false); // tool path default
+
+			// The snapshot must satisfy the gate: a coder dispatch now succeeds.
+			const hook = createDelegationGateHook(makeConfig(), dir);
+			const { input, output } = coderDispatch('session-escape');
+			await hook.toolBefore(input, output); // must NOT throw
+		});
+
+		test('snapshot carries the manual_override audit marker', async () => {
+			const plan = makePlan();
+			await writePlan(dir, plan);
+			ensureAgentSession('session-marker', 'architect');
+
+			await delegationGateInternals.forceRecordPlanCriticApproval(
+				dir,
+				'session-marker',
+				{ reason: 'test reason', userConfirmed: true },
+			);
+
+			// loadLastPlanCriticApprovedSnapshot finds it (source plan_critic_gate)
+			const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
+			expect(approved).not.toBeNull();
+			expect(approved?.approval?.method).toBe('manual_override');
+			expect(approved?.approval?.reason).toBe('test reason');
+			expect(approved?.approval?.user_confirmed).toBe(true);
+		});
+
+		test('appends an audit event to .swarm/events.jsonl', async () => {
+			const plan = makePlan();
+			await writePlan(dir, plan);
+			ensureAgentSession('session-audit', 'architect');
+
+			await delegationGateInternals.forceRecordPlanCriticApproval(
+				dir,
+				'session-audit',
+				{ reason: 'audit test' },
+			);
+
+			const eventsPath = join(dir, '.swarm', 'events.jsonl');
+			expect(existsSync(eventsPath)).toBe(true);
+			const events = readFileSync(eventsPath, 'utf8')
+				.split('\n')
+				.filter((l) => l.trim().length > 0);
+			const last = JSON.parse(events[events.length - 1]);
+			expect(last.type).toBe('plan_critic_gate_manual_approval');
+			expect(last.sessionID).toBe('session-audit');
+			expect(last.reason).toBe('audit test');
+		});
+
+		test('rejects a non-architect session (NOT_AUTHORIZED)', async () => {
+			const plan = makePlan();
+			await writePlan(dir, plan);
+			// Coder session — must NOT be allowed to self-unblock.
+			ensureAgentSession('session-coder', 'coder');
+
+			await expect(
+				delegationGateInternals.forceRecordPlanCriticApproval(
+					dir,
+					'session-coder',
+					{ reason: 'coder tries to self-unblock' },
+				),
+			).rejects.toThrow('NOT_AUTHORIZED');
+		});
+
+		test('rejects when no plan.json exists (PLAN_NOT_FOUND)', async () => {
+			await mkdir(join(dir, '.swarm'), { recursive: true });
+			ensureAgentSession('session-noplan', 'architect');
+
+			await expect(
+				delegationGateInternals.forceRecordPlanCriticApproval(
+					dir,
+					'session-noplan',
+					{ reason: 'no plan' },
+				),
+			).rejects.toThrow('PLAN_NOT_FOUND');
+		});
+
+		test('rejects with PLAN_CORRUPT when plan.json is unparseable', async () => {
+			await mkdir(join(dir, '.swarm'), { recursive: true });
+			// Write a corrupt plan.json (invalid JSON).
+			writeFileSync(join(dir, '.swarm', 'plan.json'), '{ not valid json');
+			ensureAgentSession('session-corrupt', 'architect');
+
+			await expect(
+				delegationGateInternals.forceRecordPlanCriticApproval(
+					dir,
+					'session-corrupt',
+					{ reason: 'corrupt plan' },
+				),
+			).rejects.toThrow('PLAN_CORRUPT');
+		});
+	});
+
+	// ── Issue #2012: background critic is blocked upstream (Change 3 drop) ─
+	// Per the plan critic (Kimi K3): a background critic dispatch is fail-closed
+	// blocked at the toolBefore surface and never reaches the writer. This test
+	// is a regression guard so a future background-enablement does not silently
+	// reintroduce the phantom "writer bypass" concern.
+	test('background critic dispatch is blocked upstream and does not reach the writer', async () => {
+		const plan = makePlan();
+		await writePlan(dir, plan);
+		ensureAgentSession('session-bg', 'architect');
+		const hook = createDelegationGateHook(makeConfig(), dir);
+
+		// A background=true critic dispatch must be blocked in toolBefore.
+		await expect(
+			hook.toolBefore(
+				{
+					tool: 'Task',
+					sessionID: 'session-bg',
+					callID: 'bg-critic',
+				},
+				{
+					args: {
+						subagent_type: 'critic',
+						background: true,
+						prompt: 'MODE: CRITIC-GATE\nReview the plan.',
+					},
+				},
+			),
+		).rejects.toThrow('SWARM_BACKGROUND_TASK_BLOCKED');
+
+		// And no plan-critic snapshot was recorded.
+		const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
+		expect(approved).toBeNull();
+	});
 });

@@ -12,6 +12,8 @@ import { warn } from '../utils/logger.js';
 import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
+import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
+
 import { handleAnalyzeCommand } from './analyze.js';
 import { handleArchiveCommand } from './archive.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
@@ -948,6 +950,21 @@ export const COMMAND_REGISTRY = {
 		args: '[PR_REVIEW|PR_FEEDBACK] [reason...]',
 		details:
 			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. An audit event is appended to .swarm/events.jsonl.',
+		category: 'utility',
+		toolPolicy: 'restricted',
+	},
+	'approve-plan-critic': {
+		handler: (ctx) =>
+			handleApprovePlanCriticCommand(
+				ctx.directory,
+				ctx.args,
+				ctx.sessionID,
+			),
+		description:
+			'Record a MANUAL plan-critic approval to unblock the critic_pre_plan execution gate [reason...]',
+		args: '[reason...]',
+		details:
+			'Human-only escape hatch for the ratchet-tighter critic_pre_plan execution gate (issue #2012). When the critic already returned APPROVED but the mechanical snapshot recorder failed to persist it (verdict-format mismatch, dispatch-signal miss, or a plan.json read race), the gate permanently blocks ALL coder delegations because critic_pre_plan defaults to true and cannot be disabled. Running this records a manual plan_critic_gate approval snapshot so the gate unblocks, with a distinct method: "manual_override" audit marker. The agent itself cannot run this command; it must call the approve_plan_critic tool (or ask you to run this command). Both paths funnel into the same forceRecordPlanCriticApproval hook, which requires an active architect session. An audit event is appended to .swarm/events.jsonl. Prefer re-running MODE: CRITIC-GATE first; use this only as an escape hatch when a legitimate APPROVED was lost.',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},

@@ -33,6 +33,16 @@ coders without a recorded approval wastes cycles — the coder gate will
 reject with `PLAN_CRITIC_GATE_VIOLATION`. One read-only call prevents
 this entire failure class.
 
+**Escape hatch (issue #2012):** If the critic genuinely returned APPROVED
+but the mechanical recorder failed to persist the snapshot (verdict-format
+mismatch, dispatch-signal miss, or a plan.json read race) AND re-running
+MODE: CRITIC-GATE does not help, call `approve_plan_critic` with a
+one-line `reason` (or ask the user to run `/swarm approve-plan-critic
+<reason>`). This records a manual `plan_critic_gate` approval snapshot
+tagged `method: "manual_override"`, audited to `.swarm/events.jsonl`.
+Architect-only. Use ONLY when a legitimate APPROVED was lost — this is an
+escape hatch, not a way to skip the critic review.
+
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
 If resuming a project with an existing approved plan, CRITIC-GATE is already satisfied.

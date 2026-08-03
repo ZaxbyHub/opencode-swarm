@@ -26,6 +26,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { abort_pr_workflow } from './abort-pr-workflow';
 import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
+import { approve_plan_critic } from './approve-plan-critic';
 import { ast_grep } from './ast-grep';
 import { batch_symbols } from './batch-symbols';
 import { build_check } from './build-check';
@@ -173,6 +174,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,
+	approve_plan_critic: () => approve_plan_critic,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,
