@@ -1145,6 +1145,7 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 | `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. |
 | `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `.swarm-worktrees/<sessionId>/<laneId>`. |
 | `deps_strategy` | `"skip" \| "copy" \| "link"` | `"skip"` | How to handle `node_modules` when provisioning a lane worktree. `"skip"` (default) does not copy — the lane runs without host packages. `"copy"` uses `cpSync` to duplicate `node_modules`. `"link"` creates symlinks (POSIX) or junctions (Windows). |
+| `lane_permissions` | `"scoped_allow" \| "deny" \| "off"` | `"scoped_allow"` | Permission policy for OpenCode instances running **inside** a worktree lane. See below. Has no effect outside a lane — ordinary sessions are never modified by this setting. |
 | `serialization_release_after_dispatches` | number | `5` | Release a serialized session after this many successful dispatches have completed and merged back from that session. Only applies when serialization mode is active. |
 | `serialization_release_after_ms` | number | `60000` | Release a serialized session after this many milliseconds have elapsed since the session was first serialized (even if zero dispatches have succeeded). Acts as a TTL ceiling on serialized sessions. |
 
@@ -1157,6 +1158,79 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 | `"link"` | Creates symlinks (POSIX) or directory junctions (Windows). | Projects with many packages where copying is slow; requires filesystem support for symlinks. |
 
 > **Advisory for `deps_strategy: "skip"`:** When a task's gates include test/build commands and the lane was provisioned with `deps_strategy: "skip"`, the system emits a `WORKTREE_DEPS_SKIP` advisory suggesting to set `deps_strategy` to `"copy"` or `"link"` if the task requires host dependencies.
+
+#### `worktree.lane_permissions` — Permission policy inside a lane
+
+OpenCode partitions **all** permission state by directory. A worktree lane runs in its own OpenCode instance, so it starts with an empty `approved` list — every prior "Allow always" is forgotten — and a private pending-prompt map. Because no TUI is attached to a lane instance, an `external_directory` prompt raised there can never be answered, and the lane blocks indefinitely.
+
+This setting decides how that is resolved. It applies **only** inside a swarm worktree lane; every other session is left exactly as it is today.
+
+| Value | Behavior |
+|-------|----------|
+| `"scoped_allow"` (default) | Pre-grant `external_directory` access to a justified allowlist and deny everything else outright, so no request can be left pending. See the allowlist below. |
+| `"deny"` | Emit no allowlist — only the catch-all deny. Anything you have explicitly allowed in `permission.external_directory` still applies (your configuration is merged last and always wins), so this denies everything the plugin would otherwise have granted rather than literally every request. Still resolves rather than hanging. |
+| `"off"` | Apply no lane-specific rules. **This restores the hanging behavior described above** — an unanswerable prompt inside a lane will block that lane until the server is restarted. Provided only as an escape hatch. |
+
+Under `"scoped_allow"` the allowlist is:
+
+- the parent project the lane is a git worktree of, and the lane itself;
+- both OpenCode config directories — the XDG one (`~/.config/opencode`) and, when set, the `OPENCODE_CONFIG_DIR` override. OpenCode reads config from both, but does **not** base-allow either to an agent, so granting them is a deliberate widening (see the note below);
+- OpenCode's own temp directory (`<os-temp>/opencode`), and on Windows only the shortened-worktree lane root (`<os-temp>/swwt`) used by the path-budget fallback;
+- OpenCode's plan storage (`<data>/plans`), which the host natively allows to its built-in `plan` agent;
+- the skill roots OpenCode itself scans, mirroring its `{skill,skills}` glob (see the table below);
+- any directories listed in your `skills.paths` config, resolved the same way OpenCode resolves them (`~/` expands to your home directory, relative paths anchor to the lane).
+
+> **These are WRITE grants too.** OpenCode's `external_directory` permission has no read/write split, so every allowlist entry also permits writes. The list is deliberately narrow for that reason: the whole OS temp directory is **not** granted (only the two subtrees above), and neither are the opencode-swarm plugin cache/install locations — a lane writing to its own installed plugin would be executed in-process by the host on the next load. OpenCode's data directory is not granted either — only the `plans` subdirectory is, so session storage and the primary `auth.json` stay outside the grant. The user-level `~/.opencode` tree is deliberately **not** granted for the same reason: OpenCode's GitLab OAuth helper stores credentials at `~/.opencode/auth.json` when `XDG_DATA_HOME` is unset (the default on Windows and macOS). Its skill subdirectories (`~/.opencode/skill` and `~/.opencode/skills`) are granted individually instead. If a lane genuinely needs more of `~/.opencode`, add an explicit `permission.external_directory` allow — but be aware of what else lives there.
+
+Explicit configuration mostly wins: any `permission.external_directory` entry you set in `opencode.json` is merged **after** the generated rules, so your own `allow` and `deny` entries override both the allowlist and the catch-all deny.
+
+> **Known residual — a hand-made worktree at the exact lane path.** A worktree you create yourself at literally `<parent>/.swarm-worktrees/ses_<letters-and-digits>/<id>` is treated as a lane even on your own branch, and will get the scoped rules. This is accepted rather than fixed: it takes a deliberately lane-shaped directory name to reach, and the same leniency is what keeps a real lane recognised after you check out a different branch inside it. Use a directory name outside that shape, or set `worktree.lane_permissions: "off"`.
+
+> **Known narrowing — `references` directories.** OpenCode base-allows any directory listed in your top-level `references` config for every agent, but the plugin cannot resolve those paths from the config hook, so they are **not** re-granted inside a lane and a lane will be denied access to them. If you use `references`, add each directory explicitly: `{ "permission": { "external_directory": { "/path/to/reference/*": "allow" } } }`. The other families OpenCode base-allows for an agent — its own temp directory and the tool-output directory — are preserved inside a lane, as are the skill roots enumerated in the table below. The OpenCode config directories are granted as well; that one is a deliberate widening rather than a restoration, since OpenCode does not base-allow them to an agent. The user-level `~/.opencode` tree is **not** granted (only its skill subdirectories are) — see the write-grant note above.
+
+#### Skill roots reachable from a lane
+
+OpenCode discovers skills with two globs: `skills/**/SKILL.md` under `.claude` and `.agents` (plural only), and `{skill,skills}/**/SKILL.md` under each of its config directories (either spelling). The allowlist mirrors both, so every layout OpenCode supports stays reachable. Measured effective actions inside a lane under `scoped_allow`:
+
+| Skill layout | Action in a lane |
+|---|---|
+| `~/.claude/skills/<skill>` | allow |
+| `~/.agents/skills/<skill>` | allow |
+| `~/.opencode/skills/<skill>` | allow |
+| `~/.opencode/skill/<skill>` | allow |
+| `<xdg-config>/opencode/skill/<skill>` | allow |
+| `<project>/.claude/skills/<skill>` | allow |
+| `<project>/.agents/skills/<skill>` | allow |
+| `<project>/.opencode/{skill,skills}/<skill>` | allow |
+| `~/.opencode` (the tree itself) | **deny** |
+
+> **Not covered — `skills.urls`.** OpenCode pulls URL-sourced skills over the network into a cache directory the plugin cannot resolve without performing the pull itself, which is not permissible on the plugin-init path. If you use `skills.urls`, a lane will be denied access to the pulled content; add an explicit `permission.external_directory` allow for the cache location.
+
+> **Exception — `"ask"` becomes `"deny"` inside a lane.** A lane instance has no TUI attached, so an `ask` there is not a third policy choice; nothing can ever answer it, and the lane blocks forever. Any `external_directory` `"ask"` you configure — top level or per agent, string shorthand or pattern map — is therefore applied as `"deny"` inside a lane only, and the affected patterns are named in the advisory and in the `.swarm/events.jsonl` record. Use an explicit `"allow"` or `"deny"` to control the behavior, or `worktree.lane_permissions: "off"` if you really want the prompting (and hanging) restored. Outside a lane, `"ask"` is untouched.
+
+A denial cannot carry a message — a permission rule holds an action, not text. So when lane scoping activates, the plugin emits one advisory (visible via `/swarm diagnose`) and appends a `lane_permissions` record to `.swarm/events.jsonl` naming the lane, the parent project, the full allowlist with justifications, and the remedy below.
+
+**To widen the allowlist**, add the directory to `opencode.json`:
+
+```json
+{
+  "permission": {
+    "external_directory": {
+      "/absolute/path/to/dir/*": "allow"
+    }
+  }
+}
+```
+
+**Example** — deny all external directory access inside lanes:
+
+```json
+{
+  "worktree": {
+    "lane_permissions": "deny"
+  }
+}
+```
 
 #### `worktree.runtime_isolation` — Per-lane runtime isolation settings
 

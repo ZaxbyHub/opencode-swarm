@@ -10,7 +10,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	getHostConfigDir,
+	getHostDataDir,
 	getPluginCachePaths,
+	getPluginConfigDir,
 	getPluginLockFilePaths,
 } from '../../../src/config/cache-paths.js';
 
@@ -256,5 +259,118 @@ describe('getPluginLockFilePaths', () => {
 		expect(
 			paths.some((p) => p === path.join(fallbackLocal, 'opencode', 'bun.lock')),
 		).toBe(true);
+	});
+});
+
+describe('getHostConfigDir — precedence (worktree-lane allowlist only)', () => {
+	const saved = {
+		OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
+		XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+	};
+
+	afterEach(() => {
+		for (const [k, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	});
+
+	test('OPENCODE_CONFIG_DIR wins when set', () => {
+		// Verbatim host precedence (opencode 1.18.10, offset 107379448):
+		//   config: e.OPENCODE_CONFIG_DIR ?? G.config
+		process.env.OPENCODE_CONFIG_DIR = path.join(
+			os.tmpdir(),
+			'custom-oc-config',
+		);
+		expect(getHostConfigDir()).toBe(path.join(os.tmpdir(), 'custom-oc-config'));
+	});
+
+	test('falls back to the XDG/plugin config dir when unset', () => {
+		delete process.env.OPENCODE_CONFIG_DIR;
+		expect(getHostConfigDir()).toBe(getPluginConfigDir());
+	});
+
+	test('an empty or whitespace OPENCODE_CONFIG_DIR is ignored', () => {
+		for (const bogus of ['', '   ']) {
+			process.env.OPENCODE_CONFIG_DIR = bogus;
+			expect(getHostConfigDir()).toBe(getPluginConfigDir());
+		}
+	});
+
+	test('getPluginConfigDir keeps its shared semantics (ignores the env var)', () => {
+		// src/cli/index.ts and src/services/diagnose-service.ts depend on this
+		// function meaning "the XDG plugin config dir"; only the lane allowlist
+		// wants the host override.
+		process.env.OPENCODE_CONFIG_DIR = path.join(os.tmpdir(), 'other-config');
+		expect(getPluginConfigDir()).not.toBe(process.env.OPENCODE_CONFIG_DIR);
+	});
+});
+
+describe('getHostDataDir — precedence (worktree-lane allowlist only)', () => {
+	const saved = {
+		XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+	};
+
+	afterEach(() => {
+		for (const [k, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	});
+
+	// Every assertion below builds the expected value from a LITERAL join rather
+	// than by calling getHostDataDir() again. Calling the function on both sides
+	// passes for any implementation, including a wrong one — which is how the
+	// missing XDG_DATA_HOME branch survived a mutation run.
+
+	test('XDG_DATA_HOME wins when set', () => {
+		// Verbatim host source (opencode 1.18.10, offset ~107378334):
+		//   V = R.XDG_DATA_HOME || (X ? Z.join(X, ".local", "share") : undefined)
+		//   An.data = H.join(V, "opencode")
+		const xdg = path.join(os.tmpdir(), 'custom-xdg-data');
+		process.env.XDG_DATA_HOME = xdg;
+		expect(getHostDataDir()).toBe(path.join(xdg, 'opencode'));
+	});
+
+	test('falls back to ~/.local/share/opencode when unset', () => {
+		delete process.env.XDG_DATA_HOME;
+		expect(getHostDataDir()).toBe(
+			path.join(os.homedir(), '.local', 'share', 'opencode'),
+		);
+	});
+
+	test('an empty XDG_DATA_HOME falls back (empty string is falsy, as in the host)', () => {
+		process.env.XDG_DATA_HOME = '';
+		expect(getHostDataDir()).toBe(
+			path.join(os.homedir(), '.local', 'share', 'opencode'),
+		);
+	});
+
+	test('a whitespace XDG_DATA_HOME is honoured verbatim (host uses ||, not trim)', () => {
+		// Deliberately asserting the host's actual semantics rather than a nicer
+		// one: `||` treats "   " as truthy, so the host would use it too. If we
+		// diverged here our rule text would stop matching the host's asked text.
+		process.env.XDG_DATA_HOME = '   ';
+		expect(getHostDataDir()).toBe(path.join('   ', 'opencode'));
+	});
+
+	test('there is no OPENCODE_DATA_DIR override (unlike the config dir)', () => {
+		delete process.env.XDG_DATA_HOME;
+		(process.env as Record<string, string>).OPENCODE_DATA_DIR = path.join(
+			os.tmpdir(),
+			'should-be-ignored',
+		);
+		try {
+			expect(getHostDataDir()).toBe(
+				path.join(os.homedir(), '.local', 'share', 'opencode'),
+			);
+		} finally {
+			delete (process.env as Record<string, string>).OPENCODE_DATA_DIR;
+		}
+	});
+
+	test('the data dir is NOT the config dir (they are independently derived)', () => {
+		delete process.env.XDG_DATA_HOME;
+		expect(getHostDataDir()).not.toBe(getHostConfigDir());
 	});
 });

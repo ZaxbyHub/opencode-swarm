@@ -34,6 +34,52 @@ export function getPluginConfigDir(): string {
 }
 
 /**
+ * The config directory the OpenCode HOST is actually using, honouring
+ * `OPENCODE_CONFIG_DIR`.
+ *
+ * Verbatim host precedence (`C:\OpenCode\opencode.exe`, opencode 1.18.10,
+ * offset 107379448):
+ *
+ * ```js
+ * function y(N={}){return{home:G.home,data:G.data,cache:G.cache,
+ *   config:e.OPENCODE_CONFIG_DIR??G.config, ...}}
+ * ```
+ *
+ * This is deliberately SEPARATE from {@link getPluginConfigDir}, which has
+ * shared semantics relied on by `src/cli/index.ts` and
+ * `src/services/diagnose-service.ts` for locating plugin caches and lock files.
+ * Changing that function's meaning would move those consumers too.
+ *
+ * Only the worktree-lane permission allowlist uses this: under
+ * `OPENCODE_CONFIG_DIR` the two directories differ, and allowlisting the wrong
+ * one grants a directory the host is not reading while denying the one it is.
+ */
+export function getHostConfigDir(): string {
+	const override = process.env.OPENCODE_CONFIG_DIR;
+	if (override && override.trim() !== '') return override;
+	return getPluginConfigDir();
+}
+
+/**
+ * The data directory the OpenCode HOST uses.
+ *
+ * Verbatim host source (opencode 1.18.10, offset ~107378180):
+ *   `V = XDG_DATA_HOME || join(homedir(), ".local", "share")`
+ *   `U = join(V, "opencode")`   -> `Global.Path.data`
+ *
+ * Unlike `config`, the data path has no environment override: the `y()` service
+ * factory passes `data: G.data` straight through (offset 107379448).
+ *
+ * Used by the worktree-lane allowlist to re-grant `<data>/plans`, which the
+ * host natively allows to its `plan` agent.
+ */
+export function getHostDataDir(): string {
+	const base =
+		process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+	return path.join(base, 'opencode');
+}
+
+/**
  * All known locations where OpenCode may cache the opencode-swarm plugin.
  * Order: newest/canonical first so status reporting shows the most relevant
  * path at the top.

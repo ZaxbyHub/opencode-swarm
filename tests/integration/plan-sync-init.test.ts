@@ -10,7 +10,7 @@
  * 5. Gated by outer mode check (mode !== 'manual')
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -365,5 +365,107 @@ describe('PlanSyncWorker integration with plugin config', () => {
 			automationConfig.capabilities?.plan_sync === true;
 
 		expect(shouldInit).toBe(true);
+	});
+});
+
+describe('PlanSyncWorker lifecycle reachability — regression: dead cleanup path', () => {
+	// Previous code constructed the PlanSyncWorker into a block-scoped `const`
+	// inside the `if (automationConfig.capabilities?.plan_sync === true)`
+	// branch in src/index.ts. That const was never assigned to an outer-scope
+	// binding, so `cleanupAutomation` (registered on `process.on('exit', ...)`)
+	// could never reach it — `stop()`/`dispose()` were unreachable in
+	// production. This test proves the worker constructed by a real
+	// `OpenCodeSwarm.server()` call is the same instance whose `stop()` fires
+	// when the process-exit cleanup runs.
+	let testDir: string;
+	let xdgConfigHome: string;
+	let originalXdgConfigHome: string | undefined;
+
+	beforeEach(() => {
+		originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+		xdgConfigHome = mkdtempSync(path.join(tmpdir(), 'xdg-config-test-'));
+		process.env.XDG_CONFIG_HOME = xdgConfigHome;
+
+		testDir = mkdtempSync(path.join(tmpdir(), 'plan-sync-lifecycle-'));
+		const opencodeDir = path.join(testDir, '.opencode');
+		mkdirSync(opencodeDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		if (originalXdgConfigHome === undefined) {
+			delete process.env.XDG_CONFIG_HOME;
+		} else {
+			process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+		}
+		try {
+			rmSync(xdgConfigHome, { recursive: true, force: true });
+		} catch {
+			// ignore
+		}
+		try {
+			rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// ignore
+		}
+	});
+
+	it('cleanupAutomation (registered via process.on("exit", ...)) calls PlanSyncWorker.stop()', async () => {
+		const configPath = path.join(testDir, '.opencode', 'opencode-swarm.json');
+		writeFileSync(
+			configPath,
+			JSON.stringify({
+				automation: {
+					mode: 'hybrid',
+					capabilities: { plan_sync: true },
+				},
+			}),
+		);
+
+		const { PlanSyncWorker } = await import(
+			'../../src/background/plan-sync-worker'
+		);
+		const OpenCodeSwarm = (await import('../../src/index')).default;
+
+		const stopSpy = spyOn(PlanSyncWorker.prototype, 'stop');
+
+		const mockPluginInput = {
+			client: {} as any,
+			project: {} as any,
+			directory: testDir,
+			worktree: testDir,
+			serverUrl: new URL('http://localhost:3000'),
+			$: {} as any,
+		};
+
+		// Capture only the 'exit' listener this server() call registers, rather
+		// than firing process.emit('exit') globally (which would also invoke
+		// every 'exit' listener left behind by other tests/files sharing this
+		// process — see AGENTS.md invariant 7 mock/test-isolation concerns).
+		const listenersBefore = process.listeners('exit').slice();
+
+		try {
+			await OpenCodeSwarm.server(mockPluginInput as any);
+
+			const addedListeners = process
+				.listeners('exit')
+				.filter((l) => !listenersBefore.includes(l));
+			expect(addedListeners.length).toBe(1);
+
+			expect(stopSpy).not.toHaveBeenCalled();
+
+			// Invoke exactly the listener this server() call registered —
+			// proves reachability of PlanSyncWorker.stop() from this init's own
+			// cleanupAutomation, without touching any other listener.
+			(addedListeners[0] as (...args: unknown[]) => void).call(process, 0);
+
+			expect(stopSpy).toHaveBeenCalled();
+		} finally {
+			stopSpy.mockRestore();
+			for (const l of process.listeners('exit')) {
+				if (!listenersBefore.includes(l)) {
+					process.removeListener('exit', l as (...args: unknown[]) => void);
+				}
+			}
+		}
 	});
 });

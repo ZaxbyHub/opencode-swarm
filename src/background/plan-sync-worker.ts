@@ -271,6 +271,13 @@ export class PlanSyncWorker {
 			this.pollCheck();
 		}, this.pollIntervalMs);
 
+		// Never keep the process alive solely for this poll timer.
+		if (
+			typeof (this.pollTimer as { unref?: () => void }).unref === 'function'
+		) {
+			(this.pollTimer as { unref: () => void }).unref();
+		}
+
 		log('[PlanSyncWorker] Polling fallback established', {
 			intervalMs: this.pollIntervalMs,
 		});

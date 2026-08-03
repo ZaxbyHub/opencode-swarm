@@ -87,7 +87,7 @@ afterEach(() => {
 describe('provisionWorktree', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeLaneId = 'lane-1';
-	const fakeSessionId = 'session-abc';
+	const fakeSessionId = 'ses_abc';
 	const fakeConfig = {};
 
 	test('creates worktree with correct branch name and returns worktreePath + branchName', async () => {
@@ -106,7 +106,7 @@ describe('provisionWorktree', () => {
 
 		expect(result).toEqual({
 			worktreePath: expect.stringContaining('swarm-worktrees'),
-			branchName: 'swarm-lane/session-abc/lane-1',
+			branchName: 'swarm-lane/ses_abc/lane-1',
 		} as Record<string, string>);
 	});
 
@@ -178,7 +178,7 @@ describe('provisionWorktree', () => {
 	});
 
 	test('returns error when branch already exists in an active worktree', async () => {
-		const branchName = 'swarm-lane/session-abc/lane-1';
+		const branchName = 'swarm-lane/ses_abc/lane-1';
 		const worktreeList = `worktree C:\\active-worktree
 HEAD abc123
 branch refs/heads/${branchName}
@@ -202,7 +202,7 @@ branch refs/heads/${branchName}
 
 		expect(result).toEqual({
 			error:
-				'Branch already exists and worktree is active: swarm-lane/session-abc/lane-1 (owned by another session)',
+				'Branch already exists and worktree is active: swarm-lane/ses_abc/lane-1 (owned by another session)',
 		});
 	});
 
@@ -232,7 +232,7 @@ branch refs/heads/${branchName}
 // ---------------------------------------------------------------------------
 
 describe('removeWorktree', () => {
-	const fakeWorktreePath = 'C:\\worktrees\\session-abc\\lane-1';
+	const fakeWorktreePath = 'C:\\worktrees\\ses_abc\\lane-1';
 	const fakeProjectRoot = 'C:\\project-root';
 
 	test('returns { success: true } when removal succeeds', async () => {
@@ -328,7 +328,7 @@ describe('removeWorktree', () => {
 // ---------------------------------------------------------------------------
 
 describe('isCleanWorktree', () => {
-	const fakePath = 'C:\\worktrees\\session-abc\\lane-1';
+	const fakePath = 'C:\\worktrees\\ses_abc\\lane-1';
 
 	test('returns true when both git status --porcelain and git ls-files return empty', async () => {
 		stubSpawn(0, '', ''); // used for both Promise.all calls (same stub, both get empty)
@@ -381,7 +381,7 @@ describe('isCleanWorktree', () => {
 // ---------------------------------------------------------------------------
 
 describe('autoCommitDirty', () => {
-	const fakePath = 'C:\\worktrees\\session-abc\\lane-1';
+	const fakePath = 'C:\\worktrees\\ses_abc\\lane-1';
 
 	test('returns { committed: true, message } on successful commit', async () => {
 		// git add succeeds, git commit succeeds
@@ -447,7 +447,7 @@ describe('autoCommitDirty', () => {
 // ---------------------------------------------------------------------------
 
 describe('cleanUntrackedFiles', () => {
-	const fakePath = 'C:\\worktrees\\session-abc\\lane-1';
+	const fakePath = 'C:\\worktrees\\ses_abc\\lane-1';
 
 	beforeEach(() => {
 		clearDeferredWarnings();
@@ -875,7 +875,7 @@ describe('shortenWorktreePath', () => {
 describe('provisionWorktree — path budget (Windows)', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeLaneId = 'lane-1';
-	const fakeSessionId = 'session-abc';
+	const fakeSessionId = 'ses_abcabcd'; // length load-bearing: see checkPathBudget
 
 	beforeEach(() => {
 		clearDeferredWarnings();
@@ -983,7 +983,7 @@ describe('_internals.bunSpawn', () => {
 describe('provisionWorktree deps_strategy', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeLaneId = 'lane-deps';
-	const fakeSessionId = 'sess-deps';
+	const fakeSessionId = 'ses_deps';
 
 	beforeEach(() => {
 		// Always succeed git ops for these tests

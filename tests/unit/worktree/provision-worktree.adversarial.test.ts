@@ -117,7 +117,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 		const sharedWtParent = path.join(
 			os.tmpdir(),
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 		);
 		fs.rmSync(sharedWtParent, { recursive: true, force: true });
 		origBunSpawn = worktreeInternals.bunSpawn;
@@ -138,7 +138,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/A1';
+		const branchName = 'swarm/lane/ses_parentSession/A1';
 
 		// Create the branch and commit (--allow-empty doesn't touch files)
 		await runGit(['checkout', '-b', branchName], repoDir);
@@ -185,7 +185,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 		expect(listResult.stdout).toContain(branchName);
 
 		// Now call provisionWorktree for the SAME branch — should ERROR
-		const result = await provisionWorktree(repoDir, 'A1', 'parent-session', {
+		const result = await provisionWorktree(repoDir, 'A1', 'ses_parentSession', {
 			purpose: 'lane',
 		});
 
@@ -209,7 +209,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/A2';
+		const branchName = 'swarm/lane/ses_parentSession/A2';
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['commit', '--allow-empty', '-m', 'commit'], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
@@ -230,7 +230,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, 'A2', 'parent-session', {
+		const result = await provisionWorktree(repoDir, 'A2', 'ses_parentSession', {
 			purpose: 'lane',
 		});
 
@@ -258,7 +258,7 @@ describe('provisionWorktree — adversarial (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/A3';
+		const branchName = 'swarm/lane/ses_parentSession/A3';
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['commit', '--allow-empty', '-m', 'commit'], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
@@ -285,7 +285,7 @@ branch refs/heads/main
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, 'A3', 'parent-session', {
+		const result = await provisionWorktree(repoDir, 'A3', 'ses_parentSession', {
 			purpose: 'lane',
 		});
 
@@ -307,7 +307,7 @@ branch refs/heads/main
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/A4';
+		const branchName = 'swarm/lane/ses_parentSession/A4';
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['commit', '--allow-empty', '-m', 'commit'], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
@@ -325,7 +325,7 @@ branch refs/heads/main
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, 'A4', 'parent-session', {
+		const result = await provisionWorktree(repoDir, 'A4', 'ses_parentSession', {
 			purpose: 'lane',
 		});
 
@@ -349,7 +349,7 @@ branch refs/heads/main
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/A5';
+		const branchName = 'swarm/lane/ses_parentSession/A5';
 		const worktreePath = path.join(
 			os.tmpdir(),
 			'worktree-A5-active-' + Math.random().toString(36).slice(2),
@@ -359,21 +359,36 @@ branch refs/heads/main
 		await createRealWorktree(repoDir, branchName, worktreePath);
 
 		// 1. Default call with active branch → must ERROR
-		const result1 = await provisionWorktree(repoDir, 'A5', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result1 = await provisionWorktree(
+			repoDir,
+			'A5',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// 2. Same branch name but explicit worktreeDir (collision still detected via branch check)
-		const result2 = await provisionWorktree(repoDir, 'A5', 'parent-session', {
-			purpose: 'lane',
-			worktreeDir: path.join(os.tmpdir(), 'worktree-A5-explicit'),
-		});
+		const result2 = await provisionWorktree(
+			repoDir,
+			'A5',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+				worktreeDir: path.join(os.tmpdir(), 'worktree-A5-explicit'),
+			},
+		);
 
 		// 3. Same branch + mergeStrategy option (no bypass)
-		const result3 = await provisionWorktree(repoDir, 'A5', 'parent-session', {
-			purpose: 'lane',
-			mergeStrategy: 'rebase',
-		});
+		const result3 = await provisionWorktree(
+			repoDir,
+			'A5',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+				mergeStrategy: 'rebase',
+			},
+		);
 
 		// All three must return errors — no force-adopt bypass exists
 		expect(result1).toHaveProperty('error');

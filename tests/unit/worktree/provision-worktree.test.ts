@@ -118,11 +118,11 @@ describe('provisionWorktree — verification (FR-004)', () => {
 
 	beforeEach(() => {
 		// Clean the shared default worktree parent dir to prevent cross-test pollution
-		// Tests use the same default path: os.tmpdir()/.swarm-worktrees/parent-session/<id>
+		// Tests use the same default path: os.tmpdir()/.swarm-worktrees/ses_parentSession/<id>
 		const sharedWtParent = path.join(
 			os.tmpdir(),
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 		);
 		fs.rmSync(sharedWtParent, { recursive: true, force: true });
 		origBunSpawn = worktreeInternals.bunSpawn;
@@ -138,15 +138,20 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const result = await provisionWorktree(repoDir, '1.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'1.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Fail with the actual error message if provisioning failed
 		expect(result).toHaveProperty('worktreePath');
 		expect(result).toHaveProperty('branchName');
 		const handle = result as { worktreePath: string; branchName: string };
-		expect(handle.branchName).toBe('swarm/lane/parent-session/1.1');
+		expect(handle.branchName).toBe('swarm/lane/ses_parentSession/1.1');
 		const listResult = await runGit(
 			['worktree', 'list', '--porcelain'],
 			repoDir,
@@ -181,16 +186,21 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/2.1';
+		const branchName = 'swarm/lane/ses_parentSession/2.1';
 
 		// Create the branch (but no worktree), then switch back to main so it is
 		// stale but has no commits ahead of HEAD.
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
 
-		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'2.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should succeed and recreate the branch from the current HEAD, not adopt
 		// the stale branch state.
@@ -222,14 +232,19 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/2.1';
+		const branchName = 'swarm/lane/ses_parentSession/2.1';
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['commit', '--allow-empty', '-m', 'stale commit'], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
 
-		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'2.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		expect(result).toEqual({
 			error: `Branch already exists and has unmerged commits: ${branchName}`,
@@ -248,20 +263,25 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/3.1';
+		const branchName = 'swarm/lane/ses_parentSession/3.1';
 		const worktreePath = path.join(
 			repoDir,
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 			'3.1',
 		);
 
 		// Create a REAL worktree with this branch (active collision)
 		await createRealWorktree(repoDir, branchName, worktreePath);
 
-		const result = await provisionWorktree(repoDir, '3.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'3.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error (active collision)
 		expect(result).toHaveProperty('error');
@@ -283,7 +303,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/4.1';
+		const branchName = 'swarm/lane/ses_parentSession/4.1';
 
 		// Create the branch (no worktree), then manually register a worktree at
 		// the EXPECTED path (simulating a previously created worktree that's now gone
@@ -297,7 +317,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		const expectedPath = path.join(
 			path.dirname(repoDir),
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 			'4.1',
 		);
 		fs.mkdirSync(path.dirname(expectedPath), { recursive: true });
@@ -313,9 +333,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			fs.writeFileSync(path.join(expectedPath, 'dirty.txt'), 'do not delete');
 		}
 
-		const result = await provisionWorktree(repoDir, '4.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'4.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error because same-task cleanup must not delete dirty work.
 		expect(result).toHaveProperty('error');
@@ -341,7 +366,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/5.1';
+		const branchName = 'swarm/lane/ses_parentSession/5.1';
 
 		// Create the branch so provisionWorktree enters the reconciliation branch
 		await runGit(['checkout', '-b', branchName], repoDir);
@@ -367,9 +392,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, '5.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'5.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error (fail-safe, never adopt)
 		expect(result).toHaveProperty('error');
@@ -394,7 +424,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/6.1';
+		const branchName = 'swarm/lane/ses_parentSession/6.1';
 
 		// Create the branch so we enter the reconciliation branch
 		await runGit(['checkout', '-b', branchName], repoDir);
@@ -416,9 +446,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, '6.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'6.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		expect(result).toHaveProperty('error');
 		if ('error' in result) {

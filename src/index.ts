@@ -200,6 +200,7 @@ export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
 	}
 }
 
+import { applyLanePermissions } from './config/lane-permissions.js';
 import {
 	addDeferredWarning,
 	advisoryWarn,
@@ -1427,6 +1428,7 @@ async function initializeOpenCodeSwarm(
 	let preflightTriggerManager: PreflightTriggerManager | undefined;
 	let statusArtifact: AutomationStatusArtifact | undefined;
 	let prMonitorWorker: PrMonitorWorker | null = null;
+	let planSyncWorker: PlanSyncWorker | null = null;
 
 	if (automationConfig.mode !== 'manual') {
 		automationManager = createAutomationManager(automationConfig);
@@ -1488,7 +1490,7 @@ async function initializeOpenCodeSwarm(
 		// v6.8 Task 3.2: Wire PlanSyncWorker for plan.json -> plan.md sync
 		if (automationConfig.capabilities?.plan_sync === true) {
 			try {
-				const planSyncWorker = new PlanSyncWorker({
+				planSyncWorker = new PlanSyncWorker({
 					directory: ctx.directory,
 					// Using defaults: debounceMs=300, pollIntervalMs=2000
 				});
@@ -1613,6 +1615,7 @@ async function initializeOpenCodeSwarm(
 	const cleanupAutomation = () => {
 		automationManager?.stop();
 		prMonitorWorker?.stop();
+		planSyncWorker?.stop();
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
 	};
@@ -1894,6 +1897,40 @@ async function initializeOpenCodeSwarm(
 
 			// Merge agent configs (don't override default_agent)
 			Object.assign(agentConfig, agents);
+
+			// Worktree-lane permission scoping.
+			//
+			// OpenCode partitions permission state per directory, and `Plugin.state`
+			// is built through the same directory-keyed InstanceState cache as
+			// `Permission.state` — so when this hook runs inside a lane instance,
+			// `ctx.directory` IS the lane path. Pre-resolving `external_directory`
+			// here prevents the ask from ever being raised, which matters because a
+			// lane instance has no TUI that could answer one (the host's
+			// `Permission.ask` awaits its deferred with no timeout).
+			//
+			// A no-op for every ordinary session: `applyLanePermissions` mutates
+			// nothing unless the directory resolves as a swarm worktree lane.
+			// Wrapped because a config-hook throw is logged and ignored by the host
+			// (`tryPromise` + `tapError` + `ignore`), which would silently drop the
+			// agent registration work above on some future refactor.
+			try {
+				// Read straight off `config` rather than via
+				// `resolveWorktreeIsolationConfig`: that resolver is a spread over
+				// DEFAULT_WORKTREE_ISOLATION_CONFIG whose `lane_permissions` default
+				// is this same 'scoped_allow', so the two are behaviourally
+				// identical here — and the direct read keeps this hook off the
+				// resolver's import chain. Do not "simplify" it into that import
+				// without re-checking the init-path cost.
+				applyLanePermissions(
+					opencodeConfig,
+					ctx.directory,
+					config?.worktree?.lane_permissions ?? 'scoped_allow',
+				);
+			} catch (err) {
+				addDeferredWarning(
+					`[swarm] lane permission scoping failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 
 			// Auto-select architect: disable competing built-in agents when enabled
 			const autoSelect = config?.auto_select_architect;

@@ -703,11 +703,31 @@ export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
 	},
 };
 
+/**
+ * Directory name of the DD-6 default swarm-managed worktree base, created as a
+ * SIBLING of the project root (`<project-parent>/.swarm-worktrees`).
+ *
+ * Single source of truth shared by `resolveWorktreeBaseDir` in
+ * `src/worktree/core.ts` (which BUILDS lane paths) and
+ * `src/config/lane-context.ts` (which RECOGNISES a lane path after the fact,
+ * from inside the lane's own OpenCode instance). Those two must never drift: if
+ * creation and recognition disagree, a lane instance silently fails to be
+ * identified as a lane and falls back to unscoped permission behaviour.
+ *
+ * It lives in this leaf constants module rather than in `src/worktree/core.ts`
+ * so that the init-path-safe lane modules can share it without pulling the
+ * worktree lifecycle module into the plugin entry's import graph
+ * (AGENTS.md invariant 1; enforced by
+ * `tests/unit/turbo/lean/init-safety.test.ts`).
+ */
+export const SWARM_WORKTREE_DIR_NAME = '.swarm-worktrees';
+
 export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
 	policy: 'auto',
 	merge_strategy: 'merge',
 	worktree_dir: undefined,
 	deps_strategy: 'skip',
+	lane_permissions: 'scoped_allow',
 	serialization_release_after_dispatches: 5,
 	serialization_release_after_ms: 60_000,
 	runtime_isolation: {
