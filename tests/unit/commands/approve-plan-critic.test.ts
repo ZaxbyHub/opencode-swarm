@@ -4,10 +4,10 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleApprovePlanCriticCommand } from '../../../src/commands/approve-plan-critic.js';
+import type { Plan } from '../../../src/config/plan-schema.js';
 import { loadLastApprovedPlan } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
-import type { Plan } from '../../../src/config/plan-schema.js';
 
 function makePlan(): Plan {
 	return {
@@ -41,7 +41,10 @@ async function writePlan(dir: string): Promise<Plan> {
 	await mkdir(join(dir, '.swarm'), { recursive: true });
 	const { initLedger } = await import('../../../src/plan/ledger.js');
 	const { writeFileSync } = await import('node:fs');
-	writeFileSync(join(dir, '.swarm', 'plan.json'), JSON.stringify(plan, null, 2));
+	writeFileSync(
+		join(dir, '.swarm', 'plan.json'),
+		JSON.stringify(plan, null, 2),
+	);
 	await initLedger(dir, derivePlanId(plan));
 	return plan;
 }
@@ -87,7 +90,11 @@ describe('/swarm approve-plan-critic command', () => {
 		await writePlan(dir);
 		ensureAgentSession('session-audit-cmd', 'architect');
 
-		await handleApprovePlanCriticCommand(dir, ['test reason'], 'session-audit-cmd');
+		await handleApprovePlanCriticCommand(
+			dir,
+			['test reason'],
+			'session-audit-cmd',
+		);
 
 		const eventsPath = join(dir, '.swarm', 'events.jsonl');
 		expect(existsSync(eventsPath)).toBe(true);
@@ -104,7 +111,11 @@ describe('/swarm approve-plan-critic command', () => {
 		await writePlan(dir);
 		ensureAgentSession('session-noreason', 'architect');
 
-		const result = await handleApprovePlanCriticCommand(dir, [], 'session-noreason');
+		const result = await handleApprovePlanCriticCommand(
+			dir,
+			[],
+			'session-noreason',
+		);
 		expect(result).toContain('Error: a reason is required');
 	});
 

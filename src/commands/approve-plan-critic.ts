@@ -55,14 +55,10 @@ export async function handleApprovePlanCriticCommand(
 	try {
 		// Human-initiated: user_confirmed: true distinguishes this from the
 		// agent-initiated approve_plan_critic tool path (user_confirmed: false).
-		const summary = await forceRecordPlanCriticApproval(
-			directory,
-			sessionID,
-			{
-				reason,
-				userConfirmed: true,
-			},
-		);
+		const summary = await forceRecordPlanCriticApproval(directory, sessionID, {
+			reason,
+			userConfirmed: true,
+		});
 		return (
 			`Recorded a manual plan_critic_gate approval for plan_id=${summary.planId} ` +
 			`at ${summary.recordedAt}. The critic_pre_plan execution gate will now ` +

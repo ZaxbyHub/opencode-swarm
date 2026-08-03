@@ -386,22 +386,18 @@ describe('delegation gate plan critic approval', () => {
 		});
 
 		test('bold label: matches **VERDICT**: APPROVED', () => {
-			expect(
-				extractPlanCriticVerdict('**VERDICT**: APPROVED\nAll good.'),
-			).toBe('APPROVED');
-		});
-
-		test('heading: matches ## Verdict followed by token', () => {
-			expect(extractPlanCriticVerdict('## Verdict\nAPPROVED')).toBe(
+			expect(extractPlanCriticVerdict('**VERDICT**: APPROVED\nAll good.')).toBe(
 				'APPROVED',
 			);
 		});
 
+		test('heading: matches ## Verdict followed by token', () => {
+			expect(extractPlanCriticVerdict('## Verdict\nAPPROVED')).toBe('APPROVED');
+		});
+
 		test('bare token in final lines: matches a trailing bare APPROVED', () => {
 			expect(
-				extractPlanCriticVerdict(
-					'PLAN REVIEW:\nLooks good.\n\nAPPROVED',
-				),
+				extractPlanCriticVerdict('PLAN REVIEW:\nLooks good.\n\nAPPROVED'),
 			).toBe('APPROVED');
 		});
 

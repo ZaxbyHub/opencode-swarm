@@ -16,9 +16,8 @@ import { warn } from '../utils/logger.js';
 import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
-import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
-
 import { handleAnalyzeCommand } from './analyze.js';
+import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
 import { handleArchiveCommand } from './archive.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
@@ -1027,11 +1026,7 @@ export const COMMAND_REGISTRY = {
 	},
 	'approve-plan-critic': {
 		handler: (ctx) =>
-			handleApprovePlanCriticCommand(
-				ctx.directory,
-				ctx.args,
-				ctx.sessionID,
-			),
+			handleApprovePlanCriticCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Record a MANUAL plan-critic approval to unblock the critic_pre_plan execution gate [reason...]',
 		args: '[reason...]',

@@ -3,11 +3,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { executeApprovePlanCritic } from '../../../src/tools/approve-plan-critic.js';
+import type { Plan } from '../../../src/config/plan-schema.js';
 import { loadLastApprovedPlan } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
-import type { Plan } from '../../../src/config/plan-schema.js';
+import { executeApprovePlanCritic } from '../../../src/tools/approve-plan-critic.js';
 
 function makePlan(): Plan {
 	return {
@@ -40,7 +40,10 @@ async function writePlan(dir: string): Promise<Plan> {
 	const plan = makePlan();
 	await mkdir(join(dir, '.swarm'), { recursive: true });
 	const { initLedger } = await import('../../../src/plan/ledger.js');
-	writeFileSync(join(dir, '.swarm', 'plan.json'), JSON.stringify(plan, null, 2));
+	writeFileSync(
+		join(dir, '.swarm', 'plan.json'),
+		JSON.stringify(plan, null, 2),
+	);
 	await initLedger(dir, derivePlanId(plan));
 	return plan;
 }
@@ -90,11 +93,9 @@ describe('approve_plan_critic tool', () => {
 		await writePlan(dir);
 		ensureAgentSession('session-tool-audit', 'architect');
 
-		await executeApprovePlanCritic(
-			{ reason: 'audit check' },
-			dir,
-			{ sessionID: 'session-tool-audit' },
-		);
+		await executeApprovePlanCritic({ reason: 'audit check' }, dir, {
+			sessionID: 'session-tool-audit',
+		});
 
 		const eventsPath = join(dir, '.swarm', 'events.jsonl');
 		expect(existsSync(eventsPath)).toBe(true);

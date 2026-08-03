@@ -1120,9 +1120,10 @@ function extractPlanCriticVerdict(
 	// system prompt (src/agents/critic.ts) instructs this exact shape, so a
 	// conforming critic always matches here. Also tolerates markdown-bold labels
 	// (`**VERDICT**:`) which LLMs frequently emit despite the plain instruction.
-	const primary = /^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
-		text,
-	);
+	const primary =
+		/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+			text,
+		);
 	if (primary) {
 		return primary[1].toUpperCase() as
 			| 'APPROVED'
@@ -1139,8 +1140,9 @@ function extractPlanCriticVerdict(
 	if (heading && heading.index !== undefined) {
 		const after = text.slice(heading.index + heading[0].length);
 		const nextLines = after.split('\n').slice(0, 3).join('\n');
-		const headingMatch =
-			/^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(nextLines);
+		const headingMatch = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(
+			nextLines,
+		);
 		if (headingMatch) {
 			return headingMatch[1].toUpperCase() as
 				| 'APPROVED'
