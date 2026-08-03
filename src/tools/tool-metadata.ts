@@ -233,6 +233,11 @@ export const TOOL_METADATA = {
 			'abort an unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gate and clear its durable session state',
 		agents: ['architect'],
 	},
+	approve_plan_critic: {
+		description:
+			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012)',
+		agents: ['architect'],
+	},
 	prepare_pr_workflow_checkout: {
 		description:
 			'preserve explicit dirty tracked files before an unbound PR workflow checkout with an auditable recovery receipt',

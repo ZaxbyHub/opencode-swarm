@@ -41,7 +41,7 @@ describe('Swarm subcommand registration', () => {
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands, main's CI-monitor command, and the
 		// context-map stats command (issue #1672).
-		expect(commandKeys.length).toBe(81);
+		expect(commandKeys.length).toBe(82);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -121,6 +121,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-pr-review',
 			'swarm-pr-feedback',
 			'swarm-abort-pr-workflow',
+			'swarm-approve-plan-critic',
 			'swarm-pr-subscribe',
 			'swarm-pr-unsubscribe',
 			'swarm-pr-status',

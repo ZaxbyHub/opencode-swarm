@@ -91,6 +91,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 	const EXPECTED_RESTRICTED = new Set<string>([
 		'abort-pr-workflow',
 		'acknowledge-spec-drift',
+		'approve-plan-critic',
 		'reset',
 		'reset-session',
 		'rollback',
@@ -164,14 +165,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'restricted' bucket contains exactly the expected 7 commands", () => {
+	test("'restricted' bucket contains exactly the expected 8 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'restricted') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(7);
+		expect(actual.size).toBe(8);
 		for (const name of EXPECTED_RESTRICTED) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -511,7 +512,7 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 		}
 	});
 
-	test('the 6 restricted commands are NOT in the "agent" set', () => {
+	test('the 8 restricted commands are NOT in the "agent" set', () => {
 		const restricted = new Set<string>();
 		const agent = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {

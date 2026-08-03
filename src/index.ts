@@ -2161,6 +2161,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)',
 				},
+				'swarm-approve-plan-critic': {
+					template: '/swarm approve-plan-critic $ARGUMENTS',
+					description:
+						'Use /swarm approve-plan-critic to record a MANUAL plan-critic approval that unblocks the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the snapshot was not recorded (human-only escape hatch)',
+				},
 				'swarm-ci-monitor': {
 					template: '/swarm ci-monitor $ARGUMENTS',
 					description:
