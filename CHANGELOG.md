@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.135.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.2...v7.135.3) (2026-08-03)
+
+
+### Bug Fixes
+
+* **gates:** add critic_pre_plan deadlock escape hatch + robust approval recording ([c620a07](https://github.com/ZaxbyHub/opencode-swarm/commit/c620a071b29887f6c2dc684bfa383a6441177b73))
+* **worktree:** grant the URL-skill cache to lanes when skills.urls is configured ([affbd63](https://github.com/ZaxbyHub/opencode-swarm/commit/affbd631ff6b47e6f3eb3efc3e6dc2549340d01e))
+* **worktree:** scope lane permissions so worktree-lane agents cannot hang ([c2368a7](https://github.com/ZaxbyHub/opencode-swarm/commit/c2368a72409475352e8273773e83e396fa1b0ec2))
+
 ## [7.135.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.1...v7.135.2) (2026-08-03)
 
 
